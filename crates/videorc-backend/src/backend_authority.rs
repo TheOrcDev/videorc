@@ -213,6 +213,9 @@ fn renderer_smoke_method(method: &str) -> bool {
             // Plan 140 (S9): the drill sets the daily budget to prove a
             // removal sheds at 100% without a request.
             | "test.youtubeQuota.setBudget"
+            // Plan 258 S3: smoke:camera-background holds the camera effect
+            // stage's segment worker to prove the cover takes over (D6).
+            | "test.cameraBackground.segmentationStall"
             // Plan 234: the managed overlay smoke uses the app's renderer
             // socket and the same runtime switch as the other smoke seams.
             | "cloud.overlay.set"
@@ -427,6 +430,7 @@ mod tests {
             "test.youtubeQuota.forceExpiry",
             "test.youtubeQuota.seedAccount",
             "test.youtubeQuota.setBudget",
+            "test.cameraBackground.segmentationStall",
         ] {
             assert_eq!(
                 authorize_backend_method(BackendRole::Renderer, method, false),
@@ -462,6 +466,7 @@ mod tests {
             "test.youtubeQuota.forceExpiry",
             "test.youtubeQuota.seedAccount",
             "test.youtubeQuota.setBudget",
+            "test.cameraBackground.segmentationStall",
         ] {
             assert_eq!(
                 authorize_backend_method(BackendRole::Admin, method, false),

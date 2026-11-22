@@ -437,15 +437,21 @@ async function runShortSession(context) {
   log(`${pass}: session ${started.sessionId} ${started.state}`)
   const outputs = {}
   let stall = null
-  if (pass === 'stall') {
-    stall = await holdSegmentation(ws, setup, outputDirectory, expectation)
-    outputs.stall = { ok: stall.ok, failures: stall.failures }
-    outputs.preview = stall.preview
-  } else {
-    outputs.preview = await samplePreview(ws, setup, 6, 400, outputDirectory, expectation)
+  let stage = null
+  let stopped
+  try {
+    if (pass === 'stall') {
+      stall = await holdSegmentation(ws, setup, outputDirectory, expectation)
+      outputs.stall = { ok: stall.ok, failures: stall.failures }
+      outputs.preview = stall.preview
+    } else {
+      outputs.preview = await samplePreview(ws, setup, 6, 400, outputDirectory, expectation)
+    }
+    stage = await stageStatus(ws)
+  } finally {
+    // A failed step never leaves a session behind for the next pass.
+    stopped = await request(ws, timeoutMs, 'session.stop')
   }
-  const stage = await stageStatus(ws)
-  const stopped = await request(ws, timeoutMs, 'session.stop')
   const recording = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120_000 })
   // Every frame, from the first: a raw first frame is the bug this pass hunts.
   outputs.recording = await judgeFile(recording, 'recording', expectation, outputDirectory, {
