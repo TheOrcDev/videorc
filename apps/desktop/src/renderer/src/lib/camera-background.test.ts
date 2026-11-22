@@ -4,6 +4,7 @@ import type { CameraBackground, LayoutSettings } from '../../../shared/backend'
 import { validateBackendRpcParams } from '../../../shared/backend-rpc-contract'
 import { validateElectronInvokeArgs } from '../../../shared/electron-ipc-contract'
 import {
+  CAMERA_BACKGROUND_MIGRATION_SETTLES,
   CAMERA_BACKGROUND_MIGRATION_VERSION,
   cameraBackgroundLayout,
   cameraOutputLayout,
@@ -229,6 +230,7 @@ function migrate(
     cameraId?: string
     cameraBackgrounds?: Record<string, CameraBackground>
     version?: number
+    settle?: boolean
   } = {}
 ): ReturnType<typeof migrateCameraBackgrounds> {
   return migrateCameraBackgrounds({
@@ -236,21 +238,20 @@ function migrate(
     cameraBackgroundMigration: options.version,
     cameraId: 'cameraId' in options ? options.cameraId : 'camera-a',
     scenes,
-    onStreamId
+    onStreamId,
+    settle: options.settle
   })
 }
 
 describe('D4 migration: the scenes’ key moves to the camera', () => {
-  it('with no keyed scene, the camera keeps Off and the migration is done', () => {
-    expect(migrate([scene('a'), scene('b')], 'a')).toStrictEqual({
+  it('with no keyed scene, the camera keeps Off: nothing to write, or settled with nothing moved', () => {
+    expect(migrate([scene('a'), scene('b')], 'a')).toBeNull()
+    expect(migrate([scene('a'), scene('b')], 'a', { settle: true })).toStrictEqual({
       cameraBackgrounds: undefined,
       cameraBackgroundMigration: CAMERA_BACKGROUND_MIGRATION_VERSION
     })
-    // With no camera selected either: nothing to move, so done.
-    expect(migrate([scene('a')], 'a', { cameraId: undefined })).toStrictEqual({
-      cameraBackgrounds: undefined,
-      cameraBackgroundMigration: CAMERA_BACKGROUND_MIGRATION_VERSION
-    })
+    // With no camera selected either.
+    expect(migrate([scene('a')], 'a', { cameraId: undefined })).toBeNull()
   })
 
   it('takes the key and its tuning from the scene on stream when it keys', () => {
@@ -270,7 +271,8 @@ describe('D4 migration: the scenes’ key moves to the camera', () => {
       mode: 'green',
       key: { similarityPct: 51, smoothnessPct: 6, spillPct: 20, hideEdges: edges }
     })
-    expect(result?.cameraBackgroundMigration).toBe(CAMERA_BACKGROUND_MIGRATION_VERSION)
+    // Not settled before S5: the camera keeps following the scenes.
+    expect(result?.cameraBackgroundMigration).toBeUndefined()
   })
 
   it('takes the first keyed scene when the scene on stream does not key', () => {
@@ -312,10 +314,10 @@ describe('D4 migration: the scenes’ key moves to the camera', () => {
     }
   })
 
-  it('waits for a camera, runs once, keeps other cameras and never replaces an effect', () => {
+  it('waits for a camera, keeps other cameras and never replaces an effect', () => {
     const keyed = [scene('live', keyedLayout('#0000FF'))]
     expect(migrate(keyed, 'live', { cameraId: undefined })).toBeNull()
-    expect(migrate(keyed, 'live', { version: CAMERA_BACKGROUND_MIGRATION_VERSION })).toBeNull()
+    expect(migrate(keyed, 'live', { cameraId: undefined, settle: true })).toBeNull()
     const other = { ...fixture.minimal, mode: 'cutout' as const }
     const result = migrate(keyed, 'live', {
       cameraBackgrounds: {
@@ -333,19 +335,41 @@ describe('D4 migration: the scenes’ key moves to the camera', () => {
       }
     })
     // The blur picked for the camera (S3 onwards) is never swapped for a key.
-    const blurred = migrate(keyed, 'live', { cameraBackgrounds: { 'camera-a': fixture.minimal } })
-    expect(blurred?.cameraBackgrounds).toStrictEqual({ 'camera-a': fixture.minimal })
+    const blurred = { 'camera-a': fixture.minimal }
+    expect(migrate(keyed, 'live', { cameraBackgrounds: blurred })).toBeNull()
+    expect(migrate(keyed, 'live', { cameraBackgrounds: blurred, settle: true })).toStrictEqual({
+      cameraBackgrounds: blurred,
+      cameraBackgroundMigration: CAMERA_BACKGROUND_MIGRATION_VERSION
+    })
   })
 
-  it('a later run (a bumped version) turns a screen from an earlier run Off when no scene keys any more', () => {
-    const earlier = {
-      ...DEFAULT_CAMERA_BACKGROUND,
-      mode: 'green' as const,
-      key: { similarityPct: 35, smoothnessPct: 6, spillPct: 20 }
-    }
+  it('follows the scenes until it settles, then never runs again', () => {
+    expect(CAMERA_BACKGROUND_MIGRATION_SETTLES).toBe(false)
+    const camera = 'camera-a'
+    // A camera chosen with no keyed scene, then a key turned on later: it moves.
+    expect(migrate([scene('live')], 'live')).toBeNull()
+    const keyedLater = migrate([scene('live', keyedLayout('#00FF00'))], 'live')
+    const green = keyedLater?.cameraBackgrounds?.[camera]
+    expect(green?.mode).toBe('green')
+    // The same scenes again: nothing to write (no settings churn).
     expect(
-      migrate([scene('live')], 'live', { cameraBackgrounds: { 'camera-a': earlier }, version: 0 })
+      migrate([scene('live', keyedLayout('#00FF00'))], 'live', {
+        cameraBackgrounds: keyedLater?.cameraBackgrounds
+      })
+    ).toBeNull()
+    // The key turned off in every scene: the camera's screen goes Off, tuning kept.
+    expect(
+      migrate([scene('live')], 'live', { cameraBackgrounds: { [camera]: green! } })
         ?.cameraBackgrounds
-    ).toStrictEqual({ 'camera-a': { ...earlier, mode: 'off' } })
+    ).toStrictEqual({ [camera]: { ...green!, mode: 'off' } })
+    // Settling stores the version; after that nothing moves.
+    const settled = migrate([scene('live', keyedLayout('#0000FF'))], 'live', { settle: true })
+    expect(settled?.cameraBackgroundMigration).toBe(CAMERA_BACKGROUND_MIGRATION_VERSION)
+    expect(
+      migrate([scene('live', keyedLayout('#00FF00'))], 'live', {
+        cameraBackgrounds: settled?.cameraBackgrounds,
+        version: settled?.cameraBackgroundMigration
+      })
+    ).toBeNull()
   })
 })

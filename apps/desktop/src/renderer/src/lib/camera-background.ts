@@ -25,12 +25,17 @@ export const DEFAULT_CAMERA_BACKGROUND: CameraBackground = {
   edges: 'balanced'
 }
 
-/**
- * The D4 migration's version. Bump it when a later slice must move the
- * scenes' keys again (S5, when the camera's choice takes over the render, so
- * a key turned on in a scene between S1 and S5 still moves).
- */
+/** The D4 migration's version, stored once it settles. */
 export const CAMERA_BACKGROUND_MIGRATION_VERSION = 1
+
+/**
+ * Whether the D4 migration settles (stores its version and stops). Until the
+ * camera's choice is what renders (S5), the scenes' keys are still what the
+ * streamer edits, so the camera's screen follows them on every run and
+ * nothing is stored as done. S5 turns this on in the same change that makes
+ * the camera's choice render, so the last run moves the keys as they are then.
+ */
+export const CAMERA_BACKGROUND_MIGRATION_SETTLES = false
 
 const ASSET_ID_MAX = 256
 
@@ -180,19 +185,24 @@ function keyColor(layout: Pick<KeyedLayout, 'cameraChromaKeyColor'>): 'green' | 
 
 export type CameraBackgroundMigration = {
   cameraBackgrounds: Record<string, CameraBackground> | undefined
-  cameraBackgroundMigration: number
+  cameraBackgroundMigration: number | undefined
 }
 
 /**
  * D4: the key moves to the camera. The camera's choice becomes Green or Blue
  * screen with the tuning of the scene on stream if that scene keys, else of
- * the first scene that does; with no keyed scene, the camera keeps what it
- * has (a screen it got from an earlier run goes Off, keeping its tuning). An
- * effect already picked for the camera (blur, a picture, Cut out) is never
- * replaced by a key. The scenes are left as they are.
+ * the first scene that does; with no keyed scene, a screen the camera has
+ * goes Off, keeping its tuning. An effect already picked for the camera
+ * (blur, a picture, Cut out) is never replaced by a key. The scenes are left
+ * as they are, so a rollback loses nothing.
  *
- * `null` when there is nothing to do yet: already migrated, or no camera is
- * selected (the key waits for the first camera, rather than being lost).
+ * It runs again on every change of the scenes or the camera until it
+ * settles (`settle`, CAMERA_BACKGROUND_MIGRATION_SETTLES), so a key turned
+ * on or off in a scene before then still reaches the camera. A key waits
+ * for a selected camera rather than being lost.
+ *
+ * `null` when there is nothing to write: already settled, no camera for a
+ * keyed scene, or the settings already say what the scenes do.
  */
 export function migrateCameraBackgrounds(input: {
   cameraBackgrounds: Record<string, CameraBackground> | undefined
@@ -200,13 +210,23 @@ export function migrateCameraBackgrounds(input: {
   cameraId: string | undefined
   scenes: readonly CameraBackgroundMigrationScene[]
   onStreamId: string | null | undefined
+  settle?: boolean
 }): CameraBackgroundMigration | null {
   if ((input.cameraBackgroundMigration ?? 0) >= CAMERA_BACKGROUND_MIGRATION_VERSION) return null
+  const settle = input.settle ?? CAMERA_BACKGROUND_MIGRATION_SETTLES
   const backgrounds = normalizeCameraBackgrounds(input.cameraBackgrounds) ?? {}
-  const done = (next: Record<string, CameraBackground>): CameraBackgroundMigration => ({
-    cameraBackgrounds: Object.keys(next).length > 0 ? next : undefined,
-    cameraBackgroundMigration: CAMERA_BACKGROUND_MIGRATION_VERSION
-  })
+  const result = (next: Record<string, CameraBackground>): CameraBackgroundMigration | null => {
+    const migration: CameraBackgroundMigration = {
+      cameraBackgrounds: Object.keys(next).length > 0 ? next : undefined,
+      cameraBackgroundMigration: settle
+        ? CAMERA_BACKGROUND_MIGRATION_VERSION
+        : input.cameraBackgroundMigration
+    }
+    const unchanged =
+      migration.cameraBackgroundMigration === input.cameraBackgroundMigration &&
+      JSON.stringify(migration.cameraBackgrounds) === JSON.stringify(input.cameraBackgrounds)
+    return unchanged ? null : migration
+  }
   const onStream = input.scenes.find((scene) => scene.id === input.onStreamId)
   const keyed =
     (onStream ? keyedLayout(onStream) : undefined) ??
@@ -214,13 +234,13 @@ export function migrateCameraBackgrounds(input: {
   if (!keyed) {
     const current = input.cameraId ? backgrounds[input.cameraId] : undefined
     if (input.cameraId && current && (current.mode === 'green' || current.mode === 'blue'))
-      return done({ ...backgrounds, [input.cameraId]: { ...current, mode: 'off' } })
-    return done(backgrounds)
+      return result({ ...backgrounds, [input.cameraId]: { ...current, mode: 'off' } })
+    return result(backgrounds)
   }
   if (!input.cameraId) return null
   const current = backgrounds[input.cameraId] ?? DEFAULT_CAMERA_BACKGROUND
   if (current.mode !== 'off' && current.mode !== 'green' && current.mode !== 'blue')
-    return done(backgrounds)
+    return result(backgrounds)
   const hideEdges = normalizeHideEdges(keyed.cameraChromaKeyEdges)
   const migrated: CameraBackground = {
     ...current,
@@ -232,5 +252,5 @@ export function migrateCameraBackgrounds(input: {
       ...(hideEdges ? { hideEdges } : {})
     })
   }
-  return done({ ...backgrounds, [input.cameraId]: migrated })
+  return result({ ...backgrounds, [input.cameraId]: migrated })
 }

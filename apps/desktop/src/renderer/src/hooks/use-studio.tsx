@@ -40,7 +40,11 @@ import {
 } from '@/lib/camera-frame-rate'
 import type { CameraLowLightRequest } from '@/hooks/use-camera-low-light'
 import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
-import { cameraOutputLayout, migrateCameraBackgrounds } from '@/lib/camera-background'
+import {
+  cameraBackgroundLayout,
+  cameraOutputLayout,
+  migrateCameraBackgrounds
+} from '@/lib/camera-background'
 import type { ChatOverlayDriver } from '@/lib/chat-overlay'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
 import { isReplacementPermissionClient } from '@/lib/permission-evidence'
@@ -5321,23 +5325,24 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     if (migratedShortcuts)
       setSettings((current) => ({ ...current, globalShortcuts: migratedShortcuts }))
   }, [migratedShortcuts])
-  // Plan 258 D4: the scenes' green or blue screen moves to the camera, once,
-  // when a camera is selected (it waits for one rather than losing the key).
-  // The scenes keep their key fields for a rollback; nothing renders from the
-  // camera's choice yet (S3).
+  // Plan 258 D4: the scenes' green or blue screen moves to the camera. Until
+  // the camera's choice renders (S5), it follows the scenes on every change,
+  // and a key waits for a selected camera rather than being lost. The scenes
+  // keep their key fields for a rollback; nothing renders from it yet (S3).
   const migrationCameraId = captureConfig.sources.cameraId
+  const migrationScenes = sceneLibrary.storedList
   useEffect(() => {
     setSettings((current) => {
       const migrated = migrateCameraBackgrounds({
         cameraBackgrounds: current.cameraBackgrounds,
         cameraBackgroundMigration: current.cameraBackgroundMigration,
         cameraId: migrationCameraId,
-        scenes: storedScenes(),
-        onStreamId: activeSavedSceneIdRef.current
+        scenes: migrationScenes,
+        onStreamId: activeSavedSceneId
       })
       return migrated ? { ...current, ...migrated } : current
     })
-  }, [migrationCameraId, storedScenes])
+  }, [migrationCameraId, migrationScenes, activeSavedSceneId])
   // A new user's scenes show the main display before the device list names it.
   useEffect(() => {
     const display = deviceList.devices.find(
@@ -11014,7 +11019,18 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       }
       try {
         const adapter = await import('@/lib/cloud-scene-adapter')
-        const snapshot = await adapter.commitSceneIdle(client, plan(adapter, state))
+        const commit = plan(adapter, state)
+        // Plan 258: a room's idle commit is an output boundary too, so the
+        // selected camera's background goes with it, as on a native switch.
+        const layout = cameraBackgroundLayout(
+          commit.params.layout,
+          commit.params.sources.cameraId,
+          settingsRef.current.cameraBackgrounds
+        )
+        const snapshot = await adapter.commitSceneIdle(client, {
+          ...commit,
+          params: { ...commit.params, layout }
+        })
         applyCommittedScene(snapshot)
         applyLayoutTransactionState(snapshot)
         return true
