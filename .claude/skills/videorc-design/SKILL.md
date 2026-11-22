@@ -187,6 +187,10 @@ for the owner, not a design choice.
   "Latest") goes back.
 - **Toasts are never tinted** (2026-09-29). A toast's type colours its icon
   only, never the panel, its rim or its text.
+- **Alerts are never tinted** (2026-11-22). Same rule as toasts: an `Alert`
+  is one neutral fill for every variant, and the type colours its icon only,
+  never the row's background, its rim or its text. A call site never passes
+  its own `bg-destructive/…`, `bg-warning/…` or `bg-success/…` to an Alert.
 - **No success toast for a scene, layout or source change** (2026-07-16):
   the stage is the confirmation. One exception, the owner's call on
   2026-11-15 (plan 231 D20): the off-stream key HUD. When a key, the Stream
@@ -949,8 +953,8 @@ registry is moved onto the utility there.
   inverted pill. They open after 600 ms. A tooltip is never the only place
   a fact lives, and `title=` is not an information channel: use `Tooltip`,
   `ShortcutTooltip` or `DisabledReason`.
-- **`Alert`**: a flush inline status row (a faint tone tint, the icon in the
-  tone, monochrome text), never a card. `variant` is the tone and brings its
+- **`Alert`**: a flush inline status row (one neutral fill for every tone, the
+  icon in the tone, monochrome text, never a tinted background), never a card. `variant` is the tone and brings its
   own icon: `default`, `quiet` (a neutral note in secondary text), `locked`
   (via `LockAlert`), `warning`, `success`, `destructive`. Never put an icon
   child inside it; `icon` swaps in a subject's own mark, `icon={null}` drops
@@ -984,7 +988,7 @@ registry is moved onto the utility there.
 - The guards (`renderer-style-guards.test.ts`) fail on: any CSS backdrop
   blur or filter, any import of the removed chrome ground's stills, a
   hand-rolled gradient on a screen, a chrome material outside the
-  primitives, `bg-popover`, a tinted toast, `cursor-pointer`, a colour
+  primitives, `bg-popover`, a tinted toast or Alert, `cursor-pointer`, a colour
   literal outside its short content allowlist, a coloured status word, text
   below 11 px, a hand-sized dialog, an unnamed `SelectTrigger`, `Slider` or
   `SegmentedControl`, a Field control its `FieldLabel` doesn't name, and a
