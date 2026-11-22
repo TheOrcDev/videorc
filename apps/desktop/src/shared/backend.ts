@@ -5005,6 +5005,55 @@ export interface ReorderScreensParams {
   screenIds: string[]
 }
 
+/**
+ * Linux (plan 257 S18): Electron's password store for this run. Chromium
+ * picks it once at launch, so a keyring installed later needs a restart.
+ */
+export interface LinuxKeyringStatus {
+  /** `safeStorage.getSelectedStorageBackend()`: gnome_libsecret, kwallet6, basic_text, unknown. */
+  backend: string
+  /** True when Videorc can seal sign-in and folder grants with it. */
+  available: boolean
+  /** The `--password-store` the person passed at launch, when they did. */
+  userPasswordStore: string | null
+}
+
+/** A well-known D-Bus name on the session bus (plan 257 S18). */
+export type LinuxBusServiceState = 'running' | 'activatable' | 'missing' | 'unknown'
+
+export interface LinuxPortalCheck {
+  /** `org.freedesktop.portal.Desktop`, the portal frontend. */
+  frontend: LinuxBusServiceState
+  /** ScreenCast's version; absent when no portal backend offers it. */
+  screenCastVersion?: number
+  /** The `org.freedesktop.impl.portal.desktop.*` backends on the bus (`hyprland`, `gtk`). */
+  backends: string[]
+  /** Why ScreenCast could not be read, for support bundles. */
+  detail?: string
+}
+
+export interface LinuxDeviceGroupCheck {
+  /** `video` or `render`. */
+  name: string
+  exists: boolean
+  /** This run carries the group; `usermod -aG` counts only after logging in again. */
+  member: boolean
+  /** Device nodes the group guards (`/dev/video*`, `/dev/dri/renderD*`). */
+  devices: number
+  /** How many of them open read-write (the seat ACL can grant this without the group). */
+  accessible: number
+}
+
+/** `diagnostics.linuxDesktop` (plan 257 S18): what this Linux desktop is missing. */
+export interface LinuxDesktopCheck {
+  /** `org.freedesktop.secrets`: GNOME Keyring, KWallet, KeePassXC. */
+  secretService: LinuxBusServiceState
+  portal: LinuxPortalCheck
+  groups: LinuxDeviceGroupCheck[]
+  /** `XDG_CURRENT_DESKTOP`. */
+  currentDesktop?: string
+}
+
 export interface RuntimeInfo {
   /** The running app version (`app.getVersion()`), shown in Settings → About. */
   version: string
@@ -5046,6 +5095,9 @@ export interface RuntimeInfo {
   /** Why global shortcuts can't work in this session (Linux on Wayland), in
    * words Settings shows; absent where they can. */
   globalShortcutsUnavailable?: string
+  /** Linux only (plan 257 S18): the password store Electron's safeStorage
+   * picked, which sign-in and the recordings folder need. */
+  linuxKeyring?: LinuxKeyringStatus
   isPackaged: boolean
   /** Suppresses first-run setup without changing its persisted record (smokes). */
   firstRunSuppressed: boolean

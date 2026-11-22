@@ -51,6 +51,8 @@ export interface RuntimeInfoInput {
   windowGlass?: RuntimeInfo['windowGlass']
   /** Why this session can't hold a global shortcut (see global-shortcut-lifecycle.ts). */
   globalShortcutsUnavailable?: string | null
+  /** Linux: the keyring safeStorage settled on (see linux-password-store.ts). */
+  linuxKeyring?: RuntimeInfo['linuxKeyring'] | null
   env: Partial<
     Pick<
       NodeJS.ProcessEnv,
@@ -127,6 +129,7 @@ export function buildRuntimeInfo({
   updater,
   windowGlass,
   globalShortcutsUnavailable = null,
+  linuxKeyring = null,
   env
 }: RuntimeInfoInput): RuntimeInfo {
   const targetPath = permissionTargetPath(execPath)
@@ -146,6 +149,7 @@ export function buildRuntimeInfo({
     ...(updater ? { updater } : {}),
     ...(windowGlass ? { windowGlass } : {}),
     ...(globalShortcutsUnavailable ? { globalShortcutsUnavailable } : {}),
+    ...(linuxKeyring ? { linuxKeyring } : {}),
     isPackaged,
     firstRunSuppressed: env.VIDEORC_SMOKE_SKIP_FIRST_RUN === '1',
     permissionTargetName: isPackaged ? 'Videorc' : 'Electron',

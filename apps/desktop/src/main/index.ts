@@ -427,7 +427,12 @@ import {
   DISABLE_FEATURES_SWITCH,
   mergeDisabledFeatures
 } from './chromium-disabled-features'
-import { linuxPasswordStoreSwitch, PASSWORD_STORE_SWITCH } from './linux-password-store'
+import {
+  linuxKeyringStatus,
+  linuxPasswordStoreSwitch,
+  PASSWORD_STORE_SWITCH
+} from './linux-password-store'
+import { LINUX_KEYRING_SIGN_IN_REFUSAL } from '../shared/linux-keyring'
 import { createMediaPermissionGrantWatcher } from './system-permission-watch'
 import {
   flushPermissionRestart,
@@ -1630,10 +1635,15 @@ if (disabledChromiumFeatures) {
 // grants, sign-in, provider OAuth) refuses. Ask for the Secret Service there;
 // Chromium still falls back to basic_text when none answers. A user's own
 // --password-store always wins. See linux-password-store.ts.
+// The person's own --password-store, read before Videorc appends one, so
+// Health can tell "you turned the keyring off" from "there is none" (plan 257 S18).
+const userPasswordStore = app.commandLine.hasSwitch(PASSWORD_STORE_SWITCH)
+  ? app.commandLine.getSwitchValue(PASSWORD_STORE_SWITCH) || 'set'
+  : null
 const passwordStore = linuxPasswordStoreSwitch(
   process.platform,
   process.env,
-  app.commandLine.hasSwitch(PASSWORD_STORE_SWITCH)
+  userPasswordStore !== null
 )
 if (passwordStore) {
   app.commandLine.appendSwitch(PASSWORD_STORE_SWITCH, passwordStore)
@@ -16554,8 +16564,14 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
     updater: updaterDiagnostics(),
     windowGlass: mainWindowGlassInfo(),
     globalShortcutsUnavailable,
+    linuxKeyring: currentLinuxKeyring(),
     env: process.env
   })
+}
+
+/** Linux: the keyring safeStorage uses for this run; null elsewhere (plan 257 S18). */
+function currentLinuxKeyring(): RuntimeInfo['linuxKeyring'] | null {
+  return linuxKeyringStatus(process.platform, safeStorage, userPasswordStore)
 }
 
 function mainWindowGlassInfo(): RuntimeInfo['windowGlass'] {
@@ -18698,6 +18714,12 @@ app.whenReady().then(async () => {
   secureIpcHandle('account:begin-sign-in', async (_event, authorizeUrl: string) => {
     if (typeof authorizeUrl !== 'string') {
       throw new Error('Desktop account authorization URL is required.')
+    }
+    // Plan 257 S18: on a Linux desktop with no keyring Videorc can use, the
+    // sealed sign-in transaction would fail anyway; say what to install
+    // before the backend intent or the browser starts.
+    if (currentLinuxKeyring()?.available === false) {
+      throw new Error(LINUX_KEYRING_SIGN_IN_REFUSAL)
     }
     const intent = await requestBackendAdmin<{ intentGeneration: number }>(
       'account.auth.begin_intent',

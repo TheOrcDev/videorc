@@ -1,5 +1,6 @@
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import { toast } from '@/lib/toast'
+import { LINUX_KEYRING_SIGN_IN_REFUSAL } from '../../../shared/linux-keyring'
 import { recordUserError } from '@/lib/user-error-log'
 
 // Plan 174 S2.4 (J2-7, J2-14): raw error text never reaches a toast or a line.
@@ -229,6 +230,10 @@ export function userErrorMessage(error: unknown, context?: UserErrorContext): Us
   }
   if (SECURE_STORAGE_UNAVAILABLE.test(raw)) {
     return shape('known', SECURE_STORAGE_REASON, 'error')
+  }
+  // Plan 257 S18: main's Linux sign-in refusal already names what to install.
+  if (raw === LINUX_KEYRING_SIGN_IN_REFUSAL) {
+    return shape('known', LINUX_KEYRING_SIGN_IN_REFUSAL, 'error')
   }
   const spaceRefusal = exportSpaceRefusal(raw)
   if (spaceRefusal) {

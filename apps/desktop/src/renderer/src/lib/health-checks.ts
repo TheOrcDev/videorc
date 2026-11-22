@@ -15,6 +15,7 @@ import type {
 import { cameraLowFrameRateLine, type CameraLowFrameRate } from '@/lib/camera-frame-rate'
 import { NO_VALUE, formatMetric, plural } from '@/lib/format'
 import { cameraNoVideoLine, cameraSendsNoVideo } from '@/lib/source-status'
+import { linuxDesktopChecks, type LinuxDesktopInput } from '@/lib/linux-desktop-check'
 import { previewSourceStateLabel, previewStateLabel } from '@/lib/state-labels'
 import { statusWordFromValue } from '@/lib/status-word'
 import type { RecentStreamDrops } from '@/lib/stream-health-attribution'
@@ -41,6 +42,10 @@ export type HealthCheckId =
   | 'destinations'
   | 'memory'
   | 'file-repair'
+  // Linux only (plan 257 S18): see linux-desktop-check.ts.
+  | 'keyring'
+  | 'device-groups'
+  | 'screen-portal'
 
 /** One Health check: what it looks at, its state in words, and its tone. */
 export interface HealthCheck {
@@ -485,6 +490,8 @@ export type HealthChecksInput = PreviewSpeedInput & {
   recentStreamDrops: Pick<RecentStreamDrops, 'capture'>
   streamHealth: { speed?: number; droppedFrames?: number } | null
   streamTargets: readonly StreamTargetRuntime[]
+  /** Linux: the keyring, device groups and portal (plan 257 S18). */
+  linuxDesktop?: LinuxDesktopInput
 }
 
 /** Every check, in the order "Show all checks" lists them. */
@@ -528,7 +535,8 @@ export function healthChecks(input: HealthChecksInput): HealthCheck[] {
     ),
     check('destinations', 'Destinations', destinationsCheck(input.streamTargets)),
     check('memory', 'Memory', memoryCheck(stats.backendRssBytes)),
-    check('file-repair', 'File repair', fileRepairCheck(stats))
+    check('file-repair', 'File repair', fileRepairCheck(stats)),
+    ...(platform === 'linux' ? linuxDesktopChecks(input.linuxDesktop ?? {}) : [])
   ]
 }
 

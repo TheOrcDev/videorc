@@ -10,6 +10,8 @@
 // deliberate — the apex 307-redirects every path to www.videorc.com, and
 // redirect hops drop Authorization headers in some clients; bake the host
 // that answers directly.
+import { toastUserError } from '@/lib/user-error'
+
 const DEV_ORIGIN_OVERRIDE = (import.meta.env as Record<string, string | undefined>)
   .VITE_VIDEORC_WEB_ORIGIN
 const VIDEORC_WEB_ORIGIN =
@@ -74,10 +76,15 @@ export function openVideorcWebLink(url: string): void {
 // videorc:// deep-link. Browser-only development has no main-process
 // transaction owner: it keeps the link, but the web page rejects it without the
 // generated state/challenge instead of accepting an unbound callback.
+// Main refuses before the browser opens when it cannot keep the sign-in (a
+// Linux desktop with no keyring, plan 257 S18); that refusal is shown, never
+// dropped.
 export function beginVideorcSignIn(): void {
   const beginSignIn = window.videorc?.beginAccountSignIn
   if (beginSignIn) {
-    void beginSignIn(VIDEORC_WEB_LINKS.desktopAuthorize)
+    void Promise.resolve()
+      .then(() => beginSignIn(VIDEORC_WEB_LINKS.desktopAuthorize))
+      .catch((error: unknown) => toastUserError(error, { action: 'sign in' }))
     return
   }
   openVideorcWebLink(VIDEORC_WEB_LINKS.desktopAuthorize)

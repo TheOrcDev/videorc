@@ -30,6 +30,9 @@ import { StatusBadge } from '@/components/status-badge'
 import { BroadcastInfoFields } from '@/components/streaming/broadcast-info-fields'
 import { CategoryCombobox } from '@/components/streaming/category-combobox'
 import { DestinationCard } from '@/components/streaming/destination-card'
+import { LinuxSetupAlert } from '@/components/linux-setup-alert'
+import { useLinuxDesktopCheck } from '@/hooks/use-linux-desktop-check'
+import { keyringIssue } from '@/lib/linux-desktop-check'
 import { youtubeQuotaPausedUntil } from '@/lib/youtube-quota'
 import { GoLivePanel } from '@/components/streaming/go-live-panel'
 import { ThumbnailField } from '@/components/streaming/thumbnail-field'
@@ -188,8 +191,15 @@ function StreamingSetup({
     refreshXNativeCapability,
     authorizeXLive,
     requestStopSession,
-    youtubeQuota
+    youtubeQuota,
+    runtimeInfo
   } = useStudioCore()
+  // Plan 257 S18: on a Linux desktop with no keyring Videorc can use, say what
+  // to install here, before Sign in starts and fails.
+  const linuxDesktop = useLinuxDesktopCheck(runtimeInfo)
+  const keyringNotice = linuxDesktop.keyring
+    ? keyringIssue(linuxDesktop.keyring, linuxDesktop.desktop?.secretService)
+    : null
   const youtubeQuotaPaused = youtubeQuotaPausedUntil(youtubeQuota)
   const streaming = captureConfig.streaming
   const livestreamingEntitlementReason = entitlementDisabledReason(entitlements, 'livestreaming')
@@ -286,6 +296,7 @@ function StreamingSetup({
 
   const scheduledTargets = streaming.targets.filter((target) => target.scheduledEventId)
   const showNotices =
+    Boolean(keyringNotice) ||
     Boolean(livestreamingEntitlementReason && !isSessionActive) ||
     (isSessionActive && problems.length > 0 && !dismissed) ||
     isSessionActive ||
@@ -296,6 +307,7 @@ function StreamingSetup({
       <div className={PAGE_LEAD_COLUMN}>
         {showNotices ? (
           <div className="flex flex-col gap-2 border-b border-border p-gutter">
+            {keyringNotice ? <LinuxSetupAlert issue={keyringNotice} /> : null}
             {livestreamingEntitlementReason && !isSessionActive ? (
               <LockAlert
                 action={lockAlertAction(unlockActionForReason(livestreamingEntitlementReason))}
