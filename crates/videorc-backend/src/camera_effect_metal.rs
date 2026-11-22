@@ -405,7 +405,7 @@ impl VisionSegmenter {
                 let allocated: Allocated<AnyObject> = msg_send![class, alloc];
                 msg_send![allocated, initWithCVPixelBuffer: pixel_buffer, options: &*options]
             };
-            let requests = NSArray::from_retained_slice(&[self.request.clone()]);
+            let requests = NSArray::from_retained_slice(std::slice::from_ref(&self.request));
             let performed: Result<(), Retained<NSError>> =
                 unsafe { msg_send![&*handler, performRequests: &*requests, error: _] };
             performed.map_err(|error| {
@@ -743,9 +743,9 @@ impl MetalEffectRenderer {
                 encoder
                     .setTexture_atIndex(Some(matte_texture.as_deref().unwrap_or(&self.blank)), 1);
                 encoder.setTexture_atIndex(Some(&quarter[0]), 2);
-                set_compute_bytes(&*encoder, &down);
+                set_compute_bytes(&encoder, &down);
             }
-            dispatch(&*encoder, quarter[0].width(), quarter[0].height());
+            dispatch(&encoder, quarter[0].width(), quarter[0].height());
             // The pass runs at quarter size: a quarter of the sigma there.
             let sigma = (sigma_px / 4.0).max(0.5);
             let taps = (sigma * 3.0).ceil() as i32;
@@ -760,9 +760,9 @@ impl MetalEffectRenderer {
                 unsafe {
                     encoder.setTexture_atIndex(Some(&quarter[input]), 0);
                     encoder.setTexture_atIndex(Some(&quarter[output]), 1);
-                    set_compute_bytes(&*encoder, &params);
+                    set_compute_bytes(&encoder, &params);
                 }
-                dispatch(&*encoder, quarter[0].width(), quarter[0].height());
+                dispatch(&encoder, quarter[0].width(), quarter[0].height());
             }
             encoder.endEncoding();
             blurred = Some(quarter[0].clone());
@@ -1004,7 +1004,7 @@ mod tests {
         let mut bytes = vec![0u8; (width * height * 4) as usize];
         for y in 0..height {
             for x in 0..width {
-                let on = (x / cell + y / cell) % 2 == 0;
+                let on = (x / cell + y / cell).is_multiple_of(2);
                 let i = ((y * width + x) * 4) as usize;
                 bytes[i..i + 4].copy_from_slice(if on {
                     &[255, 0, 255, 255]
@@ -1167,6 +1167,98 @@ mod tests {
         // uv 0 maps to the picture's right edge, uv 1 to its left.
         assert!((mox - 1.0).abs() < 1e-6);
         assert!((mox + mx).abs() < 1e-6);
+    }
+
+    fn percentile(samples: &mut [f64], p: f64) -> f64 {
+        samples.sort_by(f64::total_cmp);
+        let index = ((samples.len() as f64 * p).ceil() as usize).clamp(1, samples.len()) - 1;
+        samples[index]
+    }
+
+    /// Plan 258 S3's budget probe (the performance table): the effect pass's
+    /// GPU time at 1080p and 4K from an IOSurface camera buffer, and Vision
+    /// at 1080p. GPU and Neural Engine time do not depend on the Rust build
+    /// profile; the wall times printed beside them are this build's. Run:
+    /// `cargo test -p videorc-backend --bin videorc-backend camera_effect_budget_probe -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a timing probe for a quiet Mac, not a gate"]
+    fn camera_effect_budget_probe() {
+        let Ok(mut renderer) = MetalEffectRenderer::new() else {
+            eprintln!("no Metal device");
+            return;
+        };
+        let look = blur_look();
+        for (width, height) in [(1920u32, 1080u32), (3840, 2160)] {
+            let EffectPixels::Bytes(bytes) = checker_frame(width, height, height / 54).pixels
+            else {
+                unreachable!()
+            };
+            let mut pool = None;
+            let buffer =
+                upload_to_pool(&mut pool, &bytes, width as usize, height as usize).unwrap();
+            let frame = EffectFrame {
+                width,
+                height,
+                pixels: EffectPixels::PixelBuffer(RetainedPixelBuffer::new(buffer)),
+            };
+            let matte = Matte {
+                width: 512,
+                height: 384,
+                values: (0..512 * 384)
+                    .map(|i| {
+                        if (i % 512) > 170 && (i % 512) < 340 {
+                            255
+                        } else {
+                            0
+                        }
+                    })
+                    .collect(),
+            };
+            for _ in 0..10 {
+                renderer.processed(&frame, &matte, &look).unwrap();
+            }
+            let (mut gpu, mut wall, mut cover_gpu) = (Vec::new(), Vec::new(), Vec::new());
+            for _ in 0..120 {
+                let started = std::time::Instant::now();
+                let output = renderer.processed(&frame, &matte, &look).unwrap();
+                wall.push(started.elapsed().as_secs_f64() * 1000.0);
+                gpu.push(output.gpu_ms.unwrap_or(f64::NAN));
+                cover_gpu.push(
+                    renderer
+                        .cover(&frame, &look)
+                        .unwrap()
+                        .gpu_ms
+                        .unwrap_or(f64::NAN),
+                );
+            }
+            println!(
+                "[camera-effect-budget] {width}x{height} effect pass GPU p50 {:.2} ms p95 {:.2} ms; cover GPU p95 {:.2} ms; wall p95 {:.2} ms",
+                percentile(&mut gpu.clone(), 0.5),
+                percentile(&mut gpu, 0.95),
+                percentile(&mut cover_gpu, 0.95),
+                percentile(&mut wall, 0.95),
+            );
+        }
+        let Ok(mut segmenter) = VisionSegmenter::new() else {
+            eprintln!("no Vision person segmentation");
+            return;
+        };
+        let frame = checker_frame(1920, 1080, 20);
+        let first = std::time::Instant::now();
+        segmenter.segment(&frame).unwrap();
+        let cold = first.elapsed().as_secs_f64() * 1000.0;
+        let mut times = Vec::new();
+        for _ in 0..90 {
+            let started = std::time::Instant::now();
+            segmenter.segment(&frame).unwrap();
+            times.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        println!(
+            "[camera-effect-budget] Vision .balanced 1920x1080 cold {:.0} ms, p50 {:.2} ms, p95 {:.2} ms (bytes input: includes a 1080p upload)",
+            cold,
+            percentile(&mut times.clone(), 0.5),
+            percentile(&mut times, 0.95),
+        );
     }
 
     #[test]

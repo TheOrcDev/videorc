@@ -45,10 +45,13 @@ use crate::protocol::{
 /// stops reading the fixture room once the sigma is about two of its cells
 /// (40 px at 1080p; measured in S3: 1 cell leaves 8 pattern tiles a frame,
 /// 1.5 cells 2, 2 cells none). 48 px (2.4 cells) keeps a margin for H.264.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the macOS engine draws it
 pub(crate) const STRONG_BLUR_SIGMA_AT_1080: f32 = 48.0;
 /// D5: Strong blur's strength.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the macOS engine draws it
 pub(crate) const STRONG_BLUR_PCT: f32 = 70.0;
 /// D6: the blur cover is Strong blur plus 50 % more.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the macOS engine draws it
 pub(crate) const COVER_BLUR_FACTOR: f32 = 1.5;
 /// S0: EMA 0.5 on the matte cut flicker 2.5–4x.
 const MATTE_EMA_WEIGHT_PREVIOUS: u16 = 128;
@@ -122,12 +125,14 @@ impl EffectLook {
 /// The blur's Gaussian sigma in pixels for a frame `height` tall at `pct`
 /// strength: Strong blur is [`STRONG_BLUR_SIGMA_AT_1080`] at 1080p and it
 /// scales with both. Never under 2 px for a blur that is on.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the macOS engine draws it
 pub(crate) fn blur_sigma_px(pct: u32, height: u32) -> f32 {
     let scale = height.max(1) as f32 / 1080.0;
     (STRONG_BLUR_SIGMA_AT_1080 * (pct as f32 / STRONG_BLUR_PCT) * scale).max(2.0)
 }
 
 /// D6: the blur cover's sigma, Strong blur plus 50 %, whatever the strength.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the macOS engine draws it
 pub(crate) fn cover_blur_sigma_px(height: u32) -> f32 {
     blur_sigma_px(STRONG_BLUR_PCT as u32, height) * COVER_BLUR_FACTOR
 }
@@ -1393,7 +1398,7 @@ mod tests {
         for y in 0..h {
             for x in 0..w {
                 let i = ((y * w + x) * 4) as usize;
-                let on = (x / 2 + y / 2) % 2 == 0;
+                let on = (x / 2 + y / 2).is_multiple_of(2);
                 bytes[i..i + 4].copy_from_slice(if on {
                     &[255, 0, 255, 255]
                 } else {
