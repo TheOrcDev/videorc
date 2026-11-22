@@ -391,6 +391,29 @@ MP4. Per-second RMS: tone for 3.5 s / 6 s, then `-inf`. Load average was
    no SIGKILL at Stop; `pnpm smoke:record-latency:gate` passes on ogre; the
    direct matrix command passes.
    **Out of scope:** changing sources mid-session (S9).
+   **Result (2026-11-22, PR #1659):** load-driven, not a clock mismatch. FFmpeg
+   encodes the Linux raw bridge itself and reads the audio FIFO only as far
+   as the muxed video has got; a below-realtime encode held the bus cursor
+   back, the bus queued only 1 s ahead of it, so every mic buffer was refused
+   (`ahead-of-cap`) for the rest of the take. Fixed on Linux only: on-time
+   capture waits for a trailing cursor (20 s backlog), and Stop hands FFmpeg
+   the audio it owes (up to 15 s). Evidence in `~/linux-beta/s1/` on ogre:
+   - Baseline (0.36 lab build, same code path): 2 × 30 s at load 22–30 lost
+     28.3–29.1 s of tone per take; 2 × 60 s under 8 busy loops lost 13–35 s.
+   - Quiet (no other jobs; the take itself holds ogre at load 19–27), 10 × 60 s
+     camera + mic, 1080p30 OpenH264: **10/10 pass**, 0 ms silent, A/V skew
+     0–20 ms, Stop 0.8–2.4 s, no forced Stop.
+   - Loaded (`--load-cpus 8`, load 31–41): 1080p30 0/5 and VAAPI 0/3. The
+     encode falls to 1–5 fps and the bridge ends 3 of the 5 software takes
+     early (pre-existing: the baseline does the same). This is capacity (the
+     CPU camera and compositor, S2/S3), not mic placement. 720p30 is 2/5:
+     no early end and the mic held for the whole take; it failed on 1.2–2.6 s
+     of video stamped past Stop (raw input queue latency, follow-up) and one
+     forced Stop at load 41.
+   - `smoke:record-latency:gate`: every artifact verified; fails only the
+     macOS budgets Linux has no calibration for (warm click→recording p50
+     702 ms / p95 1579 ms, stop→idle p50 925 ms / p95 1158 ms).
+   - Direct matrix command (1080p30 OpenH264): PASS.
 
 ### S2: camera: native format, device size, hotplug
 
