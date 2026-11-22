@@ -395,7 +395,6 @@ import {
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import { showMp4ExportFailed, showMp4Finalizing, showMp4Ready } from '@/lib/finalization-toast'
 import {
-  COHOST_STATUS_TOAST_ID,
   cohostStatusDetail,
   cohostStatusToast,
   showBrowserApproval,
@@ -407,11 +406,7 @@ import {
   sourceSwitchFailedDescription,
   sourceSwitchFailedTitle
 } from '@/lib/studio-toasts'
-import {
-  beginVideorcSignIn,
-  openVideorcWebLink,
-  VIDEORC_PREMIUM_URL
-} from '@/lib/videorc-web-links'
+import { beginVideorcSignIn } from '@/lib/videorc-web-links'
 import {
   OFFLINE_TOAST_ID,
   offlineError,
@@ -3559,6 +3554,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     },
     [client, commitCaptionsStatus, runCaptionsCommand]
   )
+  const startCaptionsRef = useRef(startCaptions)
+  startCaptionsRef.current = startCaptions
   const stopCaptions = useCallback(async () => {
     if (!client) return
     let status: CaptionsStatus
@@ -5592,6 +5589,17 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       runtime.showBackendError(error, status, context)
     )
   }, [])
+  // What Videorc tried on its own failed: a load at launch, a reload, a
+  // retry. Nobody pressed anything, so it is an entry behind the bell and
+  // never a toast (the owner, 2026-11-22: "the first thing you see is a bunch
+  // of toasts"). The record and the console line are a toast's.
+  const reportUnasked = useCallback((error: unknown, context?: UserErrorContext) => {
+    setLastError(ipcErrorMessage(error))
+    const status = wsStatusRef.current
+    void loadSessionRuntimeRecovery().then((runtime) =>
+      runtime.noteBackgroundError(error, status, context)
+    )
+  }, [])
 
   useEffect(() => {
     const stopped = pendingScreenImportsRef.current.length
@@ -5893,25 +5901,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     if (statusToast) {
       const detail = cohostStatusDetail(merged)
       if (detail) console.warn('[buddy] stopped:', detail)
-      const show =
-        statusToast.kind === 'message'
-          ? toast
-          : statusToast.kind === 'warning'
-            ? toast.warning
-            : toast.error
-      show(statusToast.title, {
-        id: COHOST_STATUS_TOAST_ID,
-        ...(statusToast.action === 'sign-in'
-          ? { action: { label: 'Sign in', onClick: beginVideorcSignIn } }
-          : statusToast.action === 'view-premium'
-            ? {
-                action: {
-                  label: 'View Premium',
-                  onClick: () => openVideorcWebLink(VIDEORC_PREMIUM_URL)
-                }
-              }
-            : {})
-      })
+      // Sidekick's status reaches the Studio on its own (at launch too):
+      // an entry behind the bell with its fix, never a toast.
+      withAppNotifications((app) => app.publishSidekickStatus(statusToast, beginVideorcSignIn))
     }
   }, [])
 
@@ -7702,12 +7694,15 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         if (options.background && isYouTubeChannelAuthFailure(error)) {
           return
         }
-        reportError(error, { action: 'load', object: 'your YouTube channels' })
+        ;(options.background ? reportUnasked : reportError)(error, {
+          action: 'load',
+          object: 'your YouTube channels'
+        })
       } finally {
         setYoutubeChannelsLoading(false)
       }
     },
-    [client, reportError]
+    [client, reportError, reportUnasked]
   )
 
   const selectYouTubeChannel = useCallback(
@@ -7875,12 +7870,13 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         setXNativeCapability(capability)
       } catch (error) {
         setXNativeCapability(null)
-        reportError(error)
+        // Read for the X account on its own, never at a press.
+        reportUnasked(error)
       } finally {
         setXNativeCapabilityLoading(false)
       }
     },
-    [client, reportError]
+    [client, reportUnasked]
   )
 
   useEffect(() => {
@@ -8460,7 +8456,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       liveChatRecoveryRetryTimer = window.setTimeout(() => {
         liveChatRecoveryRetryTimer = null
         void recoverLiveChatSnapshot().catch((error: unknown) => {
-          if (!disposed) reportError(error)
+          if (!disposed) reportUnasked(error)
         })
       }, LIVE_CHAT_RECOVERY_RETRY_DELAY_MS)
     }
@@ -8582,7 +8578,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         if (remoteSurfaceConnected) remoteSurfacePublisher.markConnected()
       })
       .catch((error: unknown) => {
-        if (!disposed) reportError(error)
+        if (!disposed) reportUnasked(error)
       })
     const remoteIntents = createRemoteIntentQueue({
       run: async (payload) => {
@@ -8621,7 +8617,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         if (remoteSurfaceConnected) agentLink.markConnected()
       })
       .catch((error: unknown) => {
-        if (!disposed) reportError(error)
+        if (!disposed) reportUnasked(error)
       })
     const unsubscribers = [
       nextClient.on('session.sources.changed', () => {
@@ -8639,11 +8635,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         void nextClient
           .request<RemoteControlStatus>('remote.control.status')
           .then(setRemoteControlStatus)
-          .catch(reportError)
+          .catch(reportUnasked)
         void nextClient
           .request<RemoteLanStatus>('remote.lan.status')
           .then(setRemoteLanStatus)
-          .catch(reportError)
+          .catch(reportUnasked)
       }),
       // Remote-control intents (Stream Deck et al) arrive as events relayed
       // by the backend and run in arrival order (lib/remote-intent-queue.ts);
@@ -9395,7 +9391,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         if (lagged.skipped < 1) return
         feedDashboard('events.lagged', payload)
         void recoverLiveChatSnapshot().catch((error: unknown) => {
-          if (!disposed) reportError(error)
+          if (!disposed) reportUnasked(error)
         })
       }),
       nextClient.on('captions.status', (payload) =>
@@ -9980,7 +9976,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         // so captions and other live controls do not freeze behind a false
         // "Backend offline" state.
         setWsStatus(nextClient.connected ? 'connected' : 'failed')
-        reportError(error)
+        // The launch's own reads: an entry behind the bell, never a toast.
+        reportUnasked(error)
       })
 
     return () => {
@@ -10112,7 +10109,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     updateLiveChatSnapshot,
     validatePlatformAccountsForClient,
     refreshSessions,
-    reportError
+    reportError,
+    reportUnasked
   ])
 
   const loadScene = useCallback(
@@ -10609,7 +10607,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
               performanceCheckRunning: checkRunning()
             })
           ) {
-            reportError(error)
+            // The scene follows the saved config on its own: nobody pressed.
+            reportUnasked(error)
           }
         }
       )
@@ -10621,7 +10620,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     performanceCheckRunning,
     recording.state,
     reloadSceneFromCaptureConfig,
-    reportError,
+    reportUnasked,
     sceneEditMode,
     sceneReloadRetryTick,
     startRequestPending,
@@ -13291,99 +13290,105 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     wsStatus
   ])
 
-  const refreshPreview = useCallback(async () => {
-    if (!client || wsStatus !== 'connected') {
-      return
-    }
+  // `unasked`: the Studio opened the preview itself (at launch), not a press.
+  const refreshPreview = useCallback(
+    async (options: { unasked?: boolean } = {}) => {
+      if (!client || wsStatus !== 'connected') {
+        return
+      }
 
-    if (nativePreviewSurfaceEnabled) {
-      const cameraStatus = await ensureNativePreviewCamera()
-      const screenStatus = await ensureNativePreviewScreen()
-      const permissionStatus =
-        screenStatus.state === 'permission-needed'
-          ? screenStatus
-          : cameraStatus.state === 'permission-needed'
-            ? cameraStatus
-            : null
-      if (permissionStatus) {
+      if (nativePreviewSurfaceEnabled) {
+        const cameraStatus = await ensureNativePreviewCamera()
+        const screenStatus = await ensureNativePreviewScreen()
+        const permissionStatus =
+          screenStatus.state === 'permission-needed'
+            ? screenStatus
+            : cameraStatus.state === 'permission-needed'
+              ? cameraStatus
+              : null
+        if (permissionStatus) {
+          setPreviewLoading(false)
+          setPreviewUrl(null)
+          setPreviewLiveStatus({
+            state: 'unavailable',
+            source: 'unavailable',
+            transport: 'unavailable',
+            backing: 'none',
+            message: permissionStatus.message ?? 'Permission is required before preview can run.'
+          })
+          return
+        }
+        const activeSourceStatus = screenStatus.state === 'live' ? screenStatus : cameraStatus
         setPreviewLoading(false)
         setPreviewUrl(null)
+        setPreviewLiveStatus({
+          state: 'live',
+          source: 'idle-preview',
+          transport: 'electron-proof-surface',
+          backing: 'electron-browser-window',
+          targetFps: activeSourceStatus.targetFps || previewSurfaceStatusRef.current.targetFps,
+          width: (activeSourceStatus.width ?? previewSurfaceStatusRef.current.width) || undefined,
+          height:
+            (activeSourceStatus.height ?? previewSurfaceStatusRef.current.height) || undefined,
+          message:
+            screenStatus.state === 'live'
+              ? 'Screen source is live on the preview surface.'
+              : cameraStatus.state === 'live'
+                ? 'Camera source is live on the preview surface.'
+                : (screenStatus.message ??
+                  cameraStatus.message ??
+                  'Preview surface proof mode is active.')
+        })
+        return
+      }
+
+      if (previewRequestPending.current) {
+        previewRefreshQueued.current = true
+        return
+      }
+
+      try {
+        previewRequestPending.current = true
+        setPreviewLoading(true)
+        const status = await client.request<PreviewLiveStatus>('preview.live.start', {
+          sources: captureConfig.sources,
+          layout: captureConfig.layout,
+          video: captureConfig.video
+        })
+        applyPreviewLiveStatus(status)
+      } catch (error) {
+        ;(options.unasked ? reportUnasked : reportError)(error)
         setPreviewLiveStatus({
           state: 'unavailable',
           source: 'unavailable',
           transport: 'unavailable',
           backing: 'none',
-          message: permissionStatus.message ?? 'Permission is required before preview can run.'
+          message: error instanceof Error ? error.message : 'Live preview failed.'
         })
-        return
+        setPreviewUrl(null)
+      } finally {
+        previewRequestPending.current = false
+        setPreviewLoading(false)
+        if (previewRefreshQueued.current) {
+          previewRefreshQueued.current = false
+          setPreviewRefreshNonce((current) => current + 1)
+        }
       }
-      const activeSourceStatus = screenStatus.state === 'live' ? screenStatus : cameraStatus
-      setPreviewLoading(false)
-      setPreviewUrl(null)
-      setPreviewLiveStatus({
-        state: 'live',
-        source: 'idle-preview',
-        transport: 'electron-proof-surface',
-        backing: 'electron-browser-window',
-        targetFps: activeSourceStatus.targetFps || previewSurfaceStatusRef.current.targetFps,
-        width: (activeSourceStatus.width ?? previewSurfaceStatusRef.current.width) || undefined,
-        height: (activeSourceStatus.height ?? previewSurfaceStatusRef.current.height) || undefined,
-        message:
-          screenStatus.state === 'live'
-            ? 'Screen source is live on the preview surface.'
-            : cameraStatus.state === 'live'
-              ? 'Camera source is live on the preview surface.'
-              : (screenStatus.message ??
-                cameraStatus.message ??
-                'Preview surface proof mode is active.')
-      })
-      return
-    }
-
-    if (previewRequestPending.current) {
-      previewRefreshQueued.current = true
-      return
-    }
-
-    try {
-      previewRequestPending.current = true
-      setPreviewLoading(true)
-      const status = await client.request<PreviewLiveStatus>('preview.live.start', {
-        sources: captureConfig.sources,
-        layout: captureConfig.layout,
-        video: captureConfig.video
-      })
-      applyPreviewLiveStatus(status)
-    } catch (error) {
-      reportError(error)
-      setPreviewLiveStatus({
-        state: 'unavailable',
-        source: 'unavailable',
-        transport: 'unavailable',
-        backing: 'none',
-        message: error instanceof Error ? error.message : 'Live preview failed.'
-      })
-      setPreviewUrl(null)
-    } finally {
-      previewRequestPending.current = false
-      setPreviewLoading(false)
-      if (previewRefreshQueued.current) {
-        previewRefreshQueued.current = false
-        setPreviewRefreshNonce((current) => current + 1)
-      }
-    }
-  }, [
-    applyPreviewLiveStatus,
-    captureConfig.layout,
-    captureConfig.sources,
-    captureConfig.video,
-    client,
-    ensureNativePreviewCamera,
-    ensureNativePreviewScreen,
-    nativePreviewSurfaceEnabled,
-    reportError,
-    wsStatus
-  ])
+    },
+    [
+      applyPreviewLiveStatus,
+      captureConfig.layout,
+      captureConfig.sources,
+      captureConfig.video,
+      client,
+      ensureNativePreviewCamera,
+      ensureNativePreviewScreen,
+      nativePreviewSurfaceEnabled,
+      reportError,
+      reportUnasked,
+      wsStatus
+    ]
+  )
 
   const syncNativePreviewSurfaceBounds = useCallback(
     async (bounds: PreviewSurfaceBounds, generation?: number) => {
@@ -13713,8 +13718,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         visible: previewWindow.visible
       }
       previewWindowSurfaceActiveRef.current = true
+      // The Preview window's surface follows the window on its own (and is
+      // restored at launch): a failure is an entry, never a toast.
       void syncNativePreviewSurfaceBounds(bounds, previewWindow.supervisor.generation).catch(
-        reportError
+        reportUnasked
       )
       return
     }
@@ -13725,7 +13732,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   }, [
     nativePreviewSurfaceEnabled,
     previewWindow,
-    reportError,
+    reportUnasked,
     runtimeInfo?.disableAutoPreview,
     syncFramePollingSuppression,
     syncNativePreviewSurfaceBounds,
@@ -14967,7 +14974,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
               : requestError
                 ? ` ${String(requestError)}`
                 : ''
-          reportError(new Error(`${rejection.message}${detail}`))
+          // The sync runs on its own (a session's start, the Clips ring at
+          // launch too): a refusal is an entry behind the bell.
+          reportUnasked(new Error(`${rejection.message}${detail}`))
           return !rejection.disableForSession
         }
       )
@@ -15055,7 +15064,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     systemAudioRetry,
     commitLiveAudioProcessingApplied,
     failLiveMicrophoneWaiters,
-    reportError,
+    reportUnasked,
     runtimeInfo?.windowsLiveAudioSmokeMode,
     startRequestPending,
     stopRequestPending,
@@ -15140,25 +15149,26 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           reasonCode: 'captions-output-unsupported',
           message: captionOutputReadiness.description
         })
-        toast.warning("Live captions can't start in this session", {
-          id: 'captions-output-unsupported',
-          description:
-            captionOutputReadiness.description ??
-            "The active output configuration can't carry caption pixels."
-        })
+        // Captions start on their own with a session (the Clips ring at
+        // launch too): an entry behind the bell, never a toast.
+        withAppNotifications((app) =>
+          app.publishCaptionsOutputUnsupported(captionOutputReadiness.description)
+        )
         return
       }
       captionsStartAttemptedRef.current = true
       captionsStopAttemptedRef.current = false
       const language = captureConfig.captions.language
-      const start = (): void => {
-        void startCaptions(language).catch((error: unknown) => {
-          toastUserError(
-            error,
-            { action: 'start', object: 'live captions' },
-            { id: 'captions-start', action: { label: 'Retry', onClick: start } }
-          )
+      const start = (current = language): void => {
+        void startCaptionsRef.current(current).catch((error: unknown) => {
+          withAppNotifications((app) => app.publishCaptionsStartFailure(error, retry))
         })
+      }
+      // The entry's Retry may be pressed later: it asks the Studio's current
+      // client, in the language chosen now, and only while captions are on.
+      const retry = (): void => {
+        const { captions } = captureConfigRef.current
+        if (captions.enabled) start(captions.language)
       }
       start()
     } else if (action === 'stop') {
@@ -16157,7 +16167,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     const timer = window.setTimeout(
       () => {
         autoPreviewStartedForRef.current = client
-        void refreshPreview()
+        void refreshPreview({ unasked: true })
       },
       launchStart ? 0 : 500
     )
@@ -20857,7 +20867,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         registrar.sync(settingsRef.current.globalShortcuts ?? {})
       })
       .catch((error: unknown) => {
-        if (!disposed) reportError(error, { action: 'start', object: 'phone pairing' })
+        if (!disposed) reportUnasked(error, { action: 'turn on', object: 'global shortcuts' })
       })
     return () => {
       disposed = true
@@ -20866,7 +20876,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         globalShortcutsRegistrarRef.current = null
       }
     }
-  }, [reportError])
+  }, [reportUnasked])
   globalShortcutsRegistrarRef.current?.sync(settings.globalShortcuts ?? {})
   const handleGlobalShortcut = useEffectEvent((action: GlobalShortcutAction) => {
     // Plan 203 S5: no global key records, goes live or switches a scene while

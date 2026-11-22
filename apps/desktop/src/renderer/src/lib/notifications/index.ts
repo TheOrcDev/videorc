@@ -3,12 +3,17 @@
 // store lives here; other windows read a copy.
 
 import { announceNotification, setNotificationCount } from '@/lib/notification-count'
+import { LAUNCH_QUIET_MS } from '@/lib/notifications/policy'
 import { installNotificationPopUps } from '@/lib/notifications/pop-up'
 import { startNotificationRelay } from '@/lib/notifications/relay'
 import { createNotificationStore } from '@/lib/notifications/store'
 import { guardToastText } from '@/lib/toast'
+import { userHasPressed } from '@/lib/user-pressed'
 
 export const notifications = createNotificationStore({
+  // At launch, what Videorc found on its own waits behind the bell.
+  launchQuietMs: LAUNCH_QUIET_MS,
+  pressed: userHasPressed,
   onCount: setNotificationCount,
   guardText: (text) => guardToastText(text).text,
   onAnnounce: (entry) => announceNotification(entry.title, entry.tone === 'urgent')

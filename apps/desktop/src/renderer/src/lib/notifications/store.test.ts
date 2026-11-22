@@ -134,6 +134,62 @@ describe('the notification store (plan 250)', () => {
     })
   })
 
+  describe('at launch (the owner, 2026-11-22: no stack of toasts when you open the app)', () => {
+    let pressed = false
+    const launching = (): NotificationStore => {
+      pressed = false
+      const fresh = createNotificationStore({
+        now: () => clock,
+        live: () => live,
+        quiet: () => quiet,
+        pressed: () => pressed,
+        launchQuietMs: 60_000
+      })
+      fresh.setPopUpDoor(door)
+      return fresh
+    }
+
+    it('what Videorc finds in the first minute waits behind the bell, counted', () => {
+      const fresh = launching()
+      fresh.publish(problem({ key: 'host-overloaded', title: 'This computer is overloaded' }))
+      fresh.publish(problem({ key: 'global-shortcuts', title: "A shortcut didn't register" }))
+      fresh.publish({ key: 'saved', kind: kind('finished'), title: 'Recording saved' })
+      fresh.publish({ key: 'failed', kind: kind('failure'), title: 'Videorc needs a restart' })
+      expect(door.show).not.toHaveBeenCalled()
+      expect(fresh.count()).toMatchObject({ unread: 4, tone: 'urgent' })
+    })
+
+    it('a press does not let a startup check through, but its own answer speaks', () => {
+      const fresh = launching()
+      pressed = true
+      fresh.publish(problem({ key: 'host-overloaded', title: 'This computer is overloaded' }))
+      expect(door.show).not.toHaveBeenCalled()
+      fresh.publish({ key: 'clip', kind: kind('answer'), title: 'Clip saved' })
+      expect(door.show).toHaveBeenCalledTimes(1)
+      expect(door.show.mock.calls[0][0]).toMatchObject({ key: 'clip' })
+    })
+
+    it('an urgent problem pops up in a recording the streamer started in that minute', () => {
+      const fresh = launching()
+      fresh.publish({ key: 'early', kind: kind('failure'), title: 'Recording stopped' })
+      expect(door.show).not.toHaveBeenCalled()
+      pressed = true
+      live = true
+      fresh.publish({ key: 'late', kind: kind('failure'), title: 'Your stream stopped' })
+      expect(door.show).toHaveBeenCalledTimes(1)
+    })
+
+    it('after the first minute the plan 250 rules apply again; launch entries never pop up late', () => {
+      const fresh = launching()
+      fresh.publish(problem({ detail: 'No sound for 5 s.' }))
+      clock += 61_000
+      fresh.publish(problem({ detail: 'No sound for 66 s.' }))
+      expect(door.show).not.toHaveBeenCalled()
+      fresh.publish(problem({ key: 'disk-space', title: 'Recording space is low' }))
+      expect(door.show).toHaveBeenCalledTimes(1)
+    })
+  })
+
   describe('what pops up', () => {
     it('idle: a warning pops up for 8 s with its first action', () => {
       const run = vi.fn()

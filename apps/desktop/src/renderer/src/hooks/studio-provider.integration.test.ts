@@ -16340,9 +16340,20 @@ describe('real StudioProvider lifecycle', () => {
       expect(latest().lastError).toContain(
         'Noise reduction is unavailable for this capture. It is Off.'
       )
+      // The sync runs on its own (the Clips ring starts it at launch too), so
+      // its notice is an entry behind the bell (the owner, 2026-11-22), and
+      // still only one: no toast besides it, no second entry.
       const notices = (): number =>
-        toastSpies.error.mock.calls.length + toastSpies.warning.mock.calls.length
+        toastSpies.error.mock.calls.length +
+        toastSpies.warning.mock.calls.length +
+        notifications.snapshot().filter((entry) => entry.kind === 'backend-error').length
       await waitForObservation(() => notices() === 1)
+      // Recording with quiet on: the entry waits behind the bell, no toast.
+      expect(toastSpies.error).not.toHaveBeenCalled()
+      expect(toastSpies.warning).not.toHaveBeenCalled()
+      expect(
+        notifications.snapshot().filter((entry) => entry.kind === 'backend-error')
+      ).toHaveLength(1)
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 30))
       })

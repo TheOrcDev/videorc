@@ -561,3 +561,41 @@ test("the look waits for setup's performance check to finish, never for one abou
   )
   assert.ok(FIRST_RUN_SMOKE_LIMITS.performanceCheckSettleMs >= 60000)
 })
+
+test('launch-quiet: a minute with no input shows no toast, and what Videorc found is on the bell', () => {
+  const quiet = {
+    toastHook: true,
+    notificationHook: true,
+    pressed: false,
+    watchMs: FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs,
+    launchToasts: [],
+    entries: [{ key: 'host-overloaded' }, { key: 'global-shortcuts' }],
+    expectedKeys: ['host-overloaded', 'global-shortcuts'],
+    bellCount: 2
+  }
+  assert.equal(evaluateFirstRunSmokeStep('launch-quiet', quiet).pass, true)
+
+  const toasted = evaluateFirstRunSmokeStep('launch-quiet', {
+    ...quiet,
+    launchToasts: [
+      { at: 6914, kind: 'warning', title: 'This computer is overloaded' },
+      { at: 61_000, kind: 'success', title: 'Clip saved' }
+    ]
+  })
+  assert.equal(toasted.pass, false)
+  assert.match(toasted.failures.join('\n'), /6914 ms warning "This computer is overloaded"/)
+  assert.doesNotMatch(toasted.failures.join('\n'), /Clip saved/)
+
+  const blind = evaluateFirstRunSmokeStep('launch-quiet', { ...quiet, toastHook: false })
+  assert.match(blind.failures.join('\n'), /nothing was read/)
+  const lost = evaluateFirstRunSmokeStep('launch-quiet', {
+    ...quiet,
+    entries: [],
+    bellCount: 0
+  })
+  assert.match(lost.failures.join('\n'), /not behind the bell: host-overloaded, global-shortcuts/)
+  const short = evaluateFirstRunSmokeStep('launch-quiet', { ...quiet, watchMs: 30_000 })
+  assert.match(short.failures.join('\n'), /shorter than 60 s/)
+  const touched = evaluateFirstRunSmokeStep('launch-quiet', { ...quiet, pressed: true })
+  assert.match(touched.failures.join('\n'), /pressed the window/)
+})
