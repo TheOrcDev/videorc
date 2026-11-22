@@ -113,6 +113,69 @@ for (const tool of [ffmpegPath, ffprobePath]) {
   }
 }
 
+/** The renderer's stored background for the camera (settings.cameraBackgrounds), or null. */
+const READ_STORED_BACKGROUND = `
+  const settings = JSON.parse(localStorage.getItem('videorc.settings') ?? '{}');
+  return settings.cameraBackgrounds?.[params.cameraId] ?? null;
+`
+
+/**
+ * Picks the fixture camera in the Studio's Camera picker, as a streamer
+ * would, so the per-camera setting the Background control writes belongs to
+ * the camera the smoke records.
+ */
+const PIN_CAMERA = `
+  const trigger = '[data-slot="device-picker-trigger"][aria-label="Camera"]';
+  await openTab('studio', trigger);
+  (await waitFor(trigger, 15000)).click();
+  const item = await waitFor('[cmdk-item][data-value="' + params.cameraId + '"]', 15000);
+  item.click();
+  await waitFor('[data-videorc-camera-background-trigger]', 15000);
+  await sleep(800);
+  return true;
+`
+
+/**
+ * Plan 258 S5: clicks the Studio's Background trigger and the pass's tile,
+ * the way a streamer turns the effect on. A picture outside the popover's
+ * row goes through Choose image…. Returns the trigger's name after the
+ * click and the per-camera setting the click stored.
+ */
+const PICK_BACKGROUND = `
+  const inside = (scope, choice) =>
+    document.querySelector(scope + ' [data-videorc-camera-background-choice="' + choice + '"]');
+  await openTab('studio', '[data-videorc-camera-background-trigger]');
+  const trigger = await waitFor('[data-videorc-camera-background-trigger]', 15000);
+  const before = trigger.getAttribute('aria-label');
+  if (!document.querySelector('[data-videorc-camera-background-popover]')) trigger.click();
+  await waitFor('[data-videorc-camera-background-popover]');
+  let tile = inside('[data-videorc-camera-background-popover]', params.choice);
+  if (!tile && params.choice.startsWith('image:')) {
+    (await waitFor('[data-videorc-camera-background-popover] [data-videorc-camera-background-choose-image]')).click();
+    await waitFor('[data-videorc-camera-background-image-dialog]');
+    tile = inside('[data-videorc-camera-background-image-dialog]', params.choice);
+  }
+  if (!tile) throw new Error('No Background tile ' + params.choice);
+  if (tile.disabled) {
+    const reason = document.querySelector('[data-videorc-camera-background-reason]')?.textContent ?? '';
+    throw new Error('The Background tile ' + params.choice + ' is disabled: ' + reason);
+  }
+  tile.click();
+  let stored = null;
+  const deadline = performance.now() + 5000;
+  while (performance.now() < deadline) {
+    const settings = JSON.parse(localStorage.getItem('videorc.settings') ?? '{}');
+    stored = settings.cameraBackgrounds?.[params.cameraId] ?? null;
+    if ((stored?.mode ?? 'off') === params.mode) break;
+    await sleep(50);
+  }
+  // Close the popover (a pick leaves it open, as the Studio does).
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await sleep(200);
+  const after = document.querySelector('[data-videorc-camera-background-trigger]')?.getAttribute('aria-label') ?? null;
+  return { before, after, stored };
+`
+
 let app = null
 const receivers = []
 const report = {
@@ -382,69 +445,6 @@ async function evaluate(smoke, code, params = {}) {
     ? response.result
     : response
 }
-
-/** The renderer's stored background for the camera (settings.cameraBackgrounds), or null. */
-const READ_STORED_BACKGROUND = `
-  const settings = JSON.parse(localStorage.getItem('videorc.settings') ?? '{}');
-  return settings.cameraBackgrounds?.[params.cameraId] ?? null;
-`
-
-/**
- * Picks the fixture camera in the Studio's Camera picker, as a streamer
- * would, so the per-camera setting the Background control writes belongs to
- * the camera the smoke records.
- */
-const PIN_CAMERA = `
-  const trigger = '[data-slot="device-picker-trigger"][aria-label="Camera"]';
-  await openTab('studio', trigger);
-  (await waitFor(trigger, 15000)).click();
-  const item = await waitFor('[cmdk-item][data-value="' + params.cameraId + '"]', 15000);
-  item.click();
-  await waitFor('[data-videorc-camera-background-trigger]', 15000);
-  await sleep(800);
-  return true;
-`
-
-/**
- * Plan 258 S5: clicks the Studio's Background trigger and the pass's tile,
- * the way a streamer turns the effect on. A picture outside the popover's
- * row goes through Choose image…. Returns the trigger's name after the
- * click and the per-camera setting the click stored.
- */
-const PICK_BACKGROUND = `
-  const inside = (scope, choice) =>
-    document.querySelector(scope + ' [data-videorc-camera-background-choice="' + choice + '"]');
-  await openTab('studio', '[data-videorc-camera-background-trigger]');
-  const trigger = await waitFor('[data-videorc-camera-background-trigger]', 15000);
-  const before = trigger.getAttribute('aria-label');
-  if (!document.querySelector('[data-videorc-camera-background-popover]')) trigger.click();
-  await waitFor('[data-videorc-camera-background-popover]');
-  let tile = inside('[data-videorc-camera-background-popover]', params.choice);
-  if (!tile && params.choice.startsWith('image:')) {
-    (await waitFor('[data-videorc-camera-background-popover] [data-videorc-camera-background-choose-image]')).click();
-    await waitFor('[data-videorc-camera-background-image-dialog]');
-    tile = inside('[data-videorc-camera-background-image-dialog]', params.choice);
-  }
-  if (!tile) throw new Error('No Background tile ' + params.choice);
-  if (tile.disabled) {
-    const reason = document.querySelector('[data-videorc-camera-background-reason]')?.textContent ?? '';
-    throw new Error('The Background tile ' + params.choice + ' is disabled: ' + reason);
-  }
-  tile.click();
-  let stored = null;
-  const deadline = performance.now() + 5000;
-  while (performance.now() < deadline) {
-    const settings = JSON.parse(localStorage.getItem('videorc.settings') ?? '{}');
-    stored = settings.cameraBackgrounds?.[params.cameraId] ?? null;
-    if ((stored?.mode ?? 'off') === params.mode) break;
-    await sleep(50);
-  }
-  // Close the popover (a pick leaves it open, as the Studio does).
-  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  await sleep(200);
-  const after = document.querySelector('[data-videorc-camera-background-trigger]')?.getAttribute('aria-label') ?? null;
-  return { before, after, stored };
-`
 
 /**
  * Plan 258 S5: the pass's background through the Studio's controls, never
