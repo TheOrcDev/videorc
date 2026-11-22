@@ -48,6 +48,7 @@ import {
   evaluateLinuxNotifications,
   evaluateLinuxScreenGrant,
   evaluateLinuxScreenLock,
+  evaluateLinuxSessionLock,
   evaluateLinuxSession,
   evaluateLinuxSleep,
   evaluateLinuxSudo,
@@ -74,7 +75,9 @@ import {
   defaultExec,
   findOnPath,
   hyprctlJson,
-  labSessionEnv
+  labSessionEnv,
+  readSessionLock,
+  runningCommands
 } from './lib/linux-desktop.mjs'
 import { fetchControlFromUrl, stopFilePath } from './lib/kill-switch.mjs'
 import {
@@ -334,24 +337,6 @@ async function runText(command, args, options = {}) {
   return `${result.stdout}${result.stderr}`
 }
 
-// Names of running processes, from /proc/<pid>/comm. Read-only inspection;
-// nothing here ever signals a process.
-async function runningCommands() {
-  const names = new Set()
-  let entries = []
-  try {
-    entries = await readdir('/proc')
-  } catch {
-    return names
-  }
-  for (const entry of entries) {
-    if (!/^\d+$/.test(entry)) continue
-    const comm = (await readText(`/proc/${entry}/comm`)).trim()
-    if (comm) names.add(comm)
-  }
-  return names
-}
-
 async function autoLoginFiles() {
   const files = {}
   for (const path of AUTOLOGIN_FILES) {
@@ -397,22 +382,28 @@ async function linuxHostChecks(config) {
     monitorsError = error
   }
   const pulseEnv = { env: { ...process.env, ...sessionEnv } }
-  const [sinks, sources, ytDlp, ffmpeg, espeak, chrome, rtmps, picker] = await Promise.all([
-    runText('ffmpeg', ['-hide_banner', '-sinks', 'pulse'], pulseEnv),
-    runText('ffmpeg', ['-hide_banner', '-sources', 'pulse'], pulseEnv),
-    run('yt-dlp', ['--version']),
-    run('ffmpeg', ['-hide_banner', '-version']),
-    run('espeak-ng', ['--version']),
-    findOnPath(CHROME_NAMES),
-    reachable(RTMPS_HOST, 443),
-    sharePickerState(sessionEnv)
-  ])
+  const [sinks, sources, ytDlp, ffmpeg, espeak, grim, chrome, rtmps, picker, lock] =
+    await Promise.all([
+      runText('ffmpeg', ['-hide_banner', '-sinks', 'pulse'], pulseEnv),
+      runText('ffmpeg', ['-hide_banner', '-sources', 'pulse'], pulseEnv),
+      run('yt-dlp', ['--version']),
+      run('ffmpeg', ['-hide_banner', '-version']),
+      run('espeak-ng', ['--version']),
+      run('grim', ['-h']),
+      findOnPath(CHROME_NAMES),
+      reachable(RTMPS_HOST, 443),
+      sharePickerState(sessionEnv),
+      readSessionLock({ sessionEnv }).catch(() => null)
+    ])
+  results.push(evaluateLinuxSessionLock(lock))
   results.push(evaluateLinuxLabDisplay(monitors, config?.labDisplay?.name, monitorsError))
   results.push(evaluateLinuxScreenGrant(picker))
   results.push(evaluateLinuxLabAudio(sinks, sources))
   results.push(evaluateTool('yt-dlp', ytDlp && `yt-dlp ${ytDlp}`, installHint('yt-dlp')))
   results.push(evaluateTool('ffmpeg', ffmpeg, installHint('ffmpeg')))
   results.push(evaluateTool('espeak-ng', espeak, installHint('espeak-ng')))
+  // Plan 257 S0: card-up grabs one frame of the lab output with grim.
+  results.push(evaluateTool('grim', grim && 'installed', installHint('grim')))
   results.push(
     evaluateTool('chrome', chrome, `${installHint('chromium')} (or google-chrome from Google).`)
   )
@@ -445,10 +436,7 @@ async function linuxMachineChecks(sessionEnv) {
     evaluateLinuxAutoLogin(files, user),
     evaluateLinuxLinger(linger, user),
     evaluateLinuxUnattendedBoot(lsblk),
-    evaluateLinuxScreenLock({
-      hypridle: running.has('hypridle'),
-      hyprlock: running.has('hyprlock')
-    }),
+    evaluateLinuxScreenLock({ hypridle: running.has('hypridle') }),
     evaluateLinuxSleep(sleepTargets),
     evaluateLinuxNotifications({ daemon, output: notifications }),
     evaluateDiskFree(df),

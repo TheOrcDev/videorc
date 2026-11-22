@@ -3,6 +3,8 @@
 //
 //   steps: [...goLiveSteps({ destinationIds: ['youtube'] }), ...ownSteps, stopStreamStep()]
 
+import { labPictureProblem } from './linux-desktop.mjs'
+
 export const CARD_UP_DEADLINE_MS = 45_000
 
 export function cardUpStep() {
@@ -10,14 +12,21 @@ export function cardUpStep() {
     id: 'card-up',
     title: 'Test card',
     deadlineMs: CARD_UP_DEADLINE_MS,
-    run: (ctx) =>
-      ctx.waitFor(
+    async run(ctx) {
+      const pulse = await ctx.waitFor(
         () => {
-          const pulse = ctx.card.lastPulse()
-          return pulse ? { audioState: pulse.audioState, visible: pulse.visible } : null
+          const latest = ctx.card.lastPulse()
+          return latest ? { audioState: latest.audioState, visible: latest.visible } : null
         },
         { label: 'test card pulse' }
       )
+      // Plan 257 S0. The card's page pulsing proves its window runs, not that
+      // the lab output shows it: a lock screen or a dark output streams
+      // instead. On Linux one frame of the lab output must decode as the card.
+      if (!ctx.labPicture) return pulse
+      return { ...pulse, picture: await ctx.labPicture() }
+    },
+    expect: (evidence) => !evidence.picture || labPictureProblem(evidence.picture) || true
   }
 }
 
