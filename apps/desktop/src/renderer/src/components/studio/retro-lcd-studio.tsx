@@ -5,11 +5,21 @@ import {
   SpeakerOnIcon,
   StopIcon
 } from '@/components/icons'
-import { Fragment, useContext, useId, useState, type ReactElement, type ReactNode } from 'react'
+import {
+  Fragment,
+  Suspense,
+  useContext,
+  useId,
+  useState,
+  type ReactElement,
+  type ReactNode
+} from 'react'
 
 import { MicrophoneGainFader, SystemAudioGainFader } from '@/components/audio/gain-faders'
-import { CameraBackgroundImageDialog } from '@/components/camera-background/camera-background-image-dialog'
-import { CameraBackgroundPicker } from '@/components/camera-background/camera-background-popover'
+import {
+  LazyCameraBackgroundImageDialog,
+  LazyCameraBackgroundPicker
+} from '@/components/camera-background/camera-background-popover'
 import type { CameraBackgroundControl } from '@/components/camera-background/use-camera-background'
 import { LcdDevicePicker } from '@/components/lcd-device-picker'
 import {
@@ -613,27 +623,33 @@ function RetroBackgroundRow({
           <LcdPixelChevron />
         </PopoverTrigger>
         <PopoverContent align="end" className="w-80" data-videorc-camera-background-popover="">
-          <CameraBackgroundPicker
-            control={control}
-            onChooseImage={() => {
-              setOpen(false)
-              setChoosingImage(true)
-            }}
-            onSettings={() => {
-              setOpen(false)
-              openSceneBackground()
-            }}
-          />
+          <Suspense fallback={null}>
+            <LazyCameraBackgroundPicker
+              control={control}
+              onChooseImage={() => {
+                setOpen(false)
+                setChoosingImage(true)
+              }}
+              onSettings={() => {
+                setOpen(false)
+                openSceneBackground()
+              }}
+            />
+          </Suspense>
         </PopoverContent>
       </Popover>
-      <CameraBackgroundImageDialog
-        choices={control.choices().filter((choice) => choice.group === 'images')}
-        open={choosingImage}
-        reason={control.effectReason}
-        selected={control.choiceId}
-        onChoose={control.choose}
-        onOpenChange={setChoosingImage}
-      />
+      {choosingImage ? (
+        <Suspense fallback={null}>
+          <LazyCameraBackgroundImageDialog
+            choices={control.choices().filter((choice) => choice.group === 'images')}
+            open={choosingImage}
+            reason={control.effectReason}
+            selected={control.choiceId}
+            onChoose={control.choose}
+            onOpenChange={setChoosingImage}
+          />
+        </Suspense>
+      ) : null}
     </LcdPanelRow>
   )
 }

@@ -2,7 +2,7 @@ import { useId, useRef, type KeyboardEvent, type ReactElement } from 'react'
 
 import {
   CameraBackgroundArt,
-  type CameraBackgroundArtKind
+  choiceArt
 } from '@/components/camera-background/camera-background-art'
 import { ImageIcon } from '@/components/icons'
 import { MediaCard } from '@/components/media-card'
@@ -15,25 +15,6 @@ import {
   type CameraBackgroundGroup
 } from '@/lib/camera-background-view'
 import { cn } from '@/lib/utils'
-
-/** The picture a tile shows: what the camera looks like on stream with that pick. */
-export function choiceArt(
-  choice: Pick<CameraBackgroundChoice, 'id' | 'picture'>
-): CameraBackgroundArtKind {
-  switch (choice.id) {
-    case 'off':
-      return { kind: 'room' }
-    case 'slight-blur':
-      return { kind: 'blur', strength: 'slight' }
-    case 'strong-blur':
-      return { kind: 'blur', strength: 'strong' }
-    case 'green':
-    case 'blue':
-      return { kind: 'screen', color: choice.id }
-    default:
-      return choice.picture ? { kind: 'picture', src: choice.picture } : { kind: 'room' }
-  }
-}
 
 /**
  * The Background tiles (plan 258 UX): one card per choice with its picture

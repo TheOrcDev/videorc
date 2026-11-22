@@ -1,79 +1,35 @@
-import { useState, type ReactElement } from 'react'
+import { lazy, Suspense, useState, type ReactElement } from 'react'
 
-import { CameraBackgroundArt } from '@/components/camera-background/camera-background-art'
-import { CameraBackgroundImageDialog } from '@/components/camera-background/camera-background-image-dialog'
 import {
-  CameraBackgroundTiles,
+  CameraBackgroundArt,
   choiceArt
-} from '@/components/camera-background/camera-background-tiles'
-import { CameraBackgroundViewer } from '@/components/camera-background/camera-background-viewer'
+} from '@/components/camera-background/camera-background-art'
 import type { CameraBackgroundControl } from '@/components/camera-background/use-camera-background'
-import { ChevronDownIcon, LockIcon } from '@/components/icons'
+import { ChevronDownIcon } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
-  CAMERA_BACKGROUND_BLUR_CAVEAT,
   CAMERA_BACKGROUND_LABEL,
-  CAMERA_BACKGROUND_LOCK_LINE,
-  imagesPickedFirst,
   type CameraBackgroundChoiceId
 } from '@/lib/camera-background-view'
 import { openSceneBackground } from '@/lib/green-screen'
 
-/** The pictures the popover's Images row shows before Choose image…. */
-const POPOVER_IMAGES = 3
-
-/** The art of the camera's current pick, for the trigger and the viewer's fallback. */
+/** The art of the camera's current pick, for the trigger. */
 export function currentArt(control: CameraBackgroundControl) {
   return choiceArt({ id: control.choiceId ?? 'off', picture: control.picture })
 }
 
-/**
- * The popover's body, shared by both looks (the Retro LCD trigger opens the
- * same picker): the live "What viewers see" picture, the tiles in three
- * groups, the blur caveat while a blur is picked, and the lock line
- * with Settings (the Scene page's Background section, the home).
- */
-export function CameraBackgroundPicker({
-  control,
-  onChooseImage,
-  onSettings
-}: {
-  control: CameraBackgroundControl
-  onChooseImage: () => void
-  onSettings: () => void
-}): ReactElement {
-  const images = imagesPickedFirst(control.images, control.background.assetId)
-  return (
-    <div className="flex flex-col gap-3" data-videorc-camera-background-picker="">
-      <h4 className="text-section">{CAMERA_BACKGROUND_LABEL}</h4>
-      <CameraBackgroundViewer
-        fallback={<CameraBackgroundArt art={currentArt(control)} />}
-        mirror={control.mirror}
-      />
-      <CameraBackgroundTiles
-        choices={control.choices({ images, imageLimit: POPOVER_IMAGES })}
-        grouped
-        reason={control.effectReason}
-        selected={control.choiceId}
-        onChoose={control.choose}
-        onChooseImage={onChooseImage}
-      />
-      {control.background.mode === 'blur' ? (
-        <p className="text-xs text-muted-foreground" data-videorc-camera-background-caveat="">
-          {CAMERA_BACKGROUND_BLUR_CAVEAT}
-        </p>
-      ) : null}
-      <div className="flex items-center gap-2 border-t border-border pt-2.5 text-xs text-muted-foreground">
-        <LockIcon aria-hidden className="size-3.5 shrink-0" />
-        <span className="min-w-0 flex-1">{CAMERA_BACKGROUND_LOCK_LINE}</span>
-        <Button size="xs" type="button" variant="ghost" onClick={onSettings}>
-          Settings
-        </Button>
-      </div>
-    </div>
-  )
-}
+/** The picker's body and Choose image…, loaded on first use (launch bundle budget). */
+export const LazyCameraBackgroundPicker = lazy(() =>
+  import('@/components/camera-background/camera-background-picker').then((module) => ({
+    default: module.CameraBackgroundPicker
+  }))
+)
+export const LazyCameraBackgroundImageDialog = lazy(() =>
+  import('@/components/camera-background/camera-background-image-dialog').then((module) => ({
+    default: module.CameraBackgroundImageDialog
+  }))
+)
 
 /**
  * Plan 258 S5: the Studio Camera row's Background line (mockup §1). Plan
@@ -120,27 +76,33 @@ export function CameraBackgroundLine({
           <ChevronDownIcon aria-hidden className="size-3 shrink-0 text-subtle" />
         </PopoverTrigger>
         <PopoverContent align="start" className="w-80" data-videorc-camera-background-popover="">
-          <CameraBackgroundPicker
-            control={control}
-            onChooseImage={() => {
-              setOpen(false)
-              setChoosingImage(true)
-            }}
-            onSettings={() => {
-              setOpen(false)
-              openSceneBackground()
-            }}
-          />
+          <Suspense fallback={null}>
+            <LazyCameraBackgroundPicker
+              control={control}
+              onChooseImage={() => {
+                setOpen(false)
+                setChoosingImage(true)
+              }}
+              onSettings={() => {
+                setOpen(false)
+                openSceneBackground()
+              }}
+            />
+          </Suspense>
         </PopoverContent>
       </Popover>
-      <CameraBackgroundImageDialog
-        choices={control.choices().filter((choice) => choice.group === 'images')}
-        open={choosingImage}
-        reason={control.effectReason}
-        selected={control.choiceId}
-        onChoose={choose}
-        onOpenChange={setChoosingImage}
-      />
+      {choosingImage ? (
+        <Suspense fallback={null}>
+          <LazyCameraBackgroundImageDialog
+            choices={control.choices().filter((choice) => choice.group === 'images')}
+            open={choosingImage}
+            reason={control.effectReason}
+            selected={control.choiceId}
+            onChoose={choose}
+            onOpenChange={setChoosingImage}
+          />
+        </Suspense>
+      ) : null}
     </div>
   )
 }

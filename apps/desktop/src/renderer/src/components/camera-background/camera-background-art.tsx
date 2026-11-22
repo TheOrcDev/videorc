@@ -1,6 +1,7 @@
 import { useId, type ReactElement } from 'react'
 
 import { backgroundAssetDisplayUrl } from '@/lib/background-library'
+import type { CameraBackgroundChoice } from '@/lib/camera-background-view'
 import { cn } from '@/lib/utils'
 
 // Plan 258 S5: the pictures on the Background tiles (mockup §1, §2). Each is
@@ -15,6 +16,25 @@ export type CameraBackgroundArtKind =
   | { kind: 'blur'; strength: 'slight' | 'strong' }
   | { kind: 'picture'; src: string }
   | { kind: 'screen'; color: 'green' | 'blue' }
+
+/** The picture a tile shows: what the camera looks like on stream with that pick. */
+export function choiceArt(
+  choice: Pick<CameraBackgroundChoice, 'id' | 'picture'>
+): CameraBackgroundArtKind {
+  switch (choice.id) {
+    case 'off':
+      return { kind: 'room' }
+    case 'slight-blur':
+      return { kind: 'blur', strength: 'slight' }
+    case 'strong-blur':
+      return { kind: 'blur', strength: 'strong' }
+    case 'green':
+    case 'blue':
+      return { kind: 'screen', color: choice.id }
+    default:
+      return choice.picture ? { kind: 'picture', src: choice.picture } : { kind: 'room' }
+  }
+}
 
 const SCREEN_FILL = { green: '#1fae4b', blue: '#2456d6' } as const
 

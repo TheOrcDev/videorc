@@ -8562,13 +8562,10 @@ describe('real StudioProvider lifecycle', () => {
     // Record carries it too.
     await act(async () => latest().startSession())
     await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'recording')
-    expect(
-      (
-        backend.sentCommands.find((command) => command.method === 'session.start')?.params as {
-          layout: Record<string, unknown>
-        }
-      ).layout
-    ).toMatchObject({ cameraBackground: { mode: 'blur', blurPct: 70 } })
+    const sessionStart = backend.sentCommands.find((command) => command.method === 'session.start')
+    expect(sessionStart?.params).toMatchObject({
+      layout: { cameraBackground: { mode: 'blur', blurPct: 70 } }
+    })
     await act(async () => {
       expect(await latest().stopSession()).toBe(true)
     })

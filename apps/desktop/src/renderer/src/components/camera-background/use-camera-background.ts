@@ -4,8 +4,9 @@ import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
 import { slotAsset } from '@/lib/background-assets'
 import type { CameraBackground } from '@/lib/backend'
-import { cameraBackgroundFor, cameraBackgroundIsEffect } from '@/lib/camera-background'
 import {
+  cameraBackgroundFor,
+  cameraBackgroundIsEffect,
   cameraBackgroundChoiceId,
   cameraBackgroundChoices,
   cameraBackgroundForChoice,

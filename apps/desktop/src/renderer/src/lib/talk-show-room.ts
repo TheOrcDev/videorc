@@ -132,8 +132,10 @@ import {
   type TalkShowCameraSettings
 } from '@/lib/talk-show-camera-effects'
 import { sendOverlay, type OverlayImage } from '@/lib/talk-show-overlays'
-import { cameraBackgroundIsEffect } from '@/lib/camera-background'
-import { ROOM_CAMERA_OFF_FOR_BACKGROUND } from '@/lib/camera-background-view'
+import {
+  cameraBackgroundIsEffect,
+  ROOM_CAMERA_OFF_FOR_BACKGROUND
+} from '@/lib/camera-background-view'
 import {
   RemoteAudioAttachments,
   guestCaptionTracks,

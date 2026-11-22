@@ -27,22 +27,6 @@ export const DEFAULT_CAMERA_BACKGROUND: CameraBackground = {
   edges: 'balanced'
 }
 
-/**
- * An effect the camera effect stage draws (a blur, a picture, a video, Cut
- * out), as opposed to Off or a screen key. The privacy rules (D2, D6) and
- * the room's fail-closed rule (S5, before S8) apply to these.
- */
-export function cameraBackgroundIsEffect(
-  background: Pick<CameraBackground, 'mode'> | undefined | null
-): boolean {
-  return (
-    background?.mode === 'blur' ||
-    background?.mode === 'image' ||
-    background?.mode === 'video' ||
-    background?.mode === 'cutout'
-  )
-}
-
 /** The D4 migration's version, stored once it settles. */
 export const CAMERA_BACKGROUND_MIGRATION_VERSION = 1
 
@@ -205,33 +189,6 @@ export function cameraOutputLayout(
     cameraId,
     settings.cameraBackgrounds,
     cameraBackgroundMigrated(settings.cameraBackgroundMigration)
-  )
-}
-
-/**
- * One camera's background set in the settings (the Studio's and the Scene
- * page's picks): stored under the camera that renders, or nothing for no
- * camera. Off is kept with its tuning, so picking Blur again finds it.
- */
-export function withCameraBackground(
-  backgrounds: Record<string, CameraBackground> | undefined,
-  cameraId: string | undefined,
-  background: CameraBackground
-): Record<string, CameraBackground> | undefined {
-  if (!cameraId) return backgrounds
-  const normalized = normalizeCameraBackground(background)
-  if (!normalized) return backgrounds
-  return { ...backgrounds, [cameraId]: normalized }
-}
-
-/** The selected camera's background, Off with Strong blur ready when it has none. */
-export function cameraBackgroundFor(
-  backgrounds: Record<string, CameraBackground> | undefined,
-  cameraId: string | undefined
-): CameraBackground {
-  return (
-    normalizeCameraBackground(cameraId ? backgrounds?.[cameraId] : undefined) ??
-    DEFAULT_CAMERA_BACKGROUND
   )
 }
 

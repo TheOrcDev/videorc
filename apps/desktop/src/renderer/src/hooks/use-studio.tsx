@@ -43,7 +43,7 @@ import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from 
 import {
   cameraOutputLayout,
   migrateCameraBackgrounds,
-  withCameraBackground
+  normalizeCameraBackground
 } from '@/lib/camera-background'
 import type { ChatOverlayDriver } from '@/lib/chat-overlay'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
@@ -11785,11 +11785,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     (background: CameraBackground, options?: { commit?: boolean }): Promise<boolean> => {
       const cameraId = captureConfigRef.current.sources.cameraId
       if (!cameraId) return Promise.resolve(false)
-      const cameraBackgrounds = withCameraBackground(
-        settingsRef.current.cameraBackgrounds,
-        cameraId,
-        background
-      )
+      const normalized = normalizeCameraBackground(background)
+      if (!normalized) return Promise.resolve(false)
+      const cameraBackgrounds = { ...settingsRef.current.cameraBackgrounds, [cameraId]: normalized }
       const nextSettings = { ...settingsRef.current, cameraBackgrounds }
       settingsRef.current = nextSettings
       // The transaction below commits it to the live camera; suppress the
