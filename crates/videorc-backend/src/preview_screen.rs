@@ -730,13 +730,13 @@ impl ScreenCaptureFrameStatusCounts {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
 /// Plan 210 D8: how much older than its arrival an undated ScreenCaptureKit
 /// callback counts, so a frame without a capture time is never mistaken for
 /// one taken after a Show it may predate.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(target_os = "macos")]
 const SCREEN_CAPTURE_TIME_UNKNOWN_MARGIN: Duration = Duration::from_millis(100);
 
+#[cfg(any(target_os = "macos", test))]
 fn record_screen_capture_callback_status(
     shared: &Arc<StdMutex<PreviewScreenShared>>,
     callback_at: Instant,
