@@ -271,7 +271,8 @@ import type {
   StreamPlatform,
   StreamTargetsSnapshot,
   VideorcAccountSnapshot,
-  VideoSettings
+  VideoSettings,
+  LinuxDesktopCheck
 } from './backend'
 import type {
   SessionMarker,
@@ -533,6 +534,8 @@ export interface BackendRpcMethodMap {
   >
   'streamReport.email.sendLast': BackendRpcDefinition<undefined, StreamReportSendResult>
   // --- Discord go-live announcement (plan 187) ---
+  // --- Linux desktop setup (plan 257 S18) ---
+  'diagnostics.linuxDesktop': BackendRpcDefinition<undefined, LinuxDesktopCheck>
   'discord.announce.get': BackendRpcDefinition<undefined, DiscordAnnounceSnapshot>
   'discord.announce.update': BackendRpcDefinition<
     DiscordAnnounceUpdateParams,
@@ -1716,6 +1719,38 @@ const discordWebhookSnapshotSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+// --- Linux desktop setup (plan 257 S18): strict, small, no paths ---
+const linuxBusServiceStateSchema = enumSchema(['running', 'activatable', 'missing', 'unknown'])
+const linuxDeviceCountSchema = numberSchema({ integer: true, min: 0, max: 4096 })
+const linuxDesktopCheckSchema = objectSchema(
+  {
+    secretService: linuxBusServiceStateSchema,
+    portal: objectSchema(
+      {
+        frontend: linuxBusServiceStateSchema,
+        screenCastVersion: optionalSchema(numberSchema({ integer: true, min: 0, max: 1000 })),
+        backends: arraySchema(stringSchema({ minLength: 1, maxLength: 64 }), { maxLength: 32 }),
+        detail: optionalSchema(stringSchema({ maxLength: 1024 }))
+      },
+      { allowUnknown: false }
+    ),
+    groups: arraySchema(
+      objectSchema(
+        {
+          name: stringSchema({ minLength: 1, maxLength: 32 }),
+          exists: booleanSchema,
+          member: booleanSchema,
+          devices: linuxDeviceCountSchema,
+          accessible: linuxDeviceCountSchema
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 8 }
+    ),
+    currentDesktop: optionalSchema(stringSchema({ maxLength: 256 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<LinuxDesktopCheck>
 const discordAnnounceSnapshotSchema = objectSchema(
   {
     webhooks: arraySchema(discordWebhookSnapshotSchema, { maxLength: DISCORD_MAX_WEBHOOKS }),
@@ -7486,6 +7521,7 @@ const runtimeContracts = {
     params: undefinedSchema,
     result: streamReportSendResultSchema
   },
+  'diagnostics.linuxDesktop': { params: undefinedSchema, result: linuxDesktopCheckSchema },
   'discord.announce.get': { params: undefinedSchema, result: discordAnnounceSnapshotSchema },
   'discord.announce.update': {
     params: discordAnnounceUpdateParamsSchema,

@@ -222,6 +222,7 @@ export const WINDOWS_D3D11_REQUIRED_RUST_TESTS = Object.freeze({
     'windows_d3d11_session::tests::windows_d3d11_required_fails_closed_for_unsupported_session',
     'windows_d3d11_session::tests::windows_d3d11_scene_with_a_background_stays_on_d3d11',
     'windows_d3d11_session::tests::windows_d3d11_sessions_size_deep_render_pools',
+    'windows_d3d11_session::tests::windows_d3d11_show_edge_takes_over_only_with_a_frame_taken_after_the_show',
     'windows_d3d11_session::tests::windows_d3d11_split_session_assigns_record_and_stream_roles',
     'windows_d3d11_session::tests::windows_d3d11_supported_auto_session_gets_generation_roles',
     'windows_d3d11_session::tests::windows_d3d11_takes_every_level_5_1_shipping_profile',

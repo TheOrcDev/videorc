@@ -229,6 +229,24 @@ try {
     const compositor = await request(renderer, timeoutMs, 'compositor.status')
     return { done: syntheticCompositorReady(compositor, compositorBefore), value: compositor }
   })
+  // Every scene shows its own screen (plan 231): the stock Screen only scene
+  // owns the Mac's display, which the dev app can't capture (no Screen
+  // Recording grant), so after step 1's switch every Record was refused with
+  // "the screen preview source(s) produced no frames". The scene owns the
+  // test pattern instead, as smoke:agent-mcp's does, so the switch keeps the
+  // synthetic source and the recording in step 4 never depends on the host.
+  await waitUntil('the Screen only scene to own the test pattern', async () => {
+    const edited = await command('eval-js', {
+      code: `
+        const library = JSON.parse(localStorage.getItem('videorc.scenes.v2') ?? 'null');
+        const scene = library?.scenes?.find((entry) => entry.layouts?.horizontal?.layoutPreset === 'screen-only');
+        if (!scene || !window.__videorcSmokeScenePresets) return null;
+        scene.shows = { kind: 'test-pattern' };
+        return (await window.__videorcSmokeScenePresets.edit(scene)) === true ? scene.name : null;
+      `
+    })
+    return { done: typeof edited?.result === 'string', value: edited?.result }
+  })
   await waitUntil('the capability read with buddy.act', async () => ({
     done: fakeCohost.state.capabilityRequests > 0,
     value: fakeCohost.state.capabilityRequests
@@ -357,7 +375,9 @@ try {
         value: rows
       }
     })
-    results.push(`2 refused (typed as /buddy): ${refused.map((row) => row.tool).join(', ')} never ran`)
+    results.push(
+      `2 refused (typed as /buddy): ${refused.map((row) => row.tool).join(', ')} never ran`
+    )
     log("step 2: a planned tool outside Buddy's subset was refused")
   }
 

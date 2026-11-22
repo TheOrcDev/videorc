@@ -3,6 +3,7 @@ import { useEffect, useId, useMemo, useState, type ReactElement, type ReactNode 
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { CloudProgramHealth } from '@/components/tabs/cloud-program-health'
+import { LinuxSetupAlert } from '@/components/linux-setup-alert'
 import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge } from '@/components/status-badge'
@@ -50,6 +51,8 @@ import {
   type PermissionWarning
 } from '@/lib/health-checks'
 import { isMacPlatform } from '@/lib/platform'
+import { linuxDesktopIssues } from '@/lib/linux-desktop-check'
+import { useLinuxDesktopCheck } from '@/hooks/use-linux-desktop-check'
 import { formatLatencyMs, formatTimelineSummary, slowestTimelinePhase } from '@/lib/record-latency'
 import { cameraFormatFacts } from '@/lib/source-facts'
 import { unknownDeviceWarnings } from '@/lib/source-status'
@@ -111,6 +114,9 @@ export function DiagnosticsTab(): ReactElement {
   const camera = useVirtualCamera()
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
   const platform = runtimeInfo?.platform
+  // Plan 257 S18: the keyring, device groups and portal on Linux.
+  const linuxDesktop = useLinuxDesktopCheck(runtimeInfo)
+  const linuxIssues = useMemo(() => linuxDesktopIssues(linuxDesktop), [linuxDesktop])
   const currentSession = sessions.find((session) => session.id === recording.sessionId) ?? null
   const logSession = currentSession ?? sessions[0] ?? null
   const logSessionId = logSession?.id
@@ -155,9 +161,11 @@ export function DiagnosticsTab(): ReactElement {
         previewSurfaceStatus,
         recentStreamDrops,
         streamHealth,
-        streamTargets
+        streamTargets,
+        linuxDesktop
       }),
     [
+      linuxDesktop,
       diagnosticStats,
       captureConfig.sources.cameraId,
       captureConfig.sources.screenId,
@@ -227,6 +235,9 @@ export function DiagnosticsTab(): ReactElement {
             onDismiss={() => setDismissed((current) => new Set([...current, ...warning.eventIds]))}
             onFix={() => void handleSystemPermission(warning.pane)}
           />
+        ))}
+        {linuxIssues.map((issue) => (
+          <LinuxSetupAlert key={issue.id} issue={issue} />
         ))}
         {ffmpegMissing ? (
           <Alert data-testid="health-ffmpeg-missing" variant="warning">

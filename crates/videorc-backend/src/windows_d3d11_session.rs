@@ -955,6 +955,24 @@ fn privacy_edge_hold_ends(
     false
 }
 
+/// Plan 210 D8 (Hide screen's Show edge): whether a native capture frame
+/// acquired after a Show may take over from the store's stand-in. Only one
+/// the capture dated at or after the Show: Desktop Duplication hands over the
+/// last frame it presented, which can be from before the Show, and Windows
+/// Graphics Capture can have one queued. An undated frame never takes over;
+/// the stand-in keeps drawing the store, whose own gate holds anything it
+/// can't trust.
+#[cfg(any(target_os = "windows", test))]
+fn native_frame_may_take_over_after_show(
+    captured_at: Option<std::time::Instant>,
+    shown_at: Option<std::time::Instant>,
+) -> bool {
+    match shown_at {
+        None => true,
+        Some(shown_at) => captured_at.is_some_and(|captured_at| captured_at >= shown_at),
+    }
+}
+
 /// Plan 210 S7 (Hide screen): the first native frame after a Show takes over
 /// from the BGRA stand-in. The stand-in's sequences are the preview store's,
 /// the native frame's are the capture owner's: two clocks, so the source
@@ -1026,6 +1044,25 @@ mod runtime {
         WindowsD3d11CfrSequencer, WindowsD3d11CfrTick, WindowsD3d11SessionPlan,
         WindowsD3d11StartupEvidence, windows_d3d11_terminal_source_error,
     };
+
+    /// Plan 210 D8: a native capture frame's time on `Instant`'s clock, from
+    /// its own counter (Desktop Duplication's QPC present time, or Windows
+    /// Graphics Capture's `SystemRelativeTime`).
+    fn native_capture_instant(
+        metadata: &crate::windows_d3d11_capture::WindowsD3d11CaptureSubmissionMetadata,
+    ) -> Option<Instant> {
+        use crate::windows_d3d11_capture::WindowsD3d11CaptureTimestampKind;
+        match metadata.timestamp_kind {
+            WindowsD3d11CaptureTimestampKind::QueryPerformanceCounter => {
+                crate::screen_privacy::windows_clock::instant_for_qpc(metadata.source_timestamp)
+            }
+            WindowsD3d11CaptureTimestampKind::SystemRelativeHundredNanoseconds => {
+                crate::screen_privacy::windows_clock::instant_for_system_relative_100ns(
+                    metadata.source_timestamp,
+                )
+            }
+        }
+    }
 
     const STARTUP_TIMEOUT: Duration = Duration::from_secs(4);
     const CAPTURE_SOURCE_ID: u64 = 1;
@@ -2957,6 +2994,18 @@ mod runtime {
                 Ok(Some(capture)) if privacy_hidden => {
                     // Hidden between the poll and its answer: the lease is
                     // released unadopted. The still comes from the BGRA store.
+                    drop(capture);
+                }
+                Ok(Some(capture))
+                    if privacy_resume_pending
+                        && !super::native_frame_may_take_over_after_show(
+                            native_capture_instant(&capture.metadata),
+                            screen_privacy.view().shown_at,
+                        ) =>
+                {
+                    // Plan 210 D8: shown again, but this frame was taken
+                    // before the Show (or is undated): released unadopted.
+                    // The stand-in keeps drawing the gated store.
                     drop(capture);
                 }
                 Ok(Some(capture)) => {
@@ -6262,6 +6311,32 @@ mod tests {
         assert!(!privacy_edge_may_hold(cfr.source_frame(), published));
         assert!(cfr.advance(Some(11)).unwrap().is_some());
         assert!(!privacy_edge_may_hold(cfr.source_frame(), published));
+    }
+
+    /// Plan 210 D8: after a Show, a native frame takes over from the store's
+    /// stand-in only when the capture dated it at or after the Show.
+    #[test]
+    fn windows_d3d11_show_edge_takes_over_only_with_a_frame_taken_after_the_show() {
+        let shown_at = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        // Never hidden and shown: nothing to wait for.
+        assert!(native_frame_may_take_over_after_show(None, None));
+        assert!(native_frame_may_take_over_after_show(Some(shown_at), None));
+        // Desktop Duplication's last present, from before the Show: no.
+        assert!(!native_frame_may_take_over_after_show(
+            Some(shown_at - ms(1)),
+            Some(shown_at)
+        ));
+        // An undated frame never does; the stand-in keeps the gated store.
+        assert!(!native_frame_may_take_over_after_show(None, Some(shown_at)));
+        assert!(native_frame_may_take_over_after_show(
+            Some(shown_at),
+            Some(shown_at)
+        ));
+        assert!(native_frame_may_take_over_after_show(
+            Some(shown_at + ms(16)),
+            Some(shown_at)
+        ));
     }
 
     #[test]

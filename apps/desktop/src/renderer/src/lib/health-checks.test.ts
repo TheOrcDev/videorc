@@ -11,6 +11,7 @@ import {
   destinationsCheck,
   encoderCheck,
   fileRepairCheck,
+  healthChecks,
   healthVerdict,
   logLevelLabel,
   logTruncationNote,
@@ -24,7 +25,8 @@ import {
   slowdownAdvice,
   slowdownCheck,
   sourcesCheck,
-  type HealthCheck
+  type HealthCheck,
+  type HealthChecksInput
 } from './health-checks'
 
 // Plan 174 S3.18 (I-4, I-25, V-7): Health's checks are words with a tone,
@@ -280,5 +282,52 @@ describe('sourcesCheck', () => {
       value: 'Capture slow',
       tone: 'warn'
     })
+  })
+})
+
+describe('healthChecks on Linux (plan 257 S18)', () => {
+  const input = (platform: string): HealthChecksInput => ({
+    diagnosticStats: {
+      bottleneck: 'none',
+      duplicateCaptureSources: []
+    } as unknown as DiagnosticStats,
+    expectsCamera: false,
+    expectsScreen: false,
+    nativePreviewSurfaceEnabled: false,
+    platform,
+    previewCameraStatus: { state: 'idle' } as unknown as HealthChecksInput['previewCameraStatus'],
+    previewLiveStatus: { state: 'idle' } as unknown as HealthChecksInput['previewLiveStatus'],
+    previewScreenStatus: { state: 'idle' } as unknown as HealthChecksInput['previewScreenStatus'],
+    previewSurfaceStatus: {} as HealthChecksInput['previewSurfaceStatus'],
+    recentStreamDrops: { capture: 0 } as unknown as HealthChecksInput['recentStreamDrops'],
+    streamHealth: null,
+    streamTargets: [],
+    linuxDesktop: {
+      keyring: { backend: 'basic_text', available: false, userPasswordStore: null },
+      desktop: {
+        secretService: 'missing',
+        portal: { frontend: 'missing', backends: [] },
+        groups: [{ name: 'video', exists: true, member: true, devices: 1, accessible: 1 }]
+      }
+    }
+  })
+
+  it('adds the keyring, groups and portal rows on Linux only, and the verdict counts them', () => {
+    const linux = healthChecks(input('linux'))
+    expect(linux.slice(-3).map(({ id, value, tone }) => ({ id, value, tone }))).toEqual([
+      { id: 'keyring', value: 'Not found', tone: 'error' },
+      { id: 'device-groups', value: 'In video', tone: 'good' },
+      { id: 'screen-portal', value: 'Not installed', tone: 'error' }
+    ])
+    const verdict = healthVerdict({ checks: linux })
+    expect(verdict.variant).toBe('destructive')
+    expect(verdict.title).toContain('Keyring')
+    expect(verdict.title).toContain('Screen portal')
+
+    for (const platform of ['darwin', 'win32']) {
+      const ids = healthChecks(input(platform)).map((row) => row.id)
+      expect(ids).not.toContain('keyring')
+      expect(ids).not.toContain('screen-portal')
+    }
   })
 })

@@ -17,10 +17,13 @@
 //! over after it is held (the gate is read at the publish, after the
 //! capture). A frame captured while hidden is never published, even when it
 //! is handed over after Show: the gate remembers the Show instant, and a
-//! capture that knows when its frame was taken holds anything older
-//! ([`admit_screen_frame_captured_at`]). The picture held for the show is
-//! published only once that capture proves it is still the screen after the
-//! Show (macOS: an idle ScreenCaptureKit callback dated after it).
+//! capture that knows when its frame was taken holds anything older, and one
+//! that doesn't holds its first delivery after the Show too
+//! ([`admit_screen_frame_at`], [`ScreenFrameTime`]). A Show never puts the
+//! picture held while hidden back on air by itself: on macOS it goes out only
+//! once the capture proves it is still the screen after the Show (an idle
+//! ScreenCaptureKit callback dated after it); everywhere else the still stays
+//! until a frame arrives that can be trusted to be from after the Show.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex as StdMutex, OnceLock};
@@ -202,6 +205,26 @@ fn unpack(packed: u64) -> (bool, u64) {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ScreenPrivacyCursor {
     frosted_span: Option<u64>,
+    /// The Show whose first undated delivery this publish point already
+    /// held back ([`ScreenFrameTime::DeliveredFrom`]).
+    undated_show_held: Option<Instant>,
+}
+
+/// What a publish point knows about when its frame showed the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenFrameTime {
+    /// The capture dated the frame: ScreenCaptureKit's PTS, Windows Graphics
+    /// Capture's `SystemRelativeTime`, Desktop Duplication's QPC present time.
+    // The Linux portal stream doesn't date frames; only its tests build this.
+    #[cfg_attr(all(target_os = "linux", not(test)), allow(dead_code))]
+    Captured(Instant),
+    /// The capture did not date it (Linux PipeWire, the Windows FFmpeg
+    /// pipe): only when its delivery began (the buffer dequeued, the read
+    /// started). It was taken at or before then, and a frame the capture took
+    /// before a Show may still be queued behind the one in flight.
+    // macOS dates every frame; only its tests build this one.
+    #[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
+    DeliveredFrom(Instant),
 }
 
 /// What a publish point does with the live frame in its hands.
@@ -221,38 +244,144 @@ pub enum ScreenFrameAdmission {
 /// would open a window where a hide lands between the decision and the
 /// publish and a live frame covers the still, so nothing decides early.
 ///
-/// For a frame whose capture time the publish point does not know; see
-/// [`admit_screen_frame_captured_at`].
+/// Only for the hidden edge (a hide covering a store). A live frame from a
+/// capture goes through [`admit_screen_frame_at`], which also closes the Show
+/// edge.
 pub fn admit_screen_frame(
     view: ScreenPrivacyView,
     cursor: &mut ScreenPrivacyCursor,
 ) -> ScreenFrameAdmission {
-    admit_screen_frame_captured_at(view, cursor, None)
-}
-
-/// [`admit_screen_frame`] for a frame taken at `captured_at`. The Show edge
-/// fails closed: a frame captured before the screen was shown again shows
-/// the screen while it was hidden, so it holds like a hidden frame even when
-/// the capture hands it over after the Show (ScreenCaptureKit delivers a
-/// frame a few milliseconds to a few frames after it took it).
-pub fn admit_screen_frame_captured_at(
-    view: ScreenPrivacyView,
-    cursor: &mut ScreenPrivacyCursor,
-    captured_at: Option<Instant>,
-) -> ScreenFrameAdmission {
     if !view.hidden {
-        if let (Some(shown_at), Some(captured_at)) = (view.shown_at, captured_at)
-            && captured_at < shown_at
-        {
-            return ScreenFrameAdmission::Hold;
-        }
         return ScreenFrameAdmission::Publish;
     }
+    frost_or_hold(view, cursor)
+}
+
+/// [`admit_screen_frame`] for a capture's live frame, knowing what it knows
+/// about when the frame was taken. The Show edge fails closed:
+///
+/// - A dated frame taken before the Show shows the screen while it was
+///   hidden: it holds, however late the capture hands it over
+///   (ScreenCaptureKit delivers a frame a few milliseconds to a few frames
+///   after it took it).
+/// - An undated frame whose delivery began before the Show holds. So does
+///   the first one delivered after it, once per Show, at a publish point that
+///   covered a hide: it may be a frame the capture took before the Show and
+///   queued behind the one in flight. The next one is trusted.
+/// - A publish point that never covered a hide (a capture started after the
+///   Show) publishes as always.
+pub fn admit_screen_frame_at(
+    view: ScreenPrivacyView,
+    cursor: &mut ScreenPrivacyCursor,
+    time: ScreenFrameTime,
+) -> ScreenFrameAdmission {
+    if view.hidden {
+        return frost_or_hold(view, cursor);
+    }
+    let Some(shown_at) = view.shown_at else {
+        return ScreenFrameAdmission::Publish;
+    };
+    match time {
+        ScreenFrameTime::Captured(captured_at) if captured_at < shown_at => {
+            ScreenFrameAdmission::Hold
+        }
+        ScreenFrameTime::Captured(_) => ScreenFrameAdmission::Publish,
+        ScreenFrameTime::DeliveredFrom(began_at) if began_at < shown_at => {
+            ScreenFrameAdmission::Hold
+        }
+        ScreenFrameTime::DeliveredFrom(_) => {
+            if cursor.frosted_span.is_some() && cursor.undated_show_held != Some(shown_at) {
+                cursor.undated_show_held = Some(shown_at);
+                ScreenFrameAdmission::Hold
+            } else {
+                ScreenFrameAdmission::Publish
+            }
+        }
+    }
+}
+
+fn frost_or_hold(
+    view: ScreenPrivacyView,
+    cursor: &mut ScreenPrivacyCursor,
+) -> ScreenFrameAdmission {
     if cursor.frosted_span == Some(view.span) {
         return ScreenFrameAdmission::Hold;
     }
     cursor.frosted_span = Some(view.span);
     ScreenFrameAdmission::Frost
+}
+
+// ---------------------------------------------------------------------------
+// Dating capture frames on a counter clock (Windows)
+// ---------------------------------------------------------------------------
+
+/// How far ahead of the counter's own "now" a frame's time may read and still
+/// be believed (the two readings are a few instructions apart).
+#[cfg(any(target_os = "windows", test))]
+const COUNTER_FUTURE_SLACK: Duration = Duration::from_millis(5);
+
+/// The `Instant` a monotonic counter reading `ticks` stands for, from one
+/// simultaneous reading of the counter (`now_ticks`) and of `Instant`
+/// (`now`). `None` for a nonsense reading (zero or negative, an invalid rate,
+/// or later than now beyond a few milliseconds), which a publish point treats
+/// as undated. Pure, so every platform's tests hold it to its word.
+#[cfg(any(target_os = "windows", test))]
+pub fn instant_for_counter(
+    ticks: i64,
+    ticks_per_second: i64,
+    now_ticks: i64,
+    now: Instant,
+) -> Option<Instant> {
+    if ticks <= 0 || ticks_per_second <= 0 || now_ticks <= 0 {
+        return None;
+    }
+    let nanos = |delta: i64| -> Option<Duration> {
+        let nanos = i128::from(delta) * 1_000_000_000 / i128::from(ticks_per_second);
+        u64::try_from(nanos).ok().map(Duration::from_nanos)
+    };
+    if ticks <= now_ticks {
+        now.checked_sub(nanos(now_ticks - ticks)?)
+    } else {
+        let ahead = nanos(ticks - now_ticks)?;
+        (ahead <= COUNTER_FUTURE_SLACK).then(|| now + ahead)
+    }
+}
+
+/// Windows capture times on `Instant`'s clock. `Instant` is
+/// `QueryPerformanceCounter` there, and both captures stamp frames from it:
+/// Desktop Duplication's `LastPresentTime` in QPC ticks, Windows Graphics
+/// Capture's `SystemRelativeTime` in 100 ns units of the same counter.
+#[cfg(target_os = "windows")]
+pub mod windows_clock {
+    use std::time::Instant;
+
+    use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+
+    /// One reading of the counter and of `Instant`, back to back.
+    fn now() -> Option<(i64, i64, Instant)> {
+        let mut frequency = 0_i64;
+        // SAFETY: a valid out pointer.
+        unsafe { QueryPerformanceFrequency(&mut frequency) }.ok()?;
+        let mut ticks = 0_i64;
+        // SAFETY: a valid out pointer.
+        unsafe { QueryPerformanceCounter(&mut ticks) }.ok()?;
+        Some((ticks, frequency, Instant::now()))
+    }
+
+    /// A QPC reading (Desktop Duplication's present time).
+    pub fn instant_for_qpc(ticks: i64) -> Option<Instant> {
+        let (now_ticks, frequency, now) = now()?;
+        super::instant_for_counter(ticks, frequency, now_ticks, now)
+    }
+
+    /// A `SystemRelativeTime` (Windows Graphics Capture), 100 ns units of QPC.
+    pub fn instant_for_system_relative_100ns(value: i64) -> Option<Instant> {
+        let (now_ticks, frequency, now) = now()?;
+        let now_100ns =
+            i64::try_from(i128::from(now_ticks) * 10_000_000 / i128::from(frequency.max(1)))
+                .ok()?;
+        super::instant_for_counter(value, 10_000_000, now_100ns, now)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -803,19 +932,31 @@ mod tests {
         let before_hide = Instant::now();
         assert_eq!(gate.view().shown_at, None);
         assert_eq!(
-            admit_screen_frame_captured_at(gate.view(), &mut cursor, Some(before_hide)),
+            admit_screen_frame_at(
+                gate.view(),
+                &mut cursor,
+                ScreenFrameTime::Captured(before_hide)
+            ),
             ScreenFrameAdmission::Publish,
             "never hidden: nothing is held back"
         );
         gate.hide(ScreenPrivacyReason::You, "t".into());
         // Taken before the hide edge, handed over after it: held.
         assert_eq!(
-            admit_screen_frame_captured_at(gate.view(), &mut cursor, Some(before_hide)),
+            admit_screen_frame_at(
+                gate.view(),
+                &mut cursor,
+                ScreenFrameTime::Captured(before_hide)
+            ),
             ScreenFrameAdmission::Frost
         );
         let while_hidden = Instant::now();
         assert_eq!(
-            admit_screen_frame_captured_at(gate.view(), &mut cursor, Some(while_hidden)),
+            admit_screen_frame_at(
+                gate.view(),
+                &mut cursor,
+                ScreenFrameTime::Captured(while_hidden)
+            ),
             ScreenFrameAdmission::Hold
         );
         std::thread::sleep(Duration::from_millis(2));
@@ -824,12 +965,20 @@ mod tests {
         assert!(shown_at > while_hidden);
         // Handed over after the show, taken before it: still held.
         assert_eq!(
-            admit_screen_frame_captured_at(gate.view(), &mut cursor, Some(while_hidden)),
+            admit_screen_frame_at(
+                gate.view(),
+                &mut cursor,
+                ScreenFrameTime::Captured(while_hidden)
+            ),
             ScreenFrameAdmission::Hold,
             "a frame of the hidden span published after the show"
         );
         assert_eq!(
-            admit_screen_frame_captured_at(gate.view(), &mut cursor, Some(shown_at)),
+            admit_screen_frame_at(
+                gate.view(),
+                &mut cursor,
+                ScreenFrameTime::Captured(shown_at)
+            ),
             ScreenFrameAdmission::Publish
         );
         // A publish point that cannot date its frames publishes after Show.
@@ -843,8 +992,142 @@ mod tests {
         gate.show();
         assert!(gate.view().shown_at.unwrap() > shown_at);
         assert_eq!(
-            admit_screen_frame_captured_at(gate.view(), &mut cursor, Some(shown_at)),
+            admit_screen_frame_at(
+                gate.view(),
+                &mut cursor,
+                ScreenFrameTime::Captured(shown_at)
+            ),
             ScreenFrameAdmission::Hold
+        );
+    }
+
+    /// Plan 210 D8 for a capture that doesn't date its frames (Linux
+    /// PipeWire, the Windows FFmpeg pipe): a delivery that began before the
+    /// Show holds, and so does the first one after it, once per Show, since a
+    /// frame taken before the Show may be queued behind the one in flight.
+    #[test]
+    fn an_undated_capture_holds_its_first_delivery_after_each_show() {
+        let gate = gate();
+        let mut cursor = ScreenPrivacyCursor::default();
+        let delivered = |at| ScreenFrameTime::DeliveredFrom(at);
+        assert_eq!(
+            admit_screen_frame_at(gate.view(), &mut cursor, delivered(Instant::now())),
+            ScreenFrameAdmission::Publish,
+            "never hidden: nothing is held back"
+        );
+        gate.hide(ScreenPrivacyReason::You, "t".into());
+        assert_eq!(
+            admit_screen_frame_at(gate.view(), &mut cursor, delivered(Instant::now())),
+            ScreenFrameAdmission::Frost
+        );
+        let in_flight = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        gate.show();
+        let shown_at = gate.view().shown_at.unwrap();
+        // The frame being read when the Show landed: held, and it does not
+        // count as the first delivery after the Show.
+        assert_eq!(
+            admit_screen_frame_at(gate.view(), &mut cursor, delivered(in_flight)),
+            ScreenFrameAdmission::Hold
+        );
+        // The first delivery that began after the Show: still held.
+        assert_eq!(
+            admit_screen_frame_at(gate.view(), &mut cursor, delivered(shown_at)),
+            ScreenFrameAdmission::Hold,
+            "a frame queued before the show was published as live"
+        );
+        // The next one is trusted, and so is every later one.
+        for _ in 0..3 {
+            assert_eq!(
+                admit_screen_frame_at(gate.view(), &mut cursor, delivered(Instant::now())),
+                ScreenFrameAdmission::Publish
+            );
+        }
+        // A new hide and show: the first delivery after it holds again.
+        gate.hide(ScreenPrivacyReason::You, "t2".into());
+        assert_eq!(
+            admit_screen_frame_at(gate.view(), &mut cursor, delivered(Instant::now())),
+            ScreenFrameAdmission::Frost
+        );
+        std::thread::sleep(Duration::from_millis(2));
+        gate.show();
+        assert_eq!(
+            admit_screen_frame_at(gate.view(), &mut cursor, delivered(Instant::now())),
+            ScreenFrameAdmission::Hold
+        );
+        assert_eq!(
+            admit_screen_frame_at(gate.view(), &mut cursor, delivered(Instant::now())),
+            ScreenFrameAdmission::Publish
+        );
+        // A capture started after the show never covered a hide: it
+        // publishes from its first frame.
+        let mut fresh = ScreenPrivacyCursor::default();
+        assert_eq!(
+            admit_screen_frame_at(gate.view(), &mut fresh, delivered(Instant::now())),
+            ScreenFrameAdmission::Publish
+        );
+    }
+
+    /// Windows capture times: a counter reading becomes an `Instant` through
+    /// one simultaneous reading of both clocks (QPC at 10 MHz, and WGC's
+    /// 100 ns units of it).
+    #[test]
+    fn a_counter_reading_is_dated_on_the_instant_clock() {
+        let now = Instant::now();
+        let frequency = 10_000_000;
+        let now_ticks = 987_654_321_000;
+        // 16.7 ms before now.
+        let at = instant_for_counter(now_ticks - 167_000, frequency, now_ticks, now).unwrap();
+        assert_eq!(now - at, Duration::from_micros(16_700));
+        // The same instant on another rate (a 24 MHz counter).
+        let at = instant_for_counter(24_000_000 - 2_400, 24_000_000, 24_000_000, now).unwrap();
+        assert_eq!(now - at, Duration::from_micros(100));
+        // A reading a hair ahead of now is believed; far ahead is not.
+        assert_eq!(
+            instant_for_counter(now_ticks + 10_000, frequency, now_ticks, now),
+            Some(now + Duration::from_millis(1))
+        );
+        assert_eq!(
+            instant_for_counter(now_ticks + 1_000_000, frequency, now_ticks, now),
+            None
+        );
+        // Nonsense readings are undated, never "now".
+        assert_eq!(instant_for_counter(0, frequency, now_ticks, now), None);
+        assert_eq!(instant_for_counter(-5, frequency, now_ticks, now), None);
+        assert_eq!(instant_for_counter(5, 0, now_ticks, now), None);
+    }
+
+    /// On Windows the counter really is `Instant`'s clock: a QPC reading and
+    /// a `SystemRelativeTime` of "now" land within a few milliseconds of
+    /// `Instant::now()`, and one from 50 ms ago lands 50 ms back.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_times_land_on_the_instant_clock() {
+        use windows::Win32::System::Performance::{
+            QueryPerformanceCounter, QueryPerformanceFrequency,
+        };
+        let mut frequency = 0_i64;
+        // SAFETY: a valid out pointer.
+        unsafe { QueryPerformanceFrequency(&mut frequency) }.unwrap();
+        let mut ticks = 0_i64;
+        // SAFETY: a valid out pointer.
+        unsafe { QueryPerformanceCounter(&mut ticks) }.unwrap();
+        let before = Instant::now();
+        let fifty_ms = frequency / 20;
+        let qpc = windows_clock::instant_for_qpc(ticks - fifty_ms).unwrap();
+        let back = before.saturating_duration_since(qpc);
+        assert!(
+            back >= Duration::from_millis(45) && back <= Duration::from_millis(80),
+            "a QPC reading 50 ms old landed {back:?} back"
+        );
+        let system_relative =
+            i64::try_from(i128::from(ticks - fifty_ms) * 10_000_000 / i128::from(frequency))
+                .unwrap();
+        let wgc = windows_clock::instant_for_system_relative_100ns(system_relative).unwrap();
+        let back = before.saturating_duration_since(wgc);
+        assert!(
+            back >= Duration::from_millis(45) && back <= Duration::from_millis(80),
+            "a SystemRelativeTime 50 ms old landed {back:?} back"
         );
     }
 

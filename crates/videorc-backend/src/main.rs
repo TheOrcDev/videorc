@@ -111,6 +111,7 @@ mod host_pressure;
 mod incident_tone;
 mod kick;
 mod kick_chat;
+mod linux_desktop_check;
 #[cfg(any(test, target_os = "linux"))]
 mod linux_pipewire_stream;
 mod linux_portal_capture;
@@ -6389,6 +6390,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "sources.app_previews"
         | "sources.scene_pictures"
         | "diagnostics.stats"
+        | "diagnostics.linuxDesktop"
         | "capture.recovery.status"
         | "preview.surface.status"
         | "remote.control.status"
@@ -12740,6 +12742,16 @@ async fn handle_text_message_with_role(
         "diagnostics.stats" => {
             ServerResponse::ok(command.id, current_diagnostics_stats(state).await)
         }
+        // Plan 257 S18: what this Linux desktop is missing (keyring, portal,
+        // device groups), so Health and Destinations can say what to install.
+        "diagnostics.linuxDesktop" => match linux_desktop_check::linux_desktop_check().await {
+            Some(check) => ServerResponse::ok(command.id, check),
+            None => ServerResponse::error(
+                command.id,
+                "unsupported-platform",
+                "The Linux desktop check runs only on Linux.",
+            ),
+        },
         "diagnostics.metricsJournal.get" => {
             ServerResponse::ok(command.id, metrics_journal::current_state())
         }
