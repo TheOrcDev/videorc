@@ -179,12 +179,22 @@ function portalInstallLine(currentDesktop: string | undefined): string {
     : 'the portal for your desktop (xdg-desktop-portal-gnome, -kde, -hyprland or -wlr)'
 }
 
+/** A portal frontend that did not answer in time proves nothing either way. */
+function portalTimedOut(portal: LinuxPortalCheck): boolean {
+  return portal.detail?.includes('in time') ?? false
+}
+
+/** True when the answer is worth keeping: the bus answered and the portal did too. */
+export function linuxDesktopCheckSettled(check: LinuxDesktopCheck): boolean {
+  return check.portal.frontend !== 'unknown' && !portalTimedOut(check.portal)
+}
+
 export function screenPortalCheck(portal: LinuxPortalCheck): CheckWords {
   if (portal.frontend === 'unknown') return { value: "Couldn't check", tone: 'neutral' }
   if (portal.frontend === 'missing') return { value: 'Not installed', tone: 'error' }
   if (portal.screenCastVersion === undefined) {
     // A frontend that did not answer in time is not proof of a missing backend.
-    if (portal.detail?.includes('in time')) return { value: "Couldn't check", tone: 'neutral' }
+    if (portalTimedOut(portal)) return { value: "Couldn't check", tone: 'neutral' }
     return { value: 'No screen sharing', tone: 'error' }
   }
   return { value: 'Ready', tone: 'good' }

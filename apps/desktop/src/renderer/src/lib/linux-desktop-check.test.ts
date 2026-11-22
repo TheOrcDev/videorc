@@ -7,6 +7,7 @@ import {
   deviceGroupsIssue,
   keyringCheck,
   keyringIssue,
+  linuxDesktopCheckSettled,
   linuxDesktopChecks,
   linuxDesktopIssues,
   portalBackendPackage,
@@ -232,5 +233,38 @@ describe('Health rows and alerts', () => {
       'screen-portal'
     ])
     expect(linuxDesktopIssues({ keyring: keyring(), desktop: desktop() })).toEqual([])
+  })
+})
+
+describe('linuxDesktopCheckSettled', () => {
+  it('keeps answers where the bus and the portal both answered', () => {
+    expect(linuxDesktopCheckSettled(desktop())).toBe(true)
+    expect(
+      linuxDesktopCheckSettled(desktop({ portal: { frontend: 'missing', backends: [] } }))
+    ).toBe(true)
+    expect(
+      linuxDesktopCheckSettled(
+        desktop({
+          portal: { frontend: 'running', backends: ['gtk'], detail: 'ScreenCast: InvalidArgs' }
+        })
+      )
+    ).toBe(true)
+  })
+
+  it('asks again after a bus or portal that did not answer', () => {
+    expect(
+      linuxDesktopCheckSettled(desktop({ portal: { frontend: 'unknown', backends: [] } }))
+    ).toBe(false)
+    expect(
+      linuxDesktopCheckSettled(
+        desktop({
+          portal: {
+            frontend: 'running',
+            backends: ['hyprland'],
+            detail: 'ScreenCast: the portal did not answer in time'
+          }
+        })
+      )
+    ).toBe(false)
   })
 })

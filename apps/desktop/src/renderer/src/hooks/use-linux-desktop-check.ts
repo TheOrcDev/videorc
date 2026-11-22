@@ -2,7 +2,14 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { useStudioDiagnostics } from '@/hooks/use-studio'
 import type { LinuxDesktopCheck, RuntimeInfo } from '@/lib/backend'
-import type { LinuxDesktopInput } from '@/lib/linux-desktop-check'
+import { linuxDesktopCheckSettled, type LinuxDesktopInput } from '@/lib/linux-desktop-check'
+
+/**
+ * A settled answer per backend connection, shared by Health and Destinations,
+ * so a row never flips between visits. An inconclusive one (the bus or the
+ * portal did not answer in time) is asked again on the next visit.
+ */
+const settledAnswers = new WeakMap<object, LinuxDesktopCheck>()
 
 /**
  * Linux only (plan 257 S18): the keyring from RuntimeInfo plus the backend's
@@ -17,10 +24,16 @@ export function useLinuxDesktopCheck(runtimeInfo: RuntimeInfo | null): LinuxDesk
 
   useEffect(() => {
     if (!linux || !client) return undefined
+    const settled = settledAnswers.get(client)
+    if (settled) {
+      setDesktop(settled)
+      return undefined
+    }
     let disposed = false
     client
       .requestTyped('diagnostics.linuxDesktop')
       .then((answer) => {
+        if (linuxDesktopCheckSettled(answer)) settledAnswers.set(client, answer)
         if (!disposed) setDesktop(answer)
       })
       .catch((error: unknown) => {
