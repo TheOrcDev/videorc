@@ -240,6 +240,38 @@ async fn publish(
     sources: &mut CompositorLiveSources,
     cache: &mut CompositorRenderCache,
 ) -> CompositorPublishResult {
+    publish_with(
+        state,
+        sources,
+        cache,
+        super::LiveBackgroundLeg::unmeasured(&mut None),
+    )
+    .await
+}
+
+/// [`publish`] for a tick pinned to `at`: the scene-switch hold is judged at
+/// `at`, however long the host takes between ticks.
+async fn publish_at(
+    state: &AppState,
+    sources: &mut CompositorLiveSources,
+    cache: &mut CompositorRenderCache,
+    at: Instant,
+) -> CompositorPublishResult {
+    publish_with(
+        state,
+        sources,
+        cache,
+        super::LiveBackgroundLeg::pinned_at(&mut None, at),
+    )
+    .await
+}
+
+async fn publish_with(
+    state: &AppState,
+    sources: &mut CompositorLiveSources,
+    cache: &mut CompositorRenderCache,
+    live: super::LiveBackgroundLeg<'_>,
+) -> CompositorPublishResult {
     publish_compositor_frame(
         state,
         "scene-switch-test",
@@ -262,7 +294,7 @@ async fn publish(
         false,
         false,
         super::ChatOverlayLegs::OFF,
-        super::LiveBackgroundLeg::unmeasured(&mut None),
+        live,
         super::ProgramLeg::off(&mut super::ProgramLegState::default()),
     )
 }
@@ -650,6 +682,11 @@ async fn each_leg_cuts_to_the_next_window_only_when_its_own_scene_names_it() {
 #[tokio::test]
 async fn a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit() {
     let state = state();
+    // Ticks a frame apart on a pinned clock: the hold below is judged by tick
+    // time. On wall time a loaded runner took over `LEG_SCENE_HOLD_MAX` across
+    // the two busy ticks and the bound released the hold mid-test.
+    let t0 = Instant::now();
+    let tick = |n: u32| t0 + Duration::from_millis(33) * n;
     let mut scene = snapshot(SceneSourceKind::Window);
     scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
     state.compositor.lock().await.scene = Some(scene.clone());
@@ -657,7 +694,7 @@ async fn a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit() {
     let mut sources = CompositorLiveSources::default();
     let mut cache = CompositorRenderCache::refresh_initial(&state).await;
     assert_eq!(
-        publish(&state, &mut sources, &mut cache)
+        publish_at(&state, &mut sources, &mut cache, tick(0))
             .await
             .fingerprint
             .screen,
@@ -695,7 +732,7 @@ async fn a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit() {
     // ...but the compositor cannot adopt the capture this tick: the preview
     // slot is busy (a swap installing, a metrics poll, a status read).
     let busy_slot = state.preview_screen.lock().await;
-    let result = publish(&state, &mut sources, &mut cache).await;
+    let result = publish_at(&state, &mut sources, &mut cache, tick(1)).await;
     assert_eq!(
         result.fingerprint.screen, None,
         "no Beta frame proves anything yet"
@@ -705,12 +742,12 @@ async fn a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit() {
         alpha_full,
         "Alpha's frame stays under Alpha's layout: never Alpha inside Beta's shrunk layout"
     );
-    publish(&state, &mut sources, &mut cache).await;
+    publish_at(&state, &mut sources, &mut cache, tick(2)).await;
     assert_eq!(latest_bytes(&state).await, alpha_full, "the hold is steady");
     drop(busy_slot);
 
     // The next tick adopts Beta: layout and window cut together.
-    let result = publish(&state, &mut sources, &mut cache).await;
+    let result = publish_at(&state, &mut sources, &mut cache, tick(3)).await;
     assert_eq!(result.fingerprint.screen, Some(22));
     let beta_shrunk = latest_bytes(&state).await;
     assert_ne!(beta_shrunk, alpha_full);
@@ -718,7 +755,7 @@ async fn a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit() {
         beta_shrunk[0] < 40,
         "Beta's shrunk layout leaves the corner dark"
     );
-    publish(&state, &mut sources, &mut cache).await;
+    publish_at(&state, &mut sources, &mut cache, tick(4)).await;
     assert_eq!(latest_bytes(&state).await, beta_shrunk, "and the cut holds");
 
     // A layout edit on the same, delivering capture cuts at once: no hold.
@@ -726,7 +763,7 @@ async fn a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit() {
     edited.revision = 3;
     edited.scene.as_mut().unwrap().sources[0].transform.x = 0.0;
     state.compositor.lock().await.scene = Some(edited);
-    publish(&state, &mut sources, &mut cache).await;
+    publish_at(&state, &mut sources, &mut cache, tick(5)).await;
     assert_ne!(latest_bytes(&state).await, beta_shrunk);
 }
 
