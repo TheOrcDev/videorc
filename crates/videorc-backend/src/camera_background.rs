@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use crate::protocol::{CameraBackground, CameraBackgroundMode};
+use crate::protocol::{CameraBackground, CameraBackgroundMode, CameraSystemEffect};
 
 /// D6: the newest mask must be younger than this (3 frames at 30 fps), or
 /// the stage outputs the cover.
@@ -33,6 +33,30 @@ pub enum SystemEffect {
     BackgroundBlur,
     /// The system replaces the background (macOS 15 background replacement).
     BackgroundReplacement,
+}
+
+impl From<&CameraSystemEffect> for SystemEffect {
+    /// The camera status's `systemEffect` as the rule reads it. A
+    /// replacement wins over a blur (it changes more of the picture); Studio
+    /// Light leaves the background alone, so on its own it is no effect, and
+    /// a blur Videorc turned off is reported off already.
+    fn from(effect: &CameraSystemEffect) -> Self {
+        if effect.background_replacement {
+            SystemEffect::BackgroundReplacement
+        } else if effect.background_blur {
+            SystemEffect::BackgroundBlur
+        } else {
+            SystemEffect::None
+        }
+    }
+}
+
+impl From<Option<&CameraSystemEffect>> for SystemEffect {
+    /// No `systemEffect` on the camera status: none is on, or the system
+    /// can't say.
+    fn from(effect: Option<&CameraSystemEffect>) -> Self {
+        effect.map_or(SystemEffect::None, SystemEffect::from)
+    }
 }
 
 /// How the camera effect stage is doing for the camera in use.
@@ -236,6 +260,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn system_effect_reads_the_camera_status() {
+        use crate::protocol::CameraSystemEffectProvider;
+        let status = |blur, replacement, light| CameraSystemEffect {
+            provider: CameraSystemEffectProvider::MacosVideoEffects,
+            background_blur: blur,
+            background_replacement: replacement,
+            studio_light: light,
+            turned_off_by_videorc: false,
+        };
+        assert_eq!(SystemEffect::from(None), SystemEffect::None);
+        assert_eq!(
+            SystemEffect::from(Some(&status(false, false, true))),
+            SystemEffect::None
+        );
+        assert_eq!(
+            SystemEffect::from(&status(true, false, false)),
+            SystemEffect::BackgroundBlur
+        );
+        assert_eq!(
+            SystemEffect::from(&status(false, true, false)),
+            SystemEffect::BackgroundReplacement
+        );
+        assert_eq!(
+            SystemEffect::from(&status(true, true, true)),
+            SystemEffect::BackgroundReplacement
+        );
+        let windows = CameraSystemEffect {
+            provider: CameraSystemEffectProvider::WindowsStudioEffects,
+            background_blur: false,
+            turned_off_by_videorc: true,
+            ..status(false, false, false)
+        };
+        assert_eq!(SystemEffect::from(&windows), SystemEffect::None);
     }
 
     fn fixture() -> serde_json::Value {
