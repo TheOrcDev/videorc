@@ -5513,6 +5513,14 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       })
   )
   useEffect(() => () => sourceSelectionController.dispose(), [sourceSelectionController])
+  // `get` reads `clientRef`, which follows `client` at render. A bootstrap
+  // `recording.status` that lands before React commits a new client asks with
+  // no client yet, fails ("couldn't check your sources") and nothing asks
+  // again. So the committed client reads once more; with no active session
+  // this is a no-op, and a read in flight runs again after it.
+  useEffect(() => {
+    if (client) void sourceSelectionController.refresh()
+  }, [client, sourceSelectionController])
   const allowCaptureNone =
     !sessionOwnsTransport(recording) ||
     sourceSelectionState.snapshot?.capabilities.some(

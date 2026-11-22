@@ -1926,12 +1926,38 @@ function Probe({ observe }: { observe: (value: StudioObservation) => void }): nu
   return null
 }
 
+// A test that times out keeps running after Vitest moves on. If its polling
+// act() overlaps the next test's act(), the scopes close out of order, React's
+// act depth never returns to zero, and no later act() flushes React work: every
+// test after it in the file times out too (0.36.1's Linux candidate failed 146;
+// Windows shards ran into the job limit). So each polling helper belongs to one
+// test, and afterEach waits out its act() in flight before the next one starts.
+let testEpoch = 0
+let helperActInFlight: Promise<void> = Promise.resolve()
+
+/** One polling turn for the test that started at `epoch`; refuses once it ended. */
+async function pollAct(epoch: number, turn: () => Promise<void>): Promise<void> {
+  if (epoch !== testEpoch) {
+    throw new Error('The test ended (it timed out) before this wait finished.')
+  }
+  // act()'s thenable closes its scope on every then(): adopt it exactly once.
+  const pending = Promise.resolve(act(turn))
+  helperActInFlight = pending.catch(() => undefined)
+  await pending
+}
+
+async function endTestHelpers(): Promise<void> {
+  testEpoch += 1
+  await helperActInFlight
+}
+
 /** Runs only 0 ms timers (setTimeout is faked) while real time passes for
  * module loads and socket replies, until `done` or `withinMs` runs out. */
 async function turnZeroTimersUntil(done: () => boolean, withinMs = 3_000): Promise<void> {
+  const epoch = testEpoch
   const deadline = performance.now() + withinMs
   while (!done() && performance.now() < deadline) {
-    await act(async () => {
+    await pollAct(epoch, async () => {
       await new Promise<void>((resolve) => setImmediate(resolve))
       await vi.advanceTimersByTimeAsync(0)
     })
@@ -2320,6 +2346,7 @@ describe('real StudioProvider lifecycle', () => {
   let root: Root | null = null
 
   afterEach(async () => {
+    await endTestHelpers()
     if (root) {
       await act(async () => root?.unmount())
       root = null
@@ -12631,9 +12658,10 @@ describe('real StudioProvider lifecycle', () => {
       // 10 ms ticks, which outlasts the 250 ms debounce of the post-connect
       // scene reload (it re-applies the same scene as a new object).
       let quietTicks = 0
+      const epoch = testEpoch
       for (let attempt = 0; attempt < 400 && quietTicks < 30; attempt += 1) {
         const before = latest().core
-        await act(async () => {
+        await pollAct(epoch, async () => {
           await new Promise((resolve) => setTimeout(resolve, 10))
         })
         quietTicks = latest().core === before ? quietTicks + 1 : 0
@@ -19064,8 +19092,9 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       await invoke({ action: 'rapid-burst' })
     })
+    const epoch = testEpoch
     for (let attempt = 0; attempt < 100; attempt += 1) {
-      await act(async () => {
+      await pollAct(epoch, async () => {
         state = await invoke({ action: 'state' })
         await new Promise((resolve) => setTimeout(resolve, 10))
       })
@@ -20856,9 +20885,10 @@ function installProviderTestEnvironment(api: VideorcApi): {
 }
 
 async function waitForObservation(predicate: () => boolean, attempts = 500): Promise<void> {
+  const epoch = testEpoch
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (predicate()) return
-    await act(async () => {
+    await pollAct(epoch, async () => {
       await new Promise((resolve) => setTimeout(resolve, 10))
     })
   }
