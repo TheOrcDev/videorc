@@ -41,8 +41,8 @@ import {
 import type { CameraLowLightRequest } from '@/hooks/use-camera-low-light'
 import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
 import {
+  cameraBackgroundMigrated,
   cameraOutputLayout,
-  migrateCameraBackgrounds,
   normalizeCameraBackground
 } from '@/lib/camera-background'
 import type { ChatOverlayDriver } from '@/lib/chat-overlay'
@@ -2139,12 +2139,6 @@ const StudioCaptionsContext = createContext<StudioCaptionsContextValue | null>(n
 export interface StudioCloudContextValue {
   /** Null until the backend answers (an older backend never does). */
   cloudStatus: CloudStatus | null
-  /**
-   * The talk show's room is open (the cloud's room phase, or the smoke's
-   * stand-in for one). Plan 258 S5: the camera's background effects wait for
-   * S8 while it is.
-   */
-  talkShowRoomOpen: boolean
   setCloudSettings: (patch: CloudSettingsPatch) => Promise<void>
   refreshCloudAllowance: () => Promise<void>
   endCloudShow: () => Promise<void>
@@ -2170,7 +2164,6 @@ export interface StudioCloudContextValue {
 
 const NO_CLOUD: StudioCloudContextValue = {
   cloudStatus: null,
-  talkShowRoomOpen: false,
   setCloudSettings: async () => {},
   refreshCloudAllowance: async () => {},
   endCloudShow: async () => {},
@@ -4947,7 +4940,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }
     const smokeWindow = window as Window & {
       __videorcSmokeSetTalkShowRoomOpen?: (open: boolean) => boolean
-      __videorcSmokeSelectFirstCamera?: (cameraId?: string) => string | null
+      __videorcSmokeSelectFirstCamera?: () => string | null
       __videorcSmokeSelectFirstScreen?: (
         sourceId?: string
       ) => { id: string; kind: 'screen' | 'window' } | null
@@ -4982,14 +4975,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       setSmokeTalkShowRoomOpen(open)
       return open
     }
-    // An explicit camera ID pins one (plan 258 S5: the fixture camera, so the
-    // Studio's Background control acts on the camera the smoke records).
-    smokeWindow.__videorcSmokeSelectFirstCamera = (cameraId?: string): string | null => {
+    smokeWindow.__videorcSmokeSelectFirstCamera = (): string | null => {
       const camera = deviceList.devices.find(
-        (device) =>
-          device.kind === 'camera' &&
-          device.status === 'available' &&
-          (!cameraId || device.id === cameraId)
+        (device) => device.kind === 'camera' && device.status === 'available'
       )
       if (!camera) {
         return null
@@ -5364,18 +5352,29 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // lost. The scenes keep their key fields for a rollback.
   const migrationCameraId = captureConfig.sources.cameraId
   const migrationScenes = sceneLibrary.storedList
+  // Loaded only while it has not settled; until then the scenes' own key
+  // still goes out (`cameraOutputLayout` keys from the camera once settled).
+  const migrationSettled = cameraBackgroundMigrated(settings.cameraBackgroundMigration)
   useEffect(() => {
-    setSettings((current) => {
-      const migrated = migrateCameraBackgrounds({
-        cameraBackgrounds: current.cameraBackgrounds,
-        cameraBackgroundMigration: current.cameraBackgroundMigration,
-        cameraId: migrationCameraId,
-        scenes: migrationScenes,
-        onStreamId: activeSavedSceneId
+    if (migrationSettled) return
+    let current = true
+    void import('@/lib/camera-background-migration').then(({ migrateCameraBackgrounds }) => {
+      if (!current) return
+      setSettings((settings) => {
+        const migrated = migrateCameraBackgrounds({
+          cameraBackgrounds: settings.cameraBackgrounds,
+          cameraBackgroundMigration: settings.cameraBackgroundMigration,
+          cameraId: migrationCameraId,
+          scenes: migrationScenes,
+          onStreamId: activeSavedSceneId
+        })
+        return migrated ? { ...settings, ...migrated } : settings
       })
-      return migrated ? { ...current, ...migrated } : current
     })
-  }, [migrationCameraId, migrationScenes, activeSavedSceneId])
+    return () => {
+      current = false
+    }
+  }, [migrationSettled, migrationCameraId, migrationScenes, activeSavedSceneId])
   // A new user's scenes show the main display before the device list names it.
   useEffect(() => {
     const display = deviceList.devices.find(
@@ -18520,7 +18519,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const cloudValue = useMemo<StudioCloudContextValue>(
     () => ({
       cloudStatus,
-      talkShowRoomOpen,
       endCloudShow,
       refreshCloudAllowance,
       resumeCloudShow,
@@ -18530,7 +18528,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }),
     [
       cloudStatus,
-      talkShowRoomOpen,
       endCloudShow,
       refreshCloudAllowance,
       resumeCloudShow,

@@ -8522,7 +8522,7 @@ describe('real StudioProvider lifecycle', () => {
       () => latest().captureConfig.sources.cameraId === 'camera:1' && canSaveScene()
     )
     // The D4 migration settled on this profile (no keyed scene, nothing moved).
-    expect(latest().settings.cameraBackgroundMigration).toBe(1)
+    await waitForObservation(() => latest().settings.cameraBackgroundMigration === 1)
     const layoutCommand = (from: number) =>
       backend.sentCommands
         .slice(from)

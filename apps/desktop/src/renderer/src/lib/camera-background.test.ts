@@ -9,11 +9,13 @@ import {
   cameraBackgroundLayout,
   cameraOutputLayout,
   DEFAULT_CAMERA_BACKGROUND,
-  migrateCameraBackgrounds,
   normalizeCameraBackground,
-  normalizeCameraBackgrounds,
-  type CameraBackgroundMigrationScene
+  normalizeCameraBackgrounds
 } from './camera-background'
+import {
+  migrateCameraBackgrounds,
+  type CameraBackgroundMigrationScene
+} from './camera-background-migration'
 import {
   defaultCaptureConfig,
   normalizeLayoutSettings,

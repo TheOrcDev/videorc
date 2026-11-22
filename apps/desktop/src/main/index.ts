@@ -15717,7 +15717,7 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
       if (${JSON.stringify(command)} === 'select-camera-device') {
         const deadline = Date.now() + Number(params.timeoutMs ?? 10000);
         while (Date.now() < deadline) {
-          const cameraId = window.__videorcSmokeSelectFirstCamera?.(params.cameraId) ?? null;
+          const cameraId = window.__videorcSmokeSelectFirstCamera?.() ?? null;
           if (cameraId) {
             await sleep(Number(params.settleMs ?? 600));
             return { cameraId };

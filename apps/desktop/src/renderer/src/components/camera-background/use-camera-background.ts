@@ -66,11 +66,13 @@ export function useCameraBackgroundImages(): CameraBackgroundImage[] {
  */
 export function useCameraBackground(): CameraBackgroundControl {
   const { settings, captureConfig, applyCameraBackground, runtimeInfo } = useStudioCore()
-  const { cloudStatus, talkShowRoomOpen } = useStudioCloud()
+  const { cloudStatus, talkShow } = useStudioCloud()
   const images = useCameraBackgroundImages()
   const cameraId = captureConfig.sources.cameraId
   const background = cameraBackgroundFor(settings.cameraBackgrounds, cameraId)
-  const roomOpen = talkShowRoomOpen ?? cloudStatus?.room?.phase === 'open'
+  // The room's phase, or the Show stage standing in for the Preview (a room
+  // opening, or the smoke's stand-in for one).
+  const roomOpen = cloudStatus?.room?.phase === 'open' || talkShow?.previewReplaced === true
   const platform = runtimeInfo?.platform
   const available = Boolean(cameraId)
   const effectReason =
