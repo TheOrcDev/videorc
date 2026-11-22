@@ -189,8 +189,10 @@ what Videorc notices on its own never becomes a toast.
   urgent problem while idle (the engine needs a restart) only raise the
   number on the bell.
 - **Guard:** the launch check keeps watching after the first minute. It
-  sends a second batch of reports at 61 s (low space, a failed read, an
-  output too heavy), still with no input, and fails on any toast up to 75 s.
+  sends a second batch of reports 61 s after the notification store starts
+  (low space, a failed read, an output too heavy), still with no input, and
+  fails on any toast up to 14 s after it. With the old idle row it fails on
+  those three.
 
 ## The short version
 
