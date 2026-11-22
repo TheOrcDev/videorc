@@ -268,6 +268,25 @@ Any named physical Linux x64 box qualifies. The evidence records the
 distribution, kernel, render nodes with their drivers, and the VAAPI pin.
 Virtual machines and CI runners still do not count.
 
+Microphone continuity and clean Stop (plan 257 S1). One launch, N takes of
+a real session (microphone + camera + portal screen by default) with a
+continuous tone playing into the microphone; every whole second of each file
+must carry the tone, the analyzer must pass, and Stop must end FFmpeg with
+no TERM/KILL. `--load-cpus 8` runs eight owned busy loops for the whole run
+(`stress-ng --cpu 8` without stress-ng). On ogre the tone goes into the lab
+sink `videorc_lab_speech` and is recorded through `videorc_lab_mic`:
+
+```bash
+VIDEORC_DEV_BACKEND_PROFILE=release \
+VIDEORC_SMOKE_FFMPEG_PATH=$PWD/vendor/ffmpeg/linux-x64/bin/ffmpeg \
+VIDEORC_SMOKE_OUTPUT_DIR=$HOME/linux-beta/s1/quiet \
+pnpm smoke:linux-mic-continuity -- --takes 10 --recording-ms 60000
+```
+
+Reuse the output directory between runs: the portal restore token lives in
+its profile. A static scene repeats frames by design, so freeze and repeat
+findings are advisory there; timing claims need a quiet box (load under 2).
+
 ## Videorc Camera (plan 214 D: spike P0c and the F4 acceptance)
 
 Videorc Camera on Linux is a v4l2loopback device the app writes YUYV

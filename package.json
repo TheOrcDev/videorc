@@ -163,6 +163,7 @@
     "smoke:linux-encoder-acceptance": "node scripts/smoke-linux-encoder-acceptance.mjs",
     "smoke:linux-av-devices": "node scripts/smoke-linux-av-devices.mjs",
     "probe:linux-camera-hotplug": "node scripts/probe-linux-camera-hotplug.mjs",
+    "smoke:linux-mic-continuity": "node scripts/smoke-linux-mic-continuity.mjs",
     "smoke:linux-portal-capture": "node scripts/smoke-linux-portal-capture.mjs",
     "smoke:linux-portal-record": "node scripts/smoke-linux-portal-record.mjs",
     "smoke:portal-preview-proof": "node scripts/smoke-portal-preview-proof.mjs",
