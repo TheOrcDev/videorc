@@ -29,6 +29,7 @@ import { MicLcdMeter } from '@/components/studio/mic-level-meter'
 import type { MicrophoneRowProps, SystemAudioRowProps } from '@/components/studio/audio-section'
 import {
   type GreenScreenControl,
+  useCameraSystemEffectLine,
   useStudioChatDoor,
   useStudioSources
 } from '@/components/studio/quick-settings'
@@ -526,6 +527,7 @@ export function RetroQuickSettings(): ReactElement {
           />
           <RetroSwitchStatusLine kind="camera" />
           <RetroGreenScreenRow control={greenScreen} />
+          <RetroSystemEffectLine />
         </LcdPanel>
       </PanelSection>
       <PanelSection>
@@ -578,6 +580,20 @@ function RetroGreenScreenRow({ control }: { control: GreenScreenControl }): Reac
         onValueChange={control.setMode}
       />
     </LcdDisplayRow>
+  )
+}
+
+/**
+ * The system effect line under the camera, as in the default look (plan 258
+ * S4). Kept in the accessibility tree while empty, so it is announced when
+ * it arrives.
+ */
+function RetroSystemEffectLine(): ReactElement {
+  const line = useCameraSystemEffectLine()
+  return (
+    <div aria-live="polite" className={cn(LCD_MESSAGE, 'empty:sr-only')}>
+      {line ? <span data-slot="camera-system-effect">{line}</span> : null}
+    </div>
   )
 }
 

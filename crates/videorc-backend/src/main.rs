@@ -33,6 +33,7 @@ mod buddy_pet_store;
 mod buddy_sprite;
 mod camera_capture;
 mod camera_low_light;
+mod camera_system_effect;
 mod captions;
 mod capture_health;
 mod capture_input;
@@ -578,6 +579,9 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     // Plan 254 S7: what each CoreAudio microphone id named before this
     // start, so a saved id that drifted still opens its microphone.
     microphone_identity::restore(&database);
+    // Plan 258 S4: a Windows Studio Effects blur an earlier run turned off
+    // and never put back (it crashed or was force-quit) goes back on.
+    camera_system_effect::settle_owed_restores_at_launch(&database);
     // Plan 249 S22: a cloud ISO transfer the previous run left running is
     // retried, and only staging files its journal created are removed.
     if let Err(error) = database.recover_cloud_iso_imports() {

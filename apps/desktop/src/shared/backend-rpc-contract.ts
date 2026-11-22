@@ -2686,6 +2686,16 @@ const previewCameraStatusSchema = boundedSemanticValue(
       droppedFrames: nonNegativeInteger,
       frameAgeMs: optionalSchema(nonNegativeInteger),
       noVideo: optionalSchema(booleanSchema),
+      // Plan 258 S4: strict, so a renamed Rust field fails here, not in the Studio.
+      systemEffect: optionalSchema(
+        objectSchema({
+          provider: enumSchema(['macos-video-effects', 'windows-studio-effects']),
+          backgroundBlur: booleanSchema,
+          backgroundReplacement: booleanSchema,
+          studioLight: booleanSchema,
+          turnedOffByVideorc: booleanSchema
+        })
+      ),
       updatedAt: timestamp
     },
     { allowUnknown: true }

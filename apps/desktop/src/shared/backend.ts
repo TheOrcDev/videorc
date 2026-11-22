@@ -3271,6 +3271,28 @@ export interface PreviewCameraStatus {
    * the backend's first-frame grace. Absent otherwise.
    */
   noVideo?: boolean
+  /**
+   * Plan 258 S4 (D12): the operating system's own effects on this camera
+   * (macOS Video Effects, Windows Studio Effects), read from the device.
+   * Absent until the camera is live and the system has answered.
+   */
+  systemEffect?: CameraSystemEffect
+}
+
+/** Which operating system feature is changing the camera's picture (plan 258 S4). */
+export type CameraSystemEffectProvider = 'macos-video-effects' | 'windows-studio-effects'
+
+/** What the system is doing to the camera Videorc has open (plan 258 S4). */
+export interface CameraSystemEffect {
+  provider: CameraSystemEffectProvider
+  /** macOS Portrait, or Windows Studio Effects background blur. */
+  backgroundBlur: boolean
+  /** macOS 15's background replacement; never on Windows. */
+  backgroundReplacement: boolean
+  /** macOS Studio Light: the light on the face, not the background. */
+  studioLight: boolean
+  /** Windows: Videorc turned Studio Effects blur off while its own background runs. */
+  turnedOffByVideorc: boolean
 }
 
 export interface CameraCapabilityFormat {

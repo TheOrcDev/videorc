@@ -4042,6 +4042,34 @@ it('keeps a live camera that sends no video (plan 216 D2)', () => {
   ).toThrow()
 })
 
+describe('Camera system effect on the camera status (plan 258 S4)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/camera-system-effect.json', import.meta.url),
+      'utf8'
+    )
+  )
+
+  it('accepts what the backend sends, field for field', () => {
+    for (const name of ['macosPortrait', 'windowsTurnedOff']) {
+      expect(validateBackendEventPayload('preview.camera.status', fixture[name])).toEqual(
+        fixture[name]
+      )
+    }
+  })
+
+  it('rejects a system effect it does not know', () => {
+    for (const systemEffect of fixture.rejectedSystemEffects) {
+      expect(() =>
+        validateBackendEventPayload('preview.camera.status', {
+          ...fixture.macosPortrait,
+          systemEffect
+        })
+      ).toThrow()
+    }
+  })
+})
+
 describe('Camera low-light compensation wire contract (issue #1066)', () => {
   const fixture = JSON.parse(
     readFileSync(
