@@ -681,11 +681,11 @@ impl PreviewCameraShared {
     }
 
     /// A frame read from the capture process pipe (Windows dshow, Linux v4l2)
-    /// is that platform's capture callback. Count it like the AVFoundation
-    /// sample-buffer callback: capture recovery verifies a restarted camera by
-    /// this counter, and a pipe camera that never advanced it was restarted
-    /// while live and latched Failed.
-    #[cfg(any(not(target_os = "macos"), test))]
+    /// or drawn by the plan 258 fixture camera is that source's capture
+    /// callback. Count it like the AVFoundation sample-buffer callback:
+    /// capture recovery verifies a restarted camera by this counter, and a
+    /// pipe camera that never advanced it was restarted while live and
+    /// latched Failed.
     fn record_pipe_frame_callback(&mut self, at: Instant) {
         self.capture_timings.record_callback_at(at);
         self.capture_callback_count = self.capture_callback_count.saturating_add(1);
@@ -1129,7 +1129,12 @@ async fn start_preview_camera_with_owner(
     let unique_id = camera_source.device_unique_id().to_string();
     let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path.clone());
     #[cfg(target_os = "windows")]
-    let unique_id = match resolve_windows_camera_target(&state, &ffmpeg_path, &unique_id).await {
+    let unique_id = match if crate::camera_fixture::is_fixture_unique_id(&unique_id) {
+        // Plan 258 S2: the fixture camera has no DirectShow device to resolve.
+        Ok(unique_id)
+    } else {
+        resolve_windows_camera_target(&state, &ffmpeg_path, &unique_id).await
+    } {
         Ok(target) => target,
         Err(error) => {
             // Inventory admission precedes old-owner retirement. A missing or
@@ -5390,6 +5395,105 @@ enum NativeCameraStartup {
     Failed(String),
 }
 
+/// The Linux and Windows pipe readers and the plan 258 fixture camera: one
+/// BGRA frame into the camera `FrameStore`, returning the next buffer.
+fn publish_bgra_frame(
+    shared: &Arc<StdMutex<PreviewCameraShared>>,
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+) -> Vec<u8> {
+    let callback_started_at = Instant::now();
+    let frame_len = bytes.len();
+    let mut guard = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.record_pipe_frame_callback(callback_started_at);
+    let now = Instant::now();
+    guard.frames_captured = guard.frames_captured.saturating_add(1);
+    guard.frames_in_window = guard.frames_in_window.saturating_add(1);
+    let window_started = *guard.window_started_at.get_or_insert(now);
+    let elapsed = window_started.elapsed();
+    if elapsed >= Duration::from_millis(500) {
+        guard.source_fps = Some(guard.frames_in_window as f64 / elapsed.as_secs_f64().max(0.001));
+        guard.frames_in_window = 0;
+        guard.window_started_at = Some(now);
+    }
+    let sequence = guard.frames_captured;
+    guard.frame_store.publish_with_metadata(
+        sequence,
+        width,
+        height,
+        PreviewCameraPixelFormat::Bgra8,
+        (),
+        now,
+        bytes,
+    );
+    let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
+    let publish_ms = callback_started_at.elapsed().as_secs_f64() * 1000.0;
+    guard
+        .capture_timings
+        .record_valid_frame(0.0, 0.0, publish_ms, frame_len as u64);
+    next_buffer
+}
+
+/// Plan 258 S2: the fixture camera's capture loop. It draws the fixture at
+/// the capture box and the requested rate and publishes each frame like a
+/// pipe camera, until the stop channel fires or its sender drops.
+fn run_fixture_camera_preview(
+    spec: crate::camera_fixture::FixtureSpec,
+    config: NativeCameraPreviewConfig,
+    shared: Arc<StdMutex<PreviewCameraShared>>,
+    stop_rx: std_mpsc::Receiver<()>,
+    startup_tx: std_mpsc::Sender<NativeCameraStartup>,
+) {
+    let (width, height) = camera_capture_target_dimensions(&config.layout, &config.video);
+    let (width, height) = (width.max(2), height.max(2));
+    let fps = config.video.fps.clamp(1, 120);
+    let renderer = crate::camera_fixture::FixtureRenderer::new(spec, width, height);
+    let mut buffer = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .frame_store
+        .checkout_overwrite_buffer(renderer.frame_len());
+    let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
+    let started = Instant::now();
+    let mut next = started;
+    let mut startup_sent = false;
+    loop {
+        renderer.render_into(started.elapsed().as_secs_f64(), &mut buffer);
+        buffer = publish_bgra_frame(&shared, width, height, buffer);
+        if !startup_sent {
+            startup_sent = true;
+            let _ = startup_tx.send(NativeCameraStartup::Live {
+                requested_width: width,
+                requested_height: height,
+                selected_format_width: width,
+                selected_format_height: height,
+                selected_format_min_fps: f64::from(fps),
+                selected_format_max_fps: f64::from(fps),
+                width,
+                height,
+                selected_fps: f64::from(fps),
+                message: Some(format!(
+                    "{} at {width}x{height}@{fps} (plan 258 S2).",
+                    crate::camera_fixture::FIXTURE_CAMERA_NAME
+                )),
+            });
+        }
+        // Keep the cadence; after a stall, resume from now instead of bursting.
+        next += interval;
+        let now = Instant::now();
+        if next < now {
+            next = now;
+        }
+        match stop_rx.recv_timeout(next - now) {
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(()) | Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
 fn run_native_camera_preview(
     config: NativeCameraPreviewConfig,
     shared: Arc<StdMutex<PreviewCameraShared>>,
@@ -5397,6 +5501,23 @@ fn run_native_camera_preview(
     startup_tx: std_mpsc::Sender<NativeCameraStartup>,
 ) {
     let _ = config.ffmpeg_path.as_str();
+
+    // Plan 258 S2: the dev-only fixture camera stands in for the device.
+    if crate::camera_fixture::is_fixture_unique_id(&config.unique_id) {
+        match crate::camera_fixture::active_fixture() {
+            Some((_, spec)) => {
+                run_fixture_camera_preview(spec.clone(), config, shared, stop_rx, startup_tx)
+            }
+            None => {
+                let _ = startup_tx.send(NativeCameraStartup::DeviceMissing(format!(
+                    "{} needs {} pointing at its fixture in a debug build.",
+                    crate::camera_fixture::FIXTURE_CAMERA_NAME,
+                    crate::camera_fixture::FIXTURE_CAMERA_ENV
+                )));
+            }
+        }
+        return;
+    }
 
     #[cfg(target_os = "macos")]
     macos::run_native_camera_preview(config, shared, stop_rx, startup_tx);
@@ -5652,47 +5773,6 @@ mod linux {
                 thread::sleep(Duration::from_millis(50));
             }
         })
-    }
-
-    fn publish_bgra_frame(
-        shared: &Arc<StdMutex<PreviewCameraShared>>,
-        width: u32,
-        height: u32,
-        bytes: Vec<u8>,
-    ) -> Vec<u8> {
-        let callback_started_at = Instant::now();
-        let frame_len = bytes.len();
-        let mut guard = shared
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.record_pipe_frame_callback(callback_started_at);
-        let now = Instant::now();
-        guard.frames_captured = guard.frames_captured.saturating_add(1);
-        guard.frames_in_window = guard.frames_in_window.saturating_add(1);
-        let window_started = *guard.window_started_at.get_or_insert(now);
-        let elapsed = window_started.elapsed();
-        if elapsed >= Duration::from_millis(500) {
-            guard.source_fps =
-                Some(guard.frames_in_window as f64 / elapsed.as_secs_f64().max(0.001));
-            guard.frames_in_window = 0;
-            guard.window_started_at = Some(now);
-        }
-        let sequence = guard.frames_captured;
-        guard.frame_store.publish_with_metadata(
-            sequence,
-            width,
-            height,
-            PreviewCameraPixelFormat::Bgra8,
-            (),
-            now,
-            bytes,
-        );
-        let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
-        let publish_ms = callback_started_at.elapsed().as_secs_f64() * 1000.0;
-        guard
-            .capture_timings
-            .record_valid_frame(0.0, 0.0, publish_ms, frame_len as u64);
-        next_buffer
     }
 }
 
@@ -6198,49 +6278,6 @@ mod windows {
                 thread::sleep(Duration::from_millis(50));
             }
         })
-    }
-
-    fn publish_bgra_frame(
-        shared: &Arc<StdMutex<PreviewCameraShared>>,
-        width: u32,
-        height: u32,
-        bytes: Vec<u8>,
-    ) -> Vec<u8> {
-        let callback_started_at = Instant::now();
-        let publish_started_at = Instant::now();
-        let frame_len = bytes.len();
-        let frame_bytes = frame_len as u64;
-        let mut guard = shared
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.record_pipe_frame_callback(callback_started_at);
-        let now = Instant::now();
-        guard.frames_captured = guard.frames_captured.saturating_add(1);
-        guard.frames_in_window = guard.frames_in_window.saturating_add(1);
-        let window_started = *guard.window_started_at.get_or_insert(now);
-        let elapsed = window_started.elapsed();
-        if elapsed >= Duration::from_millis(500) {
-            guard.source_fps =
-                Some(guard.frames_in_window as f64 / elapsed.as_secs_f64().max(0.001));
-            guard.frames_in_window = 0;
-            guard.window_started_at = Some(now);
-        }
-        let sequence = guard.frames_captured;
-        guard.frame_store.publish_with_metadata(
-            sequence,
-            width,
-            height,
-            PreviewCameraPixelFormat::Bgra8,
-            (),
-            now,
-            bytes,
-        );
-        let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
-        let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
-        guard
-            .capture_timings
-            .record_valid_frame(0.0, 0.0, publish_ms, frame_bytes);
-        next_buffer
     }
 
     /// How long a failed attempt waits for FFmpeg's last stderr lines.

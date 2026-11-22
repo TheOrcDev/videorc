@@ -33,6 +33,16 @@ pub enum AvFoundationDeviceKind {
 }
 
 pub async fn list_devices(ffmpeg_path: &str) -> DeviceList {
+    let mut list = list_platform_devices(ffmpeg_path).await;
+    // Plan 258 S2: the dev-only fixture camera, while `VIDEORC_FIXTURE_CAMERA`
+    // names one in a debug build.
+    if let Some(device) = crate::camera_fixture::fixture_camera_device() {
+        list.devices.push(device);
+    }
+    list
+}
+
+async fn list_platform_devices(ffmpeg_path: &str) -> DeviceList {
     // Exactly one arm survives cfg-stripping and becomes the tail expression;
     // `return` here would trip clippy::needless_return on that platform.
     #[cfg(target_os = "macos")]

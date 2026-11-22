@@ -32,6 +32,7 @@ mod buddy_pet;
 mod buddy_pet_store;
 mod buddy_sprite;
 mod camera_capture;
+mod camera_fixture;
 mod camera_low_light;
 mod camera_system_effect;
 mod captions;
