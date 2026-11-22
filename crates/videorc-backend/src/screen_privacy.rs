@@ -12,9 +12,19 @@
 //! The still ([`hidden_still_bgra`]) is a designed picture of the frame's
 //! size and nothing else: it never reads the screen. It is built once per
 //! size and copied on every later hide, never per frame.
+//!
+//! Both edges fail closed. A frame captured before the hide edge but handed
+//! over after it is held (the gate is read at the publish, after the
+//! capture). A frame captured while hidden is never published, even when it
+//! is handed over after Show: the gate remembers the Show instant, and a
+//! capture that knows when its frame was taken holds anything older
+//! ([`admit_screen_frame_captured_at`]). The picture held for the show is
+//! published only once that capture proves it is still the screen after the
+//! Show (macOS: an idle ScreenCaptureKit callback dated after it).
 
-use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex as StdMutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::protocol::{ScreenPrivacy, ScreenPrivacyReason};
 
@@ -35,7 +45,18 @@ pub const SCREEN_HIDE_UNAVAILABLE_LEGACY: &str =
 #[derive(Debug, Default)]
 pub struct ScreenPrivacyGate {
     packed: AtomicU64,
+    /// The last hidden → visible edge, in nanoseconds after
+    /// [`privacy_clock_origin`] (0: never shown). Written before the edge
+    /// itself, so a reader that sees the gate visible sees this show (or a
+    /// later one, which only holds more).
+    shown_at_nanos: AtomicU64,
     details: StdMutex<ScreenPrivacyDetails>,
+}
+
+/// The process-wide origin [`ScreenPrivacyGate`] dates its Show edge from.
+fn privacy_clock_origin() -> Instant {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    *ORIGIN.get_or_init(Instant::now)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -44,16 +65,28 @@ struct ScreenPrivacyDetails {
     reason: Option<ScreenPrivacyReason>,
 }
 
-/// What a publish point needs from the gate: one atomic load.
+/// What a publish point needs from the gate: two atomic loads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScreenPrivacyView {
     pub hidden: bool,
     pub span: u64,
+    /// When the screen was last shown again (`None`: never hidden and shown).
+    /// A frame captured before it was taken while the screen was hidden.
+    pub shown_at: Option<Instant>,
 }
 
 impl ScreenPrivacyGate {
     pub fn view(&self) -> ScreenPrivacyView {
-        unpack(self.packed.load(Ordering::Acquire))
+        let (hidden, span) = unpack(self.packed.load(Ordering::Acquire));
+        let shown_at = match self.shown_at_nanos.load(Ordering::Acquire) {
+            0 => None,
+            nanos => Some(privacy_clock_origin() + Duration::from_nanos(nanos)),
+        };
+        ScreenPrivacyView {
+            hidden,
+            span,
+            shown_at,
+        }
     }
 
     /// Hide. A second hide while hidden changes nothing except the reason: a
@@ -66,14 +99,14 @@ impl ScreenPrivacyGate {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut current = self.packed.load(Ordering::Acquire);
         loop {
-            let view = unpack(current);
-            if view.hidden {
+            let (hidden, span) = unpack(current);
+            if hidden {
                 if reason == ScreenPrivacyReason::You {
                     details.reason = Some(ScreenPrivacyReason::You);
                 }
                 break;
             }
-            let next = pack(true, view.span.wrapping_add(1));
+            let next = pack(true, span.wrapping_add(1));
             match self.packed.compare_exchange_weak(
                 current,
                 next,
@@ -98,13 +131,23 @@ impl ScreenPrivacyGate {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut current = self.packed.load(Ordering::Acquire);
         loop {
-            let view = unpack(current);
-            if !view.hidden {
+            let (hidden, span) = unpack(current);
+            if !hidden {
                 break;
             }
+            // Dated before the edge: a publish point that sees the gate
+            // visible must also see when it opened.
+            let nanos = u64::try_from(
+                Instant::now()
+                    .saturating_duration_since(privacy_clock_origin())
+                    .as_nanos(),
+            )
+            .unwrap_or(u64::MAX)
+            .max(1);
+            self.shown_at_nanos.store(nanos, Ordering::Release);
             match self.packed.compare_exchange_weak(
                 current,
-                pack(false, view.span),
+                pack(false, span),
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
@@ -148,11 +191,9 @@ fn pack(hidden: bool, span: u64) -> u64 {
     (span << 1) | u64::from(hidden)
 }
 
-fn unpack(packed: u64) -> ScreenPrivacyView {
-    ScreenPrivacyView {
-        hidden: packed & 1 == 1,
-        span: packed >> 1,
-    }
+/// `(hidden, span)` from the packed word.
+fn unpack(packed: u64) -> (bool, u64) {
+    (packed & 1 == 1, packed >> 1)
 }
 
 /// One publish point's memory of the gate: the span it last frosted for.
@@ -179,11 +220,32 @@ pub enum ScreenFrameAdmission {
 /// moment it would publish. Taking it earlier (before a copy or a readback)
 /// would open a window where a hide lands between the decision and the
 /// publish and a live frame covers the still, so nothing decides early.
+///
+/// For a frame whose capture time the publish point does not know; see
+/// [`admit_screen_frame_captured_at`].
 pub fn admit_screen_frame(
     view: ScreenPrivacyView,
     cursor: &mut ScreenPrivacyCursor,
 ) -> ScreenFrameAdmission {
+    admit_screen_frame_captured_at(view, cursor, None)
+}
+
+/// [`admit_screen_frame`] for a frame taken at `captured_at`. The Show edge
+/// fails closed: a frame captured before the screen was shown again shows
+/// the screen while it was hidden, so it holds like a hidden frame even when
+/// the capture hands it over after the Show (ScreenCaptureKit delivers a
+/// frame a few milliseconds to a few frames after it took it).
+pub fn admit_screen_frame_captured_at(
+    view: ScreenPrivacyView,
+    cursor: &mut ScreenPrivacyCursor,
+    captured_at: Option<Instant>,
+) -> ScreenFrameAdmission {
     if !view.hidden {
+        if let (Some(shown_at), Some(captured_at)) = (view.shown_at, captured_at)
+            && captured_at < shown_at
+        {
+            return ScreenFrameAdmission::Hold;
+        }
         return ScreenFrameAdmission::Publish;
     }
     if cursor.frosted_span == Some(view.span) {
@@ -639,7 +701,8 @@ mod tests {
             gate.view(),
             ScreenPrivacyView {
                 hidden: false,
-                span: 0
+                span: 0,
+                shown_at: None,
             }
         );
         assert_eq!(gate.snapshot(), ScreenPrivacy::default());
@@ -727,6 +790,60 @@ mod tests {
         );
         assert_eq!(
             admit_screen_frame(gate.view(), &mut cursor),
+            ScreenFrameAdmission::Hold
+        );
+    }
+
+    /// The Show edge fails closed: a frame taken while hidden, handed over
+    /// after the Show, never publishes; one taken after the Show does.
+    #[test]
+    fn a_frame_captured_before_the_show_holds_after_it() {
+        let gate = gate();
+        let mut cursor = ScreenPrivacyCursor::default();
+        let before_hide = Instant::now();
+        assert_eq!(gate.view().shown_at, None);
+        assert_eq!(
+            admit_screen_frame_captured_at(gate.view(), &mut cursor, Some(before_hide)),
+            ScreenFrameAdmission::Publish,
+            "never hidden: nothing is held back"
+        );
+        gate.hide(ScreenPrivacyReason::You, "t".into());
+        // Taken before the hide edge, handed over after it: held.
+        assert_eq!(
+            admit_screen_frame_captured_at(gate.view(), &mut cursor, Some(before_hide)),
+            ScreenFrameAdmission::Frost
+        );
+        let while_hidden = Instant::now();
+        assert_eq!(
+            admit_screen_frame_captured_at(gate.view(), &mut cursor, Some(while_hidden)),
+            ScreenFrameAdmission::Hold
+        );
+        std::thread::sleep(Duration::from_millis(2));
+        gate.show();
+        let shown_at = gate.view().shown_at.expect("the show is dated");
+        assert!(shown_at > while_hidden);
+        // Handed over after the show, taken before it: still held.
+        assert_eq!(
+            admit_screen_frame_captured_at(gate.view(), &mut cursor, Some(while_hidden)),
+            ScreenFrameAdmission::Hold,
+            "a frame of the hidden span published after the show"
+        );
+        assert_eq!(
+            admit_screen_frame_captured_at(gate.view(), &mut cursor, Some(shown_at)),
+            ScreenFrameAdmission::Publish
+        );
+        // A publish point that cannot date its frames publishes after Show.
+        assert_eq!(
+            admit_screen_frame(gate.view(), &mut cursor),
+            ScreenFrameAdmission::Publish
+        );
+        // A second show is dated again; the first one never comes back.
+        gate.hide(ScreenPrivacyReason::You, "t2".into());
+        std::thread::sleep(Duration::from_millis(2));
+        gate.show();
+        assert!(gate.view().shown_at.unwrap() > shown_at);
+        assert_eq!(
+            admit_screen_frame_captured_at(gate.view(), &mut cursor, Some(shown_at)),
             ScreenFrameAdmission::Hold
         );
     }

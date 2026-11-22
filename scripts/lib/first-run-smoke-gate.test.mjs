@@ -567,7 +567,9 @@ test('launch-quiet: a minute with no input shows no toast, and what Videorc foun
     toastHook: true,
     notificationHook: true,
     pressed: false,
-    watchMs: FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs,
+    watchMs: FIRST_RUN_SMOKE_LIMITS.idleQuietWatchMs,
+    idleReportsAt: 66_000,
+    idleReportsAfterStoreMs: 61_000,
     launchToasts: [],
     entries: [{ key: 'host-overloaded' }, { key: 'global-shortcuts' }],
     expectedKeys: ['host-overloaded', 'global-shortcuts'],
@@ -584,7 +586,15 @@ test('launch-quiet: a minute with no input shows no toast, and what Videorc foun
   })
   assert.equal(toasted.pass, false)
   assert.match(toasted.failures.join('\n'), /6914 ms warning "This computer is overloaded"/)
-  assert.doesNotMatch(toasted.failures.join('\n'), /Clip saved/)
+  // Idle after the first minute is no different (the owner, 2026-11-22).
+  assert.match(toasted.failures.join('\n'), /61000 ms success "Clip saved"/)
+  // 61 s into the document is still the launch when the store started at 5 s.
+  const early = evaluateFirstRunSmokeStep('launch-quiet', {
+    ...quiet,
+    idleReportsAt: 61_000,
+    idleReportsAfterStoreMs: 56_000
+  })
+  assert.match(early.failures.join('\n'), /not sent after the first minute/)
 
   const blind = evaluateFirstRunSmokeStep('launch-quiet', { ...quiet, toastHook: false })
   assert.match(blind.failures.join('\n'), /nothing was read/)
@@ -594,8 +604,8 @@ test('launch-quiet: a minute with no input shows no toast, and what Videorc foun
     bellCount: 0
   })
   assert.match(lost.failures.join('\n'), /not behind the bell: host-overloaded, global-shortcuts/)
-  const short = evaluateFirstRunSmokeStep('launch-quiet', { ...quiet, watchMs: 30_000 })
-  assert.match(short.failures.join('\n'), /shorter than 60 s/)
+  const short = evaluateFirstRunSmokeStep('launch-quiet', { ...quiet, watchMs: 61_000 })
+  assert.match(short.failures.join('\n'), /shorter than 75 s/)
   const touched = evaluateFirstRunSmokeStep('launch-quiet', { ...quiet, pressed: true })
   assert.match(touched.failures.join('\n'), /pressed the window/)
 })

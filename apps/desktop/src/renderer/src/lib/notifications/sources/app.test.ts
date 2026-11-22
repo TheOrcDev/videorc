@@ -136,8 +136,8 @@ describe('devices and the app as notifications (plan 250 S7)', () => {
         occurrences: 3,
         actions: [{ label: 'Open Health', kind: 'door' }]
       })
-      // It can repeat on every reconnect: one pop-up, not one per repeat.
-      expect(door.show).toHaveBeenCalledTimes(1)
+      // It can repeat on every reconnect; idle, it never pops up.
+      expect(door.show).not.toHaveBeenCalled()
     })
   })
 

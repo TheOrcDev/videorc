@@ -80,7 +80,7 @@ describe('Notes capture protection', () => {
     expect(alert?.getAttribute('role')).toBe('alert')
     expect(alert?.textContent).toContain('These notes can appear in your recording')
     expect(alert?.textContent).toContain("Videorc couldn't hide this window from screen capture.")
-    expect(alert?.className).toContain('bg-destructive/10')
+    expect(alert?.getAttribute('data-variant')).toBe('destructive')
     expect(hiddenNote()).toBeNull()
   })
 

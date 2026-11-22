@@ -14811,12 +14811,21 @@ describe('real StudioProvider lifecycle', () => {
     await settle()
     await emit('cleanCut.status', completed)
     await settle()
-    const ready = toastSpies.success.mock.calls.filter(
-      ([title]) => typeof title === 'string' && title.startsWith('Your clean cut is ready')
-    )
+    // Work that finished out of view waits behind the bell: one entry, no
+    // toast (the owner, 2026-11-22).
+    expect(
+      toastSpies.success.mock.calls.filter(
+        ([title]) => typeof title === 'string' && title.startsWith('Your clean cut is ready')
+      )
+    ).toHaveLength(0)
+    const ready = notifications
+      .snapshot()
+      .filter((entry) => entry.title.startsWith('Your clean cut is ready'))
     expect(ready).toHaveLength(1)
-    expect(ready[0][0]).toBe('Your clean cut is ready (10:00 → 7:30)')
-    expect(ready[0][1]).toMatchObject({ action: { label: 'Review' } })
+    expect(ready[0]).toMatchObject({
+      title: 'Your clean cut is ready (10:00 → 7:30)',
+      actions: [{ label: 'Review' }]
+    })
     // The cut copy joins the Library without a click.
     expect(
       backend.sentCommands.filter((command) => command.method === 'sessions.list').length
@@ -19358,17 +19367,11 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(
       () => observations.at(-1)?.core.noiseCleanupJobs[0]?.status === 'completed'
     )
-    const completionToasts = toastSpies.success.mock.calls.filter(
-      ([message]) => message === 'Noise cleanup complete'
-    )
-    expect(completionToasts).toHaveLength(1)
-    // Plan 250: one entry behind the bell with both buttons; its short toast
-    // carries the first.
-    const completionToast = completionToasts[0]?.[1] as
-      | { action?: { label: string }; duration?: number }
-      | undefined
-    expect(completionToast?.action?.label).toBe('Play')
-    expect(completionToast?.duration).toBe(8_000)
+    // Plan 250: one entry behind the bell with both buttons, and no toast
+    // (the owner, 2026-11-22: everything goes into the notifications).
+    expect(
+      toastSpies.success.mock.calls.filter(([message]) => message === 'Noise cleanup complete')
+    ).toHaveLength(0)
     const cleaned = notifications.snapshot().find((entry) => entry.key.startsWith('noise-cleanup:'))
     expect(cleaned).toMatchObject({
       tone: 'done',

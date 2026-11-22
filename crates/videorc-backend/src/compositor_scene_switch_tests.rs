@@ -2387,6 +2387,9 @@ async fn hidden_screen_frost_reaches_every_leg() {
         )
         .await;
         install_screen(&state, "screen:fixture", 1, 1, [0, 255, 0, 255]).await;
+        // The macOS capture's Show edge (plan 210 D8): the show waits for
+        // the capture to prove the held picture is the screen after it.
+        crate::preview_screen::test_set_show_waits_for_capture_evidence(&state, true).await;
         let stream_store = Arc::new(StdMutex::new(FrameStore::new(2)));
         let iso_stores = CompositorSourceIsoFrameStores {
             batches: Arc::new(crate::compositor::source_iso_batch::SourceIsoBatchStore::default()),
@@ -2553,12 +2556,74 @@ async fn hidden_screen_frost_reaches_every_leg() {
             4
         );
 
-        // 3. Show: the held live frame (white) is on every leg at once.
+        // 3. Show. The capture's frames up to the show were taken while
+        //    hidden: every leg keeps the still, even for a frame handed over
+        //    after the show (stripes, taken just before it).
+        let before_show = Instant::now();
         state.screen_privacy.show();
         assert!(crate::preview_screen::release_screen_now(&state).await);
+        assert!(
+            crate::preview_screen::test_publish_screen_bgra(&state, 7, stripes(), before_show)
+                .await
+        );
         hide_screen_render(
             &state,
             6,
+            &mut gpus,
+            &mut sources,
+            &mut cache,
+            stream_output,
+            metal,
+        )
+        .await;
+        let program = latest(&compositor_frame_store(&state).await);
+        let aux = latest(&stream_store);
+        let iso = latest(&iso_stores.screen);
+        for (leg, samples) in [
+            ("program", program_screen(&program)),
+            ("vertical leg", aux_screen(&aux)),
+            ("Screen ISO", iso_screen(&iso)),
+        ] {
+            assert!(
+                max_step(&samples) < 48,
+                "{mode}: a frame taken while hidden reached the {leg} after the show"
+            );
+        }
+        // 4. The capture confirms nothing changed after the show (an idle
+        //    callback dated after it): the held picture, the stripes taken
+        //    just before the show and still on the screen, is on every leg.
+        crate::preview_screen::test_confirm_screen_current(&state, Instant::now()).await;
+        hide_screen_render(
+            &state,
+            7,
+            &mut gpus,
+            &mut sources,
+            &mut cache,
+            stream_output,
+            metal,
+        )
+        .await;
+        let program = latest(&compositor_frame_store(&state).await);
+        let aux = latest(&stream_store);
+        let iso = latest(&iso_stores.screen);
+        for (leg, samples) in [
+            ("program", program_screen(&program)),
+            ("vertical leg", aux_screen(&aux)),
+            ("Screen ISO", iso_screen(&iso)),
+        ] {
+            assert!(
+                max_step(&samples) > 100,
+                "{mode}: the {leg} did not return to the live picture once the show was confirmed"
+            );
+        }
+        // 5. The next frame, taken after the show, is on every leg.
+        assert!(
+            crate::preview_screen::test_publish_screen_bgra(&state, 9, white(), Instant::now())
+                .await
+        );
+        hide_screen_render(
+            &state,
+            8,
             &mut gpus,
             &mut sources,
             &mut cache,
