@@ -208,7 +208,7 @@ try {
     })
     await clickText('Freeform')
     await selectSource(baseSourceId)
-    await cdp.eval(`document.querySelector('button[aria-label="Unlock aspect ratio"]')?.click()`)
+    await setAspectLocked(false)
     await setRect({ width: 30, height: 30, x: 30, y: 30 })
     assert.equal(
       await cdp.eval(`document.querySelector('[aria-label="Snap"]')?.getAttribute('aria-pressed')`),
@@ -234,10 +234,10 @@ try {
     await gesture({ orientation, kind: 'move', index: 0, delayMs: 250, modifiers: 1 })
     await clickSnap()
     await gesture({ orientation, kind: 'move', index: 1, delayMs: 250, quickEdits: true })
-    await cdp.eval(`document.querySelector('[aria-label="Lock aspect ratio"]')?.click()`)
+    await setAspectLocked(true)
     await frames(2)
     await gesture({ orientation, kind: 'resize', index: 1, delayMs: 250, aspectLocked: true })
-    await cdp.eval(`document.querySelector('[aria-label="Unlock aspect ratio"]')?.click()`)
+    await setAspectLocked(false)
     await setRect({ width: 30, height: 30, x: 3, y: 30 })
     await clickSnap()
     await gesture({ orientation, kind: 'move', index: 1, delayMs: 250, snapCase: true })
@@ -326,10 +326,10 @@ async function recordCommittedComposition() {
   await command('select-camera-shape', { shape: 'rectangle', settleMs: 100 })
   await cdp.eval(`document.querySelector('[data-videorc-camera-aspect="source"]').click()`)
   await frames(3)
-  await cdp.eval(`document.querySelector('[aria-label="Unlock aspect ratio"]')?.click()`)
+  await setAspectLocked(false)
   await setRect({ width: 21.3, height: 28.7, x: 60.7, y: 50.3 })
   await selectSource(baseSourceId)
-  await cdp.eval(`document.querySelector('[aria-label="Unlock aspect ratio"]')?.click()`)
+  await setAspectLocked(false)
   await setRect({ width: 37.3, height: 43.7, x: 1.1, y: 2.3 })
   const committed = await request(backend, timeoutMs, 'scene.get')
   const sourceIds = [baseSourceId, 'source:camera']
@@ -515,7 +515,7 @@ async function recordWithLiveMoveTo(
   await selectSource('source:camera')
   await waitUntil(`document.body.textContent.includes(${JSON.stringify(LIVE_PLACEMENT_HINT)})`)
   await waitUntil(`document.querySelector('[data-videorc-transform-field="x"]')?.disabled===false`)
-  await cdp.eval(`document.querySelector('[aria-label="Unlock aspect ratio"]')?.click()`)
+  await setAspectLocked(false)
   const percent = (value) => {
     const rounded = Math.round(value * 1000) / 10
     return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
@@ -1638,6 +1638,40 @@ async function setRect(rect) {
     `document.activeElement?.blur(); document.querySelector('[data-videorc-stage-phase]').scrollIntoView({block:'center',behavior:'instant'})`
   )
   await frames(2)
+}
+/** Puts the selected source's aspect lock in the wanted state. A blind
+ * optional click was a no-op whenever the inspector had not mounted the
+ * toggle yet or held it disabled (a commit, a session start or stop, an
+ * orientation crossing): a whole portrait matrix then ran aspect-locked and
+ * all 20 resizes failed as display discontinuities (11-22, 3 of 11 runs).
+ * Already in the wanted state: nothing to do. Otherwise wait for the toggle,
+ * press it, and press again if a dropped press left it unchanged. */
+async function setAspectLocked(locked) {
+  const shown = locked ? 'Unlock aspect ratio' : 'Lock aspect ratio'
+  const toggle = locked ? 'Lock aspect ratio' : 'Unlock aspect ratio'
+  const inState = `document.querySelector('button[aria-label="${shown}"]') !== null`
+  for (let attempt = 1; ; attempt++) {
+    await waitUntil(
+      `${inState} || document.querySelector('button[aria-label="${toggle}"]')?.disabled === false`
+    ).catch(() => {
+      throw new Error(`The aspect lock never offered "${toggle}"`)
+    })
+    if (await cdp.eval(inState)) return
+    await cdp.eval(`document.querySelector('button[aria-label="${toggle}"]').click()`)
+    await frames(2)
+    if (attempt === 3) {
+      await waitUntil(inState)
+      return
+    }
+    if (
+      await waitUntil(inState, 3000).then(
+        () => true,
+        () => false
+      )
+    )
+      return
+    console.log(`Freeform: the aspect lock press was dropped (attempt ${attempt}); pressing again`)
+  }
 }
 /** The stage footer's Snap toggle; the footer may be re-rendering for a
  * session the Clips ring starts or stops, so wait for the button. */
