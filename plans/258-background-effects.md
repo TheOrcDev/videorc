@@ -308,7 +308,7 @@ Recommended defaults first. The owner said "start with the defaults"
 AVCaptureVideoDataOutput (BGRA, zero-copy CVPixelBuffer)
   └─ CameraEffectStage (new, preview_camera.rs publish point)
        ├─ segment queue: VNGeneratePersonSegmentationRequest (stateful, one per camera)
-       │     input: a downscaled IOSurface (≈512 px long side), output: 16-bit half matte
+       │     `.balanced`; input: the camera buffer itself (S0: a downscale saves nothing), output: 512x384 16-bit half matte
        ├─ Metal pass (own command queue): matte refine (joint bilateral on the
        │     camera's luma) + temporal EMA, then blur (quarter-res separable,
        │     mask-weighted so the person never bleeds) / picture / video + light wrap
@@ -378,13 +378,13 @@ machine.
 
 ### Performance budgets (judged in a release build on a quiet host)
 
-| Platform                     | Segmentation                                | Composite                                 | Added latency | Mask fresh                               | Notes                                                                                                |
-| ---------------------------- | ------------------------------------------- | ----------------------------------------- | ------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| macOS, Apple silicon         | ≤ 6 ms p95 per matte, off the capture queue | ≤ 1.0 ms GPU at 1080p, ≤ 2.0 ms at 4K     | ≤ 1 frame     | every frame at 30 fps, every other at 60 | Quality level picked in S0 (`.balanced` if it fits, else `.fast`)                                    |
-| macOS, Intel                 | `.fast`, ≤ 12 ms                            | ≤ 2 ms                                    | ≤ 1 frame     | ≥ 15 Hz                                  | Offered with the S0 numbers; Cut out off if over                                                     |
-| Windows                      | ≤ 5 ms GPU (DirectML), ≤ 10 ms CPU fallback | ≤ 1.5 ms D3D11 at 1080p                   | ≤ 1 frame     | ≥ 15 Hz                                  | Issue #1088's awake-display rule applies to its smoke                                                |
-| Linux (ogre)                 | ≤ 10 ms CPU per matte, `-j3` box limits     | ≤ 3 ms CPU at 1080p off the render thread | ≤ 2 frames    | ≥ 15 Hz                                  | Quiet-box timing only (plan 257)                                                                     |
-| Browser (guest or room host) | ≤ 10 ms tasks-vision GPU at 720p            | in the same WebGL pass                    | ≤ 1 frame     | ≥ 15 Hz                                  | After 2 s behind: halve the matte rate; after 5 s more: stop the camera with a named line, never raw |
+| Platform                     | Segmentation                                                                          | Composite                                 | Added latency | Mask fresh                               | Notes                                                                                                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------- | ------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS, Apple silicon         | `.balanced` ≤ 28 ms p95 on the Neural Engine, off the capture queue (S0: 22.6–26.5)   | ≤ 1.0 ms GPU at 1080p, ≤ 2.0 ms at 4K     | ≤ 1 frame     | every frame at 30 fps, every other at 60 | S0 picked `.balanced`; `.fast` leaks in low light. The old ≤ 6 ms target was missed by both levels                                                                           |
+| macOS, Intel                 | `.balanced` at ≥ 15 Hz, unmeasured                                                    | ≤ 2 ms                                    | ≤ 1 frame     | ≥ 15 Hz                                  | No Intel Mac in S0. Not `.fast` (it leaks in low light): offer only once S3 measures `.balanced` on one, else unavailable                                                    |
+| Windows                      | ≤ 5 ms GPU (DirectML), ≤ 10 ms CPU fallback                                           | ≤ 1.5 ms D3D11 at 1080p                   | ≤ 1 frame     | ≥ 15 Hz                                  | Issue #1088's awake-display rule applies to its smoke                                                                                                                        |
+| Linux (ogre)                 | ≤ 10 ms CPU per matte, `-j3` box limits                                               | ≤ 3 ms CPU at 1080p off the render thread | ≤ 2 frames    | ≥ 15 Hz                                  | Quiet-box timing only (plan 257)                                                                                                                                             |
+| Browser (guest or room host) | ≤ 10 ms p50, ≤ 14 ms p95 tasks-vision at 720p (S0: 8.2–9.6 / 11.9–13.9 with readback) | in the same WebGL pass                    | ≤ 1 frame     | ≥ 15 Hz                                  | After 2 s behind: halve the matte rate; after 5 s more: stop the camera with a named line, never raw. S8 gate: dark-room and low-light leak p99 ≤ 1 % (S0: 13.2 % and 7.9 %) |
 
 The compositor's own budgets (plan 233's key pass, PH-01/04) are unchanged:
 the stage runs before the compositor, and the compositor draws one camera
@@ -507,6 +507,47 @@ Chromium and in Chrome (GPU delegate). Evidence stays outside the repo
 (owner footage), summary in `docs/acceptance/2026-11-xx-segmentation-spike.md`.
 **Done when:** the acceptance note names the macOS quality level, the matte
 input size and whether 4K holds the budget, with a recommendation for Intel.
+
+**Result (2026-11-22, measured on the owner's M4; full note in
+`docs/acceptance/2026-11-22-segmentation-spike.md` on branch
+`spike/258-s0-segmentation`, raw runs in
+`~/cloud-test/reports/2026-11-22-plan-258/S0/`):**
+
+- **Quality level: `.balanced`** on the Neural Engine (`auto` picks it). Live
+  1080p30 camera, quiet Mac: 21.3 ms p50 / 25.1 ms p95, 29.9 mattes a second,
+  newest matte ≤ 19 ms old (p95), probe CPU 50 % of one core. `.fast`: 6.6 /
+  8.0 ms, but in low light it showed over 5 % of the room sharp in 118 of 1800
+  frames and blurred the lower face; `.balanced` never passed 2.5 % in any
+  frame of any clip. `.accurate` (59 / 69 ms, 14 Hz) adds nothing visible.
+- **Matte input size: the camera buffer itself.** A 512 px copy first saved
+  nothing (21.0 vs 21.3 ms); the matte is 512x384 (always 4:3, stretched over
+  the frame); 16-bit half costs the same as 8-bit.
+- **4K: segmentation holds** (21.8 / 26.5 ms at 4K input vs 20.2 / 22.6 at
+  1080p, the owner's clip decoder-scaled). The 4K composite is S3's to time.
+- **Intel: not measured** (none here). Recommendation in the budgets table.
+- **The ≤ 6 ms p95 budget was missed** by both levels; the table now carries
+  the measured `.balanced` budget. The ANE kept its time with the Mac at
+  100 % CPU (load 44–60). The first request after a level is cold takes
+  0.7–1.4 s, which D6's startup cover has to span.
+- **Browser (S8/S9):** tasks-vision 1.2.0 (no WebGPU delegate) kept 30 Hz in
+  Chrome 157 and Electron 39 at 720p and 1080p with no missed frames;
+  8.0–10.4 ms p50, 11.4–14.6 ms p95 with the mask read back, GPU or WASM. The
+  selfie model is fine on a green screen (IoU 0.985) but on a dark room behind
+  a black shirt it showed over 5 % of the room sharp in 211 of 1800 frames
+  (leak p99 13.2 %, worst 16.3 %; low light p99 7.9 %), against `.balanced`'s
+  0.05 % / 0.38 %. S8 must clear the leak gate in the budgets table (try the
+  multiclass model, a background-biased matte, a joint-bilateral refine and
+  the EMA) before the guest copy promises the room never leaves the computer.
+- **EMA 0.5** cut flicker 2.5–4x for every engine for about +0.01 edge error;
+  it doesn't cure leaks. S3 keeps it.
+- **The mic:** Vision treats a desk mic in front of the chest (and its arm) as
+  background, so Blur blurs it and Cut out removes it; MediaPipe keeps it.
+  S5's hint copy or S12's take should say so if the owner minds.
+- **Not covered:** Intel, WebGPU, a browser on the real camera, a real 4K
+  camera, and the owner-recorded clip with a mug, standing up and real low
+  light (S0 used 60 s of the owner's 2026-11-11 Camera ISO file over a green
+  screen, keyed over the bundled `podcast.webp` room and darkened with noise).
+  S12's owner take covers the real-room case.
 
 ### S1: The setting, the one-choice rule and the migration
 
