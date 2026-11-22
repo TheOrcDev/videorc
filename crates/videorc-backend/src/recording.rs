@@ -1093,6 +1093,9 @@ const STOP_TERM_DRAIN_POLL: Duration = Duration::from_secs(1);
 // suspect for X sources going playback-dead on reuse (2026-07-08 incident).
 const STOP_TERM_DELAY_STREAMING: Duration = Duration::from_secs(8);
 const STOP_KILL_DELAY_STREAMING: Duration = Duration::from_secs(5);
+// How often a streaming Stop checks whether only reconnecting legs are left
+// (issue #1623).
+const STOP_RECONNECTING_LEG_POLL: Duration = Duration::from_millis(250);
 const CAPTURE_AUDIO_FILTER: &str = "aresample=async=1:first_pts=0";
 const MONO_TO_STEREO_FILTER: &str = "pan=stereo|c0=c0|c1=c0";
 const DSHOW_AUDIO_OUTPUT_NORMALIZATION_FILTER: &str =
@@ -1271,6 +1274,12 @@ pub(crate) struct FfmpegProgressBeacon {
     /// from `-stats_enc_post` lines (Linux stream legs, see
     /// `encoded_video_packet_stats_args`). Zero where nothing prints them.
     encoded_video_bytes: Arc<AtomicU64>,
+    /// Which FFmpeg outputs were announced and which have closed (issue
+    /// #1623), read by the stop ladder.
+    outputs: Arc<StdMutex<FfmpegOutputLedger>>,
+    /// Set when the stop ladder ended FFmpeg because only reconnecting
+    /// stream legs were still open (issue #1623).
+    legs_abandoned: Arc<AtomicBool>,
 }
 
 impl FfmpegProgressBeacon {
@@ -1340,6 +1349,125 @@ impl FfmpegProgressBeacon {
     fn unflushed_stop(&self) -> bool {
         self.unflushed_stop.load(Ordering::Acquire)
     }
+
+    fn observe_output_line(&self, line: &str, leg_position: impl Fn(&str) -> Option<usize>) {
+        self.outputs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .observe(line, leg_position);
+    }
+
+    fn output_ledger(&self) -> FfmpegOutputLedger {
+        self.outputs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn mark_legs_abandoned(&self) {
+        self.legs_abandoned.store(true, Ordering::Release);
+    }
+
+    /// The recording was whole when FFmpeg ended: Videorc let go of legs that
+    /// were only reconnecting, or every output that is not a stream leg (the
+    /// file) had already written its trailer and closed (issue #1623).
+    fn stop_left_recording_intact(&self) -> bool {
+        self.legs_abandoned.load(Ordering::Acquire) || self.output_ledger().non_leg_outputs_closed()
+    }
+}
+
+/// FFmpeg's outputs as its stderr names them (issue #1623). Each output is
+/// announced at startup (`Output #N, <format>, to '<url>':`) and prints its
+/// final stats (`[out#N/<format> @ 0x…] video:…KiB … muxing overhead: …`)
+/// only after `of_write_trailer` has written its trailer and closed its file
+/// (fftools/ffmpeg_mux.c). FFmpeg writes the trailers in output order after
+/// Stop, and a fifo leg that is reconnecting keeps its retry loop running
+/// until its queue is empty: on Windows, where a refused connect takes about
+/// 2 s, that held the process long past the quit grace while every other
+/// output was already closed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FfmpegOutputLedger {
+    announced: std::collections::BTreeSet<usize>,
+    closed: std::collections::BTreeSet<usize>,
+    /// Output index → stream leg position, for outputs that are RTMP legs.
+    legs: std::collections::BTreeMap<usize, usize>,
+}
+
+impl FfmpegOutputLedger {
+    fn observe(&mut self, line: &str, leg_position: impl Fn(&str) -> Option<usize>) {
+        if let Some((index, url)) = parse_ffmpeg_output_header(line) {
+            self.announced.insert(index);
+            if let Some(position) = leg_position(url) {
+                self.legs.insert(index, position);
+            }
+        } else if let Some(index) = parse_ffmpeg_output_final_stats(line) {
+            self.closed.insert(index);
+        }
+    }
+
+    /// Every index from 0 to the highest was announced, so no output is
+    /// missing from the ledger.
+    fn complete(&self) -> bool {
+        self.announced
+            .last()
+            .is_some_and(|last| last + 1 == self.announced.len())
+    }
+
+    /// At least one output is not a stream leg (the recording), and every
+    /// such output has closed.
+    fn non_leg_outputs_closed(&self) -> bool {
+        let mut non_legs = self
+            .announced
+            .iter()
+            .filter(|index| !self.legs.contains_key(index))
+            .peekable();
+        self.complete()
+            && non_legs.peek().is_some()
+            && non_legs.all(|index| self.closed.contains(index))
+    }
+
+    /// The leg positions still open, when every other output has closed.
+    fn open_legs_when_only_legs_remain(&self) -> Option<Vec<usize>> {
+        if !self.complete() {
+            return None;
+        }
+        let mut open_legs = Vec::new();
+        for index in self.announced.difference(&self.closed) {
+            open_legs.push(*self.legs.get(index)?);
+        }
+        Some(open_legs)
+    }
+}
+
+/// `[out#3/fifo @ 0000010707e0d640] video:506KiB audio:1KiB … muxing
+/// overhead: unknown` → 3. FFmpeg prints it once per output, after the trailer.
+fn parse_ffmpeg_output_final_stats(line: &str) -> Option<usize> {
+    let rest = line.trim().strip_prefix("[out#")?;
+    let (index, rest) = rest.split_once('/')?;
+    let index = index.parse::<usize>().ok()?;
+    let (_, message) = rest.split_once("] ")?;
+    (message.starts_with("video:") && message.contains("muxing overhead:")).then_some(index)
+}
+
+/// Stop can end FFmpeg without waiting out the grace once every output still
+/// open is a stream leg that is reconnecting (issue #1623): the recording and
+/// the healthy legs have written their trailers, and a reconnecting leg has
+/// no viewers to say goodbye to.
+fn only_reconnecting_legs_remain(
+    ledger: &FfmpegOutputLedger,
+    targets: &StreamTargetsSnapshot,
+) -> bool {
+    ledger
+        .open_legs_when_only_legs_remain()
+        .is_some_and(|open_legs| {
+            !open_legs.is_empty()
+                && open_legs.iter().all(|position| {
+                    targets
+                        .targets
+                        .get(*position)
+                        .is_some_and(|target| target.state == StreamTargetState::Reconnecting)
+                })
+        })
 }
 
 /// The running session's FFmpeg output clock, for the performance check's
@@ -6974,6 +7102,9 @@ async fn start_session_with_timeline(
                     continue;
                 }
 
+                // Issue #1623: which outputs have closed, for the stop ladder.
+                progress_beacon
+                    .observe_output_line(trimmed, |url| stream_legs.position_for_url(url));
                 // Plan 161: per-leg reconnects and deaths, attributed exactly.
                 if let Some(update) = stream_legs.observe(trimmed) {
                     publish_stream_leg_update(
@@ -10945,20 +11076,62 @@ async fn stop_fallback(
         .await
         .as_ref()
         .is_some_and(|active| active.pid == pid && active.stream_url.is_some());
-    let progress = state
+    let (progress, stream_targets) = state
         .recording
         .lock()
         .await
         .as_ref()
         .filter(|active| active.pid == pid)
-        .map(|active| active.ffmpeg_progress.clone());
+        .map(|active| {
+            (
+                active.ffmpeg_progress.clone(),
+                active.stream_targets_snapshot.clone(),
+            )
+        })
+        .unzip();
     let mut last_media_micros = progress.as_ref().map(FfmpegProgressBeacon::media_micros);
     let base_delay = if streaming {
         STOP_TERM_DELAY_STREAMING
     } else {
         STOP_TERM_DELAY
     };
-    sleep(base_delay).await;
+    if let (true, Some(progress), Some(stream_targets)) =
+        (streaming, progress.as_ref(), stream_targets.as_ref())
+    {
+        // Issue #1623: a leg that is reconnecting at Stop keeps FFmpeg alive
+        // after everything else has closed. Let it go as soon as it is the
+        // only thing left, instead of waiting out the grace and TERM.
+        let mut waited = Duration::ZERO;
+        while waited < base_delay {
+            if !recording_matches(&state, pid, &session_id, &output_path).await {
+                return;
+            }
+            if only_reconnecting_legs_remain(
+                &progress.output_ledger(),
+                &stream_targets_snapshot_value(stream_targets),
+            ) {
+                let _ = emit_session_log(
+                    &state,
+                    &session_id,
+                    HealthLevel::Warn,
+                    "recording-stop-released-reconnecting-legs",
+                    &format!(
+                        "Stopped {}ms after Stop while a destination was still reconnecting. The recording and the other destinations had already finished; FFmpeg was ended instead of waiting for the reconnecting destination to give up.",
+                        waited.as_millis()
+                    ),
+                    None,
+                );
+                progress.mark_legs_abandoned();
+                let _ = send_process_signal(pid, "TERM").await;
+                stop_kill_fallback(state, pid, session_id, output_path, streaming).await;
+                return;
+            }
+            sleep(STOP_RECONNECTING_LEG_POLL).await;
+            waited += STOP_RECONNECTING_LEG_POLL;
+        }
+    } else {
+        sleep(base_delay).await;
+    }
 
     // An FFmpeg that is still advancing its output clock is draining admitted
     // frames (below-realtime software encode), not hung: TERM here truncates
@@ -12214,6 +12387,7 @@ async fn monitor_session(
             MonitoredRecording {
                 stop_intent_preceded_exit,
                 stop_escalated: active.ffmpeg_progress.stop_escalated(),
+                stop_left_recording_intact: active.ffmpeg_progress.stop_left_recording_intact(),
                 unflushed_stop: active.replay_only && active.ffmpeg_progress.unflushed_stop(),
                 recording_bridge_terminal_failure: active.recording_bridge_terminal_failure(),
                 stream_bridge_terminal_failure: active.stream_bridge_terminal_failure(),
@@ -12804,9 +12978,14 @@ async fn monitor_session(
         }
         Ok(exit_status)
             if should_finalize_recording_session(
-                exit_status.success(),
+                exit_status.success()
+                    || stop_released_intact_recording(
+                        monitored_recording.stop_intent_preceded_exit,
+                        monitored_recording.stop_left_recording_intact,
+                    ),
                 monitored_recording.stop_intent_preceded_exit,
-                monitored_recording.stop_escalated,
+                monitored_recording.stop_escalated
+                    && !monitored_recording.stop_left_recording_intact,
                 recording_bridge_terminal_failure.as_deref(),
                 stream_bridge_terminal_failure.as_deref(),
             ) =>
@@ -15153,6 +15332,8 @@ impl NativeAudioStats {
 struct MonitoredRecording {
     stop_intent_preceded_exit: bool,
     stop_escalated: bool,
+    /// See [`FfmpegProgressBeacon::stop_left_recording_intact`].
+    stop_left_recording_intact: bool,
     /// The Record handover ended this buffer-only session without its flush.
     unflushed_stop: bool,
     recording_bridge_terminal_failure: Option<String>,
@@ -15188,6 +15369,17 @@ impl MonitoredRecording {
 /// Without the stop intent first the exit stays FFmpeg's own.
 fn ends_unflushed_handover(monitored: &MonitoredRecording) -> bool {
     monitored.replay_only && monitored.unflushed_stop && monitored.stop_intent_preceded_exit
+}
+
+/// Issue #1623: when the user stopped and the recording had already written
+/// its trailer and closed (or Videorc let go of legs that were only
+/// reconnecting), the non-zero exit of the FFmpeg that Videorc then ended is
+/// that stop, not a cut-short file. The MP4 export still validates the file.
+fn stop_released_intact_recording(
+    stop_intent_preceded_exit: bool,
+    stop_left_recording_intact: bool,
+) -> bool {
+    stop_intent_preceded_exit && stop_left_recording_intact
 }
 
 fn should_finalize_recording_session(
@@ -56518,6 +56710,175 @@ mod low_end_windows_recording_tests {
             (stage, code),
             (RecordingPipelineStage::Muxer, "ffmpeg-exit")
         );
+    }
+
+    /// The startup dump and final stats of the multistream smoke on Windows
+    /// (issue #1623): the recording and three legs closed at Stop, the offline
+    /// leg (out#4) kept retrying.
+    fn issue_1623_ledger(lines: &[&str]) -> FfmpegOutputLedger {
+        let legs = [
+            ("rtmp://127.0.0.1:11935/live/a", 0),
+            ("rtmp://127.0.0.1:11936/live/b", 1),
+            ("rtmp://127.0.0.1:11937/live/c", 2),
+            ("rtmp://127.0.0.1:11938/live/d", 3),
+        ];
+        let mut ledger = FfmpegOutputLedger::default();
+        for line in lines {
+            ledger.observe(line, |url| {
+                legs.iter()
+                    .find(|(leg, _)| *leg == url)
+                    .map(|(_, position)| *position)
+            });
+        }
+        ledger
+    }
+
+    const ISSUE_1623_HEADERS: [&str; 5] = [
+        r"Output #0, matroska, to '\\?\C:\Temp\videorc-session.mkv':",
+        "Output #1, fifo, to 'rtmp://127.0.0.1:11935/live/a':",
+        "Output #2, fifo, to 'rtmp://127.0.0.1:11936/live/b':",
+        "Output #3, fifo, to 'rtmp://127.0.0.1:11937/live/c':",
+        "Output #4, fifo, to 'rtmp://127.0.0.1:11938/live/d':",
+    ];
+
+    fn final_stats(index: usize, format: &str) -> String {
+        format!(
+            "[out#{index}/{format} @ 0000010707e0d840] video:185KiB audio:1KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: 1.973801%"
+        )
+    }
+
+    #[test]
+    fn output_final_stats_name_their_output_and_nothing_else_does() {
+        assert_eq!(
+            parse_ffmpeg_output_final_stats(&final_stats(0, "matroska")),
+            Some(0)
+        );
+        assert_eq!(
+            parse_ffmpeg_output_final_stats(
+                "[out#3/fifo @ 0000010707e0d640] video:506KiB audio:1KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: unknown"
+            ),
+            Some(3)
+        );
+        for line in [
+            "[out#1/fifo @ 0x1] Error muxing a packet",
+            "[out#0/matroska @ 0x1] Error writing trailer: I/O error",
+            "[fifo @ 0x1] Recovery failed: Error number -138 occurred",
+            "video:185KiB audio:1KiB muxing overhead: 1%",
+            "[out#x/fifo @ 0x1] video:1KiB muxing overhead: unknown",
+        ] {
+            assert_eq!(parse_ffmpeg_output_final_stats(line), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn ledger_waits_for_the_recording_and_lets_go_of_reconnecting_legs_only() {
+        let reconnecting_last = |states: [StreamTargetState; 4]| StreamTargetsSnapshot {
+            session_id: "s".to_string(),
+            targets: states
+                .into_iter()
+                .map(|state| StreamTargetRuntime {
+                    target_id: "t".to_string(),
+                    platform: StreamPlatform::Youtube,
+                    label: "T".to_string(),
+                    state,
+                    message: None,
+                    redacted_url: None,
+                    uplink_overflows: None,
+                    uplink_overflow_at: None,
+                })
+                .collect(),
+        };
+        use StreamTargetState::{Live, Reconnecting};
+        let targets = reconnecting_last([Live, Live, Live, Reconnecting]);
+
+        // Streaming: nothing has closed, nothing is released.
+        let running = issue_1623_ledger(&ISSUE_1623_HEADERS);
+        assert!(!running.non_leg_outputs_closed());
+        assert!(!only_reconnecting_legs_remain(&running, &targets));
+
+        // The recording and the healthy legs closed; the offline leg retries.
+        let mut lines = ISSUE_1623_HEADERS.map(str::to_string).to_vec();
+        lines.push(final_stats(0, "matroska"));
+        lines.extend((1..=3).map(|index| final_stats(index, "fifo")));
+        let lines = lines.iter().map(String::as_str).collect::<Vec<_>>();
+        let stopped = issue_1623_ledger(&lines);
+        assert!(stopped.non_leg_outputs_closed());
+        assert_eq!(stopped.open_legs_when_only_legs_remain(), Some(vec![3]));
+        assert!(only_reconnecting_legs_remain(&stopped, &targets));
+        assert!(
+            !only_reconnecting_legs_remain(&stopped, &reconnecting_last([Live, Live, Live, Live])),
+            "a live leg still writing its trailer keeps the grace"
+        );
+
+        // A healthy leg queued behind the reconnecting one is still open.
+        let behind = issue_1623_ledger(&[
+            ISSUE_1623_HEADERS[0],
+            ISSUE_1623_HEADERS[1],
+            ISSUE_1623_HEADERS[2],
+            ISSUE_1623_HEADERS[3],
+            ISSUE_1623_HEADERS[4],
+            &final_stats(0, "matroska"),
+        ]);
+        assert!(behind.non_leg_outputs_closed(), "the file is whole");
+        assert!(!only_reconnecting_legs_remain(
+            &behind,
+            &reconnecting_last([Reconnecting, Live, Live, Live])
+        ));
+
+        // The recording still open: never released, never called intact.
+        let open_file = issue_1623_ledger(&[
+            ISSUE_1623_HEADERS[0],
+            ISSUE_1623_HEADERS[1],
+            &final_stats(1, "fifo"),
+        ]);
+        assert!(!open_file.non_leg_outputs_closed());
+        assert_eq!(open_file.open_legs_when_only_legs_remain(), None);
+
+        // An output missing from the dump makes the ledger incomplete.
+        let gap = issue_1623_ledger(&[
+            ISSUE_1623_HEADERS[0],
+            ISSUE_1623_HEADERS[4],
+            &final_stats(0, "matroska"),
+        ]);
+        assert!(!gap.non_leg_outputs_closed());
+        assert!(!only_reconnecting_legs_remain(&gap, &targets));
+
+        // A stream-only session has no file: it is never "intact" by itself,
+        // but its reconnecting legs can still be let go.
+        // Its first leg is output 0.
+        let stream_only =
+            issue_1623_ledger(&["Output #0, fifo, to 'rtmp://127.0.0.1:11935/live/a':"]);
+        assert!(!stream_only.non_leg_outputs_closed());
+        assert!(only_reconnecting_legs_remain(
+            &stream_only,
+            &reconnecting_last([Reconnecting, Live, Live, Live])
+        ));
+    }
+
+    #[test]
+    fn a_stop_that_left_the_recording_whole_finalizes_it() {
+        assert!(stop_released_intact_recording(true, true));
+        assert!(
+            !stop_released_intact_recording(false, true),
+            "no Stop, no pass"
+        );
+        assert!(!stop_released_intact_recording(true, false));
+        // The call site turns an intact stop into a finalizable exit on every
+        // platform, and a forced one stays recovery media.
+        assert!(should_finalize_recording_session(
+            stop_released_intact_recording(true, true),
+            true,
+            false,
+            None,
+            None
+        ));
+        assert!(!should_finalize_recording_session(
+            stop_released_intact_recording(true, false),
+            true,
+            true,
+            None,
+            None
+        ));
     }
 
     #[test]
