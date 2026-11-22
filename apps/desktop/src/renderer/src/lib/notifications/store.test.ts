@@ -12,6 +12,7 @@ vi.mock('@/lib/notifications/kinds', async (original) => {
       finished: { tone: 'done', life: 'event' },
       failure: { tone: 'urgent', life: 'event' },
       answer: { tone: 'done', life: 'event', answersAPress: true },
+      xEnded: { tone: 'warning', life: 'condition', mayBe: ['urgent'], failsASession: true },
       work: { tone: 'news', life: 'progress' }
     }
   }
@@ -205,6 +206,21 @@ describe('the notification store (plan 250)', () => {
       // The answer to a press still speaks.
       store.publish({ key: 'clip:1', kind: kind('answer'), title: 'Clip saved' })
       expect(door.show).toHaveBeenCalledTimes(1)
+    })
+
+    it('a livestream that failed pops up although it has just ended, never a warning', () => {
+      live = false
+      clock += 10 * 60_000
+      store.publish({ key: 'x', kind: kind('xEnded'), title: 'X is still preparing your stream' })
+      expect(door.show).not.toHaveBeenCalled()
+      store.publish({
+        key: 'x',
+        kind: kind('xEnded'),
+        tone: 'urgent',
+        title: 'X ended your broadcast'
+      })
+      expect(door.show).toHaveBeenCalledTimes(1)
+      expect(door.show.mock.calls[0][1]).toBe(15_000)
     })
 
     it('a warning pops up for 8 s with its first action', () => {

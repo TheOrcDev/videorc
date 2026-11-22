@@ -20,6 +20,12 @@ export interface NotificationKind {
    * would see it.
    */
   announcement?: boolean
+  /**
+   * Its urgent report says a livestream the streamer started has failed, and
+   * may arrive after the session ended ("X ended your broadcast"). Kinds that
+   * are urgent on their own are such reports already.
+   */
+  failsASession?: boolean
   /** How long that pop-up stays, when not the default. */
   popUpMs?: number
 }
@@ -60,7 +66,7 @@ const kinds = {
   // What Go Live did or still needs, said while the streamer waits for it.
   'go-live-step': { tone: 'news', life: 'event', answersAPress: true, popUpMs: 8_000 },
   // Urgent when X ended the broadcast itself.
-  'x-playback': { tone: 'warning', life: 'condition', mayBe: ['urgent'] },
+  'x-playback': { tone: 'warning', life: 'condition', mayBe: ['urgent'], failsASession: true },
   'x-live': { tone: 'done', life: 'event', answersAPress: true },
   'platform-news': { tone: 'news', life: 'event' },
   'youtube-thumbnail': { tone: 'warning', life: 'condition' },

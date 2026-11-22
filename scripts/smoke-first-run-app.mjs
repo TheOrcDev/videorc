@@ -823,7 +823,10 @@ const IDLE_REPORTS = `(async () => {
   app.publishBackgroundProblem({ title: "Couldn't refresh the device list" });
   app.publishOutputTooHeavy({ title: '1440p60 is too heavy for this computer',
     description: 'Recordings will stutter.', actionLabel: 'Use 1080p30' }, () => {});
-  return ['disk-space', "background-problem:Couldn't refresh the device list", 'output-too-heavy'];
+  return {
+    keys: ['disk-space', "background-problem:Couldn't refresh the device list", 'output-too-heavy'],
+    at: performance.now()
+  };
 })()`
 
 const launchObservation = `(() => {
@@ -885,8 +888,10 @@ async function launchQuiet() {
   const storeStartedAt = await evaluate('window.__videorcSmokeNotifications?.().startedAt ?? null')
   if (typeof storeStartedAt !== 'number') throw new Error('the store start was not read')
   await waitUntil(storeStartedAt + FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs + 1000)
-  const idleReportsAt = await evaluate('performance.now()')
-  expectedKeys = [...expectedKeys, ...(await evaluate(IDLE_REPORTS))]
+  // The watch after them starts once they ran, on the renderer's clock.
+  const idle = await evaluate(IDLE_REPORTS)
+  const idleReportsAt = idle.at
+  expectedKeys = [...expectedKeys, ...idle.keys]
   await waitUntil(Math.max(FIRST_RUN_SMOKE_LIMITS.idleQuietWatchMs, idleReportsAt + 14000) + 500)
   const observed = await evaluate(launchObservation)
   await screenshot('launch-quiet-dark')
