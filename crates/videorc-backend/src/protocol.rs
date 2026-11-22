@@ -560,11 +560,70 @@ impl CameraKeyEdges {
     }
 }
 
+/// Plan 258 D4/D5: what is behind the person on one camera, as one pick.
+/// Never two at once: `camera_background::camera_background_treatment`
+/// picks exactly one treatment for a frame.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CameraBackgroundMode {
+    Off,
+    Blur,
+    Image,
+    Video,
+    Cutout,
+    Green,
+    Blue,
+}
+
+/// How hard the outline between the person and what's behind them is.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CameraBackgroundEdges {
+    Soft,
+    Balanced,
+    Sharp,
+}
+
+/// The green or blue screen's tuning, kept with the camera (D4). The colour
+/// is the mode; the fields mirror the scene key's.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraBackgroundKey {
+    pub similarity_pct: u32,
+    pub smoothness_pct: u32,
+    pub spill_pct: u32,
+    /// Hide edges; omitted while every side is 0.
+    #[serde(default, skip_serializing_if = "CameraKeyEdges::is_none")]
+    pub hide_edges: CameraKeyEdges,
+}
+
+/// Plan 258 D3: one camera's background, kept in every scene. The renderer
+/// stores it per camera (beside the camera look) and puts it on the layout
+/// at the output boundary; absent while Off.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraBackground {
+    pub mode: CameraBackgroundMode,
+    /// Blur strength (%), 0–100; Slight is 30, Strong 70.
+    pub blur_pct: u32,
+    pub edges: CameraBackgroundEdges,
+    /// The picture or video behind the person: a background asset id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
+    /// The green or blue screen's tuning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<CameraBackgroundKey>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LayoutSettings {
     #[serde(default, skip_serializing_if = "CameraLook::is_neutral")]
     pub camera_look: CameraLook,
+    /// Plan 258: the camera's background, injected by the renderer like the
+    /// look. Nothing renders from it until the camera effect stage (S3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_background: Option<CameraBackground>,
     #[serde(default = "default_layout_preset")]
     pub layout_preset: LayoutPreset,
     #[serde(default = "default_camera_transform_mode")]
@@ -1372,6 +1431,7 @@ pub(crate) fn default_layout_settings() -> LayoutSettings {
         camera_corner_radius_pct: default_camera_corner_radius_pct(),
         camera_aspect: default_camera_aspect(),
         camera_look: Default::default(),
+        camera_background: None,
         camera_chroma_key_enabled: false,
         camera_chroma_key_color: default_camera_chroma_key_color(),
         camera_chroma_key_similarity_pct: default_camera_chroma_key_similarity_pct(),
@@ -8527,6 +8587,7 @@ mod tests {
             source_transform_overrides: std::collections::BTreeMap::new(),
             source_visibility: Default::default(),
             camera_look: Default::default(),
+            camera_background: None,
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,

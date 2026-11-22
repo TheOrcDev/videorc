@@ -40,6 +40,7 @@ import {
 } from '@/lib/camera-frame-rate'
 import type { CameraLowLightRequest } from '@/hooks/use-camera-low-light'
 import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
+import { cameraOutputLayout, migrateCameraBackgrounds } from '@/lib/camera-background'
 import type { ChatOverlayDriver } from '@/lib/chat-overlay'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
 import { isReplacementPermissionClient } from '@/lib/permission-evidence'
@@ -3421,13 +3422,12 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const captureConfig = useMemo(
     () => ({
       ...storedCaptureConfig,
-      layout: cameraLookLayout(
-        storedCaptureConfig.layout,
-        storedCaptureConfig.sources.cameraId,
-        settings.cameraLooks
-      )
+      layout: cameraOutputLayout(storedCaptureConfig.layout, storedCaptureConfig.sources.cameraId, {
+        cameraLooks: settings.cameraLooks,
+        cameraBackgrounds: settings.cameraBackgrounds
+      })
     }),
-    [storedCaptureConfig, settings.cameraLooks]
+    [storedCaptureConfig, settings.cameraLooks, settings.cameraBackgrounds]
   )
   useEffect(() => {
     const sessionId = liveChatSnapshot.sessionId
@@ -5321,6 +5321,23 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     if (migratedShortcuts)
       setSettings((current) => ({ ...current, globalShortcuts: migratedShortcuts }))
   }, [migratedShortcuts])
+  // Plan 258 D4: the scenes' green or blue screen moves to the camera, once,
+  // when a camera is selected (it waits for one rather than losing the key).
+  // The scenes keep their key fields for a rollback; nothing renders from the
+  // camera's choice yet (S3).
+  const migrationCameraId = captureConfig.sources.cameraId
+  useEffect(() => {
+    setSettings((current) => {
+      const migrated = migrateCameraBackgrounds({
+        cameraBackgrounds: current.cameraBackgrounds,
+        cameraBackgroundMigration: current.cameraBackgroundMigration,
+        cameraId: migrationCameraId,
+        scenes: storedScenes(),
+        onStreamId: activeSavedSceneIdRef.current
+      })
+      return migrated ? { ...current, ...migrated } : current
+    })
+  }, [migrationCameraId, storedScenes])
   // A new user's scenes show the main display before the device list names it.
   useEffect(() => {
     const display = deviceList.devices.find(
@@ -11273,11 +11290,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
                     : undefined
               }
             )
-          layout = cameraLookLayout(
-            layout,
-            requestedSources.cameraId,
-            settingsRef.current.cameraLooks
-          )
+          layout = cameraOutputLayout(layout, requestedSources.cameraId, settingsRef.current)
           const requestedBackground =
             options && 'backgroundOverride' in options
               ? (options.backgroundOverride ?? undefined)
