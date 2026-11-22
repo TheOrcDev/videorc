@@ -1,0 +1,245 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Segmentation bench</title>
+    <style>
+      body {
+        margin: 0;
+        background: #111;
+        color: #ddd;
+        font: 13px system-ui;
+      }
+      #log {
+        white-space: pre;
+        padding: 8px;
+      }
+      video,
+      canvas {
+        max-width: 480px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="log">starting…</div>
+    <video id="v" muted playsinline crossorigin="anonymous"></video>
+    <canvas id="gl"></canvas>
+    <script type="module">
+      // Plan 258 S0: MediaPipe selfie segmentation timing and mattes in a browser.
+      // Query: ?clip=/clips/x.mp4&model=selfie_segmenter_landscape&delegate=GPU|CPU
+      //        &mode=realtime|step&name=run-name&seconds=30
+      import { FilesetResolver, ImageSegmenter } from '/tv/vision_bundle.mjs'
+
+      const q = new URLSearchParams(location.search)
+      const clip = q.get('clip')
+      const model = q.get('model') ?? 'selfie_segmenter_landscape'
+      const delegate = q.get('delegate') ?? 'GPU'
+      const mode = q.get('mode') ?? 'realtime'
+      const name = q.get('name') ?? `${model}-${delegate}-${mode}`
+      const seconds = Number(q.get('seconds') ?? 30)
+      const inputMode = q.get('input') ?? 'full' // full: the video element; small: drawn into a model-size canvas first
+      const sync = q.get('sync') ?? 'finish' // finish: mask stays on the GPU; readback: copy it to the CPU
+      const logEl = document.getElementById('log')
+      const log = (s) => {
+        logEl.textContent += `\n${s}`
+      }
+      const post = (path, body) => fetch(path, { method: 'POST', body })
+
+      const stats = (xs) => {
+        const s = [...xs].sort((a, b) => a - b)
+        const at = (p) => (s.length ? s[Math.min(s.length - 1, Math.round((s.length - 1) * p))] : 0)
+        return {
+          n: s.length,
+          mean: s.reduce((a, b) => a + b, 0) / Math.max(1, s.length),
+          p50: at(0.5),
+          p95: at(0.95),
+          p99: at(0.99),
+          max: s.at(-1) ?? 0
+        }
+      }
+
+      async function main() {
+        const glInfo = (() => {
+          const c = document.createElement('canvas').getContext('webgl2')
+          if (!c) return 'no webgl2'
+          const ext = c.getExtension('WEBGL_debug_renderer_info')
+          return ext ? c.getParameter(ext.UNMASKED_RENDERER_WEBGL) : c.getParameter(c.RENDERER)
+        })()
+        const canvas = document.getElementById('gl')
+        const t0 = performance.now()
+        const fileset = await FilesetResolver.forVisionTasks('/tv/wasm')
+        const seg = await ImageSegmenter.createFromOptions(fileset, {
+          baseOptions: { modelAssetPath: `/models/${model}.tflite`, delegate },
+          runningMode: 'VIDEO',
+          outputConfidenceMasks: true,
+          outputCategoryMask: false,
+          canvas: delegate === 'GPU' ? canvas : undefined
+        })
+        const initMs = performance.now() - t0
+        const gl = delegate === 'GPU' ? canvas.getContext('webgl2') : null
+        log(`init ${initMs.toFixed(0)} ms, renderer ${glInfo}, ua ${navigator.userAgent}`)
+
+        const v = document.getElementById('v')
+        v.src = clip
+        await new Promise((r) => v.addEventListener('loadeddata', r, { once: true }))
+        const W = v.videoWidth,
+          H = v.videoHeight
+
+        const callMs = [],
+          frameGapMs = [],
+          firstMs = []
+        let maskW = 0,
+          maskH = 0,
+          frames = 0,
+          missed = 0,
+          lastMediaFrame = -1
+        let tsBase = 0
+        const fps = 30
+
+        // Person matte = confidence mask index 0 for the selfie models (1 class);
+        // for the multiclass model, 1 - background.
+        const readMask = (res) => {
+          const masks = res.confidenceMasks
+          const m = masks[0]
+          maskW = m.width
+          maskH = m.height
+          const f = m.getAsFloat32Array()
+          const out = new Uint8Array(f.length)
+          const invert = model.startsWith('selfie_multiclass')
+          for (let i = 0; i < f.length; i++)
+            out[i] = Math.max(0, Math.min(255, Math.round((invert ? 1 - f[i] : f[i]) * 255)))
+          for (const mm of masks) mm.close()
+          return out
+        }
+
+        if (mode === 'realtime') {
+          // Camera-like: the clip plays at 1x and each presented frame is segmented
+          // the way a LiveKit processor would, with the mask kept on the GPU
+          // (no readback); gl.finish() makes the GPU cost count.
+          v.loop = true
+          const small = document.createElement('canvas')
+          small.width = 256
+          small.height = model === 'selfie_segmenter_landscape' ? 144 : 256
+          const sctx = small.getContext('2d')
+          await v.play()
+          let lastNow = 0
+          let tEnd = Infinity // set once warm-up (60 frames) is over
+          await new Promise((resolve) => {
+            const onFrame = (now, meta) => {
+              if (performance.now() > tEnd) return resolve()
+              if (lastMediaFrame >= 0 && meta.presentedFrames - lastMediaFrame > 1)
+                missed += meta.presentedFrames - lastMediaFrame - 1
+              lastMediaFrame = meta.presentedFrames
+              const a = performance.now()
+              let src = v
+              if (inputMode === 'small') {
+                sctx.drawImage(v, 0, 0, small.width, small.height)
+                src = small
+              }
+              const res = seg.segmentForVideo(src, ++tsBase * (1000 / fps))
+              const mk = res.confidenceMasks[0]
+              maskW = mk.width
+              maskH = mk.height
+              if (delegate === 'GPU' && sync === 'finish') {
+                mk.getAsWebGLTexture()
+                gl.finish()
+              } else {
+                mk.getAsFloat32Array()
+              }
+              for (const m of res.confidenceMasks) m.close()
+              const b = performance.now()
+              frames++
+              if (frames === 60) {
+                tEnd = performance.now() + seconds * 1000
+                missed = 0
+              }
+              if (frames <= 60)
+                firstMs.push(b - a) // warm-up, reported apart
+              else {
+                callMs.push(b - a)
+                if (lastNow) frameGapMs.push(now - lastNow)
+              }
+              lastNow = now
+              v.requestVideoFrameCallback(onFrame)
+            }
+            v.requestVideoFrameCallback(onFrame)
+          })
+          v.pause()
+        } else {
+          // Step: every frame of an all-intra clip, by seeking; mattes posted back.
+          const total = Math.round(v.duration * fps)
+          const small = document.createElement('canvas')
+          small.width = 256
+          small.height = model === 'selfie_segmenter_landscape' ? 144 : 256
+          const sctx = small.getContext('2d')
+          const chunk = []
+          let chunkBytes = 0
+          for (let n = 0; n < total; n++) {
+            v.currentTime = (n + 0.5) / fps
+            await new Promise((r) => v.addEventListener('seeked', r, { once: true }))
+            const a = performance.now()
+            let src = v
+            if (inputMode === 'small') {
+              sctx.drawImage(v, 0, 0, small.width, small.height)
+              src = small
+            }
+            const res = seg.segmentForVideo(src, (n + 1) * (1000 / fps))
+            const b = performance.now()
+            const bytes = readMask(res)
+            if (n < 60) firstMs.push(b - a)
+            else callMs.push(b - a)
+            chunk.push(bytes)
+            chunkBytes += bytes.length
+            frames++
+            if (chunk.length === 100 || n === total - 1) {
+              const buf = new Uint8Array(chunkBytes)
+              let o = 0
+              for (const c of chunk) {
+                buf.set(c, o)
+                o += c.length
+              }
+              await post(`/upload?name=${encodeURIComponent(name)}&append=${n >= 100 ? 1 : 0}`, buf)
+              chunk.length = 0
+              chunkBytes = 0
+              logEl.textContent = `step ${n + 1}/${total}`
+            }
+          }
+        }
+
+        const result = {
+          name,
+          model,
+          delegate,
+          mode,
+          sync,
+          input: inputMode,
+          clip,
+          frameSize: `${W}x${H}`,
+          matte: `${maskW}x${maskH}`,
+          matteW: maskW,
+          matteH: maskH,
+          renderer: glInfo,
+          userAgent: navigator.userAgent,
+          initMs,
+          firstCallMs: firstMs[0] ?? null,
+          frames,
+          missedPresentedFrames: missed,
+          warmupMs: stats(firstMs),
+          callMs: stats(callMs),
+          frameGapMs: stats(frameGapMs),
+          segmentedHz: frameGapMs.length ? 1000 / stats(frameGapMs).mean : null
+        }
+        log(JSON.stringify(result, null, 1))
+        await post(`/result?name=${encodeURIComponent(name)}`, JSON.stringify(result))
+        seg.close()
+      }
+      main().catch(async (e) => {
+        log(`ERROR ${e?.stack ?? e}`)
+        await post(
+          `/result?name=${encodeURIComponent(name)}`,
+          JSON.stringify({ name, error: String(e?.stack ?? e) })
+        )
+      })
+    </script>
+  </body>
+</html>
