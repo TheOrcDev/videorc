@@ -947,6 +947,9 @@ async fn a_swap_while_hidden_cuts_to_a_frosted_still_never_the_live_window() {
 
     state.screen_privacy.show();
     assert!(crate::preview_screen::release_screen_now(&state).await);
+    // Plan 210 D8: the held picture goes back on air only once the capture
+    // proves it is still the screen after the show (an idle callback).
+    crate::preview_screen::test_confirm_screen_current(&state, Instant::now()).await;
     publish(&state, &mut sources, &mut cache).await;
     let shown = latest_bytes(&state).await;
     let row: Vec<u8> = (8..WIDTH - 8)
@@ -1051,6 +1054,9 @@ async fn a_hide_during_an_in_flight_swap_never_keeps_the_previous_window_live() 
 
     state.screen_privacy.show();
     assert!(crate::preview_screen::release_screen_now(&state).await);
+    // Plan 210 D8: the held picture goes back on air only once the capture
+    // proves it is still the screen after the show (an idle callback).
+    crate::preview_screen::test_confirm_screen_current(&state, Instant::now()).await;
     publish(&state, &mut sources, &mut cache).await;
     let step = max_step(&latest_bytes(&state).await);
     assert!(
@@ -2387,9 +2393,6 @@ async fn hidden_screen_frost_reaches_every_leg() {
         )
         .await;
         install_screen(&state, "screen:fixture", 1, 1, [0, 255, 0, 255]).await;
-        // The macOS capture's Show edge (plan 210 D8): the show waits for
-        // the capture to prove the held picture is the screen after it.
-        crate::preview_screen::test_set_show_waits_for_capture_evidence(&state, true).await;
         let stream_store = Arc::new(StdMutex::new(FrameStore::new(2)));
         let iso_stores = CompositorSourceIsoFrameStores {
             batches: Arc::new(crate::compositor::source_iso_batch::SourceIsoBatchStore::default()),
