@@ -121,6 +121,30 @@ export function avatarRect(value: unknown): value is AvatarRect {
     Number(y) + Number(h) <= 1.00001
   )
 }
+/**
+ * Base64 to bytes, for a string the caller already checked (standard
+ * alphabet, padded, a multiple of four long). Null: not base64 after all.
+ *
+ * It was `Uint8Array.from(atob(s), (c) => c.charCodeAt(0))`: a callback
+ * through the string iterator for every byte, on the main thread, several
+ * times per picture and per caption update (PH-05, PH-06). The engine's own
+ * decoder where there is one (Chromium 140 and later), a plain loop elsewhere;
+ * both give the bytes `atob` gives.
+ */
+export function base64Bytes(base64: string): Uint8Array<ArrayBuffer> | null {
+  try {
+    const native = (
+      Uint8Array as unknown as { fromBase64?: (text: string) => Uint8Array<ArrayBuffer> }
+    ).fromBase64
+    if (native) return native.call(Uint8Array, base64)
+    const raw = atob(base64)
+    const bytes = new Uint8Array(raw.length)
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i)
+    return bytes
+  } catch {
+    return null
+  }
+}
 /** PNG header is checked before decoding, bounding decompressed allocation. */
 export function avatarPng(
   png: string,
@@ -134,14 +158,12 @@ export function avatarPng(
     !/^[A-Za-z0-9+/]+={0,2}$/.test(png)
   )
     return null
-  let raw: string
-  try {
-    raw = atob(png)
-  } catch {
-    return null
-  }
-  const bytes = Uint8Array.from(raw, (c) => c.charCodeAt(0))
-  if (bytes.length < 33 || ![137, 80, 78, 71, 13, 10, 26, 10].every((v, i) => bytes[i] === v))
+  const bytes = base64Bytes(png)
+  if (
+    !bytes ||
+    bytes.length < 33 ||
+    ![137, 80, 78, 71, 13, 10, 26, 10].every((v, i) => bytes[i] === v)
+  )
     return null
   const view = new DataView(bytes.buffer)
   if (

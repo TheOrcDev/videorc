@@ -1,4 +1,4 @@
-import { htmlLayerFrameUrl } from '../lib/room-html-layer-publisher'
+import { htmlLayerFrameUrl } from '../lib/room-html-layer-url'
 import { attachHostSpeech } from '@/lib/room-speech-source'
 import { roomNativeMicrophoneEnabled } from '@/lib/room-microphone-state'
 import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
@@ -12,7 +12,11 @@ import {
   systemControllerStep
 } from '@/lib/room-audio-routing'
 import { withRestoredBanners } from '@/lib/cloud-restored-banners'
-import type { GraphicsContent } from '../../../shared/cloud-graphics'
+import {
+  forgetGraphicsSource,
+  graphicsSourceHeld,
+  type GraphicsContent
+} from '../../../shared/cloud-graphics'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
 import type { BackendClient } from '@/backendClient'
@@ -565,8 +569,15 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       }
       const token = ++generation
       active++
+      // PH-05: the pictures of the last answer come back by reference, so a
+      // caption update no longer carries every banner again.
+      const held = graphicsSourceHeld()
       void client
-        .requestTyped('cloud.graphics.snapshot', { showId, ...(known ? { known } : {}) })
+        .requestTyped('cloud.graphics.snapshot', {
+          showId,
+          ...(known ? { known } : {}),
+          ...(held.length ? { held } : {})
+        })
         .then((result) => {
           if (closed || token !== generation) return
           known = result.signature
@@ -576,6 +587,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         .catch(() => {
           if (!closed && token === generation) {
             known = undefined
+            // Whatever went wrong, the next answer comes whole.
+            forgetGraphicsSource()
             current.failGraphics()
           }
         })
@@ -612,6 +625,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       clearInterval(timer)
       off.forEach((fn) => fn())
       if (graphicsInvalidateRef.current === invalidate) graphicsInvalidateRef.current = null
+      forgetGraphicsSource()
       current.setGraphics(null)
     }
   }, [client, roomOpen, showId, snapshot.state])

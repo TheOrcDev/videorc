@@ -4,6 +4,7 @@ import type { RoomOptions } from 'livekit-client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import * as privacyModule from './room-screen-privacy'
+import * as privateScreenModule from './room-private-screen'
 import { CAPABILITY_TOPIC } from './room-media-v2'
 import { AVATAR_TOPIC, type AvatarLayer } from '../../../shared/cloud-avatar'
 import avatarFixture from '../../../../../..//protocol-fixtures/cloud-parity-avatar.json'
@@ -21,7 +22,8 @@ import {
   onAirElsewhere,
   stageMessage,
   talkShowRoomOptions,
-  type TalkShowRoomDeps
+  type TalkShowRoomDeps,
+  type TalkShowRoomSnapshot
 } from '@/lib/talk-show-room'
 
 // Plan 224 C-G4 and the review of 2026-11-09 (L4, L9's room client): the host
@@ -540,6 +542,61 @@ describe("LiveKit's recorder in the room (plan 234 T3)", () => {
   })
 })
 
+// PH-12 (perf hunt 11-20): LiveKit fires ActiveSpeakersChanged on every
+// speaker update, level-only ones too. A snapshot re-renders every room
+// reader, so only a change in which guests talk publishes one.
+describe('active speakers (PH-12)', () => {
+  const participant = (identity: string, name: string) => ({
+    identity,
+    name,
+    trackPublications: new Map(),
+    connectionQuality: 'good'
+  })
+
+  it('publishes when the talking guests change, never for levels or the host', async () => {
+    const snapshots: TalkShowRoomSnapshot[] = []
+    const { room } = client(undefined, undefined, { onSnapshot: (next) => snapshots.push(next) })
+    await room.connect()
+    const ada = participant('g_ada', 'Ada')
+    const bo = participant('g_bo', 'Bo')
+    for (const guest of [ada, bo]) {
+      latestRoom().remoteParticipants.set(guest.identity, guest)
+      latestRoom().emit('ParticipantConnected', guest)
+    }
+    const host = latestRoom().localParticipant
+    const speakers = (...people: { identity: string }[]): void =>
+      latestRoom().emit('ActiveSpeakersChanged', people)
+    const speaking = (): string[] =>
+      room.snapshot.people.filter((person) => person.speaking).map((person) => person.identity)
+
+    let before = snapshots.length
+    speakers(ada)
+    expect(snapshots.length).toBe(before + 1)
+    expect(speaking()).toEqual(['g_ada'])
+
+    // The same set again (a level update), in another order, or with the
+    // host in it: nothing the snapshot shows changed.
+    before = snapshots.length
+    speakers(ada)
+    speakers(host, ada)
+    speakers(ada, host)
+    expect(snapshots.length).toBe(before)
+
+    speakers(bo, ada)
+    expect(snapshots.length).toBe(before + 1)
+    expect(speaking()).toEqual(['g_ada', 'g_bo'])
+    speakers(ada, bo)
+    expect(snapshots.length).toBe(before + 1)
+
+    speakers(host)
+    expect(snapshots.length).toBe(before + 2)
+    expect(speaking()).toEqual([])
+    speakers()
+    expect(snapshots.length).toBe(before + 2)
+    await room.disconnect()
+  })
+})
+
 // Plan 234 T3 (wire contract 6.3): a managed show's overlays leave on the
 // host's own room connection, in the order they were handed over, and never
 // while the room is not connected.
@@ -883,7 +940,7 @@ describe('S2 screen publication boundary', () => {
     )
     const raw = { stop: vi.fn(), addEventListener: vi.fn() } as unknown as MediaStreamTrack
     const outputs: { stop: ReturnType<typeof vi.fn>; kind: string }[] = []
-    const adapter = vi.spyOn(privacyModule, 'createPrivateScreen').mockImplementation(() => {
+    const adapter = vi.spyOn(privateScreenModule, 'createPrivateScreen').mockImplementation(() => {
       const output = { stop: vi.fn(), kind: 'video' }
       outputs.push(output)
       return {

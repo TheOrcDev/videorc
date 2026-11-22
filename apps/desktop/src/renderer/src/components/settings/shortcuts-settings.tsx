@@ -10,14 +10,12 @@ import { PanelSection } from '@/components/panel-section'
 import { SectionLabel } from '@/components/section-label'
 import { ShortcutRecorderField } from '@/components/shortcut-recorder'
 import { Alert, AlertTitle } from '@/components/ui/alert'
-import { FieldGroup, FieldLegend, FieldSet, SettingsRow } from '@/components/ui/field'
+import { FieldGroup, FieldLegend, FieldSet } from '@/components/ui/field'
 import { KbdGroup } from '@/components/ui/kbd'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
-import { Switch } from '@/components/ui/switch'
 import { useStudioCore } from '@/hooks/use-studio'
 import { globalShortcutLabel, globalShortcutRegistration } from '@/lib/global-shortcuts'
 import { globalShortcutTakenReason } from '@/lib/global-shortcut-owner'
-import { sceneHudEnabled } from '@/lib/scene-hud-capture'
 import { sceneShortcutRows } from '@/lib/scene-shortcuts'
 import type { ShortcutRecorderAppKey } from '@/lib/shortcut-recorder'
 import { shortcutAccelerator, shortcutsByGroup } from '@/lib/shortcuts'
@@ -59,11 +57,6 @@ export function globalShortcutRows(input: {
     (action) =>
       action !== 'system-audio-toggle' || input.systemAudioAvailable || input.systemAudioBound
   )
-}
-
-/** Where the key HUD exists (plan 231 D20): macOS and Windows. */
-export function sceneHudPlatform(platform: string | undefined): boolean {
-  return platform === 'darwin' || platform === 'win32'
 }
 
 /**
@@ -157,22 +150,6 @@ export function ShortcutsSettings(): ReactElement {
                 onChange={(accelerator) => setGlobalShortcut(action, accelerator)}
               />
             ))}
-            {/* The key HUD (plan 231 D20): macOS and Windows can leave it
-                out of a capture; Linux can't, so it has no switch there. */}
-            {sceneHudPlatform(runtimeInfo?.platform) ? (
-              <SettingsRow
-                description="While another app is in front, the scene's name shows at the top of your screen for a moment. The Stream Deck and your phone show it too. It stays out of your recording and stream."
-                label="Show the scene's name when a key switches it"
-              >
-                <Switch
-                  checked={sceneHudEnabled(settings)}
-                  id="scene-hud"
-                  onCheckedChange={(checked) =>
-                    setSettings((current) => ({ ...current, sceneHud: checked }))
-                  }
-                />
-              </SettingsRow>
-            ) : null}
           </FieldGroup>
         </FieldSet>
         <p className="flex flex-wrap items-center gap-1 px-1 text-xs text-muted-foreground">

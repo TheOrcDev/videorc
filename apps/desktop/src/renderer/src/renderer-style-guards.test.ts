@@ -45,7 +45,7 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   'src/lib/talk-show-camera-effects.ts',
   'src/components/tabs/layout-tab.tsx',
   // The privacy frost drawn over a shared screen is published video, not chrome.
-  'src/lib/room-screen-privacy.ts',
+  'src/lib/room-private-screen.ts',
   // Plan 254 S2: the shade over a portrait camera's fill, as the program
   // page draws it onto the stream: a picture's own pixels, not chrome.
   'src/lib/portrait-fill.ts',

@@ -10,8 +10,6 @@ describe('Electron background policy', () => {
   it('keeps capture ownership and detached preview presentation live', () => {
     expect(backgroundThrottlingFor('main')).toBe(false)
     expect(backgroundThrottlingFor('preview')).toBe(false)
-    // The key HUD times its hold and fade while another app is in front.
-    expect(backgroundThrottlingFor('scene-hud')).toBe(false)
   })
 
   it('restores Chromium defaults for event-driven auxiliary windows', () => {

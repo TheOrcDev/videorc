@@ -4,7 +4,15 @@
   "status": "OWNER_WAIVED",
   "releaseId": "0.16.0-alpha.1",
   "sourceCommit": "f44c841305f2250f2ace17264d2182b1c26b1143",
-  "candidateIdentity": "linux:0.16.0-alpha.1:f44c841305f2250f2ace17264d2182b1c26b1143a-testers",
+  "candidateIdentity": "linux:0.16.0-alpha.1:f44c841305f2250f2ace17264d2182b1c26b1143:sha256:43964a00765e24060cbd2586ed7f0f02f94260827a5941020b758a10e3f46188",
+  "artifact": {
+    "filename": "Videorc-0.16.0-linux-x64.AppImage",
+    "sha256": "43964a00765e24060cbd2586ed7f0f02f94260827a5941020b758a10e3f46188",
+    "sizeBytes": 261134602
+  },
+  "decidedAt": "2026-10-30T09:43:43.000Z",
+  "decidedBy": "release-owner",
+  "basis": "field-use-by-alpha-testers",
   "physicalAcceptance": {
     "performed": false
   }
