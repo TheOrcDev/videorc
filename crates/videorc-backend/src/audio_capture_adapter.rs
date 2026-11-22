@@ -1628,6 +1628,8 @@ trait CaptureTime {
         raw: &mpsc::Receiver<Vec<u8>>,
         poll: Duration,
     ) -> Result<Vec<u8>, mpsc::RecvTimeoutError>;
+    /// The PCM chunk already queued, if any, without waiting.
+    fn try_recv_pcm(&self, raw: &mpsc::Receiver<Vec<u8>>) -> Result<Vec<u8>, mpsc::TryRecvError>;
 }
 
 struct HostTime;
@@ -1645,6 +1647,9 @@ impl CaptureTime for HostTime {
         poll: Duration,
     ) -> Result<Vec<u8>, mpsc::RecvTimeoutError> {
         raw.recv_timeout(poll)
+    }
+    fn try_recv_pcm(&self, raw: &mpsc::Receiver<Vec<u8>>) -> Result<Vec<u8>, mpsc::TryRecvError> {
+        raw.try_recv()
     }
 }
 
@@ -1802,6 +1807,19 @@ fn assemble_pcm_with(
                 }
             }
             if time.now() >= deadline {
+                // The thread can lose the CPU between the receive above and
+                // this check. PCM that landed in that gap came in time: take
+                // it, and refuse only when nothing is queued.
+                match time.try_recv_pcm(&raw) {
+                    Ok(bytes) => {
+                        queued.extend(bytes);
+                        continue;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        bail!("Capture PCM ended in a partial timestamped packet")
+                    }
+                }
                 bail!(
                     "Capture PCM did not match its timestamp metadata within {}ms",
                     match_budget.as_millis()
@@ -2860,41 +2878,68 @@ mod tests {
             self.now.set(self.now.get() + poll);
             Err(mpsc::RecvTimeoutError::Timeout)
         }
+        fn try_recv_pcm(
+            &self,
+            _raw: &mpsc::Receiver<Vec<u8>>,
+        ) -> Result<Vec<u8>, mpsc::TryRecvError> {
+            if self.now.get().duration_since(self.start) >= self.pcm_at
+                && let Some(bytes) = self.pcm.borrow_mut().take()
+            {
+                return Ok(bytes);
+            }
+            Err(mpsc::TryRecvError::Empty)
+        }
+    }
+
+    /// Runs `assemble_pcm_with` on `ScriptedTime`: the records are read at
+    /// `start`, their PCM (one 480-frame packet) lands `pcm_at` later. Returns
+    /// the result, the frames sent on, and the frames dropped as stale.
+    fn run_scripted(
+        protocol: CaptureProtocol,
+        records: Vec<String>,
+        pcm_at: Duration,
+    ) -> (Result<()>, Vec<AudioFrame>, u64) {
+        let bytes: Vec<u8> = (0..960).flat_map(|_| 0.25f32.to_le_bytes()).collect();
+        let start = Instant::now();
+        let time = ScriptedTime {
+            start,
+            now: std::cell::Cell::new(start),
+            pcm_at,
+            pcm: std::cell::RefCell::new(Some(bytes)),
+        };
+        let (meta_tx, meta_rx) = mpsc::channel();
+        for record in records {
+            meta_tx.send(record).unwrap();
+        }
+        drop(meta_tx);
+        // Held open: only the scripted clock delivers PCM.
+        let (_raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>();
+        let (out_tx, out_rx) = mpsc::sync_channel(4);
+        let stats = AudioCaptureStats::default();
+        let result = assemble_pcm_with(
+            &time,
+            protocol,
+            pair(start),
+            meta_rx,
+            raw_rx,
+            out_tx,
+            &AtomicBool::new(false),
+            &stats,
+        );
+        (
+            result,
+            out_rx.try_iter().collect::<Vec<_>>(),
+            stats.dropped_frames(),
+        )
     }
 
     #[test]
     fn pulse_pcm_may_trail_its_record_within_the_pulse_age_budget() {
-        let bytes: Vec<u8> = (0..960).flat_map(|_| 0.25f32.to_le_bytes()).collect();
         // The record is read at `start`; its PCM lands `pcm_at` later on the
         // scripted clock (a real sleep raced the budget on loaded runners).
-        let run = |protocol: CaptureProtocol, records: Vec<String>, pcm_at: Duration| {
-            let start = Instant::now();
-            let time = ScriptedTime {
-                start,
-                now: std::cell::Cell::new(start),
-                pcm_at,
-                pcm: std::cell::RefCell::new(Some(bytes.clone())),
-            };
-            let (meta_tx, meta_rx) = mpsc::channel();
-            for record in records {
-                meta_tx.send(record).unwrap();
-            }
-            drop(meta_tx);
-            // Held open: only the scripted clock delivers PCM.
-            let (_raw_tx, raw_rx) = mpsc::channel::<Vec<u8>>();
-            let (out_tx, out_rx) = mpsc::sync_channel(4);
-            let stats = AudioCaptureStats::default();
-            let result = assemble_pcm_with(
-                &time,
-                protocol,
-                pair(start),
-                meta_rx,
-                raw_rx,
-                out_tx,
-                &AtomicBool::new(false),
-                &stats,
-            );
-            (result, out_rx.try_iter().collect::<Vec<_>>())
+        let run = |protocol, records, pcm_at| {
+            let (result, frames, _) = run_scripted(protocol, records, pcm_at);
+            (result, frames)
         };
         // `pair(start)` reads wall 1 s at `start`: 47_520 / 48 kHz = 0.99 s,
         // so the packet was captured 10 ms before its record was read.
@@ -2951,6 +2996,54 @@ mod tests {
             "{result:?}"
         );
         assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn pcm_that_lands_after_the_last_poll_before_the_deadline_is_not_refused() {
+        // Pulse's deadline is 250 ms after the record. The poll from 245 ms
+        // comes back empty, and the PCM lands at 248 ms, before the matcher
+        // judges the deadline at 250 ms: in the app, a matcher thread off the
+        // CPU between its receive and its deadline check. That PCM came in
+        // time, so the matcher takes it rather than stopping the capture with
+        // "did not match". The packet is then near Pulse's 250 ms age limit,
+        // so it goes out or is dropped as stale; either way the worker reads
+        // on, and ends only because the test's records do.
+        let pulse_record = vec![pcm(0, 47_520, 480)];
+        let (result, frames, dropped) = run_scripted(
+            CaptureProtocol::Pulse,
+            pulse_record.clone(),
+            Duration::from_millis(248),
+        );
+        assert!(
+            result
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("stopped producing"),
+            "{result:?}"
+        );
+        assert_eq!(
+            frames.len() as u64 * 480 + dropped,
+            480,
+            "the packet was taken"
+        );
+
+        // PCM that lands after the deadline is still refused.
+        let (result, frames, dropped) = run_scripted(
+            CaptureProtocol::Pulse,
+            pulse_record,
+            Duration::from_millis(251),
+        );
+        assert!(
+            result
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("did not match its timestamp metadata within 250ms"),
+            "{result:?}"
+        );
+        assert!(frames.is_empty());
+        assert_eq!(dropped, 0);
     }
 
     /// On-device check (release test 147, plan 0001): opens the real Pulse
