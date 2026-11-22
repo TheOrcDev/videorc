@@ -8183,8 +8183,9 @@ impl<'a> LiveBackgroundLeg<'a> {
         }
     }
 
-    /// A tick pinned to `at`, for tests of the legs' shared frame (plan 193).
-    #[cfg(all(test, target_os = "macos"))]
+    /// A tick pinned to `at`, for tests of the legs' shared frame (plan 193)
+    /// and of the scene-switch hold, which is judged at this instant too.
+    #[cfg(test)]
     fn pinned_at(renderer: &'a mut Option<Box<LiveBackgroundGpuRenderer>>, at: Instant) -> Self {
         Self {
             tick: crate::live_background::LiveBackgroundTick::unmeasured(at),
@@ -10600,6 +10601,11 @@ fn publish_compositor_frame(
     // it drew last tick (`leg_scene_for_tick`). The ISO legs were derived
     // above from the scene as committed: they draw one source full-frame,
     // so no layout can be wrong there.
+    // Tests pin the tick (`LiveBackgroundLeg::pinned_at`): a hold is judged
+    // by tick time, not by how long a loaded host took between two ticks.
+    #[cfg(test)]
+    let hold_now = live.at.unwrap_or_else(Instant::now);
+    #[cfg(not(test))]
     let hold_now = Instant::now();
     let leg_screen_holds = live_sources.leg_screen_holds.clone();
     let (snapshot, primary_waiting_since) = leg_scene_for_tick(
