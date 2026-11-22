@@ -38,3 +38,23 @@ export function takeSectionFocus(id: SectionFocusId, now: number = Date.now()): 
 
 /** The attribute a section's root carries, so its request can find it. */
 export const SECTION_FOCUS_ATTRIBUTE = 'data-section-focus'
+
+/**
+ * Inside a section: the row a door lands on, when that is not the whole
+ * section ("Open Audio" lands on the Microphone row, not on the Audio group).
+ * It is scrolled into view and marked for a moment.
+ */
+export const SECTION_FOCUS_TARGET_ATTRIBUTE = 'data-section-focus-target'
+
+/**
+ * Inside the target: what takes focus, when that is not its first control.
+ * The Microphone row's first control is its mute, and a stray Space there
+ * would mute a live microphone; its picker takes focus instead.
+ */
+export const SECTION_FOCUS_CONTROL_ATTRIBUTE = 'data-section-focus-control'
+
+/** On the target while the door's mark shows (`styles.css` draws it). */
+export const SECTION_FOCUS_MARK_ATTRIBUTE = 'data-section-focus-mark'
+
+/** How long the mark shows: long enough to find the row, short enough to forget. */
+export const SECTION_FOCUS_MARK_MS = 1_600

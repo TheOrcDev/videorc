@@ -18,6 +18,7 @@ import {
   openLibraryRecording,
   openOutputRecordings,
   openSourcesSystemAudio,
+  OPEN_AUDIO_LABEL,
   openStudioAudio
 } from '@/lib/section-doors'
 import {
@@ -53,7 +54,7 @@ function door(to: HealthDoor): NotificationAction {
     case 'health':
       return { id: 'open-health', label: OPEN_HEALTH_LABEL, kind: 'door', run: openHealth }
     case 'audio':
-      return { id: 'open-audio', label: 'Open Audio', kind: 'door', run: openStudioAudio }
+      return { id: 'open-audio', label: OPEN_AUDIO_LABEL, kind: 'door', run: openStudioAudio }
     case 'sources':
       return {
         id: 'open-sources',
