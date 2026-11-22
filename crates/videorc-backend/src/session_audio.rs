@@ -11368,7 +11368,7 @@ mod mix_tests {
             let observation = bus.session.observation(false);
             losses.extend(observation.losses);
             stalls.extend(observation.output_stalls);
-            let settled = OUTPUT_BACKLOG_FRAMES > 0 && *bus.progress.borrow() >= resumed_at;
+            let settled = cfg!(target_os = "linux") && *bus.progress.borrow() >= resumed_at;
             if !stalls.is_empty() || settled || Instant::now() >= deadline {
                 if bus.observation.is_some() {
                     record_mix_boundary(&bus.session, "stall-reported");
@@ -11990,7 +11990,7 @@ mod mix_tests {
             );
             assert_eq!(losses, vec![], "not a source loss");
             assert_eq!(input_state, NativeAudioInputState::Live);
-            if OUTPUT_BACKLOG_FRAMES > 0 {
+            if cfg!(target_os = "linux") {
                 // Plan 257 S1 (Linux): the backlog keeps the stalled stretch;
                 // only the chunk blocked when the reader stopped can lose its
                 // stale tail, and nothing audible is reported.
@@ -12141,7 +12141,7 @@ mod mix_tests {
             let samples = decode(&bytes);
             assert!(losses.is_empty());
             assert_eq!(state, NativeAudioInputState::Live);
-            if OUTPUT_BACKLOG_FRAMES > 0 {
+            if cfg!(target_os = "linux") {
                 // Plan 257 S1 (Linux): the backlog plays the stalled stretch.
                 assert_eq!(stalls, vec![]);
             } else {
@@ -12336,7 +12336,7 @@ mod mix_tests {
         let samples = decode(&bytes);
         report_mix_evidence("system-after-stall", &evidence, &samples, (0.7, 0.45), 0.0);
         assert_eq!(losses, vec![]);
-        if OUTPUT_BACKLOG_FRAMES > 0 {
+        if cfg!(target_os = "linux") {
             // Plan 257 S1 (Linux): both sources play through the stall.
             assert_eq!(stalls, vec![], "nothing was lost to report");
             let kept = frames_at(&samples, STALL_AT, STALL_RESUMES_AT, 0.7);
