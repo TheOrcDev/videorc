@@ -390,6 +390,22 @@ const READ_STORED_BACKGROUND = `
 `
 
 /**
+ * Picks the fixture camera in the Studio's Camera picker, as a streamer
+ * would, so the per-camera setting the Background control writes belongs to
+ * the camera the smoke records.
+ */
+const PIN_CAMERA = `
+  const trigger = '[data-slot="device-picker-trigger"][aria-label="Camera"]';
+  await openTab('studio', trigger);
+  (await waitFor(trigger, 15000)).click();
+  const item = await waitFor('[cmdk-item][data-value="' + params.cameraId + '"]', 15000);
+  item.click();
+  await waitFor('[data-videorc-camera-background-trigger]', 15000);
+  await sleep(800);
+  return true;
+`
+
+/**
  * Plan 258 S5: clicks the Studio's Background trigger and the pass's tile,
  * the way a streamer turns the effect on. A picture outside the popover's
  * row goes through Choose image…. Returns the trigger's name after the
@@ -441,12 +457,7 @@ async function backgroundThroughControls(appHandle, setup, pass) {
   const { smoke } = appHandle
   const cameraId = setup.camera.id
   if (!appHandle.rendererCameraPinned) {
-    await requestSmokeCommand(
-      smoke,
-      'select-camera-device',
-      { cameraId, settleMs: 800 },
-      { timeoutMs }
-    )
+    await evaluate(smoke, PIN_CAMERA, { cameraId })
     appHandle.rendererCameraPinned = true
   }
   let stored = await evaluate(smoke, READ_STORED_BACKGROUND, { cameraId })
