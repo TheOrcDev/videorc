@@ -327,22 +327,50 @@ pub fn start_studio_effects_session(
     }
 }
 
+/// What one read during the session found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StudioEffectsPoll {
+    /// The flags as they are now, for the status.
+    Effect(CameraSystemEffect),
+    /// The camera answered that it has no such control: stop asking.
+    Unsupported,
+    /// The read failed this time (driver, Media Foundation, the camera
+    /// unplugged); ask again at the next poll.
+    Failed,
+}
+
 /// A later read during the session: the flags as they are now. A blur the
-/// streamer turned back on is reported, never fought.
+/// streamer turned back on is reported, never fought. When the camera holds
+/// anything but Videorc's write, the streamer changed it themselves, so
+/// Videorc gives up its restore (and the ledger entry): stop then leaves the
+/// camera as they set it, even if they later go back to Off.
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 pub fn poll_studio_effects(
     control: &mut dyn SegmentationControl,
-    owed: Option<OwedRestore>,
-) -> Option<CameraSystemEffect> {
+    owed: &mut Option<OwedRestore>,
+    ledger: Option<&Database>,
+    camera_id: &str,
+) -> StudioEffectsPoll {
     match control.read() {
-        Ok(Some((_, flags))) => Some(windows_effect(
-            flags,
-            owed.is_some_and(|owed| owed.written == flags),
-        )),
-        Ok(None) => None,
+        Ok(Some((_, flags))) => {
+            if owed.is_some_and(|owed| owed.written != flags) {
+                *owed = None;
+                if let Some(database) = ledger
+                    && let Err(error) = set_owed_restore(database, camera_id, None)
+                {
+                    tracing::warn!("Studio Effects restore ledger not cleared: {error}");
+                }
+                tracing::info!(
+                    camera = %camera_id,
+                    "Studio Effects changed by the streamer; Videorc will not put its blur back"
+                );
+            }
+            StudioEffectsPoll::Effect(windows_effect(flags, owed.is_some()))
+        }
+        Ok(None) => StudioEffectsPoll::Unsupported,
         Err(error) => {
             tracing::debug!("Studio Effects read failed: {error}");
-            None
+            StudioEffectsPoll::Failed
         }
     }
 }
@@ -395,9 +423,9 @@ pub mod windows_device {
     //! FFmpeg capture without taking it over (as the low-light control does).
 
     use super::{
-        SegmentationControl, StudioEffectsPolicy, StudioEffectsSession, WINDOWS_FIRST_READ_DELAY,
-        WINDOWS_POLL_INTERVAL, finish_studio_effects_session, poll_studio_effects,
-        settle_owed_restore, start_studio_effects_session,
+        SegmentationControl, StudioEffectsPolicy, StudioEffectsPoll, StudioEffectsSession,
+        WINDOWS_FIRST_READ_DELAY, WINDOWS_POLL_INTERVAL, finish_studio_effects_session,
+        poll_studio_effects, settle_owed_restore, start_studio_effects_session,
     };
     use crate::camera_low_light::windows_device::{CameraLookupError, MatchingCameras};
     use crate::protocol::CameraSystemEffect;
@@ -435,14 +463,19 @@ pub mod windows_device {
     }
 
     impl DeviceControl {
-        /// Runs `each` on the first matching camera that has the control.
+        /// Runs `each` on each matching camera until one answers `Some`;
+        /// `each` answers `None` when that camera lacks the property, so a
+        /// second camera of the same name is still asked. `Ok(None)` means
+        /// every connected match lacks it. A camera that is not connected
+        /// is an error, worth retrying, never "no control": a restore owed
+        /// to an unplugged camera must survive until it is back.
         fn with_controller<R>(
             &self,
-            mut each: impl FnMut(&IMFExtendedCameraController) -> Result<R, String>,
+            mut each: impl FnMut(&IMFExtendedCameraController) -> Result<Option<R>, String>,
         ) -> Result<Option<R>, String> {
             let cameras = match MatchingCameras::open(&self.device_name) {
                 Ok(cameras) => cameras,
-                Err(CameraLookupError::NotConnected(_)) => return Ok(None),
+                Err(CameraLookupError::NotConnected(reason)) => return Err(reason),
                 Err(CameraLookupError::Failed(reason)) => return Err(reason),
             };
             let mut last_error = None;
@@ -466,9 +499,9 @@ pub mod windows_device {
                 };
                 let _ = unsafe { source.Shutdown() };
                 match outcome {
-                    Some(Ok(value)) => return Ok(Some(value)),
+                    Some(Ok(Some(value))) => return Ok(Some(value)),
                     Some(Err(error)) => last_error = Some(error),
-                    None => {}
+                    Some(Ok(None)) | None => {}
                 }
             }
             match last_error {
@@ -494,7 +527,7 @@ pub mod windows_device {
                     Err(error) => Err(format!("background segmentation did not answer: {error}")),
                 }
             })?;
-            Ok(read.flatten())
+            Ok(read)
         }
 
         fn write(&mut self, flags: u64) -> Result<(), String> {
@@ -504,13 +537,21 @@ pub mod windows_device {
                         MF_CAPTURE_ENGINE_MEDIASOURCE.0,
                         KSPROPERTY_CAMERACONTROL_EXTENDED_BACKGROUNDSEGMENTATION.0 as u32,
                     )
-                }
-                .map_err(|error| format!("background segmentation did not open: {error}"))?;
+                };
+                let control = match control {
+                    Ok(control) => control,
+                    // This camera lacks it; a same-named one may have it.
+                    Err(error) if means_unsupported(&error) => return Ok(None),
+                    Err(error) => {
+                        return Err(format!("background segmentation did not open: {error}"));
+                    }
+                };
                 unsafe { control.SetFlags(flags) }
                     .and_then(|()| unsafe { control.CommitSettings() })
+                    .map(Some)
                     .map_err(|error| format!("the camera refused the change: {error}"))
             })?;
-            written.ok_or_else(|| "the camera is gone".to_string())
+            written.ok_or_else(|| "no camera of that name has the control".to_string())
         }
     }
 
@@ -535,9 +576,12 @@ pub mod windows_device {
     }
 
     /// One camera session's Studio Effects watch, run on its own thread from
-    /// camera start until `stopped` answers: start (and maybe turn off),
-    /// then a read every poll interval, then put back what was turned off.
-    /// `publish` receives each answer for the camera's status.
+    /// camera start until `stop_rx` answers (or its sender is gone): start
+    /// (and maybe turn off), then a read every poll interval, then put back
+    /// what was turned off. `publish` receives each answer for the camera's
+    /// status. It may return early (no control, no camera); the capture
+    /// never waits on it: the camera's stop is delivered on its own thread,
+    /// so a driver call stalled here can't hold up stopping FFmpeg.
     pub fn watch_session(
         camera_id: &str,
         policy: &StudioEffectsPolicy,
@@ -547,11 +591,9 @@ pub mod windows_device {
         // Unit tests start cameras with made-up dshow names; they must never
         // touch a real camera on the machine running them.
         if cfg!(test) {
-            let _ = stop_rx.recv();
             return;
         }
         let Some(mut control) = device_control(camera_id) else {
-            let _ = stop_rx.recv();
             return;
         };
         // Let FFmpeg open the camera first, as the low-light write does: the
@@ -563,32 +605,38 @@ pub mod windows_device {
             return;
         }
         let started = guarded(|| start_studio_effects_session(&mut control, policy, camera_id));
-        let owed = match started {
+        let mut owed = match started {
             Some(Ok(StudioEffectsSession::Active { effect, owed })) => {
                 publish(Some(effect));
                 owed
             }
             // No Studio Effects on this camera: never ask again this session.
-            Some(Ok(StudioEffectsSession::Unsupported)) => {
-                let _ = stop_rx.recv();
-                return;
-            }
+            Some(Ok(StudioEffectsSession::Unsupported)) => return,
             Some(Err(error)) => {
                 tracing::debug!(camera = %camera_id, "Studio Effects not read: {error}");
                 None
             }
             None => {
                 tracing::warn!(camera = %camera_id, "Studio Effects read panicked");
-                let _ = stop_rx.recv();
                 return;
             }
         };
-        // Anything but a timeout (the stop, or the camera's sender gone) ends it.
+        let ledger = policy.restore_ledger.as_ref();
+        // Anything but a timeout (the stop, or the sender gone) ends it.
         while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
             stop_rx.recv_timeout(WINDOWS_POLL_INTERVAL)
         {
-            if let Some(effect) = guarded(|| poll_studio_effects(&mut control, owed)) {
-                publish(effect);
+            match guarded(|| poll_studio_effects(&mut control, &mut owed, ledger, camera_id)) {
+                Some(StudioEffectsPoll::Effect(effect)) => publish(Some(effect)),
+                // The camera has no such control after all: stop asking,
+                // and owe nothing (there is nothing to put back).
+                Some(StudioEffectsPoll::Unsupported) => {
+                    publish(None);
+                    if owed.is_none() {
+                        return;
+                    }
+                }
+                Some(StudioEffectsPoll::Failed) | None => {}
             }
         }
         let _ = guarded(|| finish_studio_effects_session(&mut control, policy, camera_id, owed));
@@ -773,7 +821,7 @@ mod tests {
         let policy = policy(true, &database);
         let mut control = FakeControl::studio_effects(PORTRAIT_BLUR);
         let session = start_studio_effects_session(&mut control, &policy, "cam").unwrap();
-        let StudioEffectsSession::Active { effect, owed } = session else {
+        let StudioEffectsSession::Active { effect, mut owed } = session else {
             panic!("expected an active session, got {session:?}");
         };
         assert!(!effect.background_blur);
@@ -786,11 +834,13 @@ mod tests {
                 restore: PORTRAIT_BLUR
             })
         );
-        // A poll mid-session still says Videorc turned it off.
+        // A poll mid-session still says Videorc turned it off, and keeps
+        // the restore.
         assert_eq!(
-            poll_studio_effects(&mut control, owed),
-            Some(windows_effect(0, true))
+            poll_studio_effects(&mut control, &mut owed, Some(&database), "cam"),
+            StudioEffectsPoll::Effect(windows_effect(0, true))
         );
+        assert!(owed.is_some());
 
         finish_studio_effects_session(&mut control, &policy, "cam", owed);
         assert_eq!(control.writes, vec![0, PORTRAIT_BLUR]);
@@ -802,7 +852,7 @@ mod tests {
         let database = Database::open_in_memory_for_tests();
         let policy = policy(true, &database);
         let mut control = FakeControl::studio_effects(PORTRAIT_BLUR);
-        let StudioEffectsSession::Active { owed, .. } =
+        let StudioEffectsSession::Active { mut owed, .. } =
             start_studio_effects_session(&mut control, &policy, "cam").unwrap()
         else {
             panic!("expected an active session");
@@ -810,9 +860,10 @@ mod tests {
         // The streamer turns standard blur back on in Quick Settings.
         control.flags = BACKGROUND_SEGMENTATION_BLUR;
         assert_eq!(
-            poll_studio_effects(&mut control, owed),
-            Some(windows_effect(BACKGROUND_SEGMENTATION_BLUR, false))
+            poll_studio_effects(&mut control, &mut owed, Some(&database), "cam"),
+            StudioEffectsPoll::Effect(windows_effect(BACKGROUND_SEGMENTATION_BLUR, false))
         );
+        assert_eq!(owed, None, "their change ends Videorc's claim");
         finish_studio_effects_session(&mut control, &policy, "cam", owed);
         assert_eq!(
             control.writes,
@@ -820,6 +871,47 @@ mod tests {
             "their own choice is never overwritten"
         );
         assert!(load_ledger(&database).is_empty());
+    }
+
+    #[test]
+    fn a_change_then_back_to_off_is_still_the_streamers_choice() {
+        let database = Database::open_in_memory_for_tests();
+        let policy = policy(true, &database);
+        let mut control = FakeControl::studio_effects(PORTRAIT_BLUR);
+        let StudioEffectsSession::Active { mut owed, .. } =
+            start_studio_effects_session(&mut control, &policy, "cam").unwrap()
+        else {
+            panic!("expected an active session");
+        };
+        // Standard blur, then Off again: the camera ends on Videorc's value,
+        // but the streamer chose it.
+        control.flags = BACKGROUND_SEGMENTATION_BLUR;
+        poll_studio_effects(&mut control, &mut owed, Some(&database), "cam");
+        control.flags = 0;
+        assert_eq!(
+            poll_studio_effects(&mut control, &mut owed, Some(&database), "cam"),
+            StudioEffectsPoll::Effect(windows_effect(0, false))
+        );
+        finish_studio_effects_session(&mut control, &policy, "cam", owed);
+        assert_eq!(control.writes, vec![0], "Off stays Off");
+        assert!(load_ledger(&database).is_empty());
+    }
+
+    #[test]
+    fn a_poll_tells_no_control_from_a_failed_read() {
+        let mut owed = None;
+        let mut control = FakeControl::studio_effects(0);
+        control.read_error = Some("busy".to_string());
+        assert_eq!(
+            poll_studio_effects(&mut control, &mut owed, None, "cam"),
+            StudioEffectsPoll::Failed
+        );
+        control.read_error = None;
+        control.present = false;
+        assert_eq!(
+            poll_studio_effects(&mut control, &mut owed, None, "cam"),
+            StudioEffectsPoll::Unsupported
+        );
     }
 
     #[test]

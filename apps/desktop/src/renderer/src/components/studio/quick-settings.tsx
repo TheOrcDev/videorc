@@ -247,17 +247,21 @@ function StandInLine({ standIn }: { standIn: SourceStandIn | undefined }): React
  * never a toast (mockup §3). Its own component, so the camera status's
  * 4 Hz updates re-render this line and nothing else.
  */
-function SystemEffectLine(): ReactElement | null {
+function SystemEffectLine(): ReactElement {
   const line = useCameraSystemEffectLine()
-  if (!line) return null
+  // Kept mounted while empty, so a screen reader hears the line arrive.
   return (
-    <p
-      className="flex items-start gap-1.5 px-3 pb-2 pl-9.5 text-xs text-muted-foreground"
-      data-slot="camera-system-effect"
-    >
-      <InfoIcon aria-hidden className="mt-px size-3.5 shrink-0" />
-      <span className="min-w-0">{line}</span>
-    </p>
+    <div aria-live="polite" className="empty:hidden">
+      {line ? (
+        <p
+          className="flex items-start gap-1.5 px-3 pb-2 pl-9.5 text-xs text-muted-foreground"
+          data-slot="camera-system-effect"
+        >
+          <InfoIcon aria-hidden className="mt-px size-3.5 shrink-0" />
+          <span className="min-w-0">{line}</span>
+        </p>
+      ) : null}
+    </div>
   )
 }
 

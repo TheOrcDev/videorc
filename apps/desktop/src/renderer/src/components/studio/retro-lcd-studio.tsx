@@ -583,14 +583,17 @@ function RetroGreenScreenRow({ control }: { control: GreenScreenControl }): Reac
   )
 }
 
-/** The system effect line under the camera, as in the default look (plan 258 S4). */
-function RetroSystemEffectLine(): ReactElement | null {
+/**
+ * The system effect line under the camera, as in the default look (plan 258
+ * S4). Kept in the accessibility tree while empty, so it is announced when
+ * it arrives.
+ */
+function RetroSystemEffectLine(): ReactElement {
   const line = useCameraSystemEffectLine()
-  if (!line) return null
   return (
-    <p className={LCD_MESSAGE} data-slot="camera-system-effect">
-      {line}
-    </p>
+    <div aria-live="polite" className={cn(LCD_MESSAGE, 'empty:sr-only')}>
+      {line ? <span data-slot="camera-system-effect">{line}</span> : null}
+    </div>
   )
 }
 

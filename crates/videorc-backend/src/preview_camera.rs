@@ -5720,25 +5720,37 @@ mod windows {
         let stop_flag = Arc::new(AtomicBool::new(false));
         {
             let stop_flag = Arc::clone(&stop_flag);
-            // Plan 258 S4: the same thread watches Windows Studio Effects on
-            // this camera until the stop, then puts back anything it turned
-            // off, so the restore never outlives the camera session.
+            // Plan 258 S4: Windows Studio Effects is watched on a thread of
+            // its own. The stop reaches FFmpeg first, from this thread, and
+            // only then the watch (which puts back anything it turned off):
+            // a driver call stalled in the watch can never hold up the stop.
+            let (effects_stop_tx, effects_stop_rx) = std_mpsc::channel::<()>();
             let camera_id = config.camera_id.clone();
             let policy = config.studio_effects.clone();
             let effect_shared = Arc::clone(&shared);
+            let spawned = thread::Builder::new()
+                .name("videorc-camera-studio-effects".to_string())
+                .spawn(move || {
+                    crate::camera_system_effect::windows_device::watch_session(
+                        &camera_id,
+                        &policy,
+                        &effects_stop_rx,
+                        |effect| {
+                            effect_shared
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .system_effect = effect;
+                        },
+                    );
+                });
+            if let Err(error) = spawned {
+                tracing::warn!("Studio Effects watch did not start: {error}");
+            }
             thread::spawn(move || {
-                crate::camera_system_effect::windows_device::watch_session(
-                    &camera_id,
-                    &policy,
-                    &stop_rx,
-                    |effect| {
-                        effect_shared
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .system_effect = effect;
-                    },
-                );
+                let _ = stop_rx.recv();
                 stop_flag.store(true, Ordering::Release);
+                // The watch may have ended already; nothing to tell then.
+                let _ = effects_stop_tx.send(());
             });
         }
 

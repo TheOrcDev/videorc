@@ -59,6 +59,14 @@
       "turnedOffByVideorc": false,
       "extra": 1
     },
+    {
+      "provider": "macos-video-effects",
+      "backgroundBlur": true,
+      "backgroundReplacement": false,
+      "studioLight": false,
+      "turnedOffByVideorc": false,
+      "constructor": 1
+    },
     null
   ]
 }
