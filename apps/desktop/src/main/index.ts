@@ -187,7 +187,9 @@ import {
   nativePreviewSupervisorDisposition,
   nativePreviewValidatedHandoffStatus,
   windowsD3d11BackendEventAuthority,
-  windowsD3d11BackendStatusIsStale
+  windowsD3d11BackendStatusIsStale,
+  backendPreviewSurfaceHoldsPlacement,
+  heldPreviewPlacementRelease
 } from './native-preview-host-policy'
 import { loadNativePreviewInProcessDriver } from './native-preview-in-process-loader'
 import { resolveNativePreviewInProcessModule } from './native-preview-in-process-module-path'
@@ -197,6 +199,7 @@ import { drainNativePreviewHostCommands as drainNativePreviewHostCommandsWith } 
 import {
   NativePreviewMutationQueue,
   NativePreviewBackendBoundsRefusedError,
+  NATIVE_PREVIEW_PLACEMENT_HELD,
   NativePreviewPlacementQueue,
   NativePreviewPumpOwnership,
   handoffNativePreviewPumpOwnership,
@@ -827,6 +830,7 @@ import type {
   PreviewSurfaceSceneLayerKind,
   PreviewSurfaceSceneState,
   PreviewSurfaceSceneUpdateParams,
+  PreviewSurfaceState,
   PreviewSurfaceStatus,
   MediaAccessSnapshot,
   MediaAccessStatus,
@@ -1092,6 +1096,11 @@ const nativePreviewPlacementQueue = new NativePreviewPlacementQueue(
     if (!nativePreviewPresentationAllowedForGeneration(generation)) {
       return
     }
+    // #1629: the backend refuses Windows bounds until its surface is live;
+    // the push waits for its status event instead of a retry timer.
+    if (nativePreviewPlacementHeldForBackendSurface()) {
+      return NATIVE_PREVIEW_PLACEMENT_HELD
+    }
     if (
       nativePreviewRealSurfaceDriverKind === 'in-process' &&
       nativePreviewSurfaceStatusIsRealSurface(nativePreviewSurfaceStatus) &&
@@ -1108,6 +1117,7 @@ const nativePreviewPlacementQueue = new NativePreviewPlacementQueue(
       }
       return
     }
+    let held = false
     await runNativePreviewSurfaceMutation(() => {
       // Closing does not advance the generation, so a placement that waited
       // behind another host mutation must re-check the full lifecycle gate.
@@ -1116,11 +1126,17 @@ const nativePreviewPlacementQueue = new NativePreviewPlacementQueue(
       if (!nativePreviewPresentationAllowedForGeneration(generation)) {
         return nativePreviewSurfaceStatus
       }
+      // The backend surface can stop while this waited its turn.
+      if (nativePreviewPlacementHeldForBackendSurface()) {
+        held = true
+        return nativePreviewSurfaceStatus
+      }
       return applyNativePreviewHostCommands(
         [{ kind: nativePreviewSurfaceWindowExists() ? 'update-bounds' : 'create', bounds }],
         generation
       )
     }, 'placement')
+    return held ? NATIVE_PREVIEW_PLACEMENT_HELD : undefined
   },
   (error, { attempt, outcome, retryInMs }) => {
     if (!previewWindowIsOpenForSurface()) {
@@ -1139,6 +1155,14 @@ const nativePreviewPlacementQueue = new NativePreviewPlacementQueue(
   }
 )
 let nativePreviewSurfaceStatus: PreviewSurfaceStatus = idleNativePreviewSurfaceStatus()
+// #1629: the backend preview surface slot's state as main last heard it on its
+// event socket (Windows subscribes to `preview.surface.status`); null before
+// the first status and after the socket retires.
+let nativePreviewBackendSurfaceState: PreviewSurfaceState | null = null
+// How long a held placement waits for the renderer's surface create to drain
+// once the backend surface is up (#1629, releaseHeldNativePreviewPlacement).
+const NATIVE_PREVIEW_HELD_PLACEMENT_SURFACE_WAIT_MS = 1_000
+let nativePreviewHeldPlacementSurfaceWait: ReturnType<typeof setTimeout> | null = null
 // Armed only after Electron main has sent a freshly-read preview HWND for the
 // current lifecycle generation. Backend presenter events cannot claim native
 // ownership across close/reopen without this authority.
@@ -5536,6 +5560,51 @@ function pushPreviewWindowPlacement(): void {
   nativePreviewPlacementQueue.enqueue({ bounds, generation })
 }
 
+function nativePreviewPlacementHeldForBackendSurface(): boolean {
+  return backendPreviewSurfaceHoldsPlacement({
+    platform: process.platform,
+    backendSurfaceState: nativePreviewBackendSurfaceState
+  })
+}
+
+// #1629: record the backend surface slot's state, and run a placement held
+// for it once it is up.
+function noteNativePreviewBackendSurfaceState(state: PreviewSurfaceState | null): void {
+  nativePreviewBackendSurfaceState = state
+  releaseHeldNativePreviewPlacement()
+}
+
+// Runs the placement held while the backend surface was down (#1629) at the
+// window's live rect, after the renderer's own surface create has drained
+// (heldPreviewPlacementRelease).
+function releaseHeldNativePreviewPlacement(options: { surfaceWaitElapsed?: boolean } = {}): void {
+  const action = heldPreviewPlacementRelease({
+    placementHeld: nativePreviewPlacementQueue.placementHeld,
+    platform: process.platform,
+    backendSurfaceState: nativePreviewBackendSurfaceState,
+    surfaceExists: nativePreviewSurfaceWindowExists(),
+    surfaceWaitElapsed: options.surfaceWaitElapsed === true
+  })
+  if (action === 'none') {
+    return
+  }
+  if (action === 'wait-for-surface') {
+    nativePreviewHeldPlacementSurfaceWait ??= setTimeout(() => {
+      nativePreviewHeldPlacementSurfaceWait = null
+      releaseHeldNativePreviewPlacement({ surfaceWaitElapsed: true })
+    }, NATIVE_PREVIEW_HELD_PLACEMENT_SURFACE_WAIT_MS)
+    return
+  }
+  if (nativePreviewHeldPlacementSurfaceWait) {
+    clearTimeout(nativePreviewHeldPlacementSurfaceWait)
+    nativePreviewHeldPlacementSurfaceWait = null
+  }
+  const bounds = previewWindowSurfaceBounds()
+  nativePreviewPlacementQueue.releaseHeld(
+    bounds ? { bounds, generation: previewWindowSurfaceGeneration() } : undefined
+  )
+}
+
 function nativePreviewSurfaceWindowExists(): boolean {
   return Boolean(nativePreviewSurfaceWindow && !nativePreviewSurfaceWindow.isDestroyed())
 }
@@ -6065,6 +6134,7 @@ function nativePreviewPlacementStatusFields(): Pick<
   | 'nativePreviewPlacementsApplied'
   | 'nativePreviewPlacementsFailed'
   | 'nativePreviewPlacementsRetried'
+  | 'nativePreviewPlacementsHeld'
   | 'nativePreviewPlacementRoundTripP95Ms'
   | 'nativePreviewMutationQueueCapacity'
   | 'nativePreviewMutationQueueDepth'
@@ -6082,6 +6152,7 @@ function nativePreviewPlacementStatusFields(): Pick<
     nativePreviewPlacementsApplied: metrics.applied,
     nativePreviewPlacementsFailed: metrics.failed,
     nativePreviewPlacementsRetried: metrics.retried,
+    nativePreviewPlacementsHeld: metrics.held,
     nativePreviewPlacementRoundTripP95Ms: metrics.roundTripP95Ms,
     nativePreviewMutationQueueCapacity: mutationMetrics.capacity,
     nativePreviewMutationQueueDepth: mutationMetrics.currentDepth,
@@ -8269,6 +8340,8 @@ async function applyNativePreviewHostCommands(
     // already moved) from a failed create or setup.
     throw new NativePreviewBackendBoundsRefusedError(backendBoundsFailures[0])
   }
+  // A held placement waits for the surface this may just have created.
+  releaseHeldNativePreviewPlacement()
   return status
 }
 
@@ -11605,6 +11678,7 @@ function disconnectBackendEventSocket(): void {
   const socket = backendEventSocket
   backendEventSocket = null
   stopHtmlOverlays()
+  noteNativePreviewBackendSurfaceState(null)
   clearBackendWindowsD3d11PresenterAuthority('Backend preview event connection stopped.')
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
@@ -11643,6 +11717,7 @@ function retireBackendEventSocket(
   }
   backendEventSocket = null
   stopHtmlOverlays()
+  noteNativePreviewBackendSurfaceState(null)
   clearBackendWindowsD3d11PresenterAuthority(`Backend preview event connection retired: ${reason}`)
   mainCaptureState = captureStateAfterTransportLoss()
   liveExitGuard.transportLost()
@@ -11772,9 +11847,11 @@ function connectBackendEventSocket(connection: BackendConnection): void {
           if (parsed.ok !== true) {
             throw new Error('Initial preview surface status request was rejected.')
           }
+          const initialStatus = parseMainPreviewSurfaceStatus(parsed.payload)
+          noteNativePreviewBackendSurfaceState(initialStatus.state)
           if (previewSurfaceStatusRequestGeneration !== null) {
             applyBackendWindowsD3d11PresenterStatus(
-              parseMainPreviewSurfaceStatus(parsed.payload),
+              initialStatus,
               previewSurfaceStatusRequestGeneration
             )
           }
@@ -11886,6 +11963,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
       }
       if (parsed.event === 'preview.surface.status') {
         const status = parseMainPreviewSurfaceStatusEvent(parsed.payload)
+        noteNativePreviewBackendSurfaceState(status.state)
         const authority = windowsD3d11BackendEventAuthority(status)
         if (authority) {
           applyBackendWindowsD3d11PresenterStatus(status, authority.previewGeneration)
@@ -15306,6 +15384,7 @@ function nativePreviewSurfaceStatusMetrics(status: PreviewSurfaceStatus): Record
     nativePreviewPlacementsApplied: status.nativePreviewPlacementsApplied,
     nativePreviewPlacementsFailed: status.nativePreviewPlacementsFailed,
     nativePreviewPlacementsRetried: status.nativePreviewPlacementsRetried,
+    nativePreviewPlacementsHeld: status.nativePreviewPlacementsHeld,
     nativePreviewPlacementRoundTripP95Ms: status.nativePreviewPlacementRoundTripP95Ms,
     nativePreviewPresentRoundTripP95Ms: status.nativePreviewPresentRoundTripP95Ms,
     nativePreviewIosurfaceCacheHits: status.nativePreviewIosurfaceCacheHits,
