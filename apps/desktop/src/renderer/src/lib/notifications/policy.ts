@@ -106,8 +106,12 @@ export interface PopUpQuestion {
   change: NotificationChange
   tone: NotificationTone
   answersAPress?: boolean
-  /** News told once outside a session: it pops up like an answer, but never at launch. */
-  announcement?: boolean
+  /**
+   * The kind is urgent on its own: a recording or livestream the streamer
+   * started has failed. It is said as the session ends, so it is no longer
+   * "live" when it arrives.
+   */
+  failedSession?: boolean
   /** Inside the first minute of this run (`LAUNCH_QUIET_MS`). */
   launching?: boolean
   /** The streamer has pressed something in this run: a click, a key, a shortcut. */
@@ -130,20 +134,20 @@ export interface PopUpQuestion {
 export function popUpDecision(question: PopUpQuestion): number | null {
   if (question.listOpen) return null
   if (question.change === 'updated' || question.change === 'flapped') return null
-  // At launch nothing Videorc checked on its own pops up: devices, accounts,
-  // updates, quotas, memory, a recovered take, the engine starting. Only the
-  // answer to a press, or an urgent problem in a recording or livestream the
-  // streamer started, speaks.
-  if (question.launching) {
-    if (!question.pressed) return null
-    if (question.answersAPress) return pressAnswerMs(question)
-    if (question.tone !== 'urgent' || !question.live) return null
-    // An urgent problem in a recording the streamer started: the re-alert
-    // rules below still hold it to once per episode.
+  // A toast is the answer to a press. In the first minute, only once the
+  // streamer has pressed something.
+  if (question.answersAPress) {
+    if (question.launching && !question.pressed) return null
+    return question.popUpMs ?? (question.hasDetail ? POP_UP_MS : PRESS_ANSWER_POP_UP_MS)
   }
-  if (question.answersAPress || question.announcement) {
-    return pressAnswerMs(question)
-  }
+  // The owner, 2026-11-22: "we said we are going to put everything inside of
+  // our notifications". With nothing recording or live, what Videorc notices
+  // on its own (devices, accounts, updates, quotas, memory, a recovered take,
+  // the engine) waits behind the bell, at launch or at any time after.
+  if (!question.live && !(question.failedSession && question.tone === 'urgent')) return null
+  // In the first minute, only an urgent problem in a recording or livestream
+  // the streamer started speaks.
+  if (question.launching && (!question.pressed || question.tone !== 'urgent')) return null
   if (question.tone === 'news') return null
   const { lastPop } = question
   if (
@@ -168,12 +172,8 @@ export function popUpDecision(question: PopUpQuestion): number | null {
     return null
   }
   if (question.tone === 'urgent') return URGENT_POP_UP_MS
-  if (question.live && question.quiet) return null
+  if (question.quiet) return null
   return POP_UP_MS
-}
-
-function pressAnswerMs(question: Pick<PopUpQuestion, 'popUpMs' | 'hasDetail'>): number {
-  return question.popUpMs ?? (question.hasDetail ? POP_UP_MS : PRESS_ANSWER_POP_UP_MS)
 }
 
 /** Still true: an open problem, or work in progress. The list's "Now" group. */
@@ -183,8 +183,8 @@ export function isNow(entry: Pick<NotificationEntry, 'state'>): boolean {
 
 /**
  * The number is what waits for you: unread urgent and warning entries, and
- * unread finished work. News never counts, except an announcement: it waits
- * behind the bell at launch, so the number is how it is seen. A warning that
+ * unread finished work. News never counts, except an announcement: it never
+ * pops up, so the number is how it is seen. A warning that
  * cleared on its own stops counting; an urgent problem that cleared counts
  * until it is seen.
  */

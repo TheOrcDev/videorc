@@ -811,6 +811,21 @@ const OWNER_LAUNCH_REPORTS = `(async () => {
     'account-session', 'cloud-announce'];
 })()`
 
+// The same idle Studio after its first minute (plan 250's idle row, the owner
+// 2026-11-22: "we said we are going to put everything inside of our
+// notifications"): new subjects, so each is a new entry and could pop up.
+const IDLE_REPORTS = `(async () => {
+  const runtime = await import('/src/lib/session-runtime-recovery.ts');
+  const app = await import('/src/lib/notifications/sources/app.ts');
+  const ring = { state: 'recording', sessionId: 'launch-ring', replayOnly: true };
+  runtime.showSessionHealthEvent({ id: 'disk-space-low', sessionId: ring.sessionId, level: 'warn',
+    code: 'disk-space-low', message: 'Recording space is low: 4 GB left.', createdAt: new Date().toISOString() }, false, ring);
+  app.publishBackgroundProblem({ title: "Couldn't refresh the device list" });
+  app.publishOutputTooHeavy({ title: '1440p60 is too heavy for this computer',
+    description: 'Recordings will stutter.', actionLabel: 'Use 1080p30' }, () => {});
+  return ['disk-space', "background-problem:Couldn't refresh the device list", 'output-too-heavy'];
+})()`
+
 const launchObservation = `(() => {
   const record = window.__videorcSmokeToasts;
   const read = window.__videorcSmokeNotifications;
@@ -857,18 +872,24 @@ async function launchQuiet() {
   if (expectedKeys.length === 0) throw new Error('the owner launch reports never ran')
   await delay(2000)
   await screenshot('launch-quiet-dark-6s')
-  for (;;) {
-    const age = await evaluate('performance.now()')
-    const left = FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs + 500 - age
-    if (left <= 0) break
-    await delay(Math.min(5000, left))
+  // Past the first minute, still with no input: idle stays behind the bell.
+  const waitUntil = async (ms) => {
+    for (;;) {
+      const left = ms - (await evaluate('performance.now()'))
+      if (left <= 0) return
+      await delay(Math.min(5000, left))
+    }
   }
+  await waitUntil(FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs + 1000)
+  const idleReportsAt = await evaluate('performance.now()')
+  expectedKeys = [...expectedKeys, ...(await evaluate(IDLE_REPORTS))]
+  await waitUntil(FIRST_RUN_SMOKE_LIMITS.idleQuietWatchMs + 500)
   const observed = await evaluate(launchObservation)
   await screenshot('launch-quiet-dark')
   await setTheme('light')
   await settled()
   await screenshot('launch-quiet-light')
-  await check('launch-quiet', { ...observed, expectedKeys })
+  await check('launch-quiet', { ...observed, expectedKeys, idleReportsAt })
 }
 
 // Every setup profile after the launch check.

@@ -181,7 +181,7 @@ export function createNotificationStore(options: NotificationStoreOptions = {}):
       change,
       tone: item.entry.tone,
       answersAPress: kind.answersAPress === true,
-      announcement: kind.announcement === true,
+      failedSession: kind.tone === 'urgent',
       launching: at - startedAt < launchQuietMs,
       pressed: pressed(),
       popUpMs: kind.popUpMs,
