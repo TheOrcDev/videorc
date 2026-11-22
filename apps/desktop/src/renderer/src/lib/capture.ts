@@ -1,4 +1,5 @@
 import { windowsBridgeEnvelopeRefusal } from './bridge-envelope'
+import { normalizeCameraBackground } from './camera-background'
 import { normalizeCameraLook } from './camera-look'
 import type { GlobalShortcutsConfig } from '../../../shared/backend'
 import { formatBitrate, formatResolution, formatVideoQuality, resolutionName } from './format-video'
@@ -9,6 +10,7 @@ import type {
   CaptionStyleId,
   AutomaticSourceFallbackEvent,
   AutomaticSourceFallbackSourceKind,
+  CameraBackground,
   CameraKeyEdges,
   CameraLook,
   CameraTransform,
@@ -46,6 +48,14 @@ import { STREAM_PLATFORMS } from '../../../shared/stream-platforms'
 
 export type SettingsState = {
   cameraLooks?: Record<string, CameraLook>
+  /**
+   * Plan 258 D3: each camera's background (blur, a picture, Cut out, or a
+   * green or blue screen), kept in every scene. Absent for a camera that
+   * never had one: Off.
+   */
+  cameraBackgrounds?: Record<string, CameraBackground>
+  /** The D4 migration (scenes' keys to the camera) this profile has run. */
+  cameraBackgroundMigration?: number
   /** Human-readable picker label only; never a filesystem path. */
   outputDirectory: string
   outputDirectoryHandle?: string
@@ -474,6 +484,7 @@ export function simulcastLegLiveRequest(
 /** What the vertical stream takes from the program, not from its scene. */
 const PROGRAM_SOURCE_KEYS = [
   'cameraLook',
+  'cameraBackground',
   'cameraMirror',
   'cameraChromaKeyEnabled',
   'cameraChromaKeyColor',
@@ -1974,10 +1985,12 @@ export function normalizeCameraKeyEdges(raw: unknown): CameraKeyEdges | undefine
 export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
   const {
     cameraLook: storedLook,
+    cameraBackground: storedBackground,
     cameraChromaKeyEdges: storedKeyEdges,
     ...candidate
   } = layout && typeof layout === 'object' ? (layout as Partial<LayoutSettings>) : {}
   const cameraLook = normalizeCameraLook(storedLook)
+  const cameraBackground = normalizeCameraBackground(storedBackground)
   const cameraChromaKeyEdges = normalizeCameraKeyEdges(storedKeyEdges)
   const cameraTransform = normalizeCameraTransform(candidate.cameraTransform)
   const cameraTransformMode: CameraTransformMode =
@@ -1987,6 +2000,7 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
     ...defaultCaptureConfig.layout,
     ...candidate,
     ...(cameraLook ? { cameraLook } : {}),
+    ...(cameraBackground && cameraBackground.mode !== 'off' ? { cameraBackground } : {}),
     ...(cameraChromaKeyEdges ? { cameraChromaKeyEdges } : {}),
     layoutPreset: isLayoutPreset(candidate.layoutPreset)
       ? candidate.layoutPreset
@@ -2469,7 +2483,7 @@ export function applyStoredManualStreamKeyResult(
 }
 
 export function persistableCaptureConfig(config: CaptureConfig): CaptureConfig {
-  const { cameraLook: _cameraLook, ...layout } = config.layout
+  const { cameraLook: _cameraLook, cameraBackground: _cameraBackground, ...layout } = config.layout
   // Plan 213 E1: a stand-in is for this session; the pick is what persists.
   const { testPattern: _testPattern, ...sources } = wantedSourceSelection(config.sources)
   const targets = config.streaming.targets.map((item) => {

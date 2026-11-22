@@ -31,6 +31,7 @@ mod buddy_overlay;
 mod buddy_pet;
 mod buddy_pet_store;
 mod buddy_sprite;
+mod camera_background;
 mod camera_capture;
 mod camera_fixture;
 mod camera_low_light;

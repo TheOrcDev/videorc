@@ -38,6 +38,7 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   // always the light variant, the stream is not themed.
   'src/lib/buddy-overlay.ts',
   // Chroma-key colours are the key itself.
+  'src/lib/camera-background.ts',
   'src/lib/capture.ts',
   'src/lib/green-screen.ts',
   // Published video content: key colours and the composited scene background.

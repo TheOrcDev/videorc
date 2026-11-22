@@ -302,6 +302,8 @@ import {
   BANNER_OPACITY_MIN,
   HTML_OVERLAY_MAX_FPS,
   HTML_OVERLAY_MAX_TARGETS,
+  CAMERA_BACKGROUND_EDGES,
+  CAMERA_BACKGROUND_MODES,
   LAYOUT_PRESET_VALUES,
   SOUND_HOTKEYS,
   SOUND_LEVEL_DB_MAX,
@@ -2167,6 +2169,38 @@ const layoutSchema = objectSchema(
           brightness: numberSchema({ min: -0.25, max: 0.25 }),
           contrast: numberSchema({ min: 0.5, max: 1.5 }),
           saturation: numberSchema({ min: 0, max: 2 })
+        },
+        { allowUnknown: false }
+      )
+    ),
+    cameraBackground: optionalSchema(
+      objectSchema(
+        {
+          mode: enumSchema(CAMERA_BACKGROUND_MODES),
+          blurPct: numberSchema({ integer: true, min: 0, max: 100 }),
+          edges: enumSchema(CAMERA_BACKGROUND_EDGES),
+          assetId: optionalSchema(stringSchema({ minLength: 1, maxLength: 256 })),
+          key: optionalSchema(
+            objectSchema(
+              {
+                similarityPct: numberSchema({ integer: true, min: 0, max: 100 }),
+                smoothnessPct: numberSchema({ integer: true, min: 0, max: 100 }),
+                spillPct: numberSchema({ integer: true, min: 0, max: 100 }),
+                hideEdges: optionalSchema(
+                  objectSchema(
+                    {
+                      leftPct: numberSchema({ integer: true, min: 0, max: 25 }),
+                      topPct: numberSchema({ integer: true, min: 0, max: 25 }),
+                      rightPct: numberSchema({ integer: true, min: 0, max: 25 }),
+                      bottomPct: numberSchema({ integer: true, min: 0, max: 25 })
+                    },
+                    { allowUnknown: false }
+                  )
+                )
+              },
+              { allowUnknown: false }
+            )
+          )
         },
         { allowUnknown: false }
       )

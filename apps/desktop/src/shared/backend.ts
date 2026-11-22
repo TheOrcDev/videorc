@@ -830,9 +830,65 @@ export interface CameraKeyEdges {
 /** The largest share of the camera one side of Hide edges may take (%). */
 export const CAMERA_KEY_EDGE_MAX_PCT = 25
 
+/**
+ * Plan 258 D4/D5: what is behind the person on one camera, as one pick.
+ * Never two at once: a blur, a picture or Cut out never runs with a key.
+ */
+export const CAMERA_BACKGROUND_MODES = [
+  'off',
+  'blur',
+  'image',
+  'video',
+  'cutout',
+  'green',
+  'blue'
+] as const
+export type CameraBackgroundMode = (typeof CAMERA_BACKGROUND_MODES)[number]
+
+/** How hard the outline between the person and what's behind them is (Edges). */
+export const CAMERA_BACKGROUND_EDGES = ['soft', 'balanced', 'sharp'] as const
+export type CameraBackgroundEdges = (typeof CAMERA_BACKGROUND_EDGES)[number]
+
+/** Slight blur and Strong blur, as Blur strength (%) marks (D5). */
+export const CAMERA_BACKGROUND_SLIGHT_BLUR_PCT = 30
+export const CAMERA_BACKGROUND_STRONG_BLUR_PCT = 70
+
+/**
+ * The green or blue screen's tuning, kept with the camera (D4). The colour
+ * is the mode (`green` or `blue`); the fields are the scene key's.
+ */
+export interface CameraBackgroundKey {
+  similarityPct: number
+  smoothnessPct: number
+  spillPct: number
+  /** Hide edges; omitted while every side is 0. */
+  hideEdges?: CameraKeyEdges
+}
+
+/**
+ * Plan 258 D3: one camera's background, kept in every scene (stored per
+ * camera beside `cameraLooks`). Off keeps the tuning, so picking Blur or a
+ * screen again finds it as it was.
+ */
+export interface CameraBackground {
+  mode: CameraBackgroundMode
+  /** Blur strength (%), 0–100; Slight is 30, Strong 70. */
+  blurPct: number
+  edges: CameraBackgroundEdges
+  /** The picture or video behind you (`image`, `video`): a background asset id. */
+  assetId?: string
+  /** The green or blue screen's tuning (`green`, `blue`). */
+  key?: CameraBackgroundKey
+}
+
 export interface LayoutSettings {
   /** Per-camera setting injected at the output boundary; omitted when neutral. */
   cameraLook?: CameraLook
+  /**
+   * Plan 258: the camera's background, injected at the output boundary like
+   * the look; omitted while Off. Never saved into a scene.
+   */
+  cameraBackground?: CameraBackground
   layoutPreset: LayoutPreset
   cameraTransformMode: CameraTransformMode
   cameraTransform: CameraTransform | null

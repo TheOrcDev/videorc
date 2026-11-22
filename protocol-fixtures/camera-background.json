@@ -1,0 +1,74 @@
+{
+  "$comment": "A camera's background (plan 258 S1), as it rides on LayoutSettings.cameraBackground. Rust: cargo test -p videorc-backend camera_background_fixture. TypeScript: pnpm --filter @videorc/desktop test -- camera-background.test.ts",
+  "full": {
+    "mode": "image",
+    "blurPct": 30,
+    "edges": "soft",
+    "assetId": "bundled-podcast",
+    "key": {
+      "similarityPct": 42,
+      "smoothnessPct": 9,
+      "spillPct": 12,
+      "hideEdges": { "leftPct": 3, "topPct": 0, "rightPct": 5, "bottomPct": 1 }
+    }
+  },
+  "minimal": { "mode": "blur", "blurPct": 70, "edges": "balanced" },
+  "everyMode": [
+    { "mode": "off", "blurPct": 70, "edges": "balanced" },
+    { "mode": "blur", "blurPct": 30, "edges": "sharp" },
+    { "mode": "image", "blurPct": 70, "edges": "balanced", "assetId": "bundled-podcast" },
+    { "mode": "video", "blurPct": 70, "edges": "soft", "assetId": "imported-loop" },
+    { "mode": "cutout", "blurPct": 70, "edges": "balanced" },
+    {
+      "mode": "green",
+      "blurPct": 70,
+      "edges": "balanced",
+      "key": { "similarityPct": 40, "smoothnessPct": 8, "spillPct": 10 }
+    },
+    {
+      "mode": "blue",
+      "blurPct": 70,
+      "edges": "balanced",
+      "key": { "similarityPct": 40, "smoothnessPct": 8, "spillPct": 10 }
+    }
+  ],
+  "rejectedEverywhere": [
+    null,
+    { "mode": "blur", "blurPct": 70, "edges": "balanced", "extra": 1 },
+    { "mode": "portrait", "blurPct": 70, "edges": "balanced" },
+    { "mode": "blur", "blurPct": 70, "edges": "fuzzy" },
+    { "blurPct": 70, "edges": "balanced" },
+    { "mode": "blur", "edges": "balanced" },
+    { "mode": "blur", "blurPct": 70 },
+    { "mode": "blur", "blurPct": -1, "edges": "balanced" },
+    { "mode": "blur", "blurPct": 1.5, "edges": "balanced" },
+    { "mode": "blur", "blurPct": "70", "edges": "balanced" },
+    {
+      "mode": "green",
+      "blurPct": 70,
+      "edges": "balanced",
+      "key": { "similarityPct": 40, "smoothnessPct": 8 }
+    },
+    {
+      "mode": "green",
+      "blurPct": 70,
+      "edges": "balanced",
+      "key": { "similarityPct": 40, "smoothnessPct": 8, "spillPct": 10, "color": "#00FF00" }
+    }
+  ],
+  "rejectedByContract": [
+    { "mode": "blur", "blurPct": 101, "edges": "balanced" },
+    { "mode": "image", "blurPct": 70, "edges": "balanced", "assetId": "" },
+    {
+      "mode": "green",
+      "blurPct": 70,
+      "edges": "balanced",
+      "key": {
+        "similarityPct": 40,
+        "smoothnessPct": 8,
+        "spillPct": 10,
+        "hideEdges": { "leftPct": 26, "topPct": 0, "rightPct": 0, "bottomPct": 0 }
+      }
+    }
+  ]
+}
