@@ -212,13 +212,11 @@ export function screenPortalIssue(
       description: `Install xdg-desktop-portal and ${portalInstallLine(currentDesktop)}, then log out and back in.`
     }
   }
-  const found = portal.backends.length
-    ? ` The portals here (${portal.backends.join(', ')}) don't share screens.`
-    : ''
+  const found = portal.backends.length ? ` (${portal.backends.join(', ')})` : ''
   return {
     id: 'screen-portal',
     title: "Your desktop's portal can't share the screen",
-    description: `xdg-desktop-portal is running, but no portal backend offers screen sharing.${found} Install ${portalInstallLine(currentDesktop)}, then log out and back in.`
+    description: `xdg-desktop-portal is running, but none of the portals installed here${found} can share the screen. Install ${portalInstallLine(currentDesktop)}, then log out and back in.`
   }
 }
 

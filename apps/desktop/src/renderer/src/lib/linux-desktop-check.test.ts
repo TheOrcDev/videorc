@@ -167,14 +167,16 @@ describe('screen portal', () => {
     expect(screenPortalCheck(portal)).toEqual({ value: 'No screen sharing', tone: 'error' })
     const issue = screenPortalIssue(portal, 'KDE')
     expect(issue?.title).toBe("Your desktop's portal can't share the screen")
-    expect(issue?.description).toContain("The portals here (gtk) don't share screens.")
+    expect(issue?.description).toContain(
+      'none of the portals installed here (gtk) can share the screen.'
+    )
     expect(issue?.description).toContain('xdg-desktop-portal-kde (the one for KDE)')
   })
 
   it('falls back to the list of backends on a desktop it does not know', () => {
     const issue = screenPortalIssue({ frontend: 'activatable', backends: [] }, 'Weird')
     expect(issue?.description).toContain('xdg-desktop-portal-gnome, -kde, -hyprland or -wlr')
-    expect(issue?.description).not.toContain('The portals here')
+    expect(issue?.description).toContain('none of the portals installed here can share')
   })
 
   it('never blames the desktop for a bus or portal that did not answer', () => {
