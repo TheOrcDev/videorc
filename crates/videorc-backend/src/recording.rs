@@ -4698,7 +4698,12 @@ async fn start_session_with_timeline(
     timeline.mark(RecordingStartPhase::PreviewStop);
 
     let mut startup_resources = CaptureStartupResources::default();
-    let mut capture = resolve_capture_inputs(&ffmpeg_path, &params).await;
+    // Only the legacy graph opens devices through FFmpeg. A request the
+    // compositor bridge will carry skips FFmpeg's device listing: a process
+    // spawn of 130 ms at the median and over 0.5 s on one start in seven
+    // (owner log, 117 starts), for indexes the bridge never reads.
+    let (mut capture, ffmpeg_devices_resolved) =
+        session_start_capture_inputs(&ffmpeg_path, &params).await;
     timeline.mark(RecordingStartPhase::DeviceResolve);
     let mut native_audio_source =
         prepare_native_audio_source(&state, &session_id, &mut capture, &params).await;
@@ -4976,8 +4981,17 @@ async fn start_session_with_timeline(
     // outside the gated frame store. Starting it while the screen is hidden
     // would record the live screen under a "Screen hidden" chip: refuse.
     refuse_legacy_start_while_hidden(use_encoder_bridge, state.screen_privacy.view().hidden)?;
-    if matches!(capture.video, VideoInput::TestPattern)
-        && !linux_bridge_composes_native_sources(use_encoder_bridge, &params)
+    if legacy_graph_lacks_ffmpeg_devices(use_encoder_bridge, ffmpeg_devices_resolved) {
+        // The bridge decision says "legacy" only for a request ruled out
+        // above, so this does not run today. It keeps a later change to
+        // either side from starting the legacy graph on the placeholder.
+        resolve_ffmpeg_devices(&mut capture, &ffmpeg_path, &params).await;
+    }
+    // FFmpeg's test pattern is a legacy input. The bridge composes the
+    // native preview frames and refuses a missing source above, so on a
+    // bridge session `capture.video` is only the placeholder.
+    if !use_encoder_bridge
+        && matches!(capture.video, VideoInput::TestPattern)
         && let Some((code, message)) = test_pattern_fallback_warning(&params)
     {
         emit_health_event(&state, Some(&session_id), HealthLevel::Warn, code, message)?;
@@ -15370,6 +15384,53 @@ struct PreparedNativeAudioSource {
     fifo_path: PathBuf,
 }
 
+/// A session's capture inputs at start, and whether FFmpeg's device lookup
+/// ran for them. It runs only for a request the bridge is ruled out for:
+/// the bridge decision later either takes the bridge or refuses the start.
+async fn session_start_capture_inputs(
+    ffmpeg_path: &str,
+    params: &StartSessionParams,
+) -> (CaptureInputs, bool) {
+    if compositor_encoder_bridge_ruled_out(params) {
+        (resolve_capture_inputs(ffmpeg_path, params).await, true)
+    } else {
+        (capture_inputs_without_ffmpeg_devices(params), false)
+    }
+}
+
+/// The capture inputs of a session the compositor bridge carries: the
+/// microphone, and nothing FFmpeg has to list devices for. `video` is the
+/// placeholder the bridge's argument builders never read; the legacy graph
+/// must not start on it (see [`legacy_graph_lacks_ffmpeg_devices`]).
+fn capture_inputs_without_ffmpeg_devices(params: &StartSessionParams) -> CaptureInputs {
+    CaptureInputs {
+        video: VideoInput::TestPattern,
+        camera_index: None,
+        microphone: resolve_microphone_input(params.sources.microphone_id.as_deref()),
+    }
+}
+
+/// The legacy graph was chosen for a start that skipped FFmpeg's device
+/// lookup: its screen and camera indexes are still owed.
+fn legacy_graph_lacks_ffmpeg_devices(
+    use_encoder_bridge: bool,
+    ffmpeg_devices_resolved: bool,
+) -> bool {
+    !use_encoder_bridge && !ffmpeg_devices_resolved
+}
+
+/// Looks up FFmpeg's screen and camera inputs and leaves the microphone,
+/// which the start has opened and re-routed by then, as it is.
+async fn resolve_ffmpeg_devices(
+    capture: &mut CaptureInputs,
+    ffmpeg_path: &str,
+    params: &StartSessionParams,
+) {
+    let devices = resolve_capture_inputs(ffmpeg_path, params).await;
+    capture.video = devices.video;
+    capture.camera_index = devices.camera_index;
+}
+
 async fn resolve_capture_inputs(ffmpeg_path: &str, params: &StartSessionParams) -> CaptureInputs {
     #[cfg(test)]
     if matches!(
@@ -15553,17 +15614,6 @@ fn test_pattern_fallback_warning(
         "screen-capture-fallback",
         "Using FFmpeg test pattern because no screen or window source was available.",
     ))
-}
-
-/// Linux has no FFmpeg device `VideoInput` for portal screens or V4L2
-/// cameras: the compositor bridge composes them from the native preview
-/// frame stores. A `TestPattern` input there is a placeholder for the legacy
-/// path, not a fallback, unless the session really asked for the pattern.
-fn linux_bridge_composes_native_sources(
-    use_encoder_bridge: bool,
-    params: &StartSessionParams,
-) -> bool {
-    cfg!(target_os = "linux") && use_encoder_bridge && !params.sources.test_pattern
 }
 
 async fn resolve_primary_camera_video_input(
@@ -15984,6 +16034,8 @@ async fn await_recording_camera_cadence_ready(
     // Record click to wait for the 250 ms diagnostics ticker to refill it.
     let mut started_at = Instant::now();
     let mut restarted = false;
+    // What the forced restart answered: the dead-end check below reads it.
+    let mut restart_status: Option<crate::protocol::PreviewCameraStatus> = None;
 
     loop {
         // Prefer the live capture window (instant verdict); fall back to the
@@ -16056,6 +16108,36 @@ async fn await_recording_camera_cadence_ready(
             return Ok(());
         }
 
+        // The restart was the one remedy. A camera that answered it with
+        // "not connected", "no permission" or "failed", and sends no frame,
+        // has nothing left to wait for: refuse now. The owner's log has this
+        // twice (11-17, 11-18): the restart answered device-missing in 11 ms
+        // and the click then hung for the whole 10 s warm-up budget.
+        if let Some(restart_status) = restart_status.as_ref()
+            && !camera_frames_fresh(frame_age_ms)
+        {
+            let current = crate::preview_camera::preview_camera_status(state).await;
+            if let Some(dead_end) = camera_restart_dead_end(restart_status, &current) {
+                let message = camera_restart_dead_end_message(&dead_end.state);
+                state.emit_log(
+                    "warn",
+                    format!(
+                        "The camera restart before recording reached a dead end (state {:?}, {}); refusing the start without waiting out the warm-up budget.",
+                        dead_end.state,
+                        dead_end.message.as_deref().unwrap_or("no message")
+                    ),
+                );
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Error,
+                    "recording-camera-cadence-timeout",
+                    message,
+                );
+                bail!(message);
+            }
+        }
+
         // Remediate before refusing: a long-lived capture session can drift
         // into bursty delivery (classic Cam Link behavior after hours of
         // uptime) while still previewing fine — nothing else in the app ever
@@ -16082,8 +16164,9 @@ async fn await_recording_camera_cadence_ready(
             );
             let stop = crate::preview_camera::begin_preview_camera_stop(state).await;
             let _ = crate::preview_camera::finish_preview_camera_stop(stop).await;
-            let _ =
-                crate::preview_camera::start_preview_camera(state.clone(), restart_params).await;
+            restart_status = Some(
+                crate::preview_camera::start_preview_camera(state.clone(), restart_params).await,
+            );
             reset_preview_camera_capture_timings(state).await;
             // The fresh session earns a fresh clock with a warm-up-sized budget.
             started_at = Instant::now();
@@ -16136,6 +16219,58 @@ async fn await_recording_camera_cadence_ready(
         }
 
         sleep(RECORDING_CAMERA_CADENCE_READY_POLL).await;
+    }
+}
+
+fn camera_frames_fresh(frame_age_ms: Option<u64>) -> bool {
+    frame_age_ms.is_some_and(|age| age <= RECORDING_CAMERA_CADENCE_MAX_FRAME_AGE_MS)
+}
+
+/// A camera state that sends no frames and has no start under way.
+fn camera_state_is_dead_end(state: &PreviewCameraState) -> bool {
+    matches!(
+        state,
+        PreviewCameraState::DeviceMissing
+            | PreviewCameraState::PermissionNeeded
+            | PreviewCameraState::Failed
+    )
+}
+
+/// The status that says the forced restart cannot bring the camera back, or
+/// none while a wait can still pay off.
+///
+/// The camera's own state wins: a later start that is live or under way (a
+/// re-plug) is waited for, and a later dead end is one. `Disconnected` says
+/// nothing is starting, so the restart's own answer decides: the Windows
+/// start refuses a missing device without publishing a status.
+fn camera_restart_dead_end<'a>(
+    restart: &'a crate::protocol::PreviewCameraStatus,
+    current: &'a crate::protocol::PreviewCameraStatus,
+) -> Option<&'a crate::protocol::PreviewCameraStatus> {
+    match current.state {
+        PreviewCameraState::Live | PreviewCameraState::Starting => None,
+        PreviewCameraState::DeviceMissing
+        | PreviewCameraState::PermissionNeeded
+        | PreviewCameraState::Failed => Some(current),
+        PreviewCameraState::Disconnected => {
+            camera_state_is_dead_end(&restart.state).then_some(restart)
+        }
+    }
+}
+
+/// The refusal the start RPC returns, which Studio shows as it is. The
+/// camera's own status message stays in the log: it can name a device.
+fn camera_restart_dead_end_message(state: &PreviewCameraState) -> &'static str {
+    match state {
+        PreviewCameraState::DeviceMissing => {
+            "Recording startup blocked before encoding: the camera is not connected. It stopped sending video and could not be restarted. Reconnect it or choose another camera in Sources, then try again."
+        }
+        PreviewCameraState::PermissionNeeded => {
+            "Recording startup blocked before encoding: Videorc is not allowed to use the camera. Allow camera access for Videorc in your system settings, then try again."
+        }
+        _ => {
+            "Recording startup blocked before encoding: the camera stopped sending video and could not be restarted. Reconnect it or choose another camera in Sources, then try again."
+        }
     }
 }
 
@@ -31426,6 +31561,35 @@ impl StreamHealthAccumulator {
     }
 }
 
+/// Plan 218 S2: `stream.health` says what the stream sends. With a recording
+/// FFmpeg's `bitrate=` / `total_size=` describe the recording file, so the
+/// stream encoder's measured figures replace them (the diagnostics carry the
+/// recording's under their own names). Without one FFmpeg's first output is
+/// the stream's `fifo`-wrapped RTMP leg, for which it prints `N/A`: the
+/// stream encoder's figures fill what FFmpeg left empty, so a stream-only
+/// session no longer reports a delivering leg with no bitrate. Where nothing
+/// measures the stream (the raw-frame bridge, whose encoding FFmpeg does),
+/// they stay `None`.
+fn stream_health_with_measured_stream_output(
+    stream_health: &mut StreamHealth,
+    diagnostic_stats: &crate::protocol::DiagnosticStats,
+    progress_describes_recording: bool,
+) {
+    // A window over no encoded bytes measured nothing: the raw-frame bridge
+    // reports 0 kbps because FFmpeg, not the bridge, encodes.
+    let measured_total_bytes = (diagnostic_stats.stream_output_total_bytes > 0)
+        .then_some(diagnostic_stats.stream_output_total_bytes);
+    let measured_bitrate_kbps = diagnostic_stats
+        .stream_measured_bitrate_kbps
+        .filter(|_| measured_total_bytes.is_some());
+    if progress_describes_recording || stream_health.bitrate_kbps.is_none() {
+        stream_health.bitrate_kbps = measured_bitrate_kbps;
+    }
+    if progress_describes_recording || stream_health.total_bytes.is_none() {
+        stream_health.total_bytes = measured_total_bytes;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn publish_pending_ffmpeg_stream_health(
     state: &AppState,
@@ -31473,14 +31637,11 @@ async fn publish_pending_ffmpeg_stream_health(
         *diagnostics = next.clone();
         next
     };
-    // Plan 218 S2: `stream.health` says what the stream sends. FFmpeg's
-    // figures described the recording file; the stream encoder's replace
-    // them (the diagnostics carry the recording's under their own names).
-    if progress_describes_recording {
-        stream_health.bitrate_kbps = diagnostic_stats.stream_measured_bitrate_kbps;
-        stream_health.total_bytes = (diagnostic_stats.stream_output_total_bytes > 0)
-            .then_some(diagnostic_stats.stream_output_total_bytes);
-    }
+    stream_health_with_measured_stream_output(
+        &mut stream_health,
+        &diagnostic_stats,
+        progress_describes_recording,
+    );
     state.emit_event(
         "diagnostics.stats",
         apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
@@ -41525,6 +41686,78 @@ mod tests {
         assert!(args.contains(&"video=USB Camera".to_string()));
     }
 
+    /// PH-10: `base_params` names FFmpeg devices a lookup would resolve to
+    /// screen 3 and camera 0. A request the bridge carries must come back
+    /// without them, which is the proof the device listing did not run.
+    #[tokio::test]
+    async fn a_bridge_session_start_skips_the_ffmpeg_device_lookup() {
+        let params = base_params(true, false);
+        assert!(!compositor_encoder_bridge_ruled_out(&params));
+
+        let (capture, ffmpeg_devices_resolved) =
+            session_start_capture_inputs("ffmpeg", &params).await;
+
+        assert!(!ffmpeg_devices_resolved);
+        assert_eq!(capture.video, VideoInput::TestPattern);
+        assert!(capture.camera_index.is_none());
+        assert_eq!(
+            capture.microphone,
+            Some(MicrophoneInput::AvFoundation { index: 1 }),
+            "the microphone needs no device listing and is resolved as before"
+        );
+    }
+
+    /// A 4K60 recording is the shipping profile outside the bridge envelope:
+    /// its legacy graph opens the devices through FFmpeg, so they are looked
+    /// up at the start as before.
+    #[tokio::test]
+    async fn a_legacy_session_start_still_looks_up_its_ffmpeg_devices() {
+        let mut four_k_sixty = base_params(true, false);
+        four_k_sixty.output.video = VideoSettings {
+            preset: VideoPreset::Record4k60Experimental,
+            width: 3840,
+            height: 2160,
+            fps: 60,
+            bitrate_kbps: 50_000,
+        };
+        assert!(compositor_encoder_bridge_ruled_out(&four_k_sixty));
+
+        let (capture, ffmpeg_devices_resolved) =
+            session_start_capture_inputs("ffmpeg", &four_k_sixty).await;
+
+        assert!(ffmpeg_devices_resolved);
+        assert_eq!(capture.video, VideoInput::MacScreen { index: 3 });
+        assert_eq!(capture.camera_index, Some(0));
+        assert_eq!(
+            capture.microphone,
+            Some(MicrophoneInput::AvFoundation { index: 1 })
+        );
+    }
+
+    /// The safety net behind the skip: a legacy graph chosen for a start that
+    /// skipped the lookup gets its devices before FFmpeg's arguments are
+    /// built, and keeps the microphone route the start has set up by then.
+    #[tokio::test]
+    async fn a_legacy_graph_never_starts_on_the_bridge_placeholder() {
+        assert!(legacy_graph_lacks_ffmpeg_devices(false, false));
+        assert!(!legacy_graph_lacks_ffmpeg_devices(false, true));
+        assert!(!legacy_graph_lacks_ffmpeg_devices(true, false));
+        assert!(!legacy_graph_lacks_ffmpeg_devices(true, true));
+
+        let params = base_params(true, false);
+        let mut capture = capture_inputs_without_ffmpeg_devices(&params);
+        let session_bus = MicrophoneInput::SessionPcm {
+            fifo_path: PathBuf::from("videorc-test-session-audio.fifo"),
+        };
+        capture.microphone = Some(session_bus.clone());
+
+        resolve_ffmpeg_devices(&mut capture, "ffmpeg", &params).await;
+
+        assert_eq!(capture.video, VideoInput::MacScreen { index: 3 });
+        assert_eq!(capture.camera_index, Some(0));
+        assert_eq!(capture.microphone, Some(session_bus));
+    }
+
     #[tokio::test]
     async fn camera_only_resolves_camera_as_video_input() {
         let mut params = base_params(true, false);
@@ -45669,6 +45902,148 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
                 .any(|event| event.code == "recording-camera-cadence-degraded"),
             "proceeding on a jittery camera must leave a warning in the session record"
         );
+    }
+
+    /// PH-11 (owner log, 11-17 and 11-18): the camera had stopped sending
+    /// frames, the forced restart answered "device missing" in 11 ms, and
+    /// Record then hung for the whole 10 s warm-up budget before refusing.
+    /// The restart's answer now ends the wait.
+    #[tokio::test]
+    async fn cadence_barrier_refuses_at_once_when_the_restart_finds_no_camera() {
+        let state = test_state();
+        {
+            let mut diagnostics = state.diagnostics.lock().await;
+            diagnostics.preview_camera_sample_pts_gap_p95_ms = Some(40.7);
+            diagnostics.preview_camera_capture_gap_p95_ms = Some(41.7);
+            diagnostics.preview_camera_frame_age_ms = Some(5_000);
+            diagnostics.preview_camera_source_fps = None;
+        }
+        let requirements = CompositorStartupSourceRequirements {
+            require_real_source: true,
+            require_camera_source: true,
+            require_screen_source: false,
+        };
+        // An id no platform's camera start accepts: the restart answers
+        // "device missing" without touching a real device.
+        let restart = crate::protocol::PreviewCameraStartParams {
+            sources: crate::protocol::SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: Some("camera:not-a-videorc-source".to_string()),
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: crate::protocol::default_layout_settings(),
+            video: default_video_settings(),
+            ffmpeg_path: None,
+        };
+
+        let started = Instant::now();
+        let result = await_recording_camera_cadence_ready(
+            &state,
+            "session-camera-gone",
+            30,
+            requirements,
+            Some(restart),
+        )
+        .await;
+        let waited = started.elapsed();
+
+        let message = result
+            .expect_err("a camera that is not connected must refuse the start")
+            .to_string();
+        assert_eq!(
+            message,
+            camera_restart_dead_end_message(&PreviewCameraState::DeviceMissing)
+        );
+        assert!(message.contains("the camera is not connected"), "{message}");
+        assert_eq!(
+            crate::preview_camera::preview_camera_status(&state)
+                .await
+                .state,
+            PreviewCameraState::DeviceMissing
+        );
+        // Before: the 1.2 s that precedes the restart plus the whole 10 s
+        // budget after it. Now: the restart, then one 25 ms poll.
+        assert!(
+            waited >= RECORDING_CAMERA_CADENCE_RESTART_AFTER,
+            "the one restart is still tried first: {waited:?}"
+        );
+        let old_wait =
+            RECORDING_CAMERA_CADENCE_RESTART_AFTER + RECORDING_CAMERA_CADENCE_RESTARTED_TIMEOUT;
+        assert!(
+            waited < old_wait / 2,
+            "the refusal must not wait out the warm-up budget: {waited:?}"
+        );
+    }
+
+    #[test]
+    fn camera_restart_dead_end_follows_the_camera_then_the_restart_answer() {
+        let status = |state: PreviewCameraState| {
+            let mut status = crate::preview_camera::initial_preview_camera_state()
+                .status
+                .clone();
+            status.state = state;
+            status
+        };
+        let dead_ends = [
+            PreviewCameraState::DeviceMissing,
+            PreviewCameraState::PermissionNeeded,
+            PreviewCameraState::Failed,
+        ];
+
+        for dead_end in &dead_ends {
+            // The camera's own dead end ends the wait, whatever the restart said.
+            for restart in [PreviewCameraState::Live, PreviewCameraState::Starting] {
+                let (restart, current) = (status(restart), status(dead_end.clone()));
+                assert_eq!(
+                    camera_restart_dead_end(&restart, &current).map(|status| &status.state),
+                    Some(dead_end)
+                );
+            }
+            // A start that is live or under way since (a re-plug) is waited for.
+            for current in [PreviewCameraState::Live, PreviewCameraState::Starting] {
+                let (restart, current) = (status(dead_end.clone()), status(current));
+                assert!(camera_restart_dead_end(&restart, &current).is_none());
+            }
+            // Windows refuses a missing device without publishing a status:
+            // the slot stays Disconnected and the restart's answer decides.
+            let (restart, current) = (
+                status(dead_end.clone()),
+                status(PreviewCameraState::Disconnected),
+            );
+            assert_eq!(
+                camera_restart_dead_end(&restart, &current).map(|status| &status.state),
+                Some(dead_end)
+            );
+        }
+        // A restart that is still starting, or was not admitted, keeps the
+        // warm-up budget: a capture card's first frame takes 2 to 5 s.
+        for restart in [
+            PreviewCameraState::Starting,
+            PreviewCameraState::Live,
+            PreviewCameraState::Disconnected,
+        ] {
+            let (restart, current) = (status(restart), status(PreviewCameraState::Disconnected));
+            assert!(camera_restart_dead_end(&restart, &current).is_none());
+        }
+    }
+
+    #[test]
+    fn camera_restart_dead_end_messages_say_what_to_do() {
+        let missing = camera_restart_dead_end_message(&PreviewCameraState::DeviceMissing);
+        let permission = camera_restart_dead_end_message(&PreviewCameraState::PermissionNeeded);
+        let failed = camera_restart_dead_end_message(&PreviewCameraState::Failed);
+
+        assert!(missing.contains("not connected") && missing.contains("Sources"));
+        assert!(permission.contains("not allowed to use the camera"));
+        assert!(failed.contains("could not be restarted") && failed.contains("Sources"));
+        for message in [missing, permission, failed] {
+            // The family prefix every startup refusal carries, and no
+            // internals: the old line quoted a stale "sample PTS p95".
+            assert!(message.starts_with("Recording startup blocked before encoding: "));
+            assert!(!message.contains("PTS") && !message.contains("p95"));
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -54181,6 +54556,55 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
                 "non-finite or negative progress must not cross the diagnostics contract: {line}"
             );
         }
+    }
+
+    #[test]
+    fn stream_health_takes_the_measured_stream_bitrate_when_ffmpeg_prints_none() {
+        let health = |bitrate_kbps: Option<f64>, total_bytes: Option<u64>| StreamHealth {
+            session_id: "session".to_string(),
+            fps: Some(30.0),
+            dropped_frames: Some(0),
+            speed: Some(1.0),
+            bitrate_kbps,
+            total_bytes,
+            duplicated_frames: Some(0),
+            created_at: "2026-11-21T00:00:00Z".to_string(),
+        };
+        let mut measured = crate::diagnostics::idle_diagnostics();
+        measured.stream_measured_bitrate_kbps = Some(5_950.0);
+        measured.stream_output_total_bytes = 40_000;
+
+        // Stream only: FFmpeg's first output is the fifo RTMP leg (`N/A`).
+        let mut stream_only = health(None, None);
+        stream_health_with_measured_stream_output(&mut stream_only, &measured, false);
+        assert_eq!(stream_only.bitrate_kbps, Some(5_950.0));
+        assert_eq!(stream_only.total_bytes, Some(40_000));
+
+        // A figure FFmpeg did print for the stream stays.
+        let mut printed = health(Some(6_010.0), Some(50_000));
+        stream_health_with_measured_stream_output(&mut printed, &measured, false);
+        assert_eq!(printed.bitrate_kbps, Some(6_010.0));
+        assert_eq!(printed.total_bytes, Some(50_000));
+
+        // With a recording FFmpeg's figures are the file's: always replaced.
+        let mut recording = health(Some(12_000.0), Some(90_000));
+        stream_health_with_measured_stream_output(&mut recording, &measured, true);
+        assert_eq!(recording.bitrate_kbps, Some(5_950.0));
+        assert_eq!(recording.total_bytes, Some(40_000));
+
+        // Nothing measures the stream (the raw-frame bridge reports 0 kbps
+        // over no bytes): still unknown, never 0 or the recording file's.
+        let mut unmeasured = crate::diagnostics::idle_diagnostics();
+        unmeasured.stream_measured_bitrate_kbps = Some(0.0);
+        let mut raw = health(None, None);
+        stream_health_with_measured_stream_output(&mut raw, &unmeasured, false);
+        assert_eq!((raw.bitrate_kbps, raw.total_bytes), (None, None));
+        let mut raw_recording = health(Some(12_000.0), Some(90_000));
+        stream_health_with_measured_stream_output(&mut raw_recording, &unmeasured, true);
+        assert_eq!(
+            (raw_recording.bitrate_kbps, raw_recording.total_bytes),
+            (None, None)
+        );
     }
 
     #[test]

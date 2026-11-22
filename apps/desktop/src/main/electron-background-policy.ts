@@ -5,7 +5,6 @@ export type ElectronWindowRole =
   | 'comments'
   | 'captions'
   | 'proof-surface'
-  | 'scene-hud'
 
 export type ElectronBackgroundPolicy = 'scoped' | 'legacy-unthrottled'
 
@@ -20,17 +19,13 @@ export function electronBackgroundPolicyFromEnv(
 /**
  * Main owns capture orchestration and the detached preview must keep presenting
  * while occluded. Auxiliary text windows consume pushed snapshots and can use
- * Chromium's normal background scheduling policy. The key HUD (plan 231 D20)
- * times its hold and fade while another app is in front, so it is never
- * throttled either.
+ * Chromium's normal background scheduling policy.
  */
 export function backgroundThrottlingFor(
   role: ElectronWindowRole,
   policy: ElectronBackgroundPolicy = 'scoped'
 ): boolean {
-  return (
-    policy !== 'legacy-unthrottled' && role !== 'main' && role !== 'preview' && role !== 'scene-hud'
-  )
+  return policy !== 'legacy-unthrottled' && role !== 'main' && role !== 'preview'
 }
 
 /**

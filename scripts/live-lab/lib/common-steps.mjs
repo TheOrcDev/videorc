@@ -79,10 +79,15 @@ export function goLiveSteps({
       deadlineMs: 120_000,
       async run(ctx) {
         const confirmedAt = Date.now()
-        await ctx.ui.confirmGoLive()
+        // A non-Public YouTube Go Live asks "Go live unlisted?" first (#1316).
+        const { privacyConfirm } = await ctx.ui.confirmGoLive({ privacy: ctx.run.privacy })
+        if (privacyConfirm) {
+          ctx.log(`Go Live privacy step "${privacyConfirm.title}": ${privacyConfirm.answered}.`)
+        }
         const outcome = await ctx.ui.readGoLiveOutcome({ deadlineMs: 100_000 })
-        // Start latency for the verdict (plan 166 "Start latency" signal).
-        return { ...outcome, liveAfterMs: Date.now() - confirmedAt }
+        // Start latency for the verdict (plan 166 "Start latency" signal):
+        // from the Go live click, the privacy step included.
+        return { ...outcome, privacyConfirm, liveAfterMs: Date.now() - confirmedAt }
       },
       expect: (outcome) =>
         outcome.outcome === 'live' || `${outcome.outcome}: ${outcome.reason ?? ''}`

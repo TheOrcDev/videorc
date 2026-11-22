@@ -1866,6 +1866,40 @@ impl MetalSceneCompositor {
         }
     }
 
+    /// Let go of every zero-copy capture import this compositor still holds,
+    /// and flush the CoreVideo cache behind them. A leg that stops composing
+    /// for a while (the Preview's program leg while another leg already
+    /// shows its picture) would otherwise keep the last camera and screen
+    /// frames it drew for as long as it is parked, and each of those is a
+    /// buffer of the capture's own small pool. Byte-uploaded textures, the
+    /// keyed slots, the keyed cameras, the pipelines and the target ring all
+    /// stay, so the next compose allocates nothing and imports the frames of
+    /// its own tick as any compose does.
+    ///
+    /// Call it between composes only: every compose returns after
+    /// `waitUntilCompleted`, so no command buffer reads these textures here.
+    /// Returns how many imports it released (0 on every call after the first).
+    pub fn release_capture_imports(&mut self) -> usize {
+        let mut released = 0;
+        for slot in &mut self.source_textures {
+            if slot
+                .as_ref()
+                .is_some_and(|cached| !matches!(cached.backing, CachedSourceBacking::ByteUpload))
+            {
+                *slot = None;
+                released += 1;
+            }
+        }
+        if released > 0 {
+            self.source_retention_capacity.set(0);
+            if let Some(cache) = self.source_texture_cache.as_mut() {
+                cache.cache.flush(0);
+                cache.flush_policy.record_flush();
+            }
+        }
+        released
+    }
+
     /// Composite `sources` over `background` into an offscreen BGRA8 target and read back.
     pub fn compose_bgra(
         &mut self,
@@ -5240,6 +5274,109 @@ mod tests {
         assert_eq!(held.source_import_stats.camera_capture_texture_reuses, 1);
         assert_eq!(held.source_import_stats.screen_capture_texture_reuses, 0);
         assert_eq!(held.source_import_stats.import_failures, 0);
+        assert_eq!(compositor.cached_source_cvmetal_texture_count(), 1);
+    }
+
+    /// A parked leg lets go of the capture frame it drew last and keeps
+    /// everything else: the ring is not reallocated, and the next compose
+    /// imports its frame again.
+    #[test]
+    fn release_capture_imports_drops_the_held_capture_frame_and_keeps_the_ring() {
+        assert!(
+            source_zerocopy_enabled(),
+            "focused CVMetal cache tests require VIDEORC_ZEROCOPY_SOURCES enabled"
+        );
+        let mut compositor = MetalSceneCompositor::new()
+            .expect("focused CVMetal cache tests require a Metal compositor");
+        let (w, h) = (16usize, 16usize);
+        let pixel_buffer = make_iosurface_bgra_pixel_buffer(w, h)
+            .expect("focused CVMetal cache tests require local IOSurface allocation");
+        let fallback_bgra = vec![0u8; w * h * 4];
+        let overlay_bgra = vec![255u8; w * h * 4];
+        let capture_key = GpuSourceContentKey {
+            namespace: 4,
+            revision: 77,
+            variant: 0,
+        };
+        let make_sources = || {
+            let capture = GpuSource {
+                kind: GpuSourceKind::Camera,
+                bgra: &fallback_bgra,
+                content_key: Some(capture_key),
+                iosurface: None,
+                pixel_buffer: Some(&pixel_buffer),
+                texture: None,
+                width: w,
+                height: h,
+                dest: [0.0, 0.0, 1.0, 1.0],
+                crop: [0.0; 4],
+                mirror: false,
+                mask: SourceMask::None,
+                blend: false,
+                chroma_key: None,
+                camera_look: None,
+                corners: None,
+                sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                opacity: 1.0,
+            };
+            // A byte-uploaded overlay above it: no capture storage behind it.
+            let overlay = GpuSource {
+                kind: GpuSourceKind::Image,
+                bgra: &overlay_bgra,
+                content_key: None,
+                pixel_buffer: None,
+                blend: true,
+                ..capture
+            };
+            [capture, overlay]
+        };
+
+        compositor
+            .compose_target_with_timings(w, h, [0.0, 0.0, 0.0, 1.0], &make_sources())
+            .expect("first compose");
+        assert_eq!(compositor.cached_source_cvmetal_texture_count(), 1);
+        assert_eq!(compositor.cached_source_texture_count(), 2);
+        assert_eq!(
+            compositor
+                .retention_snapshot()
+                .cached_capture_source_imports_live_count,
+            1
+        );
+        let ring_before = compositor.target_ring_iosurface_ids();
+
+        assert_eq!(compositor.release_capture_imports(), 1);
+        assert_eq!(compositor.cached_source_cvmetal_texture_count(), 0);
+        assert_eq!(
+            compositor.cached_source_texture_count(),
+            1,
+            "the byte-uploaded overlay texture stays"
+        );
+        assert_eq!(
+            compositor
+                .retention_snapshot()
+                .cached_capture_source_imports_live_count,
+            0
+        );
+        assert_eq!(compositor.texture_cache_imports_since_flush(), Some(0));
+        assert_eq!(
+            compositor.target_ring_iosurface_ids(),
+            ring_before,
+            "the target ring is kept"
+        );
+        assert_eq!(
+            compositor.release_capture_imports(),
+            0,
+            "nothing is left to release"
+        );
+
+        let resumed = compositor
+            .compose_target_with_timings(w, h, [0.0, 0.0, 0.0, 1.0], &make_sources())
+            .expect("the compose after the park");
+        assert_eq!(
+            resumed.source_import_stats.cvpixelbuffer_frames, 1,
+            "the held frame is imported again, not read from a released texture"
+        );
+        assert_eq!(resumed.source_import_stats.import_failures, 0);
         assert_eq!(compositor.cached_source_cvmetal_texture_count(), 1);
     }
 

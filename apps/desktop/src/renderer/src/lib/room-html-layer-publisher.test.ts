@@ -3,13 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionState, RoomEvent, Track, type Room } from 'livekit-client'
 import {
   htmlLayerFade,
-  htmlLayerFrameUrl,
   htmlLaneLayers,
   RoomHtmlLayerPublisher,
   type HtmlLayerSurface,
   type RoomHtmlLayerStatus
 } from './room-html-layer-publisher'
 import { CAPABILITY_TOPIC } from './room-media-v2'
+import { htmlLayerFrameUrl } from './room-html-layer-url'
 import { HTML_LAYER_TOPIC, htmlLayerTrackName } from '../../../shared/cloud-html-layer'
 import type { HtmlBannerPlacement } from '../../../shared/cloud-graphics'
 

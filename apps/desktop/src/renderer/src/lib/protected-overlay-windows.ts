@@ -1,5 +1,4 @@
 import type { DeviceList, StreamManagerHideMethod } from '@/lib/backend'
-import type { SceneHudWindowState } from '../../../shared/scene-hud'
 
 export type ProtectedOverlayWindow = {
   open: boolean
@@ -21,20 +20,6 @@ export function streamManagerProtectedOverlayWindow(state: {
     open: state.open && state.hiddenFromStream,
     ...(typeof state.windowId === 'number' ? { windowId: state.windowId } : {})
   }
-}
-
-/**
- * The key HUD (plan 231 D20) as a protected overlay window: on macOS its
- * window id joins every capture's exclusion list whenever the window exists
- * (main keeps it on screen so the filter can find it). Windows leaves it out
- * through content protection, and Linux has none, so neither lists it.
- */
-export function sceneHudProtectedOverlayWindow(
-  state: Pick<SceneHudWindowState, 'method' | 'windowId'> | null | undefined
-): ProtectedOverlayWindow {
-  return state?.method === 'capture-filter' && typeof state.windowId === 'number'
-    ? { open: true, windowId: state.windowId }
-    : { open: false }
 }
 
 /** Plan 230: viewers really do not see the Stream Manager. The switch alone

@@ -12,7 +12,7 @@ import {
   cloudMarkerSchema,
   cloudMarkerLookupSchema
 } from './cloud-markers'
-import { parseGraphicsSource, type GraphicsSource } from './cloud-graphics'
+import { readGraphicsSource, type GraphicsSource } from './cloud-graphics'
 import { parseManagedOutputProfile } from './cloud-output-profile'
 import type {
   CloudArchiveView,
@@ -639,7 +639,12 @@ export interface BackendRpcMethodMap {
   'cloud.room.token.refresh': BackendRpcDefinition<undefined, CloudRoomTokenAnswer>
   /** Renderer-only bounded raster source for the explicitly enabled public output. */
   'cloud.graphics.snapshot': BackendRpcDefinition<
-    { showId: string; known?: string },
+    {
+      showId: string
+      known?: string
+      /** PH-05: hashes of the pictures held from the last answer; those come back without `png`. */
+      held?: string[]
+    },
     GraphicsSource
   >
   /**
@@ -7655,12 +7660,15 @@ const runtimeContracts = {
     params: objectSchema(
       {
         showId: stringSchema({ minLength: 1, maxLength: 128 }),
-        known: optionalSchema(stringSchema({ maxLength: 64 }))
+        known: optionalSchema(stringSchema({ maxLength: 64 })),
+        held: optionalSchema(
+          arraySchema(stringSchema({ minLength: 64, maxLength: 64 }), { maxLength: 32 })
+        )
       },
       { allowUnknown: false }
     ),
     result: runtimeSchema('a bounded public graphics snapshot', (value, path) => {
-      const result = parseGraphicsSource(value)
+      const result = readGraphicsSource(value)
       if (!result) throw new RuntimeSchemaError(path, 'a public graphics snapshot')
       return result
     })

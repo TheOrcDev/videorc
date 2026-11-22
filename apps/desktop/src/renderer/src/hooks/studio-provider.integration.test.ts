@@ -926,6 +926,9 @@ class StudioBackend {
         return nativePreviewStatus(params.bounds as PreviewSurfaceBounds)
       case 'preview.surface.take_native_host_commands':
         throw new Error('Renderer attempted to use the main-only native host command drain.')
+      // A start answers with the source's status, as the backend does; the
+      // launch start runs at once since PH-08, inside most tests.
+      case 'preview.camera.start':
       case 'preview.camera.status':
         return {
           state: 'failed',
@@ -934,6 +937,7 @@ class StudioBackend {
           droppedFrames: 0,
           updatedAt: now
         }
+      case 'preview.screen.start':
       case 'preview.screen.status':
         return {
           state: 'failed',
@@ -1920,6 +1924,18 @@ function Probe({ observe }: { observe: (value: StudioObservation) => void }): nu
     [audio, banners, captions, chat, cloud, core, diagnostics, observe, recording, replay]
   )
   return null
+}
+
+/** Runs only 0 ms timers (setTimeout is faked) while real time passes for
+ * module loads and socket replies, until `done` or `withinMs` runs out. */
+async function turnZeroTimersUntil(done: () => boolean, withinMs = 3_000): Promise<void> {
+  const deadline = performance.now() + withinMs
+  while (!done() && performance.now() < deadline) {
+    await act(async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      await vi.advanceTimersByTimeAsync(0)
+    })
+  }
 }
 
 async function mountStudioProvider(
@@ -11256,6 +11272,274 @@ describe('real StudioProvider lifecycle', () => {
     )
   }, 15_000)
 
+  // 0.36.1 release pass: the backend commits a session.start's scene as the
+  // session starts, and the Studio's scene takes a layout transaction only
+  // once its proof lands. A ring start between the two put the old scene back
+  // (an agent's background answered "Silk is on the scene" over a scene
+  // without one; a Freeform entry kept the previous layout's rectangle).
+  const ringScene = (command: BackendCommand | undefined) =>
+    (command?.params as { scene?: Scene } | undefined)?.scene
+  const liveBackgroundId = (background: unknown) =>
+    (background as Scene['background'] | null | undefined)?.live?.id
+  const isLayoutApply = (command: BackendCommand) =>
+    (command.method === 'scene.layout.apply_preview' ||
+      command.method === 'scene.layout.apply_live') &&
+    (command.params as { simulcastLeg?: boolean }).simulcastLeg !== true
+
+  it('holds the Clips ring start while a scene change awaits its proof, then starts it with that scene', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.cameraId === 'camera:1' &&
+        latest()?.core.recordBlockedReason == null
+    )
+    await act(async () => latest()!.core.applyCameraPreset({ layoutPreset: 'screen-only' }))
+    await waitForObservation(
+      () => latest()?.core.captureConfig.layout.layoutPreset === 'screen-only' && canSaveScene()
+    )
+
+    const commandsBefore = backend.sentCommands.length
+    const releaseApply = backend.deferResponse('scene.layout.apply_preview', BACKEND_RESPONSE)
+    await act(async () => {
+      void latest()!.core.applyLiveBackground('silk')
+    })
+    await waitForObservation(() => backend.sentCommands.slice(commandsBefore).some(isLayoutApply))
+    await act(async () => latest()!.replay.setEnabled(true))
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    })
+    expect(
+      backend.sentCommands
+        .slice(commandsBefore)
+        .some((command) => command.method === 'session.start')
+    ).toBe(false)
+
+    await act(async () => {
+      releaseApply()
+      await Promise.resolve()
+    })
+    await waitForObservation(() =>
+      backend.sentCommands
+        .slice(commandsBefore)
+        .some((command) => command.method === 'session.start')
+    )
+    const start = backend.sentCommands
+      .slice(commandsBefore)
+      .find((command) => command.method === 'session.start')
+    expect(liveBackgroundId(ringScene(start)?.background)).toBe('silk')
+    await waitForObservation(() => latest()?.recording.recording.replayOnly === true)
+  }, 15_000)
+
+  it('runs a scene change asked for while the Clips ring starts once the start answers, on its session', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.cameraId === 'camera:1' &&
+        latest()?.core.recordBlockedReason == null
+    )
+    await act(async () => latest()!.core.applyCameraPreset({ layoutPreset: 'screen-only' }))
+    await waitForObservation(
+      () => latest()?.core.captureConfig.layout.layoutPreset === 'screen-only' && canSaveScene()
+    )
+
+    const releaseStart = backend.deferResponse('session.start', BACKEND_RESPONSE)
+    await act(async () => latest()!.replay.setEnabled(true))
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'session.start')
+    )
+    const commandsBefore = backend.sentCommands.length
+    let committed: Promise<unknown> | undefined
+    await act(async () => {
+      committed = Promise.resolve(latest()!.core.applyLiveBackground('silk'))
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+    })
+    // Sent now, it would commit before the start's scene commit and be lost.
+    expect(backend.sentCommands.slice(commandsBefore).some(isLayoutApply)).toBe(false)
+
+    await act(async () => {
+      releaseStart()
+      await Promise.resolve()
+    })
+    await waitForObservation(() => backend.sentCommands.slice(commandsBefore).some(isLayoutApply))
+    const apply = backend.sentCommands.slice(commandsBefore).find(isLayoutApply)!
+    // The ring's session is running now: the change goes to it.
+    expect(apply.method).toBe('scene.layout.apply_live')
+    expect(liveBackgroundId((apply.params as { background?: unknown }).background)).toBe('silk')
+    await act(async () => {
+      await committed
+    })
+    await waitForObservation(() => liveBackgroundId(backend.currentScene.background) === 'silk')
+  }, 15_000)
+
+  // The same race on a Record or Go Live click (after #1640): their
+  // session.start carries the scene as the Studio held it too, and the
+  // backend commits it as the session starts.
+  const mountForStartRace = async (start: 'record' | 'live') => {
+    const backend = new StudioBackend()
+    if (start === 'live') enableYouTubeOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.cameraId === 'camera:1' &&
+        latest()?.core.recordBlockedReason == null
+    )
+    await act(async () => latest()!.core.applyCameraPreset({ layoutPreset: 'screen-only' }))
+    await waitForObservation(
+      () => latest()?.core.captureConfig.layout.layoutPreset === 'screen-only' && canSaveScene()
+    )
+    if (start === 'live') {
+      // Go Live's checks run and its dialog opens before the scene work: the
+      // click under test is the dialog's Go Live.
+      await act(async () => {
+        const current = latest()!.core.captureConfig
+        latest()!.core.setCaptureConfig({
+          ...youtubeOauthStreamCaptureConfig(),
+          layout: current.layout,
+          sources: current.sources
+        })
+      })
+      await waitForObservation(
+        () =>
+          latest()?.core.streamOutputTopologyPreflight.state === 'ready' &&
+          latest()?.core.startBlockedReason === null
+      )
+      await act(async () => {
+        await latest()!.core.startSession()
+      })
+      await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    }
+    const clickStart = (): Promise<unknown> =>
+      start === 'live' ? latest()!.core.confirmGoLive() : latest()!.core.startRecording()
+    return { backend, latest, clickStart }
+  }
+  const sessionStarts = (commands: BackendCommand[]) =>
+    commands.filter((command) => command.method === 'session.start')
+
+  it.each(['record', 'live'] as const)(
+    'holds a %s start while a scene change awaits its proof, then starts it with that scene',
+    async (start) => {
+      const { backend, latest, clickStart } = await mountForStartRace(start)
+      const commandsBefore = backend.sentCommands.length
+      const releaseApply = backend.deferResponse('scene.layout.apply_preview', BACKEND_RESPONSE)
+      await act(async () => {
+        void latest()!.core.applyLiveBackground('silk')
+      })
+      await waitForObservation(() => backend.sentCommands.slice(commandsBefore).some(isLayoutApply))
+      let started: Promise<unknown> | undefined
+      await act(async () => {
+        started = clickStart()
+      })
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 400))
+      })
+      // Sent now, it would commit the scene the change is leaving.
+      expect(sessionStarts(backend.sentCommands.slice(commandsBefore))).toHaveLength(0)
+
+      await act(async () => {
+        releaseApply()
+        await Promise.resolve()
+      })
+      await waitForObservation(
+        () => sessionStarts(backend.sentCommands.slice(commandsBefore)).length > 0
+      )
+      const sent = sessionStarts(backend.sentCommands.slice(commandsBefore))
+      expect(sent).toHaveLength(1)
+      expect(liveBackgroundId(ringScene(sent[0])?.background)).toBe('silk')
+      await act(async () => {
+        await started
+      })
+      await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    },
+    20_000
+  )
+
+  it.each(['record', 'live'] as const)(
+    'runs a scene change asked for while a %s start is in flight once the start answers, on its session',
+    async (start) => {
+      const { backend, latest, clickStart } = await mountForStartRace(start)
+      const releaseStart = backend.deferResponse('session.start', BACKEND_RESPONSE)
+      let started: Promise<unknown> | undefined
+      await act(async () => {
+        started = clickStart()
+      })
+      await waitForObservation(() => sessionStarts(backend.sentCommands).length > 0)
+      const commandsBefore = backend.sentCommands.length
+      let committed: Promise<unknown> | undefined
+      await act(async () => {
+        committed = Promise.resolve(latest()!.core.applyLiveBackground('silk'))
+      })
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      })
+      // Sent now, it would commit before the start's scene commit and be lost.
+      expect(backend.sentCommands.slice(commandsBefore).some(isLayoutApply)).toBe(false)
+
+      await act(async () => {
+        releaseStart()
+        await Promise.resolve()
+      })
+      await waitForObservation(() => backend.sentCommands.slice(commandsBefore).some(isLayoutApply))
+      const apply = backend.sentCommands.slice(commandsBefore).find(isLayoutApply)!
+      // The session is running now: the change goes to it.
+      expect(apply.method).toBe('scene.layout.apply_live')
+      expect(liveBackgroundId((apply.params as { background?: unknown }).background)).toBe('silk')
+      await act(async () => {
+        await Promise.all([committed, started])
+      })
+      await waitForObservation(() => liveBackgroundId(backend.currentScene.background) === 'silk')
+    },
+    20_000
+  )
+
   it('records a live camera Off as intent that survives confirmation', async () => {
     const backend = new StudioBackend()
     backend.recordingState = 'recording'
@@ -19658,6 +19942,179 @@ describe('real StudioProvider lifecycle', () => {
     expect(backend.commands.some((command) => command.method === 'performance.check.run')).toBe(
       false
     )
+  })
+
+  // PH-08 (11-20): the launch batch gates health, devices and the Preview
+  // start, so it reads the backend's entitlements as they stand. The
+  // revalidation with the Videorc API (up to 10 s) runs beside it.
+  it('commits health and devices while the launch entitlement revalidation is out (PH-08)', async () => {
+    const backend = new StudioBackend()
+    backend.entitlements = premiumEntitlements
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const releaseRefresh = backend.deferResponse('entitlements.refresh', DEFAULT_BASIC_ENTITLEMENTS)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+
+    await waitForObservation(
+      () =>
+        latest()?.core.health?.ffmpeg.available === true &&
+        (latest()?.core.deviceList.devices.length ?? 0) > 0
+    )
+    expect(backend.sentCommands.some((command) => command.method === 'entitlements.refresh')).toBe(
+      true
+    )
+    expect(latest()?.core.entitlements?.tier).toBe('premium')
+
+    // The revalidation answers with the effective snapshot: it commits.
+    await act(async () => {
+      releaseRefresh()
+    })
+    await waitForObservation(() => latest()?.core.entitlements?.tier === 'basic')
+  })
+
+  it('keeps an entitlement event newer than the launch read over the late revalidation (PH-08)', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const releaseStaleBasic = backend.deferResponse(
+      'entitlements.refresh',
+      DEFAULT_BASIC_ENTITLEMENTS
+    )
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.health?.ffmpeg.available === true)
+    expect(latest()?.core.entitlements?.tier).toBe('basic')
+
+    await act(async () => {
+      backend.pushEvent('entitlements.updated', premiumEntitlements)
+    })
+    await waitForObservation(() => latest()?.core.entitlements?.tier === 'premium')
+    await act(async () => {
+      releaseStaleBasic()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+
+    expect(latest()?.core.entitlements?.tier).toBe('premium')
+  })
+
+  // PH-08 (11-20): a connection's first Preview start runs once the working
+  // sources are reconciled with the launch's device list; the 500 ms debounce
+  // is for the changes after it. Only setTimeout is faked and no timer is
+  // advanced past 0 ms; real time still passes for the launch's lazy modules.
+  it('starts the launch Preview without the 500 ms debounce (PH-08)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      nativePreview: {
+        getWindowState: () => previewWindowClosed,
+        drainHostCommands: async () => nativePreviewStatus()
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const previewSourceCommands = (): number =>
+      backend.sentCommands.filter((command) =>
+        /^preview\.(camera|screen)\.(start|stop)$/.test(command.method)
+      ).length
+    // The shell's report once it decided setup stays closed.
+    function DecidedShell(): null {
+      const { setFirstRunSetupOpen } = useStudioShell()
+      useEffect(() => setFirstRunSetupOpen(false), [setFirstRunSetupOpen])
+      return null
+    }
+    root = await mountStudioProvider(testDom.container, () => {}, createElement(DecidedShell))
+
+    await turnZeroTimersUntil(() => previewSourceCommands() > 0)
+
+    expect(previewSourceCommands()).toBeGreaterThan(0)
+  })
+
+  // PH-08: first-run setup holds preview, and the shell decides whether it
+  // opens a few renders after runtime info. The launch start waits for that
+  // decision, so a 0 ms start never beats setup opening.
+  it('holds the launch Preview start until the shell decides first-run setup (PH-08)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      nativePreview: {
+        getWindowState: () => previewWindowClosed,
+        drainHostCommands: async () => nativePreviewStatus()
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const previewSourceStarts = (): number =>
+      backend.sentCommands.filter((command) =>
+        /^preview\.(camera|screen)\.start$/.test(command.method)
+      ).length
+    const observations: StudioObservation[] = []
+    let shell: ReturnType<typeof useStudioShell> | undefined
+    function ShellProbe(): null {
+      const value = useStudioShell()
+      useEffect(() => {
+        shell = value
+      }, [value])
+      return null
+    }
+    root = await mountStudioProvider(
+      testDom.container,
+      (value) => {
+        observations.push(value)
+      },
+      createElement(ShellProbe)
+    )
+    await turnZeroTimersUntil(
+      () =>
+        observations.at(-1)?.core.wsStatus === 'connected' &&
+        observations.at(-1)?.core.health?.ffmpeg.available === true &&
+        backend.sentCommands.some((command) => command.method === 'devices.list'),
+      1_000
+    )
+    await turnZeroTimersUntil(() => previewSourceStarts() > 0, 500)
+    expect(previewSourceStarts()).toBe(0)
+
+    await act(async () => shell?.setFirstRunSetupOpen(true))
+    await turnZeroTimersUntil(() => previewSourceStarts() > 0, 500)
+    expect(previewSourceStarts()).toBe(0)
+
+    await act(async () => shell?.setFirstRunSetupOpen(false))
+    await turnZeroTimersUntil(() => previewSourceStarts() > 0)
+    expect(previewSourceStarts()).toBeGreaterThan(0)
   })
 
   it('keeps a newer Basic entitlement event over a stale Premium focus response', async () => {

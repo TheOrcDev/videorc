@@ -18,55 +18,20 @@ describe('window capture protection policy', () => {
     'comments',
     'notes',
     'captions',
-    'proof-surface',
-    'scene-hud'
+    'proof-surface'
   ]
 
   it('protects ONLY the notes teleprompter by default, on every platform', () => {
     // Owner call, 2026-08-19: comments and captions are part of the show and
-    // must stay visible in recordings; notes is the one private window. The
-    // key HUD (plan 231 D20) is never part of the show: content protection
-    // wherever it shows (macOS and Windows), the filter too on macOS.
+    // must stay visible in recordings; notes is the one private window.
     for (const platform of ['darwin', 'win32', 'linux'] as const) {
       for (const role of everyRole) {
-        const expected = role === 'notes' || (role === 'scene-hud' && platform !== 'linux')
-        expect(videorcWindowRequiresCaptureProtection(role, platform)).toBe(expected)
+        expect(videorcWindowRequiresCaptureProtection(role, platform)).toBe(role === 'notes')
         expect(
           videorcWindowRequiresCaptureProtection(role, platform, { hiddenFromStream: false })
-        ).toBe(expected)
+        ).toBe(role === 'notes')
       }
     }
-  })
-
-  it('leaves the key HUD out of every capture: content protection on macOS and Windows', () => {
-    const window = { setContentProtection: vi.fn() }
-    expect(applyVideorcWindowCaptureProtection(window, 'scene-hud', { platform: 'win32' })).toEqual(
-      { state: 'protected', protected: true }
-    )
-    expect(window.setContentProtection).toHaveBeenCalledWith(true)
-    // macOS too: Videorc's own ScreenCaptureKit filter leaves it out of the
-    // stream, but a cloud room's Chromium screen share knows no filter.
-    const mac = { setContentProtection: vi.fn() }
-    expect(applyVideorcWindowCaptureProtection(mac, 'scene-hud', { platform: 'darwin' })).toEqual({
-      state: 'protected',
-      protected: true
-    })
-    expect(mac.setContentProtection).toHaveBeenCalledWith(true)
-    // Linux shows no HUD.
-    const linux = { setContentProtection: vi.fn() }
-    expect(applyVideorcWindowCaptureProtection(linux, 'scene-hud', { platform: 'linux' })).toEqual({
-      state: 'not-required',
-      protected: false
-    })
-    // A failure is reported, so the HUD can fail closed.
-    const failing = {
-      setContentProtection: vi.fn(() => {
-        throw new Error('affinity refused')
-      })
-    }
-    expect(
-      applyVideorcWindowCaptureProtection(failing, 'scene-hud', { platform: 'win32' })
-    ).toEqual({ state: 'failed', protected: false, reason: 'affinity refused' })
   })
 
   // Plan 215 D6: Hide from stream. Windows hides the Stream Manager through
@@ -83,11 +48,7 @@ describe('window capture protection policy', () => {
       for (const role of everyRole) {
         expect(
           videorcWindowRequiresCaptureProtection(role, platform, { hiddenFromStream: true })
-        ).toBe(
-          role === 'notes' ||
-            (role === 'comments' && platform === 'win32') ||
-            (role === 'scene-hud' && platform !== 'linux')
-        )
+        ).toBe(role === 'notes' || (role === 'comments' && platform === 'win32'))
       }
     }
     const window = { setContentProtection: vi.fn() }

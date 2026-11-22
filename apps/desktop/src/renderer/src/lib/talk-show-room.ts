@@ -62,8 +62,8 @@ import {
   type RoomSceneStatus,
   type SceneContent
 } from './room-scene-publisher'
+import { createPrivateScreen } from './room-private-screen'
 import {
-  createPrivateScreen,
   roomScreenPrivacy,
   privacyTrackName,
   privacyObservationMatches,
@@ -1463,7 +1463,16 @@ export class TalkShowRoomClient {
       .on(RoomEvent.ParticipantNameChanged, () => this.#publish())
       .on(RoomEvent.ConnectionQualityChanged, () => this.#publish())
       .on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
-        this.#speaking = new Set(speakers.map((speaker) => speaker.identity))
+        // LiveKit fires this on every speaker update, level-only ones too
+        // (re-sorted by level), and the host is one of the speakers. Only
+        // which guests talk reaches the snapshot, so anything else publishes
+        // nothing: each publish re-renders every room reader (PH-12).
+        const local = room.localParticipant.identity
+        const next = new Set(
+          speakers.map((speaker) => speaker.identity).filter((identity) => identity !== local)
+        )
+        if (sameMembers(next, this.#speaking)) return
+        this.#speaking = next
         this.#publish()
       })
       .on(RoomEvent.Reconnecting, () => {
@@ -2322,6 +2331,12 @@ export class TalkShowRoomClient {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function sameMembers(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false
+  for (const member of a) if (!b.has(member)) return false
+  return true
 }
 
 /** For the tests: the publication shapes the snapshot reads. */

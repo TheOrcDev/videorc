@@ -42,8 +42,10 @@ care. Screenshots via public URLs only.
 `windows`, `linux`, or a combination. Every new entry must declare it
 explicitly. Entries written before platform metadata was added omit the field
 and are interpreted as `platforms: [macos]`, so the existing macOS history
-remains valid. A Linux Alpha entry is withheld from macOS and Windows
-publication until a Linux promote path exists. A Windows Alpha entry starts
+remains valid. The Linux in-app update notice reads every entry whose
+`platforms` include `linux`, so a published Linux release needs its entry. An
+entry that names only Linux is withheld from macOS and Windows publication.
+A Windows Alpha entry starts
 like this:
 
 ```markdown

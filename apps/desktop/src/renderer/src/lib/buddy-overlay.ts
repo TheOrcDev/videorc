@@ -557,7 +557,7 @@ export async function renderCloudAvatar(params: {
   canvas: { width: number; height: number }
   rect: OverlayRect
 }): Promise<import('../../../shared/cloud-avatar').AvatarLayer[]> {
-  const { avatarHash } = await import('../../../shared/cloud-avatar')
+  const { avatarHash, base64Bytes } = await import('../../../shared/cloud-avatar')
   const measure = buddyCanvasMeasurer()
   if (!measure) throw new Error('Avatar canvas unavailable')
   const layout = layoutBuddyOverlay({
@@ -657,8 +657,8 @@ export async function renderCloudAvatar(params: {
         kind === 'avatar' ? image : null
       )
       const png = await canvasToBase64Png(canvas)
-      if (!png) throw new Error('Avatar raster failed')
-      const bytes = Uint8Array.from(atob(png), (c) => c.charCodeAt(0))
+      const bytes = png ? base64Bytes(png) : null
+      if (!png || !bytes) throw new Error('Avatar raster failed')
       layers.push({
         kind,
         rect: {

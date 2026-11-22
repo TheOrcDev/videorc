@@ -6,10 +6,10 @@ use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 const ASSET_BASE64_MAX: usize = 1024 * 1024;
@@ -18,6 +18,46 @@ const ASSET_BASE64_MAX: usize = 1024 * 1024;
 pub struct SnapshotParams {
     pub show_id: String,
     pub known: Option<String>,
+    /// PH-05: hashes of the pictures the renderer holds from the last
+    /// answer. A layer with one of them is answered by reference (no `png`).
+    /// Absent (a probe, an older caller): every picture goes whole.
+    #[serde(default)]
+    pub held: Vec<String>,
+}
+
+/// PH-05: two orientations of seven layers; a longer list is not ours.
+const HELD_MAX: usize = 32;
+
+/// The hashes a caller may be answered by reference for. Too many, or
+/// anything that is not a SHA-256 in lower-case hex: none, so everything
+/// goes whole.
+fn held_hashes(held: Vec<String>) -> HashSet<String> {
+    let valid = held.len() <= HELD_MAX
+        && held.iter().all(|hash| {
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        });
+    if valid {
+        held.into_iter().collect()
+    } else {
+        HashSet::new()
+    }
+}
+
+/// PH-05: a layer's asset as it goes to the renderer. A picture the renderer
+/// holds goes by reference (`{hash, width, height}`): with live captions on
+/// every caption update is a full answer, and each one carried every banner's
+/// base64 again, up to 1 MiB a picture, to be cloned, serialized, parsed and
+/// decoded for nothing.
+fn wire_asset(asset: &Value, held: &HashSet<String>) -> Value {
+    match asset["hash"].as_str() {
+        Some(hash) if held.contains(hash) => {
+            json!({"hash": hash, "width": asset["width"], "height": asset["height"]})
+        }
+        _ => asset.clone(),
+    }
 }
 
 /// Room output facts are separate from the native capture session. Open-only
@@ -105,15 +145,19 @@ fn png(image: image::RgbaImage) -> Result<Value> {
 fn rect(x: usize, y: usize, w: usize, h: usize, canvas: (u32, u32)) -> Value {
     json!({"x":x as f64/canvas.0 as f64,"y":y as f64/canvas.1 as f64,"w":w as f64/canvas.0 as f64,"h":h as f64/canvas.1 as f64})
 }
+#[allow(clippy::too_many_arguments)]
 fn overlay(
+    rasters: &BannerRasterCache,
+    held: &HashSet<String>,
     layer: &CaptionOverlay,
-    kind: &str,
-    canvas: (u32, u32),
+    kind: OverlayKind,
+    index: usize,
     placement: OverlayRect,
     stream: bool,
     recording: bool,
     expires: Option<i64>,
 ) -> Result<Value> {
+    let canvas = ROOM_CANVASES[index];
     let (source, x, y, width) = crate::overlay_layout::overlay_blit_layout(
         layer.width as usize,
         layer.height as usize,
@@ -123,13 +167,46 @@ fn overlay(
         0,
     );
     let height = (layer.height as usize).min(canvas.1 as usize - y);
-    let image = image::RgbaImage::from_raw(layer.width, layer.height, layer.rgba.as_ref().clone())
-        .ok_or_else(|| anyhow::anyhow!("Invalid static raster"))?;
-    let cropped =
-        image::imageops::crop_imm(&image, source as u32, 0, width as u32, height as u32).to_image();
+    let asset = rasters.overlay_asset(
+        kind,
+        index,
+        layer,
+        (source as u32, width as u32, height as u32),
+    )?;
+    let kind = kind.label();
     Ok(
-        json!({"id":kind,"kind":kind,"rect":rect(x,y,width,height,canvas),"asset":png(cropped)?,"opacity":1,"fade":null,"expiresAt":expires,"stream":stream,"recording":recording}),
+        json!({"id":kind,"kind":kind,"rect":rect(x,y,width,height,canvas),"asset":wire_asset(&asset, held),"opacity":1,"fade":null,"expiresAt":expires,"stream":stream,"recording":recording}),
     )
+}
+
+/// The three raster overlays of a room canvas. Each has one slot per canvas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayKind {
+    Caption,
+    Chat,
+    Highlight,
+}
+
+impl OverlayKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Caption => "caption",
+            Self::Chat => "chat",
+            Self::Highlight => "highlight",
+        }
+    }
+}
+
+/// PH-05: the finished asset of one overlay slot (kind and canvas), and what
+/// it was built from. The source is named by its pixel buffer itself, not by
+/// a revision number: the weak pointer keeps that address ours without
+/// keeping the pixels, so the same address is the same, unchanged buffer.
+struct OverlayRasterEntry {
+    rgba: Weak<Vec<u8>>,
+    size: (u32, u32),
+    /// `(source_left, width, height)` of the crop.
+    crop: (u32, u32, u32),
+    asset: Arc<Value>,
 }
 
 /// PERF-02: at most this many finished banner assets stay cached: four banners
@@ -159,8 +236,11 @@ struct BannerRasterEntries {
 #[derive(Default)]
 struct BannerRasterCacheInner {
     entries: Mutex<BannerRasterEntries>,
+    /// PH-05: caption, chat and highlight on the two room canvases.
+    overlays: Mutex<[Option<OverlayRasterEntry>; 6]>,
     decodes: AtomicU64,
     encodes: AtomicU64,
+    overlay_encodes: AtomicU64,
 }
 
 /// PERF-02: the lossless PNG assets of image banners, reused across full
@@ -187,7 +267,54 @@ impl BannerRasterCache {
         if cache.room.as_ref() != Some(&room) {
             cache.entries.clear();
             cache.room = Some(room);
+            *self.overlays() = Default::default();
         }
+    }
+
+    fn overlays(&self) -> std::sync::MutexGuard<'_, [Option<OverlayRasterEntry>; 6]> {
+        self.0
+            .overlays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// PH-05: the cropped PNG asset of a caption bar, chat box or comment
+    /// card on one room canvas. A caption update forces a full answer about
+    /// twice a second while someone speaks; the chat box and the card had not
+    /// changed, and were cropped, PNG-encoded, hashed and base64-encoded
+    /// again each time. One entry per slot; errors are never cached.
+    fn overlay_asset(
+        &self,
+        kind: OverlayKind,
+        index: usize,
+        layer: &CaptionOverlay,
+        crop: (u32, u32, u32),
+    ) -> Result<Arc<Value>> {
+        let slot = kind as usize * ROOM_CANVASES.len() + index;
+        let size = (layer.width, layer.height);
+        if let Some(entry) = self.overlays()[slot].as_ref()
+            && std::ptr::eq(entry.rgba.as_ptr(), Arc::as_ptr(&layer.rgba))
+            && entry.size == size
+            && entry.crop == crop
+        {
+            return Ok(Arc::clone(&entry.asset));
+        }
+        let image =
+            image::RgbaImage::from_raw(layer.width, layer.height, layer.rgba.as_ref().clone())
+                .ok_or_else(|| anyhow::anyhow!("Invalid static raster"))?;
+        self.0.overlay_encodes.fetch_add(1, Ordering::Relaxed);
+        let (source, width, height) = crop;
+        let asset = Arc::new(png(image::imageops::crop_imm(
+            &image, source, 0, width, height,
+        )
+        .to_image())?);
+        self.overlays()[slot] = Some(OverlayRasterEntry {
+            rgba: Arc::downgrade(&layer.rgba),
+            size,
+            crop,
+            asset: Arc::clone(&asset),
+        });
+        Ok(asset)
     }
 
     fn get(&self, key: &BannerRasterKey) -> Option<Arc<Value>> {
@@ -283,6 +410,36 @@ impl BannerRasterCache {
     fn len(&self) -> usize {
         self.lock().entries.len()
     }
+
+    #[cfg(test)]
+    fn overlay_encodes(&self) -> u64 {
+        self.0.overlay_encodes.load(Ordering::Relaxed)
+    }
+}
+
+/// Whether the caption source a snapshot was built from still holds once its
+/// rasters are done. A newer caption frame of the same source, on the same
+/// outputs, only moves the expiry: the snapshot is as current as one that
+/// finished a moment before that frame arrived, and the next poll carries the
+/// newer bar. A source that ended, another source, or a changed output is
+/// refused: that bar must never reach an output it no longer belongs on.
+///
+/// The snapshot is an observation, so it runs beside `cloud.speech.overlay`
+/// (several frames a second while someone speaks). Comparing the expiry too
+/// would refuse most snapshots built during speech.
+fn caption_source_held(
+    built_from: &Option<crate::captions::cloud_host::Presentation>,
+    now: &Option<crate::captions::cloud_host::Presentation>,
+) -> bool {
+    match (built_from, now) {
+        (None, None) => true,
+        (Some(built), Some(now)) => {
+            built.session == now.session
+                && built.stream == now.stream
+                && built.recording == now.recording
+        }
+        _ => false,
+    }
 }
 
 pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value> {
@@ -356,6 +513,7 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
     }
     let rasters = state.cloud_graphics_rasters.clone();
     let room = (params.show_id.clone(), generation);
+    let held = held_hashes(params.held);
     rasters.enter_room(&room.0, room.1);
     let content = tokio::task::spawn_blocking(move || -> Result<Value> {
         let mut lanes = [Vec::<Value>::new(), Vec::new()];
@@ -439,7 +597,7 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
                         .min(i64::MAX as u128) as i64;
                 lanes[index].push(json!({
                     "id": format!("banner:{}", banner.id), "kind": "banner",
-                    "rect": rect(x, y, w, h, canvas), "asset": (*assets[index]).clone(),
+                    "rect": rect(x, y, w, h, canvas), "asset": wire_asset(&assets[index], &held),
                     "opacity": banner.opacity.clamp(0.0, 1.0),
                     "fade": {"at": fade_at.max(1), "from": layer.fade.from, "to": layer.fade.to},
                     "expiresAt": if layer.fade.hides() { Some(fade_at + 200) } else { None },
@@ -447,7 +605,7 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
                 }));
             }
         }
-        for (index, canvas) in [(1920, 1080), (1080, 1920)].into_iter().enumerate() {
+        for (index, canvas) in ROOM_CANVASES.into_iter().enumerate() {
             if let (Some(caption), Some(presentation)) = (&captions[index], &caption_presentation) {
                 let placement = if index == 0 {
                     layout.captions.horizontal
@@ -455,9 +613,11 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
                     layout.captions.vertical
                 };
                 let mut layer = overlay(
+                    &rasters,
+                    &held,
                     caption,
-                    "caption",
-                    canvas,
+                    OverlayKind::Caption,
+                    index,
                     placement,
                     // Live captions alone decides (owner, 2026-11-20): the
                     // renderer's presentation carries its outputs, and the
@@ -508,9 +668,11 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
                 && (layout.chat.show_on_stream || layout.chat.show_in_recording)
             {
                 lanes[index].push(overlay(
+                    &rasters,
+                    &held,
                     chat,
-                    "chat",
-                    canvas,
+                    OverlayKind::Chat,
+                    index,
                     if index == 0 {
                         layout.chat.horizontal
                     } else {
@@ -527,9 +689,11 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
                 && let Some(card) = &cards[index]
             {
                 lanes[index].push(overlay(
+                    &rasters,
+                    &held,
                     card,
-                    "highlight",
-                    canvas,
+                    OverlayKind::Highlight,
+                    index,
                     if index == 0 {
                         layout.highlight.horizontal
                     } else {
@@ -559,7 +723,10 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
         }))
     })
     .await??;
-    if crate::captions::cloud_host::presentation(state).await != expected_caption {
+    if !caption_source_held(
+        &expected_caption,
+        &crate::captions::cloud_host::presentation(state).await,
+    ) {
         bail!("Caption source changed during graphic preparation")
     }
     let runtime = crate::cloud_show::lock(&state.cloud_show);
@@ -574,6 +741,45 @@ pub async fn snapshot(state: &AppState, params: SnapshotParams) -> Result<Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_newer_caption_frame_of_the_same_source_keeps_the_snapshot() {
+        use crate::captions::cloud_host::Presentation;
+        let built = Some(Presentation {
+            session: "host-1".into(),
+            expires_at: 1_000,
+            stream: true,
+            recording: false,
+        });
+        let newer = |change: fn(&mut Presentation)| {
+            let mut next = built.clone().unwrap();
+            change(&mut next);
+            Some(next)
+        };
+        assert!(caption_source_held(&built, &built));
+        assert!(caption_source_held(&None, &None));
+        // The next frame while the rasters were prepared: only the expiry moved.
+        assert!(caption_source_held(
+            &built,
+            &newer(|next| next.expires_at = 4_000)
+        ));
+        // Captions ended, started, moved to another source or another output.
+        assert!(!caption_source_held(&built, &None));
+        assert!(!caption_source_held(&None, &built));
+        assert!(!caption_source_held(
+            &built,
+            &newer(|next| next.session = "guests-1".into())
+        ));
+        assert!(!caption_source_held(
+            &built,
+            &newer(|next| next.stream = false)
+        ));
+        assert!(!caption_source_held(
+            &built,
+            &newer(|next| next.recording = true)
+        ));
+    }
+
     #[test]
     fn public_png_keeps_straight_alpha_and_bounds() {
         let source =
@@ -810,6 +1016,223 @@ mod tests {
             ));
         }
         println!("PERF-02 {}", rows.join("\nPERF-02 "));
+    }
+
+    /// A caption bar, chat box or card as its slot holds it.
+    /// Pixels of their own per `seed` that compress like a real overlay (bands
+    /// of flat colour, as a caption bar or a chat box): byte noise at caption
+    /// size would exceed the lossless asset budget, which no real overlay does.
+    fn raster(width: u32, height: u32, seed: u8) -> CaptionOverlay {
+        let rgba = (0..width * height)
+            .flat_map(|n| {
+                let (x, y) = (n % width, n / width);
+                [
+                    (x / 7) as u8 ^ seed,
+                    (y / 3) as u8,
+                    seed.wrapping_mul(37),
+                    255,
+                ]
+            })
+            .collect::<Vec<_>>();
+        CaptionOverlay {
+            bgra: Arc::new(Vec::new()),
+            rgba: Arc::new(rgba),
+            width,
+            height,
+            placement: crate::captions::OverlayPlacement::new(
+                None,
+                crate::captions::CaptionOverlayPosition::Bottom,
+            ),
+            revision: 1,
+        }
+    }
+
+    /// The asset exactly as the snapshot built it before PH-05.
+    fn uncropped(layer: &CaptionOverlay, crop: (u32, u32, u32)) -> Value {
+        let image =
+            image::RgbaImage::from_raw(layer.width, layer.height, layer.rgba.as_ref().clone())
+                .unwrap();
+        png(image::imageops::crop_imm(&image, crop.0, 0, crop.1, crop.2).to_image()).unwrap()
+    }
+
+    #[test]
+    fn an_unchanged_chat_box_is_encoded_once_while_the_caption_changes() {
+        let cache = BannerRasterCache::default();
+        cache.enter_room("show-1", 1);
+        let chat = raster(64, 32, 1);
+        let crop = (0, 64, 32);
+        let first = cache
+            .overlay_asset(OverlayKind::Chat, 0, &chat, crop)
+            .unwrap();
+        assert_eq!(*first, uncropped(&chat, crop), "byte-identical asset");
+        // Sixty caption updates: a new caption bar each, the same chat box.
+        for seed in 0..60 {
+            let caption = raster(48, 8, seed);
+            let asset = cache
+                .overlay_asset(OverlayKind::Caption, 0, &caption, (0, 48, 8))
+                .unwrap();
+            assert_eq!(*asset, uncropped(&caption, (0, 48, 8)));
+            // The slot hands the same pixel buffer out again (a clone of it).
+            let again = cache
+                .overlay_asset(OverlayKind::Chat, 0, &chat.clone(), crop)
+                .unwrap();
+            assert!(Arc::ptr_eq(&again, &first));
+        }
+        assert_eq!(cache.overlay_encodes(), 61, "one chat box, sixty captions");
+    }
+
+    #[test]
+    fn new_pixels_another_crop_canvas_or_room_never_serve_a_stale_overlay() {
+        let cache = BannerRasterCache::default();
+        cache.enter_room("show-1", 1);
+        let card = raster(64, 32, 1);
+        let first = cache
+            .overlay_asset(OverlayKind::Highlight, 0, &card, (0, 64, 32))
+            .unwrap();
+        // The same slot and size, other pixels (a new buffer).
+        let other = raster(64, 32, 2);
+        let second = cache
+            .overlay_asset(OverlayKind::Highlight, 0, &other, (0, 64, 32))
+            .unwrap();
+        assert_ne!(second["hash"], first["hash"]);
+        assert_eq!(*second, uncropped(&other, (0, 64, 32)));
+        // The same pixels, cropped differently (the placement moved).
+        let cropped = cache
+            .overlay_asset(OverlayKind::Highlight, 0, &other, (8, 48, 32))
+            .unwrap();
+        assert_eq!(*cropped, uncropped(&other, (8, 48, 32)));
+        assert_eq!(cache.overlay_encodes(), 3);
+        // The other canvas and the other kinds have slots of their own.
+        cache
+            .overlay_asset(OverlayKind::Highlight, 1, &other, (8, 48, 32))
+            .unwrap();
+        cache
+            .overlay_asset(OverlayKind::Chat, 0, &other, (8, 48, 32))
+            .unwrap();
+        assert_eq!(cache.overlay_encodes(), 5);
+        cache
+            .overlay_asset(OverlayKind::Highlight, 0, &other, (8, 48, 32))
+            .unwrap();
+        assert_eq!(cache.overlay_encodes(), 5);
+        // A buffer that was dropped never matches a later one, even if the
+        // allocator hands its address out again.
+        drop(other);
+        for seed in 3..40 {
+            let fresh = raster(64, 32, seed);
+            let asset = cache
+                .overlay_asset(OverlayKind::Chat, 0, &fresh, (8, 48, 32))
+                .unwrap();
+            assert_eq!(*asset, uncropped(&fresh, (8, 48, 32)));
+        }
+        // A new room generation starts empty.
+        let before = cache.overlay_encodes();
+        let kept = raster(64, 32, 99);
+        cache
+            .overlay_asset(OverlayKind::Chat, 0, &kept, (0, 64, 32))
+            .unwrap();
+        cache.enter_room("show-1", 2);
+        cache
+            .overlay_asset(OverlayKind::Chat, 0, &kept, (0, 64, 32))
+            .unwrap();
+        assert_eq!(cache.overlay_encodes(), before + 2);
+        // A raster that cannot be an image is an error every time, and
+        // leaves the slot as it was.
+        let mut broken = raster(64, 32, 5);
+        broken.width = 65;
+        for _ in 0..2 {
+            assert!(
+                cache
+                    .overlay_asset(OverlayKind::Chat, 0, &broken, (0, 64, 32))
+                    .is_err()
+            );
+        }
+        cache
+            .overlay_asset(OverlayKind::Chat, 0, &kept, (0, 64, 32))
+            .unwrap();
+        assert_eq!(cache.overlay_encodes(), before + 2);
+    }
+
+    #[test]
+    fn a_held_picture_is_answered_by_reference_and_any_other_whole() {
+        let asset = png(image::RgbaImage::from_pixel(
+            4,
+            2,
+            image::Rgba([1, 2, 3, 255]),
+        ))
+        .unwrap();
+        let hash = asset["hash"].as_str().unwrap().to_string();
+        // No list (a probe, an older caller): whole, exactly as before.
+        assert_eq!(wire_asset(&asset, &held_hashes(Vec::new())), asset);
+        assert_eq!(
+            wire_asset(&asset, &held_hashes(vec!["0".repeat(64)])),
+            asset
+        );
+        assert_eq!(
+            wire_asset(&asset, &held_hashes(vec![hash.clone()])),
+            json!({"hash": hash, "width": 4, "height": 2})
+        );
+        // A list that is not ours is ignored as a whole: everything goes whole.
+        for bad in [
+            vec![hash.clone(), "not-a-hash".to_string()],
+            vec![hash.clone(), hash.to_uppercase()],
+            vec![hash.clone(); HELD_MAX + 1],
+        ] {
+            assert!(held_hashes(bad).is_empty());
+        }
+        let params: SnapshotParams = serde_json::from_value(json!({"showId": "show-1"})).unwrap();
+        assert!(params.held.is_empty() && params.known.is_none());
+        let params: SnapshotParams =
+            serde_json::from_value(json!({"showId": "show-1", "held": [hash]})).unwrap();
+        assert_eq!(params.held.len(), 1);
+    }
+
+    /// PH-05 measurement (run with `-- --ignored --nocapture`): 61 caption
+    /// updates with a chat box and a comment card on both room canvases, as
+    /// before (crop + PNG + SHA-256 + base64 of all three every time) and
+    /// with the overlay cache. Same process, same pixels.
+    #[test]
+    #[ignore = "timing measurement"]
+    fn measure_overlay_raster_work_per_minute_of_caption_updates() {
+        let chat = raster(560, 720, 1);
+        let card = raster(900, 220, 2);
+        let captions = (0..61).map(|n| raster(1400, 180, n)).collect::<Vec<_>>();
+        let build = |cache: &BannerRasterCache, caption: &CaptionOverlay| {
+            for (index, canvas) in ROOM_CANVASES.into_iter().enumerate() {
+                for (kind, layer) in [
+                    (OverlayKind::Caption, caption),
+                    (OverlayKind::Chat, &chat),
+                    (OverlayKind::Highlight, &card),
+                ] {
+                    let width = layer.width.min(canvas.0);
+                    std::hint::black_box(
+                        cache
+                            .overlay_asset(kind, index, layer, (0, width, layer.height))
+                            .unwrap(),
+                    );
+                }
+            }
+        };
+        let mut rows = Vec::new();
+        for round in 0..3 {
+            let started = Instant::now();
+            for caption in &captions {
+                build(&BannerRasterCache::default(), caption);
+            }
+            let before = started.elapsed();
+            let cache = BannerRasterCache::default();
+            let started = Instant::now();
+            for caption in &captions {
+                build(&cache, caption);
+            }
+            let after = started.elapsed();
+            rows.push(format!(
+                "round {round}: before {:.1} ms (366 encodes); after {:.1} ms ({} encodes)",
+                before.as_secs_f64() * 1000.0,
+                after.as_secs_f64() * 1000.0,
+                cache.overlay_encodes()
+            ));
+        }
+        println!("PH-05 {}", rows.join("\nPH-05 "));
     }
 
     #[test]

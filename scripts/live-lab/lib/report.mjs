@@ -128,7 +128,8 @@ export function renderReport(verdict, { chartNames = [], steps = [] } = {}) {
           'Lab quota',
           `${verdict.quota?.labUnits ?? 0} units (bundled ${verdict.quota?.bundledUnits ?? 0})`
         ],
-        ['VOD', verdict.vod ? `[${verdict.vod.videoId}](${verdict.vod.url})` : 'unknown']
+        ['VOD', verdict.vod ? `[${verdict.vod.videoId}](${verdict.vod.url})` : 'unknown'],
+        ['YouTube side', verdict.youtubeSide ?? 'unknown']
       ]
     )
   )

@@ -433,6 +433,7 @@ export function createSessionStarter({
         ledgerPaths: () => ledgerPathsFor(dirs, install.appPath),
         rootPid: async () => parts.appPid ?? (await parts.app.appPid()),
         clock,
+        sinceMs: startedAtMs,
         log
       })
       parts.backendSocket.addEventListener('message', (event) => {

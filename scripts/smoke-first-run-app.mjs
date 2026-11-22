@@ -415,10 +415,33 @@ const samePreviewSources = (before, after) =>
         before[kind].state === after[kind].state)
   )
 
-async function beginGuard(startMs = Date.now(), allowExistingSources = true) {
+// A guard the smoke opens itself (no launch time given) first lets the
+// workspace's own source starts go quiet. A capture session that just ended
+// restarts Preview about 500 ms later, and the next reload can follow at once:
+// that restart belongs to the workspace page, not to the setup about to open.
+const GUARD_QUIET_MS = 1500
+const GUARD_SETTLE_WITHIN_MS = 10000
+const WORKSPACE_SOURCE_ACTIVITY = /Capture session finalized/
+
+async function sourceStartsSettled() {
+  const deadline = Date.now() + GUARD_SETTLE_WITHIN_MS
+  for (;;) {
+    const last = appLines.findLast(
+      ({ line }) =>
+        WORKSPACE_SOURCE_ACTIVITY.test(line) || firstRunSourceStartLines([line]).length > 0
+    )
+    const quietMs = last ? Date.now() - last.at : Number.POSITIVE_INFINITY
+    if (quietMs >= GUARD_QUIET_MS || Date.now() >= deadline) return quietMs
+    await delay(Math.min(250, GUARD_QUIET_MS - quietMs))
+  }
+}
+
+async function beginGuard(startMs, allowExistingSources = true) {
+  const quietBeforeOpenMs = startMs === undefined ? await sourceStartsSettled() : null
   const previewAtOpen = await previewSnapshot()
   guard = {
-    startMs,
+    startMs: startMs ?? Date.now(),
+    quietBeforeOpenMs,
     previewAtOpen,
     allowExistingSources,
     previewIdleAtOpen: previewQuiet(previewAtOpen),
