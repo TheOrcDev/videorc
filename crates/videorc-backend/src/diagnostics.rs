@@ -2438,9 +2438,28 @@ fn collect_runtime_resource_snapshot() -> RuntimeResourceSnapshot {
     }
     #[cfg(target_os = "windows")]
     {
-        collect_windows_process_rows()
-            .map(|rows| runtime_resource_snapshot_from_rows(&rows, backend_pid))
-            .unwrap_or_default()
+        let sampled = collect_windows_process_rows();
+        let mut log = WINDOWS_SAMPLE_FAILURE_LOG
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match sampled {
+            Ok(rows) => {
+                if log.succeeded() {
+                    tracing::info!("Windows resource sampling works again");
+                }
+                runtime_resource_snapshot_from_rows(&rows, backend_pid)
+            }
+            Err(error) => {
+                // A failed sample reads as no memory and no FFmpeg processes;
+                // say so, so Diagnostics' zeros are not taken as the truth.
+                if let Some(skipped) = log.failed(std::time::Instant::now()) {
+                    tracing::warn!(
+                        "Windows resource sampling failed: {error} ({skipped} more since the last report)"
+                    );
+                }
+                RuntimeResourceSnapshot::default()
+            }
+        }
     }
     #[cfg(not(target_os = "windows"))]
     collect_ps_runtime_resource_snapshot(backend_pid)
@@ -2554,7 +2573,7 @@ fn parse_process_sample_row(line: &str) -> Option<ProcessSampleRow> {
 /// than the parent that names it. `None` when the snapshot or the backend's own
 /// row cannot be read.
 #[cfg(target_os = "windows")]
-fn collect_windows_process_rows() -> Option<Vec<ProcessSampleRow>> {
+fn collect_windows_process_rows() -> Result<Vec<ProcessSampleRow>, String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -2563,7 +2582,8 @@ fn collect_windows_process_rows() -> Option<Vec<ProcessSampleRow>> {
 
     let backend_pid = std::process::id();
     // SAFETY: a process snapshot has no preconditions; the handle is closed below.
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
+        .map_err(|error| format!("the Toolhelp process snapshot failed: {error}"))?;
     let mut listed = Vec::new();
     let mut entry = PROCESSENTRY32W {
         dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
@@ -2588,8 +2608,68 @@ fn collect_windows_process_rows() -> Option<Vec<ProcessSampleRow>> {
     // SAFETY: the snapshot handle is owned here and closed once.
     let _ = unsafe { CloseHandle(snapshot) };
 
-    let rss_kib = windows_own_working_set_bytes()? / 1024;
-    windows_tree_rows(&listed, backend_pid, rss_kib, windows_running_process_start)
+    let rss_kib = windows_own_working_set_bytes()
+        .map_err(|error| format!("reading the backend's working set failed: {error}"))?
+        / 1024;
+    windows_tree_rows(&listed, backend_pid, rss_kib, windows_running_process_start).ok_or_else(
+        || {
+            format!(
+                "the backend (pid {backend_pid}) is missing from the {} listed processes, or its start time could not be read",
+                listed.len()
+            )
+        },
+    )
+}
+
+/// The Windows sampler runs every second; a failure that persists would
+/// otherwise log every second.
+#[cfg(target_os = "windows")]
+static WINDOWS_SAMPLE_FAILURE_LOG: std::sync::Mutex<SampleFailureLog> =
+    std::sync::Mutex::new(SampleFailureLog::new());
+
+#[cfg(any(target_os = "windows", test))]
+const SAMPLE_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// When a failing resource sample is reported: the first failure at once, then
+/// at most once per [`SAMPLE_FAILURE_REPORT_INTERVAL`] with the count it held
+/// back, and one line when samples work again.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug)]
+struct SampleFailureLog {
+    last_reported: Option<std::time::Instant>,
+    held_back: u64,
+    failing: bool,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl SampleFailureLog {
+    const fn new() -> Self {
+        Self {
+            last_reported: None,
+            held_back: 0,
+            failing: false,
+        }
+    }
+
+    /// A failed sample. `Some(held back)` when it should be reported now.
+    fn failed(&mut self, now: std::time::Instant) -> Option<u64> {
+        self.failing = true;
+        if let Some(at) = self.last_reported
+            && now.saturating_duration_since(at) < SAMPLE_FAILURE_REPORT_INTERVAL
+        {
+            self.held_back += 1;
+            return None;
+        }
+        self.last_reported = Some(now);
+        Some(std::mem::take(&mut self.held_back))
+    }
+
+    /// A sample that worked. `true` when it ends a run of failures.
+    fn succeeded(&mut self) -> bool {
+        let recovered = self.failing;
+        *self = Self::new();
+        recovered
+    }
 }
 
 /// `root` and the descendants a Windows process list names, given each running
@@ -2645,7 +2725,7 @@ fn windows_tree_rows(
 
 /// The backend's working set in bytes, Windows' resident size.
 #[cfg(target_os = "windows")]
-fn windows_own_working_set_bytes() -> Option<u64> {
+fn windows_own_working_set_bytes() -> std::io::Result<u64> {
     use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
     use windows::Win32::System::Threading::GetCurrentProcess;
 
@@ -2656,7 +2736,11 @@ fn windows_own_working_set_bytes() -> Option<u64> {
     // SAFETY: the pseudo handle needs no closing, and `counters` is writable for `cb` bytes.
     let filled =
         unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
-    filled.as_bool().then_some(counters.WorkingSetSize as u64)
+    if filled.as_bool() {
+        Ok(counters.WorkingSetSize as u64)
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 /// When a still-running process started, in FILETIME ticks. `None` when it
@@ -2884,6 +2968,30 @@ mod tests {
         assert_eq!(snapshot.backend_rss_bytes, Some(2048 * 1024));
         assert_eq!(snapshot.active_ffmpeg_processes, 2);
         assert_eq!(snapshot.active_ffprobe_processes, 1);
+    }
+
+    #[test]
+    fn sample_failures_report_at_once_then_once_a_minute_and_say_when_they_end() {
+        let start = std::time::Instant::now();
+        let mut log = SampleFailureLog::new();
+        assert!(!log.succeeded(), "no failure to recover from");
+        assert_eq!(log.failed(start), Some(0), "the first failure is reported");
+        for second in 1..60 {
+            assert_eq!(log.failed(start + Duration::from_secs(second)), None);
+        }
+        assert_eq!(
+            log.failed(start + Duration::from_secs(60)),
+            Some(59),
+            "a minute on, with the failures it held back"
+        );
+        assert_eq!(log.failed(start + Duration::from_secs(61)), None);
+        assert!(log.succeeded(), "the first good sample ends the run");
+        assert!(!log.succeeded(), "and only once");
+        assert_eq!(
+            log.failed(start + Duration::from_secs(62)),
+            Some(0),
+            "a new run of failures is reported at once"
+        );
     }
 
     #[test]
