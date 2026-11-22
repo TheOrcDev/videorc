@@ -215,6 +215,8 @@ pub struct ScreenPrivacyCursor {
 pub enum ScreenFrameTime {
     /// The capture dated the frame: ScreenCaptureKit's PTS, Windows Graphics
     /// Capture's `SystemRelativeTime`, Desktop Duplication's QPC present time.
+    // The Linux portal stream doesn't date frames; only its tests build this.
+    #[cfg_attr(all(target_os = "linux", not(test)), allow(dead_code))]
     Captured(Instant),
     /// The capture did not date it (Linux PipeWire, the Windows FFmpeg
     /// pipe): only when its delivery began (the buffer dequeued, the read
