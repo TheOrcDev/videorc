@@ -10,6 +10,7 @@ import {
   publishCaptionsProblem,
   publishGlobalShortcutsProblem,
   publishOutputTooHeavy,
+  publishSidekickStatus,
   publishSourceReturn,
   publishVideorcCameraStopped,
   resolveGlobalShortcuts,
@@ -206,6 +207,27 @@ describe('devices and the app as notifications (plan 250 S7)', () => {
     })
     await store.runAction('captions', 'retry')
     expect(retry).toHaveBeenCalledTimes(1)
+  })
+
+  it("Sidekick's own failures and stops are one entry with their fix", async () => {
+    const signIn = vi.fn()
+    publishSidekickStatus(
+      { kind: 'error', title: 'Sidekick stopped: sign in again', action: 'sign-in' },
+      signIn,
+      store
+    )
+    expect(entry('sidekick')).toMatchObject({
+      tone: 'warning',
+      actions: [{ id: 'sign-in', label: 'Sign in', kind: 'fix' }]
+    })
+    await store.runAction('sidekick', 'sign-in')
+    expect(signIn).toHaveBeenCalledTimes(1)
+    publishSidekickStatus(
+      { kind: 'message', title: 'Sidekick stopped', action: null },
+      signIn,
+      store
+    )
+    expect(store.snapshot().filter((item) => item.key === 'sidekick')).toHaveLength(1)
   })
 
   it('an output that cannot carry captions says so, with no Retry to press', () => {

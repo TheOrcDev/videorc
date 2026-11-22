@@ -10,7 +10,9 @@ import type { NotificationStore } from '@/lib/notifications/store'
 import type { NotificationAction } from '@/lib/notifications/types'
 import { openOutputVideorcCamera } from '@/lib/section-doors'
 import { openSettingsTab } from '@/lib/settings-tabs'
+import type { CohostStatusToast } from '@/lib/studio-toasts'
 import { userErrorMessage } from '@/lib/user-error'
+import { openVideorcWebLink, VIDEORC_PREMIUM_URL } from '@/lib/videorc-web-links'
 import { recordUserError } from '@/lib/user-error-log'
 
 // --- Devices ----------------------------------------------------------------
@@ -189,6 +191,37 @@ export function publishCaptionsProblem(
     title: words.title,
     detail: words.description,
     actions: retry ? [{ id: 'retry', label: 'Retry', kind: 'fix', run: retry }] : []
+  })
+}
+
+/**
+ * Sidekick stopped or failed on its own: a lapse of Premium, a sign-out, a
+ * quota. One entry, with the press that fixes it.
+ */
+export function publishSidekickStatus(
+  status: CohostStatusToast,
+  signIn: () => void,
+  store: NotificationStore = notifications
+): void {
+  const actions: NotificationAction[] =
+    status.action === 'sign-in'
+      ? [{ id: 'sign-in', label: 'Sign in', kind: 'fix', run: signIn }]
+      : status.action === 'view-premium'
+        ? [
+            {
+              id: 'view-premium',
+              label: 'View Premium',
+              kind: 'door',
+              run: () => openVideorcWebLink(VIDEORC_PREMIUM_URL)
+            }
+          ]
+        : []
+  store.publish({
+    key: 'sidekick',
+    kind: 'sidekick',
+    tone: status.kind === 'message' ? 'news' : 'warning',
+    title: status.title,
+    actions
   })
 }
 

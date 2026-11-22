@@ -16348,7 +16348,12 @@ describe('real StudioProvider lifecycle', () => {
         toastSpies.warning.mock.calls.length +
         notifications.snapshot().filter((entry) => entry.kind === 'backend-error').length
       await waitForObservation(() => notices() === 1)
+      // Recording with quiet on: the entry waits behind the bell, no toast.
       expect(toastSpies.error).not.toHaveBeenCalled()
+      expect(toastSpies.warning).not.toHaveBeenCalled()
+      expect(
+        notifications.snapshot().filter((entry) => entry.kind === 'backend-error')
+      ).toHaveLength(1)
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 30))
       })

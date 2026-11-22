@@ -272,12 +272,39 @@ function isFunctionLike(node: ts.Node): boolean {
 }
 
 /** The callee shows a toast, also behind `(pressed ? reportError : reportUnasked)(…)`. */
-function isToastCallee(callee: ts.Expression, file: ts.SourceFile): boolean {
-  if (ts.isParenthesizedExpression(callee)) return isToastCallee(callee.expression, file)
+function isToastCallee(
+  callee: ts.Expression,
+  file: ts.SourceFile,
+  aliases: ReadonlySet<string> = new Set()
+): boolean {
+  if (ts.isParenthesizedExpression(callee)) return isToastCallee(callee.expression, file, aliases)
   if (ts.isConditionalExpression(callee)) {
-    return isToastCallee(callee.whenTrue, file) || isToastCallee(callee.whenFalse, file)
+    return (
+      isToastCallee(callee.whenTrue, file, aliases) ||
+      isToastCallee(callee.whenFalse, file, aliases)
+    )
   }
-  return TOAST_SITE_CALLEE.test(callee.getText(file))
+  const text = callee.getText(file)
+  return TOAST_SITE_CALLEE.test(text) || (ts.isIdentifier(callee) && aliases.has(text))
+}
+
+/** Local names for a toast: `const show = ok ? toast.success : toast.warning`. */
+function toastAliases(file: ts.SourceFile): Set<string> {
+  const aliases = new Set<string>()
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      !ts.isCallExpression(node.initializer) &&
+      isToastCallee(node.initializer, file)
+    ) {
+      aliases.add(node.name.text)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return aliases
 }
 
 /** What runs the code with no press: the innermost effect, event or timer around it. */
@@ -333,8 +360,9 @@ function toastSites(path: string, source: string): ToastSite[] {
     path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
   )
   const found: ToastSite[] = []
+  const aliases = toastAliases(file)
   const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && isToastCallee(node.expression, file)) {
+    if (ts.isCallExpression(node) && isToastCallee(node.expression, file, aliases)) {
       const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
       const owner = siteOwner(node, file)
       found.push({ path, line: line + 1, owner: owner.name, unasked: owner.unasked })
@@ -525,6 +553,8 @@ const TOAST_SITES: Record<string, number> = {
   'src/hooks/use-virtual-camera.ts > setOn': 1,
   'src/lib/audio/frame-loop.ts > tick': 1,
   'src/lib/chat-link-actions.ts > openChatLink': 1,
+  'src/lib/chat-moderation-relay.ts > error': 1,
+  'src/lib/chat-moderation-relay.ts > outcome': 1,
   'src/lib/chat-moderation-relay.ts > show': 1,
   'src/lib/cloud-notices.ts > endCloudShow': 1,
   'src/lib/cloud-notices.ts > handOffCloudShow': 2,
@@ -540,7 +570,7 @@ const TOAST_SITES: Record<string, number> = {
   'src/lib/notifications/relay.ts > applyNotificationAct': 1,
   'src/lib/replay-buffer.ts > showNothingToClip': 4,
   'src/lib/scene-transform-commit.ts > commitSceneTransform': 2,
-  'src/lib/session-runtime-recovery.ts > showBackendError': 1,
+  'src/lib/session-runtime-recovery.ts > showBackendError': 2,
   'src/lib/session-runtime-recovery.ts > showOAuthCallbackExhausted': 1,
   'src/lib/session-runtime-recovery.ts > showOAuthCallbackResult': 3,
   'src/lib/session-runtime-recovery.ts > showPlaybackProblem': 1,
@@ -630,7 +660,11 @@ describe(
         "  return <Button onClick={() => toast.success('Saved')} />",
         '}',
         "const refresh = () => reportError(new Error('x'))",
-        "const load = useCallback(() => (asked ? reportError : reportUnasked)(new Error('x')), [])"
+        "const load = useCallback(() => (asked ? reportError : reportUnasked)(new Error('x')), [])",
+        'function say(ok) {',
+        '  const show = ok ? toast.success : toast.warning',
+        "  show('Done')",
+        '}'
       ].join('\n')
       expect(toastSites('src/sample.tsx', source).map(siteKey)).toEqual([
         'src/sample.tsx > Panel (effect)',
@@ -639,7 +673,8 @@ describe(
         'src/sample.tsx > Panel (effect)',
         'src/sample.tsx > onClick',
         'src/sample.tsx > refresh',
-        'src/sample.tsx > load'
+        'src/sample.tsx > load',
+        'src/sample.tsx > say'
       ])
     })
   }

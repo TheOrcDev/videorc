@@ -395,7 +395,6 @@ import {
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import { showMp4ExportFailed, showMp4Finalizing, showMp4Ready } from '@/lib/finalization-toast'
 import {
-  COHOST_STATUS_TOAST_ID,
   cohostStatusDetail,
   cohostStatusToast,
   showBrowserApproval,
@@ -407,11 +406,7 @@ import {
   sourceSwitchFailedDescription,
   sourceSwitchFailedTitle
 } from '@/lib/studio-toasts'
-import {
-  beginVideorcSignIn,
-  openVideorcWebLink,
-  VIDEORC_PREMIUM_URL
-} from '@/lib/videorc-web-links'
+import { beginVideorcSignIn } from '@/lib/videorc-web-links'
 import {
   OFFLINE_TOAST_ID,
   offlineError,
@@ -5904,25 +5899,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     if (statusToast) {
       const detail = cohostStatusDetail(merged)
       if (detail) console.warn('[buddy] stopped:', detail)
-      const show =
-        statusToast.kind === 'message'
-          ? toast
-          : statusToast.kind === 'warning'
-            ? toast.warning
-            : toast.error
-      show(statusToast.title, {
-        id: COHOST_STATUS_TOAST_ID,
-        ...(statusToast.action === 'sign-in'
-          ? { action: { label: 'Sign in', onClick: beginVideorcSignIn } }
-          : statusToast.action === 'view-premium'
-            ? {
-                action: {
-                  label: 'View Premium',
-                  onClick: () => openVideorcWebLink(VIDEORC_PREMIUM_URL)
-                }
-              }
-            : {})
-      })
+      // Sidekick's status reaches the Studio on its own (at launch too):
+      // an entry behind the bell with its fix, never a toast.
+      withAppNotifications((app) => app.publishSidekickStatus(statusToast, beginVideorcSignIn))
     }
   }, [])
 
