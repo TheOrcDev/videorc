@@ -8,7 +8,7 @@
 use std::os::fd::OwnedFd;
 use std::rc::Rc;
 use std::sync::mpsc as std_mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pipewire as pw;
 use pw::spa;
@@ -27,6 +27,10 @@ pub struct PipewireFrame<'a> {
     pub width: u32,
     pub height: u32,
     pub bgra: &'a mut Vec<u8>,
+    /// When the buffer was dequeued, before its conversion. The portal
+    /// stream carries no capture time here, so this is the latest the frame
+    /// can have been taken (Hide screen's Show edge, plan 210 D8).
+    pub dequeued_at: Instant,
 }
 
 #[derive(Default)]
@@ -111,6 +115,7 @@ pub fn run_pipewire_capture<T: 'static>(
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
+            let dequeued_at = Instant::now();
             let Some(layout) = user_data.layout else {
                 return;
             };
@@ -152,6 +157,7 @@ pub fn run_pipewire_capture<T: 'static>(
                     width,
                     height,
                     bgra: &mut scratch,
+                    dequeued_at,
                 });
             }
             user_data.scratch = scratch;
