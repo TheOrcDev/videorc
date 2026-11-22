@@ -830,9 +830,65 @@ export interface CameraKeyEdges {
 /** The largest share of the camera one side of Hide edges may take (%). */
 export const CAMERA_KEY_EDGE_MAX_PCT = 25
 
+/**
+ * Plan 258 D4/D5: what is behind the person on one camera, as one pick.
+ * Never two at once: a blur, a picture or Cut out never runs with a key.
+ */
+export const CAMERA_BACKGROUND_MODES = [
+  'off',
+  'blur',
+  'image',
+  'video',
+  'cutout',
+  'green',
+  'blue'
+] as const
+export type CameraBackgroundMode = (typeof CAMERA_BACKGROUND_MODES)[number]
+
+/** How hard the outline between the person and what's behind them is (Edges). */
+export const CAMERA_BACKGROUND_EDGES = ['soft', 'balanced', 'sharp'] as const
+export type CameraBackgroundEdges = (typeof CAMERA_BACKGROUND_EDGES)[number]
+
+/** Slight blur and Strong blur, as Blur strength (%) marks (D5). */
+export const CAMERA_BACKGROUND_SLIGHT_BLUR_PCT = 30
+export const CAMERA_BACKGROUND_STRONG_BLUR_PCT = 70
+
+/**
+ * The green or blue screen's tuning, kept with the camera (D4). The colour
+ * is the mode (`green` or `blue`); the fields are the scene key's.
+ */
+export interface CameraBackgroundKey {
+  similarityPct: number
+  smoothnessPct: number
+  spillPct: number
+  /** Hide edges; omitted while every side is 0. */
+  hideEdges?: CameraKeyEdges
+}
+
+/**
+ * Plan 258 D3: one camera's background, kept in every scene (stored per
+ * camera beside `cameraLooks`). Off keeps the tuning, so picking Blur or a
+ * screen again finds it as it was.
+ */
+export interface CameraBackground {
+  mode: CameraBackgroundMode
+  /** Blur strength (%), 0–100; Slight is 30, Strong 70. */
+  blurPct: number
+  edges: CameraBackgroundEdges
+  /** The picture or video behind you (`image`, `video`): a background asset id. */
+  assetId?: string
+  /** The green or blue screen's tuning (`green`, `blue`). */
+  key?: CameraBackgroundKey
+}
+
 export interface LayoutSettings {
   /** Per-camera setting injected at the output boundary; omitted when neutral. */
   cameraLook?: CameraLook
+  /**
+   * Plan 258: the camera's background, injected at the output boundary like
+   * the look; omitted while Off. Never saved into a scene.
+   */
+  cameraBackground?: CameraBackground
   layoutPreset: LayoutPreset
   cameraTransformMode: CameraTransformMode
   cameraTransform: CameraTransform | null
@@ -3107,6 +3163,8 @@ export interface PreviewSurfaceStatus {
   nativePreviewPlacementsFailed?: number
   /** Retries run after a refused placement push (#1272). */
   nativePreviewPlacementsRetried?: number
+  /** Placement pushes held until the backend surface was live (#1629). */
+  nativePreviewPlacementsHeld?: number
   nativePreviewPlacementRoundTripP95Ms?: number
   nativePreviewPresentRoundTripP95Ms?: number
   nativePreviewIosurfaceCacheHits?: number
@@ -3271,6 +3329,56 @@ export interface PreviewCameraStatus {
    * the backend's first-frame grace. Absent otherwise.
    */
   noVideo?: boolean
+  /**
+   * Plan 258 S4 (D12): the operating system's own effects on this camera
+   * (macOS Video Effects, Windows Studio Effects), read from the device.
+   * Absent until the camera is live and the system has answered.
+   */
+  systemEffect?: CameraSystemEffect
+  /**
+   * Plan 258 S3: the camera effect stage, while this camera's background is
+   * an effect (a blur or a picture). Absent while Off or a screen key.
+   */
+  cameraBackground?: CameraBackgroundStatus
+}
+
+/** How the camera effect stage is doing (plan 258 S3, D6). */
+export type CameraBackgroundStageState = 'running' | 'cover' | 'unavailable'
+
+/** The camera effect stage's line for the Studio, Health and support (plan 258 S3). */
+export interface CameraBackgroundStatus {
+  mode: CameraBackgroundMode
+  state: CameraBackgroundStageState
+  /** The newest matte's age at the last capture. */
+  maskAgeMs?: number
+  segmentMsP95?: number
+  /** The effect pass, wall time on the worker. */
+  composeMsP95?: number
+  /** The effect pass's GPU time. */
+  composeGpuMsP95?: number
+  processedFrames: number
+  coverFrames: number
+  /** How long the cover has stood in (the Studio says so after 2 s). */
+  coverForMs?: number
+  /** The newest matte's age when the cover last took over (D6: the first capture past 100 ms). */
+  coverAfterMaskAgeMs?: number
+  message?: string
+}
+
+/** Which operating system feature is changing the camera's picture (plan 258 S4). */
+export type CameraSystemEffectProvider = 'macos-video-effects' | 'windows-studio-effects'
+
+/** What the system is doing to the camera Videorc has open (plan 258 S4). */
+export interface CameraSystemEffect {
+  provider: CameraSystemEffectProvider
+  /** macOS Portrait, or Windows Studio Effects background blur. */
+  backgroundBlur: boolean
+  /** macOS 15's background replacement; never on Windows. */
+  backgroundReplacement: boolean
+  /** macOS Studio Light: the light on the face, not the background. */
+  studioLight: boolean
+  /** Windows: Videorc turned Studio Effects blur off while its own background runs. */
+  turnedOffByVideorc: boolean
 }
 
 export interface CameraCapabilityFormat {

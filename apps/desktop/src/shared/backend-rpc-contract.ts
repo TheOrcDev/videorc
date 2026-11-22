@@ -302,6 +302,8 @@ import {
   BANNER_OPACITY_MIN,
   HTML_OVERLAY_MAX_FPS,
   HTML_OVERLAY_MAX_TARGETS,
+  CAMERA_BACKGROUND_EDGES,
+  CAMERA_BACKGROUND_MODES,
   LAYOUT_PRESET_VALUES,
   SOUND_HOTKEYS,
   SOUND_LEVEL_DB_MAX,
@@ -2171,6 +2173,38 @@ const layoutSchema = objectSchema(
         { allowUnknown: false }
       )
     ),
+    cameraBackground: optionalSchema(
+      objectSchema(
+        {
+          mode: enumSchema(CAMERA_BACKGROUND_MODES),
+          blurPct: numberSchema({ integer: true, min: 0, max: 100 }),
+          edges: enumSchema(CAMERA_BACKGROUND_EDGES),
+          assetId: optionalSchema(stringSchema({ minLength: 1, maxLength: 256 })),
+          key: optionalSchema(
+            objectSchema(
+              {
+                similarityPct: numberSchema({ integer: true, min: 0, max: 100 }),
+                smoothnessPct: numberSchema({ integer: true, min: 0, max: 100 }),
+                spillPct: numberSchema({ integer: true, min: 0, max: 100 }),
+                hideEdges: optionalSchema(
+                  objectSchema(
+                    {
+                      leftPct: numberSchema({ integer: true, min: 0, max: 25 }),
+                      topPct: numberSchema({ integer: true, min: 0, max: 25 }),
+                      rightPct: numberSchema({ integer: true, min: 0, max: 25 }),
+                      bottomPct: numberSchema({ integer: true, min: 0, max: 25 })
+                    },
+                    { allowUnknown: false }
+                  )
+                )
+              },
+              { allowUnknown: false }
+            )
+          )
+        },
+        { allowUnknown: false }
+      )
+    ),
     cameraChromaKeyEnabled: booleanSchema,
     cameraChromaKeyColor: stringSchema({ minLength: 1, maxLength: 16 }),
     cameraChromaKeySimilarityPct: numberSchema({ min: 0, max: 100 }),
@@ -2686,6 +2720,32 @@ const previewCameraStatusSchema = boundedSemanticValue(
       droppedFrames: nonNegativeInteger,
       frameAgeMs: optionalSchema(nonNegativeInteger),
       noVideo: optionalSchema(booleanSchema),
+      // Plan 258 S4: strict, so a renamed Rust field fails here, not in the Studio.
+      systemEffect: optionalSchema(
+        objectSchema({
+          provider: enumSchema(['macos-video-effects', 'windows-studio-effects']),
+          backgroundBlur: booleanSchema,
+          backgroundReplacement: booleanSchema,
+          studioLight: booleanSchema,
+          turnedOffByVideorc: booleanSchema
+        })
+      ),
+      // Plan 258 S3: strict, like systemEffect.
+      cameraBackground: optionalSchema(
+        objectSchema({
+          mode: enumSchema(['off', 'blur', 'image', 'video', 'cutout', 'green', 'blue']),
+          state: enumSchema(['running', 'cover', 'unavailable']),
+          maskAgeMs: optionalSchema(nonNegativeInteger),
+          segmentMsP95: optionalSchema(numberSchema({ min: 0 })),
+          composeMsP95: optionalSchema(numberSchema({ min: 0 })),
+          composeGpuMsP95: optionalSchema(numberSchema({ min: 0 })),
+          processedFrames: nonNegativeInteger,
+          coverFrames: nonNegativeInteger,
+          coverForMs: optionalSchema(nonNegativeInteger),
+          coverAfterMaskAgeMs: optionalSchema(nonNegativeInteger),
+          message: optionalSchema(stringSchema({ maxLength: 2000 }))
+        })
+      ),
       updatedAt: timestamp
     },
     { allowUnknown: true }

@@ -1093,6 +1093,9 @@ const STOP_TERM_DRAIN_POLL: Duration = Duration::from_secs(1);
 // suspect for X sources going playback-dead on reuse (2026-07-08 incident).
 const STOP_TERM_DELAY_STREAMING: Duration = Duration::from_secs(8);
 const STOP_KILL_DELAY_STREAMING: Duration = Duration::from_secs(5);
+// How often a streaming Stop checks whether only reconnecting legs are left
+// (issue #1623).
+const STOP_RECONNECTING_LEG_POLL: Duration = Duration::from_millis(250);
 const CAPTURE_AUDIO_FILTER: &str = "aresample=async=1:first_pts=0";
 const MONO_TO_STEREO_FILTER: &str = "pan=stereo|c0=c0|c1=c0";
 const DSHOW_AUDIO_OUTPUT_NORMALIZATION_FILTER: &str =
@@ -1267,9 +1270,27 @@ pub(crate) struct FfmpegProgressBeacon {
     unflushed_stop: Arc<AtomicBool>,
     first_fatal: Arc<StdMutex<Option<&'static str>>>,
     evidence: Arc<StdMutex<FfmpegEvidenceSnapshot>>,
+    /// Bytes of every encoded video packet of the primary output, counted
+    /// from `-stats_enc_post` lines (Linux stream legs, see
+    /// `encoded_video_packet_stats_args`). Zero where nothing prints them.
+    encoded_video_bytes: Arc<AtomicU64>,
+    /// Which FFmpeg outputs were announced and which have closed (issue
+    /// #1623), read by the stop ladder.
+    outputs: Arc<StdMutex<FfmpegOutputLedger>>,
+    /// Set when the stop ladder ended FFmpeg because only reconnecting
+    /// stream legs were still open (issue #1623).
+    legs_abandoned: Arc<AtomicBool>,
 }
 
 impl FfmpegProgressBeacon {
+    fn add_encoded_video_bytes(&self, bytes: u64) {
+        self.encoded_video_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn encoded_video_bytes(&self) -> u64 {
+        self.encoded_video_bytes.load(Ordering::Relaxed)
+    }
+
     fn observe_fatal(&self, line: &str) {
         // A tee/fifo destination can fail its header while other legs remain
         // healthy. Only FFmpeg's process-wide terminal marker invalidates an
@@ -1328,6 +1349,125 @@ impl FfmpegProgressBeacon {
     fn unflushed_stop(&self) -> bool {
         self.unflushed_stop.load(Ordering::Acquire)
     }
+
+    fn observe_output_line(&self, line: &str, leg_position: impl Fn(&str) -> Option<usize>) {
+        self.outputs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .observe(line, leg_position);
+    }
+
+    fn output_ledger(&self) -> FfmpegOutputLedger {
+        self.outputs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn mark_legs_abandoned(&self) {
+        self.legs_abandoned.store(true, Ordering::Release);
+    }
+
+    /// The recording was whole when FFmpeg ended: Videorc let go of legs that
+    /// were only reconnecting, or every output that is not a stream leg (the
+    /// file) had already written its trailer and closed (issue #1623).
+    fn stop_left_recording_intact(&self) -> bool {
+        self.legs_abandoned.load(Ordering::Acquire) || self.output_ledger().non_leg_outputs_closed()
+    }
+}
+
+/// FFmpeg's outputs as its stderr names them (issue #1623). Each output is
+/// announced at startup (`Output #N, <format>, to '<url>':`) and prints its
+/// final stats (`[out#N/<format> @ 0x…] video:…KiB … muxing overhead: …`)
+/// only after `of_write_trailer` has written its trailer and closed its file
+/// (fftools/ffmpeg_mux.c). FFmpeg writes the trailers in output order after
+/// Stop, and a fifo leg that is reconnecting keeps its retry loop running
+/// until its queue is empty: on Windows, where a refused connect takes about
+/// 2 s, that held the process long past the quit grace while every other
+/// output was already closed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FfmpegOutputLedger {
+    announced: std::collections::BTreeSet<usize>,
+    closed: std::collections::BTreeSet<usize>,
+    /// Output index → stream leg position, for outputs that are RTMP legs.
+    legs: std::collections::BTreeMap<usize, usize>,
+}
+
+impl FfmpegOutputLedger {
+    fn observe(&mut self, line: &str, leg_position: impl Fn(&str) -> Option<usize>) {
+        if let Some((index, url)) = parse_ffmpeg_output_header(line) {
+            self.announced.insert(index);
+            if let Some(position) = leg_position(url) {
+                self.legs.insert(index, position);
+            }
+        } else if let Some(index) = parse_ffmpeg_output_final_stats(line) {
+            self.closed.insert(index);
+        }
+    }
+
+    /// Every index from 0 to the highest was announced, so no output is
+    /// missing from the ledger.
+    fn complete(&self) -> bool {
+        self.announced
+            .last()
+            .is_some_and(|last| last + 1 == self.announced.len())
+    }
+
+    /// At least one output is not a stream leg (the recording), and every
+    /// such output has closed.
+    fn non_leg_outputs_closed(&self) -> bool {
+        let mut non_legs = self
+            .announced
+            .iter()
+            .filter(|index| !self.legs.contains_key(index))
+            .peekable();
+        self.complete()
+            && non_legs.peek().is_some()
+            && non_legs.all(|index| self.closed.contains(index))
+    }
+
+    /// The leg positions still open, when every other output has closed.
+    fn open_legs_when_only_legs_remain(&self) -> Option<Vec<usize>> {
+        if !self.complete() {
+            return None;
+        }
+        let mut open_legs = Vec::new();
+        for index in self.announced.difference(&self.closed) {
+            open_legs.push(*self.legs.get(index)?);
+        }
+        Some(open_legs)
+    }
+}
+
+/// `[out#3/fifo @ 0000010707e0d640] video:506KiB audio:1KiB … muxing
+/// overhead: unknown` → 3. FFmpeg prints it once per output, after the trailer.
+fn parse_ffmpeg_output_final_stats(line: &str) -> Option<usize> {
+    let rest = line.trim().strip_prefix("[out#")?;
+    let (index, rest) = rest.split_once('/')?;
+    let index = index.parse::<usize>().ok()?;
+    let (_, message) = rest.split_once("] ")?;
+    (message.starts_with("video:") && message.contains("muxing overhead:")).then_some(index)
+}
+
+/// Stop can end FFmpeg without waiting out the grace once every output still
+/// open is a stream leg that is reconnecting (issue #1623): the recording and
+/// the healthy legs have written their trailers, and a reconnecting leg has
+/// no viewers to say goodbye to.
+fn only_reconnecting_legs_remain(
+    ledger: &FfmpegOutputLedger,
+    targets: &StreamTargetsSnapshot,
+) -> bool {
+    ledger
+        .open_legs_when_only_legs_remain()
+        .is_some_and(|open_legs| {
+            !open_legs.is_empty()
+                && open_legs.iter().all(|position| {
+                    targets
+                        .targets
+                        .get(*position)
+                        .is_some_and(|target| target.state == StreamTargetState::Reconnecting)
+                })
+        })
 }
 
 /// The running session's FFmpeg output clock, for the performance check's
@@ -1621,6 +1761,13 @@ async fn relay_ffmpeg_stderr_teed<R>(
     loop {
         match read_bounded_ffmpeg_line(&mut reader).await {
             Ok(Some(raw_line)) => {
+                // One line per encoded video packet (30+ a second): counted
+                // here and dropped, so it never reaches the journal tee, the
+                // failure-evidence tail or the monitor's channel.
+                if let Some(bytes) = parse_encoded_video_packet_bytes(&raw_line) {
+                    progress.add_encoded_video_bytes(bytes);
+                    continue;
+                }
                 if let Some(tee) = tee.as_ref() {
                     tee.offer(&raw_line);
                 }
@@ -3486,6 +3633,45 @@ fn refuse_legacy_start_while_hidden(use_encoder_bridge: bool, hidden: bool) -> R
     Ok(())
 }
 
+/// Plan 258 D8: what a session refused for its camera background says.
+pub const CAMERA_BACKGROUND_UNAVAILABLE_LEGACY: &str = "Background effects can't run with this recording setting. Turn off the background effect or choose 30 fps.";
+
+/// What a refused legacy start says after the exact copy.
+pub const CAMERA_BACKGROUND_LEGACY_START_DETAIL: &str = "This profile records through the legacy FFmpeg capture path, which opens the camera itself and never sees the background effect.";
+
+/// Plan 258 S3 (D8, privacy invariant 4): the legacy FFmpeg graph opens the
+/// camera itself, outside the camera store the effect stage gates, so a
+/// session that would take it while a camera's background is an effect is
+/// refused with a named reason, on the program or the vertical layout.
+fn refuse_legacy_start_with_camera_effect(
+    use_encoder_bridge: bool,
+    params: &StartSessionParams,
+) -> Result<()> {
+    if use_encoder_bridge || params.sources.camera_id.is_none() {
+        return Ok(());
+    }
+    let effect_on = |layout: &crate::protocol::LayoutSettings| {
+        crate::preview_camera::effect_stage::EffectLook::from_setting(
+            layout.camera_background.as_ref(),
+            None,
+            false,
+        )
+        .is_some()
+    };
+    let vertical = params
+        .simulcast
+        .as_ref()
+        .is_some_and(|simulcast| effect_on(&simulcast.layout));
+    if effect_on(&params.layout) || vertical {
+        bail!(
+            "{} {}",
+            CAMERA_BACKGROUND_UNAVAILABLE_LEGACY,
+            CAMERA_BACKGROUND_LEGACY_START_DETAIL
+        );
+    }
+    Ok(())
+}
+
 /// `Some(session_id)` while a session that reads the display directly runs:
 /// `screen.hide` refuses with [`crate::screen_privacy::SCREEN_HIDE_UNAVAILABLE_LEGACY`]
 /// and `screen.privacy.get` says why.
@@ -4981,6 +5167,10 @@ async fn start_session_with_timeline(
     // outside the gated frame store. Starting it while the screen is hidden
     // would record the live screen under a "Screen hidden" chip: refuse.
     refuse_legacy_start_while_hidden(use_encoder_bridge, state.screen_privacy.view().hidden)?;
+    refuse_legacy_start_with_camera_effect(use_encoder_bridge, &params)?;
+    // Plan 258 S3: the session's layout carries the camera's background; the
+    // live camera's stage takes it before the session reads a frame.
+    crate::preview_camera::apply_camera_background(&state, &params.layout).await;
     if legacy_graph_lacks_ffmpeg_devices(use_encoder_bridge, ffmpeg_devices_resolved) {
         // The bridge decision says "legacy" only for a request ruled out
         // above, so this does not run today. It keeps a later change to
@@ -6932,6 +7122,7 @@ async fn start_session_with_timeline(
                 StreamHealthAccumulator::new(&log_session_id, process_generation);
             let mut pending_stream_health = ParsedStreamHealthDelta::default();
             let mut last_stream_health_published_at = Instant::now();
+            let mut encoded_video_meter = EncodedVideoMeter::default();
             let stderr_reached_eof = loop {
                 let (line, informational) = match stderr_events.recv().await {
                     Some(FfmpegStderrEvent::Line(line)) => (line, false),
@@ -6954,6 +7145,9 @@ async fn start_session_with_timeline(
                     continue;
                 }
 
+                // Issue #1623: which outputs have closed, for the stop ladder.
+                progress_beacon
+                    .observe_output_line(trimmed, |url| stream_legs.position_for_url(url));
                 // Plan 161: per-leg reconnects and deaths, attributed exactly.
                 if let Some(update) = stream_legs.observe(trimmed) {
                     publish_stream_leg_update(
@@ -7069,6 +7263,10 @@ async fn start_session_with_timeline(
                         progress_describes_recording,
                         &mut stream_health_accumulator,
                         &mut pending_stream_health,
+                        encoded_video_meter.sample(
+                            progress_beacon.encoded_video_bytes(),
+                            progress_beacon.media_micros(),
+                        ),
                     )
                     .await
                 {
@@ -7130,6 +7328,10 @@ async fn start_session_with_timeline(
                 progress_describes_recording,
                 &mut stream_health_accumulator,
                 &mut pending_stream_health,
+                encoded_video_meter.sample(
+                    progress_beacon.encoded_video_bytes(),
+                    progress_beacon.media_micros(),
+                ),
             )
             .await;
             if stderr_reached_eof
@@ -10917,20 +11119,62 @@ async fn stop_fallback(
         .await
         .as_ref()
         .is_some_and(|active| active.pid == pid && active.stream_url.is_some());
-    let progress = state
+    let (progress, stream_targets) = state
         .recording
         .lock()
         .await
         .as_ref()
         .filter(|active| active.pid == pid)
-        .map(|active| active.ffmpeg_progress.clone());
+        .map(|active| {
+            (
+                active.ffmpeg_progress.clone(),
+                active.stream_targets_snapshot.clone(),
+            )
+        })
+        .unzip();
     let mut last_media_micros = progress.as_ref().map(FfmpegProgressBeacon::media_micros);
     let base_delay = if streaming {
         STOP_TERM_DELAY_STREAMING
     } else {
         STOP_TERM_DELAY
     };
-    sleep(base_delay).await;
+    if let (true, Some(progress), Some(stream_targets)) =
+        (streaming, progress.as_ref(), stream_targets.as_ref())
+    {
+        // Issue #1623: a leg that is reconnecting at Stop keeps FFmpeg alive
+        // after everything else has closed. Let it go as soon as it is the
+        // only thing left, instead of waiting out the grace and TERM.
+        let mut waited = Duration::ZERO;
+        while waited < base_delay {
+            if !recording_matches(&state, pid, &session_id, &output_path).await {
+                return;
+            }
+            if only_reconnecting_legs_remain(
+                &progress.output_ledger(),
+                &stream_targets_snapshot_value(stream_targets),
+            ) {
+                let _ = emit_session_log(
+                    &state,
+                    &session_id,
+                    HealthLevel::Warn,
+                    "recording-stop-released-reconnecting-legs",
+                    &format!(
+                        "Stopped {}ms after Stop while a destination was still reconnecting. The recording and the other destinations had already finished; FFmpeg was ended instead of waiting for the reconnecting destination to give up.",
+                        waited.as_millis()
+                    ),
+                    None,
+                );
+                progress.mark_legs_abandoned();
+                let _ = send_process_signal(pid, "TERM").await;
+                stop_kill_fallback(state, pid, session_id, output_path, streaming).await;
+                return;
+            }
+            sleep(STOP_RECONNECTING_LEG_POLL).await;
+            waited += STOP_RECONNECTING_LEG_POLL;
+        }
+    } else {
+        sleep(base_delay).await;
+    }
 
     // An FFmpeg that is still advancing its output clock is draining admitted
     // frames (below-realtime software encode), not hung: TERM here truncates
@@ -11623,7 +11867,7 @@ fn emit_microphone_silence_health_event(
         MicrophoneSilenceChange::Silent => (
             HealthLevel::Warn,
             MICROPHONE_SILENT_CODE,
-            microphone_silent_message(&change.device_name, change.after_ms, change.silent_ms),
+            microphone_silent_message(&change.device_name),
         ),
         MicrophoneSilenceChange::Recovered => (
             HealthLevel::Info,
@@ -11643,11 +11887,20 @@ fn emit_microphone_silence_health_event(
 }
 
 /// Activity-neutral, like the loss message: the renderer's title says
-/// whether a recording, a livestream or Clips is affected.
-fn microphone_silent_message(device_name: &str, after_ms: u64, silent_ms: u64) -> String {
+/// whether a recording, a livestream or Clips is affected. Pure digital
+/// silence from a microphone that delivers frames is almost always the
+/// device's own mute, a switch or a cable (the owner's Shure MV7+ muted on
+/// the microphone, 2026-11-22), not a wrong pick: the line says to check
+/// those first and to choose it again only after that.
+fn microphone_silent_message(device_name: &str) -> String {
+    let device_name = device_name.trim();
+    let subject = if device_name.is_empty() {
+        "Your microphone"
+    } else {
+        device_name
+    };
     format!(
-        "Microphone \"{device_name}\" has sent only silence since {:.1} seconds into this session. Try choosing it again.",
-        after_ms.saturating_sub(silent_ms) as f64 / 1_000.0
+        "{subject} is sending only silence. Check its own mute button or switch, and its cable. If it's still silent, choose it again."
     )
 }
 
@@ -12177,6 +12430,7 @@ async fn monitor_session(
             MonitoredRecording {
                 stop_intent_preceded_exit,
                 stop_escalated: active.ffmpeg_progress.stop_escalated(),
+                stop_left_recording_intact: active.ffmpeg_progress.stop_left_recording_intact(),
                 unflushed_stop: active.replay_only && active.ffmpeg_progress.unflushed_stop(),
                 recording_bridge_terminal_failure: active.recording_bridge_terminal_failure(),
                 stream_bridge_terminal_failure: active.stream_bridge_terminal_failure(),
@@ -12767,9 +13021,14 @@ async fn monitor_session(
         }
         Ok(exit_status)
             if should_finalize_recording_session(
-                exit_status.success(),
+                exit_status.success()
+                    || stop_released_intact_recording(
+                        monitored_recording.stop_intent_preceded_exit,
+                        monitored_recording.stop_left_recording_intact,
+                    ),
                 monitored_recording.stop_intent_preceded_exit,
-                monitored_recording.stop_escalated,
+                monitored_recording.stop_escalated
+                    && !monitored_recording.stop_left_recording_intact,
                 recording_bridge_terminal_failure.as_deref(),
                 stream_bridge_terminal_failure.as_deref(),
             ) =>
@@ -15116,6 +15375,8 @@ impl NativeAudioStats {
 struct MonitoredRecording {
     stop_intent_preceded_exit: bool,
     stop_escalated: bool,
+    /// See [`FfmpegProgressBeacon::stop_left_recording_intact`].
+    stop_left_recording_intact: bool,
     /// The Record handover ended this buffer-only session without its flush.
     unflushed_stop: bool,
     recording_bridge_terminal_failure: Option<String>,
@@ -15151,6 +15412,17 @@ impl MonitoredRecording {
 /// Without the stop intent first the exit stays FFmpeg's own.
 fn ends_unflushed_handover(monitored: &MonitoredRecording) -> bool {
     monitored.replay_only && monitored.unflushed_stop && monitored.stop_intent_preceded_exit
+}
+
+/// Issue #1623: when the user stopped and the recording had already written
+/// its trailer and closed (or Videorc let go of legs that were only
+/// reconnecting), the non-zero exit of the FFmpeg that Videorc then ended is
+/// that stop, not a cut-short file. The MP4 export still validates the file.
+fn stop_released_intact_recording(
+    stop_intent_preceded_exit: bool,
+    stop_left_recording_intact: bool,
+) -> bool {
+    stop_intent_preceded_exit && stop_left_recording_intact
 }
 
 fn should_finalize_recording_session(
@@ -22847,6 +23119,11 @@ fn bridge_compositor_ffmpeg_args_with_encoder_and_replay(
                     encoder.vaapi_arg_profile,
                     performance_check,
                 );
+                args.extend(encoded_video_packet_stats_args(
+                    encoder.platform,
+                    video_output,
+                    !stream_targets.is_empty(),
+                ));
             }
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
@@ -31599,6 +31876,7 @@ async fn publish_pending_ffmpeg_stream_health(
     progress_describes_recording: bool,
     accumulator: &mut StreamHealthAccumulator,
     pending: &mut ParsedStreamHealthDelta,
+    encoded_video: Option<EncodedVideoSample>,
 ) -> bool {
     if *pending == ParsedStreamHealthDelta::default() {
         return false;
@@ -31625,7 +31903,7 @@ async fn publish_pending_ffmpeg_stream_health(
     };
     let diagnostic_stats = {
         let mut diagnostics = state.diagnostics.lock().await;
-        let next = apply_active_scene_revision(
+        let mut next = apply_active_scene_revision(
             crate::diagnostics::apply_stream_health_from(
                 diagnostics.clone(),
                 &stream_health,
@@ -31634,6 +31912,12 @@ async fn publish_pending_ffmpeg_stream_health(
             ),
             scene_revision,
         );
+        // Linux stream legs: FFmpeg encodes the stream, and its own packet
+        // sizes are the stream's measured bitrate (the bridge's elsewhere).
+        if let Some(sample) = encoded_video {
+            next = crate::diagnostics::apply_measured_stream_bitrate(next, sample.bitrate_kbps);
+            next.stream_output_total_bytes = next.stream_output_total_bytes.max(sample.total_bytes);
+        }
         *diagnostics = next.clone();
         next
     };
@@ -31666,6 +31950,80 @@ fn monotonic_counter(current: Option<u64>, update: Option<u64>) -> Option<u64> {
     match (current, update) {
         (Some(current), Some(update)) => Some(current.max(update)),
         (current, update) => update.or(current),
+    }
+}
+
+/// What a `-stats_enc_post` line starts with: one per encoded video packet
+/// of the primary output, `{size}` in bytes.
+const ENCODED_VIDEO_PACKET_STAT_PREFIX: &str = "videorc_video_packet_bytes=";
+
+/// The output options that make FFmpeg print each encoded video packet's size
+/// on stderr (`pipe:2`, beside `-progress`). Linux's raw-frame path only, with
+/// a stream leg: there FFmpeg is the stream encoder and its own `bitrate=` /
+/// `total_size=` read `N/A` for a `fifo`-wrapped RTMP leg, so nothing else
+/// measures what the leg sends. Elsewhere the encoder bridge counts the
+/// encoded bytes itself (VideoToolbox, Media Foundation).
+fn encoded_video_packet_stats_args(
+    platform: FfmpegH264Platform,
+    video_output: EncoderBridgeVideoOutput,
+    has_stream_targets: bool,
+) -> Vec<String> {
+    let linux = matches!(
+        platform,
+        FfmpegH264Platform::LinuxVaapi | FfmpegH264Platform::LinuxSoftware
+    );
+    if !linux || !has_stream_targets || video_output != EncoderBridgeVideoOutput::RawYuv420p {
+        return Vec::new();
+    }
+    vec![
+        "-stats_enc_post:v:0".to_string(),
+        "pipe:2".to_string(),
+        "-stats_enc_post_fmt:v:0".to_string(),
+        format!("{ENCODED_VIDEO_PACKET_STAT_PREFIX}{{size}}"),
+    ]
+}
+
+fn parse_encoded_video_packet_bytes(line: &str) -> Option<u64> {
+    line.trim()
+        .strip_prefix(ENCODED_VIDEO_PACKET_STAT_PREFIX)?
+        .parse()
+        .ok()
+}
+
+/// One measure of the encoded video FFmpeg produced for the stream.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EncodedVideoSample {
+    bitrate_kbps: f64,
+    total_bytes: u64,
+}
+
+/// The encoded video bitrate between two diagnostics publishes: the packet
+/// bytes FFmpeg counted over the media time its output clock advanced, so a
+/// slow or bursty pipe never reads as a bitrate swing.
+#[derive(Debug, Default)]
+struct EncodedVideoMeter {
+    last: Option<(u64, u64)>,
+}
+
+impl EncodedVideoMeter {
+    fn sample(&mut self, total_bytes: u64, media_micros: u64) -> Option<EncodedVideoSample> {
+        if total_bytes == 0 {
+            return None;
+        }
+        let sample = match self.last {
+            Some((_, last_micros)) if media_micros <= last_micros => return None,
+            Some((last_bytes, last_micros)) => {
+                let seconds = (media_micros - last_micros) as f64 / 1_000_000.0;
+                let bits = total_bytes.saturating_sub(last_bytes) as f64 * 8.0;
+                Some(EncodedVideoSample {
+                    bitrate_kbps: bits / seconds / 1_000.0,
+                    total_bytes,
+                })
+            }
+            None => None,
+        };
+        self.last = Some((total_bytes, media_micros));
+        sample
     }
 }
 
@@ -32046,16 +32404,17 @@ mod tests {
     }
 
     #[test]
-    fn microphone_silence_messages_name_the_device_and_the_run() {
-        // Issue 1064: the report arrives at the end of the hold, so the
-        // silence began a hold earlier.
+    fn microphone_silence_messages_name_the_device_and_the_likely_cause() {
+        // Silent-mic report 2026-11-22: the likely cause first (the
+        // microphone's own mute, a switch, the cable), choosing it again
+        // only after that, and the device by its name alone.
         assert_eq!(
-            microphone_silent_message("HD Pro Webcam C920", 15_300, 3_000),
-            "Microphone \"HD Pro Webcam C920\" has sent only silence since 12.3 seconds into this session. Try choosing it again."
+            microphone_silent_message("Shure MV7+"),
+            "Shure MV7+ is sending only silence. Check its own mute button or switch, and its cable. If it's still silent, choose it again."
         );
         assert_eq!(
-            microphone_silent_message("Desk Mic", 1_000, 3_000),
-            "Microphone \"Desk Mic\" has sent only silence since 0.0 seconds into this session. Try choosing it again."
+            microphone_silent_message("  "),
+            "Your microphone is sending only silence. Check its own mute button or switch, and its cable. If it's still silent, choose it again."
         );
         assert_eq!(
             microphone_signal_recovered_message("Desk Mic", 7_450),
@@ -33106,6 +33465,85 @@ mod tests {
         assert!(error.contains(SCREEN_HIDE_LEGACY_START_DETAIL), "{error}");
         assert!(state.recording.lock().await.is_none());
         let _ = std::fs::remove_dir_all(&output_dir);
+    }
+
+    fn blurred_layout(
+        mut layout: crate::protocol::LayoutSettings,
+    ) -> crate::protocol::LayoutSettings {
+        layout.camera_background = Some(crate::protocol::CameraBackground {
+            mode: crate::protocol::CameraBackgroundMode::Blur,
+            blur_pct: 70,
+            edges: crate::protocol::CameraBackgroundEdges::Balanced,
+            asset_id: None,
+            key: None,
+        });
+        layout
+    }
+
+    /// Plan 258 S3, privacy invariant 4: a legacy FFmpeg start (it opens the
+    /// camera itself) is refused while the camera's background is an effect,
+    /// on the program or the vertical layout; the bridge, a screen key, Off
+    /// and a session with no camera start as always.
+    #[test]
+    fn invariant_4_a_legacy_start_with_a_camera_effect_is_refused() {
+        let plain = base_params(true, false);
+        assert!(plain.sources.camera_id.is_some());
+        assert!(refuse_legacy_start_with_camera_effect(false, &plain).is_ok());
+
+        let mut blurred = plain.clone();
+        blurred.layout = blurred_layout(blurred.layout);
+        let error = refuse_legacy_start_with_camera_effect(false, &blurred)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(CAMERA_BACKGROUND_UNAVAILABLE_LEGACY),
+            "{error}"
+        );
+        assert!(
+            error.ends_with(CAMERA_BACKGROUND_LEGACY_START_DETAIL),
+            "{error}"
+        );
+        assert!(
+            refuse_legacy_start_with_camera_effect(true, &blurred).is_ok(),
+            "the bridge reads the gated store"
+        );
+
+        for mode in [
+            crate::protocol::CameraBackgroundMode::Image,
+            crate::protocol::CameraBackgroundMode::Video,
+            crate::protocol::CameraBackgroundMode::Cutout,
+        ] {
+            let mut params = blurred.clone();
+            params.layout.camera_background.as_mut().unwrap().mode = mode;
+            assert!(
+                refuse_legacy_start_with_camera_effect(false, &params).is_err(),
+                "{mode:?}"
+            );
+        }
+        for mode in [
+            crate::protocol::CameraBackgroundMode::Off,
+            crate::protocol::CameraBackgroundMode::Green,
+            crate::protocol::CameraBackgroundMode::Blue,
+        ] {
+            let mut params = blurred.clone();
+            params.layout.camera_background.as_mut().unwrap().mode = mode;
+            assert!(
+                refuse_legacy_start_with_camera_effect(false, &params).is_ok(),
+                "{mode:?}"
+            );
+        }
+
+        let mut no_camera = blurred.clone();
+        no_camera.sources.camera_id = None;
+        assert!(refuse_legacy_start_with_camera_effect(false, &no_camera).is_ok());
+
+        let mut vertical = plain.clone();
+        vertical.simulcast = Some(crate::protocol::SimulcastParams {
+            layout: blurred_layout(plain.layout.clone()),
+            scene: None,
+            video: plain.output.video.clone(),
+        });
+        assert!(refuse_legacy_start_with_camera_effect(false, &vertical).is_err());
     }
 
     /// Plan 186 S4: which sessions take a banner shown after their start.
@@ -36443,6 +36881,7 @@ mod tests {
                 source_transform_overrides: std::collections::BTreeMap::new(),
                 source_visibility: Default::default(),
                 camera_look: Default::default(),
+                camera_background: None,
                 camera_chroma_key_enabled: false,
                 camera_chroma_key_color: "#00FF00".to_string(),
                 camera_chroma_key_similarity_pct: 40,
@@ -40796,6 +41235,148 @@ mod tests {
             .unwrap();
             assert_eq!(arg_value(&record_only, "-loglevel"), Some("warning"));
         }
+    }
+
+    #[test]
+    fn linux_raw_stream_legs_print_each_encoded_video_packet_size() {
+        // A Linux stream leg is a fifo-wrapped RTMP output FFmpeg encodes
+        // for: its `bitrate=`/`total_size=` read N/A, so FFmpeg prints each
+        // encoded video packet's size on stderr for the backend to count.
+        let capture = CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: None,
+        };
+        let fifo_path = Path::new("/tmp/videorc-bridge-raw.yuv");
+        let software = ResolvedFfmpegH264Encoder::for_platform(FfmpegH264Platform::LinuxSoftware);
+        for (record, file) in [
+            (false, None),
+            (true, Some(Path::new("/tmp/videorc-raw.mkv"))),
+        ] {
+            let params = base_params(record, true);
+            let targets = vec![build_stream_url(&params.output.rtmp).unwrap()];
+            let args = bridge_compositor_ffmpeg_args_with_encoder(
+                &capture,
+                &params,
+                file,
+                &targets,
+                fifo_path,
+                EncoderBridgeVideoOutput::RawYuv420p,
+                &software,
+            )
+            .unwrap();
+            assert_eq!(arg_value(&args, "-stats_enc_post:v:0"), Some("pipe:2"));
+            assert_eq!(
+                arg_value(&args, "-stats_enc_post_fmt:v:0"),
+                Some("videorc_video_packet_bytes={size}")
+            );
+            // An output option of the primary (encoding) output: before its URL.
+            let stats = args.iter().position(|arg| arg == "-stats_enc_post:v:0");
+            let url = args
+                .iter()
+                .position(|arg| arg.contains("rtmp") || arg == "tee");
+            assert!(stats < url, "{args:?}");
+            assert_eq!(arg_value(&args, "-progress"), Some("pipe:2"));
+        }
+
+        let raw = EncoderBridgeVideoOutput::RawYuv420p;
+        for platform in [
+            FfmpegH264Platform::LinuxVaapi,
+            FfmpegH264Platform::LinuxSoftware,
+        ] {
+            assert_eq!(
+                encoded_video_packet_stats_args(platform, raw, true).len(),
+                4
+            );
+            // A record-only session has no leg to measure.
+            assert!(encoded_video_packet_stats_args(platform, raw, false).is_empty());
+        }
+        // The bridge measures its own encoders elsewhere.
+        for platform in [
+            FfmpegH264Platform::Macos,
+            FfmpegH264Platform::WindowsHardware,
+            FfmpegH264Platform::WindowsSoftware,
+        ] {
+            assert!(encoded_video_packet_stats_args(platform, raw, true).is_empty());
+        }
+        assert!(
+            encoded_video_packet_stats_args(
+                FfmpegH264Platform::LinuxSoftware,
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                true
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn encoded_video_packet_lines_parse_and_meter_over_the_media_clock() {
+        assert_eq!(
+            parse_encoded_video_packet_bytes("videorc_video_packet_bytes=34328"),
+            Some(34_328)
+        );
+        assert_eq!(
+            parse_encoded_video_packet_bytes("videorc_video_packet_bytes=12\r"),
+            Some(12)
+        );
+        assert_eq!(parse_encoded_video_packet_bytes("total_size=34328"), None);
+        assert_eq!(
+            parse_encoded_video_packet_bytes("videorc_video_packet_bytes=N/A"),
+            None
+        );
+
+        let mut meter = EncodedVideoMeter::default();
+        assert_eq!(meter.sample(0, 1_000_000), None, "no bytes yet: no measure");
+        assert_eq!(
+            meter.sample(100_000, 1_000_000),
+            None,
+            "the first sample opens the window"
+        );
+        // 1.5 MB over 2 s of media: 6000 kbps.
+        assert_eq!(
+            meter.sample(1_600_000, 3_000_000),
+            Some(EncodedVideoSample {
+                bitrate_kbps: 6_000.0,
+                total_bytes: 1_600_000
+            })
+        );
+        // A clock that did not advance keeps the window open.
+        assert_eq!(meter.sample(1_700_000, 3_000_000), None);
+        assert_eq!(
+            meter.sample(2_350_000, 4_000_000),
+            Some(EncodedVideoSample {
+                bitrate_kbps: 6_000.0,
+                total_bytes: 2_350_000
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_stderr_relay_counts_encoded_packet_lines_and_drops_them() {
+        let (event_sender, mut events) = mpsc::channel(256);
+        let input = "videorc_video_packet_bytes=1000\n\
+                     frame=30\n\
+                     videorc_video_packet_bytes=2500\n\
+                     progress=continue\n";
+        let progress = FfmpegProgressBeacon::default();
+        relay_ffmpeg_stderr(
+            BufReader::new(input.as_bytes()),
+            event_sender,
+            None,
+            progress.clone(),
+        )
+        .await;
+        let mut lines = Vec::new();
+        while let Some(event) = events.recv().await {
+            if let FfmpegStderrEvent::Line(line) = event {
+                lines.push(line);
+            }
+        }
+        assert_eq!(
+            lines,
+            vec!["frame=30".to_string(), "progress=continue".to_string()]
+        );
+        assert_eq!(progress.encoded_video_bytes(), 3_500);
     }
 
     #[test]
@@ -47993,6 +48574,7 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
                 false,
                 &mut accumulator,
                 &mut pending,
+                None,
             )
             .await
         );
@@ -48039,6 +48621,7 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
                     false,
                     &mut accumulator,
                     &mut pending,
+                    None,
                 )
                 .await
             );
@@ -48080,6 +48663,7 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
                 false,
                 &mut accumulator,
                 &mut pending,
+                None,
             )
             .await
         );
@@ -56249,6 +56833,175 @@ mod low_end_windows_recording_tests {
             (stage, code),
             (RecordingPipelineStage::Muxer, "ffmpeg-exit")
         );
+    }
+
+    /// The startup dump and final stats of the multistream smoke on Windows
+    /// (issue #1623): the recording and three legs closed at Stop, the offline
+    /// leg (out#4) kept retrying.
+    fn issue_1623_ledger(lines: &[&str]) -> FfmpegOutputLedger {
+        let legs = [
+            ("rtmp://127.0.0.1:11935/live/a", 0),
+            ("rtmp://127.0.0.1:11936/live/b", 1),
+            ("rtmp://127.0.0.1:11937/live/c", 2),
+            ("rtmp://127.0.0.1:11938/live/d", 3),
+        ];
+        let mut ledger = FfmpegOutputLedger::default();
+        for line in lines {
+            ledger.observe(line, |url| {
+                legs.iter()
+                    .find(|(leg, _)| *leg == url)
+                    .map(|(_, position)| *position)
+            });
+        }
+        ledger
+    }
+
+    const ISSUE_1623_HEADERS: [&str; 5] = [
+        r"Output #0, matroska, to '\\?\C:\Temp\videorc-session.mkv':",
+        "Output #1, fifo, to 'rtmp://127.0.0.1:11935/live/a':",
+        "Output #2, fifo, to 'rtmp://127.0.0.1:11936/live/b':",
+        "Output #3, fifo, to 'rtmp://127.0.0.1:11937/live/c':",
+        "Output #4, fifo, to 'rtmp://127.0.0.1:11938/live/d':",
+    ];
+
+    fn final_stats(index: usize, format: &str) -> String {
+        format!(
+            "[out#{index}/{format} @ 0000010707e0d840] video:185KiB audio:1KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: 1.973801%"
+        )
+    }
+
+    #[test]
+    fn output_final_stats_name_their_output_and_nothing_else_does() {
+        assert_eq!(
+            parse_ffmpeg_output_final_stats(&final_stats(0, "matroska")),
+            Some(0)
+        );
+        assert_eq!(
+            parse_ffmpeg_output_final_stats(
+                "[out#3/fifo @ 0000010707e0d640] video:506KiB audio:1KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: unknown"
+            ),
+            Some(3)
+        );
+        for line in [
+            "[out#1/fifo @ 0x1] Error muxing a packet",
+            "[out#0/matroska @ 0x1] Error writing trailer: I/O error",
+            "[fifo @ 0x1] Recovery failed: Error number -138 occurred",
+            "video:185KiB audio:1KiB muxing overhead: 1%",
+            "[out#x/fifo @ 0x1] video:1KiB muxing overhead: unknown",
+        ] {
+            assert_eq!(parse_ffmpeg_output_final_stats(line), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn ledger_waits_for_the_recording_and_lets_go_of_reconnecting_legs_only() {
+        let reconnecting_last = |states: [StreamTargetState; 4]| StreamTargetsSnapshot {
+            session_id: "s".to_string(),
+            targets: states
+                .into_iter()
+                .map(|state| StreamTargetRuntime {
+                    target_id: "t".to_string(),
+                    platform: StreamPlatform::Youtube,
+                    label: "T".to_string(),
+                    state,
+                    message: None,
+                    redacted_url: None,
+                    uplink_overflows: None,
+                    uplink_overflow_at: None,
+                })
+                .collect(),
+        };
+        use StreamTargetState::{Live, Reconnecting};
+        let targets = reconnecting_last([Live, Live, Live, Reconnecting]);
+
+        // Streaming: nothing has closed, nothing is released.
+        let running = issue_1623_ledger(&ISSUE_1623_HEADERS);
+        assert!(!running.non_leg_outputs_closed());
+        assert!(!only_reconnecting_legs_remain(&running, &targets));
+
+        // The recording and the healthy legs closed; the offline leg retries.
+        let mut lines = ISSUE_1623_HEADERS.map(str::to_string).to_vec();
+        lines.push(final_stats(0, "matroska"));
+        lines.extend((1..=3).map(|index| final_stats(index, "fifo")));
+        let lines = lines.iter().map(String::as_str).collect::<Vec<_>>();
+        let stopped = issue_1623_ledger(&lines);
+        assert!(stopped.non_leg_outputs_closed());
+        assert_eq!(stopped.open_legs_when_only_legs_remain(), Some(vec![3]));
+        assert!(only_reconnecting_legs_remain(&stopped, &targets));
+        assert!(
+            !only_reconnecting_legs_remain(&stopped, &reconnecting_last([Live, Live, Live, Live])),
+            "a live leg still writing its trailer keeps the grace"
+        );
+
+        // A healthy leg queued behind the reconnecting one is still open.
+        let behind = issue_1623_ledger(&[
+            ISSUE_1623_HEADERS[0],
+            ISSUE_1623_HEADERS[1],
+            ISSUE_1623_HEADERS[2],
+            ISSUE_1623_HEADERS[3],
+            ISSUE_1623_HEADERS[4],
+            &final_stats(0, "matroska"),
+        ]);
+        assert!(behind.non_leg_outputs_closed(), "the file is whole");
+        assert!(!only_reconnecting_legs_remain(
+            &behind,
+            &reconnecting_last([Reconnecting, Live, Live, Live])
+        ));
+
+        // The recording still open: never released, never called intact.
+        let open_file = issue_1623_ledger(&[
+            ISSUE_1623_HEADERS[0],
+            ISSUE_1623_HEADERS[1],
+            &final_stats(1, "fifo"),
+        ]);
+        assert!(!open_file.non_leg_outputs_closed());
+        assert_eq!(open_file.open_legs_when_only_legs_remain(), None);
+
+        // An output missing from the dump makes the ledger incomplete.
+        let gap = issue_1623_ledger(&[
+            ISSUE_1623_HEADERS[0],
+            ISSUE_1623_HEADERS[4],
+            &final_stats(0, "matroska"),
+        ]);
+        assert!(!gap.non_leg_outputs_closed());
+        assert!(!only_reconnecting_legs_remain(&gap, &targets));
+
+        // A stream-only session has no file: it is never "intact" by itself,
+        // but its reconnecting legs can still be let go.
+        // Its first leg is output 0.
+        let stream_only =
+            issue_1623_ledger(&["Output #0, fifo, to 'rtmp://127.0.0.1:11935/live/a':"]);
+        assert!(!stream_only.non_leg_outputs_closed());
+        assert!(only_reconnecting_legs_remain(
+            &stream_only,
+            &reconnecting_last([Reconnecting, Live, Live, Live])
+        ));
+    }
+
+    #[test]
+    fn a_stop_that_left_the_recording_whole_finalizes_it() {
+        assert!(stop_released_intact_recording(true, true));
+        assert!(
+            !stop_released_intact_recording(false, true),
+            "no Stop, no pass"
+        );
+        assert!(!stop_released_intact_recording(true, false));
+        // The call site turns an intact stop into a finalizable exit on every
+        // platform, and a forced one stays recovery media.
+        assert!(should_finalize_recording_session(
+            stop_released_intact_recording(true, true),
+            true,
+            false,
+            None,
+            None
+        ));
+        assert!(!should_finalize_recording_session(
+            stop_released_intact_recording(true, false),
+            true,
+            true,
+            None,
+            None
+        ));
     }
 
     #[test]

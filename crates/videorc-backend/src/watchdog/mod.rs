@@ -2150,6 +2150,66 @@ mod tests {
         session_ended(&state, "live");
     }
 
+    /// Silent-mic report 2026-11-22: the owner's microphone was muted on the
+    /// device, the card came up, and unmuting it must take the card down by
+    /// itself, whether or not Got it was pressed (an acknowledged card is
+    /// still open) or it was snoozed, and the recovery reads as a clear
+    /// (`watchdog.alerts` with no alerts, `-cleared` in the log).
+    #[tokio::test(flavor = "current_thread")]
+    async fn sound_coming_back_clears_the_silent_mic_card_even_after_got_it() {
+        for answer in ["none", "got-it", "snooze"] {
+            let state = test_state();
+            let session = format!("unmuted-{answer}");
+            persist_session(&state, &session);
+            observe_health_event(
+                &state,
+                Some(&session),
+                crate::recording::MICROPHONE_SILENT_CODE,
+                "Shure MV7+ is sending only silence.",
+            );
+            let id = alerts_view(&state).alerts[0].id.clone();
+            match answer {
+                "got-it" => {
+                    acknowledge(&state, &id).unwrap();
+                }
+                "snooze" => {
+                    snooze(&state, &id, SnoozeScope::TenMinutes).unwrap();
+                }
+                _ => {}
+            }
+            let mut events = state.events.subscribe();
+            observe_health_event(
+                &state,
+                Some(&session),
+                crate::recording::MICROPHONE_SIGNAL_RECOVERED_CODE,
+                "Shure MV7+ has sound again after 4.0 seconds of silence.",
+            );
+            assert!(alerts_view(&state).alerts.is_empty(), "{answer}");
+            let mut saw_empty_view = false;
+            while let Ok(event) = events.try_recv() {
+                if event.event == "watchdog.alerts" {
+                    saw_empty_view = event.payload["alerts"] == json!([]);
+                }
+            }
+            assert!(saw_empty_view, "{answer}: the Studio hears the card go");
+            flush_announcements(&state).await;
+            let codes: Vec<String> = state
+                .database
+                .list_health_events(&session)
+                .unwrap()
+                .into_iter()
+                .map(|event| event.code)
+                .collect();
+            assert!(
+                codes
+                    .iter()
+                    .any(|code| code == "watchdog-mic-silent-cleared"),
+                "{answer}: {codes:?}"
+            );
+            session_ended(&state, &session);
+        }
+    }
+
     /// Issue 1064 on a record-only session: no tick ever starts its watch
     /// (plan 221 Q7), so the microphone's silence report starts one with the
     /// recording's wording, the recovery clears it, and a report naming

@@ -3,6 +3,7 @@ import type { Scene } from '@/lib/backend'
 import type { CaptureConfig } from '@/lib/capture'
 import {
   commitSceneIdle,
+  idleCommitOutput,
   roomAlignmentCommit,
   roomTransactionCommit,
   type IdleCommitState
@@ -173,5 +174,54 @@ describe('the idle commit', () => {
         roomTransactionCommit(state(), layout('camera-only'), undefined)
       )
     ).rejects.toThrow('superseded by session startup')
+  })
+})
+
+// Plan 258 S1 put the camera's background on a room's idle commit and left the
+// look off it: a scene's layout carries no look, so putting a scene on the room
+// program took the look off the camera while every other output kept it.
+describe('the idle commit at the output boundary', () => {
+  const look = { brightness: 0.1, contrast: 1.2, saturation: 0.8 }
+  const keyed = { mode: 'green', blurPct: 0, edges: 'soft' } as never
+
+  const aligned = () =>
+    roomAlignmentCommit(
+      state(),
+      { layout: layout('screen-camera'), sources: { cameraId: 'camera-1' }, background: null },
+      'scene-3'
+    )
+
+  it("puts the selected camera's look on a scene's layout, as every other output does", () => {
+    const out = idleCommitOutput(aligned(), { cameraLooks: { 'camera-1': look } })
+    expect(out.params.layout.cameraLook).toEqual(look)
+  })
+
+  it("puts the look and the background on together, and never another camera's", () => {
+    const out = idleCommitOutput(aligned(), {
+      cameraLooks: {
+        'camera-1': look,
+        'camera-2': { brightness: -0.2, contrast: 1, saturation: 1 }
+      },
+      cameraBackgrounds: { 'camera-1': keyed }
+    })
+    expect(out.params.layout.cameraLook).toEqual(look)
+    expect(out.params.layout.cameraBackground).toEqual(keyed)
+  })
+
+  it("drops a look the camera no longer has instead of keeping the scene's", () => {
+    const base = aligned()
+    const stale = {
+      ...base,
+      params: { ...base.params, layout: { ...base.params.layout, cameraLook: look } }
+    }
+    expect(idleCommitOutput(stale, {}).params.layout).not.toHaveProperty('cameraLook')
+  })
+
+  it('leaves everything but the layout as it was', () => {
+    const base = aligned()
+    const out = idleCommitOutput(base, { cameraLooks: { 'camera-1': look } })
+    expect(out.rest).toBe(base.rest)
+    expect(out.params.sources).toBe(base.params.sources)
+    expect(out.params.video).toBe(base.params.video)
   })
 })

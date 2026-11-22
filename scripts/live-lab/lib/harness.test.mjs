@@ -253,6 +253,20 @@ test('refusals exit 2 before anything starts and print REFUSED (reason)', async 
       argv: ['--scenario', 'unit', '--trigger', 'manual'],
       deps: { acquireRunLock: async () => ({ ok: false, reason: 'raced' }) },
       reason: 'raced'
+    },
+    {
+      // Plan 257 D12: never stream a lock screen as the test card.
+      argv: ['--scenario', 'unit', '--trigger', 'schedule'],
+      deps: {
+        sessionLock: async () => ({
+          locked: true,
+          detail: 'The session is locked (hyprland, monitors; locker: omarchy-shell (quickshell)).'
+        }),
+        acquireRunLock: async () => {
+          throw new Error('a locked session must be refused before the run lock')
+        }
+      },
+      reason: /^session-locked: The session is locked \(hyprland, monitors; locker: omarchy-shell/
     }
   ]
   for (const entry of cases) {
@@ -272,6 +286,23 @@ test('refusals exit 2 before anything starts and print REFUSED (reason)', async 
     assert.equal(result.runDir, null)
   }
   assert.deepEqual(await readdir(workDir), [], 'no run folder for a refusal')
+})
+
+test('an unlocked or unreadable session lock does not refuse the run (plan 257 D12)', async () => {
+  for (const locked of [false, null]) {
+    const workDir = await tmpWork()
+    const r = await rig({
+      workDir,
+      scenarios: { unit: scenario([{ id: 'one', deadlineMs: 1000, run: () => 1 }]) },
+      overrides: { sessionLock: async () => ({ locked, detail: 'x' }) }
+    })
+    const result = await executeRun({
+      argv: ['--scenario', 'unit', '--trigger', 'manual'],
+      deps: r.deps
+    })
+    assert.equal(result.exitCode, EXIT.ok, `locked: ${locked}`)
+    assert.equal(r.calls.startSession, 1)
+  }
 })
 
 test('a clean run exits 0 with a complete manifest and releases the lock', async () => {

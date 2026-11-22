@@ -59,9 +59,6 @@ export function showStreamTargetNotices(notices: readonly StreamTargetNotice[]):
   )
 }
 
-/** The one id for Buddy's own failures and stops, so one replaces the other. */
-export const COHOST_STATUS_TOAST_ID = 'cohost-status'
-
 export type CohostStatusToast = {
   kind: 'error' | 'warning' | 'message'
   title: string

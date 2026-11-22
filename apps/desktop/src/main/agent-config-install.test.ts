@@ -8,7 +8,6 @@ import {
   realpath,
   rm,
   stat,
-  symlink,
   writeFile
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -33,6 +32,7 @@ import {
   type AgentConfigTarget,
   type ExecFile
 } from './agent-config-install'
+import { symlinkOrSkip } from './symlink.test-helper'
 
 // Plan 209 S22: "Add to …" writes the videorc entry into another app's own
 // config file. It keeps every other server, backs the file up, writes
@@ -391,26 +391,23 @@ describe('writeAgentConfig (plan 209 S22)', () => {
     }
   })
 
-  it.skipIf(process.platform === 'win32')(
-    'writes a symlinked config through to its target and keeps the link',
-    async () => {
-      const dotfiles = await folder('dotfiles')
-      const real = join(dotfiles, 'cursor-mcp.json')
-      await writeFile(real, JSON.stringify({ mcpServers: { github: { command: 'gh' } } }))
-      const dir = await folder('.cursor')
-      const link = join(dir, 'mcp.json')
-      await symlink(real, link)
+  it('writes a symlinked config through to its target and keeps the link', async (ctx) => {
+    const dotfiles = await folder('dotfiles')
+    const real = join(dotfiles, 'cursor-mcp.json')
+    await writeFile(real, JSON.stringify({ mcpServers: { github: { command: 'gh' } } }))
+    const dir = await folder('.cursor')
+    const link = join(dir, 'mcp.json')
+    symlinkOrSkip(ctx, real, link)
 
-      const write = await writeAgentConfig(target('cursor', link), CONNECTION, HOST, {
-        now: () => NOW
-      })
+    const write = await writeAgentConfig(target('cursor', link), CONNECTION, HOST, {
+      now: () => NOW
+    })
 
-      expect(write.outcome).toBe('added')
-      expect(await readlink(link)).toBe(real)
-      expect(JSON.parse(await readFile(real, 'utf8')).mcpServers.videorc).toEqual(ENTRY)
-      expect(await backups(dotfiles)).toEqual(['cursor-mcp.json.videorc-backup-20261027-221530'])
-    }
-  )
+    expect(write.outcome).toBe('added')
+    expect(await readlink(link)).toBe(real)
+    expect(JSON.parse(await readFile(real, 'utf8')).mcpServers.videorc).toEqual(ENTRY)
+    expect(await backups(dotfiles)).toEqual(['cursor-mcp.json.videorc-backup-20261027-221530'])
+  })
 
   it('keeps the old file when the final rename fails, and removes its staging file', async () => {
     const dir = await folder('Claude')

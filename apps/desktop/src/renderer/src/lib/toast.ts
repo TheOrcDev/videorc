@@ -232,10 +232,42 @@ type Show = (title: ToastTitle, options?: ExternalToast) => string | number
 // would change what tests that spy on sonner observe.
 // A loading toast never times out on its own, so it takes no default duration.
 function guarded(show: Show, timed = true, copyable = false): Show {
-  return (title, options) => {
+  const shown: Show = (title, options) => {
     const next = guardOptions(title, options, timed, copyable)
+    // Compiled out of a packaged renderer: smokes read every toast in dev.
+    if (import.meta.env.DEV) recordSmokeToast(shown, next.title, next.options)
     return next.options === undefined ? show(next.title) : show(next.title, next.options)
   }
+  return shown
+}
+
+/** One toast a dev renderer showed: what a launch smoke reads (no toasts at launch). */
+export interface SmokeToastRecord {
+  kind: string
+  title: string
+  description?: string
+  id?: string
+  /** `performance.now()` when it was shown: ms since this document started. */
+  at: number
+  /** The caller's stack, to name the call site. */
+  stack?: string
+}
+
+const smokeToasts: SmokeToastRecord[] = []
+const smokeToastKinds = new Map<Show, string>()
+
+// Smokes read every toast here (`window.__videorcSmokeToasts()`), with its
+// call site. Dev builds only.
+function recordSmokeToast(show: Show, title: ToastTitle, options: ExternalToast | undefined): void {
+  if (typeof window === 'undefined') return
+  smokeToasts.push({
+    kind: smokeToastKinds.get(show) ?? 'default',
+    title: typeof title === 'string' ? title : '(not text)',
+    ...(typeof options?.description === 'string' ? { description: options.description } : {}),
+    ...(options?.id === undefined ? {} : { id: String(options.id) }),
+    at: performance.now(),
+    stack: new Error('toast').stack?.split('\n').slice(3, 12).join('\n')
+  })
 }
 
 const base = guarded((...args) => sonner(...args))
@@ -255,3 +287,18 @@ export const toast = Object.assign(base, {
   loading: guarded((...args) => sonner.loading(...args), false),
   dismiss: (id?: string | number) => sonner.dismiss(id)
 })
+
+if (import.meta.env.DEV && typeof window !== 'undefined') {
+  for (const kind of [
+    'success',
+    'error',
+    'problem',
+    'warning',
+    'info',
+    'message',
+    'loading'
+  ] as const)
+    smokeToastKinds.set(toast[kind], kind)
+  ;(window as Window & { __videorcSmokeToasts?: () => SmokeToastRecord[] }).__videorcSmokeToasts =
+    () => smokeToasts.slice()
+}

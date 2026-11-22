@@ -12,6 +12,8 @@ import {
   nativeWindowsScreenRecordingActive,
   parseWindowsNativeScreenArgs,
   SCENE_BACKGROUND_STAGE_INSET,
+  WINDOWS_NATIVE_SCREEN_STREAM_PRESETS,
+  windowsNativeScreenOutputPlan,
   SCENE_EDIT_SCREEN_TRANSFORM,
   sceneEditFrameRegions,
   requiredBmpPreviewAdvances,
@@ -51,21 +53,27 @@ test('native Windows screen arguments select D3D11 or natural fallback strictly'
     requireD3d11: true,
     expectFallback: null,
     background: false,
-    sceneEdit: false
+    sceneEdit: false,
+    stream: null,
+    streamPreset: null
   })
   assert.deepEqual(parseWindowsNativeScreenArgs(['--expect-fallback', 'natural']), {
     d3d11: false,
     requireD3d11: false,
     expectFallback: 'natural',
     background: false,
-    sceneEdit: false
+    sceneEdit: false,
+    stream: null,
+    streamPreset: null
   })
   assert.deepEqual(parseWindowsNativeScreenArgs(['--d3d11', '--require-d3d11', '--background']), {
     d3d11: true,
     requireD3d11: true,
     expectFallback: null,
     background: true,
-    sceneEdit: false
+    sceneEdit: false,
+    stream: null,
+    streamPreset: null
   })
   assert.deepEqual(
     parseWindowsNativeScreenArgs(['--d3d11', '--require-d3d11', '--scene-edit', '--background']),
@@ -74,7 +82,9 @@ test('native Windows screen arguments select D3D11 or natural fallback strictly'
       requireD3d11: true,
       expectFallback: null,
       background: true,
-      sceneEdit: true
+      sceneEdit: true,
+      stream: null,
+      streamPreset: null
     }
   )
   assert.throws(() => parseWindowsNativeScreenArgs(['--require-d3d11']), /requires --d3d11/)
@@ -83,6 +93,70 @@ test('native Windows screen arguments select D3D11 or natural fallback strictly'
       parseWindowsNativeScreenArgs(['--d3d11', '--require-d3d11', '--expect-fallback', 'natural']),
     /cannot be combined/
   )
+})
+
+test('#173: --stream adds a split or stream-only loopback leg with a backend stream preset', () => {
+  assert.deepEqual(parseWindowsNativeScreenArgs(['--stream', 'split']), {
+    d3d11: false,
+    requireD3d11: false,
+    expectFallback: null,
+    background: false,
+    sceneEdit: false,
+    stream: 'split',
+    streamPreset: 'stream-safe-1080p30'
+  })
+  assert.equal(
+    parseWindowsNativeScreenArgs([
+      '--stream',
+      'stream-only',
+      '--stream-preset',
+      'stream-youtube-4k30'
+    ]).streamPreset,
+    'stream-youtube-4k30'
+  )
+  assert.throws(() => parseWindowsNativeScreenArgs(['--stream', 'both']), /--stream must be/)
+  assert.throws(
+    () => parseWindowsNativeScreenArgs(['--stream-preset', 'stream-safe-1080p60']),
+    /requires --stream/
+  )
+  assert.throws(
+    () => parseWindowsNativeScreenArgs(['--stream', 'split', '--stream-preset', 'record-4k30']),
+    /--stream-preset must be one of/
+  )
+})
+
+test('#173: the output plan records, splits or streams only, with the preset as the stream profile', () => {
+  const video = { preset: 'custom', width: 2560, height: 1440, fps: 60, bitrateKbps: 12000 }
+  assert.deepEqual(windowsNativeScreenOutputPlan({ video }), {
+    outputMode: 'record',
+    recordEnabled: true,
+    sessionVideo: video,
+    streamVideo: null
+  })
+  const split = windowsNativeScreenOutputPlan({
+    stream: 'split',
+    streamPreset: 'stream-safe-1080p30',
+    video
+  })
+  assert.equal(split.outputMode, 'record+stream')
+  assert.equal(split.recordEnabled, true)
+  assert.equal(split.sessionVideo, video)
+  assert.deepEqual(split.streamVideo, WINDOWS_NATIVE_SCREEN_STREAM_PRESETS['stream-safe-1080p30'])
+  const streamOnly = windowsNativeScreenOutputPlan({
+    stream: 'stream-only',
+    streamPreset: 'stream-youtube-4k30',
+    video
+  })
+  assert.equal(streamOnly.outputMode, 'stream')
+  assert.equal(streamOnly.recordEnabled, false)
+  assert.deepEqual(streamOnly.sessionVideo, {
+    preset: 'stream-youtube-4k30',
+    width: 3840,
+    height: 2160,
+    fps: 30,
+    bitrateKbps: 30000
+  })
+  assert.deepEqual(streamOnly.streamVideo, streamOnly.sessionVideo)
 })
 
 test('a scene-edit recording is judged outside and inside the moved screen, never across it', () => {
@@ -338,6 +412,30 @@ test('native ScreenOnly recording proof joins recording, compositor, and source 
   }
 
   assert.equal(nativeWindowsScreenRecordingActive(evidence, sourceId), true)
+  // #173: a session that streams is judged on its own output mode, in either
+  // live state; a record-only run never accepts a streaming session.
+  const streaming = {
+    ...evidence,
+    diagnostics: { ...evidence.diagnostics, activeOutputMode: 'stream' },
+    recording: { state: 'streaming' }
+  }
+  assert.equal(
+    nativeWindowsScreenRecordingActive(streaming, sourceId, { outputMode: 'stream' }),
+    true
+  )
+  assert.equal(nativeWindowsScreenRecordingActive(streaming, sourceId), false)
+  assert.equal(
+    nativeWindowsScreenRecordingActive(evidence, sourceId, { outputMode: 'record+stream' }),
+    false
+  )
+  assert.equal(
+    nativeWindowsScreenRecordingActive(
+      { ...evidence, diagnostics: { ...evidence.diagnostics, activeOutputMode: 'record+stream' } },
+      sourceId,
+      { outputMode: 'record+stream' }
+    ),
+    true
+  )
   assert.equal(nativeWindowsCompositorUsesScreen(evidence.compositor, sourceId), true)
   assert.equal(
     nativeWindowsScreenRecordingActive(

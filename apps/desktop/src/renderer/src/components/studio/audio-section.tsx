@@ -360,26 +360,33 @@ function MicrophoneRow({
           </ShortcutTooltip>
         </>
       }
+      // "Open Audio" (a silent or lost microphone) lands on this row: it is
+      // centred and marked for a moment, its meter in view.
+      data-section-focus-target=""
       icon={MicrophoneIcon}
       id="studio-microphone"
       title="Microphone"
     >
       {/* The row title names the picker; its label stays for screen readers
           and the perf probe. */}
-      <DevicePicker
-        description={switchStatus}
-        devices={devices}
-        disabled={disabled}
-        discoveryPending={discoveryPending}
-        kind="microphone"
-        label="Microphone"
-        labelHidden
-        noneLabel="Off"
-        selectedDevice={selectedDevice}
-        selectedName={selectedName}
-        value={value}
-        onChange={onChange}
-      />
+      {/* "Open Audio" focuses the picker, never the mute in the header: a
+          stray Space there would mute a live microphone. */}
+      <div className="contents" data-section-focus-control="">
+        <DevicePicker
+          description={switchStatus}
+          devices={devices}
+          disabled={disabled}
+          discoveryPending={discoveryPending}
+          kind="microphone"
+          label="Microphone"
+          labelHidden
+          noneLabel="Off"
+          selectedDevice={selectedDevice}
+          selectedName={selectedName}
+          value={value}
+          onChange={onChange}
+        />
+      </div>
       {/* Exactly the picker's width: the meter alone. It still names its
           level in dB to screen readers (aria-valuetext). */}
       <div

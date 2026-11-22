@@ -25,6 +25,19 @@ export function activitySavesRecording(activity: SessionRuntimeActivity): boolea
   return activity !== 'live-stream' && activity !== 'clips'
 }
 
+/**
+ * The notice is about the microphone while it can still be fixed: it gets
+ * the Open Audio door, the watchdog card's own button. A system-audio-only
+ * loss belongs on Sources, and a finished session has nothing left to fix.
+ */
+export function sessionRuntimeNoticeOpensAudio(notice: SessionRuntimeNotice): boolean {
+  if (notice.kind !== 'microphone-input-lost' || notice.phase === 'ended') return false
+  return (
+    !notice.audioIssues?.length ||
+    notice.audioIssues.some((issue) => issue.code.startsWith('microphone-'))
+  )
+}
+
 export type SessionRuntimeNotice =
   | {
       kind: 'recording-failed'
@@ -52,8 +65,8 @@ export function sessionRuntimeNoticeTitle(notice: SessionRuntimeNotice): string 
   }
 
   // Issue 1064: the microphone never stopped; its frames hold no sound. The
-  // backend's line (the device, since when, "Try choosing it again") is the
-  // description.
+  // backend's line (the device, then its own mute, switch and cable first,
+  // choosing it again after) is the description.
   if (notice.audioIssues?.every((issue) => issue.code === MICROPHONE_SILENT_CODE)) {
     if (notice.phase === 'ended') {
       return notice.activity === 'clips'

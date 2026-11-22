@@ -14,6 +14,9 @@ function door(section: SectionFocusId, open: () => void): () => void {
   }
 }
 
+/** The door's one name, on every entry, card and notice that has it. */
+export const OPEN_AUDIO_LABEL = 'Open Audio'
+
 /** Studio, the Audio group: microphone picker, level, Gain, mute. */
 export const openStudioAudio = door('studio-audio', () => openWorkspaceTab('studio'))
 /** Sources → Audio → Microphone. */

@@ -31,8 +31,13 @@ mod buddy_overlay;
 mod buddy_pet;
 mod buddy_pet_store;
 mod buddy_sprite;
+mod camera_background;
 mod camera_capture;
+#[cfg(target_os = "macos")]
+mod camera_effect_metal;
+mod camera_fixture;
 mod camera_low_light;
+mod camera_system_effect;
 mod captions;
 mod capture_health;
 mod capture_input;
@@ -578,6 +583,9 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     // Plan 254 S7: what each CoreAudio microphone id named before this
     // start, so a saved id that drifted still opens its microphone.
     microphone_identity::restore(&database);
+    // Plan 258 S4: a Windows Studio Effects blur an earlier run turned off
+    // and never put back (it crashed or was force-quit) goes back on.
+    camera_system_effect::settle_owed_restores_at_launch(&database);
     // Plan 249 S22: a cloud ISO transfer the previous run left running is
     // retried, and only staging files its journal created are removed.
     if let Err(error) = database.recover_cloud_iso_imports() {
@@ -5090,6 +5098,9 @@ const COMMAND_LANE_SMOKE_BLOCK_METHOD: &str = "test.commandLanes.accountMaintena
 const LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD: &str = "test.commandLanes.liveControl.block";
 const COMMAND_LANE_SMOKE_STATUS_METHOD: &str = "test.commandLanes.accountMaintenance.status";
 const COMMAND_LANE_SMOKE_RELEASE_METHOD: &str = "test.commandLanes.accountMaintenance.release";
+/// Plan 258 S3: hold or release the camera effect stage's segment worker,
+/// so `pnpm smoke:camera-background` can prove the stall shows the cover.
+const CAMERA_BACKGROUND_STALL_SMOKE_METHOD: &str = "test.cameraBackground.segmentationStall";
 const CAPTURE_RECOVERY_SMOKE_INJECT_METHOD: &str =
     "test.captureRecovery.injectCameraDeliveryDegradation";
 const CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD: &str =
@@ -6155,7 +6166,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "virtualCamera.set"
         | "virtualCamera.platform.report"
         | "htmlOverlays.host.report"
-        | "camera.lowLight.set" => Some(DEFAULT_MUTATION_POLICY),
+        | "camera.lowLight.set"
+        // Plan 258 S3: the smoke's segmentation stall (debug builds only).
+        | CAMERA_BACKGROUND_STALL_SMOKE_METHOD => Some(DEFAULT_MUTATION_POLICY),
 
         // Web-bound (see `WEBSOCKET_WEB_BOUND_MAX_EXECUTION_AGE`). The
         // controls of an open room and a cloud show, all through videorc.com
@@ -10913,6 +10926,32 @@ async fn handle_text_message_with_role(
                 )
             }
         }
+        CAMERA_BACKGROUND_STALL_SMOKE_METHOD => {
+            let stalled = command
+                .params
+                .get("stalled")
+                .and_then(serde_json::Value::as_bool);
+            match stalled {
+                None => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "The segmentation stall takes { stalled: boolean }.",
+                ),
+                Some(stalled) => {
+                    match preview_camera::effect_stage::set_debug_segmentation_stall(stalled) {
+                        Ok(()) => ServerResponse::ok(
+                            command.id,
+                            serde_json::json!({ "stalled": stalled }),
+                        ),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "camera-background-stall-refused",
+                            error,
+                        ),
+                    }
+                }
+            }
+        }
         #[cfg(debug_assertions)]
         CAPTURE_RECOVERY_SMOKE_INJECT_METHOD => {
             if !rpc_params_are_empty(&command.params) {
@@ -14355,7 +14394,10 @@ async fn handle_text_message_with_role(
                         Ok(status) => ServerResponse::ok(command.id, status),
                         Err(error) => ServerResponse::error(
                             command.id,
-                            "scene-commit-failed",
+                            live_layout::idle_scene_reload_failure_code(
+                                &error,
+                                "scene-commit-failed",
+                            ),
                             error.to_string(),
                         ),
                     }
@@ -19544,6 +19586,9 @@ mod tests {
                 }
                 "CAPTURE_RECOVERY_SMOKE_INJECT_METHOD" => {
                     Some(CAPTURE_RECOVERY_SMOKE_INJECT_METHOD)
+                }
+                "CAMERA_BACKGROUND_STALL_SMOKE_METHOD" => {
+                    Some(CAMERA_BACKGROUND_STALL_SMOKE_METHOD)
                 }
                 "CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD" => {
                     Some(CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD)

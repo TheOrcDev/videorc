@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Plans 203 S7 and 207 S8. Real macOS dev app, isolated profile, CDP observations only.
 // No permission buttons are pressed. Cold TCC prompts need the owner's S0 pass.
+// It starts with the launch check (no toast in a returning user's first
+// minute); `VIDEORC_FIRST_RUN_SMOKE_ONLY=launch-quiet` runs that check alone.
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { get } from 'node:http'
@@ -782,8 +784,95 @@ async function replay() {
   })
 }
 
-try {
-  console.log(`First-run smoke output: ${output}`)
+// The owner, 2026-11-22: "especially when you enter the app; the first thing
+// you see is a bunch of toasts". What the owner's Mac reports in its first
+// seconds (their backend.log): the app's own handlers for those reports,
+// called as the backend's events call them, with no input to the window.
+// Returns the notification keys each should land on.
+const OWNER_LAUNCH_REPORTS = `(async () => {
+  const runtime = await import('/src/lib/session-runtime-recovery.ts');
+  const app = await import('/src/lib/notifications/sources/app.ts');
+  const platforms = await import('/src/lib/notifications/sources/platforms.ts');
+  const cloud = await import('/src/lib/notifications/sources/cloud.ts');
+  const ring = { state: 'recording', sessionId: 'launch-ring', replayOnly: true };
+  const createdAt = new Date().toISOString();
+  const health = (code, message) => runtime.showSessionHealthEvent(
+    { id: code, sessionId: ring.sessionId, level: 'warn', code, message, createdAt }, false, ring);
+  health('host-overloaded', 'This computer is overloaded: a load of 20 on 10 cores and 8.2 GB of swap in use.');
+  health('recording-startup-cadence-unsteady', 'The first seconds may stutter.');
+  health('mic-silent', 'The microphone has sent only silence since 3.0 seconds into this session.');
+  app.publishGlobalShortcutsProblem({ title: "A global shortcut didn't register", description: 'Another app uses it.' });
+  app.publishVideorcCameraStopped({ title: 'Videorc Camera stopped', description: 'It has no picture yet.' });
+  app.publishBackgroundProblem({ title: "Couldn't load your YouTube channels" });
+  platforms.publishSignInExpired();
+  cloud.announceCloud({ requestTyped: () => Promise.resolve({}) }, () => {});
+  return ['host-overloaded', 'session-notice:recording-startup-cadence-unsteady', 'microphone',
+    'global-shortcuts', 'videorc-camera', "background-problem:Couldn't load your YouTube channels",
+    'account-session', 'cloud-announce'];
+})()`
+
+const launchObservation = `(() => {
+  const record = window.__videorcSmokeToasts;
+  const read = window.__videorcSmokeNotifications;
+  const bell = document.querySelector('[data-videorc-notification-bell]');
+  return {
+    toastHook: typeof record === 'function',
+    launchToasts: typeof record === 'function'
+      ? record().map(({ kind, title, at, stack }) => ({ kind, title, at, stack })) : [],
+    notificationHook: typeof read === 'function',
+    entries: typeof read === 'function'
+      ? read().entries.map(({ key, kind, tone, title }) => ({ key, kind, tone, title })) : [],
+    bellCount: bell ? Number(bell.getAttribute('data-videorc-notification-count') ?? 0) : null,
+    pressed: navigator.userActivation?.hasBeenActive ?? null,
+    watchMs: performance.now()
+  };
+})()`
+
+// A returning user (setup done) opens Videorc and touches nothing for a
+// minute: zero toasts, and what Videorc found is behind the bell.
+async function launchQuiet() {
+  await startApp('returning')
+  guard = null
+  const done = JSON.stringify({
+    version: 1,
+    status: 'done',
+    step: 'destinations',
+    goal: 'both',
+    updatedAt: new Date().toISOString()
+  })
+  // The reload is the launch the renderer sees: a new document, a new store.
+  await reloadWith({ 'videorc.firstRun': done, 'videorc.theme': 'dark' })
+  await waitFor('returning Studio', (s) => s.setup === null && s.sidebar)
+  await delay(4000)
+  let expectedKeys = []
+  for (let attempt = 0; attempt < 20 && expectedKeys.length === 0; attempt += 1) {
+    try {
+      expectedKeys = await evaluate(OWNER_LAUNCH_REPORTS)
+    } catch {
+      // A dev chunk may still be loading.
+      await delay(500)
+    }
+  }
+  // Without the reports the check would pass without testing anything.
+  if (expectedKeys.length === 0) throw new Error('the owner launch reports never ran')
+  await delay(2000)
+  await screenshot('launch-quiet-dark-6s')
+  for (;;) {
+    const age = await evaluate('performance.now()')
+    const left = FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs + 500 - age
+    if (left <= 0) break
+    await delay(Math.min(5000, left))
+  }
+  const observed = await evaluate(launchObservation)
+  await screenshot('launch-quiet-dark')
+  await setTheme('light')
+  await settled()
+  await screenshot('launch-quiet-light')
+  await check('launch-quiet', { ...observed, expectedKeys })
+}
+
+// Every setup profile after the launch check.
+async function setupProfiles() {
   await startApp('recordings')
   // CDP attaches after the untouched first mount; reload to measure mount to
   // first frame on a shared renderer clock, as plan 203 did.
@@ -971,8 +1060,17 @@ try {
     beforeConfigRaw: beforeSkip.configRaw,
     beforeRegistryRaw: beforeSkip.registryRaw
   })
+}
+
+try {
+  console.log(`First-run smoke output: ${output}`)
+  await launchQuiet()
+  const onlyLaunchQuiet = process.env.VIDEORC_FIRST_RUN_SMOKE_ONLY === 'launch-quiet'
+  if (!onlyLaunchQuiet) await setupProfiles()
   report.pass = true
-  console.log('PASS first-run smoke: all steps passed')
+  console.log(
+    `PASS first-run smoke: ${onlyLaunchQuiet ? 'the launch check passed (launch-quiet only)' : 'all steps passed'}`
+  )
 } catch (error) {
   report.pass = false
   report.error = error.stack ?? String(error)

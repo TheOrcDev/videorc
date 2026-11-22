@@ -18,6 +18,8 @@ use std::{
 };
 use tokio::sync::watch;
 pub const MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// The trim's FFmpeg advertises none of the H.264 encoders Videorc knows.
+const CLIP_NO_H264_ENCODER: &str = "clip-no-h264-encoder";
 /// Journal rows, the new job's included; the jobs list shows every one (L2).
 const MAX_ROWS: usize = 16;
 /// Clips that can still be retried at once (L2).
@@ -400,9 +402,12 @@ pub async fn save(
                 "interrupted"
             }
             .into();
-            job.reason =
+            job.reason = if error.to_string() == CLIP_NO_H264_ENCODER {
+                "Clip not saved. This copy of FFmpeg has no H.264 encoder Videorc can use."
+            } else {
                 "Clip not saved. Retry while segments remain, or discard local staging files."
-                    .into();
+            }
+            .into();
             let _ = db.save_cloud_clip(&job);
             // No partial artifact enters Library; retained retry files are bounded.
             if job.state == "cancelled" {
@@ -414,7 +419,37 @@ pub async fn save(
     });
     Ok(view)
 }
-pub fn trim_args(input: &Path, output: &Path, start_ms: f64, duration_ms: f64) -> Vec<OsString> {
+/// The clip's bitrate for an encoder without a quality mode (OpenH264), the
+/// ceiling the libx264 encode was already capped at.
+const CLIP_VIDEO_BITRATE_KBPS: u32 = 8_000;
+
+/// The H.264 encode for the FFmpeg that trims the clip. Every bundled FFmpeg
+/// is LGPL and has no libx264 (macOS builds with `--disable-gpl`; the Windows
+/// and Linux fetches refuse anything else), so a hardcoded `libx264` failed
+/// every packaged clip with "Unknown encoder". Repair already probes for the
+/// encoder a build has; a clip uses the same probe and its quality settings.
+fn clip_video_encode_args(encoder: crate::repair::RepairVideoEncoder) -> Vec<String> {
+    match encoder {
+        crate::repair::RepairVideoEncoder::Libx264 => [
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-maxrate", "8M", "-bufsize",
+            "16M", "-pix_fmt", "yuv420p",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+        other => other.encode_args(CLIP_VIDEO_BITRATE_KBPS),
+    }
+}
+
+/// `video_encode` is the H.264 encode the clip's FFmpeg can run
+/// (`clip_video_encode_args`), `-pix_fmt` included.
+pub fn trim_args(
+    input: &Path,
+    output: &Path,
+    start_ms: f64,
+    duration_ms: f64,
+    video_encode: &[String],
+) -> Vec<OsString> {
     // Decode from the independent segment boundary, then trim both tracks on
     // the same timeline. Stream copy would leak video before a non-keyframe mark.
     let filter = format!(
@@ -438,25 +473,13 @@ pub fn trim_args(input: &Path, output: &Path, start_ms: f64, duration_ms: f64) -
     .map(OsString::from)
     .chain([input.as_os_str().to_owned()])
     .chain(
+        ["-filter_complex", &filter, "-map", "[v]", "-map", "[a]"]
+            .into_iter()
+            .map(OsString::from),
+    )
+    .chain(video_encode.iter().map(OsString::from))
+    .chain(
         [
-            "-filter_complex",
-            &filter,
-            "-map",
-            "[v]",
-            "-map",
-            "[a]",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "18",
-            "-maxrate",
-            "8M",
-            "-bufsize",
-            "16M",
-            "-pix_fmt",
-            "yuv420p",
             "-c:a",
             "aac",
             "-b:a",
@@ -546,6 +569,13 @@ async fn run(
     f.write_all(playlist.as_bytes())?;
     f.sync_all()?;
     j.create(db, "clip.part")?.sync_all()?;
+    let probe_path = ffmpeg.to_string();
+    let encoder =
+        tokio::task::spawn_blocking(move || crate::repair::probe_repair_encoder(&probe_path))
+            .await
+            .ok()
+            .flatten()
+            .context(CLIP_NO_H264_ENCODER)?;
     j.state = "trimming".into();
     j.reason = "Trimming and validating program video and mixed audio.".into();
     db.save_cloud_clip(j)?;
@@ -557,6 +587,7 @@ async fn run(
             &out,
             j.plan.trim_start_ms,
             j.plan.duration_ms,
+            &clip_video_encode_args(encoder),
         ),
         token,
         stop.clone(),
@@ -888,6 +919,56 @@ pub(crate) mod test_api {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_clip_encodes_with_an_encoder_the_bundled_lgpl_ffmpeg_has() {
+        use crate::repair::RepairVideoEncoder::*;
+        for encoder in [H264VideoToolbox, H264MediaFoundation, Libopenh264] {
+            let args = clip_video_encode_args(encoder);
+            assert!(
+                args.windows(2)
+                    .any(|w| w == ["-c:v".to_string(), encoder.ffmpeg_name().to_string()]),
+                "{args:?}"
+            );
+            assert!(
+                !args.iter().any(|arg| arg == "libx264" || arg == "-crf"),
+                "{args:?}"
+            );
+            assert!(
+                args.windows(2)
+                    .any(|w| w == ["-pix_fmt".to_string(), "yuv420p".to_string()]),
+                "{args:?}"
+            );
+        }
+        // OpenH264 has no quality mode: the clip's 8 Mbps ceiling is its target.
+        assert!(
+            clip_video_encode_args(Libopenh264)
+                .windows(2)
+                .any(|w| w == ["-b:v".to_string(), "8000k".to_string()])
+        );
+        // A full (GPL) FFmpeg keeps the clip's original x264 settings.
+        let x264 = clip_video_encode_args(Libx264);
+        assert!(
+            x264.windows(2)
+                .any(|w| w == ["-crf".to_string(), "18".to_string()])
+        );
+        assert!(
+            x264.windows(2)
+                .any(|w| w == ["-maxrate".to_string(), "8M".to_string()])
+        );
+        // The trim carries whatever encode it is given, and no other video codec.
+        let trim = trim_args(
+            Path::new("index.m3u8"),
+            Path::new("clip.part"),
+            0.0,
+            1000.0,
+            &clip_video_encode_args(H264MediaFoundation),
+        );
+        let trim: Vec<_> = trim.iter().map(|arg| arg.to_string_lossy()).collect();
+        assert_eq!(trim.iter().filter(|arg| *arg == "-c:v").count(), 1);
+        assert!(trim.windows(2).any(|w| w[0] == "-c:v" && w[1] == "h264_mf"));
+    }
+
     fn plan() -> Plan {
         let segments = (0..20)
             .map(|i| Segment {

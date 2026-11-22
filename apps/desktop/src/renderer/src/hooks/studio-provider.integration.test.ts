@@ -1926,12 +1926,38 @@ function Probe({ observe }: { observe: (value: StudioObservation) => void }): nu
   return null
 }
 
+// A test that times out keeps running after Vitest moves on. If its polling
+// act() overlaps the next test's act(), the scopes close out of order, React's
+// act depth never returns to zero, and no later act() flushes React work: every
+// test after it in the file times out too (0.36.1's Linux candidate failed 146;
+// Windows shards ran into the job limit). So each polling helper belongs to one
+// test, and afterEach waits out its act() in flight before the next one starts.
+let testEpoch = 0
+let helperActInFlight: Promise<void> = Promise.resolve()
+
+/** One polling turn for the test that started at `epoch`; refuses once it ended. */
+async function pollAct(epoch: number, turn: () => Promise<void>): Promise<void> {
+  if (epoch !== testEpoch) {
+    throw new Error('The test ended (it timed out) before this wait finished.')
+  }
+  // act()'s thenable closes its scope on every then(): adopt it exactly once.
+  const pending = Promise.resolve(act(turn))
+  helperActInFlight = pending.catch(() => undefined)
+  await pending
+}
+
+async function endTestHelpers(): Promise<void> {
+  testEpoch += 1
+  await helperActInFlight
+}
+
 /** Runs only 0 ms timers (setTimeout is faked) while real time passes for
  * module loads and socket replies, until `done` or `withinMs` runs out. */
 async function turnZeroTimersUntil(done: () => boolean, withinMs = 3_000): Promise<void> {
+  const epoch = testEpoch
   const deadline = performance.now() + withinMs
   while (!done() && performance.now() < deadline) {
-    await act(async () => {
+    await pollAct(epoch, async () => {
       await new Promise<void>((resolve) => setImmediate(resolve))
       await vi.advanceTimersByTimeAsync(0)
     })
@@ -2320,6 +2346,7 @@ describe('real StudioProvider lifecycle', () => {
   let root: Root | null = null
 
   afterEach(async () => {
+    await endTestHelpers()
     if (root) {
       await act(async () => root?.unmount())
       root = null
@@ -4745,6 +4772,50 @@ describe('real StudioProvider lifecycle', () => {
       '[takeover] reading the active takeover failed:',
       expect.objectContaining({ code: 'command-expired-before-dispatch' })
     )
+    expectNoBusyOrGenericToast()
+    expect(latest()?.lastError).toBeNull()
+  })
+
+  it('never toasts an idle scene reload a session superseded, and reloads once the slot frees', async () => {
+    // A 0.36.0 Windows tester: first-run setup's performance check took the
+    // session slot, the backend refused the idle reload ("superseded by
+    // session startup") and the Studio said "Videorc hit a problem".
+    const backend = new StudioBackend()
+    let superseded = 1
+    const respond = backend.response.bind(backend)
+    vi.spyOn(backend, 'response').mockImplementation((command) => {
+      if (command.method === 'scene.load_from_capture_config' && superseded > 0) {
+        superseded -= 1
+        throw Object.assign(
+          new Error('Idle capture-config scene reload was superseded by session startup'),
+          { code: 'scene-reload-superseded' }
+        )
+      }
+      return respond(command)
+    })
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue | undefined => observations.at(-1)?.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+
+    const reloads = (): number =>
+      backend.sentCommands.filter((command) => command.method === 'scene.load_from_capture_config')
+        .length
+    await waitForObservation(() => superseded === 0)
+    // The refused reload tries again by itself (1 s) and commits.
+    await waitForObservation(() => reloads() >= 2)
     expectNoBusyOrGenericToast()
     expect(latest()?.lastError).toBeNull()
   })
@@ -12631,9 +12702,10 @@ describe('real StudioProvider lifecycle', () => {
       // 10 ms ticks, which outlasts the 250 ms debounce of the post-connect
       // scene reload (it re-applies the same scene as a new object).
       let quietTicks = 0
+      const epoch = testEpoch
       for (let attempt = 0; attempt < 400 && quietTicks < 30; attempt += 1) {
         const before = latest().core
-        await act(async () => {
+        await pollAct(epoch, async () => {
           await new Promise((resolve) => setTimeout(resolve, 10))
         })
         quietTicks = latest().core === before ? quietTicks + 1 : 0
@@ -16268,9 +16340,20 @@ describe('real StudioProvider lifecycle', () => {
       expect(latest().lastError).toContain(
         'Noise reduction is unavailable for this capture. It is Off.'
       )
+      // The sync runs on its own (the Clips ring starts it at launch too), so
+      // its notice is an entry behind the bell (the owner, 2026-11-22), and
+      // still only one: no toast besides it, no second entry.
       const notices = (): number =>
-        toastSpies.error.mock.calls.length + toastSpies.warning.mock.calls.length
+        toastSpies.error.mock.calls.length +
+        toastSpies.warning.mock.calls.length +
+        notifications.snapshot().filter((entry) => entry.kind === 'backend-error').length
       await waitForObservation(() => notices() === 1)
+      // Recording with quiet on: the entry waits behind the bell, no toast.
+      expect(toastSpies.error).not.toHaveBeenCalled()
+      expect(toastSpies.warning).not.toHaveBeenCalled()
+      expect(
+        notifications.snapshot().filter((entry) => entry.kind === 'backend-error')
+      ).toHaveLength(1)
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 30))
       })
@@ -19064,8 +19147,9 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       await invoke({ action: 'rapid-burst' })
     })
+    const epoch = testEpoch
     for (let attempt = 0; attempt < 100; attempt += 1) {
-      await act(async () => {
+      await pollAct(epoch, async () => {
         state = await invoke({ action: 'state' })
         await new Promise((resolve) => setTimeout(resolve, 10))
       })
@@ -20856,9 +20940,10 @@ function installProviderTestEnvironment(api: VideorcApi): {
 }
 
 async function waitForObservation(predicate: () => boolean, attempts = 500): Promise<void> {
+  const epoch = testEpoch
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (predicate()) return
-    await act(async () => {
+    await pollAct(epoch, async () => {
       await new Promise((resolve) => setTimeout(resolve, 10))
     })
   }

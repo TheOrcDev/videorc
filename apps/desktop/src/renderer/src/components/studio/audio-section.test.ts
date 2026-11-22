@@ -4,8 +4,11 @@ import { createRoot } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { RetroAudioSectionView } from '@/components/studio/retro-lcd-studio'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { focusSection } from '@/hooks/use-section-focus'
 import { createFrameEmitter } from '@/lib/audio/frame-source'
+import { SECTION_FOCUS_MARK_ATTRIBUTE, SECTION_FOCUS_MARK_MS } from '@/lib/section-focus'
 import type { MeterFrame } from '@/lib/audio/types'
 import type { Device, ReplayBufferState } from '@/lib/backend'
 import { defaultCaptureConfig } from '@/lib/capture'
@@ -455,6 +458,77 @@ describe('Audio section: resets (plan 201 S2)', () => {
     expect(microphoneGain).toEqual([0])
     expect(systemAudioGain).toEqual([-6])
     await unmount()
+  })
+
+  // Silent-mic report 2026-11-22: "Open Audio" lands on the Microphone row,
+  // not the top of the group: the row is centred and marked for a moment,
+  // its meter in view, and its picker takes focus. Never the mute: a stray
+  // Space on a focused mute would silence a live microphone.
+  it('Open Audio lands on the Microphone row: centred, marked a moment, the picker focused', async () => {
+    vi.useFakeTimers()
+    const scrolled: { element: Element; options: unknown }[] = []
+    Element.prototype.scrollIntoView = function (this: Element, options?: unknown) {
+      scrolled.push({ element: this, options })
+    }
+    const muted: boolean[] = []
+    const unmount = await mount(
+      { onMutedChange: (next) => muted.push(next) },
+      systemAudioProps({ sessionActive: true, audioBusActive: true })
+    )
+    const row = container!.querySelector<HTMLElement>('[data-source="studio-microphone"]')!
+    expect(focusSection('studio-audio', container!)).toBe(true)
+
+    expect(scrolled).toHaveLength(1)
+    expect(scrolled[0]!.element).toBe(row)
+    expect(scrolled[0]!.options).toMatchObject({ block: 'center' })
+    const focused = document.activeElement as HTMLElement
+    expect(focused.getAttribute('data-slot')).toBe('device-picker-trigger')
+    expect(row.contains(focused)).toBe(true)
+    expect(focused.closest('[data-videorc-studio-mic-mute]')).toBeNull()
+    // The meter is in the row the door scrolled to.
+    expect(row.querySelector('[data-videorc-mic-level]')).not.toBeNull()
+
+    expect(row.hasAttribute(SECTION_FOCUS_MARK_ATTRIBUTE)).toBe(true)
+    vi.advanceTimersByTime(SECTION_FOCUS_MARK_MS - 1)
+    expect(row.hasAttribute(SECTION_FOCUS_MARK_ATTRIBUTE)).toBe(true)
+    // A second press starts the mark over instead of cutting it short.
+    focusSection('studio-audio', container!)
+    vi.advanceTimersByTime(SECTION_FOCUS_MARK_MS - 1)
+    expect(row.hasAttribute(SECTION_FOCUS_MARK_ATTRIBUTE)).toBe(true)
+    vi.advanceTimersByTime(1)
+    expect(row.hasAttribute(SECTION_FOCUS_MARK_ATTRIBUTE)).toBe(false)
+
+    // Navigation only: nothing was muted or switched.
+    expect(muted).toEqual([])
+    vi.useRealTimers()
+    await unmount()
+  })
+
+  it('the Retro LCD screen lands on its Microphone the same way', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    Element.prototype.scrollIntoView = () => {}
+    container = document.createElement('div')
+    document.body.append(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(
+        createElement(
+          TooltipProvider,
+          null,
+          createElement(RetroAudioSectionView, {
+            microphone: microphoneProps(),
+            systemAudio: null
+          })
+        )
+      )
+    })
+    expect(focusSection('studio-audio', container)).toBe(true)
+    const target = container.querySelector(`[${SECTION_FOCUS_MARK_ATTRIBUTE}]`)
+    expect(target?.querySelector('[data-videorc-mic-level]')).not.toBeNull()
+    const focused = document.activeElement as HTMLElement
+    expect(focused.closest('[data-section-focus-control]')).not.toBeNull()
+    expect(focused.getAttribute('aria-label')).not.toBe('Mute microphone')
+    await act(async () => root.unmount())
   })
 })
 

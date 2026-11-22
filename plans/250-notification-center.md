@@ -143,6 +143,34 @@ do; unit-tested), VoiceOver, Increase Contrast and Reduce Motion, Windows,
 the Videorc Cloud door (the cloud is off on a test profile), and a real
 stream.
 
+## The first minute (2026-11-22)
+
+The owner, after 0.36.1: "it's very annoying, especially when you enter the
+app; the first thing you see is a bunch of toasts". The idle row of "What
+pops up" let every warning found at launch pop up: the Clips ring is a
+session but not "live", so a loaded Mac's first seconds (overloaded, a
+silent microphone, a shortcut taken, Videorc Camera, the sign-in, the
+Cloud announcement) stacked up to eight toasts. Since then:
+
+- **For the first minute of a run** (`LAUNCH_QUIET_MS`, from the store's
+  start, so a reload counts too) nothing Videorc found on its own pops up.
+  Only the answer to a press does, once the streamer has pressed something
+  (a click or key in the window, a global shortcut, a phone remote or Stream
+  Deck press: `lib/user-pressed.ts`), and an urgent problem in a recording
+  or livestream the streamer started. The rest waits behind the bell.
+- **An announcement counts on the bell**, or nobody would see it.
+- **What Videorc tried on its own and could not do** (the launch's reads,
+  the scene reload, the auto preview, background YouTube and X reads, a
+  chunk that did not load) is an entry, one per cause (`reportUnasked`,
+  `noteBackgroundError`), never a toast. Live captions that start on their
+  own with a session, and the Clips ring's "Couldn't start", are entries too.
+- **Guards:** every toast call site is on an inventory in
+  `renderer-toast-guards.test.ts`, by file and function, and a site that an
+  effect, an event or a timer runs needs its reason there.
+  `VIDEORC_FIRST_RUN_SMOKE_ONLY=launch-quiet pnpm smoke:first-run` relaunches
+  a returning user, sends the owner's launch reports through the app's own
+  handlers and fails on any toast in the first 60 s.
+
 ## The short version
 
 Videorc shows 317 toast call sites today. 212 answer something the streamer

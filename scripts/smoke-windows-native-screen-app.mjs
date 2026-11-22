@@ -1,6 +1,7 @@
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -38,6 +39,7 @@ import {
   SCENE_BACKGROUND_STAGE_INSET,
   SCENE_EDIT_SCREEN_TRANSFORM,
   sceneEditFrameRegions,
+  windowsNativeScreenOutputPlan,
   windowsNativeScreenRecordingArtifactGates,
   windowsNativeScreenRequiresFinalDiagnostics
 } from './lib/windows-native-screen-gates.mjs'
@@ -102,13 +104,25 @@ const requireDirectD3D11Recording =
 const includeCamera = process.env.VIDEORC_WINDOWS_INCLUDE_CAMERA === '1'
 const printAppOutput = process.env.VIDEORC_SMOKE_PRINT_APP_OUTPUT === '1'
 const performanceEvaluationRequested = performanceReportRequested || performanceModeValue === 'gate'
-const video = {
-  preset: 'custom',
-  width: Number(process.env.VIDEORC_SMOKE_VIDEO_WIDTH ?? 1280),
-  height: Number(process.env.VIDEORC_SMOKE_VIDEO_HEIGHT ?? 720),
-  fps: Number(process.env.VIDEORC_SMOKE_VIDEO_FPS ?? 30),
-  bitrateKbps: Number(process.env.VIDEORC_SMOKE_VIDEO_BITRATE_KBPS ?? 4_000)
-}
+// #173: --stream split records this profile and streams --stream-preset
+// beside it to a loopback RTMP sink; --stream stream-only streams the preset
+// alone and records nothing.
+const outputPlan = windowsNativeScreenOutputPlan({
+  stream: options.stream,
+  streamPreset: options.streamPreset,
+  video: {
+    // A named preset where a rule needs one (YouTube 4K30 streams only beside
+    // a Record 4K30 recording); custom otherwise.
+    preset: process.env.VIDEORC_SMOKE_VIDEO_PRESET ?? 'custom',
+    width: Number(process.env.VIDEORC_SMOKE_VIDEO_WIDTH ?? 1280),
+    height: Number(process.env.VIDEORC_SMOKE_VIDEO_HEIGHT ?? 720),
+    fps: Number(process.env.VIDEORC_SMOKE_VIDEO_FPS ?? 30),
+    bitrateKbps: Number(process.env.VIDEORC_SMOKE_VIDEO_BITRATE_KBPS ?? 4_000)
+  }
+})
+const video = outputPlan.sessionVideo
+const rtmpPortBase = Number(process.env.VIDEORC_SMOKE_RTMP_PORT ?? 13947)
+const STREAM_KEY = 'native-screen'
 
 if ((options.background || options.sceneEdit) && includeCamera) {
   throw new Error(
@@ -173,6 +187,8 @@ let sceneEditEvidence = null
 let cameraEvidence = null
 let cameraFramesAtRecordingStart = null
 let teardownEvidence = null
+let streamEvidence = null
+let streamReceiver = null
 let occludedAuxWindowsEvidence = null
 let collectorFailure = null
 let collectorFailed = false
@@ -254,15 +270,27 @@ try {
     )
   }
 
+  let streamTarget = null
+  if (outputPlan.streamVideo) {
+    const rtmpPort = await freeTcpPort(rtmpPortBase)
+    streamReceiver = startStreamReceiver(rtmpPort, join(outputDirectory, 'stream-sink.flv'))
+    await waitForStreamReceiverListening(streamReceiver, rtmpPort)
+    streamTarget = loopbackStreamTarget(rtmpPort)
+    console.log(
+      `Windows native screen smoke ${options.stream}: ${outputPlan.recordEnabled ? `records ${video.width}x${video.height}@${video.fps} and ` : ''}streams ${outputPlan.streamVideo.preset} to 127.0.0.1:${rtmpPort}`
+    )
+  }
+
   const started = await request(
     ws,
     timeoutMs,
     'session.start',
-    sessionParams(sources, bundledBackground)
+    sessionParams(sources, bundledBackground, streamTarget)
   )
-  if (started?.state !== 'recording') {
+  const expectedStates = outputPlan.streamVideo ? ['recording', 'streaming'] : ['recording']
+  if (!expectedStates.includes(started?.state)) {
     throw new Error(
-      `Expected ${includeCamera ? 'ScreenCamera' : 'ScreenOnly'} recording, got ${started?.state ?? 'no state'}.`
+      `Expected ${includeCamera ? 'ScreenCamera' : 'ScreenOnly'} ${outputPlan.outputMode}, got ${started?.state ?? 'no state'}.`
     )
   }
   const recordingStartedAt = Date.now()
@@ -358,106 +386,133 @@ try {
   if (options.d3d11 || options.expectFallback) {
     assertD3d11Diagnostics(finalDiagnostics, { requireOutput: options.d3d11 })
   }
+  if (outputPlan.outputMode === 'record+stream' && requireDirectD3D11Recording) {
+    // Different record and stream profiles need a second Media Foundation
+    // encoder; on the direct path it takes GPU textures like the first.
+    const media = finalDiagnostics?.windowsD3d11Media
+    if (!media?.primaryEncoderAdapterLuid || !media?.auxiliaryEncoderAdapterLuid) {
+      throw new Error(
+        `Split record/stream did not run both encoders on D3D11: primary=${media?.primaryEncoderAdapterLuid ?? 'missing'}, auxiliary=${media?.auxiliaryEncoderAdapterLuid ?? 'missing'}`
+      )
+    }
+  }
   const stopRequestedAt = Date.now()
   const stopped = await request(ws, timeoutMs, 'session.stop')
-  // Analyze the published MP4, never the MKV Stop returns: the backend
-  // quarantines that MKV once the export lands, and an ffprobe holding it on
-  // Windows fails the rename with os error 32 (#1081).
-  const outputPath = await resolveFinalRecordingPath({
-    started,
-    stopped,
-    stopRequestedAt,
-    timeoutMs
-  })
-  if (!outputPath || !existsSync(outputPath) || statSync(outputPath).size <= 0) {
-    throw new Error(
-      `Native ScreenOnly recording MP4 is missing or empty: ${outputPath ?? stopped?.outputPath ?? started?.outputPath ?? 'none'}`
-    )
+  if (streamReceiver) {
+    streamEvidence = await analyzeStreamSink({
+      receiver: streamReceiver,
+      screen,
+      expectedDurationMs: stopRequestedAt - recordingStartedAt
+    })
   }
+  if (!outputPlan.recordEnabled) {
+    console.log(
+      `Windows native screen stream-only PASS: ${screen.id}, ${bmpEvidence?.advancedFrames ?? 'n/a'} GPU sample advances, ${describeStreamEvidence(streamEvidence)}`
+    )
+  } else {
+    // Analyze the published MP4, never the MKV Stop returns: the backend
+    // quarantines that MKV once the export lands, and an ffprobe holding it on
+    // Windows fails the rename with os error 32 (#1081).
+    const outputPath = await resolveFinalRecordingPath({
+      started,
+      stopped,
+      stopRequestedAt,
+      timeoutMs
+    })
+    if (!outputPath || !existsSync(outputPath) || statSync(outputPath).size <= 0) {
+      throw new Error(
+        `Native ScreenOnly recording MP4 is missing or empty: ${outputPath ?? stopped?.outputPath ?? started?.outputPath ?? 'none'}`
+      )
+    }
 
-  const report = await analyzeRecording(outputPath, {
-    ffmpegPath,
-    ffprobePath,
-    intendedFps: video.fps,
-    expectAudio: false,
-    gates: windowsNativeScreenRecordingArtifactGates(screen)
-  })
-  if (options.sceneEdit) {
-    // #1175: the moved screen is where the scene put it from the first frame,
-    // and the half it left shows the canvas fill (the background, or black).
-    const backgroundSourcePath = bundledBackground
-      ? join(
-          repoRoot,
-          'apps/desktop/src/renderer/src/assets/backgrounds',
-          bundledBackground.fileName
-        )
-      : null
-    sceneEditEvidence = [0, Math.max(0.5, recordingMs / 2000)].map((seekSeconds) =>
-      assertSceneEditPlacementFrame({ outputPath, backgroundSourcePath, seekSeconds })
-    )
-    console.log(
-      `Windows native screen scene-edit PASS: the screen stays in its moved box over ${bundledBackground ? bundledBackground.id : 'black'} at ${sceneEditEvidence
-        .map(
-          ({ seekSeconds, uncoveredScore, coveredScore }) =>
-            `${seekSeconds}s (outside ${uncoveredScore.toFixed(1)}, inside ${coveredScore.toFixed(1)})`
-        )
-        .join(', ')}`
-    )
-  } else if (bundledBackground) {
-    // The first frame is the startup case (#1067): the session draws its own
-    // committed scene before its sources are confirmed, never the bare
-    // full-canvas screen.
-    const sourcePath = join(
-      repoRoot,
-      'apps/desktop/src/renderer/src/assets/backgrounds',
-      bundledBackground.fileName
-    )
-    backgroundEvidence = [0, Math.max(0.5, recordingMs / 2000)].map((seekSeconds) =>
-      assertBundledBackgroundFrame({
-        outputPath,
-        outputDirectory,
-        ffmpegPath,
-        sourcePath,
-        seekSeconds
-      })
-    )
-    console.log(
-      `Windows native screen background PASS: border matches ${bundledBackground.id} at ${backgroundEvidence
-        .map(({ seekSeconds, meanDifference }) => `${seekSeconds}s (${meanDifference.toFixed(1)})`)
-        .join(', ')}`
-    )
-  }
-  recordingEvidence = {
-    outputPath,
-    sizeBytes: statSync(outputPath).size,
-    metrics: report.metrics,
-    verdict: report.verdict
-  }
-  const reportPaths = writeReports(report)
-  if (!report.verdict.pass) {
-    throw new Error(
-      `Native ScreenOnly recording quality failed: ${report.verdict.failures.join('; ')} (report: ${reportPaths.mdPath})`
-    )
-  }
-  const durationFailures = evaluateRecordingWallDuration({
-    expectedDurationMs: stopRequestedAt - recordingStartedAt,
-    actualDurationSeconds: report.metrics.durationSeconds
-  })
-  if (durationFailures.length > 0) {
-    throw new Error(`Native ScreenOnly duration failed: ${durationFailures.join('; ')}`)
-  }
-  assertNonblankRecordingFrame(outputPath)
+    const report = await analyzeRecording(outputPath, {
+      ffmpegPath,
+      ffprobePath,
+      intendedFps: video.fps,
+      expectAudio: false,
+      gates: windowsNativeScreenRecordingArtifactGates(screen)
+    })
+    if (options.sceneEdit) {
+      // #1175: the moved screen is where the scene put it from the first frame,
+      // and the half it left shows the canvas fill (the background, or black).
+      const backgroundSourcePath = bundledBackground
+        ? join(
+            repoRoot,
+            'apps/desktop/src/renderer/src/assets/backgrounds',
+            bundledBackground.fileName
+          )
+        : null
+      sceneEditEvidence = [0, Math.max(0.5, recordingMs / 2000)].map((seekSeconds) =>
+        assertSceneEditPlacementFrame({ outputPath, backgroundSourcePath, seekSeconds })
+      )
+      console.log(
+        `Windows native screen scene-edit PASS: the screen stays in its moved box over ${bundledBackground ? bundledBackground.id : 'black'} at ${sceneEditEvidence
+          .map(
+            ({ seekSeconds, uncoveredScore, coveredScore }) =>
+              `${seekSeconds}s (outside ${uncoveredScore.toFixed(1)}, inside ${coveredScore.toFixed(1)})`
+          )
+          .join(', ')}`
+      )
+    } else if (bundledBackground) {
+      // The first frame is the startup case (#1067): the session draws its own
+      // committed scene before its sources are confirmed, never the bare
+      // full-canvas screen.
+      const sourcePath = join(
+        repoRoot,
+        'apps/desktop/src/renderer/src/assets/backgrounds',
+        bundledBackground.fileName
+      )
+      backgroundEvidence = [0, Math.max(0.5, recordingMs / 2000)].map((seekSeconds) =>
+        assertBundledBackgroundFrame({
+          outputPath,
+          outputDirectory,
+          ffmpegPath,
+          sourcePath,
+          seekSeconds
+        })
+      )
+      console.log(
+        `Windows native screen background PASS: border matches ${bundledBackground.id} at ${backgroundEvidence
+          .map(
+            ({ seekSeconds, meanDifference }) => `${seekSeconds}s (${meanDifference.toFixed(1)})`
+          )
+          .join(', ')}`
+      )
+    }
+    recordingEvidence = {
+      outputPath,
+      sizeBytes: statSync(outputPath).size,
+      metrics: report.metrics,
+      verdict: report.verdict
+    }
+    const reportPaths = writeReports(report)
+    if (!report.verdict.pass) {
+      throw new Error(
+        `Native ScreenOnly recording quality failed: ${report.verdict.failures.join('; ')} (report: ${reportPaths.mdPath})`
+      )
+    }
+    const durationFailures = evaluateRecordingWallDuration({
+      expectedDurationMs: stopRequestedAt - recordingStartedAt,
+      actualDurationSeconds: report.metrics.durationSeconds
+    })
+    if (durationFailures.length > 0) {
+      throw new Error(`Native ScreenOnly duration failed: ${durationFailures.join('; ')}`)
+    }
+    assertNonblankRecordingFrame(outputPath)
 
-  if (!collectorFailed) {
-    console.log(
-      `Windows native screen ${options.d3d11 ? 'D3D11' : 'BMP'} PASS: ${screen.id}, ${bmpEvidence.advancedFrames} ${options.d3d11 ? 'GPU sample' : 'BMP frame'} advances, ` +
-        `${report.metrics.observedFrames ?? 'n/a'} recorded frames, ${report.metrics.durationSeconds.toFixed(2)}s, ` +
-        `${camera ? `camera source ${cameraEvidence?.sourceFps?.toFixed?.(2) ?? 'n/a'} fps, ` : ''}` +
-        `${previewStatus?.d3d11TextureAvailable === true ? 'retained D3D11 texture, ' : ''}` +
-        `${outputPath} (report: ${reportPaths.mdPath})`
-    )
+    if (!collectorFailed) {
+      console.log(
+        `Windows native screen ${options.d3d11 ? 'D3D11' : 'BMP'} PASS: ${screen.id}, ${bmpEvidence.advancedFrames} ${options.d3d11 ? 'GPU sample' : 'BMP frame'} advances, ` +
+          `${report.metrics.observedFrames ?? 'n/a'} recorded frames, ${report.metrics.durationSeconds.toFixed(2)}s, ` +
+          `${camera ? `camera source ${cameraEvidence?.sourceFps?.toFixed?.(2) ?? 'n/a'} fps, ` : ''}` +
+          `${previewStatus?.d3d11TextureAvailable === true ? 'retained D3D11 texture, ' : ''}` +
+          `${outputPath} (report: ${reportPaths.mdPath})` +
+          `${streamEvidence ? `; stream ${describeStreamEvidence(streamEvidence)}` : ''}`
+      )
+    }
   }
 } finally {
+  if (streamReceiver) await stopStreamReceiver(streamReceiver)
   let evidenceDiagnostics = null
   try {
     if (ws) {
@@ -480,6 +535,8 @@ try {
           finalDiagnostics: evidenceDiagnostics,
           cameraEvidence,
           recordingEvidence,
+          outputPlan,
+          streamEvidence,
           collectorHardFailures
         },
         null,
@@ -533,9 +590,12 @@ if (performanceEvaluationRequested) {
       : [
           `${options.d3d11 ? 'D3D11 GPU diagnostics' : 'BMP proof polling'} did not observe frame progress`
         ]),
-    ...(recordingEvidence?.verdict?.pass === true
+    ...(!outputPlan.recordEnabled || recordingEvidence?.verdict?.pass === true
       ? []
-      : ['final recording media validity was missing'])
+      : ['final recording media validity was missing']),
+    ...(!outputPlan.streamVideo || streamEvidence?.verdict?.pass === true
+      ? []
+      : ['stream sink media validity was missing'])
   ]
   const metadata = await collectPerformanceMetadata({ cwd: repoRoot })
   let activeBudget = null
@@ -580,6 +640,7 @@ if (performanceEvaluationRequested) {
       processTree: performanceTelemetry,
       bmp: bmpEvidence,
       recording: recordingEvidence,
+      stream: streamEvidence,
       occludedAuxWindows: occludedAuxWindowsEvidence,
       teardown: teardownEvidence,
       activeBudget: activeBudget
@@ -732,7 +793,7 @@ async function waitForActiveNativeScreenRecording(ws, sourceId) {
       request(ws, timeoutMs, 'recording.status')
     ])
     last = { diagnostics, compositor, recording }
-    if (nativeWindowsScreenRecordingActive(last, sourceId)) {
+    if (nativeWindowsScreenRecordingActive(last, sourceId, { outputMode: outputPlan.outputMode })) {
       return last
     }
     await sleep(100)
@@ -833,7 +894,7 @@ function sessionLayout() {
   return layout
 }
 
-function sessionParams(sources, background = null) {
+function sessionParams(sources, background = null, streamTarget = null) {
   return {
     sources,
     layout: sessionLayout(),
@@ -841,11 +902,25 @@ function sessionParams(sources, background = null) {
       ? { scene: explicitScene(sources.screenId, background, options.sceneEdit) }
       : {}),
     output: {
-      recordEnabled: true,
-      streamEnabled: false,
+      recordEnabled: outputPlan.recordEnabled,
+      streamEnabled: streamTarget !== null,
       video,
-      rtmp: { preset: 'custom', serverUrl: '', streamKey: '' }
+      rtmp: streamTarget
+        ? { preset: 'custom', serverUrl: streamTarget.serverUrl, streamKey: streamTarget.streamKey }
+        : { preset: 'custom', serverUrl: '', streamKey: '' }
     },
+    ...(streamTarget
+      ? {
+          streaming: {
+            enabled: true,
+            mode: 'multi',
+            targets: [streamTarget],
+            enabledTargetIds: [streamTarget.id],
+            defaultOutputPreset: outputPlan.streamVideo.preset,
+            defaultBitrateKbps: outputPlan.streamVideo.bitrateKbps
+          }
+        }
+      : {}),
     audio: {
       microphoneGainDb: 0,
       microphoneMuted: true,
@@ -1110,6 +1185,172 @@ function assertNonblankRecordingFrame(outputPath) {
       `Native ScreenOnly recording decoded as blank/constant: bytes=${bytes.length}, range=${maximum - minimum}, max=${maximum}.`
     )
   }
+}
+
+// ---------------------------------------------------------------------------
+// #173: the loopback RTMP sink (127.0.0.1 only). It is registered as a
+// YouTube destination because only YouTube may take the 4K30 stream profile;
+// nothing leaves the machine.
+
+function loopbackStreamTarget(port) {
+  return {
+    id: 'native-screen-sink',
+    platform: 'youtube',
+    label: 'Native screen sink',
+    enabled: true,
+    serverUrl: `rtmp://127.0.0.1:${port}/live`,
+    streamKey: STREAM_KEY,
+    urlMode: 'server-and-key',
+    streamKeyPresent: true,
+    authMode: 'manual-rtmp',
+    outputOrientation: 'horizontal',
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z'
+  }
+}
+
+async function freeTcpPort(base, span = 20) {
+  for (let port = base; port < base + span; port += 1) {
+    const free = await new Promise((resolveFree) => {
+      const server = createServer()
+      server.once('error', () => resolveFree(false))
+      server.listen(port, '127.0.0.1', () => server.close(() => resolveFree(true)))
+    })
+    if (free) return port
+  }
+  throw new Error(`no free TCP port in ${base}..${base + span - 1} for the RTMP sink`)
+}
+
+function startStreamReceiver(port, path) {
+  const child = spawn(
+    ffmpegPath,
+    [
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-listen',
+      '1',
+      '-i',
+      `rtmp://127.0.0.1:${port}/live/${STREAM_KEY}`,
+      '-c',
+      'copy',
+      '-f',
+      'flv',
+      path
+    ],
+    { stdio: ['ignore', 'ignore', 'pipe'] }
+  )
+  const receiver = { child, path, log: '', exited: null }
+  receiver.exited = new Promise((resolveExit) => {
+    child.once('exit', (code, signal) => resolveExit({ code, signal }))
+    child.once('error', (error) => resolveExit({ error }))
+  })
+  child.stderr.on('data', (text) => {
+    receiver.log = (receiver.log + text).slice(-8000)
+  })
+  return receiver
+}
+
+// The sink owns the port once a connect is refused by nothing else: poll
+// until our own listener accepts, or fail with its log if it exited.
+async function waitForStreamReceiverListening(receiver, port) {
+  const deadline = Date.now() + 8_000
+  while (Date.now() < deadline) {
+    if (receiver.child.exitCode !== null) {
+      throw new Error(`The RTMP sink exited before listening: ${receiver.log}`)
+    }
+    const listening = await new Promise((resolveProbe) => {
+      const server = createServer()
+      server.once('error', () => resolveProbe(true))
+      server.listen(port, '127.0.0.1', () => server.close(() => resolveProbe(false)))
+    })
+    if (listening) return
+    await sleep(100)
+  }
+  throw new Error(`The RTMP sink did not listen on 127.0.0.1:${port}: ${receiver.log}`)
+}
+
+async function waitForStreamReceiverExit(receiver, ms) {
+  let timer
+  try {
+    const result = await Promise.race([
+      receiver.exited,
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`The RTMP sink did not finish: ${receiver.log}`)),
+          ms
+        )
+      })
+    ])
+    if (result.error) throw result.error
+    return result
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function stopStreamReceiver(receiver) {
+  if (receiver.child.exitCode !== null || receiver.child.signalCode !== null) return
+  receiver.child.kill()
+  try {
+    await waitForStreamReceiverExit(receiver, 2_000)
+  } catch {
+    // The sink is ours; teardown continues.
+  }
+}
+
+// What reached the sink must be the stream profile at its frame rate, the
+// whole take long, and the screen rather than a blank frame.
+async function analyzeStreamSink({ receiver, screen, expectedDurationMs }) {
+  // Stop closes the RTMP connection; the sink then finishes its file.
+  await waitForStreamReceiverExit(receiver, 15_000)
+  if (!existsSync(receiver.path) || statSync(receiver.path).size <= 0) {
+    throw new Error(`The RTMP sink wrote nothing: ${receiver.log}`)
+  }
+  const expected = outputPlan.streamVideo
+  const report = await analyzeRecording(receiver.path, {
+    ffmpegPath,
+    ffprobePath,
+    intendedFps: expected.fps,
+    expectAudio: false,
+    gates: windowsNativeScreenRecordingArtifactGates(screen)
+  })
+  const reportPaths = writeReports(report)
+  const failures = [...report.verdict.failures]
+  if (report.metrics.width !== expected.width || report.metrics.height !== expected.height) {
+    failures.push(
+      `stream is ${report.metrics.width}x${report.metrics.height}, expected ${expected.width}x${expected.height}`
+    )
+  }
+  failures.push(
+    ...evaluateRecordingWallDuration({
+      expectedDurationMs,
+      actualDurationSeconds: report.metrics.durationSeconds
+    })
+  )
+  if (failures.length > 0) {
+    throw new Error(
+      `Stream sink (${expected.preset}) failed: ${failures.join('; ')} (report: ${reportPaths.mdPath})`
+    )
+  }
+  assertNonblankRecordingFrame(receiver.path)
+  return {
+    outputPath: receiver.path,
+    preset: expected.preset,
+    sizeBytes: statSync(receiver.path).size,
+    metrics: report.metrics,
+    verdict: report.verdict
+  }
+}
+
+function describeStreamEvidence(evidence) {
+  if (!evidence) return 'no stream evidence'
+  const { metrics } = evidence
+  return (
+    `${evidence.preset} ${metrics.width}x${metrics.height}, ${metrics.observedFrames ?? 'n/a'} frames, ` +
+    `${metrics.durationSeconds?.toFixed?.(2) ?? 'n/a'}s, level ${metrics.level ?? 'n/a'}, ${evidence.outputPath}`
+  )
 }
 
 function sleep(ms) {

@@ -5,8 +5,12 @@ import {
   publishAppNews,
   publishBackendError,
   publishBackendLifecycle,
+  publishBackgroundProblem,
+  publishCaptionsOutputUnsupported,
+  publishCaptionsProblem,
   publishGlobalShortcutsProblem,
   publishOutputTooHeavy,
+  publishSidekickStatus,
   publishSourceReturn,
   publishVideorcCameraStopped,
   resolveGlobalShortcuts,
@@ -178,5 +182,60 @@ describe('devices and the app as notifications (plan 250 S7)', () => {
     await store.runAction('output-too-heavy', 'use-preset')
     expect(apply).toHaveBeenCalledTimes(1)
     expect(store.snapshot()).toEqual([])
+  })
+
+  it('what Videorc tried on its own and could not do is one entry per cause', () => {
+    publishBackendError(store)
+    publishBackgroundProblem({ title: 'Videorc hit a problem', description: 'Try again.' }, store)
+    publishBackgroundProblem({ title: "Couldn't load your YouTube channels" }, store)
+    publishBackgroundProblem({ title: "Couldn't load your YouTube channels" }, store)
+    expect(store.snapshot()).toHaveLength(2)
+    expect(entry('backend-error')).toMatchObject({ occurrences: 2 })
+    expect(entry("background-problem:Couldn't load your YouTube channels")).toMatchObject({
+      tone: 'warning',
+      occurrences: 2,
+      actions: [{ label: 'Open Health', kind: 'door' }]
+    })
+  })
+
+  it('live captions that could not start on their own offer Retry', async () => {
+    const retry = vi.fn()
+    publishCaptionsProblem({ title: "Couldn't start live captions" }, retry, store)
+    expect(entry('captions')).toMatchObject({
+      tone: 'warning',
+      actions: [{ id: 'retry', label: 'Retry', kind: 'fix' }]
+    })
+    await store.runAction('captions', 'retry')
+    expect(retry).toHaveBeenCalledTimes(1)
+  })
+
+  it("Sidekick's own failures and stops are one entry with their fix", async () => {
+    const signIn = vi.fn()
+    publishSidekickStatus(
+      { kind: 'error', title: 'Sidekick stopped: sign in again', action: 'sign-in' },
+      signIn,
+      store
+    )
+    expect(entry('sidekick')).toMatchObject({
+      tone: 'warning',
+      actions: [{ id: 'sign-in', label: 'Sign in', kind: 'fix' }]
+    })
+    await store.runAction('sidekick', 'sign-in')
+    expect(signIn).toHaveBeenCalledTimes(1)
+    publishSidekickStatus(
+      { kind: 'message', title: 'Sidekick stopped', action: null },
+      signIn,
+      store
+    )
+    expect(store.snapshot().filter((item) => item.key === 'sidekick')).toHaveLength(1)
+  })
+
+  it('an output that cannot carry captions says so, with no Retry to press', () => {
+    publishCaptionsOutputUnsupported(undefined, store)
+    expect(entry('captions')).toMatchObject({
+      title: "Live captions can't start in this session",
+      detail: "The active output configuration can't carry caption pixels.",
+      actions: []
+    })
   })
 })
