@@ -57,21 +57,23 @@ describe('pop-ups (plan 250, "What pops up")', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    live = false
-    quiet = true
+    // A recording with quiet off: the row where the door is used. Idle is
+    // the bell only; the table below holds every row.
+    live = true
+    quiet = false
     store = createNotificationStore({ live: () => live, quiet: () => quiet })
     store.setPopUpDoor(createNotificationPopUpDoor(store))
   })
 
   // The plan's table, through the real door: [idle, live and quiet, quiet off].
   const table: [string, () => void, ReturnType<typeof vi.fn>, (number | null)[]][] = [
-    ['urgent', () => problem('urgent'), toast.problem, [15_000, 15_000, 15_000]],
-    ['warning', () => problem('warning'), toast.warning, [8_000, null, 8_000]],
+    ['urgent', () => problem('urgent'), toast.problem, [null, 15_000, 15_000]],
+    ['warning', () => problem('warning'), toast.warning, [null, null, 8_000]],
     [
       'done',
       () => store.publish({ key: 'saved', kind: kind('finished'), title: 'Recording saved' }),
       toast.success,
-      [8_000, null, 8_000]
+      [null, null, 8_000]
     ],
     [
       'news',
@@ -203,6 +205,7 @@ describe('pop-ups (plan 250, "What pops up")', () => {
   it('a watchdog alert while live and quiet: a warning waits, a critical one pops up once', async () => {
     const { syncWatchdogAlerts } = await import('@/lib/notifications/sources/watchdog')
     live = true
+    quiet = true
     const deps = { fix: vi.fn(), acknowledge: vi.fn(), snooze: vi.fn() }
     const base = {
       state: 'open' as const,

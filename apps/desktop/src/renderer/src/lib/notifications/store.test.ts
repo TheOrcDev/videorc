@@ -12,6 +12,7 @@ vi.mock('@/lib/notifications/kinds', async (original) => {
       finished: { tone: 'done', life: 'event' },
       failure: { tone: 'urgent', life: 'event' },
       answer: { tone: 'done', life: 'event', answersAPress: true },
+      xEnded: { tone: 'warning', life: 'condition', mayBe: ['urgent'], failsASession: true },
       work: { tone: 'news', life: 'progress' }
     }
   }
@@ -50,8 +51,11 @@ describe('the notification store (plan 250)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     clock = 1_000_000
-    live = false
-    quiet = true
+    // A recording with "Quiet while recording or live" off: the one row of
+    // the table where every tone but news pops up, so these tests see the
+    // rules that decide when. Idle is the bell only.
+    live = true
+    quiet = false
     counts = []
     store = createNotificationStore({
       now: () => clock,
@@ -191,7 +195,35 @@ describe('the notification store (plan 250)', () => {
   })
 
   describe('what pops up', () => {
-    it('idle: a warning pops up for 8 s with its first action', () => {
+    it('idle: nothing Videorc noticed pops up, at any time; it waits behind the bell', () => {
+      live = false
+      clock += 10 * 60_000
+      store.publish(problem())
+      store.publish(problem({ key: 'stream', tone: 'urgent', title: 'Videorc needs a restart' }))
+      store.publish({ key: 'saved', kind: kind('finished'), title: 'Recording saved' })
+      expect(door.show).not.toHaveBeenCalled()
+      expect(store.count()).toMatchObject({ unread: 3, tone: 'urgent' })
+      // The answer to a press still speaks.
+      store.publish({ key: 'clip:1', kind: kind('answer'), title: 'Clip saved' })
+      expect(door.show).toHaveBeenCalledTimes(1)
+    })
+
+    it('a livestream that failed pops up although it has just ended, never a warning', () => {
+      live = false
+      clock += 10 * 60_000
+      store.publish({ key: 'x', kind: kind('xEnded'), title: 'X is still preparing your stream' })
+      expect(door.show).not.toHaveBeenCalled()
+      store.publish({
+        key: 'x',
+        kind: kind('xEnded'),
+        tone: 'urgent',
+        title: 'X ended your broadcast'
+      })
+      expect(door.show).toHaveBeenCalledTimes(1)
+      expect(door.show.mock.calls[0][1]).toBe(15_000)
+    })
+
+    it('a warning pops up for 8 s with its first action', () => {
       const run = vi.fn()
       store.publish(problem({ actions: [{ id: 'open', label: 'Open Audio', kind: 'door', run }] }))
       expect(door.show).toHaveBeenCalledWith(
@@ -203,6 +235,7 @@ describe('the notification store (plan 250)', () => {
 
     it('recording or live with quiet on: only an urgent problem pops up, once', () => {
       live = true
+      quiet = true
       store.publish(problem())
       store.publish({ key: 'saved', kind: kind('finished'), title: 'Recording saved' })
       expect(door.show).not.toHaveBeenCalled()
@@ -227,12 +260,14 @@ describe('the notification store (plan 250)', () => {
 
     it('the late answer to a press pops up while live and quiet', () => {
       live = true
+      quiet = true
       store.publish({ key: 'clip:1', kind: kind('answer'), title: 'Clip saved' })
       expect(door.show.mock.calls[0][1]).toBe(4_000)
     })
 
     it('a warning that becomes urgent is one entry that pops up', () => {
       live = true
+      quiet = true
       store.publish(problem())
       store.markRead('microphone')
       store.publish(problem({ tone: 'urgent', title: 'Microphone lost' }))

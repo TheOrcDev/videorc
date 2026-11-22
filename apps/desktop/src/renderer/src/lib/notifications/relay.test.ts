@@ -89,7 +89,8 @@ describe("the main window's notification relay (plan 250 S8)", () => {
     pushed = []
     popUps = []
     streamManagerInFront = false
-    store = createNotificationStore()
+    // A recording: an urgent problem pops up (idle is the bell only).
+    store = createNotificationStore({ live: () => true })
   })
 
   it('pushes the list as plain entries the contract accepts, once per change', async () => {

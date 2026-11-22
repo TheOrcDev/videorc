@@ -811,6 +811,24 @@ const OWNER_LAUNCH_REPORTS = `(async () => {
     'account-session', 'cloud-announce'];
 })()`
 
+// The same idle Studio after its first minute (plan 250's idle row, the owner
+// 2026-11-22: "we said we are going to put everything inside of our
+// notifications"): new subjects, so each is a new entry and could pop up.
+const IDLE_REPORTS = `(async () => {
+  const runtime = await import('/src/lib/session-runtime-recovery.ts');
+  const app = await import('/src/lib/notifications/sources/app.ts');
+  const ring = { state: 'recording', sessionId: 'launch-ring', replayOnly: true };
+  runtime.showSessionHealthEvent({ id: 'disk-space-low', sessionId: ring.sessionId, level: 'warn',
+    code: 'disk-space-low', message: 'Recording space is low: 4 GB left.', createdAt: new Date().toISOString() }, false, ring);
+  app.publishBackgroundProblem({ title: "Couldn't refresh the device list" });
+  app.publishOutputTooHeavy({ title: '1440p60 is too heavy for this computer',
+    description: 'Recordings will stutter.', actionLabel: 'Use 1080p30' }, () => {});
+  return {
+    keys: ['disk-space', "background-problem:Couldn't refresh the device list", 'output-too-heavy'],
+    at: performance.now()
+  };
+})()`
+
 const launchObservation = `(() => {
   const record = window.__videorcSmokeToasts;
   const read = window.__videorcSmokeNotifications;
@@ -857,18 +875,35 @@ async function launchQuiet() {
   if (expectedKeys.length === 0) throw new Error('the owner launch reports never ran')
   await delay(2000)
   await screenshot('launch-quiet-dark-6s')
-  for (;;) {
-    const age = await evaluate('performance.now()')
-    const left = FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs + 500 - age
-    if (left <= 0) break
-    await delay(Math.min(5000, left))
+  // Past the first minute, still with no input: idle stays behind the bell.
+  const waitUntil = async (ms) => {
+    for (;;) {
+      const left = ms - (await evaluate('performance.now()'))
+      if (left <= 0) return
+      await delay(Math.min(5000, left))
+    }
   }
+  // The store's minute counts from when its chunk loaded, a few seconds into
+  // the document: the idle batch waits for the end of that minute.
+  const storeStartedAt = await evaluate('window.__videorcSmokeNotifications?.().startedAt ?? null')
+  if (typeof storeStartedAt !== 'number') throw new Error('the store start was not read')
+  await waitUntil(storeStartedAt + FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs + 1000)
+  // The watch after them starts once they ran, on the renderer's clock.
+  const idle = await evaluate(IDLE_REPORTS)
+  const idleReportsAt = idle.at
+  expectedKeys = [...expectedKeys, ...idle.keys]
+  await waitUntil(Math.max(FIRST_RUN_SMOKE_LIMITS.idleQuietWatchMs, idleReportsAt + 14000) + 500)
   const observed = await evaluate(launchObservation)
   await screenshot('launch-quiet-dark')
   await setTheme('light')
   await settled()
   await screenshot('launch-quiet-light')
-  await check('launch-quiet', { ...observed, expectedKeys })
+  await check('launch-quiet', {
+    ...observed,
+    expectedKeys,
+    idleReportsAt,
+    idleReportsAfterStoreMs: idleReportsAt - storeStartedAt
+  })
 }
 
 // Every setup profile after the launch check.
