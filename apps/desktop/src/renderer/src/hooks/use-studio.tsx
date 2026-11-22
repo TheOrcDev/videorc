@@ -3554,6 +3554,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     },
     [client, commitCaptionsStatus, runCaptionsCommand]
   )
+  const startCaptionsRef = useRef(startCaptions)
+  startCaptionsRef.current = startCaptions
   const stopCaptions = useCallback(async () => {
     if (!client) return
     let status: CaptionsStatus
@@ -15157,8 +15159,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       captionsStartAttemptedRef.current = true
       captionsStopAttemptedRef.current = false
       const language = captureConfig.captions.language
+      // The entry's Retry may run after a reconnect: it asks the Studio's
+      // current client, never the one this render had.
       const start = (): void => {
-        void startCaptions(language).catch((error: unknown) => {
+        void startCaptionsRef.current(language).catch((error: unknown) => {
           withAppNotifications((app) => app.publishCaptionsStartFailure(error, start))
         })
       }

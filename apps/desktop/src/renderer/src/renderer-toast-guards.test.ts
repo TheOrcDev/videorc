@@ -297,13 +297,18 @@ function toastAliases(file: ts.SourceFile): Set<string> {
       ts.isIdentifier(node.name) &&
       node.initializer &&
       !ts.isCallExpression(node.initializer) &&
-      isToastCallee(node.initializer, file)
+      isToastCallee(node.initializer, file, aliases)
     ) {
       aliases.add(node.name.text)
     }
     ts.forEachChild(node, visit)
   }
-  visit(file)
+  // Again until nothing new: `const notify = show` follows `show` wherever it is.
+  let known = -1
+  while (known !== aliases.size) {
+    known = aliases.size
+    visit(file)
+  }
   return aliases
 }
 
@@ -664,7 +669,12 @@ describe(
         'function say(ok) {',
         '  const show = ok ? toast.success : toast.warning',
         "  show('Done')",
-        '}'
+        '}',
+        'function later() {',
+        '  const notify = alsoShow',
+        "  notify('Unexpected')",
+        '}',
+        'const alsoShow = toast.warning'
       ].join('\n')
       expect(toastSites('src/sample.tsx', source).map(siteKey)).toEqual([
         'src/sample.tsx > Panel (effect)',
@@ -674,7 +684,8 @@ describe(
         'src/sample.tsx > onClick',
         'src/sample.tsx > refresh',
         'src/sample.tsx > load',
-        'src/sample.tsx > say'
+        'src/sample.tsx > say',
+        'src/sample.tsx > later'
       ])
     })
   }
