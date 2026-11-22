@@ -7,12 +7,14 @@ pub(crate) const WINDOWS_REQUIRE_D3D11_MEDIA_ENV: &str = "VIDEORC_WINDOWS_REQUIR
 // CFR is deadline-paced by the session pump. A blocking AcquireNextFrame
 // would consume essentially the entire 60-fps budget on a static desktop.
 const WINDOWS_D3D11_CAPTURE_POLL_WAIT_MS: u32 = 0;
-// The direct D3D11 capture/compositor/Media Foundation path has production
-// coverage through 1080p. Larger canvases must stay on the legacy bridge until
-// they have equivalent device-level qualification; admitting them here can let
-// a driver-specific hardware encoder failure take down the backend.
-const WINDOWS_D3D11_QUALIFIED_MAX_LONG_SIDE: u32 = 1920;
-const WINDOWS_D3D11_QUALIFIED_MAX_SHORT_SIDE: u32 = 1080;
+// The D3D11 capture/compositor/Media Foundation path takes every output a
+// level 5.1 H.264 encoder must accept (#173): 1440p60 and 4K30 measured on the
+// GTX 1650 SUPER host. An encoder that still refuses the size fails the pump's
+// startup, and the session falls back to the legacy bridge with that reason.
+// 4K60 (level 5.2) stays on the legacy bridge.
+const WINDOWS_D3D11_QUALIFIED_MAX_SIDE: u32 = 4096;
+const WINDOWS_D3D11_QUALIFIED_MAX_FRAME_MACROBLOCKS: u64 = 36_864;
+const WINDOWS_D3D11_QUALIFIED_MAX_MACROBLOCK_RATE: u64 = 983_040;
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_d3d11_terminal_source_error(
@@ -464,9 +466,14 @@ pub(crate) struct WindowsD3d11VideoPlan {
     pub(crate) bitrate_kbps: u32,
 }
 
+/// The output is inside H.264 level 5.1: at most 36,864 macroblocks a frame
+/// and 983,040 a second, no side past 4096. That holds 1440p60, 4K30 and their
+/// portrait twins; 4K60 needs level 5.2 and stays on the legacy bridge.
 fn windows_d3d11_output_fits_qualified_envelope(video: WindowsD3d11VideoPlan) -> bool {
-    video.width.max(video.height) <= WINDOWS_D3D11_QUALIFIED_MAX_LONG_SIDE
-        && video.width.min(video.height) <= WINDOWS_D3D11_QUALIFIED_MAX_SHORT_SIDE
+    let macroblocks = u64::from(video.width.div_ceil(16)) * u64::from(video.height.div_ceil(16));
+    video.width.max(video.height) <= WINDOWS_D3D11_QUALIFIED_MAX_SIDE
+        && macroblocks <= WINDOWS_D3D11_QUALIFIED_MAX_FRAME_MACROBLOCKS
+        && macroblocks * u64::from(video.fps) <= WINDOWS_D3D11_QUALIFIED_MAX_MACROBLOCK_RATE
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -672,8 +679,8 @@ pub(crate) fn select_windows_d3d11_session(
             mode,
             "windows-d3d11-media-primary-output-unqualified",
             format!(
-                "the production D3D11/Media Foundation path is qualified through 1920x1080; primary output is {}x{}",
-                request.primary.width, request.primary.height
+                "the D3D11/Media Foundation path takes outputs within H.264 level 5.1 (up to 4K30 or 1440p60); primary output is {}x{} at {} fps",
+                request.primary.width, request.primary.height, request.primary.fps
             ),
         );
     }
@@ -684,8 +691,8 @@ pub(crate) fn select_windows_d3d11_session(
             mode,
             "windows-d3d11-media-auxiliary-output-unqualified",
             format!(
-                "the production D3D11/Media Foundation path is qualified through 1920x1080; auxiliary output is {}x{}",
-                auxiliary.width, auxiliary.height
+                "the D3D11/Media Foundation path takes outputs within H.264 level 5.1 (up to 4K30 or 1440p60); auxiliary output is {}x{} at {} fps",
+                auxiliary.width, auxiliary.height, auxiliary.fps
             ),
         );
     }
@@ -6496,28 +6503,78 @@ mod tests {
     }
 
     #[test]
-    fn windows_d3d11_auto_falls_back_for_unqualified_2k_output() {
-        let mut output_2k = request();
-        output_2k.primary.width = 2560;
-        output_2k.primary.height = 1440;
+    fn windows_d3d11_takes_every_level_5_1_shipping_profile() {
+        // #173: 1440p and 4K30 (and their portrait twins) stay on D3D11.
+        for (width, height, fps) in [
+            (1920, 1080, 60),
+            (1080, 1920, 60),
+            (2560, 1440, 30),
+            (2560, 1440, 60),
+            (1440, 2560, 60),
+            (3840, 2160, 30),
+            (2160, 3840, 30),
+        ] {
+            let mut output = request();
+            output.primary.width = width;
+            output.primary.height = height;
+            output.primary.fps = fps;
+            assert!(
+                matches!(
+                    select_windows_d3d11_session(WindowsD3d11MediaMode::Automatic, output),
+                    Ok(WindowsD3d11SessionSelection::Candidate(_))
+                ),
+                "{width}x{height}@{fps} must stay on D3D11"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_d3d11_auto_falls_back_past_level_5_1() {
+        // 4K60 needs level 5.2; a side past 4096 is past level 5.1's frame.
+        for (width, height, fps, named) in [
+            (3840, 2160, 60, "3840x2160 at 60 fps"),
+            (4352, 1080, 30, "4352x1080 at 30 fps"),
+        ] {
+            let mut output = request();
+            output.primary.width = width;
+            output.primary.height = height;
+            output.primary.fps = fps;
+            let WindowsD3d11SessionSelection::NaturalFallback(fallback) =
+                select_windows_d3d11_session(WindowsD3d11MediaMode::Automatic, output).unwrap()
+            else {
+                panic!("{named} must use the legacy bridge");
+            };
+            assert_eq!(
+                fallback.code,
+                "windows-d3d11-media-primary-output-unqualified"
+            );
+            assert!(fallback.detail.contains(named), "{}", fallback.detail);
+        }
+
+        let mut required_4k60 = request();
+        required_4k60.primary.width = 3840;
+        required_4k60.primary.height = 2160;
+        required_4k60.primary.fps = 60;
+        let error = select_windows_d3d11_session(WindowsD3d11MediaMode::Required, required_4k60)
+            .unwrap_err();
+        assert!(error.contains("primary-output-unqualified"));
+
+        let mut auxiliary_4k60 = request();
+        auxiliary_4k60.auxiliary = Some(WindowsD3d11VideoPlan {
+            width: 3840,
+            height: 2160,
+            fps: 60,
+            bitrate_kbps: 30_000,
+        });
         let WindowsD3d11SessionSelection::NaturalFallback(fallback) =
-            select_windows_d3d11_session(WindowsD3d11MediaMode::Automatic, output_2k).unwrap()
+            select_windows_d3d11_session(WindowsD3d11MediaMode::Automatic, auxiliary_4k60).unwrap()
         else {
-            panic!("2K output must use the legacy bridge until D3D11 is qualified for it");
+            panic!("a 4K60 auxiliary output must use the legacy bridge");
         };
         assert_eq!(
             fallback.code,
-            "windows-d3d11-media-primary-output-unqualified"
+            "windows-d3d11-media-auxiliary-output-unqualified"
         );
-        assert!(fallback.detail.contains("2560x1440"));
-
-        let mut required_output_2k = request();
-        required_output_2k.primary.width = 2560;
-        required_output_2k.primary.height = 1440;
-        let error =
-            select_windows_d3d11_session(WindowsD3d11MediaMode::Required, required_output_2k)
-                .unwrap_err();
-        assert!(error.contains("primary-output-unqualified"));
     }
 
     #[test]
