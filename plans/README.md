@@ -26,6 +26,19 @@
     waiver.
   - First: lab lock detection, the recording repro, a lighter camera, the
     preview transport, portal global shortcuts and PipeWire desktop audio.
+- 2026-11-21: [Plan 256](256-window-capture-on-windows.md), the plan
+  that plan 210 D12 promised: capturing one app window on Windows through
+  Windows Graphics Capture (`CreateForWindow`). PLANNED 2026-11-21 as a
+  research draft, a spike and seven slices:
+  - Windows lists displays only today, and every window path refuses or
+    silently drops a window id.
+  - The id is `window:wgc:<hwnd>:<pid>`. The Preview's WGC user grows a
+    window target that recreates its pool on resize, pauses while
+    minimized and reports a closed window.
+  - It records and streams through the compositor bridge first; the D3D11
+    media path learns windows in S6. Hide screen sizes its still from the
+    content, not the pool.
+  - A silent fixture-window smoke proves resize, minimize and close.
 - 2026-11-20: [Plan 254](254-live-test-2-fixes.md), the fixes from the
   owner's second live test on 0.34.0 (F1-F7): a departed guest leaves the
   stage at once, a portrait phone camera is drawn whole, the guest theme
