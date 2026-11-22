@@ -196,6 +196,18 @@ try {
     'the fixture camera live with frames',
     20_000
   )
+  // And the screen: session.start refuses a screen source with no frames yet.
+  if (screen) {
+    await request(ws, timeoutMs, 'preview.screen.start', { sources, video: VIDEO })
+    await waitFor(
+      async () => {
+        const status = await request(ws, 5000, 'preview.screen.status')
+        return status.state === 'live' && status.framesCaptured > 0 ? status : null
+      },
+      'the screen source live with frames',
+      20_000
+    )
+  }
 
   const effectRequest = effectRequestToday(effect)
   report.effectRequest = effectRequest
@@ -294,7 +306,7 @@ async function runSession({ ws, smoke, sources, layout, cameraRect, screen, outp
     { path: outputDirectory, kind: 'output-directory' },
     { timeoutMs }
   )
-  const started = await request(ws, timeoutMs, 'session.start', {
+  const started = await startSession(ws, {
     sources,
     layout,
     background: null,
@@ -402,6 +414,23 @@ async function runSession({ ws, smoke, sources, layout, cameraRect, screen, outp
     'stream-vertical': receivers[1].path,
     clip: saved.payload.path,
     'camera-file': screen ? takeSiblingPaths(recording).camera : null
+  }
+}
+
+/**
+ * session.start, retried for up to 15 s while it refuses a capture source
+ * that has not produced frames yet (a warm-up race, never a leak question).
+ */
+async function startSession(ws, params) {
+  const deadline = Date.now() + 15_000
+  for (;;) {
+    try {
+      return await request(ws, timeoutMs, 'session.start', params)
+    } catch (error) {
+      if (!/produced no frames/.test(error?.message ?? '') || Date.now() > deadline) throw error
+      log(`session.start: ${error.message}; retrying`)
+      await sleep(1000)
+    }
   }
 }
 
