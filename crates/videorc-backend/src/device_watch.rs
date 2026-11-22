@@ -118,7 +118,10 @@ pub async fn run(mut changes: watch::Receiver<u64>, state: crate::state::AppStat
         #[cfg(target_os = "linux")]
         {
             let now = linux_cameras::available(&devices.devices);
-            for event in linux_cameras::edges(&cameras, &now, &chrono::Utc::now().to_rfc3339()) {
+            let removed = linux::take_removed_nodes();
+            for event in
+                linux_cameras::edges(&cameras, &now, &removed, &chrono::Utc::now().to_rfc3339())
+            {
                 tracing::info!(
                     camera = %event.unique_id,
                     connected = event.connected,
@@ -151,53 +154,80 @@ pub use linux::install;
 /// `video` group connects when its permissions land, not before.
 #[cfg(any(target_os = "linux", test))]
 mod linux_cameras {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::CameraConnectionEvent;
     use crate::protocol::{Device, DeviceKind, DeviceStatus};
 
+    /// An openable camera as one listing saw it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SeenCamera {
+        pub name: String,
+        /// The `/dev` node its path resolved to then (`video0`), so a node
+        /// deleted and recreated between two listings is still seen to go.
+        pub node: Option<String>,
+    }
+
     /// Openable cameras by the unique id a running camera reports (the
-    /// V4L2 device path), with their names.
-    pub fn available(devices: &[Device]) -> BTreeMap<String, String> {
+    /// V4L2 device path).
+    pub fn available(devices: &[Device]) -> BTreeMap<String, SeenCamera> {
         devices
             .iter()
             .filter(|device| {
                 device.kind == DeviceKind::Camera && device.status == DeviceStatus::Available
             })
             .map(|device| {
+                let path = crate::linux_v4l2_camera::parse_linux_v4l2_camera_id(&device.id)
+                    .unwrap_or_else(|| device.id.clone());
+                let node = std::fs::canonicalize(&path).ok().and_then(|resolved| {
+                    resolved
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                });
                 (
-                    crate::linux_v4l2_camera::parse_linux_v4l2_camera_id(&device.id)
-                        .unwrap_or_else(|| device.id.clone()),
-                    device.name.clone(),
+                    path,
+                    SeenCamera {
+                        name: device.name.clone(),
+                        node,
+                    },
                 )
             })
             .collect()
     }
 
+    /// Disconnects, then connects. A camera in both listings whose node was
+    /// deleted in between (an unplug and replug inside one debounce) bounces:
+    /// its capture child died with the old node, so it must reconnect.
     pub fn edges(
-        before: &BTreeMap<String, String>,
-        after: &BTreeMap<String, String>,
+        before: &BTreeMap<String, SeenCamera>,
+        after: &BTreeMap<String, SeenCamera>,
+        removed_nodes: &BTreeSet<String>,
         timestamp: &str,
     ) -> Vec<CameraConnectionEvent> {
-        let event = |unique_id: &String, name: &String, connected| CameraConnectionEvent {
+        let event = |unique_id: &String, camera: &SeenCamera, connected| CameraConnectionEvent {
             unique_id: unique_id.clone(),
-            name: name.clone(),
+            name: camera.name.clone(),
             connected,
             timestamp: timestamp.to_string(),
             device_type: "v4l2".to_string(),
             transport: 0,
         };
-        before
+        let bounced = |id: &String, camera: &SeenCamera| {
+            after.contains_key(id)
+                && camera
+                    .node
+                    .as_ref()
+                    .is_some_and(|node| removed_nodes.contains(node))
+        };
+        let gone = before
             .iter()
-            .filter(|(id, _)| !after.contains_key(*id))
-            .map(|(id, name)| event(id, name, false))
-            .chain(
-                after
-                    .iter()
-                    .filter(|(id, _)| !before.contains_key(*id))
-                    .map(|(id, name)| event(id, name, true)),
-            )
-            .collect()
+            .filter(|(id, camera)| !after.contains_key(*id) || bounced(id, camera))
+            .map(|(id, camera)| event(id, camera, false));
+        let came = after
+            .iter()
+            .filter(|(id, _)| before.get(*id).is_none_or(|camera| bounced(id, camera)))
+            .map(|(id, camera)| event(id, camera, true));
+        gone.chain(came).collect()
     }
 }
 
@@ -219,6 +249,21 @@ mod linux {
         | libc::IN_ATTRIB
         | libc::IN_MOVED_FROM
         | libc::IN_MOVED_TO;
+
+    /// `video*` nodes deleted since the last listing took them.
+    fn removed_nodes() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
+        static REMOVED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+            std::sync::OnceLock::new();
+        REMOVED.get_or_init(Default::default)
+    }
+
+    pub(super) fn take_removed_nodes() -> std::collections::BTreeSet<String> {
+        std::mem::take(
+            &mut *removed_nodes()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
 
     pub fn install(changes: watch::Sender<u64>) {
         if let Err(error) = spawn_watch(PathBuf::from("/dev"), changes) {
@@ -293,7 +338,17 @@ mod linux {
                             if mask & libc::IN_IGNORED != 0 {
                                 break 'watch;
                             }
-                            relevant |= dev_entry_is_camera(name);
+                            let camera = dev_entry_is_camera(name);
+                            relevant |= camera;
+                            if camera
+                                && name.starts_with(b"video")
+                                && mask & (libc::IN_DELETE | libc::IN_MOVED_FROM) != 0
+                            {
+                                removed_nodes()
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .insert(String::from_utf8_lossy(name).into_owned());
+                            }
                         } else if mask & libc::IN_IGNORED == 0 {
                             // Anything in /dev/v4l or /dev/v4l/by-id.
                             relevant = true;
@@ -490,22 +545,52 @@ mod tests {
             camera(lid, "FaceTime HD", DeviceStatus::Available),
             camera(usb, "C920", DeviceStatus::PermissionRequired),
         ]);
-        assert!(linux_cameras::edges(&before, &racing, "t0").is_empty());
+        let none = std::collections::BTreeSet::new();
+        assert!(linux_cameras::edges(&before, &racing, &none, "t0").is_empty());
         let plugged = linux_cameras::available(&[
             camera(lid, "FaceTime HD", DeviceStatus::Available),
             camera(usb, "C920", DeviceStatus::Available),
         ]);
-        let connected = linux_cameras::edges(&racing, &plugged, "t1");
+        let connected = linux_cameras::edges(&racing, &plugged, &none, "t1");
         assert_eq!(connected.len(), 1);
         // The unique id is the device path a running camera reports.
         assert_eq!(connected[0].unique_id, usb);
         assert_eq!(connected[0].name, "C920");
         assert!(connected[0].connected);
         assert_eq!(connected[0].timestamp, "t1");
-        let unplugged = linux_cameras::edges(&plugged, &before, "t2");
+        let unplugged = linux_cameras::edges(&plugged, &before, &none, "t2");
         assert_eq!(unplugged.len(), 1);
         assert_eq!(unplugged[0].unique_id, usb);
         assert!(!unplugged[0].connected);
+    }
+
+    #[test]
+    fn a_camera_replugged_inside_one_debounce_still_bounces() {
+        use linux_cameras::SeenCamera;
+        let usb = "/dev/v4l/by-id/usb-Logitech_C920-video-index0".to_string();
+        let seen = |node: &str| {
+            std::collections::BTreeMap::from([(
+                usb.clone(),
+                SeenCamera {
+                    name: "C920".to_string(),
+                    node: Some(node.to_string()),
+                },
+            )])
+        };
+        // Both listings show the camera; its node went away in between (the
+        // same number or a new one), so its capture child is gone.
+        for after in ["video2", "video4"] {
+            let removed = std::collections::BTreeSet::from(["video2".to_string()]);
+            let events = linux_cameras::edges(&seen("video2"), &seen(after), &removed, "t");
+            let order: Vec<_> = events
+                .iter()
+                .map(|event| (event.unique_id.as_str(), event.connected))
+                .collect();
+            assert_eq!(order, [(usb.as_str(), false), (usb.as_str(), true)]);
+        }
+        // Another camera's node going leaves this one alone.
+        let removed = std::collections::BTreeSet::from(["video0".to_string()]);
+        assert!(linux_cameras::edges(&seen("video2"), &seen("video2"), &removed, "t").is_empty());
     }
 
     #[cfg(target_os = "linux")]

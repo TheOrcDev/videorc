@@ -186,7 +186,8 @@ function cameraChildPid(appPid) {
 async function sampleCameraChildCpu(appPid, ms = 10000) {
   const child = appPid ? cameraChildPid(appPid) : null
   if (!child) return null
-  const clock = Number(spawnSync('getconf', ['CLK_TCK'], { encoding: 'utf8' }).stdout.trim()) || 100
+  const clock =
+    Number(spawnSync('getconf', ['CLK_TCK'], { encoding: 'utf8' }).stdout?.trim() ?? '') || 100
   const ticks = () => {
     try {
       return procStatCpuTicks(readFileSync(`/proc/${child.pid}/stat`, 'utf8'))

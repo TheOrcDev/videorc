@@ -5670,11 +5670,24 @@ mod linux {
             }
         };
 
+        // Every rung must answer inside LINUX_CAMERA_PREVIEW_STARTUP_TIMEOUT:
+        // a mode that opens but never delivers is killed at its deadline so
+        // the next rung still runs.
+        let start_deadline = Instant::now() + LINUX_CAMERA_START_BUDGET;
         let mut last_stderr = String::new();
         for request in linux_camera_attempts(target, fps, modes.as_deref()) {
             if stop_flag.load(Ordering::Acquire) {
                 return;
             }
+            let Some(first_frame_timeout) = linux_camera_attempt_first_frame_timeout(
+                start_deadline.saturating_duration_since(Instant::now()),
+            ) else {
+                last_stderr = format!(
+                    "{last_stderr}\nstart budget of {} s spent before {request:?}",
+                    LINUX_CAMERA_START_BUDGET.as_secs()
+                );
+                break;
+            };
             let output = linux_camera_attempt_output(&request, target, modes.as_deref());
             let Some(frame_len) = (output.0 as usize)
                 .checked_mul(output.1 as usize)
@@ -5692,6 +5705,7 @@ mod linux {
                 &stop_flag,
                 (target, output, fps, frame_len),
                 &request,
+                first_frame_timeout,
             ) {
                 Attempt::ProducedFrames | Attempt::Stopped => return,
                 Attempt::FailedBeforeFirstFrame(stderr) => {
@@ -5734,7 +5748,9 @@ mod linux {
         stop_flag: &Arc<AtomicBool>,
         (target, (width, height), fps, frame_len): ((u32, u32), (u32, u32), u32, usize),
         request: &V4l2CaptureRequest,
+        first_frame_timeout: Duration,
     ) -> Attempt {
+        let first_frame_deadline = Instant::now() + first_frame_timeout;
         let mut command = Command::new(&config.ffmpeg_path);
         command
             .args(v4l2_preview_ffmpeg_args(
@@ -5763,8 +5779,13 @@ mod linux {
         let stderr = collect_stderr(child.stderr.take());
         let child = Arc::new(StdMutex::new(child));
         let done = Arc::new(AtomicBool::new(false));
-        let killer =
-            spawn_stop_flag_killer(Arc::clone(&child), Arc::clone(&done), Arc::clone(stop_flag));
+        let race = Arc::new(FirstFrameRace::default());
+        let killer = spawn_stop_flag_killer(
+            Arc::clone(&child),
+            Arc::clone(&done),
+            Arc::clone(stop_flag),
+            (first_frame_deadline, Arc::clone(&race)),
+        );
 
         let mut buffer = {
             let mut guard = shared
@@ -5783,6 +5804,16 @@ mod linux {
             if stdout.read_exact(&mut buffer).is_err() {
                 break;
             }
+            if !startup_sent && !race.claim_live() {
+                // The deadline passed while this frame was in the pipe: the
+                // killer owns the attempt, and reporting Live now would hand
+                // the ladder a preview that is already dead.
+                let _ = child
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .kill();
+                break;
+            }
             buffer = publish_bgra_frame(shared, width, height, buffer);
             if !startup_sent {
                 let _ = startup_tx.send(linux_camera_live_startup(
@@ -5797,6 +5828,9 @@ mod linux {
         }
 
         done.store(true, Ordering::Release);
+        // Nothing reads the pipe any more; closing it lets an FFmpeg still
+        // writing exit instead of blocking the `wait`.
+        drop(stdout);
         let _ = child
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -5806,6 +5840,11 @@ mod linux {
             Attempt::ProducedFrames
         } else if stop_flag.load(Ordering::Acquire) {
             Attempt::Stopped
+        } else if race.timed_out() {
+            Attempt::FailedBeforeFirstFrame(format!(
+                "no frame within {} ms",
+                first_frame_timeout.as_millis()
+            ))
         } else {
             Attempt::FailedBeforeFirstFrame(
                 String::from_utf8_lossy(
@@ -5917,14 +5956,21 @@ mod linux {
         bytes
     }
 
+    /// Kills the attempt's FFmpeg on Stop, or when it has produced no frame by
+    /// the deadline: a V4L2 mode that opens but never delivers would
+    /// otherwise block `read_exact` past the whole start budget.
     fn spawn_stop_flag_killer(
         child: Arc<StdMutex<Child>>,
         done: Arc<AtomicBool>,
         stop_flag: Arc<AtomicBool>,
+        (first_frame_deadline, race): (Instant, Arc<FirstFrameRace>),
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             while !done.load(Ordering::Acquire) {
-                if stop_flag.load(Ordering::Acquire) {
+                // Past the deadline the killer acts only if it wins the race;
+                // a reader that already claimed Live keeps its child.
+                let stalled = Instant::now() >= first_frame_deadline && race.claim_timed_out();
+                if stop_flag.load(Ordering::Acquire) || stalled {
                     let _ = child
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -5934,6 +5980,62 @@ mod linux {
                 thread::sleep(Duration::from_millis(50));
             }
         })
+    }
+
+    /// The whole ladder's share of LINUX_CAMERA_PREVIEW_STARTUP_TIMEOUT, with
+    /// a second left for the start to report.
+    const LINUX_CAMERA_START_BUDGET: Duration = Duration::from_secs(11);
+    /// One rung's wait for its first frame; a camera that streams starts well
+    /// inside it (the FaceTime HD's first frame lands in ~1.8 s).
+    const LINUX_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(4);
+    const LINUX_CAMERA_MIN_ATTEMPT: Duration = Duration::from_secs(1);
+
+    /// A rung's first-frame deadline from what is left of the start budget;
+    /// `None` when too little is left to try it.
+    pub(super) fn linux_camera_attempt_first_frame_timeout(
+        remaining: Duration,
+    ) -> Option<Duration> {
+        let timeout = remaining.min(LINUX_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT);
+        (timeout >= LINUX_CAMERA_MIN_ATTEMPT).then_some(timeout)
+    }
+
+    const FIRST_FRAME_IDLE: u8 = 0;
+    const FIRST_FRAME_LIVE: u8 = 1;
+    const FIRST_FRAME_TIMED_OUT: u8 = 2;
+
+    /// The attempt's first-frame race, settled exactly once (the Windows
+    /// ladder's rule): the reader claims Live when `read_exact` hands it a
+    /// frame, the killer claims TimedOut when the deadline passes first, and
+    /// only the winner acts.
+    #[derive(Debug, Default)]
+    pub(super) struct FirstFrameRace(std::sync::atomic::AtomicU8);
+
+    impl FirstFrameRace {
+        pub(super) fn claim_live(&self) -> bool {
+            self.0
+                .compare_exchange(
+                    FIRST_FRAME_IDLE,
+                    FIRST_FRAME_LIVE,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        }
+
+        pub(super) fn claim_timed_out(&self) -> bool {
+            self.0
+                .compare_exchange(
+                    FIRST_FRAME_IDLE,
+                    FIRST_FRAME_TIMED_OUT,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        }
+
+        pub(super) fn timed_out(&self) -> bool {
+            self.0.load(Ordering::Acquire) == FIRST_FRAME_TIMED_OUT
+        }
     }
 
     #[cfg(test)]
@@ -5989,6 +6091,44 @@ mod linux {
                 ),
                 (1920, 1080)
             );
+        }
+
+        #[test]
+        fn every_rung_gets_a_first_frame_deadline_inside_the_start_budget() {
+            // A stalled native mode can no longer eat the whole 12 s start.
+            assert_eq!(
+                linux_camera_attempt_first_frame_timeout(LINUX_CAMERA_START_BUDGET),
+                Some(Duration::from_secs(4))
+            );
+            assert_eq!(
+                linux_camera_attempt_first_frame_timeout(Duration::from_millis(2500)),
+                Some(Duration::from_millis(2500))
+            );
+            assert_eq!(
+                linux_camera_attempt_first_frame_timeout(Duration::from_millis(900)),
+                None
+            );
+            assert!(LINUX_CAMERA_START_BUDGET < super::super::LINUX_CAMERA_PREVIEW_STARTUP_TIMEOUT);
+            // Three stalled rungs: 4 s + 4 s + 3 s fit the budget.
+            let mut remaining = LINUX_CAMERA_START_BUDGET;
+            let mut rungs = 0;
+            while let Some(timeout) = linux_camera_attempt_first_frame_timeout(remaining) {
+                remaining -= timeout;
+                rungs += 1;
+            }
+            assert_eq!(rungs, 3);
+        }
+
+        #[test]
+        fn the_first_frame_race_settles_once() {
+            let race = FirstFrameRace::default();
+            assert!(race.claim_live());
+            assert!(!race.claim_timed_out());
+            assert!(!race.timed_out());
+            let race = FirstFrameRace::default();
+            assert!(race.claim_timed_out());
+            assert!(!race.claim_live());
+            assert!(race.timed_out());
         }
 
         #[test]

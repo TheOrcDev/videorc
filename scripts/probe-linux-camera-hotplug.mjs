@@ -21,8 +21,15 @@
 //   VIDEORC_HOTPLUG_MAX_MS        the latency gate (default 2000)
 //   VIDEORC_SMOKE_OUTPUT_DIR      evidence directory
 
-import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -61,32 +68,58 @@ const save = () =>
 const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
 const log = (line) => console.log(`[hotplug] ${line}`)
 
-const videoNodes = () => {
+const SYSFS = '/sys/class/video4linux'
+const sysfsName = (node) => {
   try {
-    return new Set(readdirSync('/sys/class/video4linux').filter((name) => name.startsWith('video')))
+    return readFileSync(`${SYSFS}/${node}/name`, 'utf8').trim()
   } catch {
-    return new Set()
+    return null
+  }
+}
+const captureNodes = () => {
+  try {
+    return readdirSync(SYSFS).filter((node) => {
+      try {
+        return (
+          node.startsWith('video') && readFileSync(`${SYSFS}/${node}/index`, 'utf8').trim() === '0'
+        )
+      } catch {
+        return false
+      }
+    })
+  } catch {
+    return []
   }
 }
 
-/** Polls sysfs every 10 ms until `done(nodes)`; the time the edge was seen. */
-async function waitForNodes(done, timeoutMs) {
+/** Polls sysfs every 10 ms until `done()`; the time the edge was seen. */
+async function waitUntil(done, timeoutMs) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if (done(videoNodes())) return Date.now()
+    if (done()) return Date.now()
     await sleep(10)
   }
   return null
 }
 
+/** Unbinds or binds the interface without blocking the poll or the socket. */
 function uvc(action) {
-  const result = spawnSync('sudo', ['-n', 'tee', `/sys/bus/usb/drivers/uvcvideo/${action}`], {
-    input: uvcInterface,
-    encoding: 'utf8'
+  return new Promise((resolveAction, rejectAction) => {
+    const child = spawn('sudo', ['-n', 'tee', `/sys/bus/usb/drivers/uvcvideo/${action}`], {
+      stdio: ['pipe', 'ignore', 'pipe']
+    })
+    let stderr = ''
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk
+    })
+    child.on('error', rejectAction)
+    child.on('close', (code) =>
+      code === 0
+        ? resolveAction()
+        : rejectAction(new Error(`uvcvideo ${action} ${uvcInterface} failed: ${stderr.trim()}`))
+    )
+    child.stdin.end(uvcInterface)
   })
-  if (result.status !== 0) {
-    throw new Error(`uvcvideo ${action} ${uvcInterface} failed: ${result.stderr.trim()}`)
-  }
 }
 
 let stopApp = async () => {}
@@ -146,7 +179,8 @@ try {
     ? cameras.find((device) => device.name.includes(cameraName))
     : cameras[0]
   if (!camera) throw new Error(`no available camera${cameraName ? ` named ${cameraName}` : ''}`)
-  evidence.camera = { id: camera.id, name: camera.name }
+  camera.devicePath = Buffer.from(camera.id.slice('camera:linux-v4l2:'.length), 'hex').toString()
+  evidence.camera = { id: camera.id, name: camera.name, devicePath: camera.devicePath }
   log(`camera: ${camera.name}`)
 
   const video = { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 6000 }
@@ -190,17 +224,21 @@ try {
   for (let cycle = 1; cycle <= cycles; cycle += 1) {
     const record = { cycle }
     evidence.cycles.push(record)
-    const before = videoNodes()
+    // Only the selected camera's own node counts, so another camera's
+    // change cannot stand in for this one.
+    const node = realpathSync(camera.devicePath).split('/').pop()
+    const name = sysfsName(node)
 
-    // Remove.
+    // Remove; the poll runs while the unbind does.
     const removeAsked = Date.now()
-    if (uvcInterface) uvc('unbind')
-    else log(`cycle ${cycle}: UNPLUG ${camera.name} now`)
-    const removedAt = await waitForNodes(
-      (nodes) => [...before].some((node) => !nodes.has(node)),
+    const unbind = uvcInterface ? uvc('unbind') : null
+    if (!uvcInterface) log(`cycle ${cycle}: UNPLUG ${camera.name} now`)
+    const removedAt = await waitUntil(
+      () => sysfsName(node) === null,
       uvcInterface ? 10000 : manualWaitMs
     )
-    if (!removedAt) throw new Error(`cycle ${cycle}: the camera's node never went away`)
+    await unbind
+    if (!removedAt) throw new Error(`cycle ${cycle}: ${node} never went away`)
     const gone = await waitFor(
       deviceEvents,
       removeAsked,
@@ -222,16 +260,21 @@ try {
     save()
 
     // Re-add.
-    const removedNodes = videoNodes()
+    const leftNodes = new Set(captureNodes())
     await sleep(1000)
     const addAsked = Date.now()
-    if (uvcInterface) uvc('bind')
-    else log(`cycle ${cycle}: PLUG ${camera.name} back in now`)
-    const addedAt = await waitForNodes(
-      (nodes) => [...nodes].some((node) => !removedNodes.has(node)),
+    const bind = uvcInterface ? uvc('bind') : null
+    if (!uvcInterface) log(`cycle ${cycle}: PLUG ${camera.name} back in now`)
+    // Its capture node returns, under the same name, at any number.
+    const addedAt = await waitUntil(
+      () =>
+        captureNodes().some(
+          (candidate) => !leftNodes.has(candidate) && sysfsName(candidate) === name
+        ),
       uvcInterface ? 10000 : manualWaitMs
     )
-    if (!addedAt) throw new Error(`cycle ${cycle}: the camera's node never came back`)
+    await bind
+    if (!addedAt) throw new Error(`cycle ${cycle}: ${camera.name} never came back`)
     const back = await waitFor(
       deviceEvents,
       addAsked,
@@ -264,7 +307,7 @@ try {
   // Never leave the lab camera unbound.
   if (uvcInterface && !readdirSync('/sys/bus/usb/drivers/uvcvideo').includes(uvcInterface)) {
     try {
-      uvc('bind')
+      await uvc('bind')
     } catch (bindError) {
       console.error(`[hotplug] ${bindError.message}`)
     }
