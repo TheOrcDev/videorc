@@ -5852,15 +5852,20 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     )
     if (snapshot.state !== 'connected') return
     setCaptureConfig((current) => {
+      // A camera the background effect holds out of the room keeps the
+      // streamer's own Off as it was (plan 258 S5).
+      const cameraOff = snapshot.local.cameraHeld
+        ? current.sources.cameraOff
+        : snapshot.local.cameraOff
       if (
         current.audio.microphoneMuted === snapshot.local.micMuted &&
-        current.sources.cameraOff === snapshot.local.cameraOff
+        current.sources.cameraOff === cameraOff
       )
         return current
       const next = {
         ...current,
         audio: { ...current.audio, microphoneMuted: snapshot.local.micMuted },
-        sources: { ...current.sources, cameraOff: snapshot.local.cameraOff }
+        sources: { ...current.sources, cameraOff }
       }
       captureConfigRef.current = next
       return next

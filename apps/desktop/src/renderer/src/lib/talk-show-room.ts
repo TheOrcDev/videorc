@@ -187,6 +187,11 @@ export type TalkShowLocalMedia = {
   screen: MediaStreamTrack | null
   micMuted: boolean
   cameraOff: boolean
+  /**
+   * Plan 258 S5: the camera is off only because a background effect holds it
+   * out of the room (before S8). Not the streamer's Off: never stored as it.
+   */
+  cameraHeld?: boolean
   /** Why the camera or the mic did not open, one sentence; null when both did. */
   problem: string | null
   /** Plan 253 S4: LiveKit's own quality of the host's connection. */
@@ -775,8 +780,16 @@ export class TalkShowRoomClient {
   ): Promise<void> {
     if (!off && name && this.#deps.sourcesHeld?.()) return Promise.reject(new Error(SOURCES_HELD))
     this.#cameraWanted = !off
-    if (background !== undefined) this.#targetBackground = background
     return this.#control(async (room) => {
+      // Each queued switch opens its camera with its own camera's background;
+      // a camera with none is not held for the previous camera's effect.
+      if (background !== undefined) {
+        this.#targetBackground = background
+        if (!cameraBackgroundIsEffect(background) && this.#backgroundBlocked) {
+          this.#backgroundBlocked = false
+          if (this.#problem === ROOM_CAMERA_OFF_FOR_BACKGROUND) this.#problem = null
+        }
+      }
       // Release capture, not just its publication, for None/off.
       this.#cameraEffects?.close()
       this.#cameraEffects = null
@@ -2436,6 +2449,9 @@ export class TalkShowRoomClient {
         screen: this.#screen?.mediaStreamTrack ?? null,
         micMuted: this.#microphone?.isMuted ?? this.#micMuted,
         cameraOff: this.#cameraOff,
+        // Off only because the background effect holds it (plan 258 S5),
+        // never the streamer's own camera Off.
+        ...(this.#backgroundBlocked ? { cameraHeld: true } : {}),
         problem: this.#problem,
         ...(room && this.#snapshot.state === 'connected'
           ? { quality: qualityOf(room.localParticipant.connectionQuality) }

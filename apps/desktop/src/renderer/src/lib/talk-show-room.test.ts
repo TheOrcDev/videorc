@@ -356,6 +356,32 @@ describe('the host in the room (C-G4)', () => {
       await room.disconnect()
     })
 
+    it('says the camera is held by the effect, not off by the streamer', async () => {
+      let settings = withBackground(blur)
+      const { room } = client(undefined, () => settings)
+      await room.connect()
+      expect(room.snapshot.local).toMatchObject({ cameraOff: true, cameraHeld: true })
+      settings = withBackground()
+      await room.updateCameraSettings(settings)
+      expect(room.snapshot.local.cameraHeld).toBeUndefined()
+      await room.disconnect()
+    })
+
+    it('opens each queued camera switch with its own camera’s background', async () => {
+      const { room } = client(undefined, () => withBackground())
+      await room.connect()
+      const publishes = latestRoom().localParticipant.publishTrack.mock.calls.length
+      // B (blur) then C (no effect), queued back to back: B never goes out raw.
+      const first = room.setCameraSelection('Camera', false, blur)
+      const second = room.setCameraSelection('Camera', false, null)
+      await Promise.all([first, second])
+      const after = latestRoom().localParticipant.publishTrack.mock.calls.slice(publishes)
+      expect(
+        after.filter((args: unknown[]) => (args[1] as { source?: string })?.source === 'camera')
+      ).toHaveLength(1)
+      await room.disconnect()
+    })
+
     it('opens the camera once connected when the effect went off while connecting', async () => {
       let settings = withBackground(blur)
       const { room } = client(undefined, () => settings)
