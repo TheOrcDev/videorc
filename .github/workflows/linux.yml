@@ -8,6 +8,9 @@ on:
   push:
     branches: [main]
   pull_request:
+    # PRs into spikes/gpui (plan 260 throwaway spikes) build nothing this
+    # workflow checks, so they skip it.
+    branches: [main]
   workflow_dispatch:
 concurrency:
   group: linux-${{ github.ref }}
