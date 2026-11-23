@@ -410,12 +410,12 @@ pub(crate) fn choose_live_node(
     if candidates.is_empty() {
         return Err(LiveBackgroundStillReason::NoGpu);
     }
+    // By the GPU, not its node number (numbers swap between boots).
     let quarantined = |candidate: &RenderNodeCandidate| {
-        let node = candidate.node_name();
         vaapi_quarantined
             .iter()
             .chain(live_quarantined)
-            .any(|entry| entry.names(&node))
+            .any(|entry| entry.matches(candidate))
     };
     candidates
         .iter()
@@ -463,7 +463,7 @@ fn pick_node() -> Result<RenderNodeCandidate, Failure> {
             .as_deref(),
     )
     .map_err(|error| Failure::gpu(LiveBackgroundStillReason::NoGpu, error))?;
-    let vaapi = ProbeQuarantine::new(ProbeQuarantine::default_directory()).quarantined();
+    let vaapi = ProbeQuarantine::for_this_profile().quarantined();
     choose_live_node(&candidates, pin.as_deref(), &vaapi, &live.quarantined()).map_err(|reason| {
         Failure::gpu(
             reason,
@@ -1560,6 +1560,7 @@ mod tests {
         RenderNodeCandidate {
             path: PathBuf::from(format!("/dev/dri/{name}")),
             driver: Some("i915".to_string()),
+            device: None,
         }
     }
 
@@ -1567,6 +1568,7 @@ mod tests {
         QuarantineEntry {
             node: node.to_string(),
             driver: None,
+            device: None,
             ffmpeg_path: SENTINEL_PROBE.to_string(),
             probe_started_at_unix_secs: 0,
             quarantined_at_unix_secs: 0,

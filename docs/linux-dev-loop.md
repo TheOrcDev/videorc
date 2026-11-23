@@ -82,8 +82,11 @@ systemctl --user status pipewire xdg-desktop-portal
 On a multi-GPU host, pin VAAPI to one render node before the first launch.
 Whichever node you pin is the only one the app probes; every other node is
 listed in diagnostics as `skipped`. On ogre the Intel node is safe and the
-AMD node hangs the whole host on VAAPI encode, so the pin is not optional
-there:
+AMD node hangs the whole host on VAAPI encode. Since plan 257 S5 ogre's
+quarantine names the AMD GPU by driver, so `auto` with nothing set probes
+only Intel whichever number each GPU boots with (that is how L1.5 was
+accepted on 2026-11-23); pin anyway on a new multi-GPU box until the app has
+seen it once:
 
 The numbering is not stable: on ogre `renderD128` has been the Intel node on
 some boots and the AMD node on others (2026-10-20), and following a
@@ -95,13 +98,18 @@ for d in /sys/class/drm/renderD*; do echo "$d $(readlink "$d/device/driver")"; d
 intel=$(for d in /sys/class/drm/renderD*; do
   [ "$(basename "$(readlink "$d/device/driver")")" = i915 ] && echo "/dev/dri/$(basename "$d")"
 done)
-[ -n "$intel" ] || echo "no i915 render node: do not pin, use openh264" >&2
-export LIBVA_DRIVER_NAME=iHD
-export LIBVA_DRIVERS_PATH=/usr/lib/dri
-export LIBVA_DEVICE=$intel
-export VIDEORC_LINUX_VAAPI_DEVICE=$intel
-# Safe default while diagnosing the bridge: the software encoder only.
-export VIDEORC_LINUX_H264_ENCODER=openh264
+if [ -n "$intel" ]; then
+  export LIBVA_DRIVER_NAME=iHD
+  export LIBVA_DRIVERS_PATH=/usr/lib/dri
+  export LIBVA_DEVICE=$intel
+  export VIDEORC_LINUX_VAAPI_DEVICE=$intel
+else
+  # A blank pin means "probe every unquarantined node": never export one.
+  echo "no i915 render node: do not pin, use openh264" >&2
+  export VIDEORC_LINUX_H264_ENCODER=openh264
+fi
+# Only while diagnosing the bridge: the software encoder only.
+# export VIDEORC_LINUX_H264_ENCODER=openh264
 ```
 
 `VIDEORC_LINUX_H264_ENCODER=auto|vaapi|openh264` picks the encoder; `auto` is
@@ -117,6 +125,27 @@ running after 20 s is quarantined on the spot (its FFmpeg is killed, the
 entry carries `timedOutAfterSecs`) and nothing else is probed until the
 next start. After a host hang, plant the quarantine entry by hand before the
 next launch rather than letting the app discover it a second time.
+
+Entries name the GPU, not the node number: a node matches an entry by PCI
+address (`device`), else by `driver`, else by node name, so a boot that swaps
+the numbers still keeps the hung GPU out. Plant `node`, `driver` and `device`
+read from the same node, found by its driver (never by a remembered number).
+This prints one entry per amdgpu node; put the entries in a JSON array in
+`quarantined.json`. Keep every field: a list that does not parse reads as
+empty.
+
+```bash
+now=$(date +%s)
+for d in /sys/class/drm/renderD*; do
+  [ "$(basename "$(readlink "$d/device/driver")")" = amdgpu ] || continue
+  printf '{"node": "%s", "driver": "amdgpu", "device": "%s", "ffmpegPath": "planted by hand", "probeStartedAtUnixSecs": %s, "quarantinedAtUnixSecs": %s}\n' \
+    "$(basename "$d")" "$(basename "$(readlink "$d/device")")" "$now" "$now"
+done
+```
+
+Smoke profiles are isolated, but they also read the machine's list in
+`~/.videorc/linux-vaapi/quarantined.json` (never writing it), so an unpinned
+smoke on ogre still skips the AMD GPU.
 
 `cargo test -p videorc-backend` never probes a render node and never touches
 the real quarantine (#1027): without `VIDEORC_DATABASE_PATH` the tests use a
