@@ -1,6 +1,7 @@
 # Background tile pictures
 
-The Orc on the camera Background tiles (`camera-background-orc-art.tsx`). Owner's
+The Orc on the camera Background tiles and on the Studio Camera row's 16 px
+trigger picture (`camera-background-orc-art.tsx`). Owner's
 own character, from orc.pictures, Videorc category: `public/gifs/videorc/orc-smile.jpg`
 (640×640). No image generation.
 
@@ -14,4 +15,5 @@ own character, from orc.pictures, Videorc category: `public/gifs/videorc/orc-smi
   smears a second Orc behind the sharp one. The tiles blur it at render.
 
 Encoded with `cwebp -m 6 -sharp_yuv` (`-q 78 -alpha_q 85` for the Orc, `-q 72` for
-the room). Loaded with `?no-inline` from the picker's lazy chunk only.
+the room). Loaded with `?no-inline` from a lazy chunk only (the picker's, and the trigger's
+thumbnail through `React.lazy`), never the launch bundle.

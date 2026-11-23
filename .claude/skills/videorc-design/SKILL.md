@@ -626,7 +626,10 @@ links home.
   tile pictures are on-stream pixels and don't follow the theme: the Orc
   (owner 2026-11-23, from orc.pictures' Videorc category; one cutout drawn
   over his studio, sharp or blurred, the picture, or the screen colour,
-  `camera-background-orc-art.tsx`), never a cartoon person. While a
+  `camera-background-orc-art.tsx`), never a cartoon person; the Camera row's
+  16 px trigger picture draws the same art for the current pick, from a lazy
+  chunk (an empty ground until it loads), so the Orc's WebPs stay out of the
+  launch bundle. The Retro LCD row is text on the screen, with no picture. While a
   room is open (until plan 258 S8) the effect tiles are disabled with
   "Background effects come to rooms in a later update."; Off and the two
   screens stay.

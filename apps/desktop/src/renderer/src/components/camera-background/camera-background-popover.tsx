@@ -1,8 +1,8 @@
 import { lazy, Suspense, useState, type ReactElement } from 'react'
 
 import {
-  CameraBackgroundArt,
-  choiceArt
+  choiceArt,
+  type CameraBackgroundArtKind
 } from '@/components/camera-background/camera-background-art'
 import type { CameraBackgroundControl } from '@/components/camera-background/use-camera-background'
 import { NavigableRow } from '@/components/navigable-row'
@@ -16,6 +16,35 @@ import { openSceneBackground } from '@/lib/green-screen'
 /** The art of the camera's current pick, for the trigger. */
 export function currentArt(control: CameraBackgroundControl) {
   return choiceArt({ id: control.choiceId ?? 'off', picture: control.picture })
+}
+
+/**
+ * The Orc's pictures, loaded after the Studio first paints: the module and its
+ * two WebPs ride the same lazy chunk as the picker, never the launch bundle
+ * (renderer asset budget).
+ */
+const LazyCameraBackgroundOrcArt = lazy(() =>
+  import('@/components/camera-background/camera-background-orc-art').then((module) => ({
+    default: module.CameraBackgroundOrcArt
+  }))
+)
+
+/**
+ * The trigger's 16 px picture: the Orc over the current pick, the same art as
+ * the tiles. Until its chunk loads the square is just its ground (an empty
+ * Suspense fallback), so the row never changes size or waits on a picture.
+ */
+export function CameraBackgroundThumbnail({ art }: { art: CameraBackgroundArtKind }): ReactElement {
+  return (
+    <span
+      className="relative size-4 shrink-0 overflow-hidden rounded-chip bg-video-ground"
+      data-slot="camera-background-thumbnail"
+    >
+      <Suspense fallback={null}>
+        <LazyCameraBackgroundOrcArt art={art} />
+      </Suspense>
+    </span>
+  )
 }
 
 /** The picker's body and Choose image…, loaded on first use (launch bundle budget). */
@@ -58,14 +87,7 @@ export function CameraBackgroundLine({
               className="data-popup-open:bg-accent"
               data-videorc-camera-background-trigger=""
               label={CAMERA_BACKGROUND_LABEL}
-              leading={
-                <span
-                  className="relative size-4 shrink-0 overflow-hidden rounded-chip bg-video-ground"
-                  data-slot="camera-background-thumbnail"
-                >
-                  <CameraBackgroundArt art={currentArt(control)} />
-                </span>
-              }
+              leading={<CameraBackgroundThumbnail art={currentArt(control)} />}
               value={control.valueLabel}
             />
           }
