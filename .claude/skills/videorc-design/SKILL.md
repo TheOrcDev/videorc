@@ -623,7 +623,10 @@ links home.
   background effect", the green-screen switch and "Background settings". A
   pick applies at once and the stage confirms it, so no toast; the stage's
   cover and system effects are lines under the trigger, never toasts. The
-  tile pictures are on-stream pixels and don't follow the theme. While a
+  tile pictures are on-stream pixels and don't follow the theme: the Orc
+  (owner 2026-11-23, from orc.pictures' Videorc category; one cutout drawn
+  over his studio, sharp or blurred, the picture, or the screen colour,
+  `camera-background-orc-art.tsx`), never a cartoon person. While a
   room is open (until plan 258 S8) the effect tiles are disabled with
   "Background effects come to rooms in a later update."; Off and the two
   screens stay.
