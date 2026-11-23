@@ -1,0 +1,25 @@
+[package]
+name = "spike-text"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Plan 260 spike S0.5: text under GPUI (IME, colour emoji, font fallback, selectable text, tabular numbers, a 10,000-row chat with animated WebP emotes)"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+spike-summary.workspace = true
+serde_json.workspace = true
+raw-window-handle.workspace = true
+# The input example's grapheme handling.
+unicode-segmentation = "1"
+# The same image crate GPUI uses, to decode emote frames for the timer-driven mode.
+image = { version = "0.25", default-features = false, features = ["webp"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3.2"

@@ -83,6 +83,15 @@ which are plan 260's S0.1 lines.
 | `notification_responses` | object array | Notifications the user clicked: `tag`, `action` (S0.7) | — |
 | `picked_paths`, `revealed_paths`, `trashed_paths`, `dropped_paths` | string array | Files through the open dialog, Show in Finder, the Trash, drag and drop (S0.7) | — |
 | `header_double_clicks`, `header_drags`, `reopens` | integer | Custom-header double-clicks and drags; Dock reopens (S0.7) | — |
+| `window_open_to_first_paint_ms` | number | `open_window` to the first frame (S0.5) | ≤ 100 |
+| `chat_rows`, `chat_rows_built`, `chat_data_ms` | integer, integer, number | Chat size, rows the list built during the run, time to make the rows (S0.5) | — |
+| `chat_remount_to_frame_ms` | number | Resetting the whole chat to the next frame (S0.5) | — |
+| `emotes` | string | `gpui-img` or `timer` (S0.5) | — |
+| `scroll` | object | The scroll test: `fps`, `interval_p50_ms`, `interval_p95_ms`, `interval_p99_ms`, `interval_max_ms`, `frames_over_16_7_ms`, `frames_with_window_active`, `rows_built_during` (S0.5) | `fps` ≥ 60, `interval_p95_ms` ≤ 16.7 |
+| `idle_with_emotes` | object | Five idle seconds with emotes on screen: `cpu_percent`, `renders_per_second`, `window_active` (S0.5) | — |
+| `ime_steps` | object array | Each IME step: `step`, `text`, `marked`, `want_text`, `want_marked`, `ok`; then the candidate rect (S0.5) | every `ok` true |
+| `numbers` | object | Digit-run widths with and without `tnum`: `tabular_equal`, `proportional_differs` (S0.5) | `tabular_equal` true |
+| `selected_text` | string array | Text selected with the mouse (S0.5) | — |
 
 A spike that needs a number not in this table adds it with a plain
 snake-case name and a unit suffix (`_ms`, `_mb`, `_percent`), and adds a
