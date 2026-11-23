@@ -62,7 +62,9 @@ export function CameraBackgroundTiles({
     if (next) tiles.current.get(next)?.focus()
   }
   // The card is the picture (the pick on its chrome plate) and the name sits
-  // under it, as in the mockup, so the words get the tile's whole width.
+  // under it, as in the mockup. A name wraps to a second line rather than
+  // cutting ("Green screen" at 320 px, a long picture name, larger text); the
+  // grid row grows to the tallest name and the pictures stay level.
   const TILE =
     'group/tile flex min-w-0 flex-col gap-1 rounded-row text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/30 disabled:opacity-50'
   const tile = (choice: CameraBackgroundChoice): ReactElement => {
@@ -95,7 +97,7 @@ export function CameraBackgroundTiles({
         </MediaCard>
         <span
           className={cn(
-            'truncate text-center text-label',
+            'text-center text-label text-balance [overflow-wrap:anywhere]',
             checked ? 'text-foreground' : 'font-normal text-muted-foreground'
           )}
         >
@@ -122,7 +124,7 @@ export function CameraBackgroundTiles({
       <MediaCard className="flex aspect-[16/10] items-center justify-center text-muted-foreground group-hover/tile:border-foreground/30">
         <ImageIcon aria-hidden className="size-4" />
       </MediaCard>
-      <span className="truncate text-center text-label font-normal text-muted-foreground">
+      <span className="text-center text-label font-normal whitespace-nowrap text-muted-foreground">
         {/* "Choose…" in a narrow row (the popover), as in the mockup. */}
         {compact ? 'Choose…' : CHOOSE_IMAGE_LABEL}
       </span>
