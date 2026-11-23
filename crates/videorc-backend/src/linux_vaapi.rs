@@ -36,6 +36,10 @@ pub(crate) const PROBE_FRAMES: u32 = 30;
 pub(crate) struct RenderNodeCandidate {
     pub(crate) path: PathBuf,
     pub(crate) driver: Option<String>,
+    /// The PCI address behind the node (`0000:01:00.0`), the identity that
+    /// survives a reboot. The node number does not: ogre has booted with its
+    /// Intel and AMD nodes swapped (2026-10-20).
+    pub(crate) device: Option<String>,
 }
 
 impl RenderNodeCandidate {
@@ -113,6 +117,18 @@ pub(crate) fn driver_for_node(sysfs_drm_directory: &Path, node_name: &str) -> Op
         .map(str::to_string)
 }
 
+/// The PCI address behind a render node, read from sysfs
+/// (`/sys/class/drm/<node>/device` → `.../0000:01:00.0`). `None` when sysfs
+/// is unreadable; the quarantine then falls back to the driver.
+pub(crate) fn device_for_node(sysfs_drm_directory: &Path, node_name: &str) -> Option<String> {
+    let link = sysfs_drm_directory.join(node_name).join("device");
+    std::fs::read_link(link)
+        .ok()?
+        .file_name()?
+        .to_str()
+        .map(str::to_string)
+}
+
 /// Sorted numbered render nodes with their drivers.
 pub(crate) fn render_node_candidates(
     dri_directory: &Path,
@@ -128,6 +144,7 @@ pub(crate) fn render_node_candidates(
             is_render_node_name(name).then(|| RenderNodeCandidate {
                 path: entry.path(),
                 driver: driver_for_node(sysfs_drm_directory, name),
+                device: device_for_node(sysfs_drm_directory, name),
             })
         })
         .collect::<Vec<_>>();
@@ -167,6 +184,8 @@ struct ProbeSentinel {
     node: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     driver: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device: Option<String>,
     ffmpeg_path: String,
     started_at_unix_secs: u64,
 }
@@ -177,6 +196,10 @@ pub(crate) struct QuarantineEntry {
     pub(crate) node: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) driver: Option<String>,
+    /// The PCI address the node had when it hung. Absent in entries written
+    /// before plan 257 S5 and in ones planted by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) device: Option<String>,
     pub(crate) ffmpeg_path: String,
     pub(crate) probe_started_at_unix_secs: u64,
     pub(crate) quarantined_at_unix_secs: u64,
@@ -193,21 +216,80 @@ impl QuarantineEntry {
             Some(secs) => format!("did not return within {secs} s"),
             None => "never returned".to_string(),
         };
+        let mut seen_as = vec![self.node_name().to_string()];
+        seen_as.extend(self.driver.clone());
+        seen_as.extend(self.device.as_ref().map(|device| format!("PCI {device}")));
         format!(
-            "quarantined: a VAAPI probe of this node started at unix {} and {outcome} (delete {} under the app data directory, or pin the node with {}, to try it again)",
-            self.probe_started_at_unix_secs, QUARANTINED_FILE, DEVICE_PIN_ENV
+            "quarantined: a VAAPI probe of this GPU (then {}) started at unix {} and {outcome} (delete {} under the app data directory, or pin the node with {}, to try it again)",
+            seen_as.join(", "),
+            self.probe_started_at_unix_secs,
+            QUARANTINED_FILE,
+            DEVICE_PIN_ENV
         )
     }
 
-    /// Whether this entry quarantines `node` (`renderD129`). The backend writes
-    /// the bare name, but an entry planted by hand after a host hang may name
-    /// the node by path (`/dev/dri/renderD129`, the form the pin takes);
-    /// ignoring it probed the node that hung the host again.
-    pub(crate) fn names(&self, node: &str) -> bool {
+    /// The bare node name (`renderD129`). The backend writes the bare name,
+    /// but an entry planted by hand after a host hang may name the node by
+    /// path (`/dev/dri/renderD129`, the form the pin takes); ignoring it
+    /// probed the node that hung the host again.
+    fn node_name(&self) -> &str {
         Path::new(&self.node)
             .file_name()
-            .is_some_and(|name| name == node)
+            .and_then(|name| name.to_str())
+            .unwrap_or(&self.node)
     }
+
+    /// Whether this entry quarantines `candidate`. The node number is not an
+    /// identity: ogre has booted with renderD128 and renderD129 swapped
+    /// between its Intel and AMD GPUs, and a list matched by number then
+    /// blocked the healthy Intel node and let the AMD node that hangs the
+    /// host be probed. So the GPU is matched by what it is: the PCI address
+    /// when both sides know it, else the driver when both sides know it,
+    /// else (an entry planted by hand without a driver) the node name.
+    pub(crate) fn matches(&self, candidate: &RenderNodeCandidate) -> bool {
+        same_gpu(
+            (
+                self.node_name(),
+                self.driver.as_deref(),
+                self.device.as_deref(),
+            ),
+            (
+                candidate.node_name().as_str(),
+                candidate.driver.as_deref(),
+                candidate.device.as_deref(),
+            ),
+        )
+    }
+
+    fn same_gpu_as(&self, other: &QuarantineEntry) -> bool {
+        same_gpu(
+            (
+                self.node_name(),
+                self.driver.as_deref(),
+                self.device.as_deref(),
+            ),
+            (
+                other.node_name(),
+                other.driver.as_deref(),
+                other.device.as_deref(),
+            ),
+        )
+    }
+}
+
+/// `(node name, driver, PCI address)` of two sightings of a GPU: the most
+/// stable identity both sides carry decides.
+fn same_gpu(
+    (node_a, driver_a, device_a): (&str, Option<&str>, Option<&str>),
+    (node_b, driver_b, device_b): (&str, Option<&str>, Option<&str>),
+) -> bool {
+    if let (Some(a), Some(b)) = (device_a, device_b) {
+        return a == b;
+    }
+    if let (Some(a), Some(b)) = (driver_a, driver_b) {
+        return a == b;
+    }
+    node_a == node_b
 }
 
 /// Write via a sibling temp file and rename so a crash mid-write never leaves
@@ -230,18 +312,57 @@ fn unix_now() -> u64 {
         .unwrap_or_default()
 }
 
+fn read_quarantined(path: &Path) -> Vec<QuarantineEntry> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Vec<QuarantineEntry>>(&raw).ok())
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ProbeQuarantine {
     directory: PathBuf,
+    /// The machine's own list (`~/.videorc/linux-vaapi`), read but never
+    /// written by an isolated profile. A host hang is a fact about the
+    /// hardware, not the profile: before plan 257 S5 a fresh smoke profile
+    /// started with an empty list and, with no pin, would probe the node the
+    /// machine had already quarantined.
+    machine_directory: Option<PathBuf>,
 }
 
 impl ProbeQuarantine {
     pub(crate) fn new(directory: PathBuf) -> Self {
-        Self { directory }
+        Self {
+            directory,
+            machine_directory: None,
+        }
+    }
+
+    /// The quarantine the backend uses: this profile's list, plus the
+    /// machine's when the profile is isolated.
+    pub(crate) fn for_this_profile() -> Self {
+        let directory = Self::default_directory();
+        let machine_directory = Self::machine_directory().filter(|machine| *machine != directory);
+        Self {
+            directory,
+            machine_directory,
+        }
+    }
+
+    /// Where the un-isolated profile keeps its list. A unit test never reads
+    /// it.
+    fn machine_directory() -> Option<PathBuf> {
+        if cfg!(test) {
+            return None;
+        }
+        Some(directory_beside(
+            &crate::storage::platform_default_database_path(),
+        ))
     }
 
     /// Beside the database, so smokes with an isolated
-    /// `VIDEORC_DATABASE_PATH` never read or write the owner's quarantine.
+    /// `VIDEORC_DATABASE_PATH` never write the owner's quarantine (they read
+    /// it through [`Self::for_this_profile`]).
     pub(crate) fn default_directory() -> PathBuf {
         // A unit test that resolves the encoder without isolating the
         // database must never read or write the developer's real quarantine
@@ -286,6 +407,7 @@ impl ProbeQuarantine {
         let entry = QuarantineEntry {
             node: sentinel.node,
             driver: sentinel.driver,
+            device: sentinel.device,
             ffmpeg_path: sentinel.ffmpeg_path,
             probe_started_at_unix_secs: sentinel.started_at_unix_secs,
             quarantined_at_unix_secs: unix_now(),
@@ -297,19 +419,26 @@ impl ProbeQuarantine {
     }
 
     fn add_quarantined(&self, entry: QuarantineEntry) -> std::io::Result<()> {
-        let mut entries = self.quarantined();
-        entries.retain(|existing| !existing.names(&entry.node));
+        let mut entries = read_quarantined(&self.quarantined_path());
+        entries.retain(|existing| !existing.same_gpu_as(&entry));
         entries.push(entry);
         self.write_quarantined(&entries)
     }
 
-    /// Missing or unreadable lists read as empty; an unreadable list is
-    /// replaced the next time a node is quarantined.
+    /// This profile's list, then the machine's (when this profile is
+    /// isolated) for any GPU this profile does not list yet. Missing or
+    /// unreadable lists read as empty; an unreadable list of this profile's
+    /// is replaced the next time a node is quarantined.
     pub(crate) fn quarantined(&self) -> Vec<QuarantineEntry> {
-        std::fs::read(self.quarantined_path())
-            .ok()
-            .and_then(|raw| serde_json::from_slice::<Vec<QuarantineEntry>>(&raw).ok())
-            .unwrap_or_default()
+        let mut entries = read_quarantined(&self.quarantined_path());
+        if let Some(machine) = &self.machine_directory {
+            for entry in read_quarantined(&machine.join(QUARANTINED_FILE)) {
+                if !entries.iter().any(|known| known.same_gpu_as(&entry)) {
+                    entries.push(entry);
+                }
+            }
+        }
+        entries
     }
 
     fn write_quarantined(&self, entries: &[QuarantineEntry]) -> std::io::Result<()> {
@@ -329,6 +458,7 @@ impl ProbeQuarantine {
         let sentinel = ProbeSentinel {
             node: candidate.node_name(),
             driver: candidate.driver.clone(),
+            device: candidate.device.clone(),
             ffmpeg_path: ffmpeg_path.to_string(),
             started_at_unix_secs: unix_now(),
         };
@@ -394,6 +524,7 @@ impl ArmedProbe<'_> {
         let entry = QuarantineEntry {
             node: self.sentinel.node.clone(),
             driver: self.sentinel.driver.clone(),
+            device: self.sentinel.device.clone(),
             ffmpeg_path: self.sentinel.ffmpeg_path.clone(),
             probe_started_at_unix_secs: self.sentinel.started_at_unix_secs,
             quarantined_at_unix_secs: unix_now(),
@@ -477,8 +608,7 @@ pub(crate) fn plan_probe_order(
         return Ok((to_probe, reports));
     }
     for candidate in candidates {
-        let node = candidate.node_name();
-        if let Some(entry) = quarantined.iter().find(|entry| entry.names(&node)) {
+        if let Some(entry) = quarantined.iter().find(|entry| entry.matches(candidate)) {
             reports.push(candidate.report(LinuxRenderNodeState::Quarantined, Some(entry.detail())));
             continue;
         }
@@ -559,6 +689,7 @@ mod tests {
         RenderNodeCandidate {
             path: PathBuf::from("/dev/dri").join(node),
             driver: driver.map(str::to_string),
+            device: None,
         }
     }
 
@@ -610,14 +741,17 @@ mod tests {
         for name in ["renderD129", "card0", "renderD128", "renderDnope"] {
             std::fs::File::create(dri.join(name)).expect("create render-node fixture");
         }
+        // sysfs: renderD128/device -> .../0000:00:02.0, whose driver link
+        // names i915.
         let drivers = sysfs.join("drivers");
         std::fs::create_dir_all(drivers.join("i915")).expect("create driver dir");
-        std::fs::create_dir_all(sysfs.join("renderD128").join("device")).expect("device dir");
-        std::os::unix::fs::symlink(
-            drivers.join("i915"),
-            sysfs.join("renderD128").join("device").join("driver"),
-        )
-        .expect("driver symlink");
+        let pci = sysfs.join("devices").join("0000:00:02.0");
+        std::fs::create_dir_all(&pci).expect("pci device dir");
+        std::fs::create_dir_all(sysfs.join("renderD128")).expect("node dir");
+        std::os::unix::fs::symlink(&pci, sysfs.join("renderD128").join("device"))
+            .expect("device symlink");
+        std::os::unix::fs::symlink(drivers.join("i915"), pci.join("driver"))
+            .expect("driver symlink");
 
         let candidates = render_node_candidates(&dri, &sysfs);
         assert_eq!(
@@ -626,10 +760,12 @@ mod tests {
                 RenderNodeCandidate {
                     path: dri.join("renderD128"),
                     driver: Some("i915".to_string()),
+                    device: Some("0000:00:02.0".to_string()),
                 },
                 RenderNodeCandidate {
                     path: dri.join("renderD129"),
                     driver: None,
+                    device: None,
                 },
             ]
         );
@@ -811,6 +947,7 @@ mod tests {
         let quarantined = vec![QuarantineEntry {
             node: "renderD129".to_string(),
             driver: Some("amdgpu".to_string()),
+            device: None,
             ffmpeg_path: "/opt/ffmpeg".to_string(),
             probe_started_at_unix_secs: 1,
             quarantined_at_unix_secs: 2,
@@ -864,6 +1001,144 @@ mod tests {
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].node, "renderD129");
         assert_eq!(reports[0].state, LinuxRenderNodeState::Quarantined);
+    }
+
+    fn gpu(node: &str, driver: &str, device: &str) -> RenderNodeCandidate {
+        RenderNodeCandidate {
+            path: PathBuf::from("/dev/dri").join(node),
+            driver: Some(driver.to_string()),
+            device: Some(device.to_string()),
+        }
+    }
+
+    #[test]
+    fn the_quarantine_follows_the_gpu_when_the_node_numbers_swap() {
+        // ogre's file as it is on the box (2026-11-02): renderD129, amdgpu,
+        // no PCI address. On 2026-10-20 the box booted with the AMD GPU on
+        // renderD128 and Intel on renderD129. Matched by number, that list
+        // blocked Intel and let auto probe the AMD node that hangs the host.
+        let directory = fixture_directory("swapped");
+        std::fs::write(
+            directory.join(QUARANTINED_FILE),
+            r#"[{"node": "/dev/dri/renderD129", "driver": "amdgpu", "ffmpegPath": "/opt/ffmpeg", "probeStartedAtUnixSecs": 1, "quarantinedAtUnixSecs": 2}]"#,
+        )
+        .expect("plant ogre's entry");
+        let quarantined = ProbeQuarantine::new(directory.clone()).quarantined();
+        std::fs::remove_dir_all(directory).ok();
+
+        let usual = [
+            gpu("renderD128", "i915", "0000:00:02.0"),
+            gpu("renderD129", "amdgpu", "0000:01:00.0"),
+        ];
+        let swapped = [
+            gpu("renderD128", "amdgpu", "0000:01:00.0"),
+            gpu("renderD129", "i915", "0000:00:02.0"),
+        ];
+        for (boot, nodes, intel, amd) in [
+            ("usual", &usual, &usual[0], &usual[1]),
+            ("swapped", &swapped, &swapped[1], &swapped[0]),
+        ] {
+            let (to_probe, reports) = plan_probe_order(nodes, None, &quarantined).expect("plan");
+            assert_eq!(
+                to_probe,
+                vec![intel.clone()],
+                "{boot} boot probes Intel only"
+            );
+            assert_eq!(reports.len(), 1, "{boot}");
+            assert_eq!(reports[0].node, amd.node_name(), "{boot}");
+            assert_eq!(reports[0].driver.as_deref(), Some("amdgpu"), "{boot}");
+            assert_eq!(
+                reports[0].state,
+                LinuxRenderNodeState::Quarantined,
+                "{boot}"
+            );
+            assert!(
+                reports[0]
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("then renderD129, amdgpu")),
+                "{boot}: {:?}",
+                reports[0].detail
+            );
+        }
+    }
+
+    #[test]
+    fn a_quarantine_written_now_names_the_pci_address_and_matches_by_it() {
+        let directory = fixture_directory("pci");
+        let quarantine = ProbeQuarantine::new(directory.clone());
+        let first_amd = gpu("renderD129", "amdgpu", "0000:01:00.0");
+        std::mem::forget(
+            quarantine
+                .begin_probe(&first_amd, "/opt/ffmpeg")
+                .expect("arm the sentinel"),
+        );
+        let entry = quarantine
+            .adopt_stale_sentinel()
+            .expect("adopt")
+            .expect("a stale sentinel is a quarantine");
+        assert_eq!(entry.device.as_deref(), Some("0000:01:00.0"));
+        assert!(entry.detail().contains("PCI 0000:01:00.0"));
+        std::fs::remove_dir_all(directory).ok();
+
+        // Two GPUs on one driver: only the one at the hung address is out.
+        let second_amd = gpu("renderD130", "amdgpu", "0000:05:00.0");
+        let moved_first_amd = gpu("renderD128", "amdgpu", "0000:01:00.0");
+        assert!(entry.matches(&moved_first_amd));
+        assert!(!entry.matches(&second_amd));
+        let (to_probe, reports) = plan_probe_order(
+            &[moved_first_amd, second_amd.clone()],
+            None,
+            std::slice::from_ref(&entry),
+        )
+        .expect("plan");
+        assert_eq!(to_probe, vec![second_amd]);
+        assert_eq!(reports[0].node, "renderD128");
+
+        // Without sysfs on the candidate's side the driver decides, and
+        // without a driver on either side the node name does.
+        assert!(entry.matches(&candidate("renderD140", Some("amdgpu"))));
+        assert!(!entry.matches(&candidate("renderD129", Some("i915"))));
+        assert!(entry.matches(&candidate("renderD129", None)));
+        assert!(!entry.matches(&candidate("renderD128", None)));
+    }
+
+    #[test]
+    fn an_isolated_profile_reads_the_machine_quarantine_but_never_writes_it() {
+        let profile = fixture_directory("isolated-profile");
+        let machine = fixture_directory("machine");
+        let machine_list = r#"[{"node": "renderD129", "driver": "amdgpu", "ffmpegPath": "/opt/ffmpeg", "probeStartedAtUnixSecs": 1, "quarantinedAtUnixSecs": 2}]"#;
+        std::fs::write(machine.join(QUARANTINED_FILE), machine_list).expect("machine list");
+        let quarantine = ProbeQuarantine {
+            directory: profile.clone(),
+            machine_directory: Some(machine.clone()),
+        };
+        let intel = gpu("renderD128", "i915", "0000:00:02.0");
+        let amd = gpu("renderD129", "amdgpu", "0000:01:00.0");
+
+        let (to_probe, reports) =
+            plan_probe_order(&[intel.clone(), amd], None, &quarantine.quarantined()).expect("plan");
+        assert_eq!(to_probe, vec![intel.clone()]);
+        assert_eq!(reports[0].state, LinuxRenderNodeState::Quarantined);
+
+        // A hang inside the isolated profile lands in its own list only.
+        quarantine
+            .begin_probe(&intel, "/opt/ffmpeg")
+            .expect("arm")
+            .quarantine_timed_out(Duration::from_secs(20))
+            .expect("quarantine");
+        assert_eq!(
+            std::fs::read_to_string(machine.join(QUARANTINED_FILE)).expect("machine list"),
+            machine_list
+        );
+        assert_eq!(read_quarantined(&profile.join(QUARANTINED_FILE)).len(), 1);
+        assert_eq!(quarantine.quarantined().len(), 2);
+
+        // A unit test never reads a real machine list.
+        assert_eq!(ProbeQuarantine::for_this_profile().machine_directory, None);
+
+        std::fs::remove_dir_all(profile).ok();
+        std::fs::remove_dir_all(machine).ok();
     }
 
     #[test]

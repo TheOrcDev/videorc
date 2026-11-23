@@ -17899,7 +17899,7 @@ async fn resolve_linux_h264_encoder_uncached(
 ) -> Result<ResolvedFfmpegH264Encoder> {
     use crate::linux_vaapi::{ProbeQuarantine, RenderNodeCandidate, render_node_candidates};
 
-    let quarantine = ProbeQuarantine::new(ProbeQuarantine::default_directory());
+    let quarantine = ProbeQuarantine::for_this_profile();
     match quarantine.adopt_stale_sentinel() {
         Ok(Some(entry)) => tracing::warn!(
             "Quarantined Linux render node {} ({}): its VAAPI probe started at unix {} and never returned. It will not be probed again unless {} names it.",
@@ -35145,6 +35145,7 @@ mod tests {
         crate::linux_vaapi::RenderNodeCandidate {
             path: PathBuf::from("/dev/dri").join(node),
             driver: Some(driver.to_string()),
+            device: None,
         }
     }
 
@@ -35400,6 +35401,7 @@ mod tests {
         let intel = RenderNodeCandidate {
             path: PathBuf::from("/dev/dri/renderD128"),
             driver: Some("i915".to_string()),
+            device: None,
         };
         let decisions = StdMutex::new(std::collections::HashMap::new());
         let gate = tokio::sync::Mutex::new(());

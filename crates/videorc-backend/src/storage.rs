@@ -10779,7 +10779,13 @@ pub fn default_database_path() -> PathBuf {
     if let Some(custom) = std::env::var_os("VIDEORC_DATABASE_PATH") {
         return PathBuf::from(custom);
     }
+    platform_default_database_path()
+}
 
+/// The un-isolated profile's database, whatever `VIDEORC_DATABASE_PATH`
+/// says. Only machine-wide facts may be read from beside it (the Linux VAAPI
+/// quarantine); an isolated run never writes there.
+pub fn platform_default_database_path() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         home_dir()
