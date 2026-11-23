@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "spike": "spike-native-preview",
+  "os": "macos",
+  "arch": "aarch64",
+  "gpui_pre": "0.3.14",
+  "build": "release",
+  "args": [
+    "--seconds",
+    "40"
+  ],
+  "started_unix_ms": 1795470127642,
+  "seconds": 40,
+  "elapsed_s": 40.35,
+  "logical_cpus": 10,
+  "process_cpu_seconds": 3.35,
+  "process_cpu_percent_avg": 8.3,
+  "peak_rss_mb": 74.8,
+  "renders": 3,
+  "ui_redraws_per_second_idle": 0.07,
+  "startup_to_first_paint_ms": 156.1,
+  "native_view": true,
+  "presents": 4781,
+  "presents_per_second": 118.5,
+  "present_interval_p95_ms": 8.62,
+  "drawable_px": "2368x1600",
+  "cpu_copies_per_frame": 0,
+  "errors": 0,
+  "error_messages": []
+}
