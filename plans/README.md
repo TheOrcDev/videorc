@@ -1,5 +1,21 @@
 # Implementation Plans
 
+- 2026-11-23: [Plan 260](260-gpui-rewrite.md), the owner's ask: rewrite
+  the whole Electron app in GPUI (Zed's UI framework) instead of plan
+  220's Slint. DRAFT 2026-11-23, about 100 slices in seven phases;
+  D1-D13 open, each with a recommended default:
+  - GPUI's state from its source: weekly `gpui-pre` snapshots (no stable
+    release), Metal, DirectX 11 and wgpu renderers, AccessKit, and a
+    `NativeView` that lets the UI paint over a native video layer, on
+    macOS only. A spike showed the preview presenting on its own thread
+    while GPUI drew the window twice in 40 s.
+  - Keep `videorc-rust`'s framework-free core, preview, updater and
+    contracts; drop the Slint crates; land the core in this repo first,
+    shipping in Electron.
+  - Every Electron job with its replacement: rooms on LiveKit's Rust SDK
+    in the backend, HTML banners on a fetched Chromium host, stream
+    graphics in the backend, and the Windows and Linux preview routes to
+    measure first.
 - 2026-11-22: [Plan 258](258-background-effects.md), the owner's ask:
   background blur and replacement without a green screen, like Google Meet,
   for recording, streaming, rooms and guests. PLANNED 2026-11-22, 13 slices
