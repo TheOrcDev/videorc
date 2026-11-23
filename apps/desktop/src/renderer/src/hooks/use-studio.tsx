@@ -19527,11 +19527,12 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         const replay = await import('@/lib/replay-buffer')
         if (
           replay.takeSourcesNotReady(
+            client,
             replayCameraWaitRef,
             replayWaitingForCameraRef,
             replayGaveUpToastedRef,
-            previewCameraStatusRef.current,
-            captureConfigRef.current.sources.cameraId,
+            previewCameraStatusRef,
+            captureConfigRef,
             scheduleReplayReconcile
           )
         )
@@ -19742,25 +19743,14 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   }, [replayLayoutPreset, scheduleReplayReconcile])
 
   // A ring that waits for the camera starts on its live edge. One that
-  // stopped asking a silent camera starts on its first frame (the status
-  // ticks every 250 ms with the frame count); the ring going on resolves the
-  // bell entry.
+  // stopped asking a silent camera starts on its first frame, which
+  // lib/replay-buffer-camera-wait watches for on the camera's status events.
   const previewCameraState = previewCameraStatus.state
-  const previewCameraFramed = previewCameraStatus.framesCaptured > 0
   useEffect(() => {
-    if (previewCameraFramed && replayCameraWaitRef.current.refusals)
-      void import('@/lib/replay-buffer').then(
-        (replay) =>
-          replay.replayCameraRecovers(
-            replayCameraWaitRef,
-            replayWaitingForCameraRef,
-            previewCameraStatusRef.current
-          ) && scheduleReplayReconcile()
-      )
     if (!replayWaitingForCameraRef.current || previewCameraState !== 'live') return
     replayWaitingForCameraRef.current = false
     scheduleReplayReconcile()
-  }, [previewCameraState, previewCameraFramed, scheduleReplayReconcile])
+  }, [previewCameraState, scheduleReplayReconcile])
 
   const setReplayArmed = useCallback(
     (armed: boolean): void => {

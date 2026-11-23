@@ -316,9 +316,14 @@ describe('the Studio taking a silent-camera refusal (replaySourcesNotReadyStep)'
   function studio() {
     const scheduled: number[] = []
     const notices: string[] = []
+    const listeners = new Set<(camera: typeof silent) => void>()
     return {
       scheduled,
       notices,
+      listeners,
+      emit(camera: typeof silent) {
+        for (const listener of [...listeners]) listener(camera)
+      },
       wait: { current: REPLAY_CAMERA_WAIT_NONE },
       waitingForLive: { current: false },
       notified: { current: false },
@@ -330,7 +335,11 @@ describe('the Studio taking a silent-camera refusal (replaySourcesNotReadyStep)'
           camera,
           chosenCameraId: 'cam-1',
           schedule: (delayMs) => scheduled.push(delayMs),
-          notify: (reason) => notices.push(reason)
+          notify: (reason) => notices.push(reason),
+          watch: (listener) => {
+            listeners.add(listener)
+            return () => listeners.delete(listener)
+          }
         })
       }
     }
@@ -384,5 +393,26 @@ describe('the Studio taking a silent-camera refusal (replaySourcesNotReadyStep)'
       false
     )
     expect(t.wait.current.refusals).toBe(0)
+  })
+
+  it('watches the camera from the first live refusal and starts the ring on its first frame', () => {
+    const s = studio()
+    for (let i = 0; i < REPLAY_SILENT_CAMERA_RETRY_LIMIT; i += 1) s.take(silent)
+    // One subscription however many refusals.
+    expect(s.listeners.size).toBe(1)
+    s.emit(silent)
+    expect(s.waitingForLive.current).toBe(true)
+    expect(s.listeners.size).toBe(1)
+    s.emit({ ...silent, framesCaptured: 3 })
+    expect(s.listeners.size).toBe(0)
+    expect(s.waitingForLive.current).toBe(false)
+    expect(s.wait.current).toEqual(REPLAY_CAMERA_WAIT_NONE)
+    expect(s.scheduled.at(-1)).toBe(0)
+  })
+
+  it('a camera still starting is not watched: its live edge starts the ring', () => {
+    const s = studio()
+    s.take({ state: 'starting', cameraId: 'cam-1', framesCaptured: 0 })
+    expect(s.listeners.size).toBe(0)
   })
 })

@@ -78,6 +78,9 @@ export function replayAfterSourcesNotReady(input: {
 
 type Ref<T> = { current: T }
 
+/** The one camera-status subscription a silent-camera wait holds. */
+let unwatchCamera: (() => void) | null = null
+
 /**
  * One `replay-sources-not-ready` refusal, as the Studio takes it. Counts a
  * live camera's refusal in `wait` and acts: asks again after the backoff,
@@ -94,6 +97,8 @@ export function replaySourcesNotReadyStep(input: {
   notified: Ref<boolean>
   /** Publishes the Clips entry behind the bell. */
   notify: (reason: string) => void
+  /** Subscribes to the camera's status events; returns the unsubscribe. */
+  watch: (listener: (camera: ReplayCameraReport) => void) => () => void
   camera: ReplayCameraReport
   chosenCameraId: string | null | undefined
   schedule: (delayMs: number) => void
@@ -108,6 +113,18 @@ export function replaySourcesNotReadyStep(input: {
   const waits = next.kind === 'wait-for-frames'
   const first = waits && !wait.current.frames
   wait.current = { refusals, frames: wait.current.frames || waits }
+  // A live camera's refusal watches for its first frame (each refusal
+  // subscribes again, so a reconnected client is the one heard): the frame
+  // clears the count, and a ring that stopped asking starts.
+  if (camera.state === 'live') {
+    unwatchCamera?.()
+    const stop = (unwatchCamera = input.watch((status) => {
+      if (!replayCameraDelivers(status)) return
+      stop()
+      if (unwatchCamera === stop) unwatchCamera = null
+      if (replayCameraRecovers(wait, input.waitingForLive, status)) input.schedule(0)
+    }))
+  }
   if (next.kind === 'failed') return false
   if (next.kind === 'retry') input.schedule(next.delayMs)
   // Waiting for the live edge or the first frame holds every start.
