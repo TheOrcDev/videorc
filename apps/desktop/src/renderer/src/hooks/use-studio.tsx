@@ -11014,7 +11014,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         queueMicrotask(() => void applySavedSceneResultRef.current(restore))
       }
       skipNextConfigSceneReloadRef.current = true
-      setCaptureConfig((current) => {
+      const committed = (current: CaptureConfig): CaptureConfig => {
         // Orientation and canvas are one committed program state. Derive the
         // patch for backend-truth recovery when the response carrying the
         // original patch was lost; ordinary successful transactions carry it.
@@ -11045,6 +11045,15 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             ? current.layoutFramingMemory
             : rememberLayoutFraming(current.layoutFramingMemory, snapshot.layout)
         }
+        return next
+      }
+      // The ref takes the commit now, not at the render the update below
+      // waits for: the Clips ring re-arms and the next edit builds on it
+      // before a busy renderer has rendered (a ring start sent the layout
+      // before Freeform, and the camera left the scene).
+      captureConfigRef.current = committed(captureConfigRef.current)
+      setCaptureConfig((current) => {
+        const next = committed(current)
         workingAppRef.current = snapshot.sceneApp
         captureConfigRef.current = next
         persistWorkingVisual(next.layout, next.sources, background, savedId)
@@ -19499,8 +19508,16 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       const replay = await import('@/lib/replay-buffer')
       const status = await replay.startBufferOnlySession({
         client,
-        captureConfig: captureConfigRef.current,
-        scene: sceneWithBackground,
+        // The scene as applied (applyScene sets the ref at once), not this
+        // render's: a scene change's proof re-arms the ring before React
+        // renders the scene it left, and the start's scene would undo it.
+        current: () => ({
+          captureConfig: captureConfigRef.current,
+          scene: transformSceneRef.current && {
+            ...transformSceneRef.current,
+            background: workingBackgroundRef.current ?? undefined
+          }
+        }),
         sceneEditMode,
         settings: settingsRef.current
       })
@@ -19573,7 +19590,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     recordBlockedReason,
     replayGrantWait,
     sceneEditMode,
-    sceneWithBackground,
     scheduleReplayReconcile
   ])
 

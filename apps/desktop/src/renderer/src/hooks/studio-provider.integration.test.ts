@@ -381,7 +381,11 @@ function sceneForLayout(layout: LayoutSettings): Scene {
         deviceId: 'camera:1',
         transform: { ...transform, x: 0.7, y: 0.7, width: 0.25, height: 0.25 },
         defaultTransform: { ...transform, x: 0.7, y: 0.7, width: 0.25, height: 0.25 },
-        visible: layout.layoutPreset !== 'screen-only' && layout.sourceVisibility?.camera !== false,
+        // Freeform composes screen and camera whatever the preset (scene.rs
+        // push_freeform_sources); only the preset Screen only leaves it out.
+        visible:
+          (layout.arrangementMode === 'freeform' || layout.layoutPreset !== 'screen-only') &&
+          layout.sourceVisibility?.camera !== false,
         locked: false
       }
     ],
@@ -468,6 +472,7 @@ class StudioBackend {
   screenActivateFailure: 'definite' | null = null
   screenClearFailure: 'request-outcome-unknown-before-commit' | null = null
   sessionStartResponseDelayMs = 0
+  sessionStartCommitsScene = false
   sessionStartError: string | null = null
   emitRecordingStatusBeforeStartResponse = false
   authoritativeRecordingStatusBeforeStartResponse: 'stopping' | 'idle' | 'failed' | null = null
@@ -1637,6 +1642,13 @@ class StudioBackend {
         this.recordingState = 'recording'
         this.recordingSessionId = 'session-1'
         this.confirmedSources = { ...(params.sources as SourceSelection) }
+        if (this.sessionStartCommitsScene) {
+          // Like `requested_session_scene`: the request's scene, else its layout's.
+          this.currentLayout = params.layout as LayoutSettings
+          this.currentScene =
+            (params.scene as Scene | undefined) ?? sceneForLayout(this.currentLayout)
+          this.revision += 1
+        }
         const output = params.output as
           | { recordEnabled?: boolean; streamEnabled?: boolean }
           | undefined
@@ -11557,6 +11569,81 @@ describe('real StudioProvider lifecycle', () => {
       await committed
     })
     await waitForObservation(() => liveBackgroundId(backend.currentScene.background) === 'silk')
+  }, 15_000)
+
+  // Release pass 2026-11-23 (smoke:freeform-editor, mask law): Screen only
+  // from a portrait scene crosses the orientation, so the ring stops, the
+  // layout lands and the ring re-arms 150 ms after the next commit's proof.
+  // A commit reached the Studio's refs only at the render after it, so on a
+  // busy renderer the re-armed ring's start sent the layout and the scene
+  // from before the Freeform entry; the backend commits a start's scene, and
+  // the camera left it. The act scope below holds those renders back.
+  it('keeps a Freeform entry, camera and all, when the Clips ring re-arms before the Studio renders it', async () => {
+    const backend = new StudioBackend()
+    backend.sessionStartCommitsScene = true
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.cameraId === 'camera:1' &&
+        latest()?.core.recordBlockedReason == null
+    )
+    // Selecting a stage source turns edit mode on: the ring's start carries the scene.
+    await act(async () => latest()!.core.setSceneEditMode(true))
+    await act(async () =>
+      latest()!.core.applyCameraPreset({ layoutPreset: 'vertical-screen-only' })
+    )
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.layout.layoutPreset === 'vertical-screen-only' &&
+        canSaveScene()
+    )
+    await act(async () => latest()!.replay.setEnabled(true))
+    await waitForObservation(() => latest()?.recording.recording.replayOnly === true)
+
+    backend.layoutResponseDelayMs = 100
+    backend.sessionStartResponseDelayMs = 500
+    await act(async () => latest()!.core.applyCameraPreset({ layoutPreset: 'screen-only' }))
+    await waitForObservation(
+      () => latest()?.core.captureConfig.layout.layoutPreset === 'screen-only' && canSaveScene()
+    )
+    const commandsBefore = backend.sentCommands.length
+    await act(async () => {
+      latest()!.core.applyCameraPreset({
+        arrangementMode: 'freeform',
+        sourceTransformOverrides: {}
+      })
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.layout.arrangementMode === 'freeform' &&
+        latest()?.recording.recording.replayOnly === true
+    )
+
+    const after = backend.sentCommands.slice(commandsBefore)
+    const start = after.find((command) => command.method === 'session.start')
+    expect(start).toBeDefined()
+    expect((start!.params as { layout: LayoutSettings }).layout.arrangementMode).toBe('freeform')
+    expect(ringScene(start)?.sources.find((source) => source.kind === 'camera')?.visible).toBe(true)
+    expect(backend.currentLayout.arrangementMode).toBe('freeform')
+    expect(backend.currentScene.sources.find((source) => source.kind === 'camera')?.visible).toBe(
+      true
+    )
   }, 15_000)
 
   // The same race on a Record or Go Live click (after #1640): their

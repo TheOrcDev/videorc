@@ -150,17 +150,24 @@ export function takeSourcesNotReady(
  */
 export async function startBufferOnlySession(input: {
   client: BackendClient
-  captureConfig: CaptureConfig
-  scene: Scene | null
+  /**
+   * The capture config and the scene the Studio holds, read as the request
+   * goes out. The backend commits a start's scene over the layout, so a
+   * scene from an older render (or from before the awaits here) puts the
+   * scene a layout change left behind back: a camera dragged into Freeform
+   * from Screen only vanished that way.
+   */
+  current: () => { captureConfig: CaptureConfig; scene: Scene | null }
   sceneEditMode: boolean
   settings: SettingsState
 }): Promise<RecordingStatus> {
   const outputDirectory = input.settings.outputDirectoryHandle
     ? await window.videorc?.authorizeOutputDirectory?.(input.settings.outputDirectoryHandle)
     : null
+  const { captureConfig, scene } = input.current()
   const params = buildStartSessionParams({
-    captureConfig: input.captureConfig,
-    scene: input.scene,
+    captureConfig,
+    scene,
     sceneEditMode: input.sceneEditMode,
     settings: input.settings,
     suppressCaptionsForSession: true,
