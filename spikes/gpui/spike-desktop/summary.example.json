@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "spike": "spike-desktop",
+  "os": "macos",
+  "arch": "aarch64",
+  "gpui_pre": "0.3.14",
+  "build": "release",
+  "args": [
+    "--seconds",
+    "1200",
+    "--out",
+    "summary.json"
+  ],
+  "started_unix_ms": 1795471628965,
+  "seconds": 1200,
+  "elapsed_s": 336.77,
+  "logical_cpus": 10,
+  "process_cpu_seconds": 2.44,
+  "process_cpu_percent_avg": 0.7,
+  "peak_rss_mb": 113.5,
+  "renders": 129,
+  "ui_redraws_per_second_idle": 0.38,
+  "startup_to_first_paint_ms": 163.3,
+  "bundle_id": "com.videorc.spike-desktop",
+  "hotkey": "Ctrl+Option+Shift+R",
+  "hotkey_presses": 1,
+  "menu_actions": [
+    "Hide from Stream",
+    "Hide from Stream",
+    "Keep Awake",
+    "Show in Finder",
+    "Post Notification",
+    "Post Notification",
+    "Open\u2026",
+    "Move to Trash",
+    "Copy",
+    "Quit"
+  ],
+  "open_urls": [
+    {
+      "url": "videorc-spike://redraw-probe-2",
+      "ms_after_start": 55857.9,
+      "before_main_window": false
+    }
+  ],
+  "single_instance_handoffs": [
+    [
+      "--redraw-probe"
+    ]
+  ],
+  "hidden_window": {
+    "window_id": 104316,
+    "sharing_none": true
+  },
+  "on_top_window": {
+    "kind": "normal-raised",
+    "window_id": 104317,
+    "level": 3,
+    "hides_on_deactivate": false
+  },
+  "keep_awake_assertions": 1,
+  "notifications_posted": 2,
+  "notification_responses": [],
+  "picked_paths": [
+    "$TMPDIR/spike-desktop/sample.txt"
+  ],
+  "revealed_paths": [
+    "$TMPDIR/spike-desktop/sample.txt"
+  ],
+  "trashed_paths": [
+    "$TMPDIR/spike-desktop/sample.txt"
+  ],
+  "dropped_paths": [
+    "$TMPDIR/spike-desktop/sample.txt"
+  ],
+  "header_double_clicks": 2,
+  "header_drags": 4,
+  "reopens": 0,
+  "errors": 0,
+  "error_messages": []
+}
