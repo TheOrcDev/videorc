@@ -223,7 +223,11 @@ describe('Studio Sources rows (plan 080 S4, plan 231 D8)', () => {
     expect(button).toContain('aria-label="Background: Off"')
     expect(button).toContain('>Background<')
     expect(button).toContain('>Off<')
-    expect(button).toContain('<svg')
+    // The picture is the Orc from a lazy chunk (renderer asset budget): the
+    // launch markup is the square alone, with no picture drawn or loaded yet.
+    expect(button).toMatch(/data-slot="camera-background-thumbnail"[^>]*><\/span>/)
+    expect(button).not.toContain('<image')
+    expect(button).not.toContain('orc.webp')
     // The same row as Captions (owner, 2026-11-23): a NavigableRow with no
     // fill of its own, the picture where an icon sits, and the chevron right.
     expect(button).toContain('data-slot="navigable-row"')
