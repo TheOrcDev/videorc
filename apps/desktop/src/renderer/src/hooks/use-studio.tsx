@@ -17,7 +17,7 @@ import {
 } from '../lib/room-microphone-state'
 import { roomPcmTestResources, setRoomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import { cloudTerminalOwner } from '@/lib/cloud-provider-lifecycle'
-import { replayCameraDelivers, roomHoldsTheCamera } from '@/lib/replay-buffer-reconcile'
+import { REPLAY_CAMERA_WAIT_NONE, roomHoldsTheCamera } from '@/lib/replay-buffer-reconcile'
 import type { RoomSceneResult, RoomSceneTarget } from '@/lib/cloud-scene-adapter'
 import type { IdleCommit, IdleCommitState } from '@/lib/room-idle-commit'
 import { createRoomSceneEditSync } from '@/lib/room-scene-resender'
@@ -3022,11 +3022,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // The backend refused the default ring because the scene's camera has no
   // frame yet; it starts again once the camera preview goes live.
   const replayWaitingForCameraRef = useRef(false)
-  // A camera that says live and sends no frame: refusals so far, and the
-  // wait for its first frame once the backoff ran out (no more starts until
-  // the camera delivers, a source change or the switch).
-  const replayCameraSilentRefusalsRef = useRef(0)
-  const replayWaitingForFramesRef = useRef(false)
+  // A camera that says live and sends no frame (lib/replay-buffer-camera-wait).
+  const replayCameraWaitRef = useRef(REPLAY_CAMERA_WAIT_NONE)
   const replayReconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const replayGaveUpToastedRef = useRef(false)
   const replayLaunchArmedRef = useRef(false)
@@ -19439,8 +19436,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         settings: settingsRef.current
       })
       replayFailedStartsRef.current = 0
-      replayCameraSilentRefusalsRef.current = 0
-      replayWaitingForFramesRef.current = false
       replayBlockedReasonRef.current = null
       setReplayBlockedReasonState(null)
       applyRecordingStatus(status)
@@ -19462,38 +19457,18 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         // starts it (below). A camera that says live but sends no frame (a
         // blocked or dead one) is asked again on a backoff, then waited for:
         // its first frame starts the ring, and the bell says so once.
-        const { REPLAY_CAMERA_SENDS_NO_PICTURE, replayAfterSourcesNotReady } =
-          await import('@/lib/replay-buffer-reconcile')
-        const camera = previewCameraStatusRef.current
-        const silentRefusals =
-          camera.state === 'live'
-            ? (replayCameraSilentRefusalsRef.current += 1)
-            : replayCameraSilentRefusalsRef.current
-        const next = replayAfterSourcesNotReady({
-          camera,
-          chosenCameraId: captureConfigRef.current.sources.cameraId,
-          refusals: silentRefusals
-        })
-        if (next.kind === 'retry') {
-          scheduleReplayReconcile(next.delayMs)
+        const replay = await import('@/lib/replay-buffer')
+        if (
+          replay.takeSourcesNotReady(
+            replayCameraWaitRef,
+            replayWaitingForCameraRef,
+            replayGaveUpToastedRef,
+            previewCameraStatusRef.current,
+            captureConfigRef.current.sources.cameraId,
+            scheduleReplayReconcile
+          )
+        )
           return
-        }
-        if (next.kind === 'wait-for-live') {
-          replayWaitingForCameraRef.current = true
-          return
-        }
-        if (next.kind === 'wait-for-frames') {
-          const firstWait = !replayWaitingForFramesRef.current
-          replayWaitingForFramesRef.current = true
-          if (firstWait) console.warn('[replay-buffer] waiting for the camera to send a frame')
-          if (firstWait && !replayGaveUpToastedRef.current) {
-            replayGaveUpToastedRef.current = true
-            void import('@/lib/replay-buffer').then((replay) =>
-              replay.showClipsCouldNotStart(REPLAY_CAMERA_SENDS_NO_PICTURE)
-            )
-          }
-          return
-        }
         // A camera that reported failed, missing or denied brings no live
         // edge: the start counts as failed, and says so like any other.
       }
@@ -19568,7 +19543,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             replaySceneReloadsRef.current > 0 ||
             performanceCheckHoldRef.current,
           failedStarts: replayFailedStartsRef.current,
-          waitingForCamera: replayWaitingForCameraRef.current || replayWaitingForFramesRef.current,
+          waitingForCamera: replayWaitingForCameraRef.current,
           roomHoldsCamera:
             roomOpenHoldRef.current || roomHoldsTheCamera(cloudStatusRef.current?.room)
         })
@@ -19641,8 +19616,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     replayVisualSourcesRef.current = replayVisualSources
     replayFailedStartsRef.current = 0
     replayWaitingForCameraRef.current = false
-    replayCameraSilentRefusalsRef.current = 0
-    replayWaitingForFramesRef.current = false
+    replayCameraWaitRef.current = REPLAY_CAMERA_WAIT_NONE
     rearmReplayAfterErrorRef.current()
     void import('@/lib/replay-buffer-reconcile').then(({ replayBufferShouldRestartForSources }) => {
       if (
@@ -19695,40 +19669,38 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // A layout without the camera it waited for (screen-only) can start now.
   const replayLayoutPreset = captureConfig.layout.layoutPreset
   useEffect(() => {
-    if (!replayWaitingForCameraRef.current && !replayWaitingForFramesRef.current) return
+    if (!replayWaitingForCameraRef.current) return
     replayWaitingForCameraRef.current = false
-    replayWaitingForFramesRef.current = false
-    replayCameraSilentRefusalsRef.current = 0
     scheduleReplayReconcile()
   }, [replayLayoutPreset, scheduleReplayReconcile])
 
-  // A ring that waits for the camera starts on its live edge.
+  // A ring that waits for the camera starts on its live edge. One that
+  // stopped asking a silent camera starts on its first frame (the status
+  // ticks every 250 ms with the frame count); the ring going on resolves the
+  // bell entry.
   const previewCameraState = previewCameraStatus.state
+  const previewCameraFramed = previewCameraStatus.framesCaptured > 0
   useEffect(() => {
+    if (previewCameraFramed && replayCameraWaitRef.current.refusals)
+      void import('@/lib/replay-buffer').then(
+        (replay) =>
+          replay.replayCameraRecovers(
+            replayCameraWaitRef,
+            replayWaitingForCameraRef,
+            previewCameraStatusRef.current
+          ) && scheduleReplayReconcile()
+      )
     if (!replayWaitingForCameraRef.current || previewCameraState !== 'live') return
     replayWaitingForCameraRef.current = false
     scheduleReplayReconcile()
-  }, [previewCameraState, scheduleReplayReconcile])
-
-  // A ring that stopped asking a silent camera starts on its first frame
-  // (the status ticks every 250 ms with the frame count); the ring going on
-  // resolves the bell entry.
-  const previewCameraDelivers = replayCameraDelivers(previewCameraStatus)
-  useEffect(() => {
-    if (!previewCameraDelivers) return
-    replayCameraSilentRefusalsRef.current = 0
-    if (!replayWaitingForFramesRef.current) return
-    replayWaitingForFramesRef.current = false
-    scheduleReplayReconcile()
-  }, [previewCameraDelivers, scheduleReplayReconcile])
+  }, [previewCameraState, previewCameraFramed, scheduleReplayReconcile])
 
   const setReplayArmed = useCallback(
     (armed: boolean): void => {
       replayArmedRef.current = armed
       replayFailedStartsRef.current = 0
       replayWaitingForCameraRef.current = false
-      replayCameraSilentRefusalsRef.current = 0
-      replayWaitingForFramesRef.current = false
+      replayCameraWaitRef.current = REPLAY_CAMERA_WAIT_NONE
       setReplayArmedState(armed)
       scheduleReplayReconcile(0)
     },
