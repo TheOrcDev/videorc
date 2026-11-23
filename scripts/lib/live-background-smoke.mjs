@@ -91,3 +91,19 @@ export function liveBackgroundSampleMismatches(samples, { id, forced }) {
 export function smokeMicrophoneId(platform) {
   return platform === 'linux' ? undefined : 'microphone:coreaudio:4294967295'
 }
+
+/**
+ * The app env the take's microphone needs. The fixture id is the backend's
+ * synthetic microphone: a debug backend opens it only with
+ * VIDEORC_CAPTION_CONTRACT_TEST=1 (audio.rs `start_native_audio_source`), and
+ * it sends a continuous tone only with VIDEORC_LIVE_SOURCE_SWITCH_TEST=1;
+ * otherwise it is silent unless a test injects audio, so the take's audio
+ * check failed as digital silence (refused without the first flag, silent
+ * without the second). The same pair smoke:banners and smoke:html-overlay set.
+ * The smoke sets them itself so it never depends on the caller's shell.
+ */
+export function smokeMicrophoneEnv(platform) {
+  return smokeMicrophoneId(platform)
+    ? { VIDEORC_CAPTION_CONTRACT_TEST: '1', VIDEORC_LIVE_SOURCE_SWITCH_TEST: '1' }
+    : {}
+}

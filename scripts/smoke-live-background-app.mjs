@@ -46,6 +46,7 @@ import {
   liveBackgroundSampleMismatches,
   proofSurfaceLiveBackgroundVerdict,
   sceneCarriesBackground,
+  smokeMicrophoneEnv,
   smokeMicrophoneId
 } from './lib/live-background-smoke.mjs'
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
@@ -159,6 +160,7 @@ try {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_SMOKE_PREVIEW_MOTION: '1',
       VIDEORC_SMOKE_DISABLE_NATIVE_MICROPHONE: '0',
+      ...smokeMicrophoneEnv(process.platform),
       VIDEORC_SMOKE_STATE_DIR: outputDirectory,
       VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
       VIDEORC_USER_DATA_DIR: userDataDir,
