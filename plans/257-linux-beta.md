@@ -87,20 +87,20 @@ below), **=** neither platform has it. `R` = `crates/videorc-backend/src`,
 
 ### Encoding, preview and compositing
 
-| Feature                            | Mac               | Linux today                                                         | St  | Gap                                                                                               | Evidence                                                                     |
-| ---------------------------------- | ----------------- | ------------------------------------------------------------------- | --- | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Hardware H.264                     | VideoToolbox      | VAAPI (probed per render node, crash quarantine) else OpenH264      | D   | ogre's lab env pins OpenH264; AMD node quarantined; L1.5 evidence never committed (plans 052/053) | `R/recording.rs:16557-16570,17849-17926`; `R/linux_vaapi.rs`                 |
-| NVIDIA                             | n/a               | No `h264_nvenc` arm                                                 | M   | NVIDIA owners get OpenH264                                                                        | `R/protocol.rs:2255-2270`                                                    |
-| Separate record and stream encodes | VT split roles    | One shared encode                                                   | D   | Recording quality follows the stream; one failure takes both                                      | `R/recording.rs:23249-23259`                                                 |
-| Clips (keep the last seconds)      | On                | "Off on this computer … OpenH264"                                   | D   | Off by default without VAAPI; Linux segment muxer unchecked (plan 181)                            | Output page text                                                             |
-| Preview                            | CAMetalLayer, GPU | Electron proof surface: waiting I420 requests drawn with WebGL (S3) | W   | S3: 30 of 30 fps, 29 / 37 ms on the camera; Health "Smooth", "App window"; CPU half owed (183 %)  | `M/native-preview-proof-poller-runtime.ts`; `R/preview_bmp.rs`; S3 spike doc |
-| Preview first-frame watchdog       | Metal heal        | Proof watchdog with heal on Linux (S3)                              | W   | S3: stall seen in 1.7 s, two heals, fallback at 7.6 s, live again 1 s after the source returns    | `M/native-preview-first-frame.ts` (`proofWatchdogHealAction`)                |
-| Compositor                         | Metal             | CPU YUV420p (`GpuCompositor` uninhabited)                           | D   | Rendered 7 fps of 30 at 166 % CPU during a take (under load)                                      | `run/app.log` 20:33:16; `R/compositor.rs:8119-8137`                          |
-| Live backgrounds                   | Metal             | GLES 3 on EGL, one render node                                      | W\* | ogre goldens owed (plans 190, 194)                                                                | `R/live_background/gl.rs`                                                    |
-| Green / blue screen                | Metal or CPU      | CPU path                                                            | W\* | Not seen (black camera)                                                                           | `R/compositor.rs:9548-9556`                                                  |
-| Background removal / segmentation  | —                 | —                                                                   | =   | Neither platform has it                                                                           | —                                                                            |
-| Live canvas on the Scene tab       | Yes               | On (S3): the docked in-window view                                  | W   | S3: docked into the `scene` slot on ogre                                                          | `UI/components/tabs/layout-tab.tsx`                                          |
-| Window glass                       | Vibrancy          | Solid palette                                                       | OS  | Cosmetic                                                                                          | `M/window-glass.ts:161-163`                                                  |
+| Feature                            | Mac               | Linux today                                                                     | St  | Gap                                                                                                       | Evidence                                                                     |
+| ---------------------------------- | ----------------- | ------------------------------------------------------------------------------- | --- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Hardware H.264                     | VideoToolbox      | `auto` picks VAAPI on Intel iHD with nothing set (S5); OpenH264 fallback        | W   | S5: L1.5 proven on ogre, AMD node stays quarantined (matched by GPU, not number); AMD VAAPI unproven (D2) | `R/linux_vaapi.rs`; `docs/acceptance/2026-11-23-linux-l1.5-ogre.md`          |
+| NVIDIA                             | n/a               | No `h264_nvenc` arm                                                             | M   | NVIDIA owners get OpenH264                                                                                | `R/protocol.rs:2255-2270`                                                    |
+| Separate record and stream encodes | VT split roles    | One shared encode                                                               | D   | Recording quality follows the stream; one failure takes both                                              | `R/recording.rs:23249-23259`                                                 |
+| Clips (keep the last seconds)      | On                | On with VAAPI (S5); "Off on this computer … OpenH264" only on the software path | W   | S5: the ring runs on ogre on VAAPI; saving a clip on Linux not checked yet (plan 181)                     | Output page text                                                             |
+| Preview                            | CAMetalLayer, GPU | Electron proof surface: waiting I420 requests drawn with WebGL (S3)             | W   | S3: 30 of 30 fps, 29 / 37 ms on the camera; Health "Smooth", "App window"; CPU half owed (183 %)          | `M/native-preview-proof-poller-runtime.ts`; `R/preview_bmp.rs`; S3 spike doc |
+| Preview first-frame watchdog       | Metal heal        | Proof watchdog with heal on Linux (S3)                                          | W   | S3: stall seen in 1.7 s, two heals, fallback at 7.6 s, live again 1 s after the source returns            | `M/native-preview-first-frame.ts` (`proofWatchdogHealAction`)                |
+| Compositor                         | Metal             | CPU YUV420p (`GpuCompositor` uninhabited)                                       | D   | Rendered 7 fps of 30 at 166 % CPU during a take (under load)                                              | `run/app.log` 20:33:16; `R/compositor.rs:8119-8137`                          |
+| Live backgrounds                   | Metal             | GLES 3 on EGL, one render node                                                  | W\* | ogre goldens owed (plans 190, 194)                                                                        | `R/live_background/gl.rs`                                                    |
+| Green / blue screen                | Metal or CPU      | CPU path                                                                        | W\* | Not seen (black camera)                                                                                   | `R/compositor.rs:9548-9556`                                                  |
+| Background removal / segmentation  | —                 | —                                                                               | =   | Neither platform has it                                                                                   | —                                                                            |
+| Live canvas on the Scene tab       | Yes               | On (S3): the docked in-window view                                              | W   | S3: docked into the `scene` slot on ogre                                                                  | `UI/components/tabs/layout-tab.tsx`                                          |
+| Window glass                       | Vibrancy          | Solid palette                                                                   | OS  | Cosmetic                                                                                                  | `M/window-glass.ts:161-163`                                                  |
 
 ### Recording and output
 
@@ -268,7 +268,9 @@ Gates (JSON keys): `cleanInstall`, `protocolSignIn`, `portalScreenGrant`,
 8. **No self-update.** S19.
 9. **Hardware encoding isn't the default on most boxes** (VAAPI evidence
    missing, AMD quarantined on ogre, no NVENC), so Clips are off and record
-   and stream share one encode. S5, S6, S7.
+   and stream share one encode. S5, S6, S7. (S5 done 2026-11-23: VAAPI is
+   the default on Intel iHD and Clips run on ogre; NVENC and split encodes
+   remain.)
 10. **Talk-show rooms from Linux can't share the screen or desktop audio.**
     S14.
 
@@ -505,6 +507,25 @@ quarantine stays on ogre's amdgpu node. AMD proof waits for the second box
 both backends; the Output page no longer says Clips are off on ogre; the
 evidence JSON is committed. The AMD VAAPI check moves to S21's second-box
 pass (blocked on D2).
+**Result (2026-11-23):** `auto` already chose VAAPI first; ogre encoded
+with OpenH264 only because the lab environment pinned it. Two safety gaps
+would have opened once it stopped pinning, and both are fixed. (1) The
+quarantine matched entries by node number, and ogre's numbers swap between
+boots, so a swapped boot would have blocked Intel and probed the AMD GPU that
+hangs the host. Entries now carry the PCI address and match by PCI address,
+else driver, else name; the live-background node choice uses the same rule.
+(2) Every isolated profile (all smokes) started with an empty quarantine; it
+now also reads the machine's list in `~/.videorc/linux-vaapi` and never
+writes it. On ogre, with no encoder, device or libva pins: the direct matrix
+picked `hardware-vaapi` on `renderD128` (standard profile, `renderD129`
+`quarantined`) and passed; `pnpm smoke:linux-encoder-acceptance` passed both
+backends with `complete: true`
+(`docs/acceptance/2026-11-23-linux-l1.5-ogre.{md,json}`); in the dev app with
+the real camera the Output page's Clips row read "The newest seconds are on
+disk…" with the switch on. Seen there and owed elsewhere: the ring's encoder
+at 0.86× with "Uneven frames" in Health (the CPU compositor at 1080p30, D6).
+**Owed:** AMD VAAPI on a second box (S21, D2); the lab environment
+(`~/logs/s4.2a-env.sh`) still pins OpenH264 for other slices' runs.
 
 ### S6: NVENC arm
 

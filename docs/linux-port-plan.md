@@ -21,7 +21,7 @@ column says what is still short.
 | Camera | V4L2 | Works, degraded (L3): an FFmpeg `-f v4l2` child scales on the CPU (about 180 % CPU at idle with ogre's FaceTime camera, plan 257 audit); no hotplug until restart |
 | Audio | PipeWire | Microphone through pipewire-pulse (L2). Desktop/system audio is missing. Live captions are not available yet |
 | Preview | CPU composition and BMP transport | Works, degraded (L5): the Electron proof surface polls per-source BMPs on the CPU and Health reports "Fallback"; no live canvas on the Scene tab |
-| H.264 encode | VAAPI hardware, OpenH264 software fallback | VAAPI is probed per render node, OpenH264 is the fallback (L1.5). The hardware acceptance evidence was never committed, so VAAPI is not yet the proven default; no NVENC arm |
+| H.264 encode | VAAPI hardware, OpenH264 software fallback | Works (L1.5, proven on ogre 2026-11-23): with nothing set, `auto` probes the render nodes and picks VAAPI on Intel iHD; OpenH264 is the fallback. AMD VAAPI is unproven (no second box, D2); no NVENC arm |
 | Packaging | AppImage | Shipped (L6), unsigned, public Alpha under owner waiver. No self-update: the app only shows a changelog notice |
 | Videorc Camera (plan 214 D) | v4l2loopback: the user installs the module, the app loads it with `pkexec modprobe … exclusive_caps=1 card_label="Videorc Camera" video_nr=42` and writes YUYV 1080p30 to the device found by name | Written and compiled by the Linux CI job; hidden (`PROVEN = false` in `virtual_camera_linux.rs`) until spike P0c passes on a named box |
 
@@ -112,12 +112,26 @@ GPU hang, so the policy keeps the app from touching a bad node at all:
 - The driver is evidence, not policy. There is no amdgpu or other driver
   blocklist; most amdgpu boxes encode fine through VAAPI. The quarantine file
   is box-local state.
+- A quarantine entry names the GPU, not its node number (plan 257 S5).
+  Numbers can swap between boots (ogre, 2026-10-20: the AMD GPU came up as
+  `renderD128`). Entries carry the PCI address (`device`, the basename of
+  `/sys/class/drm/<node>/device`) and the driver. A node matches an entry by
+  PCI address when both sides know it, else by driver, else by node name
+  (an entry planted by hand with neither). ogre's older entry
+  (`renderD129`, `amdgpu`, no address) therefore keeps the AMD GPU out
+  whichever number it boots with.
+- An isolated profile (`VIDEORC_DATABASE_PATH` elsewhere, as every smoke
+  sets it) also reads the machine's list beside the un-isolated database
+  (`~/.videorc/linux-vaapi/quarantined.json`) and never writes it. A hang is
+  a fact about the hardware: without this, a fresh smoke profile started with
+  an empty list and, unpinned, could probe the GPU the machine had already
+  quarantined.
 
 ### Named tester boxes
 
 | Box | Hardware | Distribution / session | Render nodes | Role |
 | --- | --- | --- | --- | --- |
-| ogre | T2 MacBook Pro, Intel UHD 630 (Coffee Lake) + Radeon Pro 555X, FaceTime HD camera | Omarchy 4.0.4 (Arch family), Hyprland / Wayland, PipeWire + `xdg-desktop-portal-hyprland` | `renderD128` i915, allowed; `renderD129` amdgpu, **quarantined** after the 2026-09-24 host hang | Named physical tester for L1.5 through L5 |
+| ogre | T2 MacBook Pro, Intel UHD 630 (Coffee Lake) + Radeon Pro 555X, FaceTime HD camera | Omarchy 4.5.0 (Arch family), Hyprland / Wayland, PipeWire + `xdg-desktop-portal-hyprland` | `renderD128` i915, allowed; `renderD129` amdgpu, **quarantined** after the 2026-09-24 host hang | Named physical tester for L1.5 through L5 |
 
 Beta needs a second named Tier 1 box, an Ubuntu 24.04 x64 machine (plan 257
 D2, owner-owed), for the AppImage and updater evidence; ogre does not
@@ -138,6 +152,9 @@ while a plain CLI encode passes. The probe therefore tries a compat set
 (CBR, no B-frames, no level pin) after the standard set fails on the same
 node; that compat set is provisional until the bisect on the box confirms
 which argument the iHD driver rejects (Plan 053, S3).
+The bisect found the `-level 4.0` spelling (`linux-dev-loop.md`); on
+2026-11-23 the standard set passed on `renderD128` in every run, so the compat
+set stays as defence in depth only.
 
 ## Delivery phases
 
@@ -163,10 +180,13 @@ rather than allowed crate-wide.
   rate control, and truthful backend diagnostics.
 - Keep `libx264`, GPL, and nonfree builds out of provisioning and runtime args.
 
-The code and CI contract are implemented. A named physical Linux machine has
-never committed the evidence that proves both the VAAPI path and the software
-fallback (plans 052 and 053 still own it); the Alpha releases went out under
-owner waivers without it. Beta needs that evidence (plan 257 S5).
+The code and CI contract are implemented, and L1.5 is proven on ogre
+(2026-11-23, plan 257 S5): the two-backend acceptance passed with
+`complete: true` and no device pin, and `auto` with nothing set picks VAAPI on
+the Intel node while the AMD node stays quarantined. Record:
+[`acceptance/2026-11-23-linux-l1.5-ogre.md`](acceptance/2026-11-23-linux-l1.5-ogre.md)
+and its JSON. AMD VAAPI still needs a box whose AMD GPU encodes (plan 257 S21,
+blocked on D2).
 
 Run the hardware-only acceptance command on a named physical Linux x64 tester
 box (the distribution is recorded in the evidence, not gated). It requires a
@@ -213,9 +233,10 @@ Secure Boot, Linux ships guidance only.
 This was the rule for building L2 onward: a named Linux tester and a specific
 physical Linux x64 machine had to be recorded in "Named tester boxes" and the
 L1.5 evidence had to be `complete: true`. L2 through L6 were then built and
-shipped as an Alpha under owner waivers without that evidence. Beta removes the
-waiver: virtual machines and CI runners still do not satisfy the gate, and both
-Tier 1 boxes need a physical acceptance pass (plan 257 D11).
+shipped as an Alpha under owner waivers without that evidence. ogre's L1.5
+evidence is now committed (2026-11-23). Beta removes the waiver: virtual
+machines and CI runners still do not satisfy the gate, and both Tier 1 boxes
+need a physical acceptance pass (plan 257 D11).
 
 ### L2 — PipeWire audio
 
