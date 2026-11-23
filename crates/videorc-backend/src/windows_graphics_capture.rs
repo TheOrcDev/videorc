@@ -45,6 +45,37 @@ const CALLBACK_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 /// two for a direct D3D11 recording that is still blitting the previous one.
 const OWNED_FRAME_SLOTS: usize = 6;
 
+/// Turns off the yellow border Windows draws around a display while a Windows
+/// Graphics Capture session holds it.
+///
+/// The session that asked for the border never sees it, but Desktop
+/// Duplication does. The Windows Preview runs its own WGC session while the
+/// recording and stream read the same display through Desktop Duplication,
+/// so a bordered Preview put a yellow frame into finished recordings and
+/// livestreams (read as a 100% yellow outer ring on a UHD 620; none with the
+/// border off). Videorc shows its own recording state, so every session
+/// turns it off.
+///
+/// Windows 10 before build 20348 has no `IsBorderRequired`; there the border
+/// stays and the error names why.
+pub(crate) fn turn_off_capture_border(session: &GraphicsCaptureSession) -> Result<(), String> {
+    session
+        .SetIsBorderRequired(false)
+        .map_err(|error| format!("setting IsBorderRequired=false failed: {error}"))?;
+    match session.IsBorderRequired() {
+        Ok(false) => Ok(()),
+        Ok(true) => Err("IsBorderRequired read back true".to_string()),
+        Err(error) => Err(format!("reading IsBorderRequired failed: {error}")),
+    }
+}
+
+/// The monitor behind a DXGI display source, for the capture outline.
+pub(crate) fn monitor_for_source(
+    source: WindowsDxgiSourceId,
+) -> Result<windows::Win32::Graphics::Gdi::HMONITOR> {
+    find_dxgi_output(source).map(|(_, monitor)| monitor)
+}
+
 pub fn enabled() -> bool {
     graphics_capture_value_enabled(
         std::env::var("VIDEORC_WINDOWS_GRAPHICS_CAPTURE")
@@ -333,6 +364,12 @@ impl WindowsGraphicsCapture {
         session
             .SetIsCursorCaptureEnabled(include_cursor)
             .context("Could not configure Windows Graphics Capture cursor inclusion")?;
+        if let Err(reason) = turn_off_capture_border(&session) {
+            tracing::warn!(
+                reason = %reason,
+                "Windows Graphics Capture preview keeps the yellow capture border; other captures of this display may record it"
+            );
+        }
         let _ = session.SetMinUpdateInterval(TimeSpan {
             Duration: frame_interval_100ns(fps),
         });
@@ -731,7 +768,7 @@ fn copy_strided_bgra(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -787,6 +824,134 @@ mod tests {
         assert_eq!(
             output,
             vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
+    }
+
+    pub(crate) fn first_display() -> (WindowsDxgiSourceId, IDXGIAdapter1) {
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.expect("DXGI factory");
+        let mut adapter_index = 0;
+        while let Ok(adapter) = unsafe { factory.EnumAdapters1(adapter_index) } {
+            if unsafe { adapter.EnumOutputs(0) }.is_ok() {
+                let descriptor = unsafe { adapter.GetDesc1() }.expect("adapter descriptor");
+                let source = WindowsDxgiSourceId {
+                    adapter_luid: luid_u64(descriptor.AdapterLuid),
+                    output_index: 0,
+                };
+                return (source, adapter);
+            }
+            adapter_index += 1;
+        }
+        panic!("no DXGI adapter exposes a display");
+    }
+
+    /// Share of the outer `ring`-pixel band of a BGRA frame that is the
+    /// yellow Windows draws around a display under capture.
+    fn yellow_edge_share(bgra: &[u8], width: usize, height: usize, ring: usize) -> f64 {
+        let mut edge = 0_u64;
+        let mut yellow = 0_u64;
+        for y in 0..height {
+            for x in 0..width {
+                let on_edge = x < ring || y < ring || x >= width - ring || y >= height - ring;
+                if !on_edge {
+                    continue;
+                }
+                let at = (y * width + x) * 4;
+                let (b, g, r) = (bgra[at], bgra[at + 1], bgra[at + 2]);
+                edge += 1;
+                // Read (191, 166, 0) through Desktop Duplication on a UHD 620.
+                if r > 150 && g > 120 && b < 60 {
+                    yellow += 1;
+                }
+            }
+        }
+        yellow as f64 / edge.max(1) as f64
+    }
+
+    #[test]
+    fn yellow_edge_share_reads_a_bordered_frame() {
+        let (width, height) = (8, 6);
+        let mut frame = vec![0_u8; width * height * 4];
+        for y in 0..height {
+            for x in 0..width {
+                if x == 0 || y == 0 || x == width - 1 || y == height - 1 {
+                    let at = (y * width + x) * 4;
+                    frame[at..at + 4].copy_from_slice(&[0, 166, 191, 255]);
+                }
+            }
+        }
+        assert_eq!(yellow_edge_share(&frame, width, height, 1), 1.0);
+        assert_eq!(
+            yellow_edge_share(&vec![0; width * height * 4], width, height, 1),
+            0.0
+        );
+    }
+
+    /// The display tests read the whole screen, so one at a time: another
+    /// test's outline or capture border would land in their frame.
+    pub(crate) static DISPLAY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// One Desktop Duplication frame of `adapter`'s first output, read for
+    /// `window` so whatever was just drawn has been composed into it.
+    pub(crate) fn read_desktop_duplication_frame(
+        adapter: &IDXGIAdapter1,
+        window: Duration,
+    ) -> (Vec<u8>, usize, usize) {
+        use windows::Win32::Graphics::Dxgi::{DXGI_OUTDUPL_FRAME_INFO, IDXGIOutput1};
+
+        let (device, context) = create_d3d11_device(adapter).expect("D3D11 device");
+        let output: IDXGIOutput1 = unsafe { adapter.EnumOutputs(0) }
+            .expect("display output")
+            .cast()
+            .expect("IDXGIOutput1");
+        let duplication = unsafe { output.DuplicateOutput(&device) }.expect("DuplicateOutput");
+        let mut readback = D3D11BgraReadback::new(device, context);
+        let mut bgra = Vec::new();
+        let mut size = None;
+        let deadline = Instant::now() + window;
+        while Instant::now() < deadline {
+            let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut resource = None;
+            if unsafe { duplication.AcquireNextFrame(100, &mut info, &mut resource) }.is_err() {
+                continue;
+            }
+            let texture: ID3D11Texture2D = resource
+                .expect("duplicated frame")
+                .cast()
+                .expect("duplicated texture");
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            unsafe { texture.GetDesc(&mut desc) };
+            if info.LastPresentTime != 0 || size.is_none() {
+                readback
+                    .read(&texture, desc.Width, desc.Height, &mut bgra)
+                    .expect("readback");
+                size = Some((desc.Width as usize, desc.Height as usize));
+            }
+            unsafe { duplication.ReleaseFrame() }.expect("ReleaseFrame");
+        }
+        let (width, height) = size.expect("Desktop Duplication delivered no frame");
+        (bgra, width, height)
+    }
+
+    /// The Windows Preview holds a WGC session on the display while the
+    /// recording and stream read it through Desktop Duplication. With the
+    /// border on, Desktop Duplication read a 100% yellow outer ring.
+    #[test]
+    #[ignore = "needs an awake, unlocked Windows display"]
+    fn desktop_duplication_beside_the_preview_never_records_a_yellow_border() {
+        let _display = DISPLAY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (source, adapter) = first_display();
+        let _preview = WindowsGraphicsCapture::start(source, 30, false).expect("preview capture");
+        // Over a second, so the border, drawn after StartCapture, has been
+        // composed into what Desktop Duplication receives.
+        let (bgra, width, height) =
+            read_desktop_duplication_frame(&adapter, Duration::from_millis(1500));
+        let share = yellow_edge_share(&bgra, width, height, 2);
+        assert!(
+            share < 0.5,
+            "{:.0}% of the display's outer edge is capture-border yellow",
+            share * 100.0
         );
     }
 

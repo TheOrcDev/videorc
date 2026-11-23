@@ -2112,6 +2112,16 @@ mod runtime {
                     )
                 });
             }
+            // Without this, Windows draws its yellow capture border on the
+            // display, where any Desktop Duplication of it records the border.
+            // A missing property on older Windows 10 is not fatal.
+            if let Err(reason) = crate::windows_graphics_capture::turn_off_capture_border(&session)
+            {
+                tracing::warn!(
+                    reason = %reason,
+                    "WGC monitor capture keeps the yellow capture border; other captures of this display may record it"
+                );
+            }
             let callback_count = Arc::new(AtomicU64::new(0));
             let callback_counter = callback_count.clone();
             let handler = TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(

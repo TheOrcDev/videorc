@@ -6622,6 +6622,10 @@ mod windows {
         stop_rx: std_mpsc::Receiver<NativeScreenCommand>,
         startup_tx: std_mpsc::Sender<NativeScreenStartup>,
     ) {
+        // The streamer's cue for the captured display, kept out of every
+        // capture, for as long as this display is captured (WGC or FFmpeg).
+        let _capture_outline = parse_windows_dxgi_source_id(&config.source_id)
+            .and_then(crate::windows_capture_outline::CaptureOutline::show_for_source);
         let mut graphics_capture_fallback_reason = None;
         if crate::windows_graphics_capture::enabled()
             && parse_windows_dxgi_source_id(&config.source_id).is_some()

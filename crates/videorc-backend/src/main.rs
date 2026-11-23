@@ -223,6 +223,8 @@ mod virtual_camera_macos;
 mod virtual_camera_service;
 mod warm_microphone;
 mod watchdog;
+#[cfg(target_os = "windows")]
+mod windows_capture_outline;
 #[allow(dead_code)]
 mod windows_capture_owner;
 #[cfg(target_os = "windows")]
