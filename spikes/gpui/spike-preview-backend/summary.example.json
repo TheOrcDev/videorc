@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "spike": "spike-preview-backend",
+  "os": "macos",
+  "arch": "aarch64",
+  "gpui_pre": "0.3.14",
+  "build": "release",
+  "native_view": true,
+  "resolution": "3840x2160",
+  "fps": 60,
+  "live_seconds": 600.328251833,
+  "presents": 36320,
+  "presents_per_second": 59.84202802748093,
+  "present_interval_p95_ms": 18.654583,
+  "display_interval_p95_ms": 24.999750000000002,
+  "cpu_copies_per_frame": 0,
+  "iosurface_imports": 3,
+  "import_cache_hits": 36317,
+  "backend_gpu_readbacks": 0,
+  "backend_bgra_bytes_copied": 0,
+  "ui_cpu_percent_live": 7.7114766560875045,
+  "ui_cpu_percent_live_overlay_off": 5.9665989455915955,
+  "ui_cpu_percent_still": 0.011484832230354122,
+  "ui_cpu_percent_still_overlay_on": 0.011603615725558552,
+  "overlay_cpu_percent_idle_delta": 0.00011878349520443032,
+  "gpu_ms_per_frame_p50": 0.522167,
+  "gpu_ms_per_frame_p95": 1.47025,
+  "lease_held_p50_ms": 1.307291,
+  "dropped_frames": 1,
+  "ui_redraws_live": 69,
+  "floating_cpu_percent": 4.877359650938883,
+  "floating_presents_per_second": 59.959132679044565,
+  "floating_sharing_type": 0,
+  "floating_window_capture_refused": true,
+  "first_frame_since_process_start_s": 0.187182916,
+  "resume_to_presenting_s": 4.649834709,
+  "ps_ui_cpu_live": {
+    "n": 278,
+    "mean": 7.72,
+    "p50": 7.1,
+    "p95": 11.3,
+    "max": 25.2
+  },
+  "ps_backend_cpu_live": {
+    "n": 278,
+    "mean": 5.51,
+    "p50": 5.5,
+    "p95": 6.6,
+    "max": 9.1
+  },
+  "ui_rss_mb_live": {
+    "n": 278,
+    "mean": 76.23,
+    "p50": 76.078125,
+    "p95": 82.3125,
+    "max": 83.859375
+  },
+  "backend_rss_mb_live": {
+    "n": 278,
+    "mean": 39.48,
+    "p50": 38.96875,
+    "p95": 45.640625,
+    "max": 45.703125
+  },
+  "load1": {
+    "n": 408,
+    "mean": 5.81,
+    "p50": 5.76,
+    "p95": 8.75,
+    "max": 11.82
+  },
+  "backend_stray_pids": []
+}
