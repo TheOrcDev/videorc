@@ -53,8 +53,12 @@ this table stands as an owner attestation, not a step-by-step log.
   (D1 = A: hours as built, no "unlimited").
 - **Everything is named publicly:** talk shows with browser guests, continue
   from another device, and cloud recordings.
-- **Platforms.** Videorc Cloud and hosting talk shows are claimed for the
-  **macOS Beta** only. Guests can join from any browser.
+- **Platforms: all three at launch** (owner, 2026-11-23: "yes we want all
+  three platforms at launch"). Videorc Cloud and hosting talk shows are
+  offered on the **macOS Beta** and on the **Windows 11 and Linux alphas**,
+  always labelled alpha there, with nothing specific promised that hasn't
+  run. Guests can join from any browser. What was known when this was
+  decided:
   - Windows 11 alpha and Linux alpha 0.37.0 shipped owner-waived, with no
     physical acceptance (`docs/acceptance/windows-alpha/0.37.0-alpha.1.json`,
     `docs/acceptance/linux-alpha/0.37.0-alpha.1.json`).
@@ -65,7 +69,10 @@ this table stands as an owner attestation, not a step-by-step log.
   - Plan 184 D19: solo shows and talk-show hosts are macOS first.
   - The desktop doesn't hide the Cloud and Guests controls on Windows or
     Linux: they are gated by plan, not by OS. A paying alpha user can reach
-    them. Follow-up below.
+    them.
+  - `TODO(coordinator)`: the Linux cloud run on ogre (solo and a talk show
+    with a guest, on LiveKit) and any Windows run. Record what passed and
+    what didn't; the copy names only what passed.
 - **Billing is proven in Creem test mode before the switch**, on a branch
   preview with its own database, never on production data (plan 245 D3).
   Any money bug blocks the launch.
@@ -103,10 +110,11 @@ web repo.
       recordings store set (checked 2026-11-23).
 - [x] The owner's cost page is limited to the owner's account (checked
       2026-11-23).
-- [ ] The monthly cloud budget is set (missing on 2026-11-23; the owner
-      picks the number).
-- [ ] The concurrent-show cap is raised for the public (the owner picks the
-      number).
+- [x] The monthly cloud budget is set (the owner picked the number;
+      set 2026-11-23, takes effect on the next production deploy).
+- [x] The concurrent-show cap is raised for the public (the owner picked
+      the number; set 2026-11-23, takes effect on the next production
+      deploy).
 - [ ] Web PRs ready to merge with the switch: the legal update
       (videorc-web #193) and the launch blog post (videorc-web #194).
 
@@ -130,9 +138,9 @@ web repo.
 
 ## Follow-ups (not launch blockers unless marked)
 
-- **Hide Cloud and hosting talk shows on the Windows and Linux alphas**, or
-  label them, until they pass there (plan 257 S13 and S14 for Linux; a
-  Windows pass for both).
+- **Label Cloud and hosting talk shows as alpha in the Windows and Linux
+  apps**, since they're offered there before a full pass (plan 257 S13 and
+  S14 for Linux; a Windows pass for both).
 - **The web's unit suite has 21 pre-existing reds** on `main` in the
   managed-media and program tests (recorded since 2026-11-20). They are
   test drift, not a launch change, but they hide new reds in the cloud's
