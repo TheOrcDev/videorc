@@ -13525,7 +13525,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
                 })
               : await client.request<PreviewSurfaceStatus>('preview.surface.create', {
                   bounds: nextBounds,
-                  targetFps: 60,
+                  // Plan 257 S3: Linux composes no Preview pixels, so its
+                  // ticks are status only; 30 matches the sources.
+                  targetFps: permissionPlatformRef.current === 'linux' ? 30 : 60,
                   source: surfaceSource
                 })
           } catch (error) {

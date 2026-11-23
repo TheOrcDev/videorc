@@ -159,6 +159,11 @@ export function nativePreviewProofWatchdogEnabled(
   platform: NodeJS.Platform,
   status?: Pick<PreviewSurfaceStatus, 'transport' | 'backing' | 'nativePreviewHostKind'>
 ): boolean {
+  // Plan 257 S3: the proof surface is the Linux Preview, so Linux runs the
+  // same first-frame and source-liveness watch (and, unlike Windows, heals).
+  if (platform === 'linux') {
+    return true
+  }
   return platform === 'win32' && (!status || !isWindowsD3d11PreviewCapability(status, platform))
 }
 
@@ -279,18 +284,64 @@ export function assessProofPresentationWatch(params: {
     : assessment
 }
 
-export function proofPresentationFallbackReason(params: {
-  sourceFrameHistoryComplete: boolean
-  sourceFrameAgeMs?: number
-  pendingElapsedMs: number
-}): string {
+export function proofPresentationFallbackReason(
+  params: {
+    sourceFrameHistoryComplete: boolean
+    sourceFrameAgeMs?: number
+    pendingElapsedMs: number
+  },
+  platform: NodeJS.Platform = 'win32'
+): string {
+  const name = proofPreviewName(platform)
   if (!params.sourceFrameHistoryComplete) {
-    return `Windows preview did not deliver a first frame within ${Math.round(params.pendingElapsedMs)}ms.`
+    return `${name} did not deliver a first frame within ${Math.round(params.pendingElapsedMs)}ms.`
   }
   if (params.sourceFrameAgeMs != null) {
-    return `Windows preview source frames have not advanced for ${Math.round(params.sourceFrameAgeMs)}ms; keeping the last good frame while polling retries.`
+    return `${name} source frames have not advanced for ${Math.round(params.sourceFrameAgeMs)}ms; keeping the last good frame while polling retries.`
   }
-  return `Windows preview source frame liveness did not update within ${Math.round(params.pendingElapsedMs)}ms.`
+  return `${name} source frame liveness did not update within ${Math.round(params.pendingElapsedMs)}ms.`
+}
+
+/** The watchdog's pending copy while the proof surface has no pixels yet. */
+export function proofSurfaceWaitingReason(platform: NodeJS.Platform): string {
+  return `Waiting for the ${proofPreviewName(platform)} surface to deliver pixels.`
+}
+
+/** The watchdog's live copy when the scene has no polled source (compositor only). */
+export function proofCompositorLiveReason(platform: NodeJS.Platform): string {
+  return `${proofPreviewName(platform)} compositor output is live.`
+}
+
+/** Plan 257 S3: how many times the Linux watchdog restarts the source pollers before it declares a fallback. */
+export const PROOF_HEAL_ATTEMPTS = 2
+/** Plan 257 S3: the least time between two heals, so a restarted poller can deliver first. */
+export const PROOF_HEAL_SPACING_MS = 2500
+
+export type ProofHealAction = 'restart-pollers' | 'wait' | 'fallback'
+
+/**
+ * Plan 257 S3: what the proof watchdog does about a stalled Preview. Linux
+ * restarts the page's source pollers (a hung request or a dead connection
+ * is the transport's own failure, and a restart clears it) up to
+ * {@link PROOF_HEAL_ATTEMPTS} times, spaced, before it declares a fallback.
+ * Windows keeps its report-only contract: it declares the fallback at once.
+ */
+export function proofWatchdogHealAction(params: {
+  platform: NodeJS.Platform
+  attemptsMade: number
+  lastAttemptAtMs: number | null
+  nowMs: number
+}): ProofHealAction {
+  if (params.platform !== 'linux') {
+    return 'fallback'
+  }
+  if (
+    params.lastAttemptAtMs != null &&
+    params.nowMs - params.lastAttemptAtMs < PROOF_HEAL_SPACING_MS
+  ) {
+    return 'wait'
+  }
+  return params.attemptsMade < PROOF_HEAL_ATTEMPTS ? 'restart-pollers' : 'fallback'
 }
 
 // The proof surface also presents the Linux Preview; its source-frame status

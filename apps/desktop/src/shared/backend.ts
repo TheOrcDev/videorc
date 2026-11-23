@@ -3120,6 +3120,12 @@ export interface PreviewSurfaceStatus {
   proofTransportBytesPerSecond?: number
   proofTransportDecodedFramesPerSecond?: number
   proofSourceDimensions?: Record<string, { width: number; height: number }>
+  /** Plan 257 S3: the slowest polled source layer's presented frames per
+   * second over the last two seconds (proof surface only). */
+  proofSourceFps?: number
+  /** Plan 257 S3: capture-to-page latency of presented source frames, 95th
+   * percentile of the newest 300 (proof surface only). */
+  proofFrameLatencyP95Ms?: number
   droppedFrames: number
   inputToPresentLatencyMs?: number
   inputToPresentLatencyP50Ms?: number

@@ -306,7 +306,10 @@ export function DiagnosticsTab(): ReactElement {
           attention={needs('camera', 'screen', 'preview', 'preview-speed', 'preview-path')}
           title="Preview"
         >
-          <PreviewMetrics macOS={isMacPlatform(platform ?? 'darwin')} />
+          <PreviewMetrics
+            macOS={isMacPlatform(platform ?? 'darwin')}
+            linux={platform === 'linux'}
+          />
         </MetricGroup>
         <MetricGroup
           attention={needs('recording', 'encoder') || ffmpegMissing}
@@ -801,15 +804,36 @@ function ConnectionMetrics({
   )
 }
 
-function PreviewMetrics({ macOS }: { macOS: boolean }): ReactElement {
+function PreviewMetrics({ macOS, linux }: { macOS: boolean; linux: boolean }): ReactElement {
   const { previewCameraStatus, previewScreenStatus } = useStudioPreview()
   const { diagnosticStats: stats, previewSurfaceStatus } = useStudioDiagnostics()
+  const linuxProof = linux && stats.previewTransport === 'electron-proof-surface'
   return (
     <MetricGrid>
       <DiagnosticMetric
         label="Preview mode"
-        value={formatPreviewTransport(stats.previewTransport)}
+        value={formatPreviewTransport(stats.previewTransport, linux)}
       />
+      {linuxProof ? (
+        <>
+          <DiagnosticMetric
+            label="Preview frames shown"
+            value={
+              typeof previewSurfaceStatus.proofSourceFps === 'number'
+                ? `${previewSurfaceStatus.proofSourceFps.toFixed(1)} fps`
+                : '–'
+            }
+          />
+          <DiagnosticMetric
+            label="Preview latency (p95)"
+            value={
+              typeof previewSurfaceStatus.proofFrameLatencyP95Ms === 'number'
+                ? `${Math.round(previewSurfaceStatus.proofFrameLatencyP95Ms)} ms`
+                : '–'
+            }
+          />
+        </>
+      ) : null}
       <DiagnosticMetric label="Graphics" value={formatGraphicsPath(stats)} />
       <DiagnosticMetric
         label="Preview source FPS"
@@ -1248,14 +1272,15 @@ function formatSourceRegistry(registry?: DiagnosticStats['sourceRegistry']): str
     .join('; ')
 }
 
-function formatPreviewTransport(transport?: string): string {
+function formatPreviewTransport(transport?: string, linux = false): string {
   switch (transport) {
     case 'native-surface':
       return 'Native'
     case 'd3d11-shared-texture':
       return 'D3D11'
     case 'electron-proof-surface':
-      return 'Fallback window'
+      // Plan 257 S3: Linux's own Preview path, never called native.
+      return linux ? 'App window' : 'Fallback window'
     case 'latest-jpeg-polling':
       return 'JPEG'
     case 'mjpeg-stream':
