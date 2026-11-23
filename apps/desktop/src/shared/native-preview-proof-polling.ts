@@ -66,6 +66,44 @@ export function nativePreviewProofPollingMaxWidth(
   return Math.min(profileCap, Math.max(PROOF_POLLING_MIN_MAX_WIDTH, quantized))
 }
 
+/**
+ * Plan 257 S3: how the proof surface fetches and shows source frames.
+ * `interval` polls a BGRA BMP every `intervalMs` into an <img> (the Windows
+ * proof surface, unchanged). `wait-i420` (Linux) asks the backend to hold each
+ * request until the source publishes a newer frame, as planar BT.709 I420
+ * shrunk only by whole box factors, and draws it into a canvas with WebGL; the
+ * spike (`docs/acceptance/2026-11-23-linux-preview-transport-spike.md`) took
+ * the camera from 8 to 30 shown fps for less CPU.
+ */
+export type NativePreviewProofFrameTransport = 'interval' | 'wait-i420'
+
+/**
+ * The transport for this platform. `VIDEORC_PROOF_FRAME_TRANSPORT` overrides
+ * it (support and comparison runs), but only with a known value.
+ */
+export function nativePreviewProofFrameTransport(
+  platform: NodeJS.Platform,
+  env: Record<string, string | undefined>
+): NativePreviewProofFrameTransport {
+  const requested = env.VIDEORC_PROOF_FRAME_TRANSPORT
+  if (requested === 'interval' || requested === 'wait-i420') {
+    return requested
+  }
+  return platform === 'linux' ? 'wait-i420' : 'interval'
+}
+
+/**
+ * Plan 257 S3: the compositor rate the Preview surface asks for. On Linux the
+ * idle compositor composes no preview pixels (the proof surface draws each
+ * source's own frames), so its ticks are status only and every one crosses
+ * main and the proof page: at 60 Hz that cost about a third of a core with no
+ * picture at all. 30 matches the sources; elsewhere the native presenters keep
+ * 60.
+ */
+export function previewSurfaceCreateTargetFps(platform: string | undefined): number {
+  return platform === 'linux' ? 30 : 60
+}
+
 export function nativePreviewProofFrameUrl(url: string, maxWidth?: number): string {
   if (typeof maxWidth !== 'number' || !Number.isFinite(maxWidth) || maxWidth <= 0) {
     return url

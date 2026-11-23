@@ -632,6 +632,10 @@ import {
   firstFrameStandDownReason,
   ProofWatchdogRendererReadSingleFlight,
   proofPresentationFallbackReason,
+  proofCompositorLiveReason,
+  proofSurfaceWaitingReason,
+  proofWatchdogHealAction,
+  PROOF_HEAL_ATTEMPTS,
   proofSourceLiveReason,
   proofSourceStalledReason,
   proofWatchdogRendererReadAllowed,
@@ -652,6 +656,7 @@ import {
 } from './native-preview-proof-measurement-runtime'
 import {
   type NativePreviewProofPollingProfile,
+  nativePreviewProofFrameTransport,
   nativePreviewProofFrameUrl,
   nativePreviewProofPollingProfile,
   nativePreviewProofPollingProfileKey,
@@ -1960,7 +1965,11 @@ function startFirstFrameWatchdog(): void {
   }, FIRST_FRAME_TICK_MS)
 }
 
-function startWindowsProofFrameWatchdog(): void {
+// Plan 257 S3: the Linux proof watchdog's heals since its source was last live.
+let nativePreviewProofHealAttempts = 0
+let nativePreviewProofLastHealAtMs: number | null = null
+
+function startProofFrameWatchdog(): void {
   stopFirstFrameWatchdog()
   const watchdogRun = firstFrameTickOwnership.startRun()
   firstFrameWatchdogRun = watchdogRun
@@ -1970,11 +1979,13 @@ function startWindowsProofFrameWatchdog(): void {
   previewWindowStartupClock = null
   previewWindowStartupCompositor = undefined
   nativePreviewProofPendingStartedAtMs = firstFrameWatchdogStartedAtMs
-  const reason = 'Waiting for the Windows preview surface to deliver pixels.'
+  nativePreviewProofHealAttempts = 0
+  nativePreviewProofLastHealAtMs = null
+  const reason = proofSurfaceWaitingReason(process.platform)
   setFirstFrameStatus('pending', reason)
   updatePreviewWindowStartupHint()
   firstFrameWatchdogTimer = setInterval(() => {
-    void runWindowsProofFrameWatchdogTick(watchdogRun)
+    void runProofFrameWatchdogTick(watchdogRun)
   }, FIRST_FRAME_TICK_MS)
 }
 
@@ -2136,7 +2147,7 @@ function retireStalledNativePreviewMainPump(framesAdvancing: boolean): void {
   )
 }
 
-async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise<void> {
+async function runProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise<void> {
   const tick = firstFrameTickOwnership.tryAcquire(watchdogRun)
   if (!tick) {
     return
@@ -2226,17 +2237,19 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
     }
     if (assessment === 'pending') {
       if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
-        const reason = 'Waiting for the Windows preview surface to deliver pixels.'
+        const reason = proofSurfaceWaitingReason(process.platform)
         setFirstFrameStatus('pending', reason)
         updatePreviewWindowStartupHint(compositor)
       }
     } else if (assessment === 'met' || assessment === 'not-applicable') {
       nativePreviewProofPendingStartedAtMs = null
+      nativePreviewProofHealAttempts = 0
+      nativePreviewProofLastHealAtMs = null
       if (nativePreviewSurfaceStatus.firstFrameContract !== 'met') {
         const reason =
           assessment === 'met'
-            ? 'Windows preview pixels are live.'
-            : 'Windows preview compositor output is live.'
+            ? proofSourceLiveReason(process.platform)
+            : proofCompositorLiveReason(process.platform)
         setFirstFrameStatus('met', reason)
         updatePreviewWindowHint(null)
         logBackend('info', '[proof-preview] presentation watchdog is live')
@@ -2244,11 +2257,48 @@ async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): 
       }
     } else if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
       const pendingElapsedMs = Math.max(0, nowMs - pendingStartedAtMs)
-      const reason = proofPresentationFallbackReason({
-        sourceFrameHistoryComplete,
-        sourceFrameAgeMs,
-        pendingElapsedMs
+      const reason = proofPresentationFallbackReason(
+        {
+          sourceFrameHistoryComplete,
+          sourceFrameAgeMs,
+          pendingElapsedMs
+        },
+        process.platform
+      )
+      // Plan 257 S3: Linux restarts its source pollers before it gives up.
+      const heal = proofWatchdogHealAction({
+        platform: process.platform,
+        attemptsMade: nativePreviewProofHealAttempts,
+        lastAttemptAtMs: nativePreviewProofLastHealAtMs,
+        nowMs
       })
+      if (heal !== 'fallback') {
+        if (heal === 'restart-pollers' && proofWindow && !proofWindow.isDestroyed()) {
+          nativePreviewProofHealAttempts += 1
+          nativePreviewProofLastHealAtMs = nowMs
+          const healReason = `${reason} Restarting the frame requests (attempt ${nativePreviewProofHealAttempts} of ${PROOF_HEAL_ATTEMPTS}).`
+          setFirstFrameStatus('healing', healReason)
+          logBackend('warn', `[proof-preview] ${healReason}`)
+          firstFrameDecisions.record({
+            watch: 'proof-preview',
+            decision: 'heal',
+            reason: healReason,
+            evidence: {
+              sourceFrameHistoryComplete,
+              sourceFrameAgeMs: sourceFrameAgeMs ?? null,
+              pendingElapsedMs
+            }
+          })
+          runDetachedNativePreviewProofWork('watchdog-restart-pollers', () =>
+            executeProofSurfaceScript(
+              proofWindow,
+              'window.__videorcRestartSourcePollers?.() ?? 0',
+              true
+            )
+          )
+        }
+        return
+      }
       setFirstFrameStatus('fallback', reason)
       updatePreviewWindowHint(previewWindowWarningHint(reason))
       logBackend('warn', `[proof-preview] ${reason}`)
@@ -5904,7 +5954,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   if (nativePreviewFirstFrameWatchdogEnabled(process.platform)) {
     startFirstFrameWatchdog()
   } else if (nativePreviewProofWatchdogEnabled(process.platform)) {
-    startWindowsProofFrameWatchdog()
+    startProofFrameWatchdog()
   } else {
     stopFirstFrameWatchdog()
   }
@@ -6733,6 +6783,18 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         opacity: 1;
       }
 
+      /* Plan 257 S3: a source layer the bitmap transports draw into. */
+      .scene-layer > canvas.source-frame {
+        position: absolute;
+        display: block;
+        opacity: 0;
+        object-position: center;
+      }
+
+      .scene-layer > canvas.source-frame[data-live="1"] {
+        opacity: 1;
+      }
+
       /* Banners (plan 186) and the Buddy (plan 205 S9) show once decoded
          but never count as source liveness: they are overlays, not proof
          that a source is live. */
@@ -6788,6 +6850,13 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         const sourceFrames = new Map();
         let framePollingSuppressed = false;
         let framePollingIntervalMs = 40;
+        // Plan 257 S3: how source frames travel. \`interval\` (Windows) polls
+        // a BMP every framePollingIntervalMs into an <img>; \`wait-i420\`
+        // (Linux) asks the backend to hold each request until the source
+        // publishes a newer frame, as planar I420, and draws it into a canvas.
+        const proofFrameTransport = ${JSON.stringify(nativePreviewProofFrameTransport(process.platform, process.env))};
+        const proofFrameWaits = proofFrameTransport === 'wait-i420';
+        const proofFrameLatencies = [];
         let framePollingMaxWidth = 1920;
         let framePollingCeilingWidth = 1920;
         let proofSurfaceSuspended = false;
@@ -6827,8 +6896,8 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             return null;
           }
           let width = box.width;
-          const naturalWidth = image.naturalWidth;
-          const naturalHeight = image.naturalHeight;
+          const naturalWidth = image.naturalWidth ?? image.width;
+          const naturalHeight = image.naturalHeight ?? image.height;
           const fit = image.style.objectFit;
           if (naturalWidth > 0 && naturalHeight > 0 && fit !== 'fill') {
             const fitted = box.height * (naturalWidth / naturalHeight);
@@ -6866,7 +6935,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           }
         }
 
-        function frameRequestUrl(url, poller, displayedWidth) {
+        function frameRequestUrl(url, poller, displayedWidth, waitForNext = false) {
           const profiled = profiledFrameUrl(url, displayedWidth);
           try {
             const parsed = new URL(profiled);
@@ -6890,6 +6959,17 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             ) {
               parsed.searchParams.set('afterGeneration', poller.generation);
               parsed.searchParams.set('afterSequence', String(poller.sequence));
+              // Plan 257 S3: the backend holds the request until the source
+              // publishes a newer frame (or 200 ms pass), so frames arrive as
+              // they are made instead of on this page's timer.
+              if (waitForNext) {
+                parsed.searchParams.set('waitMs', '200');
+              }
+            }
+            // Plan 257 S3: planar BT.709 4:2:0 frames, shrunk only by whole
+            // box factors on the backend (the GPU does the rest).
+            if (waitForNext) {
+              parsed.searchParams.set('format', 'i420');
             }
             return parsed.toString();
           } catch {
@@ -7101,10 +7181,19 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             let retryDelayMs = framePollingIntervalMs;
             const abortController = new AbortController();
             poller.abortController = abortController;
+            let requestTimeout = null;
+            let pipelined = false;
             try {
               markProofPollerRequestStarted(poller);
+              const requestStartedAt = performance.now();
+              if (proofFrameWaits) {
+                retryDelayMs = 0;
+                // A waiting request answers within 200 ms; one that has not in
+                // 2 s is hung, and the next request starts at once.
+                requestTimeout = window.setTimeout(() => abortController.abort(), 2000);
+              }
               const response = await fetch(
-                frameRequestUrl(url, poller, displayedFramePixelWidth(poller.image)),
+                frameRequestUrl(url, poller, displayedFramePixelWidth(poller.image), proofFrameWaits),
                 {
                   cache: 'no-store',
                   signal: abortController.signal
@@ -7117,6 +7206,10 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               if (response.status === 204) {
                 markProofPollerTransportSuccess(poller, performance.now());
                 markProofPollerNotModified(poller);
+                // A backend that does not wait answers at once; never spin.
+                if (proofFrameWaits && performance.now() - requestStartedAt < 20) {
+                  retryDelayMs = framePollingIntervalMs;
+                }
                 if (cursor) {
                   poller.generation = cursor.generation;
                   poller.sequence = cursor.sequence;
@@ -7128,42 +7221,97 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               if (!response.ok) {
                 throw new Error('Preview frame request failed with status ' + response.status);
               }
-              markProofPollerTransportSuccess(poller, performance.now());
-              const blob = await response.blob();
-              if (poller.cancelled) {
-                return;
-              }
-              const objectUrl = URL.createObjectURL(blob);
-              const next = new Image();
-              next.decoding = 'async';
-              try {
-                await new Promise((resolve, reject) => {
-                  next.onload = resolve;
-                  next.onerror = reject;
-                  next.src = objectUrl;
+              const respondedAt = performance.now();
+              markProofPollerTransportSuccess(poller, respondedAt);
+              const frameAgeMs = Number(response.headers.get('x-videorc-frame-age-ms'));
+              if (proofFrameWaits && poller.image instanceof HTMLCanvasElement) {
+                // Plan 257 S3: two stages per layer, one request waiting on
+                // the backend and one frame being read and drawn. Once the
+                // frame before this one is on screen, the next request goes
+                // out while this one's body is read, so a transfer never holds
+                // the layer under the source's rate, and no backlog builds.
+                if (cursor) {
+                  poller.generation = cursor.generation;
+                  poller.sequence = cursor.sequence;
+                }
+                if (poller.decodeStage) {
+                  await poller.decodeStage;
+                }
+                if (poller.cancelled) {
+                  return;
+                }
+                let releaseDecodeStage = () => {};
+                const decodeStage = new Promise((resolve) => {
+                  releaseDecodeStage = resolve;
                 });
-              } catch (error) {
-                URL.revokeObjectURL(objectUrl);
-                throw error;
+                poller.decodeStage = decodeStage;
+                pipelined = true;
+                poller.pending = false;
+                window.setTimeout(poll, 0);
+                try {
+                  const buffer = await response.arrayBuffer();
+                  // Two frames can be in flight; never show an older one late.
+                  if (poller.cancelled || !proofPollerCursorIsNewer(poller, cursor)) {
+                    return;
+                  }
+                  if (proofI420IsBlankSampled(poller, buffer)) {
+                    blankFrames += 1;
+                    throw new Error('Preview frame decoded without any visible pixels.');
+                  }
+                  await presentProofPollerI420(poller, buffer, response);
+                  markProofPollerPresentedCursor(poller, cursor);
+                  markProofPollerFrameDecoded(
+                    poller,
+                    buffer.byteLength,
+                    poller.image.width,
+                    poller.image.height,
+                    performance.now()
+                  );
+                } finally {
+                  releaseDecodeStage();
+                  if (poller.decodeStage === decodeStage) {
+                    poller.decodeStage = null;
+                  }
+                }
+              } else {
+                const blob = await response.blob();
+                if (poller.cancelled) {
+                  return;
+                }
+                const objectUrl = URL.createObjectURL(blob);
+                const next = new Image();
+                next.decoding = 'async';
+                try {
+                  await new Promise((resolve, reject) => {
+                    next.onload = resolve;
+                    next.onerror = reject;
+                    next.src = objectUrl;
+                  });
+                } catch (error) {
+                  URL.revokeObjectURL(objectUrl);
+                  throw error;
+                }
+                if (poller.cancelled) {
+                  URL.revokeObjectURL(objectUrl);
+                  return;
+                }
+                if (proofImageIsBlank(next)) {
+                  blankFrames += 1;
+                  URL.revokeObjectURL(objectUrl);
+                  throw new Error('Preview frame decoded without any visible pixels.');
+                }
+                presentProofPollerFrame(poller, objectUrl);
+                markProofPollerFrameDecoded(
+                  poller,
+                  blob.size,
+                  next.naturalWidth,
+                  next.naturalHeight,
+                  performance.now()
+                );
               }
-              if (poller.cancelled) {
-                URL.revokeObjectURL(objectUrl);
-                return;
-              }
-              if (proofImageIsBlank(next)) {
-                blankFrames += 1;
-                URL.revokeObjectURL(objectUrl);
-                throw new Error('Preview frame decoded without any visible pixels.');
-              }
-              presentProofPollerFrame(poller, objectUrl);
-              markProofPollerFrameDecoded(
-                poller,
-                blob.size,
-                next.naturalWidth,
-                next.naturalHeight,
-                performance.now()
-              );
-              if (cursor) {
+              recordProofFrameLatency(frameAgeMs, respondedAt);
+              // A pipelined poll already moved the cursor on (maybe further).
+              if (cursor && !pipelined) {
                 poller.generation = cursor.generation;
                 poller.sequence = cursor.sequence;
               }
@@ -7173,12 +7321,18 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
                 retryDelayMs = Math.max(250, framePollingIntervalMs);
               }
             } finally {
+              if (requestTimeout !== null) {
+                window.clearTimeout(requestTimeout);
+              }
               if (poller.abortController === abortController) {
                 poller.abortController = null;
               }
-              poller.pending = false;
-              if (!poller.cancelled) {
-                window.setTimeout(poll, retryDelayMs);
+              // A pipelined frame already handed the request slot to the next poll.
+              if (!pipelined) {
+                poller.pending = false;
+                if (!poller.cancelled) {
+                  window.setTimeout(poll, retryDelayMs);
+                }
               }
             }
           };
@@ -7366,8 +7520,17 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           let entry = layers.get(id);
           if (!entry) {
             const element = document.createElement('div');
-            const image = document.createElement('img');
-            image.alt = '';
+            const drawsSourceCanvas =
+              proofFrameWaits &&
+              (layer.kind === 'camera' || layer.kind === 'screen' || layer.kind === 'window');
+            const image = document.createElement(drawsSourceCanvas ? 'canvas' : 'img');
+            if (drawsSourceCanvas) {
+              image.className = 'source-frame';
+              image.width = 1;
+              image.height = 1;
+            } else {
+              image.alt = '';
+            }
             element.className = 'scene-layer';
             element.dataset.layerId = id;
             element.appendChild(image);
@@ -7544,6 +7707,21 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         window.__videorcSetPreviewScene = applyScene;
         window.__videorcSetFramePollingSuppressed = setFramePollingSuppressed;
         window.__videorcSetFramePollingProfile = setFramePollingProfile;
+        // Plan 257 S3: the Linux watchdog's heal. Each source poller is
+        // replaced (its last frame kept on screen), which aborts a request
+        // that hung and opens a fresh connection. Returns how many restarted.
+        window.__videorcRestartSourcePollers = () => {
+          if (framePollingSuppressed || !scene) {
+            return 0;
+          }
+          let restarted = 0;
+          for (const poller of pollers.values()) {
+            poller.url = null;
+            restarted += 1;
+          }
+          applyScene(scene);
+          return restarted;
+        };
         window.addEventListener('resize', () => {
           layoutSceneStage();
           refreshLayerMasks();
@@ -7591,9 +7769,23 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
 
         window.__videorcSetCompositorStatus = applyCompositorStatus;
 
+        // Plan 257 S3: main asks for the metrics with every compositor tick,
+        // and building them sorts every latency sample: on Linux that was a
+        // tenth of a core in the proof page for numbers main reports four
+        // times a second. The Linux transports reuse one snapshot for 200 ms.
+        let proofPresentMetrics = null;
+        let proofPresentMetricsAt = 0;
         window.__videorcPresentNativePreviewNow = () => {
-          presentLatestCompositorStatus(performance.now());
-          return window.__videorcNativePreviewMetrics?.() ?? null;
+          const now = performance.now();
+          presentLatestCompositorStatus(now);
+          if (!proofFrameWaits) {
+            return window.__videorcNativePreviewMetrics?.() ?? null;
+          }
+          if (!proofPresentMetrics || now - proofPresentMetricsAt >= 200) {
+            proofPresentMetrics = window.__videorcNativePreviewMetrics?.() ?? null;
+            proofPresentMetricsAt = now;
+          }
+          return proofPresentMetrics;
         };
 
         function scheduleTick() {
@@ -7638,6 +7830,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             blankFrames,
             skippedCompositorFrames
           );
+          proofFrameLatencies.length = 0;
         };
 
         function tick(now) {
@@ -7724,6 +7917,11 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               intervalP50Ms: measurement.intervalP50Ms,
               intervalP95Ms: measurement.intervalP95Ms,
               intervalP99Ms: measurement.intervalP99Ms,
+              proofFrameTransport,
+              proofSourceFps: proofSourceFps(pollers, measuredAt),
+              proofFrameLatencyP50Ms: proofFrameLatencyPercentile(0.5),
+              proofFrameLatencyP95Ms: proofFrameLatencyPercentile(0.95),
+              proofFrameLatencySamples: proofFrameLatencies.length,
               framePollingSuppressed,
               framePollingIntervalMs,
               framePollingMaxWidth,
@@ -9042,6 +9240,8 @@ async function presentNativePreviewSurfaceCompositor(
     metrics?.proofTransportDecodedFramesPerSecond
   )
   const proofSourceDimensions = proofSourceDimensionMetrics(metrics?.proofSourceDimensions)
+  const proofSourceFps = finiteMetric(metrics?.proofSourceFps)
+  const proofFrameLatencyP95Ms = finiteMetric(metrics?.proofFrameLatencyP95Ms)
   nativePreviewSurfaceStatus = {
     ...nativePreviewSurfaceStatus,
     ...nativePreviewRendererTimingStatusFields(effectiveStatus),
@@ -9067,6 +9267,8 @@ async function presentNativePreviewSurfaceCompositor(
     proofTransportBytesPerSecond,
     proofTransportDecodedFramesPerSecond,
     proofSourceDimensions,
+    proofSourceFps,
+    proofFrameLatencyP95Ms,
     framePollingSuppressed: nativePreviewProofPollingIsSuppressed(),
     sourcePixelsPresent: freshSourceLayerCount > 0,
     nativePreviewHostKind: 'proof-surface',
@@ -9098,7 +9300,11 @@ async function presentNativePreviewSurfaceCompositor(
         reason: proofSourceLiveReason(process.platform)
       })
     }
-  } else if (proofSourceAssessment === 'stalled') {
+  } else if (
+    proofSourceAssessment === 'stalled' &&
+    // Plan 257 S3: on Linux the running watchdog owns a stall (it heals first).
+    !(process.platform === 'linux' && firstFrameWatchdogTimer)
+  ) {
     if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
       const reason = proofSourceStalledReason(process.platform, sourceFrameAgeMs ?? 0)
       setFirstFrameStatus('fallback', reason)
@@ -9127,10 +9333,10 @@ function syncPreviewSupervisorSurface(
   generation: number,
   fallbackReason: string
 ): void {
-  if (process.platform === 'win32') {
+  if (process.platform === 'win32' || process.platform === 'linux') {
     if (nativePreviewProofWatchdogEnabled(process.platform, status)) {
       if (!firstFrameWatchdogTimer && previewWindowIsOpenForSurface()) {
-        startWindowsProofFrameWatchdog()
+        startProofFrameWatchdog()
       }
     } else if (firstFrameWatchdogTimer) {
       // The backend-owned D3D11 presenter carries its own first-present/source
@@ -13036,8 +13242,9 @@ async function runSmokePreviewMotionCommand(
           screenHeight: screen?.style.height ?? null,
           screenZIndex: screen?.style.zIndex ?? null,
           layerCount: document.querySelectorAll('.scene-layer').length,
-          // Plan 190 zero cost: a picture background creates no canvas.
-          canvasCount: document.querySelectorAll('canvas').length
+          // Plan 190 zero cost: a picture background creates no canvas. (A
+          // source layer's own canvas, plan 257 S3, is not a background's.)
+          canvasCount: document.querySelectorAll('canvas.live-background').length
         };
       })()`,
       true
@@ -13064,7 +13271,9 @@ async function runSmokePreviewMotionCommand(
     }
     const inspected = await surface.webContents.executeJavaScript(
       `(() => ({
-        canvasCount: document.querySelectorAll('canvas').length,
+        // Plan 257 S3: only a background's canvas; source layers draw into
+        // canvases of their own on Linux.
+        canvasCount: document.querySelectorAll('canvas.live-background').length,
         bodyLiveBackground: document.body.dataset.liveBackground ?? null,
         surfaceLiveBackground: window.__videorcNativePreviewMetrics?.()?.liveBackground ?? null
       }))()`,

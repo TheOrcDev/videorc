@@ -321,7 +321,19 @@ export function previewSpeedCheck({
     return { value: 'Fallback', tone: unavailable ? 'neutral' : 'warn' }
   }
   if (diagnosticStats.previewTransport === 'electron-proof-surface') {
-    return { value: 'Fallback', tone: 'warn' }
+    // Plan 257 S3: the proof surface is the Linux Preview, measured on its own
+    // terms; on Windows it stays a named fallback.
+    return platform === 'linux'
+      ? linuxProofPreviewSpeedCheck({
+          diagnosticStats,
+          shouldCheckCamera,
+          shouldCheckScreen,
+          previewCameraStatus,
+          previewLiveStatus,
+          previewScreenStatus,
+          previewSurfaceStatus
+        })
+      : { value: 'Fallback', tone: 'warn' }
   }
   if (
     !isNativePreviewCapability(
@@ -387,6 +399,77 @@ export function previewSpeedCheck({
 }
 
 /**
+ * Plan 257 S3: the Linux Preview's speed. The proof surface presents each
+ * source layer itself, so "smooth" means every layer keeps up with its
+ * source: the slowest layer's presented rate (`proofSourceFps`) within 10 %
+ * of what its source sends (or of the target, when the source rate is
+ * unknown). A watchdog fallback is a stalled picture.
+ */
+function linuxProofPreviewSpeedCheck({
+  diagnosticStats,
+  shouldCheckCamera,
+  shouldCheckScreen,
+  previewCameraStatus,
+  previewLiveStatus,
+  previewScreenStatus,
+  previewSurfaceStatus
+}: Pick<
+  PreviewSpeedInput,
+  | 'diagnosticStats'
+  | 'previewCameraStatus'
+  | 'previewLiveStatus'
+  | 'previewScreenStatus'
+  | 'previewSurfaceStatus'
+> & { shouldCheckCamera: boolean; shouldCheckScreen: boolean }): CheckWords {
+  const targetFps = diagnosticStats.previewTargetFps ?? previewSurfaceStatus.targetFps
+  const minimumSourceFps = targetFps * 0.9
+  const cameraLive =
+    shouldCheckCamera &&
+    previewCameraStatus.state === 'live' &&
+    !cameraSendsNoVideo(previewCameraStatus)
+  const screenLive = shouldCheckScreen && previewScreenStatus.state === 'live'
+  if (
+    cameraLive &&
+    typeof previewCameraStatus.sourceFps === 'number' &&
+    previewCameraStatus.sourceFps < minimumSourceFps
+  ) {
+    return { value: 'Camera slow', tone: 'warn' }
+  }
+  if (
+    screenLive &&
+    typeof previewScreenStatus.sourceFps === 'number' &&
+    previewScreenStatus.sourceFps < minimumSourceFps
+  ) {
+    return { value: 'Screen slow', tone: 'warn' }
+  }
+  if (previewSurfaceStatus.firstFrameContract === 'fallback') {
+    return { value: 'Stalled', tone: 'warn' }
+  }
+  // A hidden Preview (docked, on another tab) fetches no frames: nothing to judge.
+  const previewShowing =
+    previewSurfaceStatus.framePollingSuppressed !== true &&
+    previewSurfaceStatus.bounds?.visible !== false
+  const sourceRates = [
+    cameraLive ? previewCameraStatus.sourceFps : undefined,
+    screenLive ? previewScreenStatus.sourceFps : undefined
+  ].filter((fps): fps is number => typeof fps === 'number' && fps > 0)
+  // A still screen sends no frames, and a layer can't show more than it gets.
+  const expectedFps = Math.min(targetFps, ...sourceRates)
+  if (
+    previewShowing &&
+    typeof previewSurfaceStatus.proofSourceFps === 'number' &&
+    sourceRates.length > 0 &&
+    previewSurfaceStatus.proofSourceFps < expectedFps * 0.9
+  ) {
+    return { value: 'Slow display', tone: 'warn' }
+  }
+  if (previewLiveStatus.state !== 'live') {
+    return { value: 'Measuring…', tone: 'neutral' }
+  }
+  return { value: 'Smooth', tone: 'good' }
+}
+
+/**
  * How the preview reaches the screen. Only the platform's own Metal or D3D11
  * presenter is "Native"; the browser window the Windows build presents
  * through stays a named fallback, never native (AGENTS.md, native preview).
@@ -416,7 +499,10 @@ export function previewPathCheck(
     case 'd3d11-shared-texture':
       return { value: 'Native, unconfirmed', tone: 'warn' }
     case 'electron-proof-surface':
-      return { value: 'Fallback window', tone: 'warn' }
+      // Plan 257 S3: Linux's own Preview path, never called native.
+      return platform === 'linux'
+        ? { value: 'App window', tone: 'good' }
+        : { value: 'Fallback window', tone: 'warn' }
     case 'latest-jpeg-polling':
       return { value: 'Fallback (JPEG)', tone: 'warn' }
     case 'mjpeg-stream':

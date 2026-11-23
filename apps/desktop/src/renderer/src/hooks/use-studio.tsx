@@ -56,6 +56,7 @@ import {
 import type { TakeoverImporter, TakeoverImportPhase } from '@/lib/takeover-import'
 import type { BannerImporter, BannerImportKind, BannerImportPhase } from '@/lib/banner-import'
 import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
+import { previewSurfaceCreateTargetFps } from '../../../shared/native-preview-proof-polling'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 import type { CommentsViewSnapshot } from '../../../shared/backend'
 import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
@@ -13525,7 +13526,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
                 })
               : await client.request<PreviewSurfaceStatus>('preview.surface.create', {
                   bounds: nextBounds,
-                  targetFps: 60,
+                  targetFps: previewSurfaceCreateTargetFps(permissionPlatformRef.current),
                   source: surfaceSource
                 })
           } catch (error) {

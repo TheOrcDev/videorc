@@ -87,20 +87,20 @@ below), **=** neither platform has it. `R` = `crates/videorc-backend/src`,
 
 ### Encoding, preview and compositing
 
-| Feature                            | Mac               | Linux today                                                       | St  | Gap                                                                                                                                       | Evidence                                                                           |
-| ---------------------------------- | ----------------- | ----------------------------------------------------------------- | --- | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| Hardware H.264                     | VideoToolbox      | VAAPI (probed per render node, crash quarantine) else OpenH264    | D   | ogre's lab env pins OpenH264; AMD node quarantined; L1.5 evidence never committed (plans 052/053)                                         | `R/recording.rs:16557-16570,17849-17926`; `R/linux_vaapi.rs`                       |
-| NVIDIA                             | n/a               | No `h264_nvenc` arm                                               | M   | NVIDIA owners get OpenH264                                                                                                                | `R/protocol.rs:2255-2270`                                                          |
-| Separate record and stream encodes | VT split roles    | One shared encode                                                 | D   | Recording quality follows the stream; one failure takes both                                                                              | `R/recording.rs:23249-23259`                                                       |
-| Clips (keep the last seconds)      | On                | "Off on this computer … OpenH264"                                 | D   | Off by default without VAAPI; Linux segment muxer unchecked (plan 181)                                                                    | Output page text                                                                   |
-| Preview                            | CAMetalLayer, GPU | Electron proof surface polling `/preview/*/latest.bmp` on the CPU | D   | Health: "Preview speed: Fallback", "Preview path: Fallback window"; camera layer updated 1.2 fps in a 5 s sample (lid closed, box loaded) | Health page text; `R/preview_surface.rs:2104-2123`; `M/in-window-proof-surface.ts` |
-| Preview first-frame watchdog       | Metal heal        | None on Linux (Metal = darwin, proof = win32)                     | M   | A stalled preview stays stalled                                                                                                           | `M/native-preview-first-frame.ts:155-162`                                          |
-| Compositor                         | Metal             | CPU YUV420p (`GpuCompositor` uninhabited)                         | D   | Rendered 7 fps of 30 at 166 % CPU during a take (under load)                                                                              | `run/app.log` 20:33:16; `R/compositor.rs:8119-8137`                                |
-| Live backgrounds                   | Metal             | GLES 3 on EGL, one render node                                    | W\* | ogre goldens owed (plans 190, 194)                                                                                                        | `R/live_background/gl.rs`                                                          |
-| Green / blue screen                | Metal or CPU      | CPU path                                                          | W\* | Not seen (black camera)                                                                                                                   | `R/compositor.rs:9548-9556`                                                        |
-| Background removal / segmentation  | —                 | —                                                                 | =   | Neither platform has it                                                                                                                   | —                                                                                  |
-| Live canvas on the Scene tab       | Yes               | Hidden                                                            | M   | —                                                                                                                                         | `UI/components/tabs/layout-tab.tsx:734`                                            |
-| Window glass                       | Vibrancy          | Solid palette                                                     | OS  | Cosmetic                                                                                                                                  | `M/window-glass.ts:161-163`                                                        |
+| Feature                            | Mac               | Linux today                                                         | St  | Gap                                                                                               | Evidence                                                                     |
+| ---------------------------------- | ----------------- | ------------------------------------------------------------------- | --- | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Hardware H.264                     | VideoToolbox      | VAAPI (probed per render node, crash quarantine) else OpenH264      | D   | ogre's lab env pins OpenH264; AMD node quarantined; L1.5 evidence never committed (plans 052/053) | `R/recording.rs:16557-16570,17849-17926`; `R/linux_vaapi.rs`                 |
+| NVIDIA                             | n/a               | No `h264_nvenc` arm                                                 | M   | NVIDIA owners get OpenH264                                                                        | `R/protocol.rs:2255-2270`                                                    |
+| Separate record and stream encodes | VT split roles    | One shared encode                                                   | D   | Recording quality follows the stream; one failure takes both                                      | `R/recording.rs:23249-23259`                                                 |
+| Clips (keep the last seconds)      | On                | "Off on this computer … OpenH264"                                   | D   | Off by default without VAAPI; Linux segment muxer unchecked (plan 181)                            | Output page text                                                             |
+| Preview                            | CAMetalLayer, GPU | Electron proof surface: waiting I420 requests drawn with WebGL (S3) | W   | S3: 30 of 30 fps, 29 / 37 ms on the camera; Health "Smooth", "App window"; CPU half owed (183 %)  | `M/native-preview-proof-poller-runtime.ts`; `R/preview_bmp.rs`; S3 spike doc |
+| Preview first-frame watchdog       | Metal heal        | Proof watchdog with heal on Linux (S3)                              | W   | S3: stall seen in 1.7 s, two heals, fallback at 7.6 s, live again 1 s after the source returns    | `M/native-preview-first-frame.ts` (`proofWatchdogHealAction`)                |
+| Compositor                         | Metal             | CPU YUV420p (`GpuCompositor` uninhabited)                           | D   | Rendered 7 fps of 30 at 166 % CPU during a take (under load)                                      | `run/app.log` 20:33:16; `R/compositor.rs:8119-8137`                          |
+| Live backgrounds                   | Metal             | GLES 3 on EGL, one render node                                      | W\* | ogre goldens owed (plans 190, 194)                                                                | `R/live_background/gl.rs`                                                    |
+| Green / blue screen                | Metal or CPU      | CPU path                                                            | W\* | Not seen (black camera)                                                                           | `R/compositor.rs:9548-9556`                                                  |
+| Background removal / segmentation  | —                 | —                                                                   | =   | Neither platform has it                                                                           | —                                                                            |
+| Live canvas on the Scene tab       | Yes               | On (S3): the docked in-window view                                  | W   | S3: docked into the `scene` slot on ogre                                                          | `UI/components/tabs/layout-tab.tsx`                                          |
+| Window glass                       | Vibrancy          | Solid palette                                                       | OS  | Cosmetic                                                                                          | `M/window-glass.ts:161-163`                                                  |
 
 ### Recording and output
 
@@ -459,6 +459,27 @@ Health stops calling it a fallback.
    camera on drops by at least half from today's ~3 cores; Health's preview
    check is healthy.
    **Out of scope:** a GPU compositor (D6).
+   **Result (2026-11-23, PR #1690):** spike first
+   (`docs/acceptance/2026-11-23-linux-preview-transport-spike.md`): (a) won,
+   without shared memory; (b) measured as components and deferred; (c) does
+   not exist on Linux at idle. Built: the Linux proof surface asks for each
+   source layer's next frame with `waitMs` (the backend holds the request
+   until the source publishes), as BT.709 I420 shrunk only by whole box
+   factors, in a two-stage pipeline per layer, drawn with WebGL into a canvas;
+   the surface asks for 30 fps status ticks on Linux; Windows keeps its
+   interval BMP and `<img>` unchanged. The proof watchdog runs on Linux and
+   heals (restarts the frame requests twice) before it declares a fallback;
+   Health judges the Linux Preview on its own presented rate ("Smooth",
+   "Slow display", "Stalled") and names the path "App window" (never native);
+   the Scene tab's live canvas is on. On ogre, production renderer: a moving
+   1080p card 29.99 of 30 fps (min 29.86) at 8 / 27 ms; the real camera 29.98
+   at 29 / 37 ms against 8.5 fps at 104 / 128 ms for today's transport; app
+   CPU with the camera on 183 % (today's transport at the same surface rate
+   204 %, main ~250-270 %, the plan's ~300 %). `pnpm
+probe:preview-lifecycle:linux` passes (100 cycles). **Owed:** the CPU half (183 %
+   against ~150 %; the H.264 leg is the measured way to the rest), and the
+   moving card as a real screen capture of the lab card (the session was
+   locked all night; the dev fixture camera stood in).
 
 ### S4: Linux docs tell the truth
 

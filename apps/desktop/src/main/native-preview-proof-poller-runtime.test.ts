@@ -260,3 +260,87 @@ describe('proof poller transport accounting', () => {
     })
   })
 })
+
+// Plan 257 S3: the Linux transport's helpers, from the same injected script.
+describe('Linux I420 transport helpers', () => {
+  type Cursor = { generation: string; sequence: number }
+  type Helpers = {
+    proofPollerCursorIsNewer: (poller: Record<string, unknown>, cursor: Cursor | null) => boolean
+    markProofPollerPresentedCursor: (poller: Record<string, unknown>, cursor: Cursor | null) => void
+    proofI420IsBlankSampled: (poller: Record<string, unknown>, buffer: ArrayBuffer) => boolean
+    proofSourceFps: (pollers: Map<string, Record<string, unknown>>, now: number) => number | null
+    markProofPollerFrameDecoded: (
+      poller: Record<string, unknown>,
+      byteLength: number,
+      width: number,
+      height: number,
+      now: number
+    ) => void
+  }
+  const helpers = new Function(
+    `${NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT}\nreturn { proofPollerCursorIsNewer, markProofPollerPresentedCursor, proofI420IsBlankSampled, proofSourceFps, markProofPollerFrameDecoded };`
+  )() as Helpers
+
+  it('never lets a late frame of the same run replace a newer one', () => {
+    const layer: Record<string, unknown> = {}
+    expect(helpers.proofPollerCursorIsNewer(layer, { generation: 'a', sequence: 5 })).toBe(true)
+    helpers.markProofPollerPresentedCursor(layer, { generation: 'a', sequence: 5 })
+    expect(helpers.proofPollerCursorIsNewer(layer, { generation: 'a', sequence: 4 })).toBe(false)
+    expect(helpers.proofPollerCursorIsNewer(layer, { generation: 'a', sequence: 5 })).toBe(false)
+    expect(helpers.proofPollerCursorIsNewer(layer, { generation: 'a', sequence: 6 })).toBe(true)
+    // A new source run always replaces the picture, whatever its sequence.
+    expect(helpers.proofPollerCursorIsNewer(layer, { generation: 'b', sequence: 1 })).toBe(true)
+  })
+
+  it('calls an all-zero luma row blank, on the first frame and then one in thirty', () => {
+    const blank = new ArrayBuffer(64 * 64 * 3)
+    const picture = new Uint8Array(64 * 64 * 3).fill(16).buffer
+    const layer: Record<string, unknown> = {}
+    expect(helpers.proofI420IsBlankSampled(layer, blank)).toBe(true)
+    for (let frame = 1; frame < 30; frame += 1) {
+      expect(helpers.proofI420IsBlankSampled(layer, blank)).toBe(false)
+    }
+    expect(helpers.proofI420IsBlankSampled(layer, blank)).toBe(true)
+    expect(helpers.proofI420IsBlankSampled({}, picture)).toBe(false)
+  })
+
+  it('reports the slowest layer over the last two seconds', () => {
+    const camera: Record<string, unknown> = {}
+    const screen: Record<string, unknown> = {}
+    for (let frame = 0; frame < 60; frame += 1) {
+      helpers.markProofPollerFrameDecoded(camera, 1, 2, 2, 1000 + frame * 33.3)
+    }
+    for (let frame = 0; frame < 20; frame += 1) {
+      helpers.markProofPollerFrameDecoded(screen, 1, 2, 2, 1000 + frame * 100)
+    }
+    const now = 1000 + 59 * 33.3
+    // 60 frames over the camera's own 1.97 s of life.
+    expect(helpers.proofSourceFps(new Map([['camera', camera]]), now)).toBeCloseTo(30.5, 0)
+    expect(
+      helpers.proofSourceFps(
+        new Map([
+          ['camera', camera],
+          ['screen', screen]
+        ]),
+        now
+      )
+    ).toBeCloseTo(10, 0)
+    expect(helpers.proofSourceFps(new Map(), now)).toBeNull()
+  })
+
+  it('judges a young layer over its own life, and not at all before half a second', () => {
+    const layer: Record<string, unknown> = {}
+    helpers.markProofPollerFrameDecoded(layer, 1, 2, 2, 0)
+    expect(helpers.proofSourceFps(new Map([['camera', layer]]), 300)).toBeNull()
+    for (let frame = 1; frame <= 30; frame += 1) {
+      helpers.markProofPollerFrameDecoded(layer, 1, 2, 2, frame * 33.3)
+    }
+    // One second old with 31 frames: about 30 fps, not 15.
+    expect(helpers.proofSourceFps(new Map([['camera', layer]]), 1000)).toBeCloseTo(31, 0)
+    // Hidden for five seconds, then shown again: measured from the resume on.
+    for (let frame = 0; frame <= 30; frame += 1) {
+      helpers.markProofPollerFrameDecoded(layer, 1, 2, 2, 6000 + frame * 33.3)
+    }
+    expect(helpers.proofSourceFps(new Map([['camera', layer]]), 7000)).toBeCloseTo(31, 0)
+  })
+})

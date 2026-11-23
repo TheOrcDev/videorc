@@ -3416,6 +3416,7 @@ pub async fn latest_preview_camera_bmp(
     state: &AppState,
     requested_max_width: Option<u32>,
     cursor: Option<PreviewBmpCursor>,
+    format: crate::preview_bmp::PreviewFrameFormat,
 ) -> Option<LatestPreviewBmpPoll> {
     let (generation, frame, shared, raw_epoch) = {
         let slot = state.preview_camera.lock().await;
@@ -3431,10 +3432,19 @@ pub async fn latest_preview_camera_bmp(
         drop(guard);
         (generation, frame, shared, raw_epoch)
     };
+    // Plan 257 S3: a frame the client already has answers 204 here, without a
+    // blocking task, so a waiting request can look again every few ms.
+    if crate::preview_bmp::cursor_names_frame(cursor.as_ref(), &generation, frame.sequence) {
+        return Some(LatestPreviewBmpPoll::Unchanged {
+            generation,
+            sequence: frame.sequence,
+        });
+    }
 
+    let captured_at = frame.captured_at;
     let max_width = preview_camera_png_max_width(requested_max_width);
     tokio::task::spawn_blocking(move || {
-        let poll = camera_bmp_poll(&generation, &frame, cursor.as_ref(), max_width)?;
+        let poll = camera_bmp_poll(&generation, &frame, cursor.as_ref(), max_width, format)?;
         // Plan 258 S5 (D2): a frame read while the stage was off is raw. If
         // an effect armed while it was being copied, arming replaced it in
         // the store, so this copy must never be served: the next poll reads
@@ -3452,6 +3462,7 @@ pub async fn latest_preview_camera_bmp(
     .await
     .ok()
     .flatten()
+    .map(|poll| poll.captured_at(captured_at))
 }
 
 /// The BMP poll for one stored camera frame (`None` when it can't be read).
@@ -3460,6 +3471,7 @@ fn camera_bmp_poll(
     frame: &FrameHandle<PreviewCameraPixelFormat>,
     cursor: Option<&PreviewBmpCursor>,
     max_width: u32,
+    format: crate::preview_bmp::PreviewFrameFormat,
 ) -> Option<LatestPreviewBmpPoll> {
     // Plan 258 S5: on macOS the store's frames are zero-copy pixel
     // buffers with no CPU bytes (the stage's processed buffers too), so
@@ -3473,15 +3485,28 @@ fn camera_bmp_poll(
     } else {
         None
     };
-    encode_latest_bgra_bmp(
-        cursor,
-        generation.to_string(),
-        frame.sequence,
-        frame.width,
-        frame.height,
-        surface_bytes.as_deref().unwrap_or(&frame.bytes),
-        max_width,
-    )
+    let bytes = surface_bytes.as_deref().unwrap_or(&frame.bytes);
+    match format {
+        crate::preview_bmp::PreviewFrameFormat::Bmp => encode_latest_bgra_bmp(
+            cursor,
+            generation.to_string(),
+            frame.sequence,
+            frame.width,
+            frame.height,
+            bytes,
+            max_width,
+        ),
+        // Plan 257 S3: the Linux Preview's planar frames.
+        crate::preview_bmp::PreviewFrameFormat::I420 => crate::preview_bmp::encode_latest_i420(
+            cursor,
+            generation.to_string(),
+            frame.sequence,
+            frame.width,
+            frame.height,
+            bytes,
+            max_width,
+        ),
+    }
 }
 
 /// A zero-copy camera frame's BGRA, read from its retained pixel buffer

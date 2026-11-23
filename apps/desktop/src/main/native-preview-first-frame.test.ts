@@ -22,6 +22,11 @@ import {
   nativePreviewProofWatchdogEnabled,
   ProofWatchdogRendererReadSingleFlight,
   proofPresentationFallbackReason,
+  proofSurfaceWaitingReason,
+  proofCompositorLiveReason,
+  proofWatchdogHealAction,
+  PROOF_HEAL_ATTEMPTS,
+  PROOF_HEAL_SPACING_MS,
   proofSourceLiveReason,
   proofSourceStalledReason,
   proofWatchdogRendererReadAllowed,
@@ -56,7 +61,7 @@ describe('nativePreviewFirstFrameWatchdogEnabled', () => {
 })
 
 describe('nativePreviewProofWatchdogEnabled', () => {
-  it('runs the independent proof liveness watch only for the Windows fallback', () => {
+  it('runs the independent proof liveness watch for the Windows fallback and the Linux Preview', () => {
     expect(nativePreviewProofWatchdogEnabled('win32')).toBe(true)
     expect(
       nativePreviewProofWatchdogEnabled('win32', {
@@ -66,7 +71,8 @@ describe('nativePreviewProofWatchdogEnabled', () => {
       })
     ).toBe(false)
     expect(nativePreviewProofWatchdogEnabled('darwin')).toBe(false)
-    expect(nativePreviewProofWatchdogEnabled('linux')).toBe(false)
+    // Plan 257 S3: the proof surface is the Linux Preview.
+    expect(nativePreviewProofWatchdogEnabled('linux')).toBe(true)
   })
 })
 
@@ -992,5 +998,73 @@ describe('assessPresenting', () => {
         expect(result.assessment.action).not.toBe('reset-native-path')
       }
     }
+  })
+})
+
+// Plan 257 S3: the Linux watchdog heals a stalled Preview before it gives up;
+// Windows keeps its report-only contract.
+describe('proofWatchdogHealAction', () => {
+  it('restarts the pollers on Linux, spaced, then declares the fallback', () => {
+    expect(
+      proofWatchdogHealAction({
+        platform: 'linux',
+        attemptsMade: 0,
+        lastAttemptAtMs: null,
+        nowMs: 0
+      })
+    ).toBe('restart-pollers')
+    expect(
+      proofWatchdogHealAction({
+        platform: 'linux',
+        attemptsMade: 1,
+        lastAttemptAtMs: 1_000,
+        nowMs: 1_000 + PROOF_HEAL_SPACING_MS - 1
+      })
+    ).toBe('wait')
+    expect(
+      proofWatchdogHealAction({
+        platform: 'linux',
+        attemptsMade: 1,
+        lastAttemptAtMs: 1_000,
+        nowMs: 1_000 + PROOF_HEAL_SPACING_MS
+      })
+    ).toBe('restart-pollers')
+    expect(
+      proofWatchdogHealAction({
+        platform: 'linux',
+        attemptsMade: PROOF_HEAL_ATTEMPTS,
+        lastAttemptAtMs: 0,
+        nowMs: 60_000
+      })
+    ).toBe('fallback')
+  })
+
+  it('never heals on Windows', () => {
+    expect(
+      proofWatchdogHealAction({
+        platform: 'win32',
+        attemptsMade: 0,
+        lastAttemptAtMs: null,
+        nowMs: 0
+      })
+    ).toBe('fallback')
+  })
+})
+
+describe('proof watchdog copy per platform', () => {
+  it('names Linux on Linux and keeps the Windows copy on Windows', () => {
+    expect(proofSurfaceWaitingReason('linux')).toBe(
+      'Waiting for the Linux preview surface to deliver pixels.'
+    )
+    expect(proofSurfaceWaitingReason('win32')).toBe(
+      'Waiting for the Windows preview surface to deliver pixels.'
+    )
+    expect(proofCompositorLiveReason('win32')).toBe('Windows preview compositor output is live.')
+    expect(
+      proofPresentationFallbackReason(
+        { sourceFrameHistoryComplete: false, sourceFrameAgeMs: 15_000, pendingElapsedMs: 15_000 },
+        'linux'
+      )
+    ).toBe('Linux preview did not deliver a first frame within 15000ms.')
   })
 })

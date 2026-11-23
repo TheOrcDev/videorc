@@ -23,7 +23,7 @@ function sceneCallbacksSource(): string {
   return documentSource.slice(from, to)
 }
 
-function proofScene() {
+function proofScene({ waits = false }: { waits?: boolean } = {}) {
   document.body.innerHTML = '<div id="scene-root"></div>'
   const root = document.getElementById('scene-root') as HTMLElement
   const noop = (): void => {}
@@ -31,6 +31,9 @@ function proofScene() {
     document,
     window,
     root,
+    // Plan 257 S3: Linux's waiting I420 transport draws source layers into a
+    // canvas; the interval transport (Windows) keeps an <img>.
+    proofFrameWaits: waits,
     layers: new Map(),
     overlayPollers: new Map(),
     scene: null,
@@ -71,7 +74,9 @@ function proofScene() {
     },
     order: (): Array<string | undefined> =>
       Array.from(root.children, (element) => (element as HTMLElement).dataset.layerId),
-    element: (id: string): Element | null => root.querySelector(`[data-layer-id="${id}"]`)
+    element: (id: string): Element | null => root.querySelector(`[data-layer-id="${id}"]`),
+    frameElement: (id: string): Element | null =>
+      root.querySelector(`[data-layer-id="${id}"]`)?.firstElementChild ?? null
   }
 }
 
@@ -107,5 +112,17 @@ describe('proof surface scene layer order', () => {
     expect(surface.order()).toEqual(['camera', 'screen'])
     expect(surface.element('screen')).toBe(screen)
     expect(surface.element('camera')).toBe(camera)
+  })
+
+  it('draws Linux source layers into a canvas and keeps <img> for the rest', () => {
+    const linux = proofScene({ waits: true })
+    linux.apply(['screen', 'camera', 'image'])
+    expect(linux.frameElement('camera')?.tagName).toBe('CANVAS')
+    expect(linux.frameElement('screen')?.tagName).toBe('CANVAS')
+    expect(linux.frameElement('image')?.tagName).toBe('IMG')
+
+    const windows = proofScene()
+    windows.apply(['camera'])
+    expect(windows.frameElement('camera')?.tagName).toBe('IMG')
   })
 })

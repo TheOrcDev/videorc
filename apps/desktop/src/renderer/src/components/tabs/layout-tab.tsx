@@ -715,10 +715,14 @@ export function LayoutTab(): ReactElement {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [platform, undoLayoutPatch])
 
-  // Live canvas (plan 058, macOS only): the docked native preview glues into
-  // the stage's canvas rect instead of the Studio slot while this tab is
-  // mounted. Only one tab mounts at a time, so the two reporters never fight.
-  const liveCanvasSupported = nativePreviewSurfaceEnabled && runtimeInfo?.platform === 'darwin'
+  // Live canvas (plan 058): the docked preview glues into the stage's canvas
+  // rect instead of the Studio slot while this tab is mounted. Only one tab
+  // mounts at a time, so the two reporters never fight. macOS and Linux dock
+  // the same in-window proof view (plan 216 D4, plan 257 S3), which forwards
+  // the mouse to the stage under it.
+  const liveCanvasSupported =
+    nativePreviewSurfaceEnabled &&
+    (runtimeInfo?.platform === 'darwin' || runtimeInfo?.platform === 'linux')
   const liveCanvasActive =
     liveCanvasSupported && previewWindow.open && previewWindow.mode === 'docked'
   const slotRef = useDockSlotReporter(liveCanvasActive, previewWindow.dockEpoch, 'scene')

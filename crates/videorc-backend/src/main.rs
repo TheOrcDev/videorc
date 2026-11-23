@@ -1291,6 +1291,13 @@ struct WsQuery {
     after_sequence: Option<u64>,
     #[serde(default)]
     after_generation: Option<String>,
+    /// Plan 257 S3: how long a latest-frame request may wait for a frame newer
+    /// than its cursor (ms, capped at `PREVIEW_BMP_MAX_WAIT_MS`).
+    #[serde(default)]
+    wait_ms: Option<u32>,
+    /// Plan 257 S3: `i420` for the Linux Preview's planar frames; BMP otherwise.
+    #[serde(default)]
+    format: Option<String>,
     /// PNG endpoints are retained only as an explicit developer/debug fallback.
     #[serde(default)]
     debug: bool,
@@ -1720,7 +1727,13 @@ async fn live_camera_bmp_handler(
 
     diagnostics::PREVIEW_POLL_COUNTS.record_camera_bmp();
     let cursor = query.preview_bmp_cursor();
-    match latest_preview_camera_bmp(&state, query.max_width, cursor).await {
+    let (state_ref, max_width) = (&state, query.max_width);
+    let format = preview_bmp::PreviewFrameFormat::from_query(query.format.as_deref());
+    let poll = wait_for_preview_bmp(query.wait_ms, move || {
+        latest_preview_camera_bmp(state_ref, max_width, cursor.clone(), format)
+    })
+    .await;
+    match poll {
         Some(poll) => latest_preview_bmp_response(poll),
         None => preview_bmp_not_found_response(),
     }
@@ -1736,13 +1749,52 @@ async fn live_screen_bmp_handler(
 
     diagnostics::PREVIEW_POLL_COUNTS.record_screen_bmp();
     let cursor = query.preview_bmp_cursor();
-    match latest_preview_screen_bmp(&state, query.max_width, cursor).await {
+    let (state_ref, max_width) = (&state, query.max_width);
+    let format = preview_bmp::PreviewFrameFormat::from_query(query.format.as_deref());
+    let poll = wait_for_preview_bmp(query.wait_ms, move || {
+        latest_preview_screen_bmp(state_ref, max_width, cursor.clone(), format)
+    })
+    .await;
+    match poll {
         Some(poll) => latest_preview_bmp_response(poll),
         None => preview_bmp_not_found_response(),
     }
 }
 
-const PREVIEW_BMP_EXPOSED_HEADERS: &str = "x-videorc-frame-transport, x-videorc-frame-generation, x-videorc-frame-sequence, x-videorc-frame-width, x-videorc-frame-height, x-videorc-frame-stride, x-videorc-pixel-format";
+/// Plan 257 S3: answer a latest-frame poll, waiting up to `wait_ms` for a
+/// frame newer than the cursor instead of a 204 the client must poll again.
+/// The Linux preview asks with a wait, so it gets each frame as the source
+/// publishes it rather than on its own timer.
+async fn wait_for_preview_bmp<F, Fut>(
+    wait_ms: Option<u32>,
+    mut poll: F,
+) -> Option<preview_bmp::LatestPreviewBmpPoll>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<preview_bmp::LatestPreviewBmpPoll>>,
+{
+    let wait = Duration::from_millis(u64::from(
+        wait_ms
+            .unwrap_or(0)
+            .min(preview_bmp::PREVIEW_BMP_MAX_WAIT_MS),
+    ));
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let result = poll().await;
+        let unchanged = matches!(
+            result,
+            Some(preview_bmp::LatestPreviewBmpPoll::Unchanged { .. })
+        );
+        if unchanged && tokio::time::Instant::now() + preview_bmp::PREVIEW_BMP_WAIT_STEP <= deadline
+        {
+            tokio::time::sleep(preview_bmp::PREVIEW_BMP_WAIT_STEP).await;
+            continue;
+        }
+        return result;
+    }
+}
+
+const PREVIEW_BMP_EXPOSED_HEADERS: &str = "x-videorc-frame-transport, x-videorc-frame-generation, x-videorc-frame-sequence, x-videorc-frame-width, x-videorc-frame-height, x-videorc-frame-stride, x-videorc-pixel-format, x-videorc-frame-age-ms";
 
 fn latest_preview_bmp_response(poll: preview_bmp::LatestPreviewBmpPoll) -> Response {
     match poll {
@@ -1759,22 +1811,49 @@ fn latest_preview_bmp_response(poll: preview_bmp::LatestPreviewBmpPoll) -> Respo
             .header("x-videorc-frame-sequence", sequence.to_string())
             .body(Body::empty())
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        preview_bmp::LatestPreviewBmpPoll::Frame(frame) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "image/bmp")
-            .header(header::CACHE_CONTROL, "no-store")
-            .header("access-control-allow-origin", "*")
-            .header("access-control-expose-headers", PREVIEW_BMP_EXPOSED_HEADERS)
-            .header("x-videorc-frame-transport", "latest-bgra-bmp")
-            .header("x-videorc-frame-generation", frame.generation)
-            .header("x-videorc-frame-sequence", frame.sequence.to_string())
-            .header("x-videorc-frame-width", frame.width.to_string())
-            .header("x-videorc-frame-height", frame.height.to_string())
-            .header("x-videorc-frame-stride", frame.stride.to_string())
-            .header("x-videorc-pixel-format", frame.pixel_format)
-            .body(Body::from(frame.bytes))
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        preview_bmp::LatestPreviewBmpPoll::Frame(frame) => {
+            // Plan 257 S3: how old the frame is as it leaves, so the Preview
+            // can measure capture-to-screen latency.
+            let age_ms = frame
+                .captured_at
+                .map(|captured_at| captured_at.elapsed().as_millis().to_string())
+                .unwrap_or_default();
+            preview_bmp_frame_response(frame, age_ms)
+        }
     }
+}
+
+fn preview_bmp_frame_response(frame: preview_bmp::LatestPreviewBmp, age_ms: String) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("x-videorc-frame-age-ms", age_ms)
+        .header(
+            header::CONTENT_TYPE,
+            if frame.pixel_format == "i420" {
+                "application/octet-stream"
+            } else {
+                "image/bmp"
+            },
+        )
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("access-control-allow-origin", "*")
+        .header("access-control-expose-headers", PREVIEW_BMP_EXPOSED_HEADERS)
+        .header(
+            "x-videorc-frame-transport",
+            if frame.pixel_format == "i420" {
+                "latest-i420"
+            } else {
+                "latest-bgra-bmp"
+            },
+        )
+        .header("x-videorc-frame-generation", frame.generation)
+        .header("x-videorc-frame-sequence", frame.sequence.to_string())
+        .header("x-videorc-frame-width", frame.width.to_string())
+        .header("x-videorc-frame-height", frame.height.to_string())
+        .header("x-videorc-frame-stride", frame.stride.to_string())
+        .header("x-videorc-pixel-format", frame.pixel_format)
+        .body(Body::from(frame.bytes))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 fn preview_bmp_not_found_response() -> Response {
@@ -21394,6 +21473,119 @@ mod tests {
                 generation: "screen-run-b".to_string(),
                 sequence: 42,
             })
+        );
+    }
+
+    // Plan 257 S3: the Linux Preview asks with `waitMs`.
+    #[tokio::test]
+    async fn preview_bmp_query_parses_the_wait() {
+        use axum::extract::FromRequestParts;
+
+        let request = axum::http::Request::builder()
+            .uri("/preview/camera/latest.bmp?token=t&afterGeneration=a&afterSequence=1&waitMs=200")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = request.into_parts();
+        let Query(query) = Query::<WsQuery>::from_request_parts(&mut parts, &())
+            .await
+            .unwrap();
+        assert_eq!(query.wait_ms, Some(200));
+    }
+
+    fn unchanged_poll(sequence: u64) -> Option<preview_bmp::LatestPreviewBmpPoll> {
+        Some(preview_bmp::LatestPreviewBmpPoll::Unchanged {
+            generation: "run".to_string(),
+            sequence,
+        })
+    }
+
+    fn frame_poll(sequence: u64) -> Option<preview_bmp::LatestPreviewBmpPoll> {
+        preview_bmp::encode_latest_bgra_bmp(None, "run".to_string(), sequence, 2, 1, &[0; 8], 2)
+    }
+
+    #[tokio::test]
+    async fn a_waiting_preview_poll_answers_with_the_next_frame() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let started = Instant::now();
+        let result = wait_for_preview_bmp(Some(200), || {
+            let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if call < 3 {
+                    unchanged_poll(7)
+                } else {
+                    frame_poll(8)
+                }
+            }
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Some(preview_bmp::LatestPreviewBmpPoll::Frame(ref frame)) if frame.sequence == 8
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert!(started.elapsed() < Duration::from_millis(150));
+    }
+
+    #[tokio::test]
+    async fn a_poll_without_a_wait_answers_at_once() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let result = wait_for_preview_bmp(None, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { unchanged_poll(7) }
+        })
+        .await;
+        assert_eq!(result, unchanged_poll(7));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_poll_gives_up_at_its_deadline_and_never_past_the_cap() {
+        let started = Instant::now();
+        let result = wait_for_preview_bmp(Some(30), || async { unchanged_poll(7) }).await;
+        assert_eq!(result, unchanged_poll(7));
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(20), "{waited:?}");
+        assert!(waited < Duration::from_millis(200), "{waited:?}");
+
+        // A huge wait is capped, so a client can never park a request for long.
+        let started = Instant::now();
+        let _ = wait_for_preview_bmp(Some(60_000), || async { unchanged_poll(7) }).await;
+        assert!(
+            started.elapsed()
+                < Duration::from_millis(u64::from(preview_bmp::PREVIEW_BMP_MAX_WAIT_MS) + 200)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_waiting_poll_with_no_source_answers_at_once() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let result = wait_for_preview_bmp(Some(200), || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { None }
+        })
+        .await;
+        assert!(result.is_none());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_preview_bmp_frame_says_how_old_it_is() {
+        let Some(preview_bmp::LatestPreviewBmpPoll::Frame(frame)) = frame_poll(3) else {
+            panic!("frame expected");
+        };
+        let response = preview_bmp_frame_response(frame, "12".to_string());
+        assert_eq!(
+            response.headers().get("x-videorc-frame-age-ms").unwrap(),
+            "12"
+        );
+        assert!(
+            response
+                .headers()
+                .get("access-control-expose-headers")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("x-videorc-frame-age-ms")
         );
     }
 

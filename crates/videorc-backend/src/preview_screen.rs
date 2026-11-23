@@ -4834,6 +4834,7 @@ pub async fn latest_preview_screen_bmp(
     state: &AppState,
     requested_max_width: Option<u32>,
     cursor: Option<PreviewBmpCursor>,
+    format: crate::preview_bmp::PreviewFrameFormat,
 ) -> Option<LatestPreviewBmpPoll> {
     let (generation, frame) = {
         let slot = state.preview_screen.lock().await;
@@ -4846,23 +4847,44 @@ pub async fn latest_preview_screen_bmp(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         (generation, guard.frame_store.latest()?)
     };
+    // Plan 257 S3: a frame the client already has answers 204 here, without a
+    // blocking task, so a waiting request can look again every few ms.
+    if crate::preview_bmp::cursor_names_frame(cursor.as_ref(), &generation, frame.sequence) {
+        return Some(LatestPreviewBmpPoll::Unchanged {
+            generation,
+            sequence: frame.sequence,
+        });
+    }
 
+    let captured_at = frame.captured_at;
     let max_width = preview_screen_png_max_width(requested_max_width);
     tokio::task::spawn_blocking(move || {
         let bytes = latest_preview_screen_bgra_bytes(&frame)?;
-        encode_latest_bgra_bmp(
-            cursor.as_ref(),
-            generation,
-            frame.sequence,
-            frame.width,
-            frame.height,
-            bytes.as_ref(),
-            max_width,
-        )
+        match format {
+            crate::preview_bmp::PreviewFrameFormat::Bmp => encode_latest_bgra_bmp(
+                cursor.as_ref(),
+                generation,
+                frame.sequence,
+                frame.width,
+                frame.height,
+                bytes.as_ref(),
+                max_width,
+            ),
+            crate::preview_bmp::PreviewFrameFormat::I420 => crate::preview_bmp::encode_latest_i420(
+                cursor.as_ref(),
+                generation,
+                frame.sequence,
+                frame.width,
+                frame.height,
+                bytes.as_ref(),
+                max_width,
+            ),
+        }
     })
     .await
     .ok()
     .flatten()
+    .map(|poll| poll.captured_at(captured_at))
 }
 
 /// Materialize BGRA bytes only for the authenticated latest-frame proof route.
