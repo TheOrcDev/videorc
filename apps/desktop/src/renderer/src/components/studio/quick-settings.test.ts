@@ -9,17 +9,34 @@ import { QuickSettings } from './quick-settings'
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
   // Plan 258 S4: the camera status the system effect line reads.
-  preview: { previewCameraStatus: {} as Record<string, unknown> }
+  preview: { previewCameraStatus: {} as Record<string, unknown> },
+  // Plan 258 S5: an open room disables the effects until S8.
+  cloud: { cloudStatus: null as Record<string, unknown> | null }
 }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
   useStudioPreview: () => mocked.preview,
+  useStudioCloud: () => mocked.cloud,
   useStudioChat: () => ({
     liveChatSnapshot: { providers: [], messages: [], unreadCount: 0, updatedAt: '' },
     chatNewCount: 0
   }),
   useStudioRecordingState: () => ({ recording: { state: 'idle' } }),
   useStudioShell: () => ({ openCommentsWindow: vi.fn(), runtimeInfo: { platform: 'darwin' } })
+}))
+vi.mock('@/hooks/use-background-assets', () => ({
+  useBackgroundAssets: () => ({
+    registry: {
+      version: 2,
+      slots: [{ id: 'slot-1', defaultLabel: 'Loft', assetId: 'builtin-bg-06', status: 'ready' }],
+      assets: {
+        'builtin-bg-06': { id: 'builtin-bg-06', name: 'Loft', assetPath: '/assets/loft.webp' }
+      },
+      activeSlotId: null,
+      bundledPresetVersion: 1,
+      live: { activeId: null, settings: {} }
+    }
+  })
 }))
 vi.mock('@/components/workspace-nav', () => ({
   useWorkspaceNav: () => ({ openSettings: vi.fn() })
@@ -37,7 +54,8 @@ describe('Studio Sources rows (plan 080 S4, plan 231 D8)', () => {
   function renderInputs(
     sources: SourceSelection,
     devices: Device[] = [display, camera],
-    layout: Partial<typeof defaultCaptureConfig.layout> = {}
+    layout: Partial<typeof defaultCaptureConfig.layout> = {},
+    settings: Record<string, unknown> = {}
   ): string {
     mocked.core = {
       captureConfig: {
@@ -64,7 +82,9 @@ describe('Studio Sources rows (plan 080 S4, plan 231 D8)', () => {
       wsStatus: 'connected',
       systemAudioConfirmed: null,
       systemAudioIssue: null,
-      settings: {},
+      settings,
+      applyCameraBackground: vi.fn(),
+      runtimeInfo: { platform: 'darwin' },
       screenPrivacy: { hidden: false }
     }
     return renderToStaticMarkup(createElement(QuickSettings))
@@ -92,9 +112,9 @@ describe('Studio Sources rows (plan 080 S4, plan 231 D8)', () => {
     // Captions is a door to its page (plan 174 S3.2, B-13), not a switch row.
     expect(rowLabels(markup)).toEqual(['Camera'])
     expect(markup).not.toContain('System audio')
-    // No switch at all: Green screen is a three-way pick, and no audio row.
+    // No switch at all: Background is one pick behind a trigger, and no audio row.
     expect(markup).not.toContain('role="switch"')
-    expect(markup).toContain('data-slot="green-screen"')
+    expect(markup).toContain('data-slot="camera-background"')
     expect(markup).toMatch(/data-slot="navigable-row"[^>]*>[\s\S]*?>Captions</)
     expect(markup).not.toContain('aria-label="Enable live captions"')
     expect(markup).not.toContain('Mute microphone')
@@ -141,7 +161,11 @@ describe('Studio Sources rows (plan 080 S4, plan 231 D8)', () => {
     const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' })
     const trigger = /<button[^>]*aria-label="Camera"[^>]*>/.exec(markup)?.[0]
     expect(trigger).toContain('role="combobox"')
-    const row = markup.split('data-slot="inspector-row"')[1] ?? ''
+    // The camera's own line; Background's trigger under it opens its picker (plan 258 S5).
+    const row =
+      (markup.split('data-slot="inspector-row"')[1] ?? '').split(
+        'data-slot="camera-background"'
+      )[0] ?? ''
     expect(row).not.toContain('aria-haspopup="dialog"')
   })
 
@@ -180,40 +204,82 @@ describe('Studio Sources rows (plan 080 S4, plan 231 D8)', () => {
     expect(markup).not.toContain('title="Off"')
   })
 
-  const greenScreenLine = (markup: string): string =>
-    (markup.split('data-slot="inspector-row"')[1] ?? '').split('data-slot="green-screen"')[1] ?? ''
-  const radios = (line: string): { label: string; checked: boolean }[] =>
-    [
-      ...line.matchAll(/<button[^>]*aria-checked="(true|false)"[^>]*role="radio"[^>]*>([^<]+)</g)
-    ].map((match) => ({ label: match[2] as string, checked: match[1] === 'true' }))
+  const backgroundLine = (markup: string): string =>
+    (markup.split('data-slot="inspector-row"')[1] ?? '').split(
+      'data-slot="camera-background"'
+    )[1] ?? ''
+  const backgrounds = (background: Record<string, unknown>) => ({
+    cameraBackgrounds: { 'camera:1': { blurPct: 70, edges: 'balanced', ...background } },
+    cameraBackgroundMigration: 1
+  })
+  const trigger = (line: string): string =>
+    line.match(/<button[^>]*data-videorc-camera-background-trigger[^>]*>[\s\S]*?<\/button>/)?.[0] ??
+    ''
 
-  it('picks Off, Green screen or Blue screen on the Camera row, with no title and no Adjust (plan 248)', () => {
-    const line = greenScreenLine(renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' }))
-    expect(line).toMatch(/role="radiogroup"/)
-    expect(line).toContain('aria-label="Green screen"')
-    expect(radios(line)).toEqual([
-      { label: 'Off', checked: true },
-      { label: 'Green screen', checked: false },
-      { label: 'Blue screen', checked: false }
-    ])
-    expect(line).not.toContain('<label')
+  it('replaces the Green screen line with one Background trigger, closed until clicked (plan 258 S5)', () => {
+    const line = backgroundLine(renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' }))
+    const button = trigger(line)
+    // "Background · Off" with a picture of the pick; the tiles wait in the popover.
+    expect(button).toContain('aria-label="Background: Off"')
+    expect(button).toContain('>Background<')
+    expect(button).toContain('>Off<')
+    expect(button).toContain('<svg')
+    expect(line).not.toContain('role="radiogroup"')
+    expect(line).not.toContain('aria-label="Green screen"')
     expect(line).not.toContain('Adjust')
-    expect(line).not.toContain('role="switch"')
   })
 
-  it('checks the key colour while a key is on, and Off while it is off', () => {
-    const pick = (cameraChromaKeyEnabled: boolean, cameraChromaKeyColor: string) =>
-      radios(
-        greenScreenLine(
-          renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' }, undefined, {
-            cameraChromaKeyEnabled,
-            cameraChromaKeyColor
-          })
+  it('names the pick from the camera’s own setting, never the scene’s key', () => {
+    const value = (background: Record<string, unknown>, layout = {}) =>
+      trigger(
+        backgroundLine(
+          renderInputs(
+            { screenId: 'screen:2', cameraId: 'camera:1' },
+            undefined,
+            layout,
+            backgrounds(background)
+          )
         )
-      ).find((radio) => radio.checked)?.label
-    expect(pick(true, '#0000ff')).toBe('Blue screen')
-    expect(pick(true, '#00FF00')).toBe('Green screen')
-    expect(pick(false, '#0000FF')).toBe('Off')
+      ).match(/aria-label="Background: ([^"]+)"/)?.[1]
+    expect(value({ mode: 'blur', blurPct: 70 })).toBe('Strong blur')
+    expect(value({ mode: 'blur', blurPct: 30 })).toBe('Slight blur')
+    expect(value({ mode: 'blur', blurPct: 55 })).toBe('Blur 55%')
+    expect(value({ mode: 'image', assetId: 'builtin-bg-06' })).toBe('Loft')
+    expect(value({ mode: 'blue' })).toBe('Blue screen')
+    // A scene that keys on its own no longer names the pick: the camera's does.
+    expect(value({ mode: 'off' }, { cameraChromaKeyEnabled: true })).toBe('Off')
+  })
+
+  it('says under the trigger when the effect is covering for itself, never as a toast (plan 258 S5)', () => {
+    const withStage = (cameraBackground: Record<string, unknown> | undefined): string => {
+      mocked.preview = { previewCameraStatus: cameraBackground ? { cameraBackground } : {} }
+      const markup = renderInputs(
+        { screenId: 'screen:2', cameraId: 'camera:1' },
+        undefined,
+        {},
+        backgrounds({ mode: 'blur' })
+      )
+      mocked.preview = { previewCameraStatus: {} }
+      return markup
+    }
+    const running = { mode: 'blur', state: 'running', processedFrames: 9, coverFrames: 0 }
+    expect(withStage(running)).not.toContain('data-slot="camera-background-stage"')
+    // A cover shorter than 2 s says nothing (a blink, D6 covers it).
+    expect(withStage({ ...running, state: 'cover', coverForMs: 400 })).not.toContain(
+      'data-slot="camera-background-stage"'
+    )
+    const cover = withStage({ ...running, state: 'cover', coverForMs: 2400 })
+    expect(cover.split('data-slot="camera-background-stage"')[1]).toContain(
+      'Background is catching up. Viewers see your whole camera blurred until it&#x27;s back.'
+    )
+    expect(cover.indexOf('data-slot="camera-background-stage"')).toBeGreaterThan(
+      cover.indexOf('data-slot="camera-background"')
+    )
+    expect(
+      withStage({ ...running, mode: 'image', state: 'unavailable' }).split(
+        'data-slot="camera-background-stage"'
+      )[1]
+    ).toContain('Viewers see only your picture until you turn the effect off.')
   })
 
   it('says under the Camera row when the system changes its background, never as a toast (plan 258 S4)', () => {
@@ -238,18 +304,18 @@ describe('Studio Sources rows (plan 080 S4, plan 231 D8)', () => {
     expect(line).toContain(
       'macOS is blurring this camera (Video menu, Portrait). Turn it off there to use Videorc&#x27;s background.'
     )
-    // Under the green screen line, inside the Camera row.
+    // Under the Background line, inside the Camera row.
     expect(portrait.indexOf('data-slot="camera-system-effect"')).toBeGreaterThan(
-      portrait.indexOf('data-slot="green-screen"')
+      portrait.indexOf('data-slot="camera-background"')
     )
     expect(
       withEffect({ provider: 'windows-studio-effects', ...flags, backgroundBlur: true })
     ).toContain('Windows Studio Effects is blurring this camera')
   })
 
-  it('has no green screen while the camera is Off: there is nothing to key', () => {
+  it('has no Background while the camera is Off: there is nothing behind you to change', () => {
     const markup = renderInputs({ screenId: 'screen:2', cameraOff: true })
-    expect(markup).not.toContain('data-slot="green-screen"')
-    expect(markup).not.toContain('role="radiogroup"')
+    expect(markup).not.toContain('data-slot="camera-background"')
+    expect(markup).not.toContain('data-videorc-camera-background-trigger')
   })
 })

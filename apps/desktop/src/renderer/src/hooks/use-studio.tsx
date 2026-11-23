@@ -17,7 +17,7 @@ import {
 } from '../lib/room-microphone-state'
 import { roomPcmTestResources, setRoomPcmTestEnabled } from '../lib/room-pcm-test-state'
 import { cloudTerminalOwner } from '@/lib/cloud-provider-lifecycle'
-import { roomHoldsTheCamera } from '@/lib/replay-buffer-reconcile'
+import { REPLAY_CAMERA_WAIT_NONE, roomHoldsTheCamera } from '@/lib/replay-buffer-reconcile'
 import type { RoomSceneResult, RoomSceneTarget } from '@/lib/cloud-scene-adapter'
 import type { IdleCommit, IdleCommitState } from '@/lib/room-idle-commit'
 import { createRoomSceneEditSync } from '@/lib/room-scene-resender'
@@ -40,7 +40,11 @@ import {
 } from '@/lib/camera-frame-rate'
 import type { CameraLowLightRequest } from '@/hooks/use-camera-low-light'
 import { cameraLookLayout, normalizeCameraLook, createCameraLookThrottle } from '@/lib/camera-look'
-import { cameraOutputLayout, migrateCameraBackgrounds } from '@/lib/camera-background'
+import {
+  cameraBackgroundMigrated,
+  cameraOutputLayout,
+  normalizeCameraBackground
+} from '@/lib/camera-background'
 import type { ChatOverlayDriver } from '@/lib/chat-overlay'
 import type { MicrophonePermissionProof } from '@/lib/system-permission-orchestration'
 import { isReplacementPermissionClient } from '@/lib/permission-evidence'
@@ -633,6 +637,7 @@ import type {
   OverlayLayout,
   OverlayRect,
   SetCommentHighlightParams,
+  CameraBackground,
   ViewerSample
 } from '@/lib/backend'
 import {
@@ -1650,6 +1655,12 @@ export type StudioContextValue = {
   patchLayout: (patch: Partial<LayoutSettings>) => void
   applyLayoutPatch: (patch: Partial<LayoutSettings>) => void
   applyCameraLook: (look: NonNullable<LayoutSettings['cameraLook']>) => void
+  /**
+   * Plan 258 S5: the camera's background (Studio's Background, the Scene
+   * page's section, ⌘K), stored per camera and committed through the same
+   * transaction, so every later commit carries it. False with no camera.
+   */
+  applyCameraBackground: (background: CameraBackground) => Promise<boolean>
   /** Takes the last committed layout change back (plan 174 S3.9, D15); false when there is none. */
   undoLayoutPatch: () => Promise<boolean>
   /** `keepScene`: the Scene page's Layout edits the saved scene on stream (plan 210 D3). */
@@ -3022,6 +3033,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // The backend refused the default ring because the scene's camera has no
   // frame yet; it starts again once the camera preview goes live.
   const replayWaitingForCameraRef = useRef(false)
+  // A camera that says live and sends no frame (lib/replay-buffer-camera-wait).
+  const replayCameraWaitRef = useRef(REPLAY_CAMERA_WAIT_NONE)
   const replayReconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const replayGaveUpToastedRef = useRef(false)
   const replayLaunchArmedRef = useRef(false)
@@ -3421,10 +3434,16 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       ...storedCaptureConfig,
       layout: cameraOutputLayout(storedCaptureConfig.layout, storedCaptureConfig.sources.cameraId, {
         cameraLooks: settings.cameraLooks,
-        cameraBackgrounds: settings.cameraBackgrounds
+        cameraBackgrounds: settings.cameraBackgrounds,
+        cameraBackgroundMigration: settings.cameraBackgroundMigration
       })
     }),
-    [storedCaptureConfig, settings.cameraLooks, settings.cameraBackgrounds]
+    [
+      storedCaptureConfig,
+      settings.cameraLooks,
+      settings.cameraBackgrounds,
+      settings.cameraBackgroundMigration
+    ]
   )
   useEffect(() => {
     const sessionId = liveChatSnapshot.sessionId
@@ -5325,24 +5344,30 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     if (migratedShortcuts)
       setSettings((current) => ({ ...current, globalShortcuts: migratedShortcuts }))
   }, [migratedShortcuts])
-  // Plan 258 D4: the scenes' green or blue screen moves to the camera. Until
-  // the camera's choice renders (S5), it follows the scenes on every change,
-  // and a key waits for a selected camera rather than being lost. The scenes
-  // keep their key fields for a rollback; nothing renders from it yet (S3).
+  // Plan 258 D4: the scenes' green or blue screen moves to the camera, once
+  // (S5 settles it: from then on the camera's choice is what keys, at the
+  // output boundary). A key waits for a selected camera rather than being
+  // lost. The scenes keep their key fields for a rollback.
   const migrationCameraId = captureConfig.sources.cameraId
   const migrationScenes = sceneLibrary.storedList
+  // Loaded only while it has not settled; until then the scenes' own key
+  // still goes out (`cameraOutputLayout` keys from the camera once settled).
+  const migrationSettled = cameraBackgroundMigrated(settings.cameraBackgroundMigration)
   useEffect(() => {
-    setSettings((current) => {
-      const migrated = migrateCameraBackgrounds({
-        cameraBackgrounds: current.cameraBackgrounds,
-        cameraBackgroundMigration: current.cameraBackgroundMigration,
-        cameraId: migrationCameraId,
-        scenes: migrationScenes,
-        onStreamId: activeSavedSceneId
-      })
-      return migrated ? { ...current, ...migrated } : current
-    })
-  }, [migrationCameraId, migrationScenes, activeSavedSceneId])
+    if (migrationSettled) return
+    let stale = false
+    void import('@/lib/camera-background-migration').then(
+      ({ migratedSettings }) =>
+        // A run superseded by a newer camera or scene writes nothing.
+        stale ||
+        setSettings((settings) =>
+          migratedSettings(settings, migrationCameraId, migrationScenes, activeSavedSceneId)
+        )
+    )
+    return () => {
+      stale = true
+    }
+  }, [migrationSettled, migrationCameraId, migrationScenes, activeSavedSceneId])
   // A new user's scenes show the main display before the device list names it.
   useEffect(() => {
     const display = deviceList.devices.find(
@@ -5820,15 +5845,20 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     )
     if (snapshot.state !== 'connected') return
     setCaptureConfig((current) => {
+      // A camera the background effect holds out of the room keeps the
+      // streamer's own Off as it was (plan 258 S5).
+      const cameraOff = snapshot.local.cameraHeld
+        ? current.sources.cameraOff
+        : snapshot.local.cameraOff
       if (
         current.audio.microphoneMuted === snapshot.local.micMuted &&
-        current.sources.cameraOff === snapshot.local.cameraOff
+        current.sources.cameraOff === cameraOff
       )
         return current
       const next = {
         ...current,
         audio: { ...current.audio, microphoneMuted: snapshot.local.micMuted },
-        sources: { ...current.sources, cameraOff: snapshot.local.cameraOff }
+        sources: { ...current.sources, cameraOff }
       }
       captureConfigRef.current = next
       return next
@@ -11742,6 +11772,42 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     cameraLookThrottleRef.current.schedule()
   }, [])
 
+  // Plan 258 S5: the camera's background is a per-camera setting (D3), like
+  // the look: stored under the camera that renders and put on every output
+  // at the boundary (`cameraOutputLayout`), so a scene switch, an idle commit
+  // or any other layout transaction carries it and nothing the renderer
+  // commits can drop it. The commit right after reaches the live camera's
+  // stage (`apply_camera_background`); the stage itself confirms, so no toast.
+  const applyCameraBackground = useCallback(
+    (background: CameraBackground): Promise<boolean> => {
+      const cameraId = captureConfigRef.current.sources.cameraId
+      const normalized = normalizeCameraBackground(background)
+      if (!cameraId || !normalized) return Promise.resolve(false)
+      const cameraBackgrounds = { ...settingsRef.current.cameraBackgrounds, [cameraId]: normalized }
+      // An explicit pick settles the D4 migration, so a run still loading
+      // can't replace it with a scene's key.
+      const migrated = { cameraBackgrounds, cameraBackgroundMigration: 1 }
+      const nextSettings = { ...settingsRef.current, ...migrated }
+      settingsRef.current = nextSettings
+      // The transaction below commits it to the live camera; suppress the
+      // idle reload, so a pick never tears down and reopens the camera.
+      skipNextConfigSceneReloadRef.current = true
+      captureConfigRef.current = {
+        ...captureConfigRef.current,
+        layout: cameraOutputLayout(captureConfigRef.current.layout, cameraId, nextSettings)
+      }
+      setSettings((current) => ({ ...current, ...migrated }))
+      return requestLayoutTransaction(captureConfigRef.current.layout, {
+        pendingIndicator: false
+      }).then((committed) => {
+        // Refused (Videorc reconnecting): the next idle reload carries it.
+        if (!committed) skipNextConfigSceneReloadRef.current = false
+        return committed
+      })
+    },
+    [requestLayoutTransaction]
+  )
+
   // Single-level undo of the last committed layout change (plan 174 S3.9,
   // D15): the remembered layout goes back through the same transaction, with
   // the saved scene it belonged to and the orientation ⇄ canvas coupling a
@@ -12888,7 +12954,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         if (sources.cameraId && !camera) throw new Error('The selected camera is unavailable.')
         await controls.setCameraSelection(
           camera?.name ?? null,
-          sources.cameraOff === true || !sources.cameraId
+          sources.cameraOff === true || !sources.cameraId,
+          // Plan 258 S5: the new camera's own background, before its
+          // settings reach the room, so an effect camera never goes out raw.
+          settingsRef.current.cameraBackgrounds?.[sources.cameraId ?? ''] ?? null
         )
         setCaptureConfig((current) => ({
           ...current,
@@ -19452,20 +19521,22 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       if ((error as { code?: unknown } | null)?.code === REPLAY_SOURCES_NOT_READY) {
         // Not a failure: at launch the ring is asked for before the camera
         // preview starts. No strike and no toast; the camera's live edge
-        // starts it (below). A camera that went live meanwhile retries now.
-        const camera = previewCameraStatusRef.current
-        if (camera.state === 'live') {
-          scheduleReplayReconcile()
-          return
-        }
+        // starts it (below). A camera that says live but sends no frame (a
+        // blocked or dead one) is asked again on a backoff, then waited for:
+        // its first frame starts the ring, and the bell says so once.
+        const replay = await import('@/lib/replay-buffer')
         if (
-          camera.state === 'starting' ||
-          !camera.cameraId ||
-          camera.cameraId !== captureConfigRef.current.sources.cameraId
-        ) {
-          replayWaitingForCameraRef.current = true
+          replay.takeSourcesNotReady(
+            client,
+            replayCameraWaitRef,
+            replayWaitingForCameraRef,
+            replayGaveUpToastedRef,
+            previewCameraStatusRef,
+            captureConfigRef,
+            scheduleReplayReconcile
+          )
+        )
           return
-        }
         // A camera that reported failed, missing or denied brings no live
         // edge: the start counts as failed, and says so like any other.
       }
@@ -19613,6 +19684,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     replayVisualSourcesRef.current = replayVisualSources
     replayFailedStartsRef.current = 0
     replayWaitingForCameraRef.current = false
+    replayCameraWaitRef.current = REPLAY_CAMERA_WAIT_NONE
     rearmReplayAfterErrorRef.current()
     void import('@/lib/replay-buffer-reconcile').then(({ replayBufferShouldRestartForSources }) => {
       if (
@@ -19670,7 +19742,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     scheduleReplayReconcile()
   }, [replayLayoutPreset, scheduleReplayReconcile])
 
-  // A ring that waits for the camera starts on its live edge.
+  // A ring that waits for the camera starts on its live edge. One that
+  // stopped asking a silent camera starts on its first frame, which
+  // lib/replay-buffer-camera-wait watches for on the camera's status events.
   const previewCameraState = previewCameraStatus.state
   useEffect(() => {
     if (!replayWaitingForCameraRef.current || previewCameraState !== 'live') return
@@ -19683,6 +19757,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       replayArmedRef.current = armed
       replayFailedStartsRef.current = 0
       replayWaitingForCameraRef.current = false
+      replayCameraWaitRef.current = REPLAY_CAMERA_WAIT_NONE
       setReplayArmedState(armed)
       scheduleReplayReconcile(0)
     },
@@ -21236,6 +21311,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         visual: workingVisual,
         diagnostics: {
           wsStatus,
+          // The first recording.status has landed: source picks are no longer
+          // refused with "Checking the current session…".
+          sourceStatusKnown,
           sceneShortcutRequested: sceneShortcutRequestedRef.current,
           sceneShortcutQueued: layoutShortcutTimerRef.current !== null,
           sceneResolveGeneration: savedSceneResolveGenerationRef.current,
@@ -21647,6 +21725,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       patchLayout,
       applyLayoutPatch,
       applyCameraLook,
+      applyCameraBackground,
       undoLayoutPatch,
       patchVideo,
       applyVideoPreset,
@@ -21901,6 +21980,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       patchLayout,
       applyLayoutPatch,
       applyCameraLook,
+      applyCameraBackground,
       undoLayoutPatch,
       patchVideo,
       applyVideoPreset,

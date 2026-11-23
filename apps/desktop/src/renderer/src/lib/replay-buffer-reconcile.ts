@@ -16,6 +16,12 @@ export function replayStartRetryDelayMs(failedStarts: number): number {
   return Math.min(500 * 2 ** Math.max(0, failedStarts - 1), 4000)
 }
 
+/** A camera that says live and sends no frame: its refusals so far, and
+ * whether the ring stopped asking and waits for its first frame
+ * (lib/replay-buffer-camera-wait, lazy). */
+export type ReplayCameraWait = { readonly refusals: number; readonly frames: boolean }
+export const REPLAY_CAMERA_WAIT_NONE: ReplayCameraWait = { refusals: 0, frames: false }
+
 export type ReplayReconcileInput = {
   /** The switch in the Studio: what the user wants. */
   armed: boolean

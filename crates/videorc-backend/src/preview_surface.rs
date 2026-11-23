@@ -2194,6 +2194,112 @@ mod tests {
         )
     }
 
+    /// How long any gated step in these tests may take before the test fails
+    /// with a message. Far above a loaded CI runner's latency, far below the
+    /// job timeout: a stuck step fails the test instead of hanging the job.
+    const GATE_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+    /// A gate a reconcile hook parks on, standing in for slow external work.
+    ///
+    /// `park` hands the worker's queued tasks to another thread before it
+    /// blocks (`block_in_place`). A plain Condvar wait strands the task in
+    /// the worker's LIFO slot, which no other worker can steal; when that task
+    /// had just been handed a Tokio mutex the whole state stays locked until
+    /// the gate opens, and the step under test times out. The wait is bounded,
+    /// and the gate opens when the test's `ReconcileGateRelease` drops, so a
+    /// failed assertion can never leave a runtime worker parked (runtime
+    /// teardown would wait for it forever).
+    #[derive(Clone)]
+    struct ReconcileGate(Arc<(StdMutex<bool>, std::sync::Condvar)>);
+
+    impl ReconcileGate {
+        fn new() -> (Self, ReconcileGateRelease) {
+            let gate = Self(Arc::new((StdMutex::new(false), std::sync::Condvar::new())));
+            (gate.clone(), ReconcileGateRelease(gate))
+        }
+
+        /// Call from inside a reconcile hook on a multi-thread runtime.
+        fn park(&self, what: &str) {
+            tokio::task::block_in_place(|| {
+                let (released, wake) = &*self.0;
+                let (released, _) = wake
+                    .wait_timeout_while(
+                        released.lock().unwrap_or_else(|poison| poison.into_inner()),
+                        GATE_STEP_TIMEOUT,
+                        |released| !*released,
+                    )
+                    .unwrap_or_else(|poison| poison.into_inner());
+                assert!(*released, "{what}: the gate was never opened");
+            });
+        }
+
+        fn open(&self) {
+            let (released, wake) = &*self.0;
+            *released.lock().unwrap_or_else(|poison| poison.into_inner()) = true;
+            wake.notify_all();
+        }
+    }
+
+    /// Opens its gate when dropped, including while a failed test unwinds.
+    struct ReconcileGateRelease(ReconcileGate);
+
+    impl ReconcileGateRelease {
+        fn open(&self) {
+            self.0.open();
+        }
+    }
+
+    impl Drop for ReconcileGateRelease {
+        fn drop(&mut self) {
+            self.0.open();
+        }
+    }
+
+    /// Awaits one gated step, failing the test with `what` instead of hanging.
+    async fn within_gate_timeout<T>(what: &str, step: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(GATE_STEP_TIMEOUT, step)
+            .await
+            .unwrap_or_else(|_| panic!("{what}: still waiting after {GATE_STEP_TIMEOUT:?}"))
+    }
+
+    /// A test that fails before it stops its preview run leaves the render
+    /// loop running. Dropping the runtime must still finish, or the failure
+    /// becomes a test binary that never exits (a CI job hung until cancelled).
+    #[test]
+    fn dropping_a_test_runtime_never_waits_on_a_leftover_preview_run() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _state = runtime.block_on(async {
+            let state = test_state();
+            create_preview_surface(
+                state.clone(),
+                PreviewSurfaceCreateParams {
+                    bounds: bounds(640.0, 360.0),
+                    target_fps: 60,
+                    source: PreviewSurfaceSource::Synthetic,
+                },
+            )
+            .await
+            .expect("preview surface lifecycle available");
+            assert!(
+                compositor_status(&state).await.run_id.is_some(),
+                "a live preview surface owns a running render loop"
+            );
+            state
+        });
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(runtime);
+            let _ = dropped_tx.send(());
+        });
+        dropped_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("dropping the runtime waited on the preview render loop it left running");
+    }
+
     #[test]
     fn surface_render_dimension_scales_to_device_pixels() {
         // Bounds arrive in CSS points; the canvas must render at device pixels.
@@ -2677,8 +2783,7 @@ mod tests {
         .await
         .expect("preview surface lifecycle available");
 
-        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        let blocked_gate = gate.clone();
+        let (gate, release) = ReconcileGate::new();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let update_state = state.clone();
         let update = tokio::spawn(async move {
@@ -2695,16 +2800,12 @@ mod tests {
                     if let Some(entered_tx) = entered_tx.take() {
                         let _ = entered_tx.send(());
                     }
-                    let (released, wake) = &*blocked_gate;
-                    let mut released = released.lock().unwrap();
-                    while !*released {
-                        released = wake.wait(released).unwrap();
-                    }
+                    gate.park("bounds reconcile before resize");
                 },
             )
             .await
         });
-        entered_rx
+        within_gate_timeout("bounds update reaching its resize gate", entered_rx)
             .await
             .expect("bounds update reached external compositor reconcile");
 
@@ -2722,10 +2823,8 @@ mod tests {
             _ => false,
         };
 
-        let (released, wake) = &*gate;
-        *released.lock().unwrap() = true;
-        wake.notify_all();
-        update
+        release.open();
+        within_gate_timeout("released bounds update finishing", update)
             .await
             .expect("bounds update task joined")
             .expect("bounds update completed");
@@ -2754,8 +2853,7 @@ mod tests {
         .await
         .expect("preview surface lifecycle available");
 
-        let gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
-        let blocked_gate = gate.clone();
+        let (blocked_gate, release) = ReconcileGate::new();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let destroy_state = state.clone();
         let destroy = tokio::spawn(async move {
@@ -2768,15 +2866,11 @@ mod tests {
                     return;
                 };
                 let _ = entered_tx.send(());
-                let (released, wake) = &*blocked_gate;
-                let mut released = released.lock().unwrap();
-                while !*released {
-                    released = wake.wait(released).unwrap();
-                }
+                blocked_gate.park("destroy before exact-run stop");
             })
             .await
         });
-        entered_rx
+        within_gate_timeout("destroy reaching its stop gate", entered_rx)
             .await
             .expect("destroy reached exact-run compositor cleanup");
 
@@ -2797,10 +2891,8 @@ mod tests {
         assert_eq!(recreated.state, PreviewSurfaceState::Live);
         assert_eq!((recreated.width, recreated.height), (1600, 900));
 
-        let (released, wake) = &*gate;
-        *released.lock().unwrap() = true;
-        wake.notify_all();
-        let superseded_destroy = destroy
+        release.open();
+        let superseded_destroy = within_gate_timeout("released destroy finishing", destroy)
             .await
             .expect("destroy task joined")
             .expect("preview surface lifecycle available");
@@ -2839,8 +2931,7 @@ mod tests {
         .await
         .expect("preview surface lifecycle available");
 
-        let gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
-        let blocked_gate = gate.clone();
+        let (blocked_gate, release) = ReconcileGate::new();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let destroy_state = state.clone();
         let destroy = tokio::spawn(async move {
@@ -2856,25 +2947,24 @@ mod tests {
                     return;
                 };
                 let _ = entered_tx.send(());
-                let (released, wake) = &*blocked_gate;
-                let mut released = released.lock().unwrap();
-                while !*released {
-                    released = wake.wait(released).unwrap();
-                }
+                blocked_gate.park("destroy before its diagnostics publication");
             })
             .await
         });
-        entered_rx
+        within_gate_timeout("destroy reaching its diagnostics gate", entered_rx)
             .await
             .expect("destroy reached its diagnostics publication fence");
 
-        let recreated = create_preview_surface(
-            state.clone(),
-            PreviewSurfaceCreateParams {
-                bounds: bounds(800.0, 450.0),
-                target_fps: 60,
-                source: PreviewSurfaceSource::Screen,
-            },
+        let recreated = within_gate_timeout(
+            "newer create beside a parked destroy",
+            create_preview_surface(
+                state.clone(),
+                PreviewSurfaceCreateParams {
+                    bounds: bounds(800.0, 450.0),
+                    target_fps: 60,
+                    source: PreviewSurfaceSource::Screen,
+                },
+            ),
         )
         .await
         .expect("newer preview create succeeds");
@@ -2887,10 +2977,8 @@ mod tests {
             diagnostics.preview_source_pixels_present = true;
         }
 
-        let (released, wake) = &*gate;
-        *released.lock().unwrap() = true;
-        wake.notify_all();
-        let stale_reply = destroy
+        release.open();
+        let stale_reply = within_gate_timeout("released destroy finishing", destroy)
             .await
             .expect("destroy task joined")
             .expect("preview surface lifecycle available");
@@ -3008,9 +3096,8 @@ mod tests {
         .await
         .expect("preview surface lifecycle available");
 
-        let gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        let (blocked_gate, release) = ReconcileGate::new();
         let points = Arc::new(StdMutex::new(Vec::new()));
-        let blocked_gate = gate.clone();
         let captured_points = points.clone();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let update_state = state.clone();
@@ -3033,16 +3120,12 @@ mod tests {
                         return;
                     };
                     let _ = entered_tx.send(lifecycle_revision);
-                    let (released, wake) = &*blocked_gate;
-                    let mut released = released.lock().unwrap();
-                    while !*released {
-                        released = wake.wait(released).unwrap();
-                    }
+                    blocked_gate.park("old bounds before resize");
                 },
             )
             .await
         });
-        let old_revision = entered_rx
+        let old_revision = within_gate_timeout("old bounds reaching its resize gate", entered_rx)
             .await
             .expect("old bounds update reached its resize gate");
 
@@ -3060,10 +3143,8 @@ mod tests {
         .expect("preview surface lifecycle available");
         assert_eq!((latest.width, latest.height), (1800, 1000));
 
-        let (released, wake) = &*gate;
-        *released.lock().unwrap() = true;
-        wake.notify_all();
-        let superseded = old_update
+        release.open();
+        let superseded = within_gate_timeout("released old bounds finishing", old_update)
             .await
             .expect("old bounds task joined")
             .expect("preview surface lifecycle available");
@@ -3101,8 +3182,7 @@ mod tests {
         .expect("preview surface lifecycle available");
         let mut events = state.events.subscribe();
 
-        let gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
-        let blocked_gate = gate.clone();
+        let (blocked_gate, release) = ReconcileGate::new();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let old_state = state.clone();
         let old_update = tokio::spawn(async move {
@@ -3119,20 +3199,8 @@ mod tests {
                     let Some(entered_tx) = entered_tx.take() else {
                         return;
                     };
-                    // Hand the worker's queued tasks back to Tokio before blocking:
-                    // a plain Condvar wait can strand the compositor's resize work.
-                    tokio::task::block_in_place(|| {
-                        let _ = entered_tx.send(());
-                        let (released, wake) = &*blocked_gate;
-                        let (released, _) = wake
-                            .wait_timeout_while(
-                                released.lock().unwrap(),
-                                std::time::Duration::from_secs(10),
-                                |released| !*released,
-                            )
-                            .unwrap();
-                        assert!(*released, "old bounds resize gate was not released");
-                    });
+                    let _ = entered_tx.send(());
+                    blocked_gate.park("old bounds before resize");
                 },
             )
             .await
@@ -3152,9 +3220,7 @@ mod tests {
             ),
         )
         .await;
-        let (released, wake) = &*gate;
-        *released.lock().unwrap() = true;
-        wake.notify_all();
+        release.open();
         let old_reply = tokio::time::timeout(std::time::Duration::from_secs(3), old_update)
             .await
             .expect("released old bounds task must finish promptly")
@@ -3190,8 +3256,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn globally_started_preview_is_adopted_when_newer_bounds_win_before_slot_install() {
         let state = test_state();
-        let gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
-        let blocked_gate = gate.clone();
+        let (blocked_gate, release) = ReconcileGate::new();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let create_state = state.clone();
         let create = tokio::spawn(async move {
@@ -3213,18 +3278,15 @@ mod tests {
                         return;
                     };
                     let _ = entered_tx.send(run_id);
-                    let (released, wake) = &*blocked_gate;
-                    let mut released = released.lock().unwrap();
-                    while !*released {
-                        released = wake.wait(released).unwrap();
-                    }
+                    blocked_gate.park("create after start, before adoption");
                 },
             )
             .await
         });
-        let globally_started_run = entered_rx
-            .await
-            .expect("preview start published globally before slot adoption");
+        let globally_started_run =
+            within_gate_timeout("create reaching its adoption gate", entered_rx)
+                .await
+                .expect("preview start published globally before slot adoption");
         assert_eq!(
             compositor_status(&state).await.run_id.as_deref(),
             Some(globally_started_run.as_str())
@@ -3249,10 +3311,8 @@ mod tests {
         .expect("preview surface lifecycle available");
         assert_eq!((latest.width, latest.height), (1600, 900));
 
-        let (released, wake) = &*gate;
-        *released.lock().unwrap() = true;
-        wake.notify_all();
-        let old_create_reply = create
+        release.open();
+        let old_create_reply = within_gate_timeout("released create finishing", create)
             .await
             .expect("create task joined")
             .expect("preview surface lifecycle available");
@@ -3294,8 +3354,7 @@ mod tests {
         suspension.restored = true;
         drop(suspension);
 
-        let gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
-        let blocked_gate = gate.clone();
+        let (blocked_gate, release) = ReconcileGate::new();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let restore_state = state.clone();
         let restore = tokio::spawn(async move {
@@ -3313,18 +3372,15 @@ mod tests {
                         return;
                     };
                     let _ = entered_tx.send(run_id);
-                    let (released, wake) = &*blocked_gate;
-                    let mut released = released.lock().unwrap();
-                    while !*released {
-                        released = wake.wait(released).unwrap();
-                    }
+                    blocked_gate.park("restore after start, before adoption");
                 },
             )
             .await
         });
-        let restore_started_run = entered_rx
-            .await
-            .expect("D3D11 restore published a global preview run before slot adoption");
+        let restore_started_run =
+            within_gate_timeout("restore reaching its adoption gate", entered_rx)
+                .await
+                .expect("D3D11 restore published a global preview run before slot adoption");
 
         let updated = tokio::time::timeout(
             std::time::Duration::from_secs(3),
@@ -3344,10 +3400,8 @@ mod tests {
             Some(restore_started_run.as_str())
         );
 
-        let (released, wake) = &*gate;
-        *released.lock().unwrap() = true;
-        wake.notify_all();
-        restore
+        release.open();
+        within_gate_timeout("released restore finishing", restore)
             .await
             .expect("restore task joined")
             .expect("the adopted restore run satisfies the reservation");
@@ -3380,8 +3434,7 @@ mod tests {
         suspension.restored = true;
         drop(suspension);
 
-        let gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
-        let blocked_gate = gate.clone();
+        let (blocked_gate, release) = ReconcileGate::new();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let restore_state = state.clone();
         let restore = tokio::spawn(async move {
@@ -3400,16 +3453,12 @@ mod tests {
                         return;
                     };
                     let _ = entered_tx.send(());
-                    let (released, wake) = &*blocked_gate;
-                    let mut released = released.lock().unwrap();
-                    while !*released {
-                        released = wake.wait(released).unwrap();
-                    }
+                    blocked_gate.park("restore after start, before adoption");
                 },
             )
             .await
         });
-        entered_rx
+        within_gate_timeout("restore reaching its adoption gate", entered_rx)
             .await
             .expect("D3D11 restore reached its pre-adoption gap");
 
@@ -3423,11 +3472,11 @@ mod tests {
         assert_eq!(stopped.state, PreviewSurfaceState::Stopped);
         assert!(compositor_status(&state).await.run_id.is_none());
 
-        let (released, wake) = &*gate;
-        *released.lock().unwrap() = true;
-        wake.notify_all();
+        release.open();
         assert_eq!(
-            restore.await.expect("restore task joined"),
+            within_gate_timeout("released restore finishing", restore)
+                .await
+                .expect("restore task joined"),
             Err(PreviewCompositorRestoreSkip::SurfaceChanged)
         );
         assert!(compositor_status(&state).await.run_id.is_none());

@@ -6,11 +6,14 @@ import {
   CAMERA_BACKGROUND_OUTPUTS,
   IMAGE_ASSET_ID,
   cameraBackgroundFor,
+  controlChoiceFor,
+  controlsMatchPass,
   effectRequestFrom,
   expectationFor,
   finalVerdict,
   isFullPass,
   judgeStall,
+  layoutBackgroundFromControls,
   neutralGroundFraction,
   parseSmokeArgs,
   passesFor,
@@ -90,6 +93,34 @@ describe('camera background smoke plan', () => {
       assert.equal(cameraBackgroundFor(pass).mode, 'blur')
     }
     assert.throws(() => cameraBackgroundFor('sepia'), /unknown pass/)
+  })
+
+  it('turns each pass on through the Studio tile a streamer clicks (plan 258 S5)', () => {
+    assert.equal(controlChoiceFor('off'), 'off')
+    assert.equal(controlChoiceFor('strong-blur'), 'strong-blur')
+    assert.equal(controlChoiceFor('slight-blur'), 'slight-blur')
+    assert.equal(controlChoiceFor('image'), `image:${IMAGE_ASSET_ID}`)
+    for (const pass of ['stall', 'camera-switch-record', 'relaunch'])
+      assert.equal(controlChoiceFor(pass), 'strong-blur')
+  })
+
+  it('reads the pass from the renderer’s stored background, and sends none for Off', () => {
+    const strong = { mode: 'blur', blurPct: 70, edges: 'balanced' }
+    assert.equal(controlsMatchPass('off', null), true)
+    assert.equal(controlsMatchPass('off', { ...strong, mode: 'off' }), true)
+    assert.equal(controlsMatchPass('off', strong), false)
+    assert.equal(controlsMatchPass('strong-blur', strong), true)
+    assert.equal(controlsMatchPass('relaunch', strong), true)
+    assert.equal(controlsMatchPass('strong-blur', { ...strong, blurPct: 30 }), false)
+    assert.equal(controlsMatchPass('strong-blur', null), false)
+    assert.equal(
+      controlsMatchPass('image', { ...strong, mode: 'image', assetId: IMAGE_ASSET_ID }),
+      true
+    )
+    assert.equal(controlsMatchPass('image', { ...strong, mode: 'image', assetId: 'other' }), false)
+    assert.equal(layoutBackgroundFromControls(null), null)
+    assert.equal(layoutBackgroundFromControls({ ...strong, mode: 'off' }), null)
+    assert.equal(layoutBackgroundFromControls(strong), strong)
   })
 
   it('reads whether the stage applied the background from the camera status', () => {

@@ -77,6 +77,38 @@ export function cameraBackgroundFor(pass) {
   }
 }
 
+/**
+ * Plan 258 S5: the Background tile the smoke clicks in the Studio for a
+ * pass, so the effect is turned on the way a streamer does it (the
+ * per-camera setting, which every renderer commit carries), never put on
+ * the layout by the smoke.
+ */
+export function controlChoiceFor(pass) {
+  const background = cameraBackgroundFor(pass)
+  if (!background) return 'off'
+  if (background.mode === 'image') return `image:${background.assetId}`
+  return background.blurPct === 30 ? 'slight-blur' : 'strong-blur'
+}
+
+/**
+ * Whether the renderer's stored background for the camera (the settings'
+ * `cameraBackgrounds[cameraId]`, or null) is the pass's: the same mode, the
+ * same strength for a blur, the same picture for an image; Off for null.
+ */
+export function controlsMatchPass(pass, stored) {
+  const wanted = cameraBackgroundFor(pass)
+  if (!wanted) return !stored || stored.mode === 'off'
+  if (!stored || stored.mode !== wanted.mode) return false
+  if (wanted.mode === 'blur') return stored.blurPct === wanted.blurPct
+  if (wanted.mode === 'image') return stored.assetId === wanted.assetId
+  return true
+}
+
+/** The layout's `cameraBackground` from the renderer's stored one: none while Off, as the renderer sends it. */
+export function layoutBackgroundFromControls(stored) {
+  return stored && stored.mode !== 'off' ? stored : null
+}
+
 /** `--effect <name>` (or `--effect=<name>`); Off by default. */
 export function parseSmokeArgs(argv) {
   let effect = 'off'
