@@ -16,7 +16,7 @@ import { cn } from '@/lib/utils'
 // lazy chunk loads this module and its two pictures, never the launch bundle.
 
 /** The blur in the picture's own units (160 wide), Slight and Strong. */
-const BLUR_DEVIATION = { slight: 1.6, strong: 4.5 } as const
+const BLUR_DEVIATION = { slight: 2.2, strong: 5.5 } as const
 
 const SCREEN_FILL = { green: '#1fae4b', blue: '#2456d6' } as const
 
