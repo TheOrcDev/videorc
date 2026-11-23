@@ -5,13 +5,10 @@ import {
   greenScreenColor,
   greenScreenCommandLabel,
   greenScreenLabel,
-  greenScreenMode,
-  greenScreenModePatch,
-  GREEN_SCREEN_MODES,
-  openSceneGreenScreen,
-  requestSceneGreenScreen,
-  SCENE_GREEN_SCREEN_EVENT,
-  takeSceneGreenScreenRequest
+  openSceneBackground,
+  requestSceneBackground,
+  SCENE_BACKGROUND_EVENT,
+  takeSceneBackgroundRequest
 } from './green-screen'
 import { WORKSPACE_NAVIGATE_EVENT } from './workspace-navigation'
 
@@ -37,43 +34,9 @@ describe('green screen words', () => {
   })
 })
 
-describe('the key as one choice (plan 248)', () => {
-  it('offers Off, Green screen and Blue screen, in that order', () => {
-    expect(GREEN_SCREEN_MODES.map((mode) => mode.label)).toEqual([
-      'Off',
-      'Green screen',
-      'Blue screen'
-    ])
-  })
-
-  it('reads Off while the key is off, whatever colour it keeps', () => {
-    expect(
-      greenScreenMode({ cameraChromaKeyEnabled: false, cameraChromaKeyColor: '#0000FF' })
-    ).toBe('off')
-    expect(greenScreenMode({ cameraChromaKeyEnabled: true, cameraChromaKeyColor: '#0000ff' })).toBe(
-      'blue'
-    )
-    expect(greenScreenMode({ cameraChromaKeyEnabled: true, cameraChromaKeyColor: '#00FF00' })).toBe(
-      'green'
-    )
-  })
-
-  it('makes one patch per pick, and Off keeps the colour', () => {
-    expect(greenScreenModePatch('off')).toEqual({ cameraChromaKeyEnabled: false })
-    expect(greenScreenModePatch('green')).toEqual({
-      cameraChromaKeyEnabled: true,
-      cameraChromaKeyColor: '#00FF00'
-    })
-    expect(greenScreenModePatch('blue')).toEqual({
-      cameraChromaKeyEnabled: true,
-      cameraChromaKeyColor: '#0000FF'
-    })
-  })
-})
-
-describe('the Scene page request', () => {
+describe('the Scene page request for the camera’s Background section', () => {
   afterEach(() => {
-    takeSceneGreenScreenRequest()
+    takeSceneBackgroundRequest()
     vi.unstubAllGlobals()
   })
 
@@ -96,16 +59,16 @@ describe('the Scene page request', () => {
 
   it('waits for the page and is taken once', () => {
     const events = stubWindow()
-    requestSceneGreenScreen()
-    expect(events).toEqual([SCENE_GREEN_SCREEN_EVENT])
-    expect(takeSceneGreenScreenRequest()).toBe(true)
-    expect(takeSceneGreenScreenRequest()).toBe(false)
+    requestSceneBackground()
+    expect(events).toEqual([SCENE_BACKGROUND_EVENT])
+    expect(takeSceneBackgroundRequest()).toBe(true)
+    expect(takeSceneBackgroundRequest()).toBe(false)
   })
 
   it('asks first, then opens the Scene page', () => {
     const events = stubWindow()
-    openSceneGreenScreen()
-    expect(events).toEqual([SCENE_GREEN_SCREEN_EVENT, WORKSPACE_NAVIGATE_EVENT])
-    expect(takeSceneGreenScreenRequest()).toBe(true)
+    openSceneBackground()
+    expect(events).toEqual([SCENE_BACKGROUND_EVENT, WORKSPACE_NAVIGATE_EVENT])
+    expect(takeSceneBackgroundRequest()).toBe(true)
   })
 })

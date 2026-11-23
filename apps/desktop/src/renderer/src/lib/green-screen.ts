@@ -1,12 +1,11 @@
 import type { LayoutSettings } from '@/lib/backend'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
-// Green screen in reach: the camera's chroma key had one home, the last
-// section of the camera's inspector on the Scene page, and nothing else
-// named it. The Studio's Camera row now picks it in one click (Off, Green
-// screen or Blue screen, plan 248), and ⌘K finds it by the words people use
-// for it. The tuning (similarity, smoothness, spill, edges) stays on the
-// Scene page, which picks with the same three choices.
+// Green screen in reach: ⌘K finds the camera's key by the words people use
+// for it. Since plan 258 S5 the key is two choices of the camera's one
+// Background pick (Off, a blur, a picture, Green screen, Blue screen), kept
+// per camera; the Studio's Camera row and the Scene page's Background
+// section pick it, and the tuning stays on the Scene page.
 
 // The two real-world screen colours; the protocol takes any #RRGGBB, so a
 // custom picker later needs no wire change.
@@ -42,30 +41,6 @@ export function chromaKeyHex(color: GreenScreenColor): string {
   return color === 'blue' ? CHROMA_KEY_BLUE : CHROMA_KEY_GREEN
 }
 
-/**
- * The key as one choice: Off, or on with its colour. Enabled and colour stay
- * two fields on the wire; Off keeps the colour, so the Scene page's tuning and
- * a later Green or Blue pick find it as it was.
- */
-export type GreenScreenMode = 'off' | GreenScreenColor
-
-export const GREEN_SCREEN_MODES: readonly { value: GreenScreenMode; label: string }[] = [
-  { value: 'off', label: 'Off' },
-  { value: 'green', label: 'Green screen' },
-  { value: 'blue', label: 'Blue screen' }
-]
-
-export function greenScreenMode(layout: KeyLayout): GreenScreenMode {
-  return layout.cameraChromaKeyEnabled ? greenScreenColor(layout) : 'off'
-}
-
-/** The one layout patch a pick makes: Off touches only the switch. */
-export function greenScreenModePatch(mode: GreenScreenMode): Partial<KeyLayout> {
-  return mode === 'off'
-    ? { cameraChromaKeyEnabled: false }
-    : { cameraChromaKeyEnabled: true, cameraChromaKeyColor: chromaKeyHex(mode) }
-}
-
 /** The control's name: "Blue screen" once a blue key is on, else "Green screen". */
 export function greenScreenLabel(layout: KeyLayout): string {
   return layout.cameraChromaKeyEnabled && greenScreenColor(layout) === 'blue'
@@ -80,30 +55,29 @@ export function greenScreenCommandLabel(layout: KeyLayout): string {
     : 'Turn on green screen'
 }
 
-export const GREEN_SCREEN_SETTINGS_LABEL = 'Green screen settings'
-
 // The Scene page mounts only while it is open, so a request to show the
-// Green screen section waits here until the page reads it. A page that is
-// already open hears the event instead.
-export const SCENE_GREEN_SCREEN_EVENT = 'videorc:scene-green-screen'
+// camera's Background section (plan 258 S5: it replaced Green screen in
+// place) waits here until the page reads it. A page that is already open
+// hears the event instead.
+export const SCENE_BACKGROUND_EVENT = 'videorc:scene-camera-background'
 
-let greenScreenRequested = false
+let backgroundRequested = false
 
-/** Asks the Scene page to select the camera and bring Green screen into view. */
-export function requestSceneGreenScreen(): void {
-  greenScreenRequested = true
-  window.dispatchEvent(new CustomEvent(SCENE_GREEN_SCREEN_EVENT))
+/** Asks the Scene page to select the camera and bring Background into view. */
+export function requestSceneBackground(): void {
+  backgroundRequested = true
+  window.dispatchEvent(new CustomEvent(SCENE_BACKGROUND_EVENT))
 }
 
-/** Opens the Scene page on the camera, with Green screen in view. */
-export function openSceneGreenScreen(): void {
-  requestSceneGreenScreen()
+/** Opens the Scene page on the camera, with its Background section in view (the home). */
+export function openSceneBackground(): void {
+  requestSceneBackground()
   openWorkspaceTab('layouts')
 }
 
 /** True once per request: the Scene page takes it and the request is gone. */
-export function takeSceneGreenScreenRequest(): boolean {
-  const requested = greenScreenRequested
-  greenScreenRequested = false
+export function takeSceneBackgroundRequest(): boolean {
+  const requested = backgroundRequested
+  backgroundRequested = false
   return requested
 }

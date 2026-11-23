@@ -23,6 +23,7 @@ const mocked = vi.hoisted(() => ({
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
   useStudioPreview: () => mocked.preview,
+  useStudioCloud: () => ({ cloudStatus: null }),
   // The Chat row under Captions (plan 213 B1), idle.
   useStudioChat: () => ({
     liveChatSnapshot: { providers: [], messages: [], unreadCount: 0, updatedAt: '' },
@@ -30,6 +31,9 @@ vi.mock('@/hooks/use-studio', () => ({
   }),
   useStudioRecordingState: () => ({ recording: { state: 'idle' } }),
   useStudioShell: () => ({ openCommentsWindow: vi.fn(), runtimeInfo: { platform: 'darwin' } })
+}))
+vi.mock('@/hooks/use-background-assets', () => ({
+  useBackgroundAssets: () => ({ registry: { slots: [], assets: {} } })
 }))
 vi.mock('@/components/workspace-nav', () => ({
   useWorkspaceNav: () => ({ openSettings: vi.fn(), openStudioPanel: vi.fn(), setActive: vi.fn() }),
@@ -291,6 +295,8 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
       systemAudioConfirmed: null,
       systemAudioIssue: null,
       settings: {},
+      applyCameraBackground: vi.fn(),
+      runtimeInfo: { platform: 'darwin' },
       screenPrivacy: { hidden: false },
       ...extra
     }
@@ -309,26 +315,23 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
     const cog = (sources ?? '').indexOf('aria-label="Open Sources"')
     expect(cog).toBeGreaterThan((sources ?? '').indexOf('aria-label="Camera"'))
     // System audio is in Audio since plan 201.
-    // Green screen under the Camera picker: Off, Green screen or Blue screen,
-    // with no label and no Adjust (plan 248). The Screen lives with the scene
-    // that shows it (plan 231 D8).
-    expect(rowLabels(sources ?? '')).toEqual(['Camera'])
-    const greenScreen = (sources ?? '').split('data-testid="green-screen"')[1] ?? ''
-    expect(greenScreen).toMatch(
-      /aria-label="Green screen"[^>]*role="radiogroup"|role="radiogroup"[^>]*aria-label="Green screen"/
-    )
-    expect(
-      [...greenScreen.matchAll(/role="radio"[^>]*>(?:<span[^>]*>)?([^<]+)</g)].map(
-        (match) => match[1]
-      )
-    ).toEqual(['Off', 'Green screen', 'Blue screen'])
-    expect(greenScreen).toMatch(/aria-checked="true"[^>]*role="radio"[^>]*><span[^>]*>Off</)
+    // Background under the Camera picker (plan 258 S5, where plan 248's
+    // Green screen was): the pick lit on the screen, opening the picker; no
+    // Adjust. The Screen lives with the scene that shows it (plan 231 D8).
+    expect(rowLabels(sources ?? '')).toEqual(['Camera', 'Background'])
+    const background =
+      /<button[^>]*data-videorc-camera-background-trigger[^>]*>[\s\S]*?<\/button>/.exec(
+        sources ?? ''
+      )?.[0] ?? ''
+    expect(background).toContain('aria-label="Background: Off"')
+    expect(background).toContain('>Off<')
+    expect(sources).not.toContain('role="radiogroup"')
     expect(sources).not.toContain('Adjust')
     expect(sources).not.toContain('System audio')
     expect(/<button[^>]*aria-label="Camera"[^>]*>/.exec(markup)?.[0]).toContain('role="combobox"')
     expect(markup).not.toContain('aria-label="Screen"')
     expect(markup).not.toContain('Hide screen')
-    // No switch: Green screen is a pick, and System audio lives in Audio.
+    // No switch: Background is a pick, and System audio lives in Audio.
     expect(sources).not.toContain('role="switch"')
     // Captions: under no heading, a door to its page (B-13, B-15).
     expect(captions).not.toContain('<h2')
@@ -360,7 +363,7 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
     const line = markup.split('data-slot="camera-system-effect"')[1] ?? ''
     expect(line).toContain('macOS is blurring this camera (Video menu, Portrait).')
     expect(markup.indexOf('data-slot="camera-system-effect"')).toBeGreaterThan(
-      markup.indexOf('data-testid="green-screen"')
+      markup.indexOf('data-videorc-camera-background-trigger')
     )
   })
 

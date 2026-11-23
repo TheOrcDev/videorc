@@ -3417,7 +3417,7 @@ pub async fn latest_preview_camera_bmp(
     requested_max_width: Option<u32>,
     cursor: Option<PreviewBmpCursor>,
 ) -> Option<LatestPreviewBmpPoll> {
-    let (generation, frame) = {
+    let (generation, frame, shared, raw_epoch) = {
         let slot = state.preview_camera.lock().await;
         let active = slot.active.as_ref()?;
         let generation = slot.run_id.clone()?;
@@ -3426,24 +3426,82 @@ pub async fn latest_preview_camera_bmp(
         let guard = shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (generation, guard.frame_store.latest()?)
+        let frame = guard.frame_store.latest()?;
+        let raw_epoch = guard.effect.raw_read_epoch();
+        drop(guard);
+        (generation, frame, shared, raw_epoch)
     };
 
     let max_width = preview_camera_png_max_width(requested_max_width);
     tokio::task::spawn_blocking(move || {
-        encode_latest_bgra_bmp(
-            cursor.as_ref(),
-            generation,
-            frame.sequence,
-            frame.width,
-            frame.height,
-            &frame.bytes,
-            max_width,
-        )
+        let poll = camera_bmp_poll(&generation, &frame, cursor.as_ref(), max_width)?;
+        // Plan 258 S5 (D2): a frame read while the stage was off is raw. If
+        // an effect armed while it was being copied, arming replaced it in
+        // the store, so this copy must never be served: the next poll reads
+        // the cover. Checked after the copy, under the store's lock.
+        if let Some(epoch) = raw_epoch {
+            let guard = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.effect.raw_read_epoch() != Some(epoch) {
+                return None;
+            }
+        }
+        Some(poll)
     })
     .await
     .ok()
     .flatten()
+}
+
+/// The BMP poll for one stored camera frame (`None` when it can't be read).
+fn camera_bmp_poll(
+    generation: &str,
+    frame: &FrameHandle<PreviewCameraPixelFormat>,
+    cursor: Option<&PreviewBmpCursor>,
+    max_width: u32,
+) -> Option<LatestPreviewBmpPoll> {
+    // Plan 258 S5: on macOS the store's frames are zero-copy pixel
+    // buffers with no CPU bytes (the stage's processed buffers too), so
+    // the Studio's "What viewers see" picture reads the buffer itself.
+    // Only for a frame the caller has not seen: an unchanged poll copies
+    // nothing.
+    let unchanged = cursor
+        .is_some_and(|cursor| cursor.generation == generation && frame.sequence <= cursor.sequence);
+    let surface_bytes = if frame.bytes.is_empty() && !unchanged {
+        camera_frame_surface_bgra(frame)
+    } else {
+        None
+    };
+    encode_latest_bgra_bmp(
+        cursor,
+        generation.to_string(),
+        frame.sequence,
+        frame.width,
+        frame.height,
+        surface_bytes.as_deref().unwrap_or(&frame.bytes),
+        max_width,
+    )
+}
+
+/// A zero-copy camera frame's BGRA, read from its retained pixel buffer
+/// (locked read-only). `None` off macOS, for a frame without one, or for a
+/// buffer that is not the frame's size in BGRA.
+fn camera_frame_surface_bgra(frame: &FrameHandle<PreviewCameraPixelFormat>) -> Option<Vec<u8>> {
+    #[cfg(target_os = "macos")]
+    {
+        let expected = frame.width as usize * frame.height as usize * 4;
+        frame
+            .source_pixel_buffer
+            .as_ref()
+            .and_then(|buffer| crate::camera_effect_metal::read_bgra(buffer.pixel_buffer()))
+            .filter(|bytes| bytes.len() == expected)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = frame;
+        None
+    }
 }
 
 fn encode_preview_camera_png(
@@ -12463,5 +12521,59 @@ Error opening input file video=HP HD Camera."#;
             slot.live_acked_at = None;
         }
         assert!(camera_live_session_is_frameless_zombie(&state).await);
+    }
+
+    /// Plan 258 S5: the Studio's "What viewers see" picture reads the
+    /// camera store, and on macOS a zero-copy frame has no CPU bytes, so
+    /// the BMP transport reads the retained pixel buffer instead.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_zero_copy_camera_frame_reads_its_pixels_from_the_buffer() {
+        use crate::frame_store::RetainedPixelBuffer;
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferLockBaseAddress,
+            CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        };
+        let (width, height) = (8usize, 4usize);
+        let Some(pixel_buffer) =
+            crate::metal_compositor::make_test_iosurface_bgra_pixel_buffer(width, height)
+        else {
+            eprintln!("skipped: no local IOSurface allocation");
+            return;
+        };
+        unsafe {
+            assert_eq!(
+                CVPixelBufferLockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags(0)),
+                0
+            );
+            let base = CVPixelBufferGetBaseAddress(&pixel_buffer).cast::<u8>();
+            let stride = CVPixelBufferGetBytesPerRow(&pixel_buffer);
+            for y in 0..height {
+                for x in 0..width {
+                    let pixel = base.add(y * stride + x * 4);
+                    std::ptr::copy_nonoverlapping([10u8, 20, 30, 255].as_ptr(), pixel, 4);
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags(0));
+        }
+        let mut store = FrameStore::<PreviewCameraPixelFormat>::new(1);
+        let frame = store.publish_with_source_handles(
+            1,
+            width as u32,
+            height as u32,
+            PreviewCameraPixelFormat::Bgra8,
+            Instant::now(),
+            Vec::new(),
+            None,
+            Some(RetainedPixelBuffer::new(pixel_buffer)),
+        );
+        assert!(frame.bytes.is_empty());
+        let bytes = camera_frame_surface_bgra(&frame).expect("the buffer's pixels");
+        assert_eq!(bytes.len(), width * height * 4);
+        assert!(
+            bytes
+                .chunks_exact(4)
+                .all(|pixel| pixel == [10, 20, 30, 255])
+        );
     }
 }

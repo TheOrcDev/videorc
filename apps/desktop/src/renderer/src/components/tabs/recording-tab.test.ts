@@ -22,6 +22,10 @@ import { RecordingTab, SAVE_RECORDING_OFF, SAVE_RECORDING_ON } from './recording
 // resolution picker: its Output row opens this page (S3.3, B-15).
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
+// Plan 258 S5: the Camera row's Background reads the Images library.
+vi.mock('@/hooks/use-background-assets', () => ({
+  useBackgroundAssets: () => ({ registry: { slots: [], assets: {} } })
+}))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
   // Plan 224 D10: no room is open; the local file's rows read as today.

@@ -1,6 +1,15 @@
-import { type AppIcon, CameraIcon, CaptionsIcon, ChatIcon, InfoIcon } from '@/components/icons'
+import {
+  type AppIcon,
+  CameraIcon,
+  CaptionsIcon,
+  ChatIcon,
+  InfoIcon,
+  WarningIcon
+} from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
+import { CameraBackgroundLine } from '@/components/camera-background/camera-background-popover'
+import { useCameraBackground } from '@/components/camera-background/use-camera-background'
 import { DevicePicker } from '@/components/device-picker'
 import { GroupedList } from '@/components/list-row'
 import { NavigableRow } from '@/components/navigable-row'
@@ -8,7 +17,6 @@ import { PanelSection } from '@/components/panel-section'
 import { OpenPageCog } from '@/components/studio/open-page-cog'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { useWorkspaceNav } from '@/components/workspace-nav'
-import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import {
   useStudioChat,
@@ -17,17 +25,12 @@ import {
   useStudioRecordingState,
   useStudioShell
 } from '@/hooks/use-studio'
+import { cameraBackgroundStageLine } from '@/lib/camera-background-view'
 import { cameraSystemEffectLine } from '@/lib/camera-system-effect'
 import { buildCameraSources, sourceStandIn, type SourceStandIn } from '@/lib/capture'
 import { shortcutAccelerator } from '@/lib/shortcuts'
 import { standInLine } from '@/lib/source-status'
 import { captionsStatusLabel } from '@/lib/state-labels'
-import {
-  GREEN_SCREEN_MODES,
-  type GreenScreenMode,
-  greenScreenMode,
-  greenScreenModePatch
-} from '@/lib/green-screen'
 import { chatDoorNewLabel } from '@/lib/studio-chat'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { systemAudioRowDevice, systemAudioSwitchView } from '@/lib/system-audio'
@@ -58,7 +61,7 @@ export function QuickSettings(): ReactElement {
     cameras,
     selectedCameraId,
     cameraStandIn,
-    greenScreen
+    cameraBackground
   } = useStudioSources()
 
   return (
@@ -74,7 +77,8 @@ export function QuickSettings(): ReactElement {
             footer={
               <>
                 <StandInLine standIn={cameraStandIn} />
-                <GreenScreenLine control={greenScreen} />
+                <CameraBackgroundLine control={cameraBackground} />
+                <BackgroundStageLine />
                 <SystemEffectLine />
               </>
             }
@@ -205,7 +209,7 @@ function InspectorRow({
   label: string
   /** A live-switch status line under the row; collapses when it renders nothing. */
   status?: ReactNode
-  /** The row's own lines under its status (the Camera row's Green screen). */
+  /** The row's own lines under its status (the Camera row's Background). */
   footer?: ReactNode
   /** A compact action at the row's right end, after its control (the Camera row's cog). */
   trailing?: ReactNode
@@ -271,52 +275,34 @@ export function useCameraSystemEffectLine(): string | null {
 }
 
 /**
- * Green screen on the Camera row: the camera's chroma key picked in one
- * click, without leaving the Studio (plan 248): Off, Green screen or Blue
- * screen, with no title, because the choices name themselves. The line is one
- * height whatever is picked, so nothing below it moves. The tuning stays on
- * the Scene page (⌘K "Green screen settings"). Like Hide screen it is a line
- * of the row it belongs to, never beside Record and Go Live (owner,
- * 2026-10-12). The stage shows the change, so no toast.
+ * Plan 258 S5 (mockup §3): the camera effect stage is covering for itself
+ * (2 s of cover) or can't run here. One line under the Background trigger,
+ * beside S4's system effect line, never a toast; viewers see the cover,
+ * never the room, and the line says what they see. Its own component, so
+ * the camera status's updates re-render this line and nothing else.
  */
-function GreenScreenLine({ control }: { control: GreenScreenControl }): ReactElement | null {
-  if (!control.available) return null
+function BackgroundStageLine(): ReactElement {
+  const line = useCameraBackgroundStageLine()
   return (
-    <div
-      className="flex min-h-8 items-center pr-1 pb-2 pl-9.5"
-      data-mode={control.mode}
-      data-slot="green-screen"
-    >
-      <SegmentedControl
-        aria-label="Green screen"
-        className="w-full"
-        data-videorc-green-screen=""
-        options={GREEN_SCREEN_LINE_OPTIONS}
-        size="sm"
-        value={control.mode}
-        onValueChange={control.setMode}
-      />
+    <div aria-live="polite" className="empty:hidden">
+      {line ? (
+        <p
+          className="flex items-start gap-1.5 px-3 pb-2 pl-9.5 text-xs text-muted-foreground"
+          data-slot="camera-background-stage"
+        >
+          <WarningIcon aria-hidden className="mt-px size-3.5 shrink-0 tone-warning" />
+          <span className="min-w-0">{line}</span>
+        </p>
+      ) : null}
     </div>
   )
 }
 
-// Off takes the room its word needs; the two screens share the rest evenly.
-const GREEN_SCREEN_LINE_OPTIONS: SegmentedControlOption<GreenScreenMode>[] = GREEN_SCREEN_MODES.map(
-  ({ value, label }) => ({
-    value,
-    label,
-    className: value === 'off' ? 'flex-none' : undefined,
-    'data-videorc-green-screen-mode': value
-  })
-)
-
-/** What both looks' Green screen controls show and do (the row and the Retro LCD's). */
-export interface GreenScreenControl {
-  /** Off, or the key's colour while it is on. */
-  mode: GreenScreenMode
-  /** False while the camera is Off: there is nothing to key. */
-  available: boolean
-  setMode: (mode: GreenScreenMode) => void
+/** Both looks' stage line (plan 258 S5): the copy for the camera in use, or null. */
+export function useCameraBackgroundStageLine(): string | null {
+  return (
+    cameraBackgroundStageLine(useStudioPreview().previewCameraStatus.cameraBackground)?.text ?? null
+  )
 }
 
 /**
@@ -339,8 +325,7 @@ export function useStudioSources() {
     systemAudioConfirmed,
     systemAudioJoining,
     systemAudioIssue,
-    runtimeInfo,
-    applyLayoutPatch
+    runtimeInfo
   } = useStudioCore()
   const { openSettings, openStudioPanel } = useWorkspaceNav()
   const systemAudio = systemAudioSwitchView({
@@ -361,13 +346,9 @@ export function useStudioSources() {
   const { sources } = captureConfig
   const selectedCameraId = sources.cameraId ?? sources.wantedCameraId
   const cameraStandIn = sourceStandIn(sources, 'camera', deviceList.devices)
-  // The camera's key, by the Scene page's own layout patch, so a session on
-  // air takes it like an edit there.
-  const greenScreen: GreenScreenControl = {
-    mode: greenScreenMode(captureConfig.layout),
-    available: Boolean(selectedCameraId),
-    setMode: (mode) => applyLayoutPatch(greenScreenModePatch(mode))
-  }
+  // Plan 258 S5: the camera's one Background pick (a blur, a picture or a
+  // screen), kept per camera; both looks show the same control.
+  const cameraBackground = useCameraBackground()
   return {
     captureConfig,
     setCaptureConfig,
@@ -384,6 +365,6 @@ export function useStudioSources() {
     cameras,
     selectedCameraId,
     cameraStandIn,
-    greenScreen
+    cameraBackground
   }
 }

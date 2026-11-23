@@ -35,7 +35,9 @@ describe('CameraResetButton (plan 174 S0.3, C-18)', () => {
     await act(async () => trigger.click())
     const dialog = byTestId('camera-reset-dialog')
     expect(dialog?.textContent).toContain('Reset camera settings?')
-    expect(dialog?.textContent).toContain('Placement, frame, lens and chroma key')
+    expect(dialog?.textContent).toContain('Placement, frame and lens')
+    // Plan 258 S5: the background (with the key) is the camera's and stays.
+    expect(dialog?.textContent).toContain('the background stay')
     await act(async () => byTestId('camera-reset-cancel')!.click())
     expect(onReset).not.toHaveBeenCalled()
     await act(async () => trigger.click())
@@ -44,14 +46,15 @@ describe('CameraResetButton (plan 174 S0.3, C-18)', () => {
     expect(byTestId('camera-reset-dialog')).toBeNull()
   })
 
-  it('keeps the nineteen shipped defaults', () => {
-    expect(Object.keys(CAMERA_SETTINGS_DEFAULTS)).toHaveLength(19)
+  it('keeps the thirteen shipped defaults, and never the key or the background (plan 258 S5)', () => {
+    expect(Object.keys(CAMERA_SETTINGS_DEFAULTS)).toHaveLength(13)
     expect(CAMERA_SETTINGS_DEFAULTS).toMatchObject({
       cameraTransformMode: 'preset',
-      cameraCorner: 'bottom-right',
-      cameraChromaKeyEnabled: false,
-      // Plan 227 B: the key's Hide edges reset with the key.
-      cameraChromaKeyEdges: { leftPct: 0, topPct: 0, rightPct: 0, bottomPct: 0 }
+      cameraCorner: 'bottom-right'
     })
+    expect(
+      Object.keys(CAMERA_SETTINGS_DEFAULTS).some((key) => key.startsWith('cameraChromaKey'))
+    ).toBe(false)
+    expect(CAMERA_SETTINGS_DEFAULTS).not.toHaveProperty('cameraBackground')
   })
 })

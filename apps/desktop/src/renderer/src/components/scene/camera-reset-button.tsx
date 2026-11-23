@@ -3,12 +3,12 @@ import { useState, type ReactElement } from 'react'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Button } from '@/components/ui/button'
-import { defaultCaptureConfig, NO_CAMERA_KEY_EDGES } from '@/lib/capture'
 
 /**
- * The shipped camera defaults: placement, frame, lens and chroma key. Never
- * the layout preset or the selected sources (owner request, 2026-08-19). The
- * key colour is the capture default, never a literal here (the style guard).
+ * The shipped camera defaults: placement, frame and lens. Never the layout
+ * preset or the selected sources (owner request, 2026-08-19), and never the
+ * camera's background (plan 258 S5): the green or blue screen moved into it,
+ * kept per camera, and a reset that turned a blur off would show the room.
  */
 export const CAMERA_SETTINGS_DEFAULTS = {
   cameraTransformMode: 'preset',
@@ -23,13 +23,7 @@ export const CAMERA_SETTINGS_DEFAULTS = {
   cameraMirror: false,
   cameraZoom: 100,
   cameraOffsetX: 0,
-  cameraOffsetY: 0,
-  cameraChromaKeyEnabled: false,
-  cameraChromaKeyColor: defaultCaptureConfig.layout.cameraChromaKeyColor,
-  cameraChromaKeySimilarityPct: 40,
-  cameraChromaKeySmoothnessPct: 8,
-  cameraChromaKeySpillPct: 10,
-  cameraChromaKeyEdges: NO_CAMERA_KEY_EDGES
+  cameraOffsetY: 0
 } as const
 
 /**
@@ -51,7 +45,7 @@ export function CameraResetButton({
       </Button>
       <ConfirmDialog
         confirmLabel="Reset camera settings"
-        description="Placement, frame, lens and chroma key go back to their defaults, on a running stream or recording too. The layout and your sources stay."
+        description="Placement, frame and lens go back to their defaults, on a running stream or recording too. The layout, your sources and the background stay."
         open={confirming}
         testId="camera-reset"
         title="Reset camera settings?"

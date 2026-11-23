@@ -73,10 +73,15 @@ import { EDIT_SCENE_LABEL } from '@/lib/edit-scene'
 import { openAddScene } from '@/lib/scene-add-request'
 import {
   GREEN_SCREEN_KEYWORDS,
-  GREEN_SCREEN_SETTINGS_LABEL,
   greenScreenCommandLabel,
-  openSceneGreenScreen
+  openSceneBackground
 } from '@/lib/green-screen'
+import {
+  CAMERA_BACKGROUND_KEYWORDS,
+  CAMERA_BACKGROUND_SETTINGS_LABEL,
+  cameraBackgroundCommand
+} from '@/lib/camera-background-view'
+import { useCameraBackground } from '@/components/camera-background/use-camera-background'
 import {
   useStudioBanners,
   useStudioCore,
@@ -189,7 +194,6 @@ export function CommandPalette({
     applySavedSceneResult,
     captureConfig,
     requestRemoteMicrophoneMute,
-    applyLayoutPatch,
     settings,
     setSettings,
     markClip,
@@ -240,11 +244,16 @@ export function CommandPalette({
   const microphoneMuted = captureConfig.audio.microphoneMuted
   const muteLabel = microphoneMuted ? 'Unmute microphone' : 'Mute microphone'
   const MuteIcon = microphoneMuted ? SpeakerOnIcon : SpeakerOffIcon
-  // The camera's key, as the Studio's Camera row turns it: only with a camera.
-  const cameraPicked = Boolean(
-    captureConfig.sources.cameraId ?? captureConfig.sources.wantedCameraId
-  )
+  // Plan 258 S5: the camera's Background pick, as the Studio's Camera row
+  // turns it, only with a camera that renders: a blur by state, and the key.
+  const background = useCameraBackground()
+  const cameraPicked = background.available
   const greenScreenCommand = greenScreenCommandLabel(captureConfig.layout)
+  const backgroundCommand = cameraBackgroundCommand(background.background)
+  // Blur can't be turned on where the effect can't run (Windows, Linux, an
+  // open room before S8); turning one off always can.
+  const backgroundCommandShown =
+    cameraPicked && (background.isEffect || background.effectReason === null)
 
   const openPage = (id: WorkspaceTab): void => {
     if (isStudioPanel(id)) openStudioPanel(id)
@@ -318,15 +327,24 @@ export function CommandPalette({
             {screenPrivacy.hidden ? 'Show screen' : 'Hide screen'}
             {shortcut(settings.globalShortcuts?.screenHideToggle ?? DEFAULT_SCREEN_HIDE_SHORTCUT)}
           </CommandItem>
+          {backgroundCommandShown ? (
+            <CommandItem
+              value={backgroundCommand.label}
+              keywords={[...CAMERA_BACKGROUND_KEYWORDS]}
+              onSelect={() => run(() => background.choose(backgroundCommand.next))}
+            >
+              <CameraIcon className="size-4" />
+              {backgroundCommand.label}
+              <Context>Camera</Context>
+            </CommandItem>
+          ) : null}
           {cameraPicked ? (
             <CommandItem
               value={greenScreenCommand}
               keywords={[...GREEN_SCREEN_KEYWORDS]}
               onSelect={() =>
                 run(() =>
-                  applyLayoutPatch({
-                    cameraChromaKeyEnabled: !captureConfig.layout.cameraChromaKeyEnabled
-                  })
+                  background.choose(captureConfig.layout.cameraChromaKeyEnabled ? 'off' : 'green')
                 )
               }
             >
@@ -452,12 +470,19 @@ export function CommandPalette({
                 ) : null}
                 {page.id === 'layouts' ? (
                   <CommandItem
-                    value={GREEN_SCREEN_SETTINGS_LABEL}
-                    keywords={[...GREEN_SCREEN_KEYWORDS, 'similarity', 'spill', 'smoothness']}
-                    onSelect={() => run(openSceneGreenScreen)}
+                    value={CAMERA_BACKGROUND_SETTINGS_LABEL}
+                    keywords={[
+                      ...CAMERA_BACKGROUND_KEYWORDS,
+                      ...GREEN_SCREEN_KEYWORDS,
+                      'blur strength',
+                      'similarity',
+                      'spill',
+                      'smoothness'
+                    ]}
+                    onSelect={() => run(openSceneBackground)}
                   >
                     <AdjustIcon className="size-4" />
-                    {GREEN_SCREEN_SETTINGS_LABEL}
+                    {CAMERA_BACKGROUND_SETTINGS_LABEL}
                     <Context>Scene</Context>
                   </CommandItem>
                 ) : null}

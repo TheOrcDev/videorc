@@ -1,11 +1,12 @@
 import type { LocalVideoTrack, Track, TrackProcessor, VideoProcessorOptions } from 'livekit-client'
-import type { EffectiveSceneBackground } from '@/lib/backend'
+import type { EffectiveSceneBackground, LayoutSettings } from '@/lib/backend'
 import { backgroundAssetDisplayUrl } from '@/lib/background-library'
 import { clamp, keySpec, type KeySettings } from '@/lib/chroma-key-reference'
 import { KEY_FRAGMENT, KEY_VERTEX } from '@/lib/talk-show-key-shader'
 
 export type TalkShowCameraSettings = {
-  layout: KeySettings
+  /** The key's fields, and the camera's background (plan 258: the room refuses an effect until S8). */
+  layout: KeySettings & Pick<LayoutSettings, 'cameraBackground'>
   background?: EffectiveSceneBackground | null
 }
 type KeyProcessor = TrackProcessor<Track.Kind.Video, VideoProcessorOptions> & {
