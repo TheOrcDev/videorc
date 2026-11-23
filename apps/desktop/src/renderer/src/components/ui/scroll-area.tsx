@@ -1,7 +1,8 @@
 'use client'
 
 import { ScrollArea as ScrollAreaPrimitive } from '@base-ui/react/scroll-area'
-import { createContext, useContext, type Ref } from 'react'
+import { createContext, useContext } from 'react'
+import type { Ref } from 'react'
 
 import { cn } from '@/lib/utils'
 

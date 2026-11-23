@@ -8,7 +8,7 @@ import { cn } from '@/lib/utils'
 
 // A flush inline status row, never a card: one neutral fill for every tone,
 // the icon in the tone, and monochrome text. A tone never tints the row, as it
-// never tints a toast (owner call 2026-11-22); `renderer-style-guards` holds it.
+// never tints a toast, and a test holds it.
 // - The variant is the tone and brings its own icon: one glyph and one weight
 //   per tone. `icon` swaps in a subject's own mark (the microphone, a
 //   platform), and `icon={null}` drops it. Callers never pass an icon as a
