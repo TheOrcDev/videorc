@@ -261,19 +261,17 @@ impl QuarantineEntry {
         )
     }
 
-    fn same_gpu_as(&self, other: &QuarantineEntry) -> bool {
-        same_gpu(
-            (
-                self.node_name(),
-                self.driver.as_deref(),
-                self.device.as_deref(),
-            ),
-            (
-                other.node_name(),
-                other.driver.as_deref(),
-                other.device.as_deref(),
-            ),
-        )
+    /// Whether `newer` makes this entry redundant: the same PCI address, or
+    /// (neither knowing one) the same node and driver. Anything wider is kept:
+    /// a legacy driver-only entry also keeps out GPUs a newer, precise entry
+    /// for another address does not, and dropping it would let the GPU that
+    /// hung be probed again.
+    fn superseded_by(&self, newer: &QuarantineEntry) -> bool {
+        match (self.device.as_deref(), newer.device.as_deref()) {
+            (Some(old), Some(new)) => old == new,
+            (None, None) => self.node_name() == newer.node_name() && self.driver == newer.driver,
+            _ => false,
+        }
     }
 }
 
@@ -420,23 +418,19 @@ impl ProbeQuarantine {
 
     fn add_quarantined(&self, entry: QuarantineEntry) -> std::io::Result<()> {
         let mut entries = read_quarantined(&self.quarantined_path());
-        entries.retain(|existing| !existing.same_gpu_as(&entry));
+        entries.retain(|existing| !existing.superseded_by(&entry));
         entries.push(entry);
         self.write_quarantined(&entries)
     }
 
-    /// This profile's list, then the machine's (when this profile is
-    /// isolated) for any GPU this profile does not list yet. Missing or
-    /// unreadable lists read as empty; an unreadable list of this profile's
-    /// is replaced the next time a node is quarantined.
+    /// This profile's list, then every entry of the machine's (when this
+    /// profile is isolated); a node is out if any entry matches it. Missing
+    /// or unreadable lists read as empty; an unreadable list of this
+    /// profile's is replaced the next time a node is quarantined.
     pub(crate) fn quarantined(&self) -> Vec<QuarantineEntry> {
         let mut entries = read_quarantined(&self.quarantined_path());
         if let Some(machine) = &self.machine_directory {
-            for entry in read_quarantined(&machine.join(QUARANTINED_FILE)) {
-                if !entries.iter().any(|known| known.same_gpu_as(&entry)) {
-                    entries.push(entry);
-                }
-            }
+            entries.extend(read_quarantined(&machine.join(QUARANTINED_FILE)));
         }
         entries
     }
@@ -922,7 +916,7 @@ mod tests {
         // reads, and a second quarantine of the same node replaces it.
         std::fs::write(
             directory.join(QUARANTINED_FILE),
-            r#"[{"node": "renderD129", "ffmpegPath": "/opt/ffmpeg", "probeStartedAtUnixSecs": 1, "quarantinedAtUnixSecs": 2}]"#,
+            r#"[{"node": "renderD129", "driver": "amdgpu", "ffmpegPath": "/opt/ffmpeg", "probeStartedAtUnixSecs": 1, "quarantinedAtUnixSecs": 2}]"#,
         )
         .expect("plant the older entry");
         let older = quarantine.quarantined();
@@ -1137,6 +1131,74 @@ mod tests {
         // A unit test never reads a real machine list.
         assert_eq!(ProbeQuarantine::for_this_profile().machine_directory, None);
 
+        std::fs::remove_dir_all(profile).ok();
+        std::fs::remove_dir_all(machine).ok();
+    }
+
+    #[test]
+    fn a_precise_entry_for_another_gpu_never_drops_a_wider_legacy_entry() {
+        // GPU A hung under a backend that wrote no PCI address. A pin then
+        // let GPU B (same driver, other address) be probed, and it timed out.
+        let directory = fixture_directory("legacy-kept");
+        std::fs::write(
+            directory.join(QUARANTINED_FILE),
+            r#"[{"node": "renderD129", "driver": "amdgpu", "ffmpegPath": "/opt/ffmpeg", "probeStartedAtUnixSecs": 1, "quarantinedAtUnixSecs": 2}]"#,
+        )
+        .expect("plant the legacy entry");
+        let quarantine = ProbeQuarantine::new(directory.clone());
+        let gpu_a = gpu("renderD129", "amdgpu", "0000:01:00.0");
+        let gpu_b = gpu("renderD130", "amdgpu", "0000:05:00.0");
+        quarantine
+            .begin_probe(&gpu_b, "/opt/ffmpeg")
+            .expect("arm")
+            .quarantine_timed_out(Duration::from_secs(20))
+            .expect("quarantine B");
+        assert_eq!(quarantine.quarantined().len(), 2);
+        let intel = gpu("renderD128", "i915", "0000:00:02.0");
+        let (to_probe, _) = plan_probe_order(
+            &[intel.clone(), gpu_a, gpu_b.clone()],
+            None,
+            &quarantine.quarantined(),
+        )
+        .expect("plan");
+        assert_eq!(to_probe, vec![intel]);
+
+        // B hanging again replaces only B's own entry.
+        quarantine
+            .begin_probe(&gpu_b, "/opt/ffmpeg")
+            .expect("arm")
+            .quarantine_timed_out(Duration::from_secs(20))
+            .expect("quarantine B again");
+        assert_eq!(quarantine.quarantined().len(), 2);
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn every_machine_entry_stays_in_the_merged_list() {
+        // The profile knows GPU B precisely; the machine's legacy amdgpu
+        // entry must still keep out a third amdgpu GPU.
+        let profile = fixture_directory("merge-profile");
+        let machine = fixture_directory("merge-machine");
+        std::fs::write(
+            profile.join(QUARANTINED_FILE),
+            r#"[{"node": "renderD130", "driver": "amdgpu", "device": "0000:05:00.0", "ffmpegPath": "/opt/ffmpeg", "probeStartedAtUnixSecs": 1, "quarantinedAtUnixSecs": 2}]"#,
+        )
+        .expect("profile list");
+        std::fs::write(
+            machine.join(QUARANTINED_FILE),
+            r#"[{"node": "renderD129", "driver": "amdgpu", "ffmpegPath": "/opt/ffmpeg", "probeStartedAtUnixSecs": 1, "quarantinedAtUnixSecs": 2}]"#,
+        )
+        .expect("machine list");
+        let quarantine = ProbeQuarantine {
+            directory: profile.clone(),
+            machine_directory: Some(machine.clone()),
+        };
+        let third = gpu("renderD131", "amdgpu", "0000:07:00.0");
+        let intel = gpu("renderD128", "i915", "0000:00:02.0");
+        let (to_probe, _) =
+            plan_probe_order(&[intel.clone(), third], None, &quarantine.quarantined())
+                .expect("plan");
+        assert_eq!(to_probe, vec![intel]);
         std::fs::remove_dir_all(profile).ok();
         std::fs::remove_dir_all(machine).ok();
     }

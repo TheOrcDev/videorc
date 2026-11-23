@@ -98,11 +98,16 @@ for d in /sys/class/drm/renderD*; do echo "$d $(readlink "$d/device/driver")"; d
 intel=$(for d in /sys/class/drm/renderD*; do
   [ "$(basename "$(readlink "$d/device/driver")")" = i915 ] && echo "/dev/dri/$(basename "$d")"
 done)
-[ -n "$intel" ] || echo "no i915 render node: do not pin, use openh264" >&2
-export LIBVA_DRIVER_NAME=iHD
-export LIBVA_DRIVERS_PATH=/usr/lib/dri
-export LIBVA_DEVICE=$intel
-export VIDEORC_LINUX_VAAPI_DEVICE=$intel
+if [ -n "$intel" ]; then
+  export LIBVA_DRIVER_NAME=iHD
+  export LIBVA_DRIVERS_PATH=/usr/lib/dri
+  export LIBVA_DEVICE=$intel
+  export VIDEORC_LINUX_VAAPI_DEVICE=$intel
+else
+  # A blank pin means "probe every unquarantined node": never export one.
+  echo "no i915 render node: do not pin, use openh264" >&2
+  export VIDEORC_LINUX_H264_ENCODER=openh264
+fi
 # Only while diagnosing the bridge: the software encoder only.
 # export VIDEORC_LINUX_H264_ENCODER=openh264
 ```
@@ -123,9 +128,22 @@ next launch rather than letting the app discover it a second time.
 
 Entries name the GPU, not the node number: a node matches an entry by PCI
 address (`device`), else by `driver`, else by node name, so a boot that swaps
-the numbers still keeps the hung GPU out. Plant `driver` (and `device`, from
-`basename "$(readlink /sys/class/drm/renderD129/device)"`) along with
-`node`. Smoke profiles are isolated, but they also read the machine's list in
+the numbers still keeps the hung GPU out. Plant `node`, `driver` and `device`
+read from the same node, found by its driver (never by a remembered number).
+This prints one entry per amdgpu node; put the entries in a JSON array in
+`quarantined.json`. Keep every field: a list that does not parse reads as
+empty.
+
+```bash
+now=$(date +%s)
+for d in /sys/class/drm/renderD*; do
+  [ "$(basename "$(readlink "$d/device/driver")")" = amdgpu ] || continue
+  printf '{"node": "%s", "driver": "amdgpu", "device": "%s", "ffmpegPath": "planted by hand", "probeStartedAtUnixSecs": %s, "quarantinedAtUnixSecs": %s}\n' \
+    "$(basename "$d")" "$(basename "$(readlink "$d/device")")" "$now" "$now"
+done
+```
+
+Smoke profiles are isolated, but they also read the machine's list in
 `~/.videorc/linux-vaapi/quarantined.json` (never writing it), so an unpinned
 smoke on ogre still skips the AMD GPU.
 
