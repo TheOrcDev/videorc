@@ -2562,22 +2562,18 @@ async fn hidden_screen_frost_reaches_every_leg() {
         // 3. Show. The capture's frames up to the show were taken while
         //    hidden: every leg keeps the still, even for a frame handed over
         //    after the show (stripes, taken just before it).
+        // Read right before `show()`, this stamp can equal the Show's own
+        // (`Instant` ticks about every 42 ns on Apple silicon); a frame dated
+        // at the Show holds as well, so either way it is not after it.
         let before_show = Instant::now();
-        // `Instant` ticks coarsely (about 42 ns on Apple silicon): read
-        // right before `show()`, the frame's stamp could equal the Show's,
-        // and a frame stamped at the Show counts as taken after it. Let the
-        // clock move on so the frame is strictly before the Show.
-        while Instant::now() <= before_show {
-            std::hint::spin_loop();
-        }
         state.screen_privacy.show();
         assert!(
             state
                 .screen_privacy
                 .view()
                 .shown_at
-                .is_some_and(|shown_at| before_show < shown_at),
-            "the frame must be taken strictly before the Show"
+                .is_some_and(|shown_at| before_show <= shown_at),
+            "the frame must not be taken after the Show"
         );
         assert!(crate::preview_screen::release_screen_now(&state).await);
         assert!(

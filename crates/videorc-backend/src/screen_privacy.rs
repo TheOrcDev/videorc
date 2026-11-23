@@ -263,8 +263,10 @@ pub fn admit_screen_frame(
 /// - A dated frame taken before the Show shows the screen while it was
 ///   hidden: it holds, however late the capture hands it over
 ///   (ScreenCaptureKit delivers a frame a few milliseconds to a few frames
-///   after it took it).
-/// - An undated frame whose delivery began before the Show holds. So does
+///   after it took it). So does one dated at the Show itself: `Instant`
+///   ticks coarsely (about 42 ns on Apple silicon), so the same reading
+///   cannot prove the frame came after the Show, and the covered frame wins.
+/// - An undated frame whose delivery began before (or at) the Show holds. So does
 ///   the first one delivered after it, once per Show, at a publish point that
 ///   covered a hide: it may be a frame the capture took before the Show and
 ///   queued behind the one in flight. The next one is trusted.
@@ -282,11 +284,11 @@ pub fn admit_screen_frame_at(
         return ScreenFrameAdmission::Publish;
     };
     match time {
-        ScreenFrameTime::Captured(captured_at) if captured_at < shown_at => {
+        ScreenFrameTime::Captured(captured_at) if captured_at <= shown_at => {
             ScreenFrameAdmission::Hold
         }
         ScreenFrameTime::Captured(_) => ScreenFrameAdmission::Publish,
-        ScreenFrameTime::DeliveredFrom(began_at) if began_at < shown_at => {
+        ScreenFrameTime::DeliveredFrom(began_at) if began_at <= shown_at => {
             ScreenFrameAdmission::Hold
         }
         ScreenFrameTime::DeliveredFrom(_) => {
@@ -973,11 +975,23 @@ mod tests {
             ScreenFrameAdmission::Hold,
             "a frame of the hidden span published after the show"
         );
+        // Dated at the Show's own clock reading: it cannot be proven to come
+        // after the Show, so it holds (the covered frame wins).
         assert_eq!(
             admit_screen_frame_at(
                 gate.view(),
                 &mut cursor,
                 ScreenFrameTime::Captured(shown_at)
+            ),
+            ScreenFrameAdmission::Hold,
+            "a frame dated at the show itself published"
+        );
+        // Any later reading is after the Show: it publishes.
+        assert_eq!(
+            admit_screen_frame_at(
+                gate.view(),
+                &mut cursor,
+                ScreenFrameTime::Captured(shown_at + Duration::from_nanos(1))
             ),
             ScreenFrameAdmission::Publish
         );
@@ -1030,9 +1044,20 @@ mod tests {
             admit_screen_frame_at(gate.view(), &mut cursor, delivered(in_flight)),
             ScreenFrameAdmission::Hold
         );
-        // The first delivery that began after the Show: still held.
+        // A delivery that began at the Show's own clock reading is not after
+        // it: held, and it is not the first delivery after the Show either.
         assert_eq!(
             admit_screen_frame_at(gate.view(), &mut cursor, delivered(shown_at)),
+            ScreenFrameAdmission::Hold,
+            "a delivery that began at the show itself published"
+        );
+        // The first delivery that began after the Show: still held.
+        assert_eq!(
+            admit_screen_frame_at(
+                gate.view(),
+                &mut cursor,
+                delivered(shown_at + Duration::from_nanos(1))
+            ),
             ScreenFrameAdmission::Hold,
             "a frame queued before the show was published as live"
         );
