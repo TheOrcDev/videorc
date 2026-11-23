@@ -4776,6 +4776,18 @@ fn spawn_compositor_render_loop(
     stop_rx: watch::Receiver<bool>,
     worker_activity: Arc<CompositorWorkerActivity>,
 ) -> JoinHandle<()> {
+    // Tests only: a render owner never outlives the runtime that started it.
+    // Dropping a runtime waits for every `spawn_blocking` task, so a test that
+    // failed before stopping its preview run used to hang the whole test
+    // binary (and its CI job, until cancelled) instead of reporting the
+    // failure. The anchor task dies with the runtime; the loop then ends.
+    // Production joins the owner itself in `shutdown_compositor`.
+    #[cfg(test)]
+    let parent_runtime_gone = {
+        let (mut anchor, gone) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move { anchor.closed().await });
+        gone
+    };
     tokio::task::spawn_blocking(move || {
         let _activity_guard = CompositorWorkerActivityGuard::begin(worker_activity);
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -4791,6 +4803,14 @@ fn spawn_compositor_render_loop(
                 return;
             }
         };
+        #[cfg(test)]
+        runtime.block_on(async move {
+            tokio::select! {
+                () = run_synthetic_compositor_loop(state, params, stop_rx) => {}
+                _ = parent_runtime_gone => {}
+            }
+        });
+        #[cfg(not(test))]
         runtime.block_on(run_synthetic_compositor_loop(state, params, stop_rx));
     })
 }
