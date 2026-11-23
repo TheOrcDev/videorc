@@ -914,6 +914,19 @@ Routes: Orchestrator · `fable-5.1` · 10 for S2.1, S2.3a, S2.5; UI/Product
 Design · `opus-5.5` · 9 for S2.2a–d; Implementation · `gpt-6.1-sol` · 8 for
 S2.4 and S2.6a; S2.3c and S2.6c: Implementation · `fable-5.1` · 8.
 
+**S2.3a, from S0.1 (2026-11-23).** S0.1 passed every line with plan 220's
+element unchanged
+([`spikes/gpui/spike-preview-backend`](https://github.com/TheOrcDev/videorc/pull/1718)).
+It found one gap S2.3a closes: after a surface is destroyed and created again
+(the suspend path, `preview.surface.destroy` then `create`), `main`'s backend
+refuses every lease until a fresh scene commit, and the element only gets
+there through its watchdog's resync-scene step, 4.6 to 5.2 s later. The lease
+loop re-commits the scene itself right after `preview.surface.create`, and
+S2.3a's GPUI `probe:preview-lifecycle` asserts frames within one second of
+the new surface. Hosting under GPUI: a layer-hosting `NSView` (flipped root
+layer) goes to `NativeView`, the element attaches to that view's handle, and
+its `CAMetalLayer` gets an autoresizing mask and the slot's corner radius.
+
 ### Phase 3: screens to parity on all three platforms
 
 One PR per screen, owned by one screen lane, done by the parity bar above
