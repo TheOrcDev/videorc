@@ -396,6 +396,37 @@ describe('the host in the room (C-G4)', () => {
       await room.disconnect()
     })
 
+    it('keeps the camera held when an effect arrives after a no-effect switch was queued', async () => {
+      let settings = withBackground()
+      const { room } = client(undefined, () => settings)
+      await room.connect()
+      const publishes = latestRoom().localParticipant.publishTrack.mock.calls.length
+      // The switch to a camera with no effect waits in the queue; the
+      // streamer picks Strong blur for it before it opens.
+      const switching = room.setCameraSelection('Camera', false, null)
+      settings = withBackground(blur)
+      await room.updateCameraSettings(settings)
+      await switching
+      expect(latestRoom().localParticipant.publishTrack.mock.calls.length).toBe(publishes)
+      expect(room.snapshot.local.cameraHeld).toBe(true)
+      expect(room.snapshot.local.problem).toBe(ROOM_CAMERA_OFF_FOR_BACKGROUND)
+      await room.disconnect()
+    })
+
+    it('opens the camera after a reconnect when the effect went off while reconnecting', async () => {
+      let settings = withBackground(blur)
+      const { room } = client(undefined, () => settings)
+      await room.connect()
+      expect(publishedCamera()).toBe(false)
+      latestRoom().emit('Reconnecting')
+      settings = withBackground()
+      await room.updateCameraSettings(settings)
+      latestRoom().emit('Reconnected')
+      await vi.waitFor(() => expect(publishedCamera()).toBe(true))
+      expect(room.snapshot.local.cameraOff).toBe(false)
+      await room.disconnect()
+    })
+
     it('opens the camera once connected when the effect went off while connecting', async () => {
       let settings = withBackground(blur)
       const { room } = client(undefined, () => settings)

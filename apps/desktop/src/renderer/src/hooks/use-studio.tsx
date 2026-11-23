@@ -5353,18 +5353,18 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const migrationSettled = cameraBackgroundMigrated(settings.cameraBackgroundMigration)
   useEffect(() => {
     if (migrationSettled) return
-    void import('@/lib/camera-background-migration').then(({ migrateCameraBackgrounds }) =>
-      setSettings((settings) => {
-        const migrated = migrateCameraBackgrounds({
-          cameraBackgrounds: settings.cameraBackgrounds,
-          cameraBackgroundMigration: settings.cameraBackgroundMigration,
-          cameraId: migrationCameraId,
-          scenes: migrationScenes,
-          onStreamId: activeSavedSceneId
-        })
-        return migrated ? { ...settings, ...migrated } : settings
-      })
+    let stale = false
+    void import('@/lib/camera-background-migration').then(
+      ({ migratedSettings }) =>
+        // A run superseded by a newer camera or scene writes nothing.
+        stale ||
+        setSettings((settings) =>
+          migratedSettings(settings, migrationCameraId, migrationScenes, activeSavedSceneId)
+        )
     )
+    return () => {
+      stale = true
+    }
   }, [migrationSettled, migrationCameraId, migrationScenes, activeSavedSceneId])
   // A new user's scenes show the main display before the device list names it.
   useEffect(() => {
@@ -11779,9 +11779,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const applyCameraBackground = useCallback(
     (background: CameraBackground): Promise<boolean> => {
       const cameraId = captureConfigRef.current.sources.cameraId
-      if (!cameraId) return Promise.resolve(false)
       const normalized = normalizeCameraBackground(background)
-      if (!normalized) return Promise.resolve(false)
+      if (!cameraId || !normalized) return Promise.resolve(false)
       const cameraBackgrounds = { ...settingsRef.current.cameraBackgrounds, [cameraId]: normalized }
       // An explicit pick settles the D4 migration, so a run still loading
       // can't replace it with a scene's key.

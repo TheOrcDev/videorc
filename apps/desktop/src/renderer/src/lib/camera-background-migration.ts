@@ -116,3 +116,29 @@ export function migrateCameraBackgrounds(input: {
   }
   return result({ ...backgrounds, [input.cameraId]: migrated })
 }
+
+/**
+ * The settings with the migration applied (the same object when there is
+ * nothing to write): the one call `use-studio` makes, so the launch bundle
+ * carries none of this.
+ */
+export function migratedSettings<
+  S extends {
+    cameraBackgrounds?: Record<string, CameraBackground>
+    cameraBackgroundMigration?: number
+  }
+>(
+  settings: S,
+  cameraId: string | undefined,
+  scenes: readonly CameraBackgroundMigrationScene[],
+  onStreamId: string | null | undefined
+): S {
+  const migrated = migrateCameraBackgrounds({
+    cameraBackgrounds: settings.cameraBackgrounds,
+    cameraBackgroundMigration: settings.cameraBackgroundMigration,
+    cameraId,
+    scenes,
+    onStreamId
+  })
+  return migrated ? { ...settings, ...migrated } : settings
+}

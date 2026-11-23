@@ -69,9 +69,12 @@ export function useCameraBackground(): CameraBackgroundControl {
   const { cloudStatus, talkShow } = useStudioCloud()
   const images = useCameraBackgroundImages()
   const cameraId = captureConfig.sources.cameraId
-  // A slider mid-drag shows its value here only; the drop stores and commits it.
-  const [draft, setDraft] = useState<CameraBackground | null>(null)
-  const background = draft ?? cameraBackgroundFor(settings.cameraBackgrounds, cameraId)
+  // A slider mid-drag shows its value here only, for the camera it was
+  // dragged on; the drop stores and commits it. Another camera never sees it.
+  const [draft, setDraft] = useState<{ cameraId: string; value: CameraBackground } | null>(null)
+  const background =
+    (draft && draft.cameraId === cameraId ? draft.value : null) ??
+    cameraBackgroundFor(settings.cameraBackgrounds, cameraId)
   // The room's phase, or the Show stage standing in for the Preview (a room
   // opening, or the smoke's stand-in for one).
   const roomOpen = cloudStatus?.room?.phase === 'open' || talkShow?.previewReplaced === true
@@ -89,13 +92,18 @@ export function useCameraBackground(): CameraBackgroundControl {
   const set = useCallback(
     (next: CameraBackground, options?: { commit?: boolean }) => {
       if (options?.commit === false) {
-        setDraft(next)
+        if (cameraId) setDraft({ cameraId, value: next })
+        return
+      }
+      // A drop after the camera changed under the drag commits nothing.
+      if (draft && draft.cameraId !== cameraId) {
+        setDraft(null)
         return
       }
       setDraft(null)
       void applyCameraBackground(next)
     },
-    [applyCameraBackground]
+    [applyCameraBackground, cameraId, draft]
   )
   return {
     available,

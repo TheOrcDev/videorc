@@ -14,6 +14,7 @@ import {
 } from './camera-background'
 import {
   migrateCameraBackgrounds,
+  migratedSettings,
   type CameraBackgroundMigrationScene
 } from './camera-background-migration'
 import {
@@ -535,5 +536,21 @@ describe('D4 migration: the scenes’ key moves to the camera', () => {
         version: settled?.cameraBackgroundMigration
       })
     ).toBeNull()
+  })
+
+  it('hands use-studio the settings with the migration merged, the same object when settled', () => {
+    const base: SettingsState = { outputDirectory: '', keepOriginalRecording: false }
+    const merged = migratedSettings(
+      base,
+      'camera-a',
+      [scene('live', keyedLayout('#0000FF'))],
+      'live'
+    )
+    expect(merged).toMatchObject({
+      ...base,
+      cameraBackgroundMigration: CAMERA_BACKGROUND_MIGRATION_VERSION
+    })
+    expect(merged.cameraBackgrounds?.['camera-a']?.mode).toBe('blue')
+    expect(migratedSettings(merged, 'camera-a', [scene('live')], 'live')).toBe(merged)
   })
 })
