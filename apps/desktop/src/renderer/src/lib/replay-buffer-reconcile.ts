@@ -16,6 +16,75 @@ export function replayStartRetryDelayMs(failedStarts: number): number {
   return Math.min(500 * 2 ** Math.max(0, failedStarts - 1), 4000)
 }
 
+/**
+ * Refusals of a camera that says live and has sent no frame before the ring
+ * stops asking and waits for the camera's first frame (2026-11-23: a blocked
+ * or dead camera retried about every half second, forever).
+ */
+export const REPLAY_SILENT_CAMERA_RETRY_LIMIT = 5
+
+/** The wait before asking again after the nth silent-camera refusal: 1, 2, 4,
+ * 8 s, so the last refusal lands about 15 s after the first, longer than a
+ * camera that streams takes to its first frame. */
+export function replaySilentCameraRetryDelayMs(refusals: number): number {
+  return Math.min(1000 * 2 ** Math.max(0, refusals - 1), 8000)
+}
+
+/** The bell's detail when the ring stops asking a camera that sends nothing. */
+export const REPLAY_CAMERA_SENDS_NO_PICTURE =
+  'The camera is on but sends no picture. Clips start by themselves once it does.'
+
+/** The camera as the renderer last heard it (`preview.camera.status`). */
+export type ReplayCameraReport = {
+  state: string
+  cameraId?: string | null
+  framesCaptured?: number
+  /** The backend's verdict: live past its first-frame grace with no frame. */
+  noVideo?: boolean
+}
+
+/** True once the camera sends a picture: what a silent-camera wait ends on. */
+export function replayCameraDelivers(camera: ReplayCameraReport): boolean {
+  return camera.state === 'live' && (camera.framesCaptured ?? 0) > 0 && camera.noVideo !== true
+}
+
+export type ReplaySourcesNotReadyNext =
+  /** Ask again after `delayMs`; the refusal is counted. */
+  | { kind: 'retry'; delayMs: number }
+  /** The camera is starting or being switched: its live edge starts the ring. */
+  | { kind: 'wait-for-live' }
+  /** The camera says live and sends nothing: stop asking; its first frame
+   * starts the ring. The Studio says so once (the bell, never a toast). */
+  | { kind: 'wait-for-frames' }
+  /** The camera failed, is missing or was denied: a failed start like any other. */
+  | { kind: 'failed' }
+
+/**
+ * What the ring does after the backend refused its start as
+ * `replay-sources-not-ready` (the scene's camera has no frame). `refusals` is
+ * the silent-camera refusals so far, this one included.
+ */
+export function replayAfterSourcesNotReady(input: {
+  camera: ReplayCameraReport
+  /** The camera the scene shows. */
+  chosenCameraId: string | null | undefined
+  refusals: number
+}): ReplaySourcesNotReadyNext {
+  const { camera } = input
+  if (camera.state === 'live') {
+    // The backend already gave up on a picture (its first-frame grace), or
+    // asking again keeps finding none: wait for the frame instead.
+    if (camera.noVideo === true || input.refusals >= REPLAY_SILENT_CAMERA_RETRY_LIMIT) {
+      return { kind: 'wait-for-frames' }
+    }
+    return { kind: 'retry', delayMs: replaySilentCameraRetryDelayMs(input.refusals) }
+  }
+  if (camera.state === 'starting' || !camera.cameraId || camera.cameraId !== input.chosenCameraId) {
+    return { kind: 'wait-for-live' }
+  }
+  return { kind: 'failed' }
+}
+
 export type ReplayReconcileInput = {
   /** The switch in the Studio: what the user wants. */
   armed: boolean

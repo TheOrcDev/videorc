@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  REPLAY_SILENT_CAMERA_RETRY_LIMIT,
   REPLAY_START_RETRY_LIMIT,
+  replayAfterSourcesNotReady,
   replayBufferReconcileAction,
+  replayCameraDelivers,
+  replaySilentCameraRetryDelayMs,
   replayBufferShouldRestartForSources,
   replayShouldRearmAfterError,
   replayStartRetryDelayMs,
@@ -211,5 +215,93 @@ describe('replayBufferReconcileAction (plan 181 S4)', () => {
     expect(replayStartRetryDelayMs(2)).toBe(1000)
     expect(replayStartRetryDelayMs(3)).toBe(2000)
     expect(replayStartRetryDelayMs(9)).toBe(4000)
+  })
+})
+
+describe('a camera that says live and sends no frame (2026-11-23)', () => {
+  const silent = { state: 'live', cameraId: 'cam-1', framesCaptured: 0 }
+
+  it('backs off 1, 2, 4, 8 s, then stops asking and waits for the first frame', () => {
+    const delays: number[] = []
+    for (let refusals = 1; refusals < REPLAY_SILENT_CAMERA_RETRY_LIMIT; refusals += 1) {
+      const next = replayAfterSourcesNotReady({ camera: silent, chosenCameraId: 'cam-1', refusals })
+      expect(next.kind).toBe('retry')
+      if (next.kind === 'retry') delays.push(next.delayMs)
+    }
+    expect(delays).toEqual([1000, 2000, 4000, 8000])
+    expect(
+      replayAfterSourcesNotReady({
+        camera: silent,
+        chosenCameraId: 'cam-1',
+        refusals: REPLAY_SILENT_CAMERA_RETRY_LIMIT
+      })
+    ).toEqual({ kind: 'wait-for-frames' })
+    expect(replaySilentCameraRetryDelayMs(20)).toBe(8000)
+  })
+
+  it('asks a bounded number of times over ten minutes, where it used to ask every half second', () => {
+    // The Studio's loop: start, refused, decide, wait, reconcile. Waiting for
+    // frames sets waitingForCamera, which holds every later start.
+    let refusals = 0
+    let waiting = false
+    let starts = 0
+    let now = 0
+    while (now < 10 * 60_000) {
+      const action = replayBufferReconcileAction({ ...idle, waitingForCamera: waiting })
+      if (action !== 'start') break
+      starts += 1
+      refusals += 1
+      const next = replayAfterSourcesNotReady({ camera: silent, chosenCameraId: 'cam-1', refusals })
+      if (next.kind === 'retry') now += next.delayMs
+      else if (next.kind === 'wait-for-frames') waiting = true
+      else throw new Error(`unexpected ${next.kind}`)
+    }
+    expect(starts).toBe(REPLAY_SILENT_CAMERA_RETRY_LIMIT)
+    expect(now).toBe(15_000)
+    expect(replayBufferReconcileAction({ ...idle, waitingForCamera: true })).toBeNull()
+  })
+
+  it('waits for frames at once when the backend already says the camera sends no video', () => {
+    expect(
+      replayAfterSourcesNotReady({
+        camera: { ...silent, noVideo: true },
+        chosenCameraId: 'cam-1',
+        refusals: 1
+      })
+    ).toEqual({ kind: 'wait-for-frames' })
+  })
+
+  it('recovers on the first frame: the wait ends and the ring starts', () => {
+    expect(replayCameraDelivers(silent)).toBe(false)
+    expect(replayCameraDelivers({ ...silent, framesCaptured: 3, noVideo: true })).toBe(false)
+    expect(replayCameraDelivers({ ...silent, state: 'starting', framesCaptured: 3 })).toBe(false)
+    const delivering = { ...silent, framesCaptured: 1 }
+    expect(replayCameraDelivers(delivering)).toBe(true)
+    // The Studio clears the wait on that edge and reconciles.
+    expect(replayBufferReconcileAction({ ...idle, waitingForCamera: false })).toBe('start')
+  })
+
+  it('keeps the launch wait for a camera that is still starting or being switched', () => {
+    for (const camera of [
+      { state: 'starting', cameraId: 'cam-1', framesCaptured: 0 },
+      { state: 'failed', cameraId: 'cam-0', framesCaptured: 0 },
+      { state: 'disconnected', cameraId: null, framesCaptured: 0 }
+    ]) {
+      expect(replayAfterSourcesNotReady({ camera, chosenCameraId: 'cam-1', refusals: 0 })).toEqual({
+        kind: 'wait-for-live'
+      })
+    }
+  })
+
+  it('counts a failed, missing or denied camera as a failed start', () => {
+    for (const state of ['failed', 'device-missing', 'permission-needed']) {
+      expect(
+        replayAfterSourcesNotReady({
+          camera: { state, cameraId: 'cam-1', framesCaptured: 0 },
+          chosenCameraId: 'cam-1',
+          refusals: 0
+        })
+      ).toEqual({ kind: 'failed' })
+    }
   })
 })
