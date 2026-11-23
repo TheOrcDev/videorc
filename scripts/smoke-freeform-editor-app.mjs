@@ -132,6 +132,9 @@ const report = {
 // each. The camera starts at the artifact proof's box below.
 const LIVE_PLACEMENT_HINT = 'Changes apply to your stream when you let go.'
 const LIVE_MOVE_SETTLE_MS = Number(process.env.VIDEORC_FREEFORM_LIVE_MOVE_SETTLE_MS ?? 2000)
+// The stream leg is sized by its own preset, never by the recording's video
+// (there is no 640x360 stream preset): the sink's picture is judged there.
+const LIVE_MOVE_STREAM_PRESET = { id: 'tutorial-1080p30', width: 1920, height: 1080 }
 const LIVE_MOVE_STREAM_PORT = Number(process.env.VIDEORC_FREEFORM_LIVE_MOVE_STREAM_PORT ?? 19631)
 const LIVE_MOVE_DEFINITION =
   "Record (then Record + stream to a local RTMP sink), wait, set the camera's X field (one commit), wait, set its Height field (one commit), wait, Stop. Every decoded frame of the recording (and of what the sink received) is matched against the committed placement before, after the move and after the resize with the artifact placement gate; the frames must step through those three in order. Gate: no black frame, no frame matching none of them, and no two identical consecutive frames within 10 frames of either commit; identical pairs elsewhere are counted, not gated. The session id, its state and the compositor run id must be the same before and after both commits."
@@ -205,7 +208,7 @@ try {
     })
     await clickText('Freeform')
     await selectSource(baseSourceId)
-    await cdp.eval(`document.querySelector('button[aria-label="Unlock aspect ratio"]')?.click()`)
+    await setAspectLocked(false)
     await setRect({ width: 30, height: 30, x: 30, y: 30 })
     assert.equal(
       await cdp.eval(`document.querySelector('[aria-label="Snap"]')?.getAttribute('aria-pressed')`),
@@ -231,10 +234,10 @@ try {
     await gesture({ orientation, kind: 'move', index: 0, delayMs: 250, modifiers: 1 })
     await clickSnap()
     await gesture({ orientation, kind: 'move', index: 1, delayMs: 250, quickEdits: true })
-    await cdp.eval(`document.querySelector('[aria-label="Lock aspect ratio"]')?.click()`)
+    await setAspectLocked(true)
     await frames(2)
     await gesture({ orientation, kind: 'resize', index: 1, delayMs: 250, aspectLocked: true })
-    await cdp.eval(`document.querySelector('[aria-label="Unlock aspect ratio"]')?.click()`)
+    await setAspectLocked(false)
     await setRect({ width: 30, height: 30, x: 3, y: 30 })
     await clickSnap()
     await gesture({ orientation, kind: 'move', index: 1, delayMs: 250, snapCase: true })
@@ -323,10 +326,10 @@ async function recordCommittedComposition() {
   await command('select-camera-shape', { shape: 'rectangle', settleMs: 100 })
   await cdp.eval(`document.querySelector('[data-videorc-camera-aspect="source"]').click()`)
   await frames(3)
-  await cdp.eval(`document.querySelector('[aria-label="Unlock aspect ratio"]')?.click()`)
+  await setAspectLocked(false)
   await setRect({ width: 21.3, height: 28.7, x: 60.7, y: 50.3 })
   await selectSource(baseSourceId)
-  await cdp.eval(`document.querySelector('[aria-label="Unlock aspect ratio"]')?.click()`)
+  await setAspectLocked(false)
   await setRect({ width: 37.3, height: 43.7, x: 1.1, y: 2.3 })
   const committed = await request(backend, timeoutMs, 'scene.get')
   const sourceIds = [baseSourceId, 'source:camera']
@@ -357,6 +360,15 @@ async function recordCommittedComposition() {
   // while recording and streaming to a local RTMP sink (on macOS the stream
   // is the aux compositor leg, so the file alone proves nothing about it).
   report.liveMove = { definition: LIVE_MOVE_DEFINITION, passes: [] }
+  // These passes start and stop their sessions on the backend directly, past
+  // the Studio's Record, which would hand over from the Clips ring. The ring
+  // re-arms on its own the moment a pass stops (with the app's scene, whose
+  // camera the dev app can't read, so it retries), and the next pass's
+  // session.start landed on its half-open start: "The previous microphone is
+  // still opening or closing" (11-22 run). Switch it off first, as
+  // smoke:live-background and smoke:record-latency do; the editor steps above
+  // keep running against the ring.
+  await clipsOff()
   for (const streaming of [false, true]) {
     // An output-directory capability is single-use: each session.start
     // consumes one, so each pass gets its own.
@@ -399,21 +411,27 @@ async function recordCommittedComposition() {
  * frame of every output and check the boxes step through the three
  * placements with nothing black, unmatched or frozen around either commit.
  */
-async function recordWithLiveMove({
-  scene,
-  saved,
-  resource,
-  transforms,
-  streaming,
-  width,
-  height,
-  fps,
-  ffmpegPath,
-  ffprobePath
-}) {
-  const label = streaming ? 'record-stream' : 'recording'
-  console.log(`Freeform: live move while ${streaming ? 'recording and streaming' : 'recording'}`)
-  const sink = streaming ? await startRtmpSink(ffmpegPath, label) : null
+async function recordWithLiveMove(pass) {
+  const label = pass.streaming ? 'record-stream' : 'recording'
+  console.log(
+    `Freeform: live move while ${pass.streaming ? 'recording and streaming' : 'recording'}`
+  )
+  const sink = pass.streaming ? await startRtmpSink(pass.ffmpegPath, label) : null
+  // A pass that fails still closes its listener: a sink left behind keeps the
+  // port and takes the next run's stream (11-22: run 3's sink could not bind,
+  // and run 2's orphan wrote run 3's stream into run 2's file).
+  try {
+    return await recordWithLiveMoveTo(pass, label, sink)
+  } finally {
+    await sink?.close()
+  }
+}
+
+async function recordWithLiveMoveTo(
+  { scene, saved, resource, transforms, streaming, width, height, fps, ffmpegPath, ffprobePath },
+  label,
+  sink
+) {
   const sourceIds = Object.keys(transforms)
   const fields = ['x', 'y', 'width', 'height']
   const timestamp = '2026-01-01T00:00:00.000Z'
@@ -463,7 +481,7 @@ async function recordWithLiveMove({
                 updatedAt: timestamp
               }
             ],
-            defaultOutputPreset: 'tutorial-1080p30',
+            defaultOutputPreset: LIVE_MOVE_STREAM_PRESET.id,
             defaultBitrateKbps: 2000,
             enabledTargetIds: ['custom']
           }
@@ -497,7 +515,7 @@ async function recordWithLiveMove({
   await selectSource('source:camera')
   await waitUntil(`document.body.textContent.includes(${JSON.stringify(LIVE_PLACEMENT_HINT)})`)
   await waitUntil(`document.querySelector('[data-videorc-transform-field="x"]')?.disabled===false`)
-  await cdp.eval(`document.querySelector('[aria-label="Unlock aspect ratio"]')?.click()`)
+  await setAspectLocked(false)
   const percent = (value) => {
     const rounded = Math.round(value * 1000) / 10
     return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
@@ -553,10 +571,18 @@ async function recordWithLiveMove({
     { label: 'moved', rects: [transforms[baseSourceId], moved] },
     { label: 'resized', rects: [transforms[baseSourceId], resized] }
   ]
-  const outputs = [{ kind: 'recording', artifact: path }]
-  if (received) outputs.push({ kind: 'stream', artifact: received })
+  // Each output at its own size: the recording at the session's video, the
+  // stream at its preset's, and every frame decoded there.
+  const outputs = [{ kind: 'recording', artifact: path, width, height }]
+  if (received)
+    outputs.push({
+      kind: 'stream',
+      artifact: received,
+      width: LIVE_MOVE_STREAM_PRESET.width,
+      height: LIVE_MOVE_STREAM_PRESET.height
+    })
   const results = {}
-  for (const { kind, artifact } of outputs) {
+  for (const { kind, artifact, width, height } of outputs) {
     const quality = await analyzeRecording(artifact, {
       ffmpegPath,
       ffprobePath,
@@ -694,6 +720,11 @@ async function startRtmpSink(ffmpegPath, label) {
         }
       )
       return indexed
+    },
+    /** Ends the listener whatever it received; a no-op once it exited. */
+    async close() {
+      stopping = true
+      await stopProcess(proc)
     }
   }
 }
@@ -1350,6 +1381,15 @@ async function assertIdleHold(label) {
 async function staleDraftExpires() {
   console.log('Freeform: stale editor draft never outlives the heartbeat')
   await selectSource(baseSourceId)
+  // The visual matrix and the mask-law steps leave the page scrolled, and a
+  // docked Preview scrolled out of view hides (`dockHiddenReason:
+  // "scrolled-away"`): the stage is then no live canvas and holds nothing
+  // (11-22, every run). Bring the stage back and require the live surface, as
+  // the pointer matrix does, before judging the hold.
+  await cdp.eval(
+    `document.querySelector('[data-videorc-stage-phase]').scrollIntoView({block:'center',behavior:'instant'})`
+  )
+  await ensureLiveSurface('stale-draft step')
   await assertIdleHold(`stale-draft step, ${baseSourceId} selected`)
   const transform = { x: 0.11, y: 0.12, width: 0.3, height: 0.3 }
   const params = {
@@ -1599,6 +1639,40 @@ async function setRect(rect) {
   )
   await frames(2)
 }
+/** Puts the selected source's aspect lock in the wanted state. A blind
+ * optional click was a no-op whenever the inspector had not mounted the
+ * toggle yet or held it disabled (a commit, a session start or stop, an
+ * orientation crossing): a whole portrait matrix then ran aspect-locked and
+ * all 20 resizes failed as display discontinuities (11-22, 3 of 11 runs).
+ * Already in the wanted state: nothing to do. Otherwise wait for the toggle,
+ * press it, and press again if a dropped press left it unchanged. */
+async function setAspectLocked(locked) {
+  const shown = locked ? 'Unlock aspect ratio' : 'Lock aspect ratio'
+  const toggle = locked ? 'Lock aspect ratio' : 'Unlock aspect ratio'
+  const inState = `document.querySelector('button[aria-label="${shown}"]') !== null`
+  for (let attempt = 1; ; attempt++) {
+    await waitUntil(
+      `${inState} || document.querySelector('button[aria-label="${toggle}"]')?.disabled === false`
+    ).catch(() => {
+      throw new Error(`The aspect lock never offered "${toggle}"`)
+    })
+    if (await cdp.eval(inState)) return
+    await cdp.eval(`document.querySelector('button[aria-label="${toggle}"]').click()`)
+    await frames(2)
+    if (attempt === 3) {
+      await waitUntil(inState)
+      return
+    }
+    if (
+      await waitUntil(inState, 3000).then(
+        () => true,
+        () => false
+      )
+    )
+      return
+    console.log(`Freeform: the aspect lock press was dropped (attempt ${attempt}); pressing again`)
+  }
+}
 /** The stage footer's Snap toggle; the footer may be re-rendering for a
  * session the Clips ring starts or stops, so wait for the button. */
 async function clickSnap() {
@@ -1640,6 +1714,26 @@ async function waitForPointerDown(count) {
   await cdp.eval(
     `new Promise((resolve,reject)=>{const end=performance.now()+1000;const tick=()=>{if(window.__freeformSmoke.pointerDowns.filter(event=>event.trusted).length===${count})resolve();else if(performance.now()>end)reject(Error('Trusted pointerdown was not delivered'));else requestAnimationFrame(tick)};tick()})`
   )
+}
+/** The Studio's Clips switch off (its smoke hook takes the Output switch's
+ * path), then the ring's session gone: replay off and the recorder idle. */
+async function clipsOff() {
+  assert.equal(
+    await cdp.eval(`window.__videorcSmokeSetReplayBuffer?.(false) ?? null`),
+    true,
+    'the renderer has no clip buffer smoke hook'
+  )
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const replay = await request(backend, timeoutMs, 'replay.status')
+    const recording = await request(backend, timeoutMs, 'recording.status')
+    if (replay?.state === 'off' && recording?.state === 'idle') return
+    if (Date.now() > deadline)
+      throw new Error(
+        `Clips never went off: replay ${JSON.stringify(replay?.state)}, recording ${JSON.stringify(recording?.state)}`
+      )
+    await sleep(250)
+  }
 }
 async function waitUntil(expression, timeoutMs = 10000) {
   await cdp.eval(

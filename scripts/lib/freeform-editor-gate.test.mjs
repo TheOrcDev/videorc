@@ -4,6 +4,7 @@ import {
   freeformLiveSurfaceReady,
   createFreeformMouseSequence,
   evaluateFreeformArtifact,
+  syntheticStripBand,
   evaluateFreeformChrome,
   evaluateFreeformGesture,
   evaluateIdleHold,
@@ -205,6 +206,73 @@ describe('final artifact placement', () => {
   it('rejects missing or displaced source pixels', () => {
     assert.equal(evaluateFreeformArtifact(fixture([rects[0]])).ok, false)
     assert.equal(evaluateFreeformArtifact(fixture([rects[0], { ...rects[1], x: 0.66 }])).ok, false)
+  })
+})
+
+// 0.36.1 pass and the 11-22 run: the record+stream take's synthetic sources
+// restart at sequence 0, and the camera's cover crop of the frame-number strip
+// shows bits 3-12 only, so its first frames have no bright row in the strip.
+describe('final artifact placement over the frame-number strip', () => {
+  const width = 640,
+    height = 360
+  // The camera and screen boxes of the smoke's live move, in pixels.
+  const screen = { x: 7, y: 8, width: 239, height: 157 }
+  const camera = { x: 388, y: 181, width: 56, height: 103 }
+  const toRect = (box) => ({
+    x: box.x / width,
+    y: box.y / height,
+    width: box.width / width,
+    height: box.height / height
+  })
+  function frame(boxes, darkTopRows) {
+    const pixels = new Uint8Array(width * height * 3)
+    boxes.forEach((box, index) => {
+      for (let y = box.y + (darkTopRows[index] ?? 0); y < box.y + box.height; y++)
+        for (let x = box.x; x < box.x + box.width; x++)
+          pixels.fill(150, (y * width + x) * 3, (y * width + x) * 3 + 3)
+    })
+    return pixels
+  }
+  const rects = [toRect(screen), toRect(camera)]
+
+  it('sees the strip on a box taller than the pattern is wide, never on a wide one', () => {
+    assert.ok(Math.abs(syntheticStripBand(camera) - (3 * 103) / 64) < 1e-9)
+    assert.equal(syntheticStripBand(screen), 0)
+  })
+  it('accepts a camera whose visible strip cells are all clear', () => {
+    const band = Math.round(syntheticStripBand(camera))
+    const result = evaluateFreeformArtifact({
+      pixels: frame([screen, camera], [0, band]),
+      width,
+      height,
+      rects
+    })
+    assert.equal(result.ok, true, result.failures.join('; '))
+  })
+  it('still rejects a camera drawn a strip lower, or with a dark band of another height', () => {
+    const band = Math.round(syntheticStripBand(camera))
+    const lower = { ...camera, y: camera.y + band }
+    assert.equal(
+      evaluateFreeformArtifact({ pixels: frame([screen, lower], [0, band]), width, height, rects })
+        .ok,
+      false
+    )
+    assert.equal(
+      evaluateFreeformArtifact({
+        pixels: frame([screen, camera], [0, band + 6]),
+        width,
+        height,
+        rects
+      }).ok,
+      false
+    )
+  })
+  it('keeps the strict top edge on a box the strip never reaches', () => {
+    assert.equal(
+      evaluateFreeformArtifact({ pixels: frame([screen, camera], [5, 0]), width, height, rects })
+        .ok,
+      false
+    )
   })
 })
 
