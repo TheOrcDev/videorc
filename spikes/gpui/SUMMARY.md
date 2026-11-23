@@ -73,6 +73,16 @@ which are plan 260's S0.1 lines.
 | `dropped_frames` | integer | Frames the producer made that never reached the screen | reported |
 | `route` | string | `a`, `b`, `c` or `d` (S0.2c) | — |
 | `resolution`, `fps` | string, integer | The source's size and rate (S0.2c) | — |
+| `bundle_id` | string or null | The app bundle's id on macOS (`spike-desktop`, S0.7) | — |
+| `hotkey`, `hotkey_presses` | string, integer | The global shortcut and how many presses arrived (S0.7) | ≥ 1 when pressed with another app in front |
+| `menu_actions` | string array | Menu items that ran, in order (S0.7) | — |
+| `open_urls` | object array | Each link: `url`, `ms_after_start`, `before_main_window` (S0.7) | the cold-start link arrives |
+| `single_instance_handoffs` | array of string arrays | The arguments each second start handed over (S0.7) | — |
+| `hidden_window`, `on_top_window` | object | The test windows: id, `sharing_none`, `level`, `hides_on_deactivate`, or `gap` (S0.7) | — |
+| `keep_awake_assertions`, `notifications_posted` | integer | Sleep-guard assertions taken; notifications posted (S0.7) | — |
+| `notification_responses` | object array | Notifications the user clicked: `tag`, `action` (S0.7) | — |
+| `picked_paths`, `revealed_paths`, `trashed_paths`, `dropped_paths` | string array | Files through the open dialog, Show in Finder, the Trash, drag and drop (S0.7) | — |
+| `header_double_clicks`, `header_drags`, `reopens` | integer | Custom-header double-clicks and drags; Dock reopens (S0.7) | — |
 
 A spike that needs a number not in this table adds it with a plain
 snake-case name and a unit suffix (`_ms`, `_mb`, `_percent`), and adds a

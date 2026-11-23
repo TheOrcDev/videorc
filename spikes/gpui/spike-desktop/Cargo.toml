@@ -1,0 +1,24 @@
+[package]
+name = "spike-desktop"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Plan 260 spike S0.7: desktop integration under GPUI (menus, title bar, hotkey, deep links, one instance, window order, hide from capture, sleep guard, notifications, files)"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+spike-summary.workspace = true
+serde_json.workspace = true
+raw-window-handle.workspace = true
+# Global shortcuts as videorc-rust does (Carbon on macOS, RegisterHotKey on
+# Windows, XGrabKey on X11). Wayland needs the GlobalShortcuts portal (L5).
+global-hotkey = "0.7"
+# Move to Trash / Recycle Bin / the freedesktop trash.
+trash = "5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3.2"
+objc2-app-kit = { version = "0.3.2", features = ["NSView", "NSWindow", "NSResponder", "NSPanel", "NSGraphics"] }
