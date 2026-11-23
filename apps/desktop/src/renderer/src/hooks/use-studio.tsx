@@ -1659,12 +1659,8 @@ export type StudioContextValue = {
    * Plan 258 S5: the camera's background (Studio's Background, the Scene
    * page's section, ⌘K), stored per camera and committed through the same
    * transaction, so every later commit carries it. False with no camera.
-   * `commit: false` only stores it (a slider mid-drag); the drop commits.
    */
-  applyCameraBackground: (
-    background: CameraBackground,
-    options?: { commit?: boolean }
-  ) => Promise<boolean>
+  applyCameraBackground: (background: CameraBackground) => Promise<boolean>
   /** Takes the last committed layout change back (plan 174 S3.9, D15); false when there is none. */
   undoLayoutPatch: () => Promise<boolean>
   /** `keepScene`: the Scene page's Layout edits the saved scene on stream (plan 210 D3). */
@@ -5357,9 +5353,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const migrationSettled = cameraBackgroundMigrated(settings.cameraBackgroundMigration)
   useEffect(() => {
     if (migrationSettled) return
-    let current = true
-    void import('@/lib/camera-background-migration').then(({ migrateCameraBackgrounds }) => {
-      if (!current) return
+    void import('@/lib/camera-background-migration').then(({ migrateCameraBackgrounds }) =>
       setSettings((settings) => {
         const migrated = migrateCameraBackgrounds({
           cameraBackgrounds: settings.cameraBackgrounds,
@@ -5370,10 +5364,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         })
         return migrated ? { ...settings, ...migrated } : settings
       })
-    })
-    return () => {
-      current = false
-    }
+    )
   }, [migrationSettled, migrationCameraId, migrationScenes, activeSavedSceneId])
   // A new user's scenes show the main display before the device list names it.
   useEffect(() => {
@@ -11786,7 +11777,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // commits can drop it. The commit right after reaches the live camera's
   // stage (`apply_camera_background`); the stage itself confirms, so no toast.
   const applyCameraBackground = useCallback(
-    (background: CameraBackground, options?: { commit?: boolean }): Promise<boolean> => {
+    (background: CameraBackground): Promise<boolean> => {
       const cameraId = captureConfigRef.current.sources.cameraId
       if (!cameraId) return Promise.resolve(false)
       const normalized = normalizeCameraBackground(background)
@@ -11805,7 +11796,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         layout: cameraOutputLayout(captureConfigRef.current.layout, cameraId, nextSettings)
       }
       setSettings((current) => ({ ...current, ...migrated }))
-      if (options?.commit === false) return Promise.resolve(true)
       return requestLayoutTransaction(captureConfigRef.current.layout, {
         pendingIndicator: false
       }).then((committed) => {

@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
@@ -69,7 +69,9 @@ export function useCameraBackground(): CameraBackgroundControl {
   const { cloudStatus, talkShow } = useStudioCloud()
   const images = useCameraBackgroundImages()
   const cameraId = captureConfig.sources.cameraId
-  const background = cameraBackgroundFor(settings.cameraBackgrounds, cameraId)
+  // A slider mid-drag shows its value here only; the drop stores and commits it.
+  const [draft, setDraft] = useState<CameraBackground | null>(null)
+  const background = draft ?? cameraBackgroundFor(settings.cameraBackgrounds, cameraId)
   // The room's phase, or the Show stage standing in for the Preview (a room
   // opening, or the smoke's stand-in for one).
   const roomOpen = cloudStatus?.room?.phase === 'open' || talkShow?.previewReplaced === true
@@ -78,13 +80,21 @@ export function useCameraBackground(): CameraBackgroundControl {
   const effectReason =
     platformBackgroundReason(platform) ?? (roomOpen ? ROOM_BACKGROUND_UNAVAILABLE : null)
   const choose = useCallback(
-    (choice: CameraBackgroundChoiceId) =>
-      void applyCameraBackground(cameraBackgroundForChoice(background, choice)),
+    (choice: CameraBackgroundChoiceId) => {
+      setDraft(null)
+      void applyCameraBackground(cameraBackgroundForChoice(background, choice))
+    },
     [applyCameraBackground, background]
   )
   const set = useCallback(
-    (next: CameraBackground, options?: { commit?: boolean }) =>
-      void applyCameraBackground(next, options),
+    (next: CameraBackground, options?: { commit?: boolean }) => {
+      if (options?.commit === false) {
+        setDraft(next)
+        return
+      }
+      setDraft(null)
+      void applyCameraBackground(next)
+    },
     [applyCameraBackground]
   )
   return {
