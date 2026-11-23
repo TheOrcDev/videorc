@@ -1288,6 +1288,8 @@ async function waitForLiveLayoutProof(
   let lastError: unknown = null
 
   while (Date.now() < deadline) {
+    // A client the window let go never answers again: stop asking.
+    if (activeClient.isClosed) break
     try {
       const [compositorStatus, diagnostics] = await Promise.all([
         activeClient.requestTyped('compositor.status'),
@@ -11196,8 +11198,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         })
         .catch((error: unknown) => {
           // A request that raced Stop is refused by design; only a failure
-          // while the session is still running is news.
-          if (isActiveRecordingState(recordingRef.current.state)) {
+          // while the session is still running is news. A client the window
+          // let go rejects what it still had in flight: that is teardown.
+          if (!client.isClosed && isActiveRecordingState(recordingRef.current.state)) {
             reportError(error)
           }
         })
@@ -11589,6 +11592,17 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
                   'The preview may be behind',
                   'Your stream and recording have the new scene. Reopen the preview if it looks stale.'
                 )
+              )
+              return
+            }
+            if (client.isClosed || !client.connected) {
+              // The connection went away while the switch waited: the window
+              // let it go (it closed, or a newer connection replaced it), or
+              // it dropped and has not come back. The Session badge says so,
+              // and connection recovery reads the scene again, so there is
+              // nothing to tell the streamer about this switch.
+              console.warn(
+                `Layout committed at revision ${status.sceneRevision}, but preview proof was not observed before its engine connection closed. ${detail}`
               )
               return
             }

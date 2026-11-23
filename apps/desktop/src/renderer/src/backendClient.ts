@@ -177,6 +177,11 @@ export class BackendClient {
     return this.ws?.readyState === WebSocket.OPEN
   }
 
+  /** Closed for good (`close()`): the window let this client go. */
+  get isClosed(): boolean {
+    return this.closed
+  }
+
   connect(): Promise<void> {
     if (this.closed) {
       return Promise.reject(new Error(ENGINE_SHUT_DOWN))

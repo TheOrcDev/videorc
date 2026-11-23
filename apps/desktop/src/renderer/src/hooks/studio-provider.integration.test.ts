@@ -10064,6 +10064,62 @@ describe('real StudioProvider lifecycle', () => {
     }
   }, 20_000)
 
+  // A scene switch while recording waits up to 5 s for the recording to draw
+  // it. When the window's engine connection closes during that wait (the
+  // window closed, or a newer connection replaced it), nobody is looking at
+  // that switch any more and connection recovery reads the scene again: no
+  // "Couldn't confirm the scene change" toast. On a loaded CI runner the old
+  // toast landed in whichever test ran next (the co-host and Sidekick flakes).
+  it('says nothing about a scene switch whose engine connection closed while it waited for the recording', async () => {
+    const backend = new StudioBackend()
+    // The recording never reports drawing the new scene: the wait runs its course.
+    backend.reportsActiveSceneRevision = false
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => canSaveScene() && latest().savedScenes.length >= 3)
+    const cameraOnly = latest().savedScenes[2]
+    await act(async () => latest().startSession())
+    await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'recording')
+
+    const from = backend.sentCommands.length
+    let switched: Promise<boolean> | undefined
+    await act(async () => {
+      switched = latest().applySavedScene(cameraOnly.id)
+    })
+    await waitForObservation(() =>
+      backend.sentCommands
+        .slice(from)
+        .some((command) => command.method === 'scene.layout.apply_live')
+    )
+    const warn = vi.spyOn(console, 'warn')
+    const unproven = (): boolean =>
+      warn.mock.calls.some((call) => String(call[0]).includes('preview proof was not observed'))
+    // The window goes away while the switch waits for the recording's proof.
+    await act(async () => root?.unmount())
+    root = null
+    await vi.waitFor(() => expect(unproven()).toBe(true), { timeout: 8_000, interval: 50 })
+    await switched?.catch(() => false)
+    // A report goes out through the lazily loaded recovery module: load it
+    // here too, so any report the switch made has landed before the check.
+    await import('@/lib/session-runtime-recovery')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(toastSpies.error).not.toHaveBeenCalled()
+  }, 15_000)
+
   // Plan 231 D18: Camera only shows no screen, and going on stream leaves the
   // running capture as it is, so going back to a screen scene is a swap in
   // place. Idle and while recording.
