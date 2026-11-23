@@ -1222,6 +1222,58 @@ fn chat_id_lookup_error_is_transient(error: &anyhow::Error) -> bool {
     })
 }
 
+/// Tests only: the poll loop's waits, scripted. A connector task run inside
+/// `SCRIPTED_POLL_WAITS.scope` records every wait it asks for; the first
+/// `allowed` return at once and the rest never end (the test aborts the
+/// task). The 5 s poll floor is then checked without spending 5 s of real
+/// time, which a loaded CI runner could stretch past a test's deadline.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct ScriptedPollWaits(std::sync::Arc<std::sync::Mutex<(usize, Vec<Duration>)>>);
+
+#[cfg(test)]
+impl ScriptedPollWaits {
+    pub(crate) fn allowing(allowed: usize) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new((
+            allowed,
+            Vec::new(),
+        ))))
+    }
+
+    /// Every wait the connector asked for, in order.
+    pub(crate) fn asked(&self) -> Vec<Duration> {
+        self.0.lock().unwrap().1.clone()
+    }
+
+    /// Records `delay`; whether this wait may end at once.
+    fn take(&self, delay: Duration) -> bool {
+        let mut inner = self.0.lock().unwrap();
+        inner.1.push(delay);
+        if inner.0 == 0 {
+            return false;
+        }
+        inner.0 -= 1;
+        true
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static SCRIPTED_POLL_WAITS: ScriptedPollWaits;
+}
+
+/// The poll loop's wait between requests (a plain sleep outside tests).
+async fn poll_wait(delay: Duration) {
+    #[cfg(test)]
+    if let Ok(waits) = SCRIPTED_POLL_WAITS.try_with(Clone::clone) {
+        if !waits.take(delay) {
+            std::future::pending::<()>().await;
+        }
+        return;
+    }
+    sleep(delay).await;
+}
+
 /// The connector task: resolve the chat id, then poll → normalize → deliver, honoring the
 /// server poll interval, with backoff + status transitions on errors. Spawned by session
 /// integration (and `liveChat.start` with a `youtube` config for the live smoke).
@@ -1482,7 +1534,7 @@ pub async fn run_youtube_chat_connector(
                     // Do not advance the provider cursor past a page that was
                     // rejected by durable persistence. The next poll requests
                     // the same page and the restored de-dup state accepts it.
-                    sleep(Duration::from_millis(delay_ms)).await;
+                    poll_wait(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
                 page_token = page.next_page_token;
@@ -1500,7 +1552,7 @@ pub async fn run_youtube_chat_connector(
                     .await;
                     return;
                 }
-                sleep(Duration::from_millis(delay_ms)).await;
+                poll_wait(Duration::from_millis(delay_ms)).await;
             }
             Err(error) => {
                 let kind = match error {
@@ -1552,7 +1604,7 @@ pub async fn run_youtube_chat_connector(
                     page_token = None;
                 }
                 connected = false;
-                sleep(Duration::from_millis(backoff_ms)).await;
+                poll_wait(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms.saturating_mul(2)).min(MAX_BACKOFF_MS);
             }
         }
@@ -2397,13 +2449,18 @@ mod tests {
         state
     }
 
+    /// Runs the connector with scripted poll waits: `waits` lets its first
+    /// waits end at once and parks the next one, so no real 5 s floor is
+    /// spent and no third page can arrive before the test reads the second.
     async fn start_expiring_connector(
         state: &AppState,
         base_url: String,
         token_source: crate::session_token::SessionTokenSource,
+        waits: ScriptedPollWaits,
     ) -> tokio::task::JoinHandle<()> {
-        start_connector(
+        start_connector_with_waits(
             state,
+            Some(waits),
             YouTubeChatConfig {
                 access_token: "token-1".to_string(),
                 live_chat_id: Some("chat-1".to_string()),
@@ -2418,6 +2475,14 @@ mod tests {
 
     async fn start_connector(
         state: &AppState,
+        config: YouTubeChatConfig,
+    ) -> tokio::task::JoinHandle<()> {
+        start_connector_with_waits(state, None, config).await
+    }
+
+    async fn start_connector_with_waits(
+        state: &AppState,
+        waits: Option<ScriptedPollWaits>,
         config: YouTubeChatConfig,
     ) -> tokio::task::JoinHandle<()> {
         let provider = crate::live_chat::LiveChatProviderState {
@@ -2441,12 +2506,16 @@ mod tests {
             coordinator.start_session("session-1".to_string(), vec![provider]);
             coordinator.session_generation()
         };
-        tokio::spawn(run_youtube_chat_connector(
+        let connector = run_youtube_chat_connector(
             state.clone(),
             "session-1".to_string(),
             session_generation,
             config,
-        ))
+        );
+        match waits {
+            Some(waits) => tokio::spawn(SCRIPTED_POLL_WAITS.scope(waits, connector)),
+            None => tokio::spawn(connector),
+        }
     }
 
     async fn wait_for_provider(
@@ -2471,14 +2540,28 @@ mod tests {
     async fn chat_keeps_polling_after_the_token_expires_mid_session() {
         let (base_url, server) = spawn_expiring_youtube().await;
         let state = expiry_state();
+        // One poll wait ends at once (after page 1); the next one, after
+        // page 2, parks the connector.
+        let waits = ScriptedPollWaits::allowing(1);
         let connector = start_expiring_connector(
             &state,
             base_url,
             crate::session_token::SessionTokenSource::scripted(vec![Ok("token-2")]),
+            waits.clone(),
         )
         .await;
-        let snapshot = wait_for_provider(&state, |snapshot| snapshot.messages.len() >= 2).await;
+        // Page 2 is delivered just before its wait is asked for: read both.
+        let snapshot = wait_for_provider(&state, |snapshot| {
+            snapshot.messages.len() >= 2 && waits.asked().len() >= 2
+        })
+        .await;
         connector.abort();
+        // The renewal retries at once; both successful pages waited the
+        // 5 s floor (YouTube asked for 1 s).
+        assert_eq!(
+            waits.asked(),
+            vec![Duration::from_millis(MIN_POLLING_INTERVAL_MS); 2]
+        );
         assert_eq!(
             snapshot
                 .messages
@@ -2498,10 +2581,12 @@ mod tests {
     async fn a_revoked_youtube_sign_in_fails_clearly() {
         let (base_url, _server) = spawn_expiring_youtube().await;
         let state = expiry_state();
+        let waits = ScriptedPollWaits::allowing(1);
         let connector = start_expiring_connector(
             &state,
             base_url,
             crate::session_token::SessionTokenSource::scripted(vec![Err("revoked")]),
+            waits.clone(),
         )
         .await;
         let snapshot = wait_for_provider(&state, |snapshot| {
@@ -2511,6 +2596,10 @@ mod tests {
         connector.abort();
         assert_eq!(snapshot.providers[0].message, YOUTUBE_SIGN_IN_EXPIRED);
         assert_eq!(snapshot.messages.len(), 1);
+        assert_eq!(
+            waits.asked(),
+            vec![Duration::from_millis(MIN_POLLING_INTERVAL_MS)]
+        );
     }
 
     #[tokio::test]
@@ -2903,10 +2992,12 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         let state = expiry_state();
+        let waits = ScriptedPollWaits::allowing(1);
         let connector = start_expiring_connector(
             &state,
             format!("http://{address}"),
             crate::session_token::SessionTokenSource::scripted(vec![]),
+            waits.clone(),
         )
         .await;
 
@@ -2924,6 +3015,11 @@ mod tests {
         );
         assert_eq!(snapshot.messages.len(), 1);
         assert_eq!(server.hits.lock().unwrap().len(), 2);
+        assert_eq!(
+            waits.asked(),
+            vec![Duration::from_millis(MIN_POLLING_INTERVAL_MS)],
+            "page 1 waited the 5 s floor; the refusal parks without a poll wait"
+        );
 
         // Parked: no request goes out while the breaker is set.
         tokio::time::sleep(Duration::from_millis(300)).await;
