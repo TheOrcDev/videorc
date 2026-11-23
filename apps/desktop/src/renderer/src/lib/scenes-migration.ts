@@ -25,7 +25,12 @@ import {
 } from './scene-presets'
 import { canonicalJson } from './scene-visibility-identity'
 import { normalizeAccelerator } from '../../../shared/accelerator'
-import { displayShows } from './scenes-store'
+import {
+  defaultSceneId,
+  displayShows,
+  presetsShowSameSources,
+  verticalTwinPreset
+} from './scenes-store'
 import {
   SCENE_SLOT_ACTIONS,
   sceneSlotAccelerator,
@@ -86,8 +91,7 @@ export function horizontalTwin(preset: LayoutPreset): LayoutPreset {
   return 'screen-camera'
 }
 
-/** The ids migration gives the scenes it makes: stable, so a second run names the same scenes. */
-export const defaultSceneId = (preset: LayoutPreset): string => `default-${preset}`
+export { defaultSceneId }
 export const WORKING_SCENE_ID = 'migrated-working'
 
 /**
@@ -141,18 +145,23 @@ export function migrateToScenes(
     sourceTransformOverrides: {}
   })
   /**
-   * What the vertical stream shows for a 16:9 layout today. In a 9:16 studio
-   * no vertical leg runs, so the layout's own Fill or Fit stays.
+   * A 16:9 layout's 9:16 layout: what the vertical stream shows for it today
+   * when that shows the same sources (a screen or not, a camera or not), else
+   * its 9:16 twin, so a "Screen + camera" is never only a camera in 9:16
+   * (owner report 2026-11-23). In a 9:16 studio no vertical leg runs, so the
+   * layout's own Fill or Fit stays.
    */
-  const legLayout = (layout: LayoutSettings): LayoutSettings => ({
-    ...presetLayout(
-      layout,
-      captureConfig.simulcastFollowsProgram && layout.layoutPreset === 'camera-only'
+  const legPreset = (preset: LayoutPreset): LayoutPreset => {
+    const streamed =
+      captureConfig.simulcastFollowsProgram && preset === 'camera-only'
         ? 'vertical-camera-only'
-        : captureConfig.simulcastFollowsProgram && layout.layoutPreset === 'screen-only'
+        : captureConfig.simulcastFollowsProgram && preset === 'screen-only'
           ? 'vertical-screen-only'
           : captureConfig.lastVerticalPreset
-    ),
+    return presetsShowSameSources(preset, streamed) ? streamed : verticalTwinPreset(preset)
+  }
+  const legLayout = (layout: LayoutSettings): LayoutSettings => ({
+    ...presetLayout(layout, legPreset(layout.layoutPreset)),
     verticalScreenFraming:
       orientation === 'vertical'
         ? layout.verticalScreenFraming
@@ -333,7 +342,8 @@ export function migrateToScenes(
   const { layouts: _layouts, ...shortcuts } = globalShortcuts ?? {}
   const sceneSlots = settleSlotKeys(scenes, customKeys, shortcuts, platform)
   return {
-    library: { version: 2, scenes, onStreamId: onStream.id },
+    // Made with each 9:16 layout showing what its 16:9 one shows: nothing to repair.
+    library: { version: 2, scenes, onStreamId: onStream.id, verticalLayoutsRepaired: true },
     globalShortcuts: {
       ...shortcuts,
       scenes: customKeys,

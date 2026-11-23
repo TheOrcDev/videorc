@@ -63,6 +63,13 @@ export type SceneLibrary = {
   scenes: Scene[]
   onStreamId: string
   pendingShortcuts?: GlobalShortcutsConfig
+  /**
+   * Set once every default scene's 9:16 layout shows what its 16:9 layout
+   * shows: by the migration that makes the library, or by the one repair of
+   * a library made by 0.34.0 to 0.37.0 (`repairStoredSceneVerticals`). From
+   * then on a 9:16 layout the streamer picks is theirs, never repaired.
+   */
+  verticalLayoutsRepaired?: true
 }
 
 export type MainDisplay = Pick<Device, 'id' | 'name' | 'displayUuid'>

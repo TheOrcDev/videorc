@@ -21,12 +21,20 @@ import {
 } from './scene-presets'
 import { canonicalJson } from './scene-visibility-identity'
 import { defaultScenes, horizontalTwin, migrateToScenes } from './scenes-migration'
-import { canDeleteScene, hydrateScenes, normalizeScene, withMainDisplay } from './scenes-store'
+import {
+  canDeleteScene,
+  hydrateScenes,
+  normalizeScene,
+  repairStoredSceneVerticals,
+  verticalTwinPreset,
+  withMainDisplay
+} from './scenes-store'
 import { sceneFromSaved, savedSceneView } from './scene-studio'
 import { normalizeAccelerator } from '../../../shared/accelerator'
 import { globalShortcutEntries } from '../../../shared/global-shortcuts'
 import {
   firstSceneWithLayout,
+  layoutShowsScreen,
   sameShows,
   sceneAtPosition,
   sceneLayout,
@@ -353,19 +361,49 @@ describe('migrateToScenes on the fixtures (plan 231 D15)', () => {
       expect(scene.layouts.vertical.verticalScreenFraming).toBe('fit')
   })
 
-  it('vertical stream, follow off: every scene streams the remembered 9:16 layout', () => {
+  it('vertical stream, follow off: the remembered 9:16 layout where it shows the same sources', () => {
     const { library } = migrate('vertical-follow-off')
+    // Camera bottom shows a screen and a camera: Screen + camera and Side by
+    // side keep it; Screen only and Camera only take their own 9:16 twins, so
+    // no scene shows in 9:16 what its name says it doesn't (owner report
+    // 2026-11-23).
     expect(rows(library).map((row) => [row[2], row[3]])).toEqual([
       ['screen-camera', 'vertical-camera-bottom'],
-      ['screen-only', 'vertical-camera-bottom'],
-      ['camera-only', 'vertical-camera-bottom'],
+      ['screen-only', 'vertical-screen-only'],
+      ['camera-only', 'vertical-camera-only'],
       ['side-by-side', 'vertical-camera-bottom']
     ])
     expect(library.onStreamId).toBe('default-screen-camera')
+    expect(library.verticalLayoutsRepaired).toBe(true)
     for (const scene of library.scenes) {
       expect(scene.layouts.vertical.verticalScreenFraming).toBe('fill')
-      // Camera only streams a 9:16 layout with a screen: it keeps today's.
+      // Not a new user: every default keeps today's screen.
       expect(showsTag(scene.shows)).toBe('display:screen:1')
+    }
+  })
+
+  it('vertical stream remembering Camera only: Screen + camera and Side by side still show their screen in 9:16', () => {
+    // The owner's setup before 0.34.0: Follow on, the last 9:16 pick Camera
+    // only. Plan 231 gave Screen + camera and Side by side that Camera only.
+    const { v1, working, config, shortcuts } = inputs(fixture('vertical-follow-on'))
+    const { library } = migrateToScenes(
+      v1,
+      working,
+      { ...config, lastVerticalPreset: 'vertical-camera-only' },
+      shortcuts,
+      NOW
+    )
+    expect(rows(library).map((row) => [row[2], row[3]])).toEqual([
+      ['screen-camera', 'vertical-camera-top'],
+      ['screen-only', 'vertical-screen-only'],
+      ['camera-only', 'vertical-camera-only'],
+      ['side-by-side', 'vertical-camera-top']
+    ])
+    for (const scene of library.scenes) {
+      expect(layoutShowsScreen(scene.layouts.vertical)).toBe(
+        layoutShowsScreen(scene.layouts.horizontal)
+      )
+      expect(sceneShowsWords(scene, 'vertical')).toBe(sceneShowsWords(scene, 'horizontal'))
     }
   })
 
@@ -831,6 +869,183 @@ describe('defaultScenes (D3)', () => {
     ])
     expect(pinned.scenes).toEqual(defaultScenes({ id: 'screen:1', name: 'Display 1' }, NOW))
     expect(withMainDisplay(pinned, { id: 'screen:2', name: 'Display 2' })).toBe(pinned)
+  })
+})
+
+describe('repairStoredSceneVerticals (owner report 2026-11-23)', () => {
+  // A library 0.34.0's migration made for a streamer whose last 9:16 pick was
+  // Camera only (the owner's, screen and camera renamed): Screen + camera and
+  // Side by side show only the camera in 9:16, with their screen assigned.
+  const owner = () => fixture('v2-vertical-camera-only')
+  const ownerLibrary = () => owner()[SCENES_KEY] as Record<string, unknown>
+  const ownerWorking = () => owner()[WORKING_SCENE_KEY] as Record<string, unknown>
+  const hydrated = (raw: unknown): SceneLibrary => hydrateScenes(raw).library!
+  const byId = (library: SceneLibrary, id: string): Scene =>
+    library.scenes.find((scene) => scene.id === id)!
+
+  it('puts Screen + camera and Side by side back on a 9:16 layout with their screen and camera', () => {
+    const before = hydrated(ownerLibrary())
+    expect(rows(before).map((row) => [row[1], row[3]])).toEqual([
+      ['Screen + camera', 'vertical-camera-only'],
+      ['Screen only', 'vertical-screen-only'],
+      ['Camera only', 'vertical-camera-only'],
+      ['Side by side', 'vertical-camera-only']
+    ])
+    const repair = repairStoredSceneVerticals(ownerLibrary(), ownerWorking())!
+    expect(repair.repaired).toEqual(['default-screen-camera', 'default-side-by-side'])
+    const after = hydrated(repair.library)
+    expect(after.verticalLayoutsRepaired).toBe(true)
+    expect(rows(after).map((row) => [row[1], row[2], row[3]])).toEqual([
+      ['Screen + camera', 'screen-camera', 'vertical-camera-top'],
+      ['Screen only', 'screen-only', 'vertical-screen-only'],
+      ['Camera only', 'camera-only', 'vertical-camera-only'],
+      ['Side by side', 'side-by-side', 'vertical-camera-top']
+    ])
+    for (const scene of after.scenes) {
+      const was = byId(before, scene.id)
+      // 9:16: what the 16:9 layout shows, in words on the card too.
+      expect(layoutShowsScreen(scene.layouts.vertical)).toBe(
+        layoutShowsScreen(scene.layouts.horizontal)
+      )
+      expect(sceneShowsWords(scene, 'vertical')).toBe(sceneShowsWords(scene, 'horizontal'))
+      // 16:9, the screen, the name, the dates and the background are untouched.
+      expect(scene.layouts.horizontal).toEqual(was.layouts.horizontal)
+      expect(scene.shows).toEqual(was.shows)
+      expect([scene.name, scene.createdAt, scene.updatedAt]).toEqual([
+        was.name,
+        was.createdAt,
+        was.updatedAt
+      ])
+      expect(scene.background).toEqual(was.background)
+      // The 9:16 look and framing stay; only the layout changes.
+      expect({ ...scene.layouts.vertical, layoutPreset: null }).toEqual({
+        ...was.layouts.vertical,
+        layoutPreset: null
+      })
+    }
+    expect(sceneShowsWords(byId(before, 'default-screen-camera'), 'vertical')).toBe('Camera only')
+    expect(sceneShowsWords(byId(after, 'default-screen-camera'), 'vertical')).toBe('Display 1')
+    expect(byId(after, 'default-screen-only')).toEqual(byId(before, 'default-screen-only'))
+    expect(byId(after, 'default-camera-only')).toEqual(byId(before, 'default-camera-only'))
+    expect(after.onStreamId).toBe(before.onStreamId)
+    // Camera only is on stream: the working setup is not moved.
+    expect(repair.working).toBeNull()
+  })
+
+  it('runs once: a repaired library is never repaired again, even a 9:16 pick made after it', () => {
+    const repaired = repairStoredSceneVerticals(ownerLibrary(), null)!.library
+    expect(repairStoredSceneVerticals(repaired, null)).toBeNull()
+    const picked = hydrated(repaired)
+    byId(picked, 'default-side-by-side').layouts.vertical.layoutPreset = 'vertical-camera-only'
+    expect(repairStoredSceneVerticals(JSON.parse(JSON.stringify(picked)), null)).toBeNull()
+  })
+
+  it('a library the migration makes now needs no repair', () => {
+    expect(repairStoredSceneVerticals(migrate('vertical-follow-on').library, null)).toBeNull()
+  })
+
+  it('moves the working setup with the scene a 9:16 studio shows, only when it is exactly the stored layout', () => {
+    const library = ownerLibrary()
+    const screenCamera = byId(hydrated(library), 'default-screen-camera')
+    const working = {
+      ...ownerWorking(),
+      sceneId: 'default-screen-camera',
+      visual: {
+        ...(ownerWorking().visual as Record<string, unknown>),
+        layout: screenCamera.layouts.vertical
+      }
+    }
+    const repair = repairStoredSceneVerticals(library, working)!
+    const moved = hydrateWorkingScene(repair.working)!
+    expect(moved.sceneId).toBe('default-screen-camera')
+    expect(moved.visual.layout).toEqual(
+      byId(hydrated(repair.library), 'default-screen-camera').layouts.vertical
+    )
+    expect(moved.visual.sources).toEqual(hydrateWorkingScene(working)!.visual.sources)
+    // A working look that drifted from the scene is the streamer's: left alone.
+    const drifted = {
+      ...working,
+      visual: { ...working.visual, layout: { ...screenCamera.layouts.vertical, cameraZoom: 150 } }
+    }
+    expect(repairStoredSceneVerticals(library, drifted)!.working).toBeNull()
+    // A 16:9 studio's program is the 16:9 layout: nothing to move.
+    const horizontal = {
+      ...working,
+      visual: { ...working.visual, layout: screenCamera.layouts.horizontal }
+    }
+    expect(repairStoredSceneVerticals(library, horizontal)!.working).toBeNull()
+  })
+
+  it('touches only the default scenes still on their own 16:9 layout, never Freeform or a saved scene', () => {
+    const library = ownerLibrary()
+    const scenes = (library.scenes as Scene[]).map((scene) => {
+      if (scene.id === 'default-screen-camera')
+        return {
+          ...scene,
+          layouts: {
+            ...scene.layouts,
+            horizontal: { ...scene.layouts.horizontal, layoutPreset: 'screen-only' }
+          }
+        }
+      if (scene.id === 'default-side-by-side')
+        return {
+          ...scene,
+          layouts: {
+            ...scene.layouts,
+            vertical: { ...scene.layouts.vertical, arrangementMode: 'freeform' }
+          }
+        }
+      return scene
+    })
+    const saved = {
+      ...scenes[0]!,
+      id: 'scene-figma',
+      name: 'Figma',
+      layouts: (library.scenes as Scene[])[0]!.layouts
+    }
+    const repair = repairStoredSceneVerticals(
+      { ...library, scenes: [...scenes, saved, { broken: true }] },
+      null
+    )!
+    expect(repair.repaired).toEqual([])
+    // Still marked, so the check never runs again; the invalid entry stays as stored.
+    expect(repair.library.verticalLayoutsRepaired).toBe(true)
+    expect(repair.library.scenes).toEqual([...scenes, saved, { broken: true }])
+  })
+
+  it('puts a Screen only or Camera only 9:16 layout that shows the other source on its own twin', () => {
+    const library = ownerLibrary()
+    const scenes = (library.scenes as Scene[]).map((scene) =>
+      scene.id === 'default-camera-only' || scene.id === 'default-screen-only'
+        ? {
+            ...scene,
+            layouts: {
+              ...scene.layouts,
+              vertical: { ...scene.layouts.vertical, layoutPreset: 'vertical-camera-bottom' }
+            }
+          }
+        : scene
+    )
+    const repaired = hydrated(repairStoredSceneVerticals({ ...library, scenes }, null)!.library)
+    expect(byId(repaired, 'default-screen-only').layouts.vertical.layoutPreset).toBe(
+      'vertical-screen-only'
+    )
+    expect(byId(repaired, 'default-camera-only').layouts.vertical.layoutPreset).toBe(
+      'vertical-camera-only'
+    )
+  })
+
+  it('nothing usable stored is nothing to repair', () => {
+    expect(repairStoredSceneVerticals(null, null)).toBeNull()
+    expect(repairStoredSceneVerticals({ version: 3, scenes: [] }, null)).toBeNull()
+  })
+
+  it('gives each 16:9 layout the 9:16 twin that shows the same sources', () => {
+    expect(verticalTwinPreset('screen-camera')).toBe('vertical-camera-top')
+    expect(verticalTwinPreset('side-by-side')).toBe('vertical-camera-top')
+    expect(verticalTwinPreset('screen-only')).toBe('vertical-screen-only')
+    expect(verticalTwinPreset('camera-only')).toBe('vertical-camera-only')
+    expect(verticalTwinPreset('vertical-split')).toBe('vertical-split')
   })
 })
 
