@@ -1,0 +1,228 @@
+{
+  "schema_version": 1,
+  "spike": "spike-linux-preview",
+  "os": "linux",
+  "arch": "x86_64",
+  "gpui_pre": "0.3.14",
+  "build": "release",
+  "args": [
+    "--label",
+    "final-wl-native-60",
+    "--out",
+    "/home/orcdev/linux-beta/plan260-s0-3/runs/final-wl-native-60.json",
+    "--compositor-pid",
+    "638338",
+    "--compositor-pid",
+    "638360",
+    "--fps",
+    "60",
+    "--seconds",
+    "60",
+    "--still",
+    "20",
+    "--resize",
+    "5",
+    "--presentation"
+  ],
+  "started_unix_ms": 1795476221369,
+  "seconds": 60,
+  "elapsed_s": 88.69,
+  "logical_cpus": 12,
+  "process_cpu_seconds": 2.99,
+  "process_cpu_percent_avg": 3.4,
+  "peak_rss_mb": 84.3,
+  "route": "wl-subsurface",
+  "backing": "wl_subsurface over the shared-memory ring (wl_shm)",
+  "session": "wayland",
+  "native_view": true,
+  "video_below_gpui": true,
+  "overlay_window": false,
+  "resolution": "1920x1080",
+  "fps": 60,
+  "drawable_px": "1378x775",
+  "presents": 3600,
+  "presents_per_second": 60.0,
+  "present_interval_p95_ms": 16.87,
+  "present_interval_source": "wp_presentation (on screen)",
+  "ui_cpu_percent_live": 3.67,
+  "ui_cpu_percent_still": 0.06,
+  "renders": 54,
+  "ui_redraws_per_second_live": 0.0,
+  "ui_redraws_per_second_idle": 0.0,
+  "cpu_copies_per_frame": 1,
+  "cpu_copies_per_frame_in_app": 0,
+  "dropped_frames": 0,
+  "linux": {
+    "label": "final-wl-native-60",
+    "session": "wayland",
+    "backing": "wl_subsurface over the shared-memory ring (wl_shm)",
+    "subsurfaceBelowGpui": true,
+    "overlay": true,
+    "overlayWindow": false,
+    "route": "native",
+    "resolution": "1920x1080",
+    "fps": 60,
+    "rssMb": 84.8,
+    "framesWritten": 4091,
+    "leasesMissed": 0,
+    "presentationClockId": 1,
+    "presentationDiscardedTotal": 1,
+    "phases": [
+      {
+        "phase": "live",
+        "seconds": 60.0,
+        "uiCpuPercentOfOneCore": 3.67,
+        "writerCpuPercent": 9.03,
+        "compositorCpuPercent": [
+          {
+            "pid": 638338,
+            "comm": "Hyprland",
+            "percent": 18.17
+          },
+          {
+            "pid": 638360,
+            "comm": "Xwayland",
+            "percent": 0.0
+          }
+        ],
+        "gpuiPaints": 0,
+        "framesWritten": 3600,
+        "framesLeased": 3600,
+        "framesShown": 3600,
+        "framesReleasedInTime": 3600,
+        "presentErrors": 0,
+        "shownPerSecond": 60.0,
+        "commitIntervalMs": {
+          "p50": 16.67,
+          "p95": 16.8,
+          "max": 31.57
+        },
+        "ageAtCommitMs": {
+          "p50": 0.11,
+          "p95": 0.13
+        },
+        "leaseHeldMs": {
+          "p50": 2.58,
+          "p95": 2.77
+        },
+        "wpPresentation": {
+          "presented": 3599,
+          "presentedPerSecond": 59.98,
+          "intervalMs": {
+            "p50": 16.66,
+            "p95": 16.87,
+            "max": 33.12
+          },
+          "ageAtPresentMs": {
+            "p50": 21.61,
+            "p95": 29.87
+          }
+        }
+      },
+      {
+        "phase": "still",
+        "seconds": 20.0,
+        "uiCpuPercentOfOneCore": 0.06,
+        "writerCpuPercent": 0.15,
+        "compositorCpuPercent": [
+          {
+            "pid": 638338,
+            "comm": "Hyprland",
+            "percent": 0.0
+          },
+          {
+            "pid": 638360,
+            "comm": "Xwayland",
+            "percent": 0.0
+          }
+        ],
+        "gpuiPaints": 0,
+        "framesWritten": 0,
+        "framesLeased": 0,
+        "framesShown": 0,
+        "framesReleasedInTime": 0,
+        "presentErrors": 0,
+        "shownPerSecond": 0.0,
+        "commitIntervalMs": {
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "ageAtCommitMs": {
+          "p50": null,
+          "p95": null
+        },
+        "leaseHeldMs": {
+          "p50": null,
+          "p95": null
+        },
+        "wpPresentation": {
+          "presented": 0,
+          "presentedPerSecond": 0.0,
+          "intervalMs": {
+            "p50": null,
+            "p95": null,
+            "max": null
+          },
+          "ageAtPresentMs": {
+            "p50": null,
+            "p95": null
+          }
+        }
+      },
+      {
+        "phase": "resize",
+        "seconds": 5.02,
+        "uiCpuPercentOfOneCore": 11.64,
+        "writerCpuPercent": 9.36,
+        "compositorCpuPercent": [
+          {
+            "pid": 638338,
+            "comm": "Hyprland",
+            "percent": 22.31
+          },
+          {
+            "pid": 638360,
+            "comm": "Xwayland",
+            "percent": 0.0
+          }
+        ],
+        "gpuiPaints": 50,
+        "framesWritten": 301,
+        "framesLeased": 301,
+        "framesShown": 301,
+        "framesReleasedInTime": 301,
+        "presentErrors": 0,
+        "shownPerSecond": 59.95,
+        "commitIntervalMs": {
+          "p50": 16.67,
+          "p95": 16.82,
+          "max": 17.03
+        },
+        "ageAtCommitMs": {
+          "p50": 0.11,
+          "p95": 0.13
+        },
+        "leaseHeldMs": {
+          "p50": 2.59,
+          "p95": 2.94
+        },
+        "wpPresentation": {
+          "presented": 300,
+          "presentedPerSecond": 59.75,
+          "intervalMs": {
+            "p50": 16.68,
+            "p95": 16.81,
+            "max": 17.65
+          },
+          "ageAtPresentMs": {
+            "p50": 20.11,
+            "p95": 20.26
+          }
+        }
+      }
+    ]
+  },
+  "errors": 0,
+  "error_messages": []
+}
