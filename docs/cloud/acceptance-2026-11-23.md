@@ -1,9 +1,9 @@
 # Videorc Cloud: public launch acceptance, 2026-11-23
 
-> **Status: DRAFT.** The owner's sign-off and the decisions are recorded.
-> The billing results and the switch-on smoke are placeholders
-> (`TODO(coordinator)`), filled in at launch. This record merges when the
-> launch switch is on and the smoke has passed.
+> **Status: DRAFT.** The switch is on (2026-11-23, about 19:22 UTC), the
+> billing pass and the switch-on smoke are recorded. Still open
+> (`TODO(coordinator)`): the owner's own Max purchase, a Premium desktop
+> showing the cloud, and the Linux and Windows cloud runs.
 >
 > Prices, costs, margins and production env values stay in the private web
 > repo (`videorc-web`, plan 245 and plan 185). This public record names
@@ -81,23 +81,29 @@ this table stands as an owner attestation, not a step-by-step log.
 
 ## Billing in Creem test mode (plan 245 S2, S3, S6)
 
-`TODO(coordinator)`: from the billing thread's report
-(`~/cloud-test/reports/2026-11-23-cloud-launch/billing/`). One row each,
-pass or fail, with the evidence's name. No prices.
+Run on the plan 245 branch preview with its own Neon branch database and
+Creem test mode, never on production data. Evidence is in the private launch
+reports (`billing/progress.md`, `billing/db/`, `billing/chrome/`,
+`billing/emails/`). Four money bugs were found and fixed before the switch
+(videorc-web #195, #198, #199, #201; #200 for the webhook logs), each proven
+again in test mode.
 
-| Path                                   | Result | Evidence |
-| -------------------------------------- | ------ | -------- |
-| Buy Premium, monthly and yearly        | TODO   | TODO     |
-| Buy Max, monthly and yearly            | TODO   | TODO     |
-| Upgrade Premium → Max                  | TODO   | TODO     |
-| Downgrade Max → Premium, at period end | TODO   | TODO     |
-| Cancel                                 | TODO   | TODO     |
-| Refund                                 | TODO   | TODO     |
-| Webhook replay is idempotent           | TODO   | TODO     |
-| A discount code                        | TODO   | TODO     |
-| The emails sent                        | TODO   | TODO     |
-| The desktop reads Max                  | TODO   | TODO     |
-| S6: the logo on the live Max products  | TODO   | TODO     |
+| Path                                   | Result                                                                                                                                     | Evidence                                                                               |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| Buy Premium, monthly and yearly        | Pass                                                                                                                                       | `db/*-pm-after-premium-month.txt`, `db/*-py-after-buy.txt`                             |
+| Buy Max, monthly and yearly            | Pass                                                                                                                                       | `db/*-mm-after-buy.txt`, `db/*-my-after-buy.txt`                                       |
+| A second checkout while subscribed     | Pass: refused, the account page changes the plan instead                                                                                   | terminal                                                                               |
+| Upgrade Premium → Max, monthly         | Pass: Max at once, charged the difference                                                                                                  | `db/*-up-after-upgrade.txt`                                                            |
+| Upgrade Premium monthly → Max yearly   | Failed (Creem's refund of the unused month briefly ended the plan); fixed in #195, then pass ×3                                            | `db/blocker-upgrade-refund-ends-plan.txt`, `db/fix-proof-yearly-upgrade-x3.txt`        |
+| Downgrade Max → Premium, at period end | Pass: Max kept to the period end, nothing charged; undoing it also passes                                                                  | `db/*-dn-after-downgrade.txt`, `db/*-dn-after-keep-max.txt`                            |
+| Yearly → monthly                       | Failed (Creem charged at once and dropped the year); fixed in #198: no self-serve yearly → monthly, and the dialogs say what Creem charges | `db/blocker2-yearly-to-monthly-charges-now.txt`, `db/fix2-proof-yearly-to-monthly.txt` |
+| Cancel                                 | Pass: the plan stays to the period end, then ends                                                                                          | `db/*-cx-after-cancel.txt`                                                             |
+| Refund, full and partial               | Pass: a full refund ends the plan; a partial one keeps it                                                                                  | `chrome/03-08`                                                                         |
+| Webhook replay is idempotent           | Failed (a dashboard Resend carries a new event id); fixed in #201, then pass                                                               | `db/blocker4-resend-old-event.txt`, `db/fix4-proof-resend.txt`                         |
+| A discount code                        | Pass: applied at checkout. Upgrading a discounted subscription is refused by Creem with nothing charged (contact support)                  | `chrome/09-12`, progress notes                                                         |
+| The emails sent                        | Pass after #199: purchase and upgrade emails name the plan bought and what it gives                                                        | `emails/` (purchase and upgrade, monthly and yearly, light and dark)                   |
+| The desktop reads Max                  | Pass: capabilities give Max's cloud hours, guests and retention, with a signed entitlement token                                           | `db/cap-mm.txt`, `db/cap-pm.txt`                                                       |
+| S6: the logo on the live Max products  | Done: both live Max products show the logo; nothing bought                                                                                 | `chrome/20-33`                                                                         |
 
 ## Production before the switch
 
@@ -115,26 +121,41 @@ web repo.
 - [x] The concurrent-show cap is raised for the public (the owner picked
       the number; set 2026-11-23, takes effect on the next production
       deploy).
-- [ ] Web PRs ready to merge with the switch: the legal update
-      (videorc-web #193) and the launch blog post (videorc-web #194).
+- [x] The legal update (videorc-web #193) merged with the switch.
+- [ ] The launch blog post (videorc-web #194) waits for the owner's
+      approval, like every public post.
 
 ## The switch and its smoke (plan 245 S7)
 
-`TODO(coordinator)`: fill in at launch.
-
-- Switch flipped (Max on sale in Production) and redeployed at: `TODO`
-  (deployment: `TODO`).
-- `/max` answers 200: `TODO`
-- The home page's pricing shows three plans: `TODO`
-- `/terms` and `/privacy` show the cloud sections, LiveKit and the launch
-  date: `TODO`
-- A real Max checkout by the owner opens Creem live (completed and
-  refunded, or stopped at Creem's page): `TODO`
+- **Switch flipped:** Max on sale in Production at 19:20:56 UTC on
+  2026-11-23; the legal update (#193) merged at 19:21:07 UTC, and its
+  production deploy (`videorc-7ia9ie1zb`) was ready at about 19:21:52 UTC.
+  **Videorc Cloud and Max have been live since about 19:22 UTC.** The same
+  deploy applied the monthly budget and the show cap.
+- Minutes before the switch, the same smoke saw `/max` 404, no cloud
+  sections in the legal pages, and Max checkout refused as not on sale.
+- `/max` answers 200: **pass**.
+- The home page's pricing (`/#pricing`) shows three plans, Open Source,
+  Premium and Max: **pass**.
+- `/terms` and `/privacy` show the cloud sections, LiveKit and "Last
+  updated: November 23, 2026": **pass**. The old "media server in the EU"
+  wording is gone.
+- A Max checkout from a throwaway production account opens Creem **live**
+  (no test banner), monthly and yearly, with the Max product, its logo and
+  the plan's prices: **pass**. Stopped at the payment form; nothing paid.
 - The owner's own account shows Max on `/account` and in the desktop:
-  `TODO`
-- A Premium account other than the owner's has its cloud hours
-  (`GET /api/cloud/allowance` says enabled): `TODO`
-- `/blog/videorc-cloud` is live: `TODO`
+  `TODO(coordinator)`: the owner's purchase (plan 245 S7's done line).
+- A Premium account other than the owner's has its cloud hours: **not run
+  on production**, for want of a Premium session. While managed media is
+  on, the capabilities route reports the cloud only to a Videorc desktop
+  (0.26.0 or later), so a browser can't show it. Preview evidence
+  (`db/cap-pm.txt`) has Premium's hours and guest. `TODO(coordinator)`:
+  the owner's or a Premium tester's desktop showing Videorc Cloud on.
+- The owner's cost page: not reached (owner-only).
+- `/blog/videorc-cloud`: not yet; held for the owner's approval (#194).
+
+Screenshots: `~/.local/share/ghostex/i/cloud-launch-smoke/` on the owner's
+Mac (`pre-*` before the switch, `live-*` after).
 
 ## Follow-ups (not launch blockers unless marked)
 
