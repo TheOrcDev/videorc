@@ -94,6 +94,14 @@ which are plan 260's S0.1 lines.
 | `selected_text` | string array | Text selected with the mouse (S0.5) | — |
 | `a11y_tree_available`, `a11y_nodes` | boolean, integer | Whether GPUI built an accessibility tree (an assistive technology asked for it) and how many nodes it had (S0.6) | true once a screen reader or driver is attached |
 | `recording_at_end`, `deleted_scenes`, `events` | boolean, string array, string array | What the controls did, in order (S0.6) | — |
+| `backing` | string | The surface that shows the video, in words (S0.3) | — |
+| `session` | string | `wayland` or `x11` (S0.3) | — |
+| `video_below_gpui` | boolean | GPUI's own drawing shows over the video in the main window (S0.3; X11's child window covers it) | true, or `overlay_window` |
+| `overlay_window` | boolean | GPUI's overlay is drawn in a second, override-redirect window over the slot (S0.3, X11) | — |
+| `present_interval_source` | string | What `present_interval_p95_ms` timed: `wp_presentation (on screen)`, the commit, `ShmCompletion`, or the image route's notify (S0.3) | — |
+| `ui_redraws_per_second_live` | number | GPUI frames a second while the video moves (S0.3) | 0 for the native routes |
+| `cpu_copies_per_frame_in_app` | integer | The part of `cpu_copies_per_frame` made in the app's process (S0.3) | 0 for the native routes |
+| `linux` | object | spike-linux-preview's full report: per phase (live, still, resize) the app's, writer's and compositor's CPU, GPUI paints, frames, commit and presentation intervals, ages and lease times (S0.3) | — |
 
 A spike that needs a number not in this table adds it with a plain
 snake-case name and a unit suffix (`_ms`, `_mb`, `_percent`), and adds a

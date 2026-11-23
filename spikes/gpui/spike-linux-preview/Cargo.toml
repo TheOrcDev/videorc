@@ -1,0 +1,31 @@
+[package]
+name = "spike-linux-preview"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Plan 260 spike S0.3: Videorc's Linux preview under GPUI's wgpu window (a Wayland subsurface below GPUI's surface, an X11 child window, and route d, CPU frames as a GPUI image)"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+spike-summary.workspace = true
+serde_json.workspace = true
+raw-window-handle.workspace = true
+# Route (d): a frame as a GPUI `RenderImage`, and its channel to the UI.
+image = { version = "0.25", default-features = false }
+smallvec = "1"
+futures = "0.3"
+# The backend's CPU preview ring (plan 220 S4.1d), copied from
+# TheOrcDev/videorc-rust crates/videorc-preview-ring at 2c96c499.
+videorc-preview-ring = { path = "ring" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Plan 220's Linux presenter (S4.2c, `src/presenter.rs`): a wl_subsurface fed
+# by wl_shm over the ring on GPUI's own display, or an X11 child window fed
+# by MIT-SHM, scaled by XRender.
+libc = "0.2"
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+x11rb = { version = "0.13", features = ["render", "shape", "shm"] }
