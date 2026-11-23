@@ -21321,6 +21321,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         visual: workingVisual,
         diagnostics: {
           wsStatus,
+          // The first recording.status has landed: source picks are no longer
+          // refused with "Checking the current session…".
+          sourceStatusKnown,
           sceneShortcutRequested: sceneShortcutRequestedRef.current,
           sceneShortcutQueued: layoutShortcutTimerRef.current !== null,
           sceneResolveGeneration: savedSceneResolveGenerationRef.current,

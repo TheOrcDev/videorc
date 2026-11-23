@@ -193,22 +193,44 @@ try {
       'the clip buffer to turn off'
     )
     await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 0 }, { timeoutMs })
+    // The Studio refuses scene and source changes, with a toast, until its
+    // own backend link is up, its scene is loaded and the first
+    // recording.status has landed ("Videorc is reconnecting", "Checking the
+    // current session…"). The hooks above are there before that: 3 of 10
+    // runs set the fixture up ~2.8 s after launch, inside that window, and
+    // the apply was refused (2026-11-23).
+    await waitFor(async () => {
+      const { result } = await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        { code: 'return window.__videorcSmokeScenePresets?.state?.() ?? null' },
+        { timeoutMs }
+      )
+      return (
+        result?.canSave === true &&
+        result.diagnostics.wsStatus === 'connected' &&
+        result.diagnostics.hasScene === true &&
+        result.diagnostics.sourceStatusKnown === true
+      )
+    }, 'the Studio connected with its scene loaded')
     // A scene owns the fixture too (D2/D9): a later renderer resync must
-    // restore this screen-only pattern, not a camera-enabled default.
+    // restore this screen-only pattern, not a camera-enabled default. Each
+    // step reads the hook again: it is rebuilt every render, and an old one
+    // holds that render's closures.
     const prepared = await requestSmokeCommand(
       smoke,
       'eval-js',
       {
         code: `
-      const hook = window.__videorcSmokeScenePresets;
+      const hook = () => window.__videorcSmokeScenePresets;
       const library = JSON.parse(localStorage.getItem('videorc.scenes.v2'));
       const scene = library.scenes.find((entry) => entry.id === library.onStreamId);
       scene.shows = {kind: 'test-pattern'};
       scene.layouts.horizontal.layoutPreset = 'screen-only';
-      if (!await hook.edit(scene)) throw new Error('Fixture scene edit refused');
-      await hook.pickCameraOff();
-      if (!await hook.apply(scene.id)) throw new Error('Fixture scene apply refused');
-      return hook.state();
+      if (!await hook().edit(scene)) throw new Error('Fixture scene edit refused');
+      await hook().pickCameraOff();
+      if (!await hook().apply(scene.id)) throw new Error('Fixture scene apply refused');
+      return hook().state();
     `
       },
       { timeoutMs }
