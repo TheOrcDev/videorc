@@ -122,8 +122,8 @@ web repo.
       the number; set 2026-11-23, takes effect on the next production
       deploy).
 - [x] The legal update (videorc-web #193) merged with the switch.
-- [ ] The launch blog post (videorc-web #194) waits for the owner's
-      approval, like every public post.
+- [x] The launch blog post (videorc-web #194) merged on the owner's
+      approval.
 
 ## The switch and its smoke (plan 245 S7)
 
@@ -152,7 +152,10 @@ web repo.
   (`db/cap-pm.txt`) has Premium's hours and guest. `TODO(coordinator)`:
   the owner's or a Premium tester's desktop showing Videorc Cloud on.
 - The owner's cost page: not reached (owner-only).
-- `/blog/videorc-cloud`: not yet; held for the owner's approval (#194).
+- `/blog/videorc-cloud`: live since 20:12 UTC on the owner's approval
+  (videorc-web #194, a23b3fd76), with its link-card image checked. The
+  site's Cloud wording names all three platforms, alphas labelled, since
+  20:14 UTC (videorc-web #202, f084d2aeb).
 
 Screenshots: `~/.local/share/ghostex/i/cloud-launch-smoke/` on the owner's
 Mac (`pre-*` before the switch, `live-*` after).
