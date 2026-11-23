@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { act, createElement, StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { SCENE_LIBRARY_KEY } from '@/lib/scene-presets'
+import { SCENE_LIBRARY_KEY, WORKING_SCENE_KEY } from '@/lib/scene-presets'
 import { SCENES_KEY, type Scene } from '@/lib/scenes'
 import { hydrateScenes } from '@/lib/scenes-store'
 import { defaultScenes } from '@/lib/scenes-migration'
@@ -332,8 +332,9 @@ it('never deletes the last scene', async () => {
       onStreamId: 'default-screen-camera'
     })
   )
-  const writes = watchWrites()
   const result = await mount()
+  // The launch marked the library checked (`verticalLayoutsRepaired`); the refusal writes nothing.
+  const writes = watchWrites()
   await act(async () =>
     expect(result.current.remove('default-screen-camera', { sessionActive: false })).toBe(false)
   )
@@ -381,4 +382,71 @@ it('writes the migration with the first change when the first write failed', asy
       ({ name }) => name
     )
   ).toEqual(['T3 Code', 'Figma', 'Screen only', 'Camera only', 'Side by side'])
+})
+
+// Owner report 2026-11-23 (0.37.0): a library 0.34.0's migration made for a
+// streamer whose last 9:16 pick was Camera only has a Screen + camera and a
+// Side by side that show only the camera in 9:16. The launch repairs it once.
+it('repairs a stored library whose Screen + camera and Side by side lost their screen in 9:16, once', async () => {
+  seed('v2-vertical-camera-only')
+  const working = localStorage.getItem(WORKING_SCENE_KEY)
+  const writes = watchWrites()
+  const first = await mount()
+  expect(writes).toHaveBeenCalledTimes(1)
+  expect(writes.mock.calls[0]![0]).toBe(SCENES_KEY)
+  expect(
+    first.current.scenes.map((scene) => [
+      scene.name,
+      scene.layouts.horizontal.layoutPreset,
+      scene.layouts.vertical.layoutPreset
+    ])
+  ).toEqual([
+    ['Screen + camera', 'screen-camera', 'vertical-camera-top'],
+    ['Screen only', 'screen-only', 'vertical-screen-only'],
+    ['Camera only', 'camera-only', 'vertical-camera-only'],
+    ['Side by side', 'side-by-side', 'vertical-camera-top']
+  ])
+  expect(first.current.onStreamId).toBe('default-camera-only')
+  expect(first.current.error).toBeNull()
+  // Camera only is on stream: the working setup is left as it was.
+  expect(localStorage.getItem(WORKING_SCENE_KEY)).toBe(working)
+  const stored = hydrateScenes(JSON.parse(localStorage.getItem(SCENES_KEY)!)).library!
+  expect(stored.verticalLayoutsRepaired).toBe(true)
+  expect(stored.scenes).toEqual(first.current.scenes)
+
+  // A 9:16 pick made after the repair is the streamer's: never undone.
+  const sideBySide = first.current.scenes.find(({ id }) => id === 'default-side-by-side')!
+  await act(async () =>
+    expect(
+      first.current.replace({
+        ...sideBySide,
+        layouts: {
+          ...sideBySide.layouts,
+          vertical: { ...sideBySide.layouts.vertical, layoutPreset: 'vertical-camera-only' }
+        }
+      })
+    ).toBe(true)
+  )
+  await unmount!()
+  writes.mockClear()
+  const second = await mount()
+  expect(writes).not.toHaveBeenCalled()
+  expect(
+    second.current.scenes.find(({ id }) => id === 'default-side-by-side')!.layouts.vertical
+      .layoutPreset
+  ).toBe('vertical-camera-only')
+})
+
+it('a failed repair write leaves the library as stored, and the next launch repairs it', async () => {
+  seed('v2-vertical-camera-only')
+  const before = localStorage.getItem(SCENES_KEY)
+  watchWrites().mockImplementationOnce(() => {
+    throw new Error('quota exceeded')
+  })
+  const first = await mount()
+  expect(localStorage.getItem(SCENES_KEY)).toBe(before)
+  expect(first.current.scenes[0]!.layouts.vertical.layoutPreset).toBe('vertical-camera-only')
+  await unmount!()
+  const second = await mount()
+  expect(second.current.scenes[0]!.layouts.vertical.layoutPreset).toBe('vertical-camera-top')
 })

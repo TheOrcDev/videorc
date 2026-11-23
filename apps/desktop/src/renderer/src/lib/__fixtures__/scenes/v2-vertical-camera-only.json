@@ -1,0 +1,429 @@
+{
+  "videorc.scenes.v2": {
+    "version": 2,
+    "scenes": [
+      {
+        "id": "default-screen-camera",
+        "name": "Screen + camera",
+        "createdAt": "2026-11-19T22:25:47.083Z",
+        "updatedAt": "2026-11-22T13:13:50.266Z",
+        "shows": {
+          "kind": "display",
+          "screenId": "screen:1",
+          "screenName": "Display 1",
+          "screenUuid": "37D8832A-2D66-02CA-B9F7-8F30A301B230"
+        },
+        "layouts": {
+          "horizontal": {
+            "layoutPreset": "screen-camera",
+            "cameraTransformMode": "preset",
+            "cameraTransform": null,
+            "cameraCorner": "bottom-right",
+            "cameraSize": "large",
+            "cameraShape": "rectangle",
+            "cameraCornerRadiusPct": 12,
+            "cameraAspect": "source",
+            "cameraChromaKeyEnabled": true,
+            "cameraChromaKeyColor": "#00FF00",
+            "cameraChromaKeySimilarityPct": 40,
+            "cameraChromaKeySmoothnessPct": 8,
+            "cameraChromaKeySpillPct": 10,
+            "cameraMargin": 0,
+            "cameraFit": "fill",
+            "cameraMirror": false,
+            "cameraZoom": 100,
+            "cameraOffsetX": 0,
+            "cameraOffsetY": 0,
+            "sideBySideSplit": "70-30",
+            "sideBySideCameraSide": "right",
+            "verticalScreenFraming": "fill",
+            "horizontalScreenFraming": "fit",
+            "arrangementMode": "preset",
+            "sourceTransformOverrides": {},
+            "sourceVisibility": {
+              "camera": true,
+              "capture": true
+            }
+          },
+          "vertical": {
+            "layoutPreset": "vertical-camera-only",
+            "cameraTransformMode": "preset",
+            "cameraTransform": null,
+            "cameraCorner": "bottom-right",
+            "cameraSize": "large",
+            "cameraShape": "rectangle",
+            "cameraCornerRadiusPct": 12,
+            "cameraAspect": "source",
+            "cameraChromaKeyEnabled": true,
+            "cameraChromaKeyColor": "#00FF00",
+            "cameraChromaKeySimilarityPct": 40,
+            "cameraChromaKeySmoothnessPct": 8,
+            "cameraChromaKeySpillPct": 10,
+            "cameraMargin": 0,
+            "cameraFit": "fill",
+            "cameraMirror": false,
+            "cameraZoom": 100,
+            "cameraOffsetX": 0,
+            "cameraOffsetY": 0,
+            "sideBySideSplit": "70-30",
+            "sideBySideCameraSide": "right",
+            "verticalScreenFraming": "fit",
+            "horizontalScreenFraming": "fit",
+            "arrangementMode": "preset",
+            "sourceTransformOverrides": {},
+            "sourceVisibility": {
+              "camera": true,
+              "capture": true
+            }
+          }
+        },
+        "background": null
+      },
+      {
+        "id": "default-screen-only",
+        "name": "Screen only",
+        "createdAt": "2026-11-19T22:25:47.083Z",
+        "updatedAt": "2026-11-19T22:25:47.083Z",
+        "shows": {
+          "kind": "display",
+          "screenId": "screen:1",
+          "screenName": "Display 1",
+          "screenUuid": "37D8832A-2D66-02CA-B9F7-8F30A301B230"
+        },
+        "layouts": {
+          "horizontal": {
+            "layoutPreset": "screen-only",
+            "cameraTransformMode": "preset",
+            "cameraTransform": null,
+            "cameraCorner": "bottom-right",
+            "cameraSize": "large",
+            "cameraShape": "rectangle",
+            "cameraCornerRadiusPct": 12,
+            "cameraAspect": "source",
+            "cameraChromaKeyEnabled": true,
+            "cameraChromaKeyColor": "#00FF00",
+            "cameraChromaKeySimilarityPct": 40,
+            "cameraChromaKeySmoothnessPct": 8,
+            "cameraChromaKeySpillPct": 10,
+            "cameraMargin": 0,
+            "cameraFit": "fill",
+            "cameraMirror": false,
+            "cameraZoom": 100,
+            "cameraOffsetX": 0,
+            "cameraOffsetY": 0,
+            "sideBySideSplit": "70-30",
+            "sideBySideCameraSide": "right",
+            "verticalScreenFraming": "fill",
+            "horizontalScreenFraming": "fit",
+            "arrangementMode": "preset",
+            "sourceTransformOverrides": {},
+            "sourceVisibility": {
+              "camera": true,
+              "capture": true
+            }
+          },
+          "vertical": {
+            "layoutPreset": "vertical-screen-only",
+            "cameraTransformMode": "preset",
+            "cameraTransform": null,
+            "cameraCorner": "bottom-right",
+            "cameraSize": "large",
+            "cameraShape": "rectangle",
+            "cameraCornerRadiusPct": 12,
+            "cameraAspect": "source",
+            "cameraChromaKeyEnabled": true,
+            "cameraChromaKeyColor": "#00FF00",
+            "cameraChromaKeySimilarityPct": 40,
+            "cameraChromaKeySmoothnessPct": 8,
+            "cameraChromaKeySpillPct": 10,
+            "cameraMargin": 0,
+            "cameraFit": "fill",
+            "cameraMirror": false,
+            "cameraZoom": 100,
+            "cameraOffsetX": 0,
+            "cameraOffsetY": 0,
+            "sideBySideSplit": "70-30",
+            "sideBySideCameraSide": "right",
+            "verticalScreenFraming": "fit",
+            "horizontalScreenFraming": "fit",
+            "arrangementMode": "preset",
+            "sourceTransformOverrides": {},
+            "sourceVisibility": {
+              "camera": true,
+              "capture": true
+            }
+          }
+        },
+        "background": {
+          "assetId": "live-plasma-wave-plasma",
+          "fit": "fill",
+          "scale": 100,
+          "offsetX": 0,
+          "offsetY": 0,
+          "blurPx": 0,
+          "dimPercent": 0,
+          "saturationPercent": 100,
+          "vignettePercent": 0,
+          "visibilityPercent": 20,
+          "live": {
+            "id": "plasma-wave",
+            "look": "plasma",
+            "motion": "calm"
+          }
+        }
+      },
+      {
+        "id": "default-camera-only",
+        "name": "Camera only",
+        "createdAt": "2026-11-19T22:25:47.083Z",
+        "updatedAt": "2026-11-23T14:18:44.850Z",
+        "shows": {
+          "kind": "display",
+          "screenId": "screen:1",
+          "screenName": "Display 1",
+          "screenUuid": "37D8832A-2D66-02CA-B9F7-8F30A301B230"
+        },
+        "layouts": {
+          "horizontal": {
+            "layoutPreset": "camera-only",
+            "cameraTransformMode": "preset",
+            "cameraTransform": null,
+            "cameraCorner": "bottom-right",
+            "cameraSize": "large",
+            "cameraShape": "rectangle",
+            "cameraCornerRadiusPct": 12,
+            "cameraAspect": "source",
+            "cameraChromaKeyEnabled": true,
+            "cameraChromaKeyColor": "#00FF00",
+            "cameraChromaKeySimilarityPct": 40,
+            "cameraChromaKeySmoothnessPct": 8,
+            "cameraChromaKeySpillPct": 10,
+            "cameraMargin": 0,
+            "cameraFit": "fill",
+            "cameraMirror": false,
+            "cameraZoom": 100,
+            "cameraOffsetX": 0,
+            "cameraOffsetY": 0,
+            "sideBySideSplit": "70-30",
+            "sideBySideCameraSide": "right",
+            "verticalScreenFraming": "fill",
+            "horizontalScreenFraming": "fit",
+            "arrangementMode": "preset",
+            "sourceTransformOverrides": {},
+            "sourceVisibility": {
+              "camera": true,
+              "capture": true
+            }
+          },
+          "vertical": {
+            "layoutPreset": "vertical-camera-only",
+            "cameraTransformMode": "preset",
+            "cameraTransform": null,
+            "cameraCorner": "bottom-right",
+            "cameraSize": "large",
+            "cameraShape": "rectangle",
+            "cameraCornerRadiusPct": 12,
+            "cameraAspect": "source",
+            "cameraChromaKeyEnabled": false,
+            "cameraChromaKeyColor": "#00FF00",
+            "cameraChromaKeySimilarityPct": 40,
+            "cameraChromaKeySmoothnessPct": 8,
+            "cameraChromaKeySpillPct": 10,
+            "cameraMargin": 0,
+            "cameraFit": "fill",
+            "cameraMirror": false,
+            "cameraZoom": 100,
+            "cameraOffsetX": 0,
+            "cameraOffsetY": 0,
+            "sideBySideSplit": "70-30",
+            "sideBySideCameraSide": "right",
+            "verticalScreenFraming": "fit",
+            "horizontalScreenFraming": "fit",
+            "arrangementMode": "preset",
+            "sourceTransformOverrides": {},
+            "sourceVisibility": {
+              "camera": true,
+              "capture": true
+            }
+          }
+        },
+        "background": {
+          "assetId": "live-plasma-wave-plasma",
+          "fit": "fill",
+          "scale": 100,
+          "offsetX": 0,
+          "offsetY": 0,
+          "blurPx": 0,
+          "dimPercent": 0,
+          "saturationPercent": 100,
+          "vignettePercent": 0,
+          "visibilityPercent": 20,
+          "live": {
+            "id": "plasma-wave",
+            "look": "plasma",
+            "motion": "calm"
+          }
+        }
+      },
+      {
+        "id": "default-side-by-side",
+        "name": "Side by side",
+        "createdAt": "2026-11-19T22:25:47.083Z",
+        "updatedAt": "2026-11-19T22:25:47.083Z",
+        "shows": {
+          "kind": "display",
+          "screenId": "screen:1",
+          "screenName": "Display 1",
+          "screenUuid": "37D8832A-2D66-02CA-B9F7-8F30A301B230"
+        },
+        "layouts": {
+          "horizontal": {
+            "layoutPreset": "side-by-side",
+            "cameraTransformMode": "preset",
+            "cameraTransform": null,
+            "cameraCorner": "bottom-right",
+            "cameraSize": "large",
+            "cameraShape": "rectangle",
+            "cameraCornerRadiusPct": 12,
+            "cameraAspect": "source",
+            "cameraChromaKeyEnabled": true,
+            "cameraChromaKeyColor": "#00FF00",
+            "cameraChromaKeySimilarityPct": 40,
+            "cameraChromaKeySmoothnessPct": 8,
+            "cameraChromaKeySpillPct": 10,
+            "cameraMargin": 0,
+            "cameraFit": "fill",
+            "cameraMirror": false,
+            "cameraZoom": 100,
+            "cameraOffsetX": 0,
+            "cameraOffsetY": 0,
+            "sideBySideSplit": "70-30",
+            "sideBySideCameraSide": "right",
+            "verticalScreenFraming": "fill",
+            "horizontalScreenFraming": "fit",
+            "arrangementMode": "preset",
+            "sourceTransformOverrides": {},
+            "sourceVisibility": {
+              "camera": true,
+              "capture": true
+            }
+          },
+          "vertical": {
+            "layoutPreset": "vertical-camera-only",
+            "cameraTransformMode": "preset",
+            "cameraTransform": null,
+            "cameraCorner": "bottom-right",
+            "cameraSize": "large",
+            "cameraShape": "rectangle",
+            "cameraCornerRadiusPct": 12,
+            "cameraAspect": "source",
+            "cameraChromaKeyEnabled": true,
+            "cameraChromaKeyColor": "#00FF00",
+            "cameraChromaKeySimilarityPct": 40,
+            "cameraChromaKeySmoothnessPct": 8,
+            "cameraChromaKeySpillPct": 10,
+            "cameraMargin": 0,
+            "cameraFit": "fill",
+            "cameraMirror": false,
+            "cameraZoom": 100,
+            "cameraOffsetX": 0,
+            "cameraOffsetY": 0,
+            "sideBySideSplit": "70-30",
+            "sideBySideCameraSide": "right",
+            "verticalScreenFraming": "fit",
+            "horizontalScreenFraming": "fit",
+            "arrangementMode": "preset",
+            "sourceTransformOverrides": {},
+            "sourceVisibility": {
+              "camera": true,
+              "capture": true
+            }
+          }
+        },
+        "background": {
+          "assetId": "live-plasma-wave-plasma",
+          "fit": "fill",
+          "scale": 100,
+          "offsetX": 0,
+          "offsetY": 0,
+          "blurPx": 0,
+          "dimPercent": 0,
+          "saturationPercent": 100,
+          "vignettePercent": 0,
+          "visibilityPercent": 20,
+          "live": {
+            "id": "plasma-wave",
+            "look": "plasma",
+            "motion": "calm"
+          }
+        }
+      }
+    ],
+    "onStreamId": "default-camera-only"
+  },
+  "videorc.working-scene.v1": {
+    "version": 1,
+    "origin": "saved",
+    "sceneId": "default-camera-only",
+    "visual": {
+      "layout": {
+        "layoutPreset": "vertical-camera-only",
+        "cameraTransformMode": "preset",
+        "cameraTransform": null,
+        "cameraCorner": "bottom-right",
+        "cameraSize": "large",
+        "cameraShape": "rectangle",
+        "cameraCornerRadiusPct": 12,
+        "cameraAspect": "source",
+        "cameraChromaKeyEnabled": false,
+        "cameraChromaKeyColor": "#00FF00",
+        "cameraChromaKeySimilarityPct": 40,
+        "cameraChromaKeySmoothnessPct": 8,
+        "cameraChromaKeySpillPct": 10,
+        "cameraMargin": 0,
+        "cameraFit": "fill",
+        "cameraMirror": false,
+        "cameraZoom": 100,
+        "cameraOffsetX": 0,
+        "cameraOffsetY": 0,
+        "sideBySideSplit": "70-30",
+        "sideBySideCameraSide": "right",
+        "verticalScreenFraming": "fit",
+        "horizontalScreenFraming": "fit",
+        "arrangementMode": "preset",
+        "sourceTransformOverrides": {},
+        "sourceVisibility": {
+          "camera": true,
+          "capture": true
+        }
+      },
+      "sources": {
+        "cameraId": "camera:facetime",
+        "cameraName": "FaceTime HD Camera",
+        "cameraOff": false,
+        "captureOff": false,
+        "screenId": "screen:1",
+        "screenName": "Display 1",
+        "screenUuid": "37D8832A-2D66-02CA-B9F7-8F30A301B230",
+        "testPattern": false
+      },
+      "background": {
+        "assetId": "live-plasma-wave-plasma",
+        "fit": "fill",
+        "scale": 100,
+        "offsetX": 0,
+        "offsetY": 0,
+        "blurPx": 0,
+        "dimPercent": 0,
+        "saturationPercent": 100,
+        "vignettePercent": 0,
+        "visibilityPercent": 20,
+        "live": {
+          "id": "plasma-wave",
+          "look": "plasma",
+          "motion": "calm"
+        }
+      }
+    }
+  }
+}
