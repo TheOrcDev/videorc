@@ -158,6 +158,9 @@ type _RegistryIconProps = _AssertIconProps<
  * character on the stream, in its own module (`avatar-page-icon.tsx`) so the
  * registry stays a pure re-export for the eager sidebar. The avatar's own
  * picture (or the stone character's artwork) is `BuddyIcon`.
+ * The `…RowIcon` slots are those pages' rows in the sidebar and ⌘K: the same
+ * glyphs in regular and fill only (`page-row-icons.tsx`), so the eager
+ * sidebar does not carry six weights of each.
  * `NotificationsIcon` is the bell that opens Notifications (plan 250), in
  * the status bar: its own module (`notifications-icon.tsx`) for the same
  * reason.
@@ -177,6 +180,16 @@ export {
 export { AvatarPageIcon } from './avatar-page-icon'
 export { SettingsIcon } from './settings-icon'
 export { SoundsPageIcon } from './sounds-page-icon'
+export {
+  AssetsRowIcon,
+  BuddyPageRowIcon,
+  CaptionsRowIcon,
+  HealthRowIcon,
+  LibraryRowIcon,
+  LivestreamRowIcon,
+  SceneRowIcon,
+  StudioRowIcon
+} from './page-row-icons'
 export { NotificationsIcon } from './notifications-icon'
 /**
  * Status and feedback. One glyph per meaning: a triangle warns, a circle
