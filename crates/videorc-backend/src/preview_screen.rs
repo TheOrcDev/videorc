@@ -1454,9 +1454,10 @@ fn release_cpu_store_now(guard: &mut PreviewScreenShared) -> bool {
 
 /// Plan 210 D8, the Show edge: the capture proved, with a callback taken at
 /// `evidence_at`, that nothing changed since its last frame. When that
-/// moment is at or after the Show, the held frame is the screen as it is
-/// now, not as it was while hidden, and is published. Anything earlier
-/// proves nothing: the still stays (the covered frame wins). Returns the
+/// moment is after the Show, the held frame is the screen as it is now, not
+/// as it was while hidden, and is published. Anything earlier, or the Show's
+/// own clock reading, proves nothing: the still stays (the covered frame
+/// wins). Returns the
 /// time the show waited, when this published the held frame.
 fn confirm_cpu_store_current(
     guard: &mut PreviewScreenShared,
@@ -1466,7 +1467,7 @@ fn confirm_cpu_store_current(
     if view.hidden || guard.held_live.is_none() {
         return None;
     }
-    if view.shown_at.is_none_or(|shown_at| evidence_at < shown_at) {
+    if view.shown_at.is_none_or(|shown_at| evidence_at <= shown_at) {
         return None;
     }
     let waited = guard
@@ -7292,8 +7293,19 @@ mod windows {
                 ScreenFrameAdmission::Hold
             );
             assert!(guard.held_live_d3d11.is_some());
+            // Dated at the Show itself: not provably after it, so it holds.
             assert_eq!(
                 admit_d3d11_texture_frame(&mut guard, W, H, captured(shown_at)),
+                ScreenFrameAdmission::Hold
+            );
+            assert!(guard.held_live_d3d11.is_some());
+            assert_eq!(
+                admit_d3d11_texture_frame(
+                    &mut guard,
+                    W,
+                    H,
+                    captured(shown_at + Duration::from_nanos(1))
+                ),
                 ScreenFrameAdmission::Publish
             );
             assert!(guard.held_live_d3d11.is_none());
@@ -9924,9 +9936,14 @@ mod tests {
             None
         );
         assert_eq!(on_air(&shared).storage_identity(), still.storage_identity());
+        // One taken at the Show's own clock reading proves nothing either.
+        assert_eq!(confirm_cpu_store_current(&mut shared, shown_at), None);
+        assert_eq!(on_air(&shared).storage_identity(), still.storage_identity());
         // One taken after it: nothing changed since the last frame, so the
         // newest held picture is the screen now.
-        assert!(confirm_cpu_store_current(&mut shared, shown_at).is_some());
+        assert!(
+            confirm_cpu_store_current(&mut shared, shown_at + Duration::from_nanos(1)).is_some()
+        );
         assert_eq!(on_air(&shared).bytes, privacy_stripes(1));
         assert!(shared.held_live.is_none());
         assert_eq!(confirm_cpu_store_current(&mut shared, Instant::now()), None);
