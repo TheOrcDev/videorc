@@ -294,6 +294,13 @@ async function freeformMaskAppliesFromNonInsetPresets() {
     console.log(`Freeform: mask law applies entering from ${preset}`)
     await command('select-layout-preset', { preset, settleMs: 100 })
     await clickText('Freeform')
+    // Screen only crosses back from the portrait matrix, so the Clips ring
+    // restarts; a layout change asked for while its start is in flight waits
+    // for it (its scene commit would land over the change) and shows no
+    // pending mark meanwhile. The camera is in the scene once Freeform is on.
+    await waitUntil(
+      `document.querySelector('[data-videorc-layout-preset="freeform"]')?.getAttribute('aria-pressed') === 'true'`
+    )
     await selectSource('source:camera')
     await command('select-camera-shape', { shape: 'circle', settleMs: 100 })
     await frames(3)
