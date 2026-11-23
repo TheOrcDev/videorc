@@ -2563,7 +2563,22 @@ async fn hidden_screen_frost_reaches_every_leg() {
         //    hidden: every leg keeps the still, even for a frame handed over
         //    after the show (stripes, taken just before it).
         let before_show = Instant::now();
+        // `Instant` ticks coarsely (about 42 ns on Apple silicon): read
+        // right before `show()`, the frame's stamp could equal the Show's,
+        // and a frame stamped at the Show counts as taken after it. Let the
+        // clock move on so the frame is strictly before the Show.
+        while Instant::now() <= before_show {
+            std::hint::spin_loop();
+        }
         state.screen_privacy.show();
+        assert!(
+            state
+                .screen_privacy
+                .view()
+                .shown_at
+                .is_some_and(|shown_at| before_show < shown_at),
+            "the frame must be taken strictly before the Show"
+        );
         assert!(crate::preview_screen::release_screen_now(&state).await);
         assert!(
             crate::preview_screen::test_publish_screen_bgra(&state, 7, stripes(), before_show)
