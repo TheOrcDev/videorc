@@ -4785,6 +4785,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "spike-text"
+version = "0.1.0"
+dependencies = [
+ "gpui-pre",
+ "gpui-pre-platform",
+ "image",
+ "libc",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+ "raw-window-handle",
+ "serde_json",
+ "spike-summary",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

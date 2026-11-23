@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "spike": "spike-text",
+  "os": "macos",
+  "arch": "aarch64",
+  "gpui_pre": "0.3.14",
+  "build": "release",
+  "args": [
+    "--seconds",
+    "30",
+    "--scroll-test",
+    "--simulate-ime",
+    "--emotes",
+    "gpui",
+    "--no-inactive-cap",
+    "--out",
+    "summary.json"
+  ],
+  "started_unix_ms": 1795473591168,
+  "seconds": 30,
+  "elapsed_s": 30.67,
+  "logical_cpus": 10,
+  "process_cpu_seconds": 18.92,
+  "process_cpu_percent_avg": 61.7,
+  "peak_rss_mb": 107.4,
+  "renders": 3637,
+  "ui_redraws_per_second_idle": 120.0,
+  "startup_to_first_paint_ms": 162.4,
+  "window_open_to_first_paint_ms": 114.6,
+  "chat_remount_to_frame_ms": 10.6,
+  "emotes": "gpui-img",
+  "chat_rows": 10000,
+  "chat_data_ms": 4.1,
+  "chat_rows_built": 95863,
+  "scroll": {
+    "frames": 718,
+    "seconds": 5.99,
+    "fps": 119.7,
+    "interval_p50_ms": 8.33,
+    "interval_p95_ms": 8.42,
+    "interval_p99_ms": 9.76,
+    "interval_max_ms": 19.512458,
+    "frames_over_16_7_ms": 1,
+    "step_px": 24.0,
+    "rows_built_during": 19188,
+    "frames_with_window_active": 718
+  },
+  "ime_steps": [
+    {
+      "step": "ja: marked romaji",
+      "text": "nihon",
+      "marked": "nihon",
+      "want_text": "nihon",
+      "want_marked": "nihon",
+      "ok": true
+    },
+    {
+      "step": "ja: marked kana",
+      "text": "にほん",
+      "marked": "にほん",
+      "want_text": "にほん",
+      "want_marked": "にほん",
+      "ok": true
+    },
+    {
+      "step": "ja: commit kanji",
+      "text": "日本",
+      "marked": null,
+      "want_text": "日本",
+      "want_marked": null,
+      "ok": true
+    },
+    {
+      "step": "zh: marked pinyin",
+      "text": "日本zhong wen",
+      "marked": "zhong wen",
+      "want_text": "日本zhong wen",
+      "want_marked": "zhong wen",
+      "ok": true
+    },
+    {
+      "step": "zh: commit hanzi",
+      "text": "日本中文",
+      "marked": null,
+      "want_text": "日本中文",
+      "want_marked": null,
+      "ok": true
+    },
+    {
+      "step": "emoji picker",
+      "text": "日本中文😀",
+      "marked": null,
+      "want_text": "日本中文😀",
+      "want_marked": null,
+      "ok": true
+    },
+    {
+      "step": "candidate window rect",
+      "detail": {
+        "first_rect_screen": [
+          21.0,
+          837.0,
+          56.916015625,
+          30.0
+        ],
+        "has_marked_text": true,
+        "input_bounds_window": [
+          21.0,
+          51.0,
+          517.0,
+          30.0
+        ]
+      }
+    }
+  ],
+  "numbers": {
+    "font": ".SystemUIFont",
+    "proportional_ones_px": 67.24,
+    "proportional_eights_px": 93.46,
+    "tabular_ones_px": 92.14,
+    "tabular_eights_px": 92.14,
+    "tabular_equal": true,
+    "proportional_differs": true
+  },
+  "idle_with_emotes": {
+    "seconds": 5.26,
+    "cpu_percent": 63.7,
+    "renders_per_second": 120.0,
+    "window_active": true
+  },
+  "selected_text": [],
+  "errors": 0,
+  "error_messages": []
+}
