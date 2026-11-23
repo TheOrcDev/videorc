@@ -204,7 +204,7 @@ function SegmentedControl<T extends string>({
         aria-checked={checked}
         className={cn(
           variant === 'lcd'
-            ? 'inline-flex min-w-0 flex-1 items-center justify-center rounded-chip px-1.5 py-0.5 text-(--lcd-display-ink-dim) uppercase outline-none hover:bg-(--lcd-display-ink-unlit) hover:text-(--lcd-display-lit) focus-visible:ring-1 focus-visible:ring-(--lcd-display-lit) aria-checked:bg-(--lcd-display-ink-unlit) aria-checked:text-(--lcd-display-lit) disabled:pointer-events-none disabled:opacity-50'
+            ? 'rounded-chip inline-flex min-w-0 flex-1 items-center justify-center px-1.5 py-0.5 text-(--lcd-display-ink-dim) uppercase outline-none hover:bg-(--lcd-display-ink-unlit) hover:text-(--lcd-display-lit) focus-visible:ring-1 focus-visible:ring-(--lcd-display-lit) disabled:pointer-events-none disabled:opacity-50 aria-checked:bg-(--lcd-display-ink-unlit) aria-checked:text-(--lcd-display-lit)'
             : cn(
                 segmentedItemClassName,
                 size === 'sm' ? 'h-5 px-2 text-xs' : 'h-6',
