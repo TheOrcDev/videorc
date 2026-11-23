@@ -862,12 +862,15 @@ fn latest_frame_of_generation(
 /// that still names that target.
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn begin_capture_generation(guard: &mut PreviewScreenShared, generation: u64) {
-    // Two targets at the same place cannot be told apart by their frames:
-    // the completion's stamp decides, and nothing is left to attribute.
+    // Two targets at the same place, or no place known for the previous
+    // one, cannot be told apart by their frames: the completion's stamp
+    // decides, and nothing is left to attribute.
     if guard.swap_attribution.is_some_and(|attribution| {
-        attribution
-            .previous_rect
-            .is_some_and(|previous| screen_rects_match(previous, attribution.next_rect))
+        attribution.previous_rect.is_none_or(|previous| {
+            attribution
+                .next_rect
+                .is_some_and(|next| screen_rects_match(previous, next))
+        })
     }) {
         guard.swap_attribution = None;
     }
@@ -896,7 +899,8 @@ type ScreenRect = (f64, f64, f64, f64);
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct SwapAttribution {
     next_generation: u64,
-    next_rect: ScreenRect,
+    /// Where the next target is, when the shareable content says.
+    next_rect: Option<ScreenRect>,
     previous_generation: u64,
     previous_rect: Option<ScreenRect>,
     /// Frames of the new generation still to publish before the attribution
@@ -931,13 +935,14 @@ fn disarm_capture_generation(guard: &mut PreviewScreenShared) {
 /// rectangle it was captured from (plan 210 S3), or `None` for a frame to
 /// discard. While a swap is armed, a frame of the next target begins the new
 /// generation at once (a fresh capture for the Hide screen gate too). A frame
-/// of the previous target is live content until the new generation began;
-/// after that it is a straggler, and publishing it would put the previous
-/// window over the next one's first frame in the depth-one store (the
-/// compositor would then hold the previous window under the new scene), so
-/// it is discarded. Without a rectangle, or with both targets at the same
-/// place, the completion's stamp decides. The attribution expires a few
-/// frames into the new generation.
+/// no rectangle attributes is discarded until the completion: it may be the
+/// next target's. A frame of the previous target is live content until the
+/// new generation began; after that it is a straggler, and publishing it
+/// would put the previous window over the next one's first frame in the
+/// depth-one store (the compositor would then hold the previous window under
+/// the new scene), so it is discarded. Without a rectangle, or with both targets at the same
+/// place, the completion's stamp decides: after it such a frame is the next
+/// target's. The attribution expires a few frames into the new generation.
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn frame_capture_generation(
     guard: &mut PreviewScreenShared,
@@ -949,7 +954,9 @@ fn frame_capture_generation(
     let (next, previous) = screen_rect
         .map(|rect| {
             (
-                screen_rects_match(rect, attribution.next_rect),
+                attribution
+                    .next_rect
+                    .is_some_and(|next| screen_rects_match(rect, next)),
                 attribution
                     .previous_rect
                     .is_some_and(|previous| screen_rects_match(rect, previous)),
@@ -967,6 +974,15 @@ fn frame_capture_generation(
     if next && !previous && !began {
         guard.generation_began_early = true;
         begin_capture_generation(guard, attribution.next_generation);
+    } else if !began {
+        // Release pass 2026-11-23: no rectangle proves this frame the
+        // previous target's, and the next target may deliver before the
+        // completion (same place, no rectangle, or its place unknown).
+        // Stamped with the previous generation, the scene still on air took
+        // the next window as its own and held it in the old layout until the
+        // switch committed. Discarded, the previous target's last frame stays
+        // on air until the completion decides.
+        return None;
     }
     let generation = guard.capture_generation;
     if generation == attribution.next_generation {
@@ -8214,7 +8230,10 @@ mod macos {
                 Err(error_description(error))
             });
         });
-        if let Some(next_rect) = selected.screen_rect {
+        // Armed even when the next target's place is unknown: until the
+        // completion, a frame no rectangle proves to be the previous
+        // target's is never published as its frame.
+        {
             let mut guard = shared
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -8223,7 +8242,7 @@ mod macos {
                 &mut guard,
                 SwapAttribution {
                     next_generation: request.generation,
-                    next_rect,
+                    next_rect: selected.screen_rect,
                     previous_generation,
                     previous_rect: session.screen_rect,
                     frames_left: 0,
@@ -9609,7 +9628,7 @@ mod tests {
             &mut shared,
             SwapAttribution {
                 next_generation: 2,
-                next_rect: beta,
+                next_rect: Some(beta),
                 previous_generation: 1,
                 previous_rect: Some(alpha),
                 frames_left: 0,
@@ -9617,7 +9636,7 @@ mod tests {
         );
         let attribution = |next: u64, next_rect, previous_rect| SwapAttribution {
             next_generation: next,
-            next_rect,
+            next_rect: Some(next_rect),
             previous_generation: next - 1,
             previous_rect: Some(previous_rect),
             frames_left: 0,
@@ -9625,8 +9644,10 @@ mod tests {
         // Before the completion: the previous target's frames keep 1 ...
         assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), Some(1));
         assert_eq!(shared.capture_generation, 1);
-        // ... a frame without a rectangle takes the stamp of the moment ...
-        assert_eq!(frame_capture_generation(&mut shared, None), Some(1));
+        // ... a frame without a rectangle may be either target's: it is
+        // discarded until the completion decides ...
+        assert_eq!(frame_capture_generation(&mut shared, None), None);
+        assert_eq!(shared.capture_generation, 1);
         // ... and the next target's first frame begins its generation itself.
         assert_eq!(frame_capture_generation(&mut shared, Some(beta)), Some(2));
         assert_eq!(shared.capture_generation, 2);
@@ -9663,8 +9684,9 @@ mod tests {
             capture_generation: 3,
             ..Default::default()
         };
+        // Before it, a frame there may be the next target's: discarded.
         arm_capture_generation(&mut shared, attribution(4, alpha, alpha));
-        assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), Some(3));
+        assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), None);
         begin_capture_generation(&mut shared, 4);
         assert!(shared.swap_attribution.is_none());
         assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), Some(4));
@@ -9672,6 +9694,71 @@ mod tests {
         arm_capture_generation(&mut shared, attribution(5, beta, alpha));
         disarm_capture_generation(&mut shared);
         assert_eq!(frame_capture_generation(&mut shared, Some(beta)), Some(4));
+    }
+
+    /// Release pass 2026-11-23 (smoke:smart-scenes rapid-keys, 1 run in 5):
+    /// a scene switch swapped the capture to Beta's window in place while
+    /// its camera started cold. ScreenCaptureKit handed over Beta's first
+    /// frame before the update's completion, at Alpha's place (or with no
+    /// rectangle to tell), and it carried Alpha's generation: the scene still
+    /// on air took it as Alpha's frame and held it, so the recording showed
+    /// Beta's window in Alpha's layout, frozen, until Beta's commit 0.9 s
+    /// later. A frame no rectangle proves to be the previous target's never
+    /// carries its generation while the swap is in flight.
+    #[test]
+    fn a_frame_the_swap_cannot_attribute_never_carries_the_previous_generation() {
+        let alpha = (40.0, 40.0, 1280.0, 720.0);
+        let beta = (200.0, 230.0, 1280.0, 720.0);
+        let in_flight = |previous_generation: u64, next_rect, previous_rect| {
+            let mut shared = PreviewScreenShared {
+                capture_generation: previous_generation,
+                ..Default::default()
+            };
+            arm_capture_generation(
+                &mut shared,
+                SwapAttribution {
+                    next_generation: previous_generation + 1,
+                    next_rect,
+                    previous_generation,
+                    previous_rect,
+                    frames_left: 0,
+                },
+            );
+            shared
+        };
+
+        // Both windows at the same place: a frame there is ambiguous.
+        let mut shared = in_flight(7, Some(alpha), Some(alpha));
+        assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), None);
+        assert_eq!(frame_capture_generation(&mut shared, None), None);
+        assert_eq!(shared.capture_generation, 7);
+        // The completion decides: every frame from then on is the next one's.
+        begin_capture_generation(&mut shared, 8);
+        assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), Some(8));
+
+        // The next target's place unknown: only the previous target's own
+        // place keeps its generation.
+        let mut shared = in_flight(7, None, Some(alpha));
+        assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), Some(7));
+        assert_eq!(frame_capture_generation(&mut shared, Some(beta)), None);
+        assert_eq!(frame_capture_generation(&mut shared, None), None);
+        begin_capture_generation(&mut shared, 8);
+        assert_eq!(frame_capture_generation(&mut shared, Some(beta)), Some(8));
+        // A straggler at the previous target's place is still discarded.
+        assert_eq!(frame_capture_generation(&mut shared, Some(alpha)), None);
+
+        // Neither place known: the completion alone decides.
+        let mut shared = in_flight(7, None, None);
+        assert_eq!(frame_capture_generation(&mut shared, Some(beta)), None);
+        assert_eq!(frame_capture_generation(&mut shared, None), None);
+        begin_capture_generation(&mut shared, 8);
+        assert!(shared.swap_attribution.is_none());
+        assert_eq!(frame_capture_generation(&mut shared, None), Some(8));
+
+        // A refused swap gives every frame back to the previous target.
+        let mut shared = in_flight(7, Some(beta), Some(alpha));
+        disarm_capture_generation(&mut shared);
+        assert_eq!(frame_capture_generation(&mut shared, None), Some(7));
     }
 
     #[test]
