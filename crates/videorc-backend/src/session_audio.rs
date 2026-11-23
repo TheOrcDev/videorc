@@ -12365,11 +12365,21 @@ mod mix_tests {
         for packet in microphone.iter_mut().skip(200) {
             packet.timestamp_micros += 5_000_000;
         }
+        // The fault under test is the device clock's jump, judged on
+        // placement times; the playout delay is only the scheduling slack the
+        // bus and the fixture's sender share. 50 ms was too little on a
+        // loaded CI runner: the sender once sent a packet 60 ms late and the
+        // bus rightly played silence for it (release 68faba84f), and a
+        // starved local run stalled the bus writer 108 ms. This test runs at
+        // the shipped system-audio playout delay (150 ms) instead.
         let (bus, evidence) = start_observed_bus_with_trace(
             epoch,
             Some(microphone),
             AudioProcessingSettings::default(),
-            SessionAudioOptions::default(),
+            SessionAudioOptions {
+                playout_delay: SYSTEM_AUDIO_PLAYOUT_DELAY,
+                ..SessionAudioOptions::default()
+            },
             None,
             Some((288_000, 384_000)),
         )
