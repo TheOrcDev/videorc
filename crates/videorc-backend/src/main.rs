@@ -26426,8 +26426,18 @@ mod tests {
         dispatcher.await.unwrap();
     }
 
+    // Real time on purpose: the mutation executor runs the handler on its own
+    // runtime, so a paused clock here jumps past the deadlines while the
+    // handler runs. The waits below are liveness bounds, not latency budgets:
+    // "first" stays wedged until the test releases it, so an expiry that
+    // waited behind it would never answer and still fails (the next reply
+    // must be "expired", not "first"). A 150 ms window failed on loaded CI
+    // runners before the lane worker even ran. Only "expired" carries the
+    // 25 ms deadline; the lane's queue-age cap would otherwise give "first"
+    // the same 25 ms to be dispatched, another race on a loaded runner.
     #[tokio::test]
     async fn websocket_lane_expiry_reports_command_was_not_applied() {
+        const LANE_EXPIRY_LIVENESS_BOUND: Duration = Duration::from_secs(10);
         let first_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
         let release_first = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
         let executed = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
@@ -26455,7 +26465,7 @@ mod tests {
         let (lane, lane_rx) = WebSocketIsolatedCommandLane::new(
             WebSocketIsolatedCommandLaneKind::LiveControl,
             2,
-            Duration::from_millis(25),
+            LANE_EXPIRY_LIVENESS_BOUND,
             transport.register_command_lane("liveControl"),
         );
         let connection = transport.register_connection();
@@ -26481,13 +26491,13 @@ mod tests {
         try_enqueue_websocket_lane_command(
             &lane,
             json!({ "id": "first", "method": "screens.activate", "params": {} }).to_string(),
-            tokio::time::Instant::now() + Duration::from_millis(25),
+            tokio::time::Instant::now() + LANE_EXPIRY_LIVENESS_BOUND,
             None,
             None,
             None,
         )
         .unwrap();
-        timeout(Duration::from_secs(1), first_entered.acquire())
+        timeout(LANE_EXPIRY_LIVENESS_BOUND, first_entered.acquire())
             .await
             .expect("first command should dispatch")
             .unwrap()
@@ -26503,7 +26513,7 @@ mod tests {
         .unwrap();
 
         let expired = timeout(
-            Duration::from_millis(150),
+            LANE_EXPIRY_LIVENESS_BOUND,
             receive_tracked_json(&mut outgoing_rx, &reliable_metrics),
         )
         .await
