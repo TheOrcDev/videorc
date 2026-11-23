@@ -342,6 +342,14 @@ mod tests {
     #[test]
     #[ignore = "spawns three ffmpeg processes and a render thread; run with --ignored"]
     fn pipeline_runs_and_applies_a_live_edit() {
+        // The encoder `ffmpeg` ships: no bundled build has VideoToolbox off
+        // macOS or libx264 anywhere (#1635).
+        let Some(encoder) = crate::repair::probe_repair_encoder("ffmpeg") else {
+            eprintln!(
+                "pipeline_runs_and_applies_a_live_edit: skipped, ffmpeg on PATH has no H.264 encoder"
+            );
+            return;
+        };
         let config = RenderConfig {
             width: 320,
             height: 180,
@@ -361,6 +369,7 @@ mod tests {
             },
         ];
         let encode_args = render_encode_ffmpeg_args(
+            encoder,
             config.width,
             config.height,
             config.fps,

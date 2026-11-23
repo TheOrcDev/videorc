@@ -2259,12 +2259,19 @@ mod runtime_tests {
     #[ignore = "spawns ffmpeg and ffprobe; run on recording-studio hosts"]
     async fn real_ffmpeg_ring_saves_a_probed_replay_with_a_library_row() {
         let ffmpeg = crate::ffmpeg::resolve_ffmpeg_path(None);
+        let Some(video_args) = crate::repair::test_h264_encode_args(
+            &ffmpeg,
+            "real_ffmpeg_ring_saves_a_probed_replay_with_a_library_row",
+        ) else {
+            return;
+        };
         let state = test_state();
         let mut events = state.events.subscribe();
         let params = replay_only_params();
-        let recordings =
-            std::env::temp_dir().join(format!("videorc-replay-save-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&recordings).unwrap();
+        // Removed on drop, best effort: on Windows a just-written replay can
+        // still be open in a scanner when the test ends (os error 32 in 2 of
+        // 25 runs, after every assertion had passed).
+        let recordings = crate::test_temp_dir::TestTempDir::new("replay-save-test");
         let guard = prepare(
             &state,
             RingRequest {
@@ -2295,21 +2302,16 @@ mod runtime_tests {
             "0:v".to_string(),
             "-map".to_string(),
             "1:a".to_string(),
-            "-c:v".to_string(),
-            // The bundled macOS FFmpeg is LGPL (no libx264): VideoToolbox
-            // there, libx264 elsewhere.
-            if cfg!(target_os = "macos") {
-                "h264_videotoolbox".to_string()
-            } else {
-                "libx264".to_string()
-            },
+        ];
+        // The encoder the resolved FFmpeg ships: every bundled build is LGPL
+        // with no libx264 (#1635).
+        args.extend(video_args);
+        args.extend([
             "-g".to_string(),
             "60".to_string(),
             "-force_key_frames".to_string(),
             "expr:gte(t,n_forced*2)".to_string(),
-            "-pix_fmt".to_string(),
-            "yuv420p".to_string(),
-        ];
+        ]);
         args.extend(replay_audio_encoding_args(None, 1));
         args.extend(segment_muxer_args(&dir, 30));
         let output = tokio::process::Command::new(&ffmpeg)
@@ -2410,7 +2412,6 @@ mod runtime_tests {
         }
         retire(&state, "session-save", RetireOutcome::Stopped);
         assert!(!dir.exists());
-        std::fs::remove_dir_all(&recordings).unwrap();
     }
 
     /// Plan 200 B1, on real files: a 3-segment, 30 fps ring whose packets
@@ -2422,6 +2423,12 @@ mod runtime_tests {
     #[ignore = "spawns ffmpeg and ffprobe; run with --ignored"]
     fn real_ffmpeg_clip_keeps_every_frame_at_segment_joins() {
         let ffmpeg = crate::ffmpeg::resolve_ffmpeg_path(None);
+        let Some(video_args) = crate::repair::test_h264_encode_args(
+            &ffmpeg,
+            "real_ffmpeg_clip_keeps_every_frame_at_segment_joins",
+        ) else {
+            return;
+        };
         let ffprobe = crate::ffmpeg::ffprobe_path_for(&ffmpeg);
         let dir =
             std::env::temp_dir().join(format!("videorc-replay-joins-{}", uuid::Uuid::new_v4()));
@@ -2463,22 +2470,17 @@ mod runtime_tests {
             "0:v",
             "-map",
             "1:a",
-            "-c:v",
-            // The bundled macOS FFmpeg is LGPL (no libx264).
-            if cfg!(target_os = "macos") {
-                "h264_videotoolbox"
-            } else {
-                "libx264"
-            },
+        ]);
+        // The encoder the resolved FFmpeg ships (#1635).
+        args.extend(video_args);
+        args.extend(strings(&[
             "-bf",
             "0",
             "-g",
             "60",
             "-force_key_frames",
             "expr:gte(t,n_forced*2)",
-            "-pix_fmt",
-            "yuv420p",
-        ]);
+        ]));
         args.extend(replay_audio_encoding_args(None, 1));
         args.extend(strings(&["-f", "mpegts"]));
         args.push(source.display().to_string());

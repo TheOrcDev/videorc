@@ -38836,14 +38836,13 @@ mod tests {
                 "sine=frequency=440:sample_rate=48000",
                 "-t",
                 "6",
-                "-c:v",
-                "libx264",
+            ])
+            .args(plan200_h264_args())
+            .args([
                 "-bf",
                 "0",
                 "-g",
                 "30",
-                "-pix_fmt",
-                "yuv420p",
                 "-c:a",
                 "pcm_s16le",
                 "-ac",
@@ -52032,8 +52031,8 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
         directory
     }
 
-    /// `true` when `ffmpeg` and `ffprobe` run; otherwise the real-file test
-    /// logs a skip line and returns.
+    /// `true` when `ffmpeg` and `ffprobe` run and `ffmpeg` ships an H.264
+    /// encoder; otherwise the real-file test logs a skip line and returns.
     fn plan200_ffmpeg_available(test: &str) -> bool {
         let runs = |tool: &str| {
             std::process::Command::new(tool)
@@ -52043,11 +52042,18 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
                 .status()
                 .is_ok_and(|status| status.success())
         };
-        let available = runs("ffmpeg") && runs("ffprobe");
-        if !available {
+        if !(runs("ffmpeg") && runs("ffprobe")) {
             eprintln!("{test}: skipped, ffmpeg/ffprobe are not on PATH");
+            return false;
         }
-        available
+        crate::repair::test_h264_encode_args("ffmpeg", test).is_some()
+    }
+
+    /// The fixture's H.264 encode, from the encoder `ffmpeg` ships (#1635).
+    /// Callers checked [`plan200_ffmpeg_available`] first.
+    fn plan200_h264_args() -> Vec<String> {
+        crate::repair::test_h264_encode_args("ffmpeg", "plan200 fixture")
+            .expect("plan200_ffmpeg_available found an H.264 encoder")
     }
 
     /// A synthetic Videorc-like capture: H.264 without B-frames, PCM audio,
@@ -52071,17 +52077,9 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
                 "sine=frequency=440:sample_rate=48000",
                 "-t",
                 seconds,
-                "-c:v",
-                "libx264",
-                "-bf",
-                "0",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "pcm_s16le",
-                "-ac",
-                "2",
             ])
+            .args(plan200_h264_args())
+            .args(["-bf", "0", "-c:a", "pcm_s16le", "-ac", "2"])
             .arg(path)
             .status()
             .expect("ffmpeg runs");
@@ -52293,6 +52291,12 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
     #[tokio::test]
     #[ignore = "spawns ffmpeg and writes media; run with --ignored"]
     async fn real_ffmpeg_export_creates_absent_child_and_rejects_preexisting_output() {
+        let Some(video_args) = crate::repair::test_h264_encode_args(
+            "ffmpeg",
+            "real_ffmpeg_export_creates_absent_child_and_rejects_preexisting_output",
+        ) else {
+            return;
+        };
         let directory =
             std::env::temp_dir().join(format!("videorc-real-mp4-export-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
@@ -52313,13 +52317,11 @@ drawbox=x=0:y=ih-ih*0.250000:w=iw:h=ih*0.250000:color=black@0:t=fill:replace=1,"
                 "anullsrc=channel_layout=stereo:sample_rate=48000",
                 "-t",
                 "0.2",
-                // The MP4 export rewrites the H.264 VUI with `h264_metadata`,
-                // which rejects any other codec; recordings are always H.264.
-                "-c:v",
-                "libx264",
-                "-c:a",
-                "pcm_s16le",
             ])
+            // The MP4 export rewrites the H.264 VUI with `h264_metadata`,
+            // which rejects any other codec; recordings are always H.264.
+            .args(&video_args)
+            .args(["-c:a", "pcm_s16le"])
             .arg(&input)
             .status()
             .expect("ffmpeg should be on PATH for this ignored test");
