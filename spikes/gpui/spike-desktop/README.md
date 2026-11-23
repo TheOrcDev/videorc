@@ -6,11 +6,10 @@ menus, the title bar over a custom header, a global shortcut, a deep link on
 a cold start, one instance, window order, Hide from stream, the sleep guard,
 system notifications and files?
 
-**Answer on macOS: yes, every row** (verdicts below). Two GPUI defaults need
-a line of our own code each (the floating panel and the redraw after an
-accessibility menu press). Windows (WC-0.9) and Linux (L5) fill in their
-halves of [`src/os.rs`](src/os.rs); until then those calls report a gap
-instead of faking a pass.
+**Answer on macOS: yes, every row** (verdicts below). One GPUI default
+needs a line of our own code (the floating panel). Windows (WC-0.9) and
+Linux (L5) fill in their halves of [`src/os.rs`](src/os.rs); until then
+those calls report a gap instead of faking a pass.
 
 ## What it does
 
@@ -127,12 +126,11 @@ events; idle draws nothing).
   the raw handle keeps it (317,486). The app should use normal windows and
   raise their level (this spike's default), which also allows toggling
   Keep on top at run time; no GPUI patch is needed.
-- **A menu item pressed through the accessibility API does not redraw the
-  window** until the next input or timer event: the action runs and
-  `cx.notify()` is called, but no frame is drawn. A click in the window or
-  a timer-driven update redraws at once. VoiceOver and the UI driver press
-  menu items this way, so S0.6 should reproduce it and decide between a
-  small GPUI fix and a refresh after menu actions in the app.
+- **GPUI doesn't draw a window another window covers**, so a menu action
+  run while the window is covered shows only once it is uncovered. A first
+  reading of this run blamed accessibility menu presses; rerun with the
+  window visible, an accessibility press of Window → Keep Awake redrew at
+  once. A driver on a shared screen must keep its window visible.
 - `screencapture` and a ScreenCaptureKit window capture (cua-driver's)
   both honour `sharingType = .none` on macOS 26. The backend's capture
   filter can also exclude the window ids the spike prints.
