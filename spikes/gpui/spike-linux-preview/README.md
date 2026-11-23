@@ -1,13 +1,13 @@
 # spike-linux-preview (plan 260 S0.3)
 
 **Question:** can Videorc's Linux preview, the backend's CPU frames in the
-shared-memory ring, show inside a GPUI window *below* GPUI's own drawing
+shared-memory ring, show inside a GPUI window _below_ GPUI's own drawing
 (editor handles, labels, popups), at the camera's rate, within S0.1's CPU
 lines, under Wayland and under X11?
 
 **Answer on ogre (Hyprland 0.56.2), 2026-11-23:**
 
-- **Wayland: yes.** A `wl_subsurface` placed *below* GPUI's `wl_surface`,
+- **Wayland: yes.** A `wl_subsurface` placed _below_ GPUI's `wl_surface`,
   fed by `wl_shm` buffers over the ring, shows through a transparent hole
   in GPUI's surface. GPUI's translucent box, handles, pill and popup blend
   over the video. 30.0 and 59.97 frames a second reach the screen
@@ -110,19 +110,19 @@ screenshots with `grim`, the busiest core's clock every 2 s) and
 screen" is the nested compositor's `wp_presentation` (`--presentation`
 runs); otherwise the presenter's commit or the server's `ShmCompletion`.
 
-| Run | Frames shown /s | Interval p95 (ms) | Age at present p50 / p95 (ms) | UI live, % of one core | UI still | GPUI redraws /s live | Compositor live |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Wayland, subsurface below, 30 fps | 30.0 (on screen) | 33.7 | 7.1 / 7.4 | 1.30 (1.98 with feedback) | 0.06 | 0 | Hyprland 9.8 % |
-| Wayland, subsurface below, 60 fps | 60.0 (on screen 59.97) | 16.9 | 21.6 / 29.9 | 2.44 (3.67 with feedback) | 0.06 | 0 | Hyprland 18.2 % |
-| Wayland, 30 fps, no overlay | 30.0 | 33.5 | — | 1.29 | 0.06 | 0 | Hyprland 9.6 % |
-| X11 child window, 30 fps | 30.0 | 33.5 | — | 1.42 | 0.57 | 0 | Xwayland 7.8 %, Hyprland 4.2 % |
-| X11 child window, 60 fps | 60.0 | 16.8 | — | 2.27 | 0.57 | 0 | Xwayland 16.0 %, Hyprland 7.7 % |
-| X11 child + overlay window, 30 fps | 30.0 | 33.5 | — | 1.80 | 0.90 | 0 | Xwayland 7.8 %, Hyprland 4.3 % |
-| X11 child + overlay window, 60 fps | 60.0 | 16.8 | — | 2.48 | 0.99 | 0 | Xwayland 16.2 %, Hyprland 7.2 % |
-| Route (d), Wayland, 30 fps | 30.0 | 33.6 | — | 34.4 | 0.04 | 30 | Hyprland 4.4 % |
-| Route (d), Wayland, 60 fps | 59.8 | 17.1 | — | 68.8 | 0.04 | 58 | Hyprland 8.2 % |
-| Route (d), X11, 30 fps | 30.0 | 33.6 | — | 25.0 | 0.52 | 30 | Xwayland 1.5 %, Hyprland 4.3 % |
-| Route (d), X11, 60 fps | 60.0 | 17.0 | — | 51.0 | 0.52 | 60 | Xwayland 2.9 %, Hyprland 7.5 % |
+| Run                                | Frames shown /s        | Interval p95 (ms) | Age at present p50 / p95 (ms) | UI live, % of one core    | UI still | GPUI redraws /s live | Compositor live                 |
+| ---------------------------------- | ---------------------- | ----------------- | ----------------------------- | ------------------------- | -------- | -------------------- | ------------------------------- |
+| Wayland, subsurface below, 30 fps  | 30.0 (on screen)       | 33.7              | 7.1 / 7.4                     | 1.30 (1.98 with feedback) | 0.06     | 0                    | Hyprland 9.8 %                  |
+| Wayland, subsurface below, 60 fps  | 60.0 (on screen 59.97) | 16.9              | 21.6 / 29.9                   | 2.44 (3.67 with feedback) | 0.06     | 0                    | Hyprland 18.2 %                 |
+| Wayland, 30 fps, no overlay        | 30.0                   | 33.5              | —                             | 1.29                      | 0.06     | 0                    | Hyprland 9.6 %                  |
+| X11 child window, 30 fps           | 30.0                   | 33.5              | —                             | 1.42                      | 0.57     | 0                    | Xwayland 7.8 %, Hyprland 4.2 %  |
+| X11 child window, 60 fps           | 60.0                   | 16.8              | —                             | 2.27                      | 0.57     | 0                    | Xwayland 16.0 %, Hyprland 7.7 % |
+| X11 child + overlay window, 30 fps | 30.0                   | 33.5              | —                             | 1.80                      | 0.90     | 0                    | Xwayland 7.8 %, Hyprland 4.3 %  |
+| X11 child + overlay window, 60 fps | 60.0                   | 16.8              | —                             | 2.48                      | 0.99     | 0                    | Xwayland 16.2 %, Hyprland 7.2 % |
+| Route (d), Wayland, 30 fps         | 30.0                   | 33.6              | —                             | 34.4                      | 0.04     | 30                   | Hyprland 4.4 %                  |
+| Route (d), Wayland, 60 fps         | 59.8                   | 17.1              | —                             | 68.8                      | 0.04     | 58                   | Hyprland 8.2 %                  |
+| Route (d), X11, 30 fps             | 30.0                   | 33.6              | —                             | 25.0                      | 0.52     | 30                   | Xwayland 1.5 %, Hyprland 4.3 %  |
+| Route (d), X11, 60 fps             | 60.0                   | 17.0              | —                             | 51.0                      | 0.52     | 60                   | Xwayland 2.9 %, Hyprland 7.5 %  |
 
 - **Resize** (50 steps in 5 s): the native routes keep the frame rate
   (29.9 and 59.8 on screen) while GPUI redraws once per step; the app
