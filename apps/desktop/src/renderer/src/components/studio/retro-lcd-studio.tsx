@@ -5,15 +5,7 @@ import {
   SpeakerOnIcon,
   StopIcon
 } from '@/components/icons'
-import {
-  Fragment,
-  Suspense,
-  useContext,
-  useId,
-  useState,
-  type ReactElement,
-  type ReactNode
-} from 'react'
+import { Fragment, Suspense, useContext, useState, type ReactElement, type ReactNode } from 'react'
 
 import { MicrophoneGainFader, SystemAudioGainFader } from '@/components/audio/gain-faders'
 import {
@@ -33,9 +25,7 @@ import {
   LcdPanelKey,
   LcdPanelNavRow,
   LcdPanelPressRow,
-  LcdPanelRow,
-  LcdPanelSwitch,
-  LcdPixelChevron
+  LcdPanelSwitch
 } from '@/components/lcd-panel'
 import { PanelSection } from '@/components/panel-section'
 import { AgentsSessionRow } from '@/components/studio/agents-session-row'
@@ -591,7 +581,8 @@ function RetroChatDoorRow(): ReactElement | null {
 
 /**
  * Background under the camera, as in the default look (plan 258 S5): the
- * pick lit on the screen, opening the same picker (the live picture and the
+ * pick lit on the screen, on the same row as Captions (chevron right),
+ * opening the same picker (the live picture and the
  * tiles are on-stream pixels, so they sit on the popup, not on the screen).
  */
 function RetroBackgroundRow({
@@ -599,29 +590,23 @@ function RetroBackgroundRow({
 }: {
   control: CameraBackgroundControl
 }): ReactElement | null {
-  const id = useId()
   const [open, setOpen] = useState(false)
   const [choosingImage, setChoosingImage] = useState(false)
   if (!control.available) return null
   return (
-    <LcdPanelRow htmlFor={id} label={CAMERA_BACKGROUND_LABEL}>
+    <>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger
-          id={id}
           render={
-            <button
+            <LcdPanelNavRow
               aria-label={`${CAMERA_BACKGROUND_LABEL}: ${control.valueLabel}`}
-              className={cn(LCD_VALUE_BUTTON, 'data-popup-open:bg-(--lcd-display-ink-unlit)')}
+              className="data-popup-open:bg-(--lcd-display-ink-unlit)"
               data-videorc-camera-background-trigger=""
-              type="button"
+              label={CAMERA_BACKGROUND_LABEL}
+              value={control.valueLabel}
             />
           }
-        >
-          <span className="min-w-0 truncate" title={control.valueLabel}>
-            {control.valueLabel}
-          </span>
-          <LcdPixelChevron />
-        </PopoverTrigger>
+        />
         <PopoverContent align="end" className="w-80" data-videorc-camera-background-popover="">
           <Suspense fallback={null}>
             <LazyCameraBackgroundPicker
@@ -650,7 +635,7 @@ function RetroBackgroundRow({
           />
         </Suspense>
       ) : null}
-    </LcdPanelRow>
+    </>
   )
 }
 

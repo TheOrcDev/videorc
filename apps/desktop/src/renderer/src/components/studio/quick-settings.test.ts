@@ -224,6 +224,13 @@ describe('Studio Sources rows (plan 080 S4, plan 231 D8)', () => {
     expect(button).toContain('>Background<')
     expect(button).toContain('>Off<')
     expect(button).toContain('<svg')
+    // The same row as Captions (owner, 2026-11-23): a NavigableRow with no
+    // fill of its own, the picture where an icon sits, and the chevron right.
+    expect(button).toContain('data-slot="navigable-row"')
+    expect(button).toContain('data-slot="camera-background-thumbnail"')
+    expect(button).not.toContain('bg-secondary')
+    // The caret points right (CaretRight's path), as on Captions' row.
+    expect(button).toContain('M181.66,133.66l-80,80')
     expect(line).not.toContain('role="radiogroup"')
     expect(line).not.toContain('aria-label="Green screen"')
     expect(line).not.toContain('Adjust')
