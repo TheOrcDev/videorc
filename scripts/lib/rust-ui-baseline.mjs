@@ -28,7 +28,7 @@ import {
   readUiSettingJs,
   seedUiSettingsJs,
   UI_SETTINGS_READY_JS
-} from './renderer-profile-seed.mjs'
+} from './rust-ui-baseline-settings.mjs'
 import { CdpPage, connectWindow, listTargets, windowRoleOfUrl } from './rust-ui-baseline-cdp.mjs'
 import {
   BASELINE_CHAT_ROWS,
@@ -127,6 +127,12 @@ export async function runBaseline({
   // The Buddy run is signed in: the dev-only mock account (a Developer
   // entitlement) and the local fakes the Buddy smokes use, never the real API.
   const signedIn = parts.includes('buddy')
+  // The mock account and the fake API origin are debug-build only
+  // (account.rs, videorc_api.rs): a release backend ignores both, so the
+  // signed-in run would shoot a signed-out app, or reach the real service.
+  if (signedIn && process.env.VIDEORC_DEV_BACKEND_PROFILE === 'release') {
+    throw new Error('The buddy part needs the debug backend: unset VIDEORC_DEV_BACKEND_PROFILE for it.')
+  }
   const fakes = signedIn ? await startSignedInFakes(stateDir) : null
 
   let devtoolsUrl = null
@@ -541,7 +547,7 @@ async function shootIdleStates({ ctx, tryStep, only, missing }) {
   })
   await tryStep('scene', 'new-scene', async () => {
     await ctx.open('layout')
-    await ctx.click('^New scene', { nth: 0 })
+    await ctx.click('^Add scene', { nth: 0 })
     await sleep(800)
     await ctx.shoot('scene', 'new-scene')
     await ctx.dismiss()
@@ -607,7 +613,7 @@ async function shootIdleStates({ ctx, tryStep, only, missing }) {
     await setVerticalLeg(ctx, true)
     await ctx.open('studio')
     await ctx.js(
-      `const leg = await waitFor(() => document.querySelector('[data-slot=vertical-leg-scenes]'), 'the Vertical stream section');
+      `const leg = await waitFor(() => document.querySelector('[data-slot=vertical-stream-layout]'), 'the Vertical stream section');
        let scroller = leg.parentElement;
        while (scroller && !(scroller.scrollHeight > scroller.clientHeight && /auto|scroll/.test(getComputedStyle(scroller).overflowY))) scroller = scroller.parentElement;
        if (scroller) scroller.scrollTop = scroller.scrollHeight;
@@ -1056,20 +1062,25 @@ async function shootBuddy({ ctx, only, sizes, failed }) {
       await ctx.shoot('account-menu', 'signed-in')
       await ctx.dismiss()
     })
+    // Plan 239 moved avatar creation to the Avatar page (⌘8): onboarding is
+    // "New avatar…" on Profile, and the Alive creator replaces Profile.
     await tryStep('buddy-pet-creator', 'default', async () => {
-      await ctx.open('ai')
-      await ctx.click('^Profile$', { selector: '[role=tab]' })
+      await ctx.open('avatar')
+      await ctx.click('^Profile$', { selector: '[role=tab]', how: 'click' })
       await sleep(600)
-      await ctx.click('^New Buddy')
-      await sleep(1500)
+      await ctx.js(
+        `const { openBuddyPetCreator } = await import('/src/lib/buddy-pet-creator-nav.ts'); openBuddyPetCreator({ reference: 'persona-idle' }); await sleep(1500); return true`
+      )
       await ctx.shoot('buddy-pet-creator', 'default')
-      await ctx.dismiss()
+      await ctx.js(
+        `const { closeBuddyPetCreator } = await import('/src/lib/buddy-pet-creator-nav.ts'); closeBuddyPetCreator(); await sleep(600); return true`
+      )
     })
     await tryStep('buddy-onboarding', 'default', async () => {
-      await ctx.open('ai')
-      await ctx.click('^Profile$', { selector: '[role=tab]' })
+      await ctx.open('avatar')
+      await ctx.click('^Profile$', { selector: '[role=tab]', how: 'click' })
       await sleep(600)
-      await ctx.click('^Start$')
+      await ctx.click('^New avatar')
       await sleep(1500)
       await ctx.shoot('buddy-onboarding', 'default')
       await ctx.dismiss()
