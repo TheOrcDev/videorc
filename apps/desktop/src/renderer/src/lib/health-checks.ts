@@ -320,22 +320,15 @@ export function previewSpeedCheck({
   if (!nativePreviewSurfaceEnabled) {
     return { value: 'Fallback', tone: unavailable ? 'neutral' : 'warn' }
   }
-  if (diagnosticStats.previewTransport === 'electron-proof-surface') {
-    // Plan 257 S3: the proof surface is the Linux Preview, measured on its own
-    // terms; on Windows it stays a named fallback.
-    return platform === 'linux'
-      ? linuxProofPreviewSpeedCheck({
-          diagnosticStats,
-          shouldCheckCamera,
-          shouldCheckScreen,
-          previewCameraStatus,
-          previewLiveStatus,
-          previewScreenStatus,
-          previewSurfaceStatus
-        })
-      : { value: 'Fallback', tone: 'warn' }
+  // Plan 257 S3: the proof surface is the Linux Preview, measured on its own
+  // presented rate below; on Windows it stays a named fallback.
+  const linuxProof =
+    platform === 'linux' && diagnosticStats.previewTransport === 'electron-proof-surface'
+  if (diagnosticStats.previewTransport === 'electron-proof-surface' && !linuxProof) {
+    return { value: 'Fallback', tone: 'warn' }
   }
   if (
+    !linuxProof &&
     !isNativePreviewCapability(
       {
         transport: diagnosticStats.previewTransport,
@@ -368,19 +361,37 @@ export function previewSpeedCheck({
   ) {
     return { value: 'Screen slow', tone: 'warn' }
   }
-  if (
+  if (linuxProof) {
+    if (previewSurfaceStatus.firstFrameContract === 'fallback') {
+      return { value: 'Stalled', tone: 'warn' }
+    }
+    // Every layer keeps up with what its source sends (or the target, when no
+    // rate is known). A hidden Preview fetches no frames: nothing to judge.
+    const sourceRates = [
+      shouldCheckCamera && previewCameraStatus.state === 'live' && previewCameraStatus.sourceFps,
+      shouldCheckScreen && previewScreenStatus.state === 'live' && previewScreenStatus.sourceFps
+    ].filter((fps): fps is number => typeof fps === 'number' && fps > 0)
+    const shownFps = previewSurfaceStatus.proofSourceFps
+    if (
+      sourceRates.length > 0 &&
+      typeof shownFps === 'number' &&
+      previewSurfaceStatus.framePollingSuppressed !== true &&
+      previewSurfaceStatus.bounds?.visible !== false &&
+      shownFps < Math.min(targetFps, ...sourceRates) * 0.9
+    ) {
+      return { value: 'Slow display', tone: 'warn' }
+    }
+  } else if (
     typeof diagnosticStats.previewRenderFrameTimeP95Ms === 'number' &&
     diagnosticStats.previewRenderFrameTimeP95Ms > (1000 / Math.max(1, targetFps)) * 1.5
   ) {
     return { value: 'Slow rendering', tone: 'warn' }
-  }
-  if (
+  } else if (
     typeof diagnosticStats.previewPresentFps === 'number' &&
     diagnosticStats.previewPresentFps < minimumSourceFps
   ) {
     return { value: 'Slow display', tone: 'warn' }
-  }
-  if (
+  } else if (
     diagnosticStats.previewDroppedFrames > 0 ||
     diagnosticStats.previewRepeatedFrames > targetFps ||
     (typeof diagnosticStats.previewCompositorFrameLag === 'number' &&
@@ -391,77 +402,6 @@ export function previewSpeedCheck({
       diagnosticStats.previewInputToPresentLatencyMs > 150)
   ) {
     return { value: 'App busy', tone: 'warn' }
-  }
-  if (previewLiveStatus.state !== 'live') {
-    return { value: 'Measuring…', tone: 'neutral' }
-  }
-  return { value: 'Smooth', tone: 'good' }
-}
-
-/**
- * Plan 257 S3: the Linux Preview's speed. The proof surface presents each
- * source layer itself, so "smooth" means every layer keeps up with its
- * source: the slowest layer's presented rate (`proofSourceFps`) within 10 %
- * of what its source sends (or of the target, when the source rate is
- * unknown). A watchdog fallback is a stalled picture.
- */
-function linuxProofPreviewSpeedCheck({
-  diagnosticStats,
-  shouldCheckCamera,
-  shouldCheckScreen,
-  previewCameraStatus,
-  previewLiveStatus,
-  previewScreenStatus,
-  previewSurfaceStatus
-}: Pick<
-  PreviewSpeedInput,
-  | 'diagnosticStats'
-  | 'previewCameraStatus'
-  | 'previewLiveStatus'
-  | 'previewScreenStatus'
-  | 'previewSurfaceStatus'
-> & { shouldCheckCamera: boolean; shouldCheckScreen: boolean }): CheckWords {
-  const targetFps = diagnosticStats.previewTargetFps ?? previewSurfaceStatus.targetFps
-  const minimumSourceFps = targetFps * 0.9
-  const cameraLive =
-    shouldCheckCamera &&
-    previewCameraStatus.state === 'live' &&
-    !cameraSendsNoVideo(previewCameraStatus)
-  const screenLive = shouldCheckScreen && previewScreenStatus.state === 'live'
-  if (
-    cameraLive &&
-    typeof previewCameraStatus.sourceFps === 'number' &&
-    previewCameraStatus.sourceFps < minimumSourceFps
-  ) {
-    return { value: 'Camera slow', tone: 'warn' }
-  }
-  if (
-    screenLive &&
-    typeof previewScreenStatus.sourceFps === 'number' &&
-    previewScreenStatus.sourceFps < minimumSourceFps
-  ) {
-    return { value: 'Screen slow', tone: 'warn' }
-  }
-  if (previewSurfaceStatus.firstFrameContract === 'fallback') {
-    return { value: 'Stalled', tone: 'warn' }
-  }
-  // A hidden Preview (docked, on another tab) fetches no frames: nothing to judge.
-  const previewShowing =
-    previewSurfaceStatus.framePollingSuppressed !== true &&
-    previewSurfaceStatus.bounds?.visible !== false
-  const sourceRates = [
-    cameraLive ? previewCameraStatus.sourceFps : undefined,
-    screenLive ? previewScreenStatus.sourceFps : undefined
-  ].filter((fps): fps is number => typeof fps === 'number' && fps > 0)
-  // A still screen sends no frames, and a layer can't show more than it gets.
-  const expectedFps = Math.min(targetFps, ...sourceRates)
-  if (
-    previewShowing &&
-    typeof previewSurfaceStatus.proofSourceFps === 'number' &&
-    sourceRates.length > 0 &&
-    previewSurfaceStatus.proofSourceFps < expectedFps * 0.9
-  ) {
-    return { value: 'Slow display', tone: 'warn' }
   }
   if (previewLiveStatus.state !== 'live') {
     return { value: 'Measuring…', tone: 'neutral' }

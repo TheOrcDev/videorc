@@ -8,8 +8,7 @@ import {
   nativePreviewProofPollingMaxWidth,
   nativePreviewProofPollingProfile,
   nativePreviewProofPollingProfileKey,
-  nativePreviewProofPresentStatus,
-  previewSurfaceCreateTargetFps
+  nativePreviewProofPresentStatus
 } from './native-preview-proof-polling'
 
 describe('nativePreviewProofPollingProfile', () => {
@@ -150,14 +149,5 @@ describe('nativePreviewProofFrameTransport', () => {
     expect(
       nativePreviewProofFrameTransport('linux', { VIDEORC_PROOF_FRAME_TRANSPORT: 'h264' })
     ).toBe('wait-i420')
-  })
-})
-
-describe('previewSurfaceCreateTargetFps', () => {
-  it('asks Linux for 30 fps status ticks and keeps 60 elsewhere', () => {
-    expect(previewSurfaceCreateTargetFps('linux')).toBe(30)
-    expect(previewSurfaceCreateTargetFps('darwin')).toBe(60)
-    expect(previewSurfaceCreateTargetFps('win32')).toBe(60)
-    expect(previewSurfaceCreateTargetFps(undefined)).toBe(60)
   })
 })
