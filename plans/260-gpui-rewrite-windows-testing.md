@@ -234,6 +234,7 @@ cargo run --release -p spike-preview-windows -- --route a --resolution 4k --fps 
 While it runs, in a second PowerShell:
 
 ```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\videorc-evidence\S0.2c" | Out-Null
 typeperf "\Process(spike-preview-windows)\% Processor Time" "\Process(videorc-backend)\% Processor Time" -si 2 -sc 300 -o "$env:USERPROFILE\videorc-evidence\S0.2c\cpu-route-a-run1.csv"
 ```
 
@@ -262,7 +263,7 @@ S0.1):
 | `ui_cpu_percent_still` (app process, scene not changing) | ≤ 3 |
 | `ui_cpu_percent_live` (app process, video moving) | ≤ 10 |
 | `gpu_ms_per_frame_p95` | ≤ 2 |
-| `ui_redraws_per_second_idle` | ≤ 2 (the UI must not redraw per video frame) |
+| `ui_redraws_per_second_idle` (no UI change, video moving) | ≤ 2 for routes a, c and d (the UI must not redraw per video frame). Route b redraws the window for every video frame by design: report its number and its CPU cost, don't mark it FAIL on this line |
 | `dropped_frames` | report it |
 
 **Send:** per route, the three `summary.json` files, the CPU CSVs, a
@@ -350,6 +351,26 @@ if a step needs it, and take screenshots of each page and window listed in
 the [Windows parity checklist](#windows-parity-checklist) in dark and light
 mode. These are what the GPUI app is compared against later. Use the test
 profile; don't sign in to your own streaming accounts.
+
+Then measure the CPU cost of the Electron app, the line the GPUI app's
+"Performance on your PC" row is compared with. Same scene for both: the
+Studio page open with your camera and your main display as the sources
+(the default first scene), the window not covered, on AC power.
+
+1. **Idle:** the app open on the Studio page, not recording, for 5
+   minutes.
+2. **Live:** press Record with the default settings and keep recording for
+   5 minutes, then stop.
+
+For each, in a second PowerShell started when the step starts:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\videorc-evidence\S0.10" | Out-Null
+typeperf "\Process(Videorc*)\% Processor Time" "\Process(videorc-backend*)\% Processor Time" -si 2 -sc 150 -o "$env:USERPROFILE\videorc-evidence\S0.10\cpu-<idle or live>.csv"
+```
+
+**Send:** the two CSVs, the recording's resolution and frame rate (from
+the Output page), and the screenshots.
 
 ## Phases 1 to 5: the checks after Phase 0
 

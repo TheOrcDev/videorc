@@ -113,7 +113,7 @@ What GPUI changes against Slint, checked in the source on 2026-11-23:
   switch to a texture route at 30 to 40 % of a core at 4K60
   (`videorc-rust:docs/rust-ui/spike-report.md:53-60`). With GPUI the editor's
   handles, scrims and labels sit on the same layer route as the docked
-  preview. [The spike](#spike-s0-0-native-preview-under-gpui) measured it.
+  preview. [The spike](#spike-s00-native-preview-under-gpui) measured it.
 - **Plain Rust, no second language.** Screens are Rust functions, not
   `.slint` files, which is what agents write best and what Zed itself is written
   in. No vendored toolkit patches today (Slint needed three,
@@ -357,7 +357,7 @@ The rule stays: the core never imports GPUI (the test above is kept).
 
 | Platform | Route | Status |
 | --- | --- | --- |
-| macOS | A `NativeView` holding an `NSView` whose layer is `videorc-preview`'s `CAMetalLayer`, presented on its own thread from the backend's IOSurface ring. GPUI lays it out like any element and paints the scene editor's handles, the scrims and the labels over it. The detached Preview window gets its own `NativeView` (a view shows in one window only, `native_view.rs:62-67`) | Spike S0.0 showed it on synthetic content ([below](#spike-s0-0-native-preview-under-gpui)); S0.1 measures it with the backend's real ring at 4K60 |
+| macOS | A `NativeView` holding an `NSView` whose layer is `videorc-preview`'s `CAMetalLayer`, presented on its own thread from the backend's IOSurface ring. GPUI lays it out like any element and paints the scene editor's handles, the scrims and the labels over it. The detached Preview window gets its own `NativeView` (a view shows in one window only, `native_view.rs:62-67`) | Spike S0.0 showed it on synthetic content ([below](#spike-s00-native-preview-under-gpui)); S0.1 measures it with the backend's real ring at 4K60 |
 | Windows | To measure (S0.2, D12): (a) a native view for Windows, contributed to GPUI: a DirectComposition visual beneath GPUI's visual, showing a composition surface the backend's presenter presents into (`DCompositionCreateSurfaceHandle`, opened with `CreateSurfaceFromHandle`), so the presenter stays in the backend as on macOS; (b) a shared-texture `draw_surfaces` in GPUI's DirectX renderer, which redraws the window at video rate; (c) the backend's own DirectComposition window stacked over ours (`windows_d3d11_preview.rs:610-1016`, today's unqualified presenter); (d) CPU frames from the shared-memory ring as GPUI images | Unbuilt. **On the critical path (D8).** Built and measured by the Windows contributors ([code](260-gpui-rewrite-windows-code.md) WC-0.2 to WC-0.5); (a), (b) and (d) need the backend's hand-over first (S0.2b). Anything beats today's BMP proof surface |
 | Linux | `videorc-preview`'s Wayland subsurface or X11 child window over the shared-memory ring, placed below a transparent hole in GPUI's surface; fallback (d) | Built for Slint (plan 220 P4-D2), never under GPUI. **On the critical path (D8):** S0.3 on ogre |
 
@@ -819,7 +819,7 @@ contributor's PC (the testing plan's Phase 1 row).
 | S1.0 | The workspace scaffold: the root `Cargo.toml` members and `[workspace.dependencies]` for every crate this plan adds (empty crates, each with a README naming its lane), so no later lane edits the root manifest | L2 | CI green on all three platforms; each new crate compiles empty |
 | S1.1 | `videorc-protocol` extracted from `protocol.rs`; `backend.ts` generated | L2 | Contract tests and `protocol-fixtures/` pass on both sides; Windows and Linux CI compile |
 | S1.2 | Stream graphics in the backend (captions, chat box, cards, Sidekick bubble) | L2 | Golden images match the renderer's within a threshold and by eye; `smoke:captions-live`, `smoke:comment-highlight-stream` and a record-plus-stream smoke pass on macOS and on a contributor's PC |
-| S1.3 | Meters from `audio.levels`; the monitor, clicks and chime from the backend | L2 | `smoke:soundboard`, `smoke:system-audio` and the mixer tests pass on macOS and on a contributor's PC; the renderer has no getUserMedia or AudioContext |
+| S1.3 | Meters from `audio.levels`; the monitor, clicks and chime from the backend | L2 | `smoke:soundboard`, `smoke:system-audio` and the mixer tests pass on macOS and on a contributor's PC; the meter, monitor, click and chime paths use no getUserMedia or AudioContext (the room microphone keeps its renderer graph, `lib/room-microphone-source.ts:257`, until S1.8 moves rooms) |
 | S1.4 | UI settings into `app_settings`, with a one-time migration | L2 | `smoke:first-run` and `smoke:scene-presets` pass on a profile from the previous release |
 | S1.5 | Main's side jobs to the backend: avatar/emote/GIF cache, comments history, thumbnails, agent config writes, OBS import | L2 | Their tests move with them; main owns none of them |
 | S1.6a–f | `videorc-app-core` lands and catches up, one area per slice: session and Studio; scenes, sources and the editor; live, destinations, Go Live, cloud; guests and rooms; Sidekick, Avatar, chat, notifications; Library, Settings, first run | L7 | Each area's drift list is empty, its core tests pass, and the smokes it can run headless pass |
@@ -950,7 +950,9 @@ extra and are not counted.
 - **L2:** S1.0 → S0.2b → S1.1 → S0.8 → S1.2 → S1.3 → S1.4 → S1.5 → S1.7
   (its crates) → S1.8 → backend fixes the screens find → S5.2 → S5.0 on
   macOS.
-- **L3:** S0.4 → [the owner's look, D3] → S2.2a → S2.2b → S2.2c (a few PRs)
+- **L3:** S0.4 → [the owner's look, D3] → S2.2a's token output (plain
+  JavaScript in `build-theme.mjs`, no GPUI) → [Phase 0 gate] → the rest of
+  S2.2a → S2.2b → S2.2c (a few PRs)
   → S2.2d → L3's screens.
 - **L4:** S0.7 → S0.5 → S0.6 → S0.9 → [gate] → S2.1 → S2.6a → L4's screens
   → S5.1a.
@@ -971,7 +973,7 @@ busy in each window.
 | Window | Heavy on this Mac (≤ 2) | Light on this Mac | ogre | Windows contributors (extra) |
 | --- | --- | --- | --- | --- |
 | **Now** (Phase 0, Phase 1 starts) | L1 S0.1; L2 S1.0 → S0.2b | L3 S0.4; L4 S0.7; L6 S0.12 → S0.11 | L5 S0.3 | WC-0.1 on both PCs, then WC-0.2 (one) and WC-0.5's route (c) (the other) |
-| After S1.1 merges | L2 S0.8 → S1.2…; L6 S0.10 when L1 is light | L1 S1.7; L3 the owner's look → S2.2a; L4 S0.5 → S0.6; L7 S1.6a… | L5 the Linux halves | WC-0.5 routes (a), (b), (d) after S0.2b; WC-0.6 to WC-0.9 |
+| After S1.1 merges | L2 S0.8 → S1.2…; L6 S0.10 when L1 is light | L1 S1.7; L3 the owner's look → S2.2a's token output (the rest of S2.2a waits for the gate); L4 S0.5 → S0.6; L7 S1.6a… | L5 the Linux halves | WC-0.5 routes (a), (b), (d) after S0.2b; WC-0.6 to WC-0.9 |
 | Phase 2 (after the gate) | L2 Phase 1's tail; one cold build at a time from L1 (S2.3a) or L4 (S2.1) | L3 S2.2a–d; L6 S2.5; L7 S1.6's tail → S2.4 | L5 S2.3c, S2.6c | WC-2.1, WC-2.2, WC-2.4 to WC-2.7 |
 | Phase 3 | L2 backend fixes and S1.8 | L1, L3, L4, L7 screen PRs (warm targets); L6 smokes | L5 each screen's Linux pass | WC-3.x Windows passes |
 | Phases 4 and 5 | L2 S5.2; L4 release builds | L6 the parity file; L3 the kit's polish | L5 Linux packages and passes | WC-4.x, WC-5.1 |
