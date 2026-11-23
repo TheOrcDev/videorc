@@ -1,0 +1,31 @@
+[package]
+name = "spike-preview-backend"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Plan 260 S0.1: videorc-preview's presenter in a GPUI NativeView, fed by the real backend's IOSurface ring at 4K60."
+
+[dependencies]
+anyhow = "1.0"
+gpui = { package = "gpui-pre", version = "=0.3.14" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.14", features = ["font-kit", "runtime_shaders"] }
+libc = "0.2"
+objc2 = "0.6"
+objc2-foundation = "0.3.2"
+objc2-app-kit = { version = "0.3.2", features = ["NSView", "NSResponder", "NSWindow", "NSGraphics", "objc2-quartz-core"] }
+objc2-quartz-core = { version = "0.3.2", features = ["CALayer", "CAMetalLayer", "objc2-metal"] }
+raw-window-handle = "0.6"
+serde_json = "1.0"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
+# Plan 220's crates from a videorc-rust checkout beside this one (private repo; main 1e097e52c), unchanged. S1.7 moves them into this repo.
+videorc-app-core = { path = "../../../../videorc-rust/crates/videorc-app-core" }
+videorc-preview = { path = "../../../../videorc-rust/crates/videorc-preview" }
+videorc-protocol = { path = "../../../../videorc-rust/crates/videorc-protocol" }
+
+# Its own workspace: the path dependencies need a videorc-rust checkout, so it
+# stays out of the spikes workspace the Windows contributors build.
+[workspace]
+
+[profile.release]
+# This toolchain has no rust-objcopy for the default strip.
+strip = false
