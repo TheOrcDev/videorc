@@ -20,6 +20,7 @@ use crate::live_scene::{
     ActiveScene, LiveEditDecision, LiveEditEvent, MutationContext, SceneMutation, decode_op,
 };
 use crate::protocol::{SceneSource, SceneTransform};
+use crate::repair::RepairVideoEncoder;
 
 /// The background colour where no visible source covers a pixel.
 const BACKGROUND: [u8; 3] = [0, 0, 0];
@@ -342,17 +343,8 @@ pub fn capture_ffmpeg_args(
     args
 }
 
-/// FFmpeg args to encode composited rgb24 frames (read from stdin) to a local MKV with
-/// the streaming-safe encode: 2-second keyframes + global headers (the same settings
-/// proven for the tee fan-out). LS3b-2 adds the `tee` to stream targets on top of this
-/// single-output base.
-pub fn render_encode_ffmpeg_args(
-    width: usize,
-    height: usize,
-    fps: u32,
-    bitrate_kbps: u32,
-    output_path: &str,
-) -> Vec<String> {
+/// The rgb24 stdin input both render encodes read.
+fn render_rawvideo_input_args(width: usize, height: usize, fps: u32) -> Vec<String> {
     vec![
         "-y".to_string(),
         "-hide_banner".to_string(),
@@ -368,14 +360,37 @@ pub fn render_encode_ffmpeg_args(
         fps.to_string(),
         "-i".to_string(),
         "pipe:0".to_string(),
-        "-c:v".to_string(),
-        "h264_videotoolbox".to_string(),
-        "-allow_sw".to_string(),
-        "1".to_string(),
-        "-realtime".to_string(),
-        "1".to_string(),
-        "-prio_speed".to_string(),
-        "1".to_string(),
+    ]
+}
+
+/// The streaming-safe video encode both render encodes use: `encoder` at a
+/// constant `bitrate_kbps`, 2-second keyframes and global headers (the same
+/// settings proven for the tee fan-out). The encoder is the caller's pick from
+/// what its FFmpeg ships ([`crate::repair::probe_repair_encoder`]): this used to
+/// be VideoToolbox only, which no Windows or Linux FFmpeg has (#1635).
+fn render_video_encode_args(
+    encoder: RepairVideoEncoder,
+    fps: u32,
+    bitrate_kbps: u32,
+) -> Vec<String> {
+    let codec: &[&str] = match encoder {
+        RepairVideoEncoder::H264VideoToolbox => &[
+            "-c:v",
+            "h264_videotoolbox",
+            "-allow_sw",
+            "1",
+            "-realtime",
+            "1",
+            "-prio_speed",
+            "1",
+        ],
+        RepairVideoEncoder::H264MediaFoundation => &["-c:v", "h264_mf", "-rate_control", "cbr"],
+        // Never skip a frame: every composited frame is meant to land.
+        RepairVideoEncoder::Libopenh264 => &["-c:v", "libopenh264", "-allow_skip_frames", "0"],
+        RepairVideoEncoder::Libx264 => &["-c:v", "libx264", "-preset", "veryfast"],
+    };
+    let mut args: Vec<String> = codec.iter().map(|arg| arg.to_string()).collect();
+    args.extend([
         "-b:v".to_string(),
         format!("{bitrate_kbps}k"),
         "-maxrate".to_string(),
@@ -390,8 +405,25 @@ pub fn render_encode_ffmpeg_args(
         "+global_header".to_string(),
         "-pix_fmt".to_string(),
         "yuv420p".to_string(),
-        output_path.to_string(),
-    ]
+    ]);
+    args
+}
+
+/// FFmpeg args to encode composited rgb24 frames (read from stdin) to a local MKV with
+/// the streaming-safe encode ([`render_video_encode_args`]). LS3b-2 adds the `tee` to
+/// stream targets on top of this single-output base.
+pub fn render_encode_ffmpeg_args(
+    encoder: RepairVideoEncoder,
+    width: usize,
+    height: usize,
+    fps: u32,
+    bitrate_kbps: u32,
+    output_path: &str,
+) -> Vec<String> {
+    let mut args = render_rawvideo_input_args(width, height, fps);
+    args.extend(render_video_encode_args(encoder, fps, bitrate_kbps));
+    args.push(output_path.to_string());
+    args
 }
 
 /// FFmpeg args to encode composited rgb24 frames (stdin) and fan them out to a local
@@ -400,6 +432,7 @@ pub fn render_encode_ffmpeg_args(
 /// This is what the LS3b session pipeline uses to record + multistream one composite.
 /// Errors only when neither a recording path nor any stream target is supplied.
 pub fn render_tee_encode_args(
+    encoder: RepairVideoEncoder,
     width: usize,
     height: usize,
     fps: u32,
@@ -407,44 +440,8 @@ pub fn render_tee_encode_args(
     output_path: Option<&str>,
     stream_urls: &[String],
 ) -> Result<Vec<String>, String> {
-    let mut args = vec![
-        "-y".to_string(),
-        "-hide_banner".to_string(),
-        "-loglevel".to_string(),
-        "error".to_string(),
-        "-f".to_string(),
-        "rawvideo".to_string(),
-        "-pix_fmt".to_string(),
-        "rgb24".to_string(),
-        "-s".to_string(),
-        format!("{width}x{height}"),
-        "-r".to_string(),
-        fps.to_string(),
-        "-i".to_string(),
-        "pipe:0".to_string(),
-        "-c:v".to_string(),
-        "h264_videotoolbox".to_string(),
-        "-allow_sw".to_string(),
-        "1".to_string(),
-        "-realtime".to_string(),
-        "1".to_string(),
-        "-prio_speed".to_string(),
-        "1".to_string(),
-        "-b:v".to_string(),
-        format!("{bitrate_kbps}k"),
-        "-maxrate".to_string(),
-        format!("{bitrate_kbps}k"),
-        "-bufsize".to_string(),
-        format!("{}k", bitrate_kbps.saturating_mul(2)),
-        "-g".to_string(),
-        fps.saturating_mul(2).to_string(),
-        "-force_key_frames".to_string(),
-        "expr:gte(t,n_forced*2)".to_string(),
-        "-flags".to_string(),
-        "+global_header".to_string(),
-        "-pix_fmt".to_string(),
-        "yuv420p".to_string(),
-    ];
+    let mut args = render_rawvideo_input_args(width, height, fps);
+    args.extend(render_video_encode_args(encoder, fps, bitrate_kbps));
 
     let stream_legs = stream_urls
         .iter()
@@ -745,41 +742,22 @@ mod tests {
     #[ignore = "spawns ffmpeg and writes a file; run with --ignored"]
     fn fake_recording_encodes_a_moving_source() {
         use std::io::Write;
-        use std::process::{Command, Stdio};
 
-        let (width, height, fps, total_frames) = (320usize, 180usize, 30usize, 60usize);
+        let Some(encoder) = probed_render_encoder("fake_recording_encodes_a_moving_source") else {
+            return;
+        };
+        let (width, height, fps, total_frames) = (320usize, 180usize, 30u32, 60usize);
         let output = std::env::temp_dir().join("videorc-ls2-fake-recording.mkv");
         let _ = std::fs::remove_file(&output);
 
-        let mut child = Command::new("ffmpeg")
-            .args([
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgb24",
-                "-s",
-                &format!("{width}x{height}"),
-                "-r",
-                &fps.to_string(),
-                "-i",
-                "pipe:0",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-pix_fmt",
-                "yuv420p",
-            ])
-            .arg(&output)
-            .stdin(Stdio::piped())
-            .spawn()
-            .expect("ffmpeg should be on PATH for this ignored test");
-
-        let mut stdin = child.stdin.take().expect("ffmpeg stdin");
+        let (mut child, mut stdin, stderr) = spawn_render_encoder(render_encode_ffmpeg_args(
+            encoder,
+            width,
+            height,
+            fps,
+            4000,
+            output.to_str().expect("output path"),
+        ));
         let mut consumer = LiveRenderConsumer::start(screen_camera_scene(), width, height);
         for frame_index in 0..total_frames {
             if frame_index == total_frames / 2 {
@@ -791,15 +769,103 @@ mod tests {
                 );
             }
             let frame = consumer.render_next();
-            stdin.write_all(&frame.rgb_bytes()).expect("write frame");
+            if let Err(error) = stdin.write_all(&frame.rgb_bytes()) {
+                drop(stdin);
+                let status = child.wait_within(ENCODER_FINALIZE_LIMIT, "the encoder");
+                panic!(
+                    "the encoder ({status}) refused frame {frame_index}: {error}; {}",
+                    stderr.join().unwrap_or_default()
+                );
+            }
         }
         drop(stdin);
 
-        let status = child.wait().expect("ffmpeg wait");
-        assert!(status.success(), "ffmpeg should finalize the recording");
+        let status = child.wait_within(ENCODER_FINALIZE_LIMIT, "the encoder");
+        let stderr = stderr.join().unwrap_or_default();
+        assert!(
+            status.success(),
+            "ffmpeg should finalize the recording: {stderr}"
+        );
         let size = std::fs::metadata(&output).expect("recording exists").len();
         assert!(size > 0, "the fake recording should contain encoded video");
         assert_eq!(consumer.generation(), 1, "the output never restarted");
+    }
+
+    /// An FFmpeg child a test owns: killed and reaped on drop, a failed assert
+    /// included, so a dead peer can never leave it blocked on a full pipe
+    /// (#1635).
+    struct OwnedFfmpeg(std::process::Child);
+
+    impl OwnedFfmpeg {
+        /// The child's exit status once it ends on its own within `limit`. Past
+        /// the deadline the child is killed and reaped, and the test fails.
+        fn wait_within(
+            &mut self,
+            limit: std::time::Duration,
+            what: &str,
+        ) -> std::process::ExitStatus {
+            let deadline = std::time::Instant::now() + limit;
+            loop {
+                match self.0.try_wait().expect("poll the FFmpeg child") {
+                    Some(status) => return status,
+                    None if std::time::Instant::now() >= deadline => {
+                        let _ = self.0.kill();
+                        let _ = self.0.wait();
+                        panic!("{what} did not exit within {limit:?}; killed and reaped");
+                    }
+                    None => std::thread::sleep(std::time::Duration::from_millis(10)),
+                }
+            }
+        }
+    }
+
+    impl Drop for OwnedFfmpeg {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// How long an encoder may take to finalize after its input closes.
+    const ENCODER_FINALIZE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// The H.264 encoder `ffmpeg` on PATH ships, or `None` (with a skip line
+    /// naming `test`) when it has none.
+    fn probed_render_encoder(test: &str) -> Option<RepairVideoEncoder> {
+        let encoder = crate::repair::probe_repair_encoder("ffmpeg");
+        if encoder.is_none() {
+            eprintln!("{test}: skipped, ffmpeg on PATH has no H.264 encoder");
+        }
+        encoder
+    }
+
+    /// Spawns the render encoder with its stdin piped and its stderr drained on
+    /// a thread, so a refusal is reported with FFmpeg's own words.
+    fn spawn_render_encoder(
+        args: Vec<String>,
+    ) -> (
+        OwnedFfmpeg,
+        std::process::ChildStdin,
+        std::thread::JoinHandle<String>,
+    ) {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        let mut child = OwnedFfmpeg(
+            Command::new("ffmpeg")
+                .args(args)
+                .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("ffmpeg should be on PATH for this ignored test"),
+        );
+        let stdin = child.0.stdin.take().expect("encoder stdin");
+        let mut stderr = child.0.stderr.take().expect("encoder stderr");
+        let stderr = std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            text
+        });
+        (child, stdin, stderr)
     }
 
     fn frames_map(pairs: &[(&str, SourceFrame)]) -> HashMap<String, SourceFrame> {
@@ -913,66 +979,53 @@ mod tests {
         use std::io::{Read, Write};
         use std::process::{Command, Stdio};
 
+        let Some(encoder) =
+            probed_render_encoder("capture_composite_encode_pipeline_applies_a_live_edit")
+        else {
+            return;
+        };
         let (width, height, fps, seconds) = (320usize, 180usize, 30usize, 2usize);
         let total_frames = fps * seconds;
         let frame_bytes = width * height * 3;
 
         // FFmpeg "capture": a moving test pattern stands in for a screen source.
-        let mut capture = Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                &format!("testsrc2=size={width}x{height}:rate={fps}"),
-                "-t",
-                &seconds.to_string(),
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgb24",
-                "pipe:1",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("capture ffmpeg should be on PATH for this ignored test");
-        let mut capture_out = capture.stdout.take().expect("capture stdout");
+        let mut capture = OwnedFfmpeg(
+            Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("testsrc2=size={width}x{height}:rate={fps}"),
+                    "-t",
+                    &seconds.to_string(),
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "rgb24",
+                    "pipe:1",
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("capture ffmpeg should be on PATH for this ignored test"),
+        );
+        let mut capture_out = capture.0.stdout.take().expect("capture stdout");
 
         // FFmpeg encoder: composited rgb24 frames in, MKV out.
         let output = std::env::temp_dir().join("videorc-ls3-capture-composite-encode.mkv");
         let _ = std::fs::remove_file(&output);
-        let mut encode = Command::new("ffmpeg")
-            .args([
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgb24",
-                "-s",
-                &format!("{width}x{height}"),
-                "-r",
-                &fps.to_string(),
-                "-i",
-                "pipe:0",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-pix_fmt",
-                "yuv420p",
-            ])
-            .arg(&output)
-            .stdin(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("encode ffmpeg");
-        let mut encode_in = encode.stdin.take().expect("encode stdin");
+        let (mut encode, mut encode_in, encode_err) =
+            spawn_render_encoder(render_encode_ffmpeg_args(
+                encoder,
+                width,
+                height,
+                fps as u32,
+                4000,
+                output.to_str().expect("output path"),
+            ));
 
         let mut sources = vec![
             source(
@@ -1014,21 +1067,27 @@ mod tests {
             ]);
             let composed = composite_frames(&sources, &frames, revision, width, height);
             if encode_in.write_all(&composed.rgb_bytes()).is_err() {
+                // The encoder is gone: stop at once rather than feed it.
                 break;
             }
             produced += 1;
         }
         drop(encode_in);
-        let _ = capture.wait();
-        let status = encode.wait().expect("encode wait");
+        // Close the capture's stdout before reaping it. This used to wait on a
+        // capture still writing into a pipe nobody read, which hung for good
+        // when the encoder died early (#1635).
+        drop(capture_out);
+        drop(capture);
+        let status = encode.wait_within(ENCODER_FINALIZE_LIMIT, "the encoder");
+        let encode_err = encode_err.join().unwrap_or_default();
 
         assert!(
             status.success(),
-            "the encoder should finalize the recording"
+            "the encoder should finalize the recording: {encode_err}"
         );
         assert_eq!(
             produced, total_frames,
-            "every captured frame was composited"
+            "every captured frame was composited: {encode_err}"
         );
         let size = std::fs::metadata(&output).expect("recording exists").len();
         assert!(size > 0, "the recording should contain encoded video");
@@ -1085,7 +1144,14 @@ mod tests {
 
     #[test]
     fn render_encode_args_use_rawvideo_input_and_keyframes() {
-        let args = render_encode_ffmpeg_args(1920, 1080, 30, 6000, "/tmp/out.mkv");
+        let args = render_encode_ffmpeg_args(
+            RepairVideoEncoder::H264VideoToolbox,
+            1920,
+            1080,
+            30,
+            6000,
+            "/tmp/out.mkv",
+        );
         assert!(args.windows(2).any(|w| w[0] == "-f" && w[1] == "rawvideo"));
         assert!(args.contains(&"pipe:0".to_string()));
         assert!(args.contains(&"h264_videotoolbox".to_string()));
@@ -1102,9 +1168,74 @@ mod tests {
         assert_eq!(args.last().unwrap(), "/tmp/out.mkv");
     }
 
+    /// Every encoder a bundled FFmpeg can ship keeps the streaming-safe encode,
+    /// and VideoToolbox's own flags stay off the others, which reject them
+    /// (#1635).
+    #[test]
+    fn render_encode_args_fit_every_probed_encoder() {
+        for encoder in [
+            RepairVideoEncoder::Libx264,
+            RepairVideoEncoder::H264VideoToolbox,
+            RepairVideoEncoder::H264MediaFoundation,
+            RepairVideoEncoder::Libopenh264,
+        ] {
+            let args = render_encode_ffmpeg_args(encoder, 1280, 720, 30, 4500, "/tmp/out.mkv");
+            assert!(
+                args.windows(2)
+                    .any(|w| w[0] == "-c:v" && w[1] == encoder.ffmpeg_name()),
+                "{encoder:?}: {args:?}"
+            );
+            for (flag, value) in [
+                ("-b:v", "4500k"),
+                ("-g", "60"),
+                ("-force_key_frames", "expr:gte(t,n_forced*2)"),
+                ("-flags", "+global_header"),
+                ("-pix_fmt", "yuv420p"),
+            ] {
+                assert!(
+                    args.windows(2).any(|w| w[0] == flag && w[1] == value),
+                    "{encoder:?} lacks {flag} {value}: {args:?}"
+                );
+            }
+            let videotoolbox_only = ["-allow_sw", "-realtime", "-prio_speed"];
+            assert_eq!(
+                args.iter()
+                    .any(|arg| videotoolbox_only.contains(&arg.as_str())),
+                encoder == RepairVideoEncoder::H264VideoToolbox,
+                "{encoder:?}: {args:?}"
+            );
+            assert_eq!(args.last().unwrap(), "/tmp/out.mkv");
+
+            let tee = render_tee_encode_args(
+                encoder,
+                1280,
+                720,
+                30,
+                4500,
+                Some("/tmp/rec.mkv"),
+                &["rtmp://x/app/a".to_string()],
+            )
+            .unwrap();
+            assert!(
+                tee.windows(2)
+                    .any(|w| w[0] == "-c:v" && w[1] == encoder.ffmpeg_name()),
+                "{encoder:?}: {tee:?}"
+            );
+        }
+    }
+
     #[test]
     fn render_tee_encode_records_only_without_streams() {
-        let args = render_tee_encode_args(1280, 720, 30, 4500, Some("/tmp/rec.mkv"), &[]).unwrap();
+        let args = render_tee_encode_args(
+            RepairVideoEncoder::H264VideoToolbox,
+            1280,
+            720,
+            30,
+            4500,
+            Some("/tmp/rec.mkv"),
+            &[],
+        )
+        .unwrap();
         assert!(
             !args.contains(&"tee".to_string()),
             "no streams -> plain mkv"
@@ -1118,8 +1249,16 @@ mod tests {
             "rtmp://a.rtmp.youtube.com/live2/yt".to_string(),
             "rtmp://live.twitch.tv/app/tw".to_string(),
         ];
-        let args =
-            render_tee_encode_args(1920, 1080, 30, 6000, Some("/tmp/rec.mkv"), &streams).unwrap();
+        let args = render_tee_encode_args(
+            RepairVideoEncoder::H264VideoToolbox,
+            1920,
+            1080,
+            30,
+            6000,
+            Some("/tmp/rec.mkv"),
+            &streams,
+        )
+        .unwrap();
         assert!(args.contains(&"tee".to_string()));
         let spec = args.iter().find(|a| a.contains("[f=matroska")).unwrap();
         assert!(spec.contains("[f=matroska:onfail=abort]/tmp/rec.mkv"));
@@ -1140,7 +1279,16 @@ mod tests {
     #[test]
     fn render_tee_encode_stream_only_multi_has_no_recording_leg() {
         let streams = vec!["rtmp://x/app/a".to_string(), "rtmp://y/app/b".to_string()];
-        let args = render_tee_encode_args(1280, 720, 30, 4500, None, &streams).unwrap();
+        let args = render_tee_encode_args(
+            RepairVideoEncoder::H264VideoToolbox,
+            1280,
+            720,
+            30,
+            4500,
+            None,
+            &streams,
+        )
+        .unwrap();
         let spec = args.iter().find(|a| a.contains("[f=flv")).unwrap();
         assert!(!spec.contains("[f=matroska"));
         assert_eq!(spec.matches("[f=flv").count(), 2);
@@ -1148,7 +1296,18 @@ mod tests {
 
     #[test]
     fn render_tee_encode_requires_an_output() {
-        assert!(render_tee_encode_args(1280, 720, 30, 4500, None, &[]).is_err());
+        assert!(
+            render_tee_encode_args(
+                RepairVideoEncoder::H264VideoToolbox,
+                1280,
+                720,
+                30,
+                4500,
+                None,
+                &[]
+            )
+            .is_err()
+        );
     }
 
     /// The realistic LS3b case: two real capture inputs (screen + camera) composited
@@ -1162,50 +1321,54 @@ mod tests {
         use std::io::{Read, Write};
         use std::process::{Command, Stdio};
 
+        let Some(encoder) = probed_render_encoder("two_source_capture_composite_encode_pipeline")
+        else {
+            return;
+        };
         let (width, height, fps) = (320usize, 180usize, 30u32);
         let total_frames = 60usize;
         let frame_bytes = width * height * 3;
 
-        let mut screen_cap = Command::new("ffmpeg")
-            .args(capture_ffmpeg_args(
-                &CaptureInput::Lavfi("testsrc2=size=320x180:rate=30".to_string()),
-                width,
-                height,
-                fps,
-            ))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("screen capture ffmpeg should be on PATH for this ignored test");
-        let mut camera_cap = Command::new("ffmpeg")
-            .args(capture_ffmpeg_args(
-                &CaptureInput::Lavfi("color=c=green:size=320x180:rate=30".to_string()),
-                width,
-                height,
-                fps,
-            ))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("camera capture ffmpeg");
-        let mut screen_out = screen_cap.stdout.take().expect("screen stdout");
-        let mut camera_out = camera_cap.stdout.take().expect("camera stdout");
+        let mut screen_cap = OwnedFfmpeg(
+            Command::new("ffmpeg")
+                .args(capture_ffmpeg_args(
+                    &CaptureInput::Lavfi("testsrc2=size=320x180:rate=30".to_string()),
+                    width,
+                    height,
+                    fps,
+                ))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("screen capture ffmpeg should be on PATH for this ignored test"),
+        );
+        let mut camera_cap = OwnedFfmpeg(
+            Command::new("ffmpeg")
+                .args(capture_ffmpeg_args(
+                    &CaptureInput::Lavfi("color=c=green:size=320x180:rate=30".to_string()),
+                    width,
+                    height,
+                    fps,
+                ))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("camera capture ffmpeg"),
+        );
+        let mut screen_out = screen_cap.0.stdout.take().expect("screen stdout");
+        let mut camera_out = camera_cap.0.stdout.take().expect("camera stdout");
 
         let output = std::env::temp_dir().join("videorc-ls3b-two-source.mkv");
         let _ = std::fs::remove_file(&output);
-        let mut encode = Command::new("ffmpeg")
-            .args(render_encode_ffmpeg_args(
+        let (mut encode, mut encode_in, encode_err) =
+            spawn_render_encoder(render_encode_ffmpeg_args(
+                encoder,
                 width,
                 height,
                 fps,
                 4000,
                 output.to_str().expect("output path"),
-            ))
-            .stdin(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("encode ffmpeg");
-        let mut encode_in = encode.stdin.take().expect("encode stdin");
+            ));
 
         let mut consumer = LiveRenderConsumer::start(screen_camera_scene(), width, height);
         let mut screen_buf = vec![0u8; frame_bytes];
@@ -1242,19 +1405,21 @@ mod tests {
             produced += 1;
         }
         drop(encode_in);
-        let _ = screen_cap.kill();
-        let _ = camera_cap.kill();
-        let _ = screen_cap.wait();
-        let _ = camera_cap.wait();
-        let status = encode.wait().expect("encode wait");
+        // The captures run unbounded: close their stdout, then kill and reap.
+        drop(screen_out);
+        drop(camera_out);
+        drop(screen_cap);
+        drop(camera_cap);
+        let status = encode.wait_within(ENCODER_FINALIZE_LIMIT, "the encoder");
+        let encode_err = encode_err.join().unwrap_or_default();
 
         assert!(
             status.success(),
-            "the encoder should finalize the recording"
+            "the encoder should finalize the recording: {encode_err}"
         );
         assert_eq!(
             produced, total_frames,
-            "every paired capture frame was composited"
+            "every paired capture frame was composited: {encode_err}"
         );
         let size = std::fs::metadata(&output).expect("recording exists").len();
         assert!(size > 0, "the recording should contain encoded video");

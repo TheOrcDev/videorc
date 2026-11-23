@@ -884,6 +884,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "spawns ffmpeg and writes media; run with --ignored"]
     async fn real_ffmpeg_mov_import_stays_quicktime_and_probes() {
+        let Some(video_args) = crate::repair::test_h264_encode_args(
+            "ffmpeg",
+            "real_ffmpeg_mov_import_stays_quicktime_and_probes",
+        ) else {
+            return;
+        };
         let directory =
             std::env::temp_dir().join(format!("videorc-import-real-mov-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
@@ -900,11 +906,9 @@ mod tests {
                 "testsrc=size=64x64:rate=10",
                 "-t",
                 "1",
-                "-c:v",
-                "libx264",
-                "-f",
-                "mov",
             ])
+            .args(&video_args)
+            .args(["-f", "mov"])
             .arg(&fixture)
             .status()
             .expect("ffmpeg should be on PATH for this ignored test");

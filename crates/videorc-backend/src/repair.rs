@@ -1189,6 +1189,35 @@ pub fn probe_repair_encoder(ffmpeg_path: &str) -> Option<RepairVideoEncoder> {
     probed
 }
 
+/// `-c:v …` args for a test fixture that needs a valid H.264 stream, from
+/// the encoder `ffmpeg_path` actually ships (#1635). Every FFmpeg Videorc
+/// bundles is LGPL with no libx264, so a hardcoded `-c:v libx264` failed
+/// "Unknown encoder" before the test proved anything. libx264 keeps the old
+/// fixtures' fast preset; the others take the repair encode, which never skips
+/// a frame. `None`, with `test` named on stderr, when the binary has no H.264
+/// encoder at all: the caller skips.
+#[cfg(test)]
+pub(crate) fn test_h264_encode_args(ffmpeg_path: &str, test: &str) -> Option<Vec<String>> {
+    let Some(encoder) = probe_repair_encoder(ffmpeg_path) else {
+        eprintln!("{test}: skipped, {ffmpeg_path} has no H.264 encoder");
+        return None;
+    };
+    Some(match encoder {
+        RepairVideoEncoder::Libx264 => [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+        .iter()
+        .map(|arg| arg.to_string())
+        .collect(),
+        other => other.encode_args(4_000),
+    })
+}
+
 /// Whether any issue is something a viewer notices immediately (a missing stream),
 /// as opposed to analyzer-grade pacing/skew residuals. Drives whether a "not 100%"
 /// verdict warrants interrupting the user or just a Library/Diagnostics record.
@@ -4127,6 +4156,11 @@ mod tests {
     #[test]
     #[ignore = "builds ffmpeg fixtures and repairs them; run with --ignored"]
     fn repairs_a_one_sided_recording_end_to_end() {
+        let Some(video_args) =
+            test_h264_encode_args("ffmpeg", "repairs_a_one_sided_recording_end_to_end")
+        else {
+            return;
+        };
         let dir = scratch_dir("fixture-one-sided");
         let original = dir.join("one_sided.mp4");
 
@@ -4157,17 +4191,9 @@ mod tests {
                 "30",
                 "-vsync",
                 "cfr",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-ac",
-                "2",
             ])
+            .args(&video_args)
+            .args(["-c:a", "aac", "-ac", "2"])
             .arg(&original)
             .status()
             .expect("ffmpeg should be on PATH for this ignored test");
@@ -4467,6 +4493,10 @@ mod tests {
     #[test]
     #[ignore = "spawns ffmpeg/ffprobe to build and gate a real clean recording"]
     fn gate_passes_a_clean_recording() {
+        let Some(video_args) = test_h264_encode_args("ffmpeg", "gate_passes_a_clean_recording")
+        else {
+            return;
+        };
         let dir = scratch_dir("gate-clean");
         let path = dir.join("clean.mp4");
         let built = Command::new("ffmpeg")
@@ -4482,14 +4512,9 @@ mod tests {
                 "sine=frequency=440",
                 "-t",
                 "1",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                path.to_str().unwrap(),
             ])
+            .args(&video_args)
+            .args(["-c:a", "aac", path.to_str().unwrap()])
             .output()
             .unwrap();
         assert!(
@@ -4517,6 +4542,11 @@ mod tests {
     #[test]
     #[ignore = "spawns ffmpeg/ffprobe to build and gate a one-sided recording"]
     fn gate_repairs_a_one_sided_recording() {
+        let Some(video_args) =
+            test_h264_encode_args("ffmpeg", "gate_repairs_a_one_sided_recording")
+        else {
+            return;
+        };
         let dir = scratch_dir("gate-one-sided");
         let path = dir.join("one-sided.mp4");
         let built = Command::new("ffmpeg")
@@ -4534,14 +4564,9 @@ mod tests {
                 "1",
                 "-af",
                 "pan=stereo|c0=c0|c1=0*c0",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                path.to_str().unwrap(),
             ])
+            .args(&video_args)
+            .args(["-c:a", "aac", path.to_str().unwrap()])
             .output()
             .unwrap();
         assert!(
