@@ -16521,7 +16521,11 @@ mod tests {
                 source_pixel_buffer: None,
                 source_d3d11_texture: None,
                 recycle_pool: None,
-                captured_at: Instant::now(),
+                // The CPU render runs first and is slow in a debug build under a
+                // loaded test run; a frame stamped now could be past the 2 s
+                // staleness cutoff by the Metal compose, which then draws the
+                // missing-source placeholder. Both renders must see the same frame.
+                captured_at: sustained_camera_fixture_time(),
             });
         let inputs = CompositorRenderInputs {
             sequence: 1,
@@ -25003,7 +25007,11 @@ mod tests {
                         source_pixel_buffer: None,
                         source_d3d11_texture: None,
                         recycle_pool: None,
-                        captured_at: Instant::now(),
+                        // The CPU render runs first and is slow in a debug build under a
+                        // loaded test run; a frame stamped now could be past the 2 s
+                        // staleness cutoff by the Metal compose, which then draws the
+                        // missing-source placeholder. Both renders must see the same frame.
+                        captured_at: sustained_camera_fixture_time(),
                     },
                 );
                 let inputs = CompositorRenderInputs {
