@@ -69,6 +69,13 @@ pub(crate) fn turn_off_capture_border(session: &GraphicsCaptureSession) -> Resul
     }
 }
 
+/// The monitor behind a DXGI display source, for the capture outline.
+pub(crate) fn monitor_for_source(
+    source: WindowsDxgiSourceId,
+) -> Result<windows::Win32::Graphics::Gdi::HMONITOR> {
+    find_dxgi_output(source).map(|(_, monitor)| monitor)
+}
+
 pub fn enabled() -> bool {
     graphics_capture_value_enabled(
         std::env::var("VIDEORC_WINDOWS_GRAPHICS_CAPTURE")
@@ -761,7 +768,7 @@ fn copy_strided_bgra(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -820,7 +827,7 @@ mod tests {
         );
     }
 
-    fn first_display() -> (WindowsDxgiSourceId, IDXGIAdapter1) {
+    pub(crate) fn first_display() -> (WindowsDxgiSourceId, IDXGIAdapter1) {
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.expect("DXGI factory");
         let mut adapter_index = 0;
         while let Ok(adapter) = unsafe { factory.EnumAdapters1(adapter_index) } {
@@ -879,17 +886,19 @@ mod tests {
         );
     }
 
-    /// The Windows Preview holds a WGC session on the display while the
-    /// recording and stream read it through Desktop Duplication. With the
-    /// border on, Desktop Duplication read a 100% yellow outer ring.
-    #[test]
-    #[ignore = "needs an awake, unlocked Windows display"]
-    fn desktop_duplication_beside_the_preview_never_records_a_yellow_border() {
+    /// The display tests read the whole screen, so one at a time: another
+    /// test's outline or capture border would land in their frame.
+    pub(crate) static DISPLAY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// One Desktop Duplication frame of `adapter`'s first output, read for
+    /// `window` so whatever was just drawn has been composed into it.
+    pub(crate) fn read_desktop_duplication_frame(
+        adapter: &IDXGIAdapter1,
+        window: Duration,
+    ) -> (Vec<u8>, usize, usize) {
         use windows::Win32::Graphics::Dxgi::{DXGI_OUTDUPL_FRAME_INFO, IDXGIOutput1};
 
-        let (source, adapter) = first_display();
-        let _preview = WindowsGraphicsCapture::start(source, 30, false).expect("preview capture");
-        let (device, context) = create_d3d11_device(&adapter).expect("D3D11 device");
+        let (device, context) = create_d3d11_device(adapter).expect("D3D11 device");
         let output: IDXGIOutput1 = unsafe { adapter.EnumOutputs(0) }
             .expect("display output")
             .cast()
@@ -898,9 +907,7 @@ mod tests {
         let mut readback = D3D11BgraReadback::new(device, context);
         let mut bgra = Vec::new();
         let mut size = None;
-        // Read for over a second so the border, drawn after StartCapture,
-        // has been composed into what Desktop Duplication receives.
-        let deadline = Instant::now() + Duration::from_millis(1500);
+        let deadline = Instant::now() + window;
         while Instant::now() < deadline {
             let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource = None;
@@ -922,6 +929,24 @@ mod tests {
             unsafe { duplication.ReleaseFrame() }.expect("ReleaseFrame");
         }
         let (width, height) = size.expect("Desktop Duplication delivered no frame");
+        (bgra, width, height)
+    }
+
+    /// The Windows Preview holds a WGC session on the display while the
+    /// recording and stream read it through Desktop Duplication. With the
+    /// border on, Desktop Duplication read a 100% yellow outer ring.
+    #[test]
+    #[ignore = "needs an awake, unlocked Windows display"]
+    fn desktop_duplication_beside_the_preview_never_records_a_yellow_border() {
+        let _display = DISPLAY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (source, adapter) = first_display();
+        let _preview = WindowsGraphicsCapture::start(source, 30, false).expect("preview capture");
+        // Over a second, so the border, drawn after StartCapture, has been
+        // composed into what Desktop Duplication receives.
+        let (bgra, width, height) =
+            read_desktop_duplication_frame(&adapter, Duration::from_millis(1500));
         let share = yellow_edge_share(&bgra, width, height, 2);
         assert!(
             share < 0.5,
