@@ -172,15 +172,38 @@ cover the spike's window during a timed run, keep other heavy programs
 closed, and keep the PC on AC power: CPU numbers only mean something on an
 unobstructed window.
 
-To read a process's CPU from outside (when a step asks for it), in a
-second PowerShell while the spike runs:
+To read processes' CPU from outside (when a step asks for it), paste this
+function once into the second PowerShell you measure from. It reads each
+process's CPU time every 2 seconds through `Get-Process`, so it works on
+any Windows display language (performance-counter names such as `% Processor
+Time` are translated on non-English Windows; this avoids them):
 
 ```powershell
-typeperf "\Process(<process name without .exe>)\% Processor Time" -si 2 -sc 15
+function Measure-VideorcCpu {
+  param([string[]]$Names, [int]$Seconds, [string]$Out)
+  New-Item -ItemType Directory -Force (Split-Path $Out) | Out-Null
+  'time,process,pid,cpu_percent_of_one_core' | Set-Content $Out
+  $prev = @{}
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  $last = 0.0
+  while ($clock.Elapsed.TotalSeconds -lt $Seconds) {
+    Start-Sleep -Seconds 2
+    $now = $clock.Elapsed.TotalSeconds
+    foreach ($p in Get-Process -Name $Names -ErrorAction SilentlyContinue) {
+      if ($prev.ContainsKey($p.Id)) {
+        $pct = [math]::Round(($p.CPU - $prev[$p.Id]) / ($now - $last) * 100, 1)
+        "$(Get-Date -Format o),$($p.ProcessName),$($p.Id),$pct" | Add-Content $Out
+      }
+      $prev[$p.Id] = $p.CPU
+    }
+    $last = $now
+  }
+}
 ```
 
-Divide by the number of logical processors to get the share of the whole
-machine, or report it raw and say which.
+The numbers are a percentage of one core (200 means two cores busy). Report
+them as they are, with your PC's logical processor count
+(`[Environment]::ProcessorCount`) in the report.
 
 ## Phase 0 checks, per slice
 
@@ -231,11 +254,11 @@ For each route, three runs of 10 minutes each:
 cargo run --release -p spike-preview-windows -- --route a --resolution 4k --fps 60 --seconds 600
 ```
 
-While it runs, in a second PowerShell:
+While it runs, in the PowerShell where you pasted `Measure-VideorcCpu`
+(change the route and run number in the file name each time):
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:USERPROFILE\videorc-evidence\S0.2c" | Out-Null
-typeperf "\Process(spike-preview-windows)\% Processor Time" "\Process(videorc-backend)\% Processor Time" -si 2 -sc 300 -o "$env:USERPROFILE\videorc-evidence\S0.2c\cpu-route-a-run1.csv"
+Measure-VideorcCpu -Names 'spike-preview-windows','videorc-backend' -Seconds 600 -Out "$env:USERPROFILE\videorc-evidence\S0.2c\cpu-route-a-run1.csv"
 ```
 
 Then, with the spike still running for each route:
@@ -362,11 +385,15 @@ Studio page open with your camera and your main display as the sources
 2. **Live:** press Record with the default settings and keep recording for
    5 minutes, then stop.
 
-For each, in a second PowerShell started when the step starts:
+For each, in the PowerShell where you pasted `Measure-VideorcCpu`, started
+when the step starts (`Videorc*` matches the app's processes and
+`videorc-backend`):
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:USERPROFILE\videorc-evidence\S0.10" | Out-Null
-typeperf "\Process(Videorc*)\% Processor Time" "\Process(videorc-backend*)\% Processor Time" -si 2 -sc 150 -o "$env:USERPROFILE\videorc-evidence\S0.10\cpu-<idle or live>.csv"
+# step 1, idle:
+Measure-VideorcCpu -Names 'Videorc*' -Seconds 300 -Out "$env:USERPROFILE\videorc-evidence\S0.10\cpu-idle.csv"
+# step 2, live:
+Measure-VideorcCpu -Names 'Videorc*' -Seconds 300 -Out "$env:USERPROFILE\videorc-evidence\S0.10\cpu-live.csv"
 ```
 
 **Send:** the two CSVs, the recording's resolution and frame rate (from
