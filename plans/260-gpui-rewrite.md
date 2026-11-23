@@ -999,7 +999,10 @@ busy in each window.
 - **One Cargo target per lane, never shared between lanes:**
   `CARGO_TARGET_DIR=~/projects/.targets/260-l<N>`. A target shared across
   worktrees once ran another worktree's stale binary (2026-11-22). Within
-  a lane the target stays warm. GPUI's share: a clean release build of
+  a lane the target stays warm. A new lane that needs GPUI starts from an
+  APFS clone of a warm target (`cp -cR`, near-free on this disk) instead
+  of a cold build: L3 keeps `~/gpui-scratch/target` (S0.0's build), and L1
+  and L4 begin from clones of it. GPUI's share: a clean release build of
   `gpui-pre` took about ten minutes on one job and 1.2 GB (S0.0); a debug
   target that includes the backend takes 25 to 33 GB.
 - **Disk is the hard limit today: 31 GB free (97 % used) on 2026-11-23.**
