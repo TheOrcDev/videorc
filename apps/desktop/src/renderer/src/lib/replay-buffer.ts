@@ -11,6 +11,7 @@ import { withWorkNotifications } from '@/lib/notify'
 import { buildStartSessionParams } from '@/lib/session-params'
 import { toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { replaySourcesNotReadyStep } from '@/lib/replay-buffer-camera-wait'
 
 // Plan 181 (the owner's redesign, R4): the clip buffer's words, numbers and
 // toasts. Loaded lazily by the Studio provider and the UI that shows the
@@ -114,6 +115,32 @@ export function showClipsStopped(reason: string | undefined): void {
 
 export function showClipsCouldNotStart(reason: string): void {
   withWorkNotifications((work) => work.publishClipsCouldNotStart(reason))
+}
+
+export { replayCameraRecovers } from '@/lib/replay-buffer-camera-wait'
+
+type CameraWaitInput = Parameters<typeof replaySourcesNotReadyStep>[0]
+
+/** A `replay-sources-not-ready` refusal (lib/replay-buffer-camera-wait); its
+ * one notice is the Clips entry behind the bell. Positional, so the eager
+ * Studio call stays small. False: the start counts as failed. */
+export function takeSourcesNotReady(
+  wait: CameraWaitInput['wait'],
+  waitingForLive: CameraWaitInput['waitingForLive'],
+  notified: CameraWaitInput['notified'],
+  camera: CameraWaitInput['camera'],
+  chosenCameraId: CameraWaitInput['chosenCameraId'],
+  schedule: CameraWaitInput['schedule']
+): boolean {
+  return replaySourcesNotReadyStep({
+    wait,
+    waitingForLive,
+    notified,
+    camera,
+    chosenCameraId,
+    schedule,
+    notify: showClipsCouldNotStart
+  })
 }
 
 /**
