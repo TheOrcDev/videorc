@@ -1,9 +1,7 @@
 import { useId, useRef, type KeyboardEvent, type ReactElement } from 'react'
 
-import {
-  CameraBackgroundArt,
-  choiceArt
-} from '@/components/camera-background/camera-background-art'
+import { choiceArt } from '@/components/camera-background/camera-background-art'
+import { CameraBackgroundOrcArt } from '@/components/camera-background/camera-background-orc-art'
 import { ImageIcon } from '@/components/icons'
 import { MediaCard } from '@/components/media-card'
 import { SectionLabel } from '@/components/section-label'
@@ -93,7 +91,7 @@ export function CameraBackgroundTiles({
           className="relative aspect-[16/10] overflow-hidden bg-video-ground group-enabled/tile:group-hover/tile:border-foreground/30"
           selected={checked}
         >
-          <CameraBackgroundArt art={choiceArt(choice)} />
+          <CameraBackgroundOrcArt art={choiceArt(choice)} />
         </MediaCard>
         <span
           className={cn(

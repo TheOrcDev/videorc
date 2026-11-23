@@ -1,9 +1,7 @@
 import type { ReactElement } from 'react'
 
-import {
-  CameraBackgroundArt,
-  choiceArt
-} from '@/components/camera-background/camera-background-art'
+import { choiceArt } from '@/components/camera-background/camera-background-art'
+import { CameraBackgroundOrcArt } from '@/components/camera-background/camera-background-orc-art'
 import { CameraBackgroundTiles } from '@/components/camera-background/camera-background-tiles'
 import { CameraBackgroundViewer } from '@/components/camera-background/camera-background-viewer'
 import type { CameraBackgroundControl } from '@/components/camera-background/use-camera-background'
@@ -46,7 +44,7 @@ export function CameraBackgroundPicker({
       <CameraBackgroundViewer
         key={control.choiceId ?? control.background.mode}
         fallback={
-          <CameraBackgroundArt
+          <CameraBackgroundOrcArt
             art={choiceArt({ id: control.choiceId ?? 'off', picture: control.picture })}
           />
         }
