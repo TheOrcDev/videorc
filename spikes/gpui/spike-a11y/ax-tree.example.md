@@ -1,0 +1,26 @@
+- [0] AXWindow "spike-a11y" [actions=[raise]]
+  - AXGroup "spike-a11y"
+    - AXToolbar "Studio"
+      - Heading "Studio"
+        - AXStaticText = "Studio"
+      - AXGroup "Recording"
+        - AXStaticText = "● Recording"
+      - [1] AXButton "Stop recording" [actions=[press]]
+    - AXStaticText = "SCENES"
+    - AXList "Scenes"
+      - [2] AXGroup "Camera only" [actions=[pick,press]]
+      - [3] AXGroup "Screen and camera" [actions=[pick,press]]
+      - [4] AXGroup "Screen only" [actions=[pick,press]]
+      - [5] AXGroup "Interview" [actions=[pick,press]]
+      - [6] AXGroup "Be right back" [actions=[pick,press]]
+      - [7] AXGroup "Ending" [actions=[pick,press]]
+    - [8] AXButton "Delete scene…" [actions=[press]]
+    - AXWindow "Delete Interview?" [help="The scene and its layout are removed. Recordings are kept."]
+      - Heading "Delete Interview?"
+        - AXStaticText = "Delete Interview?"
+      - AXStaticText = "The scene and its layout are removed. Recordings are kept."
+      - [9] AXButton "Cancel" [actions=[press]]
+      - [10] AXButton "Delete" [actions=[press]]
+  - [11] AXButton [actions=[press]]
+  - [12] AXButton [help="this button also has an action to zoom the window" actions=[press,zoomwindow]]
+  - [13] AXButton [actions=[press]]

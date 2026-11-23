@@ -92,6 +92,8 @@ which are plan 260's S0.1 lines.
 | `ime_steps` | object array | Each IME step: `step`, `text`, `marked`, `want_text`, `want_marked`, `ok`; then the candidate rect (S0.5) | every `ok` true |
 | `numbers` | object | Digit-run widths with and without `tnum`: `tabular_equal`, `proportional_differs` (S0.5) | `tabular_equal` true |
 | `selected_text` | string array | Text selected with the mouse (S0.5) | — |
+| `a11y_tree_available`, `a11y_nodes` | boolean, integer | Whether GPUI built an accessibility tree (an assistive technology asked for it) and how many nodes it had (S0.6) | true once a screen reader or driver is attached |
+| `recording_at_end`, `deleted_scenes`, `events` | boolean, string array, string array | What the controls did, in order (S0.6) | — |
 
 A spike that needs a number not in this table adds it with a plain
 snake-case name and a unit suffix (`_ms`, `_mb`, `_percent`), and adds a

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "spike": "spike-a11y",
+  "os": "macos",
+  "arch": "aarch64",
+  "gpui_pre": "0.3.14",
+  "build": "release",
+  "args": [
+    "--seconds",
+    "10",
+    "--out",
+    "summary.json"
+  ],
+  "started_unix_ms": 1795474777990,
+  "seconds": 10,
+  "elapsed_s": 10.56,
+  "logical_cpus": 10,
+  "process_cpu_seconds": 0.17,
+  "process_cpu_percent_avg": 1.6,
+  "peak_rss_mb": 69.7,
+  "a11y_tree_available": true,
+  "a11y_nodes": 25,
+  "recording_at_end": true,
+  "deleted_scenes": [],
+  "renders": 6,
+  "startup_to_first_paint_ms": 130.7,
+  "events": [
+    "record started"
+  ],
+  "errors": 0,
+  "error_messages": []
+}
