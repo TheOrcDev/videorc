@@ -318,13 +318,19 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
     // Background under the Camera picker (plan 258 S5, where plan 248's
     // Green screen was): the pick lit on the screen, opening the picker; no
     // Adjust. The Screen lives with the scene that shows it (plan 231 D8).
-    expect(rowLabels(sources ?? '')).toEqual(['Camera', 'Background'])
+    // It is the same row as Captions (a nav row with the pixel chevron
+    // pointing right), never a value button with a down chevron.
+    expect(rowLabels(sources ?? '')).toEqual(['Camera'])
     const background =
       /<button[^>]*data-videorc-camera-background-trigger[^>]*>[\s\S]*?<\/button>/.exec(
         sources ?? ''
       )?.[0] ?? ''
     expect(background).toContain('aria-label="Background: Off"')
+    expect(background).toContain('data-slot="lcd-panel-nav-row"')
+    expect(background).toContain('>Background<')
     expect(background).toContain('>Off<')
+    expect(background).toContain('viewBox="0 0 3 5"')
+    expect(background).not.toContain('viewBox="0 0 5 3"')
     expect(sources).not.toContain('role="radiogroup"')
     expect(sources).not.toContain('Adjust')
     expect(sources).not.toContain('System audio')

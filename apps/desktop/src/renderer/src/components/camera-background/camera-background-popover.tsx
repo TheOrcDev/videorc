@@ -5,8 +5,7 @@ import {
   choiceArt
 } from '@/components/camera-background/camera-background-art'
 import type { CameraBackgroundControl } from '@/components/camera-background/use-camera-background'
-import { ChevronDownIcon } from '@/components/icons'
-import { Button } from '@/components/ui/button'
+import { NavigableRow } from '@/components/navigable-row'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   CAMERA_BACKGROUND_LABEL,
@@ -33,10 +32,12 @@ export const LazyCameraBackgroundImageDialog = lazy(() =>
 
 /**
  * Plan 258 S5: the Studio Camera row's Background line (mockup §1). Plan
- * 248's segmented Green screen line became one select-like trigger,
- * "Background · Strong blur" with a small picture of the pick, opening the
- * picker on the popup tier. A pick applies at once and the stage confirms
- * it, so no toast. One height whatever is picked, so nothing below moves.
+ * 248's segmented Green screen line became one trigger, "Background · Strong
+ * blur" with a small picture of the pick, opening the picker on the popup
+ * tier. It is the same NavigableRow as Captions below it (no fill, chevron
+ * right), with the picture where a row's icon sits, under the Camera icon.
+ * A pick applies at once and the stage confirms it, so no toast. One height
+ * whatever is picked, so nothing below moves.
  */
 export function CameraBackgroundLine({
   control
@@ -48,33 +49,27 @@ export function CameraBackgroundLine({
   if (!control.available) return null
   const choose = (choice: CameraBackgroundChoiceId): void => control.choose(choice)
   return (
-    <div
-      className="flex min-h-8 items-center pr-1 pb-2 pl-9.5"
-      data-mode={control.background.mode}
-      data-slot="camera-background"
-    >
+    <div data-mode={control.background.mode} data-slot="camera-background">
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger
           render={
-            <Button
+            <NavigableRow
               aria-label={`${CAMERA_BACKGROUND_LABEL}: ${control.valueLabel}`}
-              className="w-full justify-start gap-2 pl-0.5"
+              className="data-popup-open:bg-accent"
               data-videorc-camera-background-trigger=""
-              size="xs"
-              type="button"
-              variant="secondary"
+              label={CAMERA_BACKGROUND_LABEL}
+              leading={
+                <span
+                  className="relative size-4 shrink-0 overflow-hidden rounded-chip bg-video-ground"
+                  data-slot="camera-background-thumbnail"
+                >
+                  <CameraBackgroundArt art={currentArt(control)} />
+                </span>
+              }
+              value={control.valueLabel}
             />
           }
-        >
-          <span className="relative h-4.5 w-7.5 shrink-0 overflow-hidden rounded-chip bg-video-ground">
-            <CameraBackgroundArt art={currentArt(control)} />
-          </span>
-          <span className="shrink-0 font-normal text-muted-foreground">
-            {CAMERA_BACKGROUND_LABEL}
-          </span>
-          <span className="min-w-0 flex-1 truncate text-left">{control.valueLabel}</span>
-          <ChevronDownIcon aria-hidden className="size-3 shrink-0 text-subtle" />
-        </PopoverTrigger>
+        />
         <PopoverContent align="start" className="w-80" data-videorc-camera-background-popover="">
           <Suspense fallback={null}>
             <LazyCameraBackgroundPicker

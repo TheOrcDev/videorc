@@ -1,12 +1,17 @@
-import type { ReactElement, ReactNode } from 'react'
+import type { ComponentProps, ReactElement, ReactNode } from 'react'
 
 import { ChevronRightIcon } from '@/components/icons'
 import type { AppIcon } from '@/components/icons'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
-interface NavigableRowProps {
+interface NavigableRowProps extends Omit<ComponentProps<'button'>, 'children' | 'value'> {
   icon?: AppIcon
+  /**
+   * A small visual in the icon's place, when the row shows a picture rather
+   * than an icon (a thumbnail of the pick). Keep it 16 px tall.
+   */
+  leading?: ReactNode
   label: string
   value: ReactNode
   /**
@@ -24,15 +29,23 @@ interface NavigableRowProps {
  * a chevron when clicking jumps to the page that OWNS the value. On the row
  * metrics: 32 px, 12 px padding, flush inside a GroupedList. The Studio's
  * Session rows and Settings' pointer rows are this one component.
+ *
+ * A row that opens a popover is the same row: the popover's trigger renders
+ * it (`render={<NavigableRow … />}`), and the button takes the trigger's
+ * props, ref and click.
  */
 function NavigableRow({
   icon: RowIcon,
+  leading,
   label,
   value,
   hint,
   className,
-  onNavigate
+  onNavigate,
+  onClick,
+  ...buttonProps
 }: NavigableRowProps): ReactElement {
+  const navigates = onNavigate !== undefined || onClick !== undefined
   const rowClassName = cn(
     'h-row rounded-row flex w-full items-center gap-2.5 px-3 text-sm in-data-[slot=grouped-list]:rounded-none',
     className
@@ -46,7 +59,9 @@ function NavigableRow({
     <>
       {RowIcon ? (
         <RowIcon className="text-muted-foreground size-4 shrink-0" weight="duotone" />
-      ) : null}
+      ) : (
+        leading
+      )}
       <span
         className={cn(
           'text-muted-foreground truncate text-left',
@@ -64,22 +79,26 @@ function NavigableRow({
         data-slot="navigable-row-value"
       >
         {textValue ? <span className="truncate">{value}</span> : value}
-        {onNavigate ? (
+        {navigates ? (
           <ChevronRightIcon className="text-muted-foreground size-3.5 shrink-0" />
         ) : null}
       </span>
     </>
   )
 
-  if (onNavigate) {
+  if (navigates) {
     const button = (
       <button
+        {...buttonProps}
         className={cn(
           rowClassName,
           'hover:bg-accent focus-visible:ring-ring outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-inset'
         )}
         data-slot="navigable-row"
-        onClick={onNavigate}
+        onClick={(event) => {
+          onClick?.(event)
+          onNavigate?.()
+        }}
         type="button"
       >
         {body}
