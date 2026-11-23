@@ -19,12 +19,13 @@ merged into `main`, and nothing in the shipping app depends on it.
 | [`spike-native-preview/`](spike-native-preview/) | **The model.** A GPUI window with a sidebar and a pane; on macOS the pane is a `CAMetalLayer` presented on its own thread through GPUI's `NativeView`, with translucent GPUI elements drawn over it. On Windows and Linux GPUI paints the pane once a second (no native view there yet) | macOS (the full spike); Windows and Linux (the frame only) | Plan 260 S0.0 |
 | [`spike-desktop/`](spike-desktop/) | Desktop integration: menus, the title bar over a custom header, a global shortcut, a deep link on a cold start, one instance, keep on top, hide from capture, the sleep guard, notifications, files. macOS complete; Windows and Linux report each OS call as a gap until WC-0.9 and L5 fill in `src/os.rs` | macOS (all rows); Windows and Linux (window, menus, shortcut, links, one instance, files) | Plan 260 S0.7, WC-0.9 |
 | [`spike-text/`](spike-text/) | Text: an IME-capable input (GPUI's own example), colour emoji and script fallback, tabular numbers, a selectable paragraph, and a 10,000-row chat with animated WebP emotes, with a scroll test, memory and first paint | macOS (all, IME by its `NSTextInputClient` calls); Windows and Linux (all but `--simulate-ime`: type with the real IME) | Plan 260 S0.5, WC-0.7 |
+| [`spike-a11y/`](spike-a11y/) | Accessibility: a Record button, a list and a modal dialog with roles and names through AccessKit, GPUI's own tree dump, and a headless test that clicks Record | All three (read it with VoiceOver, Narrator or Orca) | Plan 260 S0.6, WC-0.8 |
 | [`spike-summary/`](spike-summary/) | The shared arguments, `summary.json` and `[spike] error` lines | All | — |
 
 Spikes still to come, by the slice that adds them: `spike-hello`
 (WC-0.1), the Windows native view and its patch (WC-0.2), the shared
 texture (WC-0.3), CPU frames (WC-0.4), `spike-preview-windows` (WC-0.5),
-`spike-chrome` (S0.4, WC-0.6) and `spike-a11y` (S0.6, WC-0.8).
+`spike-chrome` (S0.4, WC-0.6).
 
 ## Build and run
 

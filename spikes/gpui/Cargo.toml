@@ -10,7 +10,7 @@
 # the `spike-summary` crate (the format is in SUMMARY.md).
 
 [workspace]
-members = ["spike-summary", "spike-native-preview", "spike-desktop", "spike-text"]
+members = ["spike-summary", "spike-native-preview", "spike-desktop", "spike-text", "spike-a11y"]
 resolver = "3"
 
 [workspace.package]
