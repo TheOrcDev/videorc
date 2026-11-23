@@ -1,0 +1,19 @@
+[package]
+name = "spike-native-preview"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Plan 260 spike S0.0: a native video layer under GPUI, presented on its own thread"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+spike-summary.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3.2"
+objc2-app-kit = { version = "0.3.2", features = ["NSView", "NSResponder", "objc2-quartz-core"] }
+objc2-metal = "0.3.2"
+objc2-quartz-core = { version = "0.3.2", features = ["CALayer", "CAMetalLayer", "objc2-metal"] }

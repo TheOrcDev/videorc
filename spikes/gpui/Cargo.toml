@@ -1,0 +1,41 @@
+# The plan 260 spikes workspace. It lives only on the `spikes/gpui` branch and
+# never reaches `main` (plan 260, "Phases and slices"; AGENTS.md keeps scratch
+# code out of the shipping tree). It is its own workspace, separate from the
+# repository's root workspace, with its own Cargo.lock.
+#
+# Build one spike:   cargo build --release -p <spike>
+# Run it:            cargo run --release -p <spike> -- --seconds 40
+#
+# Every spike prints `[spike] summary <json>` and writes summary.json through
+# the `spike-summary` crate (the format is in SUMMARY.md).
+
+[workspace]
+members = ["spike-summary", "spike-native-preview"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+
+[workspace.dependencies]
+# Plan 260 D1: gpui-pre from crates.io, pinned exactly. Bumps are their own PR.
+gpui = { package = "gpui-pre", version = "=0.3.14" }
+# font-kit and runtime_shaders only touch the macOS crates: runtime_shaders
+# compiles Metal shaders at run time, so macOS builds need no Metal Toolchain
+# (development only). wayland and x11 only touch the Linux crates. On Windows
+# GPUI compiles its HLSL with fxc.exe from the Windows SDK at build time.
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.14", features = [
+    "font-kit",
+    "runtime_shaders",
+    "wayland",
+    "x11",
+] }
+spike-summary = { path = "spike-summary" }
+serde_json = "1"
+raw-window-handle = "0.6"
+
+[profile.release]
+# Some macOS toolchains ship no rust-objcopy, which the default release strip
+# needs ("unable to run rust-objcopy"). Spikes keep their symbols anyway.
+strip = false
