@@ -2,20 +2,25 @@
 
 - 2026-11-23: [Plan 260](260-gpui-rewrite.md), the owner's ask: rewrite
   the whole Electron app in GPUI (Zed's UI framework) instead of plan
-  220's Slint. DRAFT 2026-11-23, about 100 slices in seven phases;
-  D1-D13 open, each with a recommended default:
-  - GPUI's state from its source: weekly `gpui-pre` snapshots (no stable
-    release), Metal, DirectX 11 and wgpu renderers, AccessKit, and a
-    `NativeView` that lets the UI paint over a native video layer, on
-    macOS only. A spike showed the preview presenting on its own thread
-    while GPUI drew the window twice in 40 s.
+  220's Slint. DECIDED 2026-11-23, about 110 slices in seven phases, run
+  in at least four parallel lanes; D1-D13 taken the same day (D8 and D10
+  changed from the recommendation):
+  - Why GPUI: the ecosystem (the owner: "it's going forward, everyone is
+    using it"), not Slint's speed. Phase 0 checks smoothness, the look,
+    text and start-up on all three platforms against Electron.
+  - All three platforms switch together (D8): the Windows and Linux
+    preview routes are on the critical path. Windows is done by two
+    outside contributors on their own PCs, no waiver:
+    [testing](260-gpui-rewrite-windows-testing.md) and
+    [code](260-gpui-rewrite-windows-code.md) plans for them.
+  - The kit is the GPUI flavour of videorc-ui (D3, D10): same names and
+    tokens as the React components, published at ui.videorc.com and
+    synced with `ui:sync`/`ui:check`; ui.videorc.com is kept for both.
   - Keep `videorc-rust`'s framework-free core, preview, updater and
     contracts; drop the Slint crates; land the core in this repo first,
-    shipping in Electron.
-  - Every Electron job with its replacement: rooms on LiveKit's Rust SDK
-    in the backend, HTML banners on a fetched Chromium host, stream
-    graphics in the backend, and the Windows and Linux preview routes to
-    measure first.
+    shipping in Electron (Phase 1 starts now).
+  - Seven lanes with their own files, worktrees and Cargo targets, at most
+    two heavy builds on the Mac at once; a dispatch table per phase.
 - 2026-11-22: [Plan 258](258-background-effects.md), the owner's ask:
   background blur and replacement without a green screen, like Google Meet,
   for recording, streaming, rooms and guests. PLANNED 2026-11-22, 13 slices

@@ -1,13 +1,20 @@
 # Plan 260: The whole desktop app in GPUI
 
 > **Executor instructions**: this is a program plan: seven phases, about
-> 100 slices. Phase 0 is a gate. Nothing in Phase 2 or later starts until
-> the owner has taken D1 to D3 on Phase 0's numbers and looks. Before a
-> phase starts, cut it into agent-sized slices with the `cut-it` skill; the
-> slices below are each phase's outline and its "Done when" checks. Every
-> slice is one PR to `TheOrcDev/videorc` `main`, leaves `main` green and
-> runs the `AGENTS.md` gates for what it touches. Anything under "STOP
-> conditions" means stop and report, not improvise.
+> 110 slices, run in at least four parallel lanes
+> ([Lanes](#lanes-at-least-four-agents-at-once)). The owner took D1 to D13
+> on 2026-11-23. Phase 0 is the gate for GPUI work: nothing in Phase 2 or
+> later starts until S0.1, S0.2 and S0.3 pass on their machines, the owner
+> has judged S0.4's look (D3) and has taken D12's route on S0.2's numbers.
+> Phase 1 ships in Electron and starts now. Before a phase starts, cut it
+> into agent-sized slices with the `cut-it` skill; the slices below are
+> each phase's outline and its "Done when" checks. Every slice is one PR to
+> `TheOrcDev/videorc` `main` (spikes excepted: they go to the `spikes/gpui`
+> branch), leaves `main` green and runs the `AGENTS.md` gates for what it
+> touches. Windows slices are done by two outside contributors from two
+> companion docs: [Windows testing](260-gpui-rewrite-windows-testing.md)
+> and [Windows code](260-gpui-rewrite-windows-code.md). Anything under
+> "STOP conditions" means stop and report, not improvise.
 >
 > **Drift check (run before each phase):** recount "The app today" against
 > `origin/main`. A new window, page, RPC method or smoke since this plan is
@@ -19,11 +26,25 @@ GPU. It is actually only Rust. I want you to plan out a complete rewrite of
 that refactoring that we did to GPUI. Plan it out properly. Ask me any
 questions if you need something."
 
+The owner's answers, the same day:
+
+- On why GPUI: "I want GPUI, it's going forward, everyone is using it, and
+  many UI libs are coming out with GPUI support."
+- On the component library: "we have ui.videorc.com, we can just create
+  GPUI support for our lib."
+- On Windows: "We have two contributors on Windows. We'll make a plan for
+  testing for them and a plan for writing code."
+- On pace: "always have a minimum of 4 agents working on different
+  slices."
+
 ## Status and scope
 
-- **Status: PLANNED 2026-11-23.** Research, source reads and one spike;
-  no product code changed. Every decision below is open, each with a
-  recommended default ([Owner decisions](#owner-decisions)).
+- **Status: DECIDED 2026-11-23.** Research, source reads and one spike;
+  no product code changed. The owner took D1 to D13 the same day: eleven
+  as recommended, D8 (all three platforms switch together) and D10
+  (ui.videorc.com is kept and gains a GPUI flavour) changed
+  ([Owner decisions](#owner-decisions)). Owed before the switch: the
+  hardware under [D8](#owner-decisions).
 - **What it is:** one Rust desktop app on GPUI, Zed's GPU-accelerated UI
   framework, that replaces the Electron shell (`apps/desktop`: main
   process, React renderer, preload) on macOS, Windows and Linux, and looks,
@@ -32,7 +53,9 @@ questions if you need something."
 - **What it replaces:** plan 220's Slint UI in `TheOrcDev/videorc-rust`.
   This plan keeps everything of plan 220 that is not Slint: its core, its
   preview element, its contracts, its spikes, its decisions on banners,
-  the updater and identity, and its lessons. It drops the Slint crates.
+  the updater and identity, and its lessons. It drops the Slint crates. It
+  reverses two of plan 220's decisions: D6 (videorc-ui freezes at the
+  cutover) by this plan's D10, and D12 (macOS first) by this plan's D8.
 - **Not in scope:** a redesign (the `videorc-design` skill, `docs/ui-copy.md`
   and the `CONTEXT.md` glossary are the spec, and every owner call in them
   still binds), new features during the rewrite beyond [D7](#owner-decisions),
@@ -41,13 +64,36 @@ questions if you need something."
   2026-11-23). `TheOrcDev/videorc-rust` `main` at `1e097e52c`
   (2026-11-17). GPUI as `gpui-pre` 0.3.14, a snapshot of Zed at
   `f126950f9d3b62666f97437ae5d4ccac2272c4db`, published 2026-11-23.
-- **Branch:** `plan/260-gpui-rewrite`, a draft PR until the owner has
-  answered the decisions.
+- **Branch:** `plan/260-gpui-rewrite`, PR #1713, merged after the owner's
+  answers.
+- **Companion docs (public, for the Windows contributors):**
+  [260-gpui-rewrite-windows-testing.md](260-gpui-rewrite-windows-testing.md)
+  and [260-gpui-rewrite-windows-code.md](260-gpui-rewrite-windows-code.md).
 - **Working notes and spike:** `~/cloud-test/reports/2026-11-23-gpui-plan/`
   (notes) and `~/gpui-scratch/spike-native-preview/` (the spike), outside
-  both repos.
+  both repos. S0.12 copies the spike to the `spikes/gpui` branch as the
+  contributors' model.
 
 ## Why GPUI, and what it does not change
+
+**The owner's reason is the ecosystem (decided 2026-11-23).** "I want
+GPUI, it's going forward, everyone is using it, and many UI libs are coming
+out with GPUI support." It is not a complaint about Slint's speed. The facts
+behind it, as of today ([GPUI today](#gpui-today)): Zed and Delta ship on
+it on three platforms; Longbridge publishes weekly `gpui-pre` snapshots;
+gpui-kit (21.2k stars, weekly releases) is a shadcn-style library on it and
+powers Longbridge Pro; Cap's open-source screen recorder has a GPUI desktop
+app; and Zed keeps adding the platform work an app like Videorc needs
+(accessibility, system notifications, headless rendering, native views).
+Videorc's own library joins that ecosystem as the GPUI flavour of
+ui.videorc.com (D3, D10).
+
+So Phase 0 does not set out to beat Slint on a number (Slint drew on the
+GPU too: Skia on wgpu, `videorc-rust:crates/videorc-app/src/renderer.rs:1-11`).
+It checks what any desktop UI must get right, on all three platforms,
+against Electron's baseline (S0.10): **smoothness** (the preview, S0.1 to
+S0.3; scrolling and resizing, S0.5), **the look** (S0.4), **text** (S0.5)
+and **start-up** (S0.9).
 
 Plan 220's reasons for leaving Electron stand
 (`videorc-rust:plans/220-the-whole-ui-in-rust.md:161-180`): about 14,000
@@ -79,13 +125,6 @@ What GPUI changes against Slint, checked in the source on 2026-11-23:
   src/linux/wayland/window.rs:48`, `gpui-pre-wgpu src/wgpu_renderer.rs`).
   Zed ships on all three.
 
-On the owner's reason ("without GPU"): the Slint app does draw on the GPU.
-Its default renderer is Skia on wgpu (`videorc-rust:crates/videorc-app/src/renderer.rs:1-11`,
-`Cargo.toml` `default = ["skia"]`), and its preview is a Metal layer. Both
-apps would be GPU-drawn. So the question in [Questions for the
-owner](#questions-for-the-owner) asks what the owner saw, so that Phase 0 tests
-that exact thing in GPUI before any screen is built.
-
 What GPUI costs, also from the source:
 
 - **No stable release.** crates.io `gpui` stops at 0.2.2 (2025-10-22).
@@ -98,7 +137,9 @@ What GPUI costs, also from the source:
   `gpui-pre-apple src/metal_renderer.rs:1267-1270`); the Windows renderer's
   `draw_surfaces` is an empty function (`gpui-pre-windows
   src/directx_renderer.rs:845-850`). The Windows and Linux preview need a
-  route of our own ([The preview](#the-preview-is-an-element-on-every-platform)).
+  route of our own ([The preview](#the-preview-is-an-element-on-every-platform)),
+  and since all three platforms switch together (D8) those routes are on
+  the critical path.
 - **Two-stop gradients only, no radial gradient.** `linear_gradient` takes
   exactly two stops (`gpui-pre src/color.rs:865-876`). Liquid Chrome uses
   five-stop fills and radial beads
@@ -222,13 +263,15 @@ owner look), `studio-state-port.md` (the map from `use-studio.tsx` to the
 core), the smoke ledger, the JS UI driver (`scripts/lib/ui-driver.mjs`,
 `ui-driver-map.mjs`) and the `VIDEORC_APP` launcher switch.
 
-Plan 220 decisions this plan keeps unless the owner says otherwise
-([D11](#owner-decisions)): D2 (two processes), D5 (the action executor in
-the app's core), D6 (videorc-ui freezes at the cutover), D7/P5-D3 (a small
+Plan 220 decisions this plan keeps (D11, decided 2026-11-23): D2 (two
+processes), D5 (the action executor in the app's core), D7/P5-D3 (a small
 Rust updater on today's feed), D8 (the backend rasterises stream
 graphics), D9 (Library playback decoded by the backend), D11 (identity),
-D12 (macOS first), P5-D6 (a second feed), P5-D10 (a Chromium page host
-fetched on first use for HTML banners). D13 (Slint's licence) falls away.
+P5-D6 (a second feed), P5-D10 (a Chromium page host fetched on first use
+for HTML banners), and P4-D6 (a contributor's Windows run with evidence is
+the physical pass). Two are reversed: D6 (videorc-ui freezes at the
+cutover) by this plan's D10, and D12 (macOS first) by this plan's D8.
+D13 (Slint's licence) falls away.
 
 Lessons that carry (from the Slint work and its memory notes): set a view's
 data only when it changed (rebuilt models cost two full redraws a second
@@ -267,7 +310,7 @@ stream, and the backend's other clients (the Stream Deck plugin over
 agents over `/mcp`) keep their transport. The UI talks to the backend over
 the same loopback WebSocket, typed by `videorc-protocol`.
 
-In-process was weighed and is not recommended: it saves one socket hop
+In-process was weighed and not taken (D4): it saves one socket hop
 (sub-millisecond on loopback) and lets the preview share a GPU device, but
 the preview already crosses processes with zero copies (IOSurface ids, NT
 handles), and a panic in 652k lines of capture and encoding code would
@@ -279,9 +322,11 @@ take the window with it.
   `crates/videorc-preview`, `crates/videorc-gpu-import`,
   `crates/videorc-preview-ring`, `crates/videorc-updater`,
   `crates/videorc-page-host`: from `videorc-rust`, caught up (Phase 1).
-- `crates/videorc-kit` (new): the design system on GPUI: tokens from
-  `styles.css`, Liquid Chrome, one primitive per job as the skill lists
-  them, the gallery. Only this crate and the app touch GPUI.
+- `crates/videorc-kit` (new): the design system on GPUI, **synced from the
+  GPUI flavour of videorc-ui** (D3, D10;
+  [below](#the-gpui-flavour-of-videorc-ui-d3-d10)), never edited here, as
+  `apps/desktop/src/renderer/src/components/ui` is synced today. Only this
+  crate and the app touch GPUI.
 - `apps/videorc` (new, the `Videorc` binary): windows, screens, the
   preview element's GPUI side, OS integration, the smoke UI driver.
 
@@ -313,8 +358,8 @@ The rule stays: the core never imports GPUI (the test above is kept).
 | Platform | Route | Status |
 | --- | --- | --- |
 | macOS | A `NativeView` holding an `NSView` whose layer is `videorc-preview`'s `CAMetalLayer`, presented on its own thread from the backend's IOSurface ring. GPUI lays it out like any element and paints the scene editor's handles, the scrims and the labels over it. The detached Preview window gets its own `NativeView` (a view shows in one window only, `native_view.rs:62-67`) | Spike S0.0 showed it on synthetic content ([below](#spike-s0-0-native-preview-under-gpui)); S0.1 measures it with the backend's real ring at 4K60 |
-| Windows | To measure (S0.2, D12): (a) a native view for Windows, contributed to GPUI: a DirectComposition visual beneath GPUI's visual, holding the backend's shared D3D11 texture (or a cross-process composition surface) presented on its own thread; (b) a shared-texture `draw_surfaces` in GPUI's DirectX renderer, which redraws the window at video rate; (c) the backend's own DirectComposition window stacked over ours (`windows_d3d11_preview.rs`, today's unqualified presenter); (d) CPU frames from the shared-memory ring as GPUI images | Unbuilt. Anything beats today's BMP proof surface |
-| Linux | `videorc-preview`'s Wayland subsurface or X11 child window over the shared-memory ring, placed below a transparent hole in GPUI's surface; fallback (d) | Built for Slint (plan 220 P4-D2), never under GPUI |
+| Windows | To measure (S0.2, D12): (a) a native view for Windows, contributed to GPUI: a DirectComposition visual beneath GPUI's visual, showing a composition surface the backend's presenter presents into (`DCompositionCreateSurfaceHandle`, opened with `CreateSurfaceFromHandle`), so the presenter stays in the backend as on macOS; (b) a shared-texture `draw_surfaces` in GPUI's DirectX renderer, which redraws the window at video rate; (c) the backend's own DirectComposition window stacked over ours (`windows_d3d11_preview.rs:610-1016`, today's unqualified presenter); (d) CPU frames from the shared-memory ring as GPUI images | Unbuilt. **On the critical path (D8).** Built and measured by the Windows contributors ([code](260-gpui-rewrite-windows-code.md) WC-0.2 to WC-0.5); (a), (b) and (d) need the backend's hand-over first (S0.2b). Anything beats today's BMP proof surface |
+| Linux | `videorc-preview`'s Wayland subsurface or X11 child window over the shared-memory ring, placed below a transparent hole in GPUI's surface; fallback (d) | Built for Slint (plan 220 P4-D2), never under GPUI. **On the critical path (D8):** S0.3 on ogre |
 
 The preview contracts stay as built: one lease at a time, the first-frame
 and source-liveness watchdogs, the honest fallback labels (`AGENTS.md`
@@ -356,13 +401,15 @@ and Library playback come from the backend through the same element (plan
   not affected by element opacity or transformations"
   (`native_view.rs:37-38`), so the preview stage's rounded corners come
   from the layer's own `cornerRadius`, not from GPUI clipping.
-- **gpui-kit or our own primitives (D3).** gpui-kit brings unstyled
-  behaviour (`gpui-base`, modelled on Base UI) and styled components
-  (`gpui-component`, modelled on shadcn): a tested text input (IME,
-  selection), virtual lists and tables, menus, popovers, a command palette.
-  Videorc's look is its own. The recommended split: behaviour from
-  gpui-kit, looks from `videorc-kit`, which wraps it, as shadcn wraps Base
-  UI in the Electron app today.
+- **Behaviour from gpui-kit, looks from Videorc (D3, decided
+  2026-11-23).** gpui-kit brings unstyled behaviour (`gpui-base`, modelled
+  on Base UI) and styled components (`gpui-component`, modelled on shadcn):
+  a tested text input (IME, selection), virtual lists and tables, menus,
+  popovers, a command palette. Videorc's look is its own: the GPUI flavour
+  of videorc-ui styles `gpui-base`, as the React flavour styles Base UI
+  today, and borrows gpui-component's input, editor, virtual list and table
+  where `gpui-base` has none. The kit is built only after the owner has
+  judged S0.4's look.
 - **Guards become types and lints.** Theme tokens only (a lint rejects raw
   colours in screens), radii from the tiers, control heights from the
   primitive, a text scale that starts at 11 px, shortcuts only through
@@ -371,9 +418,69 @@ and Library playback come from the backend through the same element (plan
   tables.
 - **Parity is by eye and by diff:** every screen in dark, light and
   Increase Contrast against an Electron baseline shot the same day.
-- **videorc-ui (ui.videorc.com) freezes** at the cutover and is archived
-  when Electron is deleted (D10). It stays the reference while screens are
-  ported.
+- **videorc-ui (ui.videorc.com) is kept and maintained (D10, decided
+  2026-11-23).** It becomes the home of both flavours, React and GPUI, with
+  the same names, tokens and design language. It is never frozen or
+  archived.
+
+### The GPUI flavour of videorc-ui (D3, D10)
+
+The owner: "we have ui.videorc.com, we can just create GPUI support for our
+lib." So the kit is not a private crate of the app. It is the second flavour
+of the registry that already serves Videorc's React components
+(`TheOrcDev/videorc-ui`, `~/projects/videorc-ui`, MIT; 89 registry items in
+`registry.json`, served from `public/r/<item>.json`).
+
+- **Where it lives.** videorc-ui gains `gpui/`, a Cargo workspace beside
+  the Next.js site: `gpui/kit/src/<item>.rs`, one module per registry item
+  with the same name as its React twin (`button`, `switch`, `slider`,
+  `list-row`, `pane`, `status-bar`, `shortcut-keys`…); `gpui/kit/src/tokens.rs`,
+  generated; `gpui/gallery/`, a binary that shows every item in dark, light
+  and Increase Contrast; and one exact pin of `gpui-pre` and `gpui-base`,
+  the same as the app's (D1). gpui-kit (Apache-2.0) is a dependency; code
+  adapted from it keeps its notice in `THIRD_PARTY_NOTICES.md`; nothing
+  comes from Zed's GPL crates.
+- **One token source.** `styles/videorc.css` and `styles/desktop.css` stay
+  the source; `scripts/build-theme.mjs` already turns them into the
+  registry's `theme` and `desktop` items. It gains a GPUI output,
+  `gpui/kit/src/tokens.rs` (every colour per appearance, radii, control
+  heights, the type scale), and `theme:check` fails when it is stale. Until
+  Electron is deleted, the skill's rule stays: a token goes in the desktop's
+  `styles.css` and in videorc-ui's theme in the same change.
+- **Publishing.** Each GPUI item is a registry item in a second index,
+  `registry-gpui.json`, built into `public/r/gpui/<item>.json` and served at
+  `https://ui.videorc.com/r/gpui/<item>.json`, in the shadcn item shape
+  (`files` with `path`, `content` and `target`, `registryDependencies` on
+  other GPUI items). Each component's docs page gets a GPUI tab beside the
+  React one: the Rust usage and a gallery screenshot. Vercel builds only
+  the site, so the shots are made by the gallery on CI runners (macOS
+  first, then Windows and Linux) and committed; a check fails when an
+  item's source changed after its shot.
+- **Syncing into the app.** The model the app uses today, copied in and
+  never edited here: `crates/videorc-kit/ui-registry.json` lists the synced
+  GPUI items and their `keepLocal`; `pnpm ui:sync --flavour gpui [item…]`
+  fetches them, writes them into `crates/videorc-kit/src/`, formats them
+  with `rustfmt` and prints the diff; `--local` reads videorc-ui's dev
+  server; and `pnpm ui:check` checks both flavours, so the existing
+  `AGENTS.md` gate covers the kit. `ui:check` also fails when the app's
+  `gpui-pre` pin differs from the registry's. Videorc's own compositions
+  (screens, the Retro LCD kit) stay in `apps/videorc`, as they stay in
+  `apps/desktop` today.
+- **Checks in videorc-ui.** CI adds `cargo fmt --check`, `cargo clippy -D
+  warnings` and `cargo test` (GPUI's headless test platform) for `gpui/` on
+  macOS, Windows and Linux runners; a twin check that every GPUI item has a
+  React item of the same name with the same variants and sizes; the token
+  check; the shot check. The site's `pnpm build` stays free of Rust.
+- **One change, both flavours.** While both flavours exist, a change to a
+  component's look lands in its React and GPUI files in the same videorc-ui
+  PR (the twin check enforces the names and variants; the gallery and the
+  docs shots show the look). Then `ui:sync` in this repo, for each flavour
+  that changed.
+- **Bumping GPUI** is two PRs in order: videorc-ui first (the kit builds,
+  the gallery is looked at), then this repo (`ui:sync`, the pin, the bump
+  slice's checks).
+- **The skill.** `videorc-design` gains a GPUI section in S2.2d: the
+  primitive names map one to one, and every owner call binds both flavours.
 
 ## Every Electron job and its replacement
 
@@ -403,7 +510,9 @@ already produces most of what the renderer publishes:
 - guest speech mixed for captions (`lib/room-guest-speech.ts:86`) and the
   room program rasterised for Videorc Camera (`lib/room-program-raster.ts`).
 
-**Replacement (D9): LiveKit's Rust SDK in the backend.** The backend
+**Replacement (D9, decided 2026-11-23): LiveKit's Rust SDK in the
+backend**, confirmed on S0.8's numbers; the first beta may start without
+the room, which is required before Electron is deleted. The backend
 holds the camera, microphone, system audio and screen already, so it
 publishes its own frames and PCM: the bridges, the camera hand-over and the
 Windows camera limit go away, and the guests' frames come back to the UI
@@ -495,9 +604,9 @@ the compositor, not shown in the UI, so it does not change this answer.
 
 ### Strategy (D5, D6)
 
-- **Beside, then switch, per platform.** The GPUI app grows next to
-  Electron against the same backend and data directory, and takes the
-  bundle id at the switch. Screen-by-screen inside Electron is not
+- **Beside, then one switch on all three platforms (D5, D8, decided
+  2026-11-23).** The GPUI app grows next to Electron against the same
+  backend and data directory, and takes the bundle id at the switch. Screen-by-screen inside Electron is not
   possible: two UI processes would stack windows and fight over the
   backend's registry lock, which already refuses a second owner.
 - **One repo.** The GPUI app is built in `TheOrcDev/videorc` (P5-D1 put
@@ -511,17 +620,22 @@ the compositor, not shown in the UI, so it does not change this answer.
   They were built in `videorc-rust` and never reached streamers
   (`videorc-rust:plans/220-the-whole-ui-in-rust.md:335-343`); here they are re-landed on
   today's code, not merged across 885 commits.
-- **Electron keeps releasing.** Every Electron release continues through
-  the `videorc-release` skill. What Electron may still gain is D7.
+- **Electron keeps releasing** on all three platforms until the one switch,
+  through the `videorc-release` skill. What Electron may still gain is D7.
 - **Crossover (unchanged from plan 220):** an Electron release carries
   Phase 1 to every install; the GPUI app ships on a second feed only the
   bridge build and the GPUI app read; the last Electron build (the bridge)
   updates installs into the GPUI app with the same bundle id and team on
-  macOS and the same NSIS installer on Windows. The last Electron build
+  macOS, the same NSIS install on Windows and plan 257's packages on Linux,
+  all in the same release. The last Electron build
   stays downloadable for one release cycle; the UI never changes the
   backend's schema, so a rollback reads the same data.
-- **Platform order (D8):** macOS first, then Windows on a physical PC
-  with no waiver, then Linux as its alpha and beta lane (plan 257).
+- **No platform order (D8, decided 2026-11-23): all three switch
+  together.** No macOS-first beta. Every platform reaches parity before
+  anyone switches: Windows on real PCs with no waiver (the two
+  contributors), Linux on its Tier 1 boxes (plan 257). Each screen slice is
+  done on all three before Phase 5, so the platform passes trail each
+  macOS screen PR by days, not phases.
 
 ### The drift is the largest risk
 
@@ -536,17 +650,22 @@ days chasing that pace. So:
 - Phase 1 lands app-core in the shipping repo early and catches it up
   once, by area, with a drift list per area (the `upstream-drift.md`
   method).
-- From then on, D7 decides how new behaviour lands. The recommended rule:
+- From then on, D7 (decided 2026-11-23) decides how new behaviour lands:
   any new behaviour goes into the backend or app-core (Rust) in the same
   PR that adds Electron's UI for it, and the GPUI screen gains the UI in
   its next pass. Electron takes bug fixes only once the GPUI beta starts.
 
 ### What parity means
 
-The GPUI app is at parity on a platform when every row below works as in
-Electron, by eye in dark, light and Increase Contrast, with byte-identical
-strings, every control reachable by keyboard and named for a screen
-reader, and its smokes green with `VIDEORC_APP=gpui`.
+The GPUI app is at parity when every row below works as in Electron on
+macOS, Windows and Linux (D8), by eye in dark, light and the platform's
+high-contrast mode, with byte-identical strings, every control reachable
+by keyboard and named for the platform's screen reader (VoiceOver,
+Narrator, Orca), and its smokes green with `VIDEORC_APP=gpui`. A row that
+Electron does not have on a platform today (Videorc Camera on Windows) is
+not a row there. The Windows-only rows (scale, snap layouts, IME, Narrator,
+the installer) are in the
+[Windows testing plan](260-gpui-rewrite-windows-testing.md#windows-parity-checklist).
 
 | Area | Rows |
 | --- | --- |
@@ -569,9 +688,10 @@ reader, and its smokes green with `VIDEORC_APP=gpui`.
 | First run | Welcome backdrop, goal, look, permissions, sound, destinations; Sidekick onboarding; Linux setup alert |
 | OS | Menus, deep links, global shortcuts, TCC prompts and relaunch, Videorc Camera activation, sleep guard, Hide from stream on every window, saved window frames, update UI |
 
-The table is the outline; S5.0 regenerates it from the code into
-`docs/gpui/parity.md` with one line per control, and each screen slice
-ticks its lines.
+The table is the outline; S0.11 generates it from the code into
+`docs/gpui/parity.md` with one line per control and a column per platform,
+each screen slice ticks its lines on each platform, and S5.0 regenerates
+it before the switch.
 
 ## Verification
 
@@ -594,20 +714,30 @@ ticks its lines.
   probes, `probe:comments-window`, `probe:ui-glass`…) become UI-driver
   smokes or app-core tests. The 14 `window.__videorc*` hooks become smoke
   commands on the core. The smoke ledger (`videorc-rust:docs/rust-ui/smoke-ledger.md`)
-  is re-counted for GPUI in S2.6 and each screen slice moves its smokes.
+  is re-counted for GPUI in S2.5 and each screen slice moves its smokes.
 - **Headless tests:** `TestAppContext` and `VisualTestContext` for view
   logic and focus order; the core's tests stay framework-free.
-- **By eye:** a `gallery` binary for the kit; the baseline harness
+- **By eye:** the kit's `gallery` binary in videorc-ui, on all three
+  platforms; the baseline harness
   (`scripts/rust-ui-baseline.mjs compare`) shoots the GPUI app against
   Electron per screen, theme and width, side by side, and an agent looks
   at every pair. The owner's looks are recorded in `docs/gpui/screens.md`.
+- **Windows evidence comes from the contributors** in the form the
+  [testing plan](260-gpui-rewrite-windows-testing.md#sending-evidence)
+  fixes: a comment per run on the slice's PR with the machine, the commit,
+  the command, a verdict per check (`PASS`, `FAIL`, `BLOCKED`), the
+  spike's `summary.json`, screenshots, the app's logs and a screen
+  recording. A Windows check counts once the owner has reviewed it (plan
+  220 P4-D6). Raw evidence never enters the repository.
 - **Gates by phase:** end of Phase 1, `pnpm smoke:local-gates` (Electron)
-  on main; end of Phase 2, the recording-studio fixtures and
-  `smoke:record-latency` with `VIDEORC_APP=gpui`; end of Phase 3, the
-  whole `smoke:local-gates` with `VIDEORC_APP=gpui` on macOS; end of Phase
-  4, `smoke:local-gates:windows` on the physical PC and plan 257's Linux
-  matrix; Phase 5, the crossover proof before any release slice, then the
-  `videorc-release` gates.
+  on main, and the Windows smokes each Phase 1 PR names on a contributor's
+  PC; end of Phase 2, the recording-studio fixtures and
+  `smoke:record-latency` with `VIDEORC_APP=gpui` on macOS, and the shell
+  opening and recording on a contributor's PC and on ogre; end of Phases 3
+  and 4, all with `VIDEORC_APP=gpui`: `smoke:local-gates` on macOS,
+  `smoke:local-gates:windows` on both contributors' PCs, and plan 257's
+  matrix on its Tier 1 Linux boxes; Phase 5, the crossover proof on all
+  three before any release slice, then the `videorc-release` gates.
 
 ## Spike S0.0: native preview under GPUI
 
@@ -647,237 +777,421 @@ lines), against `gpui-pre` 0.3.14 from crates.io.
 
 ## Phases and slices
 
-Route, lane and fit per `CLAUDE.md` follow each slice. Phases 1 and 2 can
-overlap once Phase 0's macOS gate (S0.1) passes.
+Route, lane and fit per `CLAUDE.md` follow each slice. "Lane" is the
+[lane](#lanes-at-least-four-agents-at-once) that owns the slice; **W** is
+the Windows contributors, whose slices are numbered WC-… in the
+[Windows code plan](260-gpui-rewrite-windows-code.md) and tested by the
+[Windows testing plan](260-gpui-rewrite-windows-testing.md).
 
-### Phase 0: prove it (gate)
+### Phase 0: prove it, on all three platforms (gate)
 
-| # | Slice | Route · lane · fit | Done when |
+Phase 0 gates every GPUI slice from Phase 2 on. It passes when S0.1, S0.2
+and S0.3 meet their lines, the owner has judged S0.4 (D3) and taken D12 on
+S0.2's numbers, and S0.5 to S0.7 leave no gap without a known fix on any
+platform. S0.8 and S0.9 inform the plan and do not gate it.
+
+| # | Slice | Where | Lane | Route · lane · fit | Done when |
+| --- | --- | --- | --- | --- | --- |
+| S0.1 | macOS preview with the real backend: `videorc-preview`'s presenter in a `NativeView`, the IOSurface ring at 4K60, docked and floating, editor handles over the video | This Mac: a quiet machine and an unoccluded window; one build slot for the backend | L1 | Diagnose · `fable-5.1` · 9 | Plan 220's week-1 lines pass for 10 min at 4K60: zero CPU copies, present p95 ≤ 20 ms, still frame ≤ 3 % CPU, live ≤ 10 %, ≤ 2 ms GPU per frame, floating window out of capture; and the editor overlay adds ≤ 1 % CPU while idle |
+| S0.2a | GPUI on Windows: the frame spike, then routes (a), (b) and (d) in one process with synthetic frames | Both contributors' PCs | W (WC-0.1 to WC-0.4) | Contributors; reviewed as Diagnose · `fable-5.1` · 9 | The testing plan's S0.2a checks on both PCs; the patch sizes of (a) and (b) |
+| S0.2b | The backend hands its preview over on Windows: a DirectComposition surface handle for (a), shared NT-handle textures with a keyed mutex for (b), the shared-memory ring for (d), and the lease message that names them | This Mac (`pnpm check:windows`); run on a contributor's PC | L2 | Implementation · `fable-5.1` · 9 | Windows CI green; a contributor's spike receives frames by each route |
+| S0.2c | Routes (a) to (d) measured with the real backend at 4K60 | Both contributors' PCs | W (WC-0.5) | Contributors | Numbers per route on both PCs against S0.1's lines, reviewed by the owner; the owner takes D12 |
+| S0.3 | Linux preview: the Wayland subsurface and the X11 child under GPUI's wgpu window | ogre (Hyprland, and one X11 session) | L5 | Diagnose · `fable-5.1` · 8 | It presents below GPUI content at the camera's rate on both sessions, within S0.1's CPU lines; GNOME and KDE wait for the second box (a Phase 4 gate, not this one) |
+| S0.4 | Liquid Chrome in GPUI: Button (every variant), Switch, Slider, the Record button, a pane with sidebar and toolbar, in dark, light and Increase Contrast | This Mac, in `~/gpui-scratch` (its warm target needs no slot); the same spike on Windows and ogre | L3 (+ W WC-0.6, L5) | UI/Product Design · `opus-5.5` · 9 | Side-by-side shots against Electron; the owner judges macOS equal by eye (D3); the Windows (DirectWrite) and Linux shots show nothing the owner rejects |
+| S0.5 | Text: IME (Japanese, Chinese) on each platform, colour emoji, font fallback, selectable text, tabular numbers, a 10,000-row chat with inline animated WebP emotes | This Mac; W (WC-0.7); ogre (fcitx5 on Wayland, XIM on X11) | L4 (+ W, L5) | Implementation · `fable-5.1` · 8 | Scrolls at 60 fps with ≤ 100 MB extra and first paint ≤ 100 ms; IME commits correctly on each platform; the gaps are listed against D13 |
+| S0.6 | Accessibility and testing: VoiceOver, Narrator and Orca read a list and a dialog; a headless test clicks Record; the UI driver finds a control by role and name through AccessKit | This Mac; W (WC-0.8); ogre | L4 (+ W, L5) | Implementation · `fable-5.1` · 8 | All work on each platform, or the gap and its patch size are reported (`gpui-pre-windows` depends on `accesskit_windows`; Zed's Windows screen-reader issue #41138 is still open) |
+| S0.7 | Desktop: menus, the title bar over a custom header, a global hotkey, a deep link on a cold start, single instance, window ordering, Hide from stream, sleep guard, notifications, files | This Mac; W (WC-0.9); ogre | L4 (+ W, L5) | Implementation · `gpt-6.1-sol` · 8 | Each works on each platform, or the gap is listed |
+| S0.8 | Rooms: LiveKit's Rust SDK in the backend against a local `livekit-server`, with a browser guest (plan 220 room spike Part 2's nine checks) | This Mac; one build slot | L2 | Diagnose · `fable-5.1` · 9 | The nine checks pass or the report names the blocker; the download size added is measured; D9 confirmed |
+| S0.9 | Build, bump and start-up: clean and incremental build time and disk per platform; cold start to first paint and to `backend.ready` against Electron's; a weekly `gpui-pre` bump rehearsed | This Mac (one slot); ogre; W (from WC-0.1) | L4 (+ L5, W) | Research · `gpt-6.1-sol` · 7 | Numbers in this plan; start-up no slower than Electron's; the bump's breakage counted in lines |
+| S0.10 | The Electron baseline: screenshots of every window, page, tab and dialog in three appearances, per platform; idle and live cost of Electron's processes | This Mac (the dev app's backend build takes a slot); W (the current Windows Alpha); ogre (the Linux Alpha) | L6 (+ W, L5) | Implementation · `gpt-6.1-sol` · 8 | The archive exists outside the repo with its manifest committed (plan 220 S0.1 reused) |
+| S0.11 | The parity list from the code: `docs/gpui/parity.md`, one line per control, a column per platform | Docs only, no build | L6 | Research · `gpt-6.1-sol` · 8 | Every row of [What parity means](#what-parity-means) expanded; its Windows column is the testing plan's checklist |
+| S0.12 | The spikes branch: `spikes/gpui` in `TheOrcDev/videorc` with a spikes workspace, S0.0's spike as the model, the `summary.json` format and a README per spike | This Mac, no slot | L6 | Implementation · `gpt-6.1-sol` · 7 | A contributor can clone it, build the model and see the summary format; nothing reaches `main` |
+
+### Phase 1: the core lands in the shipping repo (ships in Electron, starts now)
+
+Phase 1 needs no GPUI, and each move leaves Electron better if the rewrite
+stops, so it runs beside Phase 0 (D2). Only S1.8 waits, on S0.8. Each
+move that changes Windows behaviour in today's app is also run on a
+contributor's PC (the testing plan's Phase 1 row).
+
+| # | Slice | Lane | Done when |
 | --- | --- | --- | --- |
-| S0.1 | macOS preview under GPUI with the real backend: `videorc-preview`'s presenter in a `NativeView`, the IOSurface ring at 4K60, docked and floating, editor handles over the video | Diagnose · `fable-5.1` · 9 | Plan 220's week-1 lines pass for 10 min at 4K60: zero CPU copies, present p95 ≤ 20 ms, still frame ≤ 3 % CPU, live ≤ 10 %, ≤ 2 ms GPU per frame, floating window out of capture; and the editor overlay adds ≤ 1 % CPU while idle |
-| S0.2 | Windows preview routes (a) to (d) on the physical PC | Diagnose · `fable-5.1` · 9 | Numbers per route against the same lines; the patch size of (a) and (b); the owner takes D12 |
-| S0.3 | Linux preview: the Wayland subsurface and X11 child under GPUI's wgpu window on ogre | Diagnose · `fable-5.1` · 8 | It presents below GPUI content at the camera's rate on Hyprland and one X11 session; the CPU line is reported |
-| S0.4 | Liquid Chrome in GPUI: Button (every variant), Switch, Slider, the Record button, a pane with sidebar and toolbar, in both themes | UI/Product Design · `opus-5.5` · 9 | Side-by-side shots against Electron; the owner judges them equal by eye (D3) |
-| S0.5 | Text: Japanese IME on macOS and Windows, colour emoji, font fallback, selectable text, tabular numbers, a 10,000-row chat with inline animated WebP emotes | Implementation · `fable-5.1` · 8 | Scrolls at 60 fps with ≤ 100 MB extra and first paint ≤ 100 ms; IME commits correctly; the gaps are listed against D13 |
-| S0.6 | Accessibility and testing: VoiceOver and Narrator read a list and a dialog; a headless test clicks Record; the UI driver finds a control by role and name through AccessKit | Implementation · `fable-5.1` · 8 | All three work, or the gap and its patch size are reported |
-| S0.7 | Desktop: menus, traffic lights over a custom header, a global hotkey, deep link on a cold start, single instance, window ordering, Hide from stream | Implementation · `gpt-6.1-sol` · 8 | Each works on macOS; Windows and Linux are listed for S0.2/S0.3's machines |
-| S0.8 | Rooms: LiveKit's Rust SDK in the backend against a local `livekit-server`, with a browser guest (plan 220 room spike Part 2's nine checks) | Diagnose · `fable-5.1` · 9 | The nine checks pass or the report names the blocker; the download size added is measured; the owner takes D9 |
-| S0.9 | Build cost: the GPUI app's clean and incremental build time and disk on this Mac, one compile at a time; a weekly `gpui-pre` bump rehearsed | Research · `gpt-6.1-sol` · 7 | Numbers in this plan; the bump's breakage counted in lines |
-| S0.10 | The Electron baseline: screenshots of every window, page, tab and dialog in three appearances; idle and live cost of Electron's processes | Implementation · `gpt-6.1-sol` · 8 | The archive exists outside the repo with its manifest committed (plan 220 S0.1 reused) |
-
-### Phase 1: the core lands in the shipping repo (ships in Electron)
-
-| # | Slice | Done when |
-| --- | --- | --- |
-| S1.1 | `videorc-protocol` extracted from `protocol.rs`; `backend.ts` generated | Contract tests and `protocol-fixtures/` pass on both sides; Windows and Linux CI compile |
-| S1.2 | Stream graphics in the backend (captions, chat box, cards, Sidekick bubble) | Golden images match the renderer's within a threshold and by eye; `smoke:captions-live`, `smoke:comment-highlight-stream` and a record-plus-stream smoke pass |
-| S1.3 | Meters from `audio.levels`; the monitor, clicks and chime from the backend | `smoke:soundboard`, `smoke:system-audio` and the mixer tests pass; the renderer has no getUserMedia or AudioContext |
-| S1.4 | UI settings into `app_settings`, with a one-time migration | `smoke:first-run` and `smoke:scene-presets` pass on a profile from the previous release |
-| S1.5 | Main's side jobs to the backend: avatar/emote/GIF cache, comments history, thumbnails, agent config writes, OBS import | Their tests move with them; main owns none of them |
-| S1.6a–f | `videorc-app-core` lands and catches up, one area per slice: session and Studio; scenes, sources and the editor; live, destinations, Go Live, cloud; guests and rooms; Sidekick, Avatar, chat, notifications; Library, Settings, first run | Each area's drift list is empty, its core tests pass, and the smokes it can run headless pass |
-| S1.7 | `videorc-preview`, `-gpu-import`, `-preview-ring`, `-updater`, `-page-host` land | Their tests pass on all three CI platforms |
-| S1.8 | Rooms in the backend, if D9 takes the Rust SDK | The room spike's checks pass from Electron with the backend publishing; `livekit-client` leaves the renderer |
+| S1.0 | The workspace scaffold: the root `Cargo.toml` members and `[workspace.dependencies]` for every crate this plan adds (empty crates, each with a README naming its lane), so no later lane edits the root manifest | L2 | CI green on all three platforms; each new crate compiles empty |
+| S1.1 | `videorc-protocol` extracted from `protocol.rs`; `backend.ts` generated | L2 | Contract tests and `protocol-fixtures/` pass on both sides; Windows and Linux CI compile |
+| S1.2 | Stream graphics in the backend (captions, chat box, cards, Sidekick bubble) | L2 | Golden images match the renderer's within a threshold and by eye; `smoke:captions-live`, `smoke:comment-highlight-stream` and a record-plus-stream smoke pass on macOS and on a contributor's PC |
+| S1.3 | Meters from `audio.levels`; the monitor, clicks and chime from the backend | L2 | `smoke:soundboard`, `smoke:system-audio` and the mixer tests pass on macOS and on a contributor's PC; the renderer has no getUserMedia or AudioContext |
+| S1.4 | UI settings into `app_settings`, with a one-time migration | L2 | `smoke:first-run` and `smoke:scene-presets` pass on a profile from the previous release |
+| S1.5 | Main's side jobs to the backend: avatar/emote/GIF cache, comments history, thumbnails, agent config writes, OBS import | L2 | Their tests move with them; main owns none of them |
+| S1.6a–f | `videorc-app-core` lands and catches up, one area per slice: session and Studio; scenes, sources and the editor; live, destinations, Go Live, cloud; guests and rooms; Sidekick, Avatar, chat, notifications; Library, Settings, first run | L7 | Each area's drift list is empty, its core tests pass, and the smokes it can run headless pass |
+| S1.7 | `videorc-preview`, `-gpu-import` and `-preview-ring` land (L1); `-updater` and `-page-host` land (L2) | L1, L2 | Their tests pass on all three CI platforms |
+| S1.8 | Rooms in the backend (D9) | L2 | The room spike's checks pass from Electron with the backend publishing; `livekit-client` leaves the renderer |
 
 Routes: S1.2, S1.3, S1.6a, S1.6d and S1.8 touch recording, audio or rooms:
 Implementation · `fable-5.1` · 9. The rest: Implementation · `gpt-6.1-sol`
 · 8.
 
-### Phase 2: the shell
+### Phase 2: the shell, on all three platforms
 
-| # | Slice | Done when |
-| --- | --- | --- |
-| S2.1 | `apps/videorc` starts: supervisor, registry lock, logs, crash log, typed client, the store bridge | The main window opens with the sidebar and empty pages, and `backend.ready` arrives |
-| S2.2 | `videorc-kit` v1 on S0.4's route: tokens, Liquid Chrome, the primitives the skill lists, toasts, the gallery | The gallery matches videorc-ui's docs by eye in three appearances; the guard tests exist |
-| S2.3 | The preview element on macOS, docked and floating, with the first-frame contracts and fallback labels | The GPUI forms of `probe:preview-lifecycle` and `probe:preview-window` pass; the owner judges it against S0.10 |
-| S2.4 | The core runs a session from the UI: Record, Stop, a minimal Go Live | The owner records from the skeleton |
-| S2.5 | The smoke command server and the AccessKit UI driver; `VIDEORC_APP=gpui` | `smoke:record-latency`, `smoke:recording-matrix` and the recording-studio fixtures pass with it |
-| S2.6 | OS integration from S0.7, for real | Menus, shortcuts, deep links, TCC and relaunch, Videorc Camera activation, sleep guard, Hide from stream, saved frames |
+| # | Slice | Lane | Done when |
+| --- | --- | --- | --- |
+| S2.1 | `apps/videorc` starts: supervisor, registry lock, logs, crash log, typed client, the store bridge; CI builds it on macOS (with the Metal Toolchain on the runner), Windows and Linux | L4 | The main window opens with the sidebar and empty pages, and `backend.ready` arrives, on this Mac, on a contributor's PC and on ogre |
+| S2.2a | videorc-ui's `gpui/` workspace: the pin, `tokens.rs` from the theme CSS, the gallery, CI on three runners | L3 | `theme:check` covers `tokens.rs`; the gallery runs on all three |
+| S2.2b | Publishing and syncing: `registry-gpui.json`, `public/r/gpui/`, the docs' GPUI tab; `ui:sync --flavour gpui` and `ui:check` for both flavours here | L3 | A test item round-trips (edited in videorc-ui, deployed, synced here) and `ui:check` fails on a local edit |
+| S2.2c | The primitives the skill lists, on S0.4's route, in a few videorc-ui PRs, then synced | L3 | The gallery matches the React docs by eye in three appearances on macOS; Windows and Linux shots from W and L5; the twin check is green |
+| S2.2d | The `videorc-design` skill's GPUI section and the guard tests (tokens only, radii tiers, text scale from 11 px, `ShortcutKeys`, icon-only toast tint) | L3 | Each guard fails on a planted violation |
+| S2.3a | The preview element on macOS, docked and floating, with the first-frame contracts and fallback labels | L1 | The GPUI forms of `probe:preview-lifecycle` and `probe:preview-window` pass; the owner judges it against S0.10 |
+| S2.3b | The preview element on Windows on D12's route | W (WC-2.2), reviewed by L1 | The testing plan's S0.2c checks pass against the real app on both PCs |
+| S2.3c | The preview element on Linux on S0.3's route | L5 | It presents on ogre on Wayland and X11 within S0.1's lines |
+| S2.4 | The core runs a session from the UI: Record, Stop, a minimal Go Live | L7 | The owner records from the skeleton on macOS; a contributor and ogre record too |
+| S2.5 | The smoke command server and the AccessKit UI driver; `VIDEORC_APP=gpui`; the smoke ledger re-counted for GPUI | L6 | `smoke:record-latency`, `smoke:recording-matrix` and the recording-studio fixtures pass with it on macOS |
+| S2.6a | OS integration on macOS from S0.7, behind one OS interface (`apps/videorc/src/platform/`) | L4 | Menus, shortcuts, deep links, TCC and relaunch, Videorc Camera activation, sleep guard, Hide from stream, saved frames |
+| S2.6b | OS integration on Windows | W (WC-2.4 to WC-2.7) | The testing plan's Windows rows for them pass on both PCs |
+| S2.6c | OS integration on Linux: the desktop entry, the GlobalShortcuts and Inhibit portals, Secret Service, plan 257's setup alert | L5 | The same rows pass on ogre |
 
-Routes: Orchestrator · `fable-5.1` · 10 for S2.1, S2.3, S2.5; UI/Product
-Design · `opus-5.5` · 9 for S2.2; Implementation · `gpt-6.1-sol` · 8 for
-S2.4 and S2.6.
+Routes: Orchestrator · `fable-5.1` · 10 for S2.1, S2.3a, S2.5; UI/Product
+Design · `opus-5.5` · 9 for S2.2a–d; Implementation · `gpt-6.1-sol` · 8 for
+S2.4 and S2.6a; S2.3c and S2.6c: Implementation · `fable-5.1` · 8.
 
-### Phase 3: screens to parity (macOS)
+### Phase 3: screens to parity on all three platforms
 
-One PR per screen, in this order, each done by the parity bar above:
-Studio (three slices: preview and session, audio in both looks, scenes and
-chat); Scene with the freeform editor (two); Sources; the Stream Manager
-(two) and Notes; Destinations and the Go Live dialog (two); Guests; Output;
-Captions and the reader; Library with its player (two); Images and Sounds;
-Avatar; Sidekick (two); Settings; Health; ⌘K; the dialogs; first run; the
-notification centre and toasts. About 30 slices.
+One PR per screen, owned by one screen lane, done by the parity bar above
+on macOS; behind it, L5 and the contributors run the screen's Linux and
+Windows pass and fix platform-only problems in their own small PRs. A
+screen is done when its lines in `docs/gpui/parity.md` are ticked on all
+three. Each lane owns its screens' folders under `apps/videorc/src/screens/`;
+the Studio is split by sub-folder between L1 and L7.
 
-Routes: UI/Product Design · `opus-5.5` · 9; Studio, the Scene editor, the
-Stream Manager and Guests take `fable-5.1`.
+| Lane | Screens, in order |
+| --- | --- |
+| L1 (preview) | Studio: preview and session; Scene with the freeform editor (two); Library with its player (two) |
+| L3 (kit) | Settings; Images and Sounds; Avatar; ⌘K; the dialogs; the notification centre and toasts |
+| L4 (shell) | Sources; Output; Captions and the reader; Destinations and the Go Live dialog (two); first run; Health |
+| L7 (core) | Studio: audio in both looks; Studio: scenes and chat; the Stream Manager (two) and Notes; Guests; Sidekick (two) |
+| L6 (harness) | Each screen's smokes moved to the UI driver; the baseline pairs shot and compared |
+| L5 (ogre) | Each screen's Linux pass |
+| W | Each screen's Windows pass; fixes as WC-3.x |
 
-### Phase 4: Windows and Linux
+About 30 screen slices and as many platform passes. Routes: UI/Product
+Design · `opus-5.5` · 9; the Studio, the Scene editor, the Stream Manager
+and Guests take `fable-5.1`.
 
-- **Windows** (about 10 slices): the first run on the physical PC; the
-  preview on D12's route, docked and floating; the frame, scale, theme and
-  type; keys, links and single instance; Hide from stream, files and
-  permissions; every screen; the smokes; the NSIS installer upgrading an
-  Electron install in place. _Done when:_ `smoke:local-gates:windows`
-  passes with `VIDEORC_APP=gpui` and the owner records and streams on the
-  physical PC with no waiver.
-- **Linux** (about 8 slices, after plan 257's beta work): the first run on
-  ogre, Wayland and X11; the preview on S0.3's route; the desktop entry and
-  deep links; the GlobalShortcuts portal; every screen; the AppImage.
-  _Done when:_ plan 257's matrix passes with the GPUI app on its Tier 1
-  boxes.
+### Phase 4: platform finish (beside Phase 3)
+
+- **Windows** (W: WC-4.1 to WC-4.3): the smokes through the GPUI app, the
+  NSIS installer upgrading an Electron install in place, the updater.
+  _Done when:_ `smoke:local-gates:windows` passes with `VIDEORC_APP=gpui`
+  on both contributors' PCs, and a contributor records and streams on each
+  PC with evidence the owner has reviewed (no waiver).
+- **Linux** (L5, about 8 slices, with plan 257's beta work): the first run
+  on Wayland and X11, the desktop entry and deep links, packages, every
+  screen. _Done when:_ plan 257's matrix passes with the GPUI app on its
+  Tier 1 boxes (ogre and the second box).
+- **macOS** (L4): the remaining OS rows found by the screens.
 
 Routes: the first run on each machine and the preview: `fable-5.1` · 9;
 screens: `opus-5.5` · 8; packaging: `gpt-6.1-sol` · 8.
 
-### Phase 5: ship it
+### Phase 5: one switch
 
-S5.0 the parity file regenerated and the crossover proof (an installed,
-signed Electron build updates into a signed GPUI app with every setting,
-grant and sign-in kept, on macOS and Windows); S5.1 macOS packaging without
-electron-builder (entitlements, the camera extension and app group,
-hardened runtime, notarisation, DMG, a `check-packaged-app` equivalent);
-S5.2 the updater wired, its UI and the second feed, the release scripts and
-the `videorc-release` skill; S5.3 the owner's week on the signed build,
-Electron and GPUI compared back to back; S5.4 opt-in beta on macOS; S5.5 the
-bridge release; S5.6 Windows and Linux switch, each after a real run.
-About 14 slices. Every release slice: Release · `fable-5.1` · 10.
+S5.0 the parity file regenerated and the crossover proof on all three (an
+installed, signed Electron build updates into a signed GPUI app with every
+setting, grant and sign-in kept: macOS by L2, Windows by W in WC-5.1,
+Linux by L5); S5.1 packaging per platform (a: macOS without
+electron-builder, with entitlements, the camera extension and app group,
+hardened runtime, notarisation, DMG, a `check-packaged-app` equivalent and
+the Metal Toolchain on the release machine, L4; b: the Windows NSIS
+installer signed by our workflows, W with WC-4.2; c: Linux packages, L5);
+S5.2 the updater wired, its UI and the second feed on all three, the
+release scripts and the `videorc-release` skill (L2); S5.3 a week on the
+signed builds, Electron and GPUI back to back (the owner on macOS, the
+contributors on Windows, ogre on Linux); S5.4 the opt-in beta on all three
+at once (it may start without the room, D9); S5.5 the bridge release on all
+three. About 14 slices. Every release slice: Release · `fable-5.1` · 10.
 
 ### Phase 6: delete Electron
 
-One release cycle after Windows switches, on the owner's go: remove
-`apps/desktop`, the Electron and React dependencies, the videorc-ui sync,
-the TS mirrors and Electron-only smokes, the native preview addon, the BMP
-proof surface and the PNG overlay parameters; rewrite `AGENTS.md`,
-`CLAUDE.md` and the `videorc-design` skill for GPUI primitives; archive
-`videorc-rust` and ui.videorc.com. About 6 slices.
+One release cycle after the switch, on the owner's go, and only with the
+room in (D9): remove `apps/desktop`, the Electron and React dependencies,
+the desktop's React sync (`apps/desktop/ui-registry.json`; ui.videorc.com
+keeps both flavours, D10), the TS mirrors and Electron-only smokes, the
+native preview addon, the BMP proof surface and the PNG overlay
+parameters; rewrite `AGENTS.md`, `CLAUDE.md` and the `videorc-design` skill
+for GPUI first; delete the `spikes/gpui` branch; archive `videorc-rust`.
+About 6 slices.
+
+## Lanes: at least four agents at once
+
+The owner, 2026-11-23: "always have a minimum of 4 agents working on
+different slices." The slices above run in seven lanes on our side, each
+owning its own crates and files, so at least five agents can work at once
+in every phase without editing the same files. The Windows contributors are
+extra and are not counted.
+
+### The lanes
+
+| Lane | Owns (only this lane edits these) | Machine | Build weight |
+| --- | --- | --- | --- |
+| L1 Preview | `crates/videorc-preview` (except its Linux files), `-gpu-import`, `-preview-ring`; `apps/videorc/src/preview/`; the screens in L1's row of Phase 3 | This Mac | Heavy once per phase (S0.1's backend build, a cold target), then light |
+| L2 Backend and contracts | `crates/videorc-backend`, `crates/videorc-protocol`, `crates/videorc-updater`, `crates/videorc-page-host`, the generated `backend.ts`, the root `Cargo.toml` and `Cargo.lock` (S1.0 and bumps only), the release scripts | This Mac | Heavy: every slice compiles the backend |
+| L3 Kit | videorc-ui's `gpui/`, `scripts/build-theme.mjs` and registry files; `crates/videorc-kit`; `scripts/sync-ui.mjs` and `scripts/lib/ui-registry.mjs`; the design skill; L3's screens | This Mac | Light: a warm GPUI target, no backend |
+| L4 Shell and OS | `apps/videorc/src/main.rs`, `app/`, `platform/mod.rs`, `platform/macos/`; L4's screens; macOS packaging | This Mac | Light, except S0.9 and release builds |
+| L5 Linux | `apps/videorc/src/platform/linux/`, `crates/videorc-preview/src/linux*`, Linux packaging; every Linux pass | ogre: one Rust build at a time under `~/linux-beta/ogre-rust.lock`, `cargo -j3` | Its own machine |
+| L6 Harness and parity | `scripts/lib/app-launcher.mjs`, `scripts/lib/ui-driver*.mjs`, the smoke scripts as they move, `apps/videorc/src/smoke/`, `docs/gpui/`, the baseline archive, the `spikes/gpui` branch | This Mac | Light; S0.10's dev-app build takes a slot |
+| L7 Core | `crates/videorc-app-core`; L7's screens | This Mac | Light: app-core does not compile the backend |
+| W Windows (extra) | `apps/videorc/src/platform/windows/`, the GPUI Windows patch crates, the Windows installer; their spikes on `spikes/gpui` | Two contributors' PCs | Theirs |
+
+### What each lane does next
+
+`→` means "then"; `[…]` is a wait on another lane or the gate.
+
+- **L1:** S0.1 → S1.7 (its crates) → [Phase 0 gate] → S2.3a → Studio
+  preview and session → the Scene editor (two) → Library (two); reviews
+  S2.3b.
+- **L2:** S1.0 → S0.2b → S1.1 → S0.8 → S1.2 → S1.3 → S1.4 → S1.5 → S1.7
+  (its crates) → S1.8 → backend fixes the screens find → S5.2 → S5.0 on
+  macOS.
+- **L3:** S0.4 → [the owner's look, D3] → S2.2a → S2.2b → S2.2c (a few PRs)
+  → S2.2d → L3's screens.
+- **L4:** S0.7 → S0.5 → S0.6 → S0.9 → [gate] → S2.1 → S2.6a → L4's screens
+  → S5.1a.
+- **L5:** S0.3 → the Linux halves of S0.4 to S0.7, S0.9 and S0.10 → [gate]
+  → S2.3c → S2.6c → each screen's Linux pass → Phase 4's Linux slices →
+  S5.0 and S5.1c on Linux.
+- **L6:** S0.12 → S0.11 → S0.10 → [S2.1] S2.5 → each screen's smokes →
+  S5.0's parity file.
+- **L7:** [S1.1] S1.6a → b → c → d → e → f → [S2.1] S2.4 → L7's screens.
+- **W:** WC-0.1 → WC-0.2 to WC-0.4 and WC-0.5's route (c) → [S0.2b] WC-0.5
+  → the owner takes D12 → [S2.1, S2.3a] WC-2.x → WC-3.x → WC-4.x → WC-5.1.
+
+### Dispatch table
+
+At most two heavy builds on this Mac at a time; at least five of our lanes
+busy in each window.
+
+| Window | Heavy on this Mac (≤ 2) | Light on this Mac | ogre | Windows contributors (extra) |
+| --- | --- | --- | --- | --- |
+| **Now** (Phase 0, Phase 1 starts) | L1 S0.1; L2 S1.0 → S0.2b | L3 S0.4; L4 S0.7; L6 S0.12 → S0.11 | L5 S0.3 | WC-0.1 on both PCs, then WC-0.2 (one) and WC-0.5's route (c) (the other) |
+| After S1.1 merges | L2 S0.8 → S1.2…; L6 S0.10 when L1 is light | L1 S1.7; L3 the owner's look → S2.2a; L4 S0.5 → S0.6; L7 S1.6a… | L5 the Linux halves | WC-0.5 routes (a), (b), (d) after S0.2b; WC-0.6 to WC-0.9 |
+| Phase 2 (after the gate) | L2 Phase 1's tail; one cold build at a time from L1 (S2.3a) or L4 (S2.1) | L3 S2.2a–d; L6 S2.5; L7 S1.6's tail → S2.4 | L5 S2.3c, S2.6c | WC-2.1, WC-2.2, WC-2.4 to WC-2.7 |
+| Phase 3 | L2 backend fixes and S1.8 | L1, L3, L4, L7 screen PRs (warm targets); L6 smokes | L5 each screen's Linux pass | WC-3.x Windows passes |
+| Phases 4 and 5 | L2 S5.2; L4 release builds | L6 the parity file; L3 the kit's polish | L5 Linux packages and passes | WC-4.x, WC-5.1 |
+
+### Builds, worktrees and disk on this Mac
+
+- **Two shared build slots.** Heavy builds run through
+  `node scripts/with-build-slot.mjs <command>` (two slots machine-wide,
+  shared with other sessions), so at most two are heavy at once. Heavy
+  means anything that compiles `videorc-backend` (a full backend test build
+  has peaked at 41 GB of memory: one at a time, `--bin videorc-backend -j
+  1`), a cold GPUI build into a new target, a release build, or a
+  workspace clippy. Light means a warm incremental build or test of a
+  crate that does not compile the backend (the kit, app-core, the
+  protocol, the preview crates, the GPUI app with a warm target), with
+  `CARGO_BUILD_JOBS=2` and no slot.
+- **Lanes plan around the slots.** L2 is heavy by nature; L1, L4 and L6
+  are heavy about once per phase; L3 and L7 never compile the backend. A
+  lane waiting for a slot writes code, docs or tests meanwhile and batches
+  its gates at the end of the slice.
+- **One worktree per lane,** made from fresh `origin/main`:
+  `~/projects/videorc-wt-260-l<N>`, reused across the lane's slices with a
+  new branch per slice (`gpui/<slice>-<words>`). L3 also has
+  `~/projects/videorc-ui-wt-260-kit`.
+- **One Cargo target per lane, never shared between lanes:**
+  `CARGO_TARGET_DIR=~/projects/.targets/260-l<N>`. A target shared across
+  worktrees once ran another worktree's stale binary (2026-11-22). Within
+  a lane the target stays warm. GPUI's share: a clean release build of
+  `gpui-pre` took about ten minutes on one job and 1.2 GB (S0.0); a debug
+  target that includes the backend takes 25 to 33 GB.
+- **Disk is the hard limit today: 31 GB free (97 % used) on 2026-11-23.**
+  Two backend targets alone exceed it. Free at least 120 GB before more
+  than one heavy lane starts (`pnpm clean:worktrees --apply`, the targets
+  of finished lanes), and remove a lane's target when the lane ends.
+- **The Metal Toolchain.** Until Xcode's Metal Toolchain is installed
+  (`xcodebuild -downloadComponent MetalToolchain`, an owner action on this
+  Mac), every macOS lane builds with GPUI's `runtime_shaders` feature,
+  which is for development only. Release builds (S5.1a) and the macOS CI
+  runner (S2.1) need the toolchain.
+- **ogre** runs L5 only: one Rust build at a time under
+  `flock ~/linux-beta/ogre-rust.lock`, `cargo -j3`.
+
+### Merging without blocking
+
+- One slice, one small PR to `main` (under about 800 changed lines,
+  generated files aside). A lane's agent merges its own PR once CI is
+  green and its review route has passed: squash, never `--admin`.
+- Every file has one owner lane (the table above). A change a lane needs in
+  a file it doesn't own is a small PR by the owning lane first: protocol
+  changes by L2, kit changes by L3 in videorc-ui. The shared files (root
+  `Cargo.toml`, `Cargo.lock`, `package.json`, `pnpm-lock.yaml`, `AGENTS.md`,
+  `plans/README.md`) change only in S1.0, in a GPUI bump, or in a PR of
+  their own.
+- The author rebases: whoever merges second rebases their own branch on
+  `origin/main`; nobody rebases another lane's branch. `Cargo.lock` and the
+  generated files (`backend.ts`, `tokens.rs`, synced kit files) are
+  regenerated after a rebase, never merged by hand.
+- Protocol changes stay additive while Electron lives, so a merged
+  protocol PR never breaks another lane's open branch.
+- The orchestrator keeps the dispatch table full, gives a free lane its
+  next ready slice at once, and runs the full gates on `main` after each
+  batch of merges.
 
 ## Sizing
 
 From plan 220's measured pace (Phase 2's 19 slices in three days; Phase 3
-at 54 of 65 slices in nine days, with one to three lanes), and what is new
-here:
+at 54 of 65 slices in nine days, with one to three lanes), the lanes above,
+and what is new here:
 
-- **Phase 0:** one to two weeks. S0.2 and S0.8 need the Windows PC and a
-  quiet Mac; S0.4 needs the owner's eye.
-- **Phase 1:** three to five weeks. The catch-up (S1.6) is the bulk and
-  is set by the shipping repo's pace; each move also waits for an Electron
-  release.
-- **Phases 2 and 3:** four to six weeks for macOS. The core exists; the
-  screens are new GPUI code against the same view-models. The owner's
-  looks set the end more than building does.
-- **Phase 4:** Windows three to five weeks (no Rust UI has ever run on the
-  PC), Linux two to three, side by side.
+- **Phase 0:** two to three weeks. The Windows half sets the end (the
+  contributors' time, and S0.2b before WC-0.5); S0.4 needs the owner's eye.
+- **Phase 1:** three to five weeks, beside Phase 0. The catch-up (S1.6) is
+  the bulk and is set by the shipping repo's pace; each move also waits
+  for an Electron release.
+- **Phases 2 and 3:** five to seven weeks with five lanes, the Linux and
+  Windows passes trailing each screen by days. The owner's looks and the
+  contributors' passes set the end more than building does.
+- **Phase 4:** beside Phase 3, plus two to four weeks after the last
+  screen, mostly the Windows installer, the updater and the gate runs on
+  both PCs.
 - **Phase 5:** six to ten weeks, mostly waiting that agents cannot
-  shorten: an Electron release carrying Phase 1, the owner's week, two
-  weeks of beta, then Windows acceptance.
+  shorten: an Electron release carrying Phase 1, a week on the signed
+  builds, two weeks of beta.
 
-That puts a macOS beta in March 2027 at the earliest and the macOS switch
-in April, Windows some weeks later. It is an estimate from plan 220's pace,
-not a commitment, and it holds only if D7 stops the drift and Phase 0
-passes without a toolkit fork.
+That puts the one beta on all three platforms in April 2027 at the
+earliest and the switch in May. It is an estimate from plan 220's pace, not
+a commitment. It holds only if D7 stops the drift, Phase 0 passes without
+a toolkit fork, the disk is freed for the lanes, and the Windows
+contributors keep pace: their time is the largest unknown, because nothing
+switches without Windows.
 
 ## Risks
 
 | Risk | Mitigation |
 | --- | --- |
-| GPUI has no stable release; weekly snapshots break the build | Pin `gpui-pre` and gpui-component to exact versions (D1); bump on purpose, at most monthly, in one slice that runs the gallery, the headless tests and the preview probes; S0.9 rehearses a bump |
+| GPUI has no stable release; weekly snapshots break the build | Pin `gpui-pre` and gpui-kit exactly (D1); bump on purpose, at most monthly, in one slice that runs the gallery, the headless tests and the preview probes; S0.9 rehearses a bump |
 | GPUI is built for Zed first: on 2025-12-12 Zed declined outside PRs with no Zed use case (custom shaders, a tray), and that still holds; `NativeView` is one day old | The core stays framework-free (the test is kept), so a swap costs the kit and screens only; any patch is kept in a fork of the platform crates and sent upstream; a fourth patch is a STOP |
-| Native views exist only on macOS | S0.2 and S0.3 measure Windows and Linux routes before any screen; a miss on every Windows route is a STOP |
-| Liquid Chrome needs multi-stop and radial gradients | S0.4 by the owner's eye before the kit is built |
+| Native views exist only on macOS, and all three platforms switch together | S0.2 and S0.3 measure the Windows and Linux routes before any screen; a miss on every route of either platform is a STOP |
+| Windows rests on two outside contributors; their pace sets the switch | Cold-start docs and self-contained slices; we do the backend half (S0.2b) first; either contributor can take any slice; macOS and Linux keep moving, since only the switch waits on Windows |
+| Windows evidence is remote and second-hand | One fixed evidence form (testing plan); the owner reviews it before a check counts; screen recordings and logs, not summaries |
+| Liquid Chrome needs multi-stop and radial gradients | S0.4 by the owner's eye before the kit is built, with the Windows and Linux shots beside it |
+| Two component flavours drift apart | Same names, one token source, the twin check, and both flavours changed in one videorc-ui PR |
 | The drift: Electron gains features weekly | Phase 1 lands the core early; D7's rule; a drift list per phase |
 | `use-studio.tsx` (22,187 lines) hides behaviour | app-core already ports it with tests (`studio-state-port.md`); S1.6's catch-up re-reads the diff since the copy; the smokes run through both apps |
-| Rooms move from Chromium to libwebrtc in the backend | S0.8 measures first; the fallback is `livekit-client` in the page host; P5-D12 lets the beta start without the room if the owner keeps it |
-| Text: IME, selectable text, spellcheck | S0.5 lists the gaps; D13 sets the bar; Electron's spellcheck has no Rust equivalent and waits |
-| Accessibility is newer in GPUI than in Slint | S0.6 with VoiceOver and Narrator before screens; every screen's done check names its controls |
-| Build cost on a shared Mac | S0.9 measures; one GPUI compile at a time, `CARGO_BUILD_JOBS` capped, as the Slint lanes did |
-| The update from Electron into the GPUI app fails | S5.0 proves it before any release slice; the fallback is a one-time manual download |
+| Rooms move from Chromium to libwebrtc in the backend | S0.8 measures first; the fallback is `livekit-client` in the page host; the first beta may start without the room (D9) |
+| Text: IME, selectable text, spellcheck | S0.5 lists the gaps on each platform; D13 sets the bar; Electron's spellcheck has no Rust equivalent and waits |
+| Accessibility is newer in GPUI than in Slint, and Zed's Windows screen-reader issue (#41138) is open | S0.6 with VoiceOver, Narrator and Orca before screens; every screen's done check names its controls |
+| Build cost and disk on a shared Mac: 31 GB free, two build slots | The lane rules above; free disk before dispatching more than one heavy lane; one GPUI compile per lane target |
+| The update from Electron into the GPUI app fails | S5.0 proves it on all three before any release slice; the fallback is a one-time manual download |
 | The Developer ID certificate expires on 2027-02-01, before the earliest switch | Renew it and the Videorc Camera profile before the bridge release (`docs/releases/macos-signing.md`) |
 | Two UIs maintained for months | D7's rule and a fixed end: Electron bug fixes only from the GPUI beta |
 
 ## Owner decisions
 
-Recommended defaults first. Nothing is decided yet.
+All taken by the owner on 2026-11-23. D8 and D10 differ from what this plan
+recommended; the rest are the recommended defaults.
 
-- **D1. How GPUI is consumed.** (a) `gpui-pre` snapshots from crates.io,
-  pinned exactly, with gpui-component at the matching version; (b) a git
-  pin of `zed-industries/zed` at a commit; (c) our own fork of the GPUI
-  crates. **Recommended: (a)**, bumped on purpose at most monthly, with a
-  fork of only the crates we must patch (the Windows native view, maybe
-  gradients) through `[patch.crates-io]`, each patch sent upstream.
-- **D2. Where the work happens.** (a) In `TheOrcDev/videorc`: land
-  `videorc-rust`'s framework-free crates there (Phase 1), build the GPUI
-  app beside Electron, archive `videorc-rust`; (b) continue in
-  `videorc-rust`, swapping Slint for GPUI, and merge at the end as plan 220
-  planned; (c) start over from Electron and port `use-studio.tsx` again.
-  **Recommended: (a).** It ends the 885-commit gap instead of growing it,
-  and each move ships to streamers in Electron as it lands.
-- **D3. The look's building blocks.** (a) `videorc-kit` as Videorc's
-  styled layer over gpui-kit's unstyled `gpui-base` (the way shadcn sits
-  over Base UI today), borrowing gpui-component's input, editor, virtual
-  list and table where `gpui-base` has none; (b) only our own primitives
-  on bare GPUI; (c) gpui-component's own theme, restyled. **Recommended:
-  (a)**, taken after S0.4's looks.
-- **D4. One process or two.** **Recommended: two, as today** (plan 220
+- **D1. How GPUI is consumed. Decided 2026-11-23: `gpui-pre` snapshots
+  from crates.io, pinned exactly,** with gpui-kit at the matching version,
+  bumped on purpose at most monthly, with a fork of only the crates we must
+  patch (the Windows native view, maybe gradients) through
+  `[patch.crates-io]`, each patch sent upstream. (Not taken: a git pin of
+  `zed-industries/zed`; our own fork of GPUI.)
+- **D2. Where the work happens. Decided 2026-11-23: in
+  `TheOrcDev/videorc`.** `videorc-rust`'s framework-free crates land here
+  (Phase 1), the GPUI app is built beside Electron, and `videorc-rust` is
+  archived. It ends the 885-commit gap, and each move ships to streamers in
+  Electron as it lands.
+- **D3. The look's building blocks. Decided 2026-11-23: Videorc's own kit
+  over gpui-kit's unstyled `gpui-base`,** borrowing gpui-component's input,
+  editor, virtual list and table where `gpui-base` has none, built after
+  the owner has judged S0.4's look. **And, the owner's note: the kit is the
+  GPUI flavour of videorc-ui** (ui.videorc.com), beside the React
+  components, with the same names, tokens and design language, published
+  and synced as [The GPUI flavour of videorc-ui](#the-gpui-flavour-of-videorc-ui-d3-d10)
+  describes.
+- **D4. One process or two. Decided 2026-11-23: two, as today** (plan 220
   D2): a UI crash never ends a live stream.
-- **D5. How to switch.** **Recommended: build beside Electron to parity,
-  then switch in one release per platform** (plan 220 D3).
-- **D6. Slint.** **Recommended: stop now.** No more Slint slices; the
+- **D5. How to switch. Decided 2026-11-23: build beside Electron to parity,
+  then switch** (plan 220 D3), in one release for all three platforms
+  (D8).
+- **D6. Slint. Decided 2026-11-23: stop now.** No more Slint slices; the
   Slint crates stay in `videorc-rust` until it is archived.
-- **D7. Electron during the rewrite.** (a) New behaviour lands in the
-  backend or app-core in the same PR as Electron's UI for it, and Electron
-  takes bug fixes only from the GPUI beta; (b) Electron keeps taking
-  features freely until the beta (plan 220's revised D4, whose batch 1
-  grew from 2 to 19 slices); (c) Electron freezes now. **Recommended:
-  (a).**
-- **D8. Platform order.** **Recommended: macOS, then Windows on a physical
-  PC with no waiver, then Linux** (plan 220 D12). Electron keeps shipping
-  on every platform that has not switched.
-- **D9. Rooms.** (a) LiveKit's Rust SDK in the backend; (b)
-  `livekit-client` kept inside the Chromium page host. **Recommended:
-  (a)**, taken on S0.8's numbers. And: may the macOS beta start without
-  the room (plan 220 P5-D12, taken for Slint)? **Recommended: yes**, with
-  the room required before Electron is deleted.
-- **D10. videorc-ui and ui.videorc.com.** **Recommended:** the registry
-  stays the reference while screens are ported, freezes at the macOS
-  switch and is archived in Phase 6; the GPUI design system lives in
-  `crates/videorc-kit`. No GPUI registry is published.
-- **D11. Plan 220's settled decisions carry over:** two processes, the
-  executor in the core, a small Rust updater on today's feed and a second
-  feed, the backend draws stream graphics and decodes Library playback,
-  same bundle id, data directory and `videorc://` scheme, and a Chromium
-  page host fetched on first use for HTML banners. **Recommended: yes, all
-  of them.**
-- **D12. Windows preview route.** Taken on S0.2's numbers. **Recommended
-  if the numbers allow: (a), a native view for Windows contributed to
-  GPUI**, with (d) CPU frames as the fallback for machines without a
-  shared texture.
-- **D13. The bar for text and accessibility at the switch.**
-  **Recommended:** IME, colour emoji, inline emotes, selectable chat and
-  Notes text, and screen-reader names on every control are required;
-  spellcheck in the chat composer and Notes waits for a follow-up (no Rust
-  toolkit has it; Electron gets it from Chromium).
+- **D7. Electron during the rewrite. Decided 2026-11-23:** new behaviour
+  lands in the backend or app-core in the same PR as Electron's UI for it,
+  and Electron takes bug fixes only from the GPUI beta.
+- **D8. Platform order. Decided 2026-11-23, changed from the
+  recommendation: all three platforms together.** No macOS-first beta:
+  Windows and Linux reach parity before anyone switches, so the Windows and
+  Linux preview routes (S0.2, S0.3) and their spikes are on the critical
+  path, and Phases 2 to 5 run each platform side by side
+  ([Phases](#phases-and-slices)). **The hardware it needs:**
+  - **Windows: the two contributors' own PCs.** Windows 11 x64 on real
+    hardware (no VM), no waiver; ideally one with integrated and one with
+    discrete graphics, and at least one display above 100 % scale. Their
+    run with the testing plan's evidence, reviewed by the owner, is the
+    physical pass (plan 220 P4-D6). Videorc has no Windows PC and needs
+    none on its side. Their work: the
+    [Windows testing plan](260-gpui-rewrite-windows-testing.md) and the
+    [Windows code plan](260-gpui-rewrite-windows-code.md).
+  - **Linux: ogre** (Hyprland on Wayland, and an X11 session) for every
+    Linux slice, and **the second Tier 1 box of plan 257 D2** (Ubuntu
+    24.04 on GNOME, Intel or AMD graphics), needed before the switch for
+    S0.3's GNOME half and plan 257's matrix in Phase 4. That box is still
+    owed in plan 257.
+  - **macOS: this Mac,** with at least 120 GB of free disk for the lanes
+    and Xcode's Metal Toolchain for release builds.
+- **D9. Rooms. Decided 2026-11-23: LiveKit's Rust SDK in the backend,**
+  confirmed on S0.8's numbers (the fallback is `livekit-client` in the
+  Chromium page host). The first beta may start without the room; the
+  room is required before Electron is deleted.
+- **D10. videorc-ui and ui.videorc.com. Decided 2026-11-23, changed from
+  the recommendation: kept and maintained for GPUI too.** It is never
+  frozen or archived: it becomes the home of both flavours (D3). Phase 6
+  removes only the desktop app's React copy.
+- **D11. Plan 220's settled decisions carry over. Decided 2026-11-23: yes,
+  all of them:** two processes, the executor in the core, a small Rust
+  updater on today's feed and a second feed, the backend draws stream
+  graphics and decodes Library playback, the same bundle id, data
+  directory and `videorc://` scheme, and a Chromium page host fetched on
+  first use for HTML banners. (Plan 220's D6 and D12 are replaced by D10
+  and D8 here.)
+- **D12. Windows preview route. Decided 2026-11-23: taken on S0.2's
+  numbers;** if they allow, (a), a native view for Windows contributed to
+  GPUI, with (d) CPU frames as the fallback for machines without a shared
+  texture. The pick itself waits for S0.2c.
+- **D13. The bar for text and accessibility at the switch. Decided
+  2026-11-23:** IME, colour emoji, inline emotes, selectable chat and Notes
+  text, and screen-reader names on every control are required on all three
+  platforms; spellcheck in the chat composer and Notes waits for a
+  follow-up (no Rust toolkit has it; Electron gets it from Chromium).
 
 ## Questions for the owner
 
-- **Slint: what did you see?** The Slint app draws on the GPU (Skia on
-  wgpu, and a Metal layer for the preview). If "without GPU" was about
-  something you saw or felt (smoothness of scrolling or animation, the
-  look of the chrome, text rendering, start-up), Phase 0 should measure
-  that exact thing in GPUI before any screen is built.
-- **Windows and Linux at the switch.** Is a macOS-first GPUI beta, with
-  Electron still shipping on Windows and Linux for some weeks, acceptable?
+Both questions of the draft were answered on 2026-11-23: GPUI is an
+ecosystem choice ([Why GPUI](#why-gpui-and-what-it-does-not-change)), and
+all platforms switch together (D8). What is still owed is the owner's to
+do, not to decide:
+
+- **The second Linux box** (plan 257 D2), before Phase 4's Linux gate.
+- **Free disk on this Mac** (at least 120 GB) before more than one heavy
+  lane runs.
+- **Xcode's Metal Toolchain** on this Mac before the first release build.
 
 ## STOP conditions
 
 - Phase 0 misses a pass line on macOS (S0.1): stop, report, start no
   screen.
-- Every Windows preview route misses its lines (S0.2): stop before Phase
-  4 and bring it to the owner.
+- Every Windows preview route misses its lines (S0.2c), or both Linux
+  routes do (S0.3): stop before Phase 2 and bring it to the owner. All
+  platforms switch together, so no platform goes ahead alone.
 - GPUI needs a fork of more than the platform crates, or a fourth patch:
   stop and bring it to the owner.
 - A Phase 1 PR changes a recording, a stream or a remote's behaviour:
   stop. Phase 1 moves code; it must not change behaviour.
 - A design owner call can't be met in GPUI: ask the owner; never bend the
   call.
+- No Windows contributor can run the next Windows slice for two weeks:
+  report to the owner. The switch date moves; nothing switches without
+  Windows.
 - The crossover cannot update an installed Electron app into the GPUI app
   and a manual download is not accepted: stop before the release slices.
 
@@ -886,14 +1200,28 @@ Recommended defaults first. Nothing is decided yet.
 - The program: Orchestrator · `fable-5.1` · 10 (cross-cutting,
   release-critical, already failed once on another framework).
 - Phase 0: Diagnose/Research · `fable-5.1` · 9, except S0.4 (UI/Product
-  Design · `opus-5.5` · 9) and S0.7, S0.9, S0.10 (`gpt-6.1-sol` · 7–8).
+  Design · `opus-5.5` · 9) and S0.7, S0.9 to S0.12 (`gpt-6.1-sol` · 7–8).
+  Windows slices are the contributors'; their reviews take the slice's
+  route.
 - Later phases: each slice above carries its own line.
 
 ## Sources
 
 - Code: `TheOrcDev/videorc` `origin/main` `c0cdc36f0` (file:line refs
   above); `TheOrcDev/videorc-rust` `main` `1e097e52c` (refs prefixed
-  `videorc-rust:`), its `plans/220-*.md` and `videorc-rust:docs/rust-ui/*.md`.
+  `videorc-rust:`), its `plans/220-*.md` (P4-D6, Windows by contributors:
+  `plans/220-slices-phase-4-6.md:2931-2955`) and `videorc-rust:docs/rust-ui/*.md`.
+- `TheOrcDev/videorc-ui` `main` at `ef2b3a0`: `registry.json` (89 items),
+  `scripts/build-theme.mjs`, `styles/`; this repo's `scripts/sync-ui.mjs`
+  and `apps/desktop/ui-registry.json`; the `videorc-design` skill's "Where
+  components come from".
+- Windows contributor practice in this repo: `docs/windows-dev-loop.md`,
+  `docs/acceptance/windows-physical-acceptance-checklist.md`,
+  `docs/acceptance/windows-alpha-acceptance-record.md`,
+  `.github/ISSUE_TEMPLATE/windows-alpha-bug.yml`; `gpui-pre-windows`
+  0.3.14 (`Cargo.toml`: `accesskit_windows`; `build.rs`: `fxc.exe`;
+  `src/events.rs:1507`: IMM32).
+- Plan 257 (Linux beta): its Tier 1 boxes and D2, the second Linux box.
 - GPUI source as published on crates.io, read on 2026-11-23: `gpui-pre`,
   `gpui-pre-platform`, `-macos`, `-apple`, `-windows`, `-linux`, `-wgpu`
   0.3.14 (snapshot of Zed `f126950f9d3b62666f97437ae5d4ccac2272c4db`);
