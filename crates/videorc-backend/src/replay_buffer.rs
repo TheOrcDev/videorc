@@ -2268,9 +2268,10 @@ mod runtime_tests {
         let state = test_state();
         let mut events = state.events.subscribe();
         let params = replay_only_params();
-        let recordings =
-            std::env::temp_dir().join(format!("videorc-replay-save-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&recordings).unwrap();
+        // Removed on drop, best effort: on Windows a just-written replay can
+        // still be open in a scanner when the test ends (os error 32 in 2 of
+        // 25 runs, after every assertion had passed).
+        let recordings = crate::test_temp_dir::TestTempDir::new("replay-save-test");
         let guard = prepare(
             &state,
             RingRequest {
@@ -2411,7 +2412,6 @@ mod runtime_tests {
         }
         retire(&state, "session-save", RetireOutcome::Stopped);
         assert!(!dir.exists());
-        std::fs::remove_dir_all(&recordings).unwrap();
     }
 
     /// Plan 200 B1, on real files: a 3-segment, 30 fps ring whose packets
