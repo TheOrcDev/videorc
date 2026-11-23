@@ -14,6 +14,17 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 // --themes= narrow the sweep; --check adds the layout check to any run. The
 // size is set inside this run only: the app's own window size, minimum and
 // placement are untouched.
+//
+// The Electron baseline (plan 260 S0.10, plan 220 S0.1a's shooter):
+//   node scripts/capture-ui-pages.mjs --baseline [--baseline-out=DIR]
+//     [--parts=idle,windows,live,first-run] [--screens=studio,scene]
+//     [--looks=dark,light,dark-contrast,light-contrast] [--sizes=...]
+//   node scripts/capture-ui-pages.mjs --baseline-manifest [--baseline-out=DIR]
+// shoots every window, page, tab and dialog on one seeded, isolated profile
+// (scripts/lib/rust-ui-baseline-profile.mjs) in dark, light and Increase
+// Contrast, into DIR (default ~/videorc-gpui-baseline/<date>, outside the
+// repo); --baseline-manifest writes docs/gpui/baseline-manifest.json from
+// what the runs in DIR logged and checks it against the files.
 import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
 import {
   UI_SWEEP_SIZES,
@@ -25,6 +36,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 const arg = (name) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3)
 const flag = (name) => process.argv.includes(`--${name}`)
+if (flag('baseline') || flag('baseline-manifest')) {
+  await import('./lib/rust-ui-baseline-cli.mjs').then(({ runBaselineCli }) =>
+    runBaselineCli({ arg, flag })
+  )
+  process.exit(0)
+}
 const sweep = flag('sweep')
 const themeArg = arg('theme')
 const themes = (arg('themes') ?? (sweep ? 'light,dark' : themeArg ?? '')).split(',').filter(Boolean)
