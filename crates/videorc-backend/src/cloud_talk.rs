@@ -1134,6 +1134,7 @@ pub struct RoomMediaStatus {
 /// `TalkShowPerson`, without the tracks).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct RoomRemotePerson {
     pub identity: String,
     pub name: String,
@@ -1153,6 +1154,7 @@ pub struct RoomRemotePerson {
 /// The runner's return as the host receives it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct RoomRemoteMonitor {
     pub video: bool,
     pub audio: bool,
