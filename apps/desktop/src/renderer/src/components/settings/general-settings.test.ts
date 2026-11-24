@@ -83,24 +83,12 @@ describe('GeneralSettings', () => {
     expect(container.textContent).toContain('Open Stream Manager when you go live')
   })
 
-  // Plan 250 (D4): the quiet rule's one home. On until turned off.
-  it('offers Quiet while recording or live under Notifications, on by default', async () => {
+  // The owner's rule made "Quiet while recording or live" always true: only
+  // an urgent problem or a press's answer pops up. Its switch is gone.
+  it('has no Quiet while recording or live switch any more', async () => {
     await act(async () => root.render(createElement(GeneralSettings)))
-    const toggle = switchById('quiet-while-live')
-    expect(toggle?.getAttribute('role')).toBe('switch')
-    expect(toggle?.getAttribute('aria-checked')).toBe('true')
-    const section = toggle?.closest('[data-slot="panel-section"]')
-    expect(section?.textContent).toContain('Quiet while recording or live')
-    expect(section?.textContent).toContain(
-      'Only urgent problems pop up. Everything else waits in Notifications.'
-    )
-    await act(async () => (toggle as HTMLElement).click())
-    const setSettings = mocked.core.setSettings as ReturnType<typeof vi.fn>
-    const update = setSettings.mock.calls.at(-1)?.[0] as (current: object) => object
-    expect(update({ keepOriginalRecording: false })).toEqual({
-      keepOriginalRecording: false,
-      quietWhileLive: false
-    })
+    expect(switchById('quiet-while-live')).toBeNull()
+    expect(container.textContent).not.toContain('Quiet while recording or live')
   })
 
   it('offers Retro LCD under Appearance, off until turned on (plan 197)', async () => {

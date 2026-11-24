@@ -121,7 +121,7 @@ describe('Settings layout', () => {
     expect(
       Object.fromEntries(tabPanels().map((panel) => [panel.value, sectionTitles(panel.jsx)]))
     ).toEqual({
-      general: ['Appearance', 'Chat', 'Notifications', 'Setup', 'Import', 'Elsewhere'],
+      general: ['Appearance', 'Chat', 'Setup', 'Import', 'Elsewhere'],
       permissions: ['System access'],
       shortcuts: ['Global shortcuts', 'App shortcuts'],
       remote: ['Remote control', 'Phone remote', 'Agents'],
@@ -243,7 +243,7 @@ describe('Settings layout', () => {
     const general = exportedBody(panelSources.GeneralSettings as string, 'GeneralSettings')
     expect(general.match(/<PageStack\b/g)).toHaveLength(2)
     const [first, second] = general.split(/<PageStack\b/).slice(1)
-    expect(sectionTitles(first as string)).toEqual(['Appearance', 'Chat', 'Notifications', 'Setup'])
+    expect(sectionTitles(first as string)).toEqual(['Appearance', 'Chat', 'Setup'])
     expect(sectionTitles(second as string)).toEqual(['Import', 'Elsewhere'])
   })
 

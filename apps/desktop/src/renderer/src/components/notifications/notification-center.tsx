@@ -32,7 +32,7 @@ export interface NotificationCenterProps {
   source: NotificationListSource
   /** A door was pressed: the list closes and the page takes over. */
   onClose: () => void
-  /** The line under the list (the quiet rule and its link). */
+  /** An optional line under the list. */
   footer?: ReactNode
 }
 

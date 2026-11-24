@@ -51,9 +51,10 @@ describe('the notification store (plan 250)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     clock = 1_000_000
-    // A recording with "Quiet while recording or live" off: the one row of
-    // the table where every tone but news pops up, so these tests see the
-    // rules that decide when. Idle is the bell only.
+    // A recording with "Quiet while recording or live" off. Since the
+    // owner's rule only an urgent problem (or a press's answer) pops up, so
+    // the tests about when it pops up use urgent reports. Idle is the bell
+    // only.
     live = true
     quiet = false
     counts = []
@@ -68,9 +69,9 @@ describe('the notification store (plan 250)', () => {
 
   describe('one entry per subject', () => {
     it('a second report about the same subject updates the entry in place', () => {
-      store.publish(problem({ detail: 'No sound for 5 s.' }))
+      store.publish(problem({ tone: 'urgent', detail: 'No sound for 5 s.' }))
       clock += 1_000
-      store.publish(problem({ detail: 'No sound for 6 s.' }))
+      store.publish(problem({ tone: 'urgent', detail: 'No sound for 6 s.' }))
       expect(only()).toMatchObject({ detail: 'No sound for 6 s.', state: 'open', occurrences: 1 })
       expect(door.show).toHaveBeenCalledTimes(1)
     })
@@ -190,6 +191,8 @@ describe('the notification store (plan 250)', () => {
       fresh.publish(problem({ detail: 'No sound for 66 s.' }))
       expect(door.show).not.toHaveBeenCalled()
       fresh.publish(problem({ key: 'disk-space', title: 'Recording space is low' }))
+      expect(door.show).not.toHaveBeenCalled()
+      fresh.publish(problem({ key: 'stream', tone: 'urgent', title: 'Your stream is frozen' }))
       expect(door.show).toHaveBeenCalledTimes(1)
     })
   })
@@ -223,12 +226,17 @@ describe('the notification store (plan 250)', () => {
       expect(door.show.mock.calls[0][1]).toBe(15_000)
     })
 
-    it('a warning pops up for 8 s with its first action', () => {
+    it('an urgent problem pops up for 15 s with its first action', () => {
       const run = vi.fn()
-      store.publish(problem({ actions: [{ id: 'open', label: 'Open Audio', kind: 'door', run }] }))
+      store.publish(
+        problem({
+          tone: 'urgent',
+          actions: [{ id: 'open', label: 'Open Audio', kind: 'door', run }]
+        })
+      )
       expect(door.show).toHaveBeenCalledWith(
         expect.objectContaining({ key: 'microphone' }),
-        8_000,
+        15_000,
         expect.objectContaining({ label: 'Open Audio' })
       )
     })
@@ -245,12 +253,14 @@ describe('the notification store (plan 250)', () => {
       expect(door.show.mock.calls[0][1]).toBe(15_000)
     })
 
-    it('quiet off: warnings and finished work pop up while live', () => {
+    it('quiet off changes nothing: warnings and finished work wait behind the bell while live', () => {
+      // The owner's rule: a toast answers a press or says an urgent problem.
       live = true
       quiet = false
       store.publish(problem())
       store.publish({ key: 'saved', kind: kind('finished'), title: 'Recording saved' })
-      expect(door.show).toHaveBeenCalledTimes(2)
+      expect(door.show).not.toHaveBeenCalled()
+      expect(store.count().unread).toBe(2)
     })
 
     it('news never pops up', () => {
@@ -283,7 +293,7 @@ describe('the notification store (plan 250)', () => {
     })
 
     it('a recovery never pops up: the door only hears that it resolved', () => {
-      store.publish(problem())
+      store.publish(problem({ tone: 'urgent' }))
       store.resolve('microphone', { title: 'Microphone is back' })
       expect(door.show).toHaveBeenCalledTimes(1)
       expect(door.resolved).toHaveBeenCalledWith(
@@ -291,13 +301,14 @@ describe('the notification store (plan 250)', () => {
       )
     })
 
-    it('work in progress shows no toast; finishing follows the table', () => {
+    it('work in progress shows no toast, and finishing waits behind the bell', () => {
       store.publish({ key: 'mp4:1', kind: kind('work'), title: 'Exporting MP4' })
       expect(door.show).not.toHaveBeenCalled()
       expect(only()).toMatchObject({ state: 'running' })
       store.publish({ key: 'mp4:1', kind: kind('work'), state: 'done', title: 'MP4 ready' })
       expect(only()).toMatchObject({ state: 'done', tone: 'done', title: 'MP4 ready' })
-      expect(door.show).toHaveBeenCalledTimes(1)
+      // Live, with quiet off: still the bell (the owner's rule).
+      expect(door.show).not.toHaveBeenCalled()
       store.publish({
         key: 'mp4:2',
         kind: kind('work'),
@@ -346,12 +357,12 @@ describe('the notification store (plan 250)', () => {
 
   describe('flapping', () => {
     it('cleared and back within 60 s is the same episode', () => {
-      store.publish(problem({ detail: 'No sound.' }))
+      store.publish(problem({ tone: 'urgent', detail: 'No sound.' }))
       store.markRead('microphone')
       clock += 10_000
       store.resolve('microphone')
       clock += FLAP_WINDOW_MS - 1
-      store.publish(problem({ detail: 'No sound.' }))
+      store.publish(problem({ tone: 'urgent', detail: 'No sound.' }))
       expect(only()).toMatchObject({
         state: 'open',
         read: true,
@@ -360,22 +371,22 @@ describe('the notification store (plan 250)', () => {
       })
       store.resolve('microphone')
       clock += 1_000
-      store.publish(problem({ detail: 'No sound.' }))
+      store.publish(problem({ tone: 'urgent', detail: 'No sound.' }))
       expect(only().detail).toBe('Came back 2 times. No sound.')
       expect(door.show).toHaveBeenCalledTimes(1)
     })
 
     it('back after longer is a new episode: unread, but no pop-up inside five minutes', () => {
-      store.publish(problem())
+      store.publish(problem({ tone: 'urgent' }))
       store.markRead('microphone')
       store.resolve('microphone')
       clock += FLAP_WINDOW_MS
-      store.publish(problem())
+      store.publish(problem({ tone: 'urgent' }))
       expect(only()).toMatchObject({ state: 'open', read: false, openedAt: clock })
       expect(door.show).toHaveBeenCalledTimes(1)
       store.resolve('microphone')
       clock += REALERT_AFTER_MS
-      store.publish(problem())
+      store.publish(problem({ tone: 'urgent' }))
       expect(door.show).toHaveBeenCalledTimes(2)
     })
 
@@ -536,7 +547,8 @@ describe('the notification store (plan 250)', () => {
       store.clear('microphone')
       store.publish(problem({ tone: 'urgent', title: 'Microphone lost' }))
       expect(only()).toMatchObject({ tone: 'urgent', read: false })
-      expect(door.show).toHaveBeenCalledTimes(2)
+      // The warning waited behind the bell; the urgent one pops up.
+      expect(door.show).toHaveBeenCalledTimes(1)
     })
 
     it('a cleared problem comes back when it ends and starts again, not when it flaps', () => {
