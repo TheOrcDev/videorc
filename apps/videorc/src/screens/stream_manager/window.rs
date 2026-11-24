@@ -309,7 +309,7 @@ impl Render for StreamManager {
                     this.run(PaneKey::WriteInChat, window, cx)
                 }))
                 .child(WindowHeader::new(TITLE).mac(mac))
-                .child(stats_bar(t, self.chip))
+                .child(stats_bar(t, self.chip, width))
                 .child(
                     div()
                         .flex_1()
@@ -323,6 +323,7 @@ impl Render for StreamManager {
                     pinned,
                     hidden,
                     hide_method,
+                    width,
                     move |next, _, window, app| {
                         let _ = pin.update(app, |this, cx| this.set_pinned(next, window, cx));
                     },
