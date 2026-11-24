@@ -41,6 +41,16 @@ pub(crate) const STAGE_TOPIC: &str = "videorc.stage";
 /// At most two screens on the stage (plan 251, `STAGE_MAX_SCREENS`).
 const STAGE_MAX_SCREENS: usize = 2;
 
+/// The runner's return and LiveKit's recorder (the program page): neither
+/// is a guest, and neither needs the stage (`talk-show-room-audio.ts`).
+const RUNNER_IDENTITY_PREFIX: &str = "runner:";
+const RECORDER_IDENTITY_PREFIX: &str = "EG_";
+
+/// Whether a participant who joined is a guest page that needs the stage.
+fn needs_stage(identity: &str) -> bool {
+    !identity.starts_with(RUNNER_IDENTITY_PREFIX) && !identity.starts_with(RECORDER_IDENTITY_PREFIX)
+}
+
 /// The rejoin backoff, as the renderer's (seconds).
 const REJOIN_BACKOFF_S: [u64; 5] = [1, 2, 4, 8, 15];
 /// How long a duplicate identity waits before it reports the take-over.
@@ -285,6 +295,14 @@ async fn hold(
                             Some(RoomEvent::Reconnected) => {
                                 report(&state, CloudRoomClientState::Connected, None);
                             }
+                            // A guest who just joined needs the stage (data
+                            // messages are not replayed).
+                            Some(RoomEvent::ParticipantConnected(participant))
+                                if needs_stage(participant.identity().as_str()) =>
+                            {
+                                let message = stage.borrow().clone();
+                                publish_stage(&room, message).await;
+                            }
                             Some(RoomEvent::Disconnected { reason }) => break reason,
                             None => break DisconnectReason::UnknownReason,
                             Some(_) => {}
@@ -435,6 +453,13 @@ mod tests {
             serde_json::json!({ "v": 1, "onStage": [], "screen": null, "captions": true })
         );
         assert!(stage_message(&serde_json::json!({ "room": null }), false).is_none());
+    }
+
+    #[test]
+    fn a_joining_guest_gets_the_stage_but_not_the_runner_or_the_recorder() {
+        assert!(needs_stage("guest-7f3a"));
+        assert!(!needs_stage("runner:show-1"));
+        assert!(!needs_stage("EG_abc123"));
     }
 
     #[test]
