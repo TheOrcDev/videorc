@@ -109,7 +109,7 @@ pub fn smoke_preview_compositor_sources(
 /// (`settings.cameraLooks`) replaces whatever look the layout held; no look
 /// for that camera is the neutral one. Electron's `cameraOutputLayout` also
 /// puts the camera's background (plan 258) and, after the D4 migration, its
-/// key on the layout; that part lands with the camera background (S1.6b).
+/// key on the layout: [`camera_output_layout`] adds those on top.
 pub fn camera_look_layout(
     layout: &LayoutSettings,
     camera_id: Option<&str>,
@@ -123,8 +123,27 @@ pub fn camera_look_layout(
     layout
 }
 
+/// `cameraOutputLayout` on the typed layout: the camera's look
+/// ([`camera_look_layout`]), then its background and, once the D4
+/// migration settled, its key, through the output boundary
+/// ([`super::camera_background::camera_output_layout`]). The session start
+/// and the Preview's idle reload both send this.
+pub fn camera_output_layout(
+    layout: &LayoutSettings,
+    camera_id: Option<&str>,
+    studio: &StudioSettings,
+) -> LayoutSettings {
+    let looked = camera_look_layout(layout, camera_id, studio);
+    serde_json::to_value(&looked)
+        .ok()
+        .map(|layout| super::camera_background::camera_output_layout(&layout, camera_id, studio))
+        .and_then(|layout| serde_json::from_value(layout).ok())
+        .unwrap_or(looked)
+}
+
 /// `reloadSceneFromCaptureConfig`'s params: the capture config's sources,
-/// layout (with the camera's look) and video; the smoke mode's sources in a
+/// layout (through the camera's output boundary, as Electron's
+/// `captureConfig.layout` is) and video; the smoke mode's sources in a
 /// preview smoke run. The working scene's background joins with the scenes
 /// (S1.6b).
 pub fn studio_scene_params(
@@ -132,7 +151,7 @@ pub fn studio_scene_params(
     studio: &StudioSettings,
     smoke_preview: bool,
 ) -> SceneConfigParams {
-    let layout = camera_look_layout(
+    let layout = camera_output_layout(
         &capture.layout,
         capture.sources.camera_id.as_deref(),
         studio,
@@ -283,5 +302,26 @@ mod tests {
             assert!(!layout_preset_needs_camera(&preset));
             assert!(layout_preset_needs_screen(&preset));
         }
+    }
+
+    /// Review of #1813: the Preview's idle reload goes through the camera's
+    /// output boundary, as Electron's `captureConfig.layout` does: the
+    /// camera's background, and its key once the D4 migration settled.
+    #[test]
+    fn the_idle_reload_carries_the_cameras_background_and_key() {
+        let mut capture = CaptureConfig::default();
+        capture.sources.camera_id = Some("camera-a".into());
+        let blue = serde_json::json!({"mode": "blue", "blurPct": 70, "edges": "balanced"});
+        let studio = StudioSettings::load(Some(&serde_json::Value::String(
+            serde_json::json!({
+                "cameraBackgrounds": {"camera-a": blue},
+                "cameraBackgroundMigration": 1
+            })
+            .to_string(),
+        )));
+        let params = studio_scene_params(&capture, &studio, false);
+        assert!(params.layout.camera_background.is_some());
+        assert!(params.layout.camera_chroma_key_enabled);
+        assert_eq!(params.layout.camera_chroma_key_color, "#0000FF");
     }
 }
