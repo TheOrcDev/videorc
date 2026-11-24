@@ -25,8 +25,10 @@ impl SettingsScreen {
                                     Button::new("whats-new")
                                         .label(a::copy::WHATS_NEW_BUTTON)
                                         .variant(ButtonVariant::Outline)
-                                        .disabled(true)
-                                        .tooltip(view::NOT_IN_THIS_BUILD),
+                                        .disabled(self.changelog.loading)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_changelog(window, cx)
+                                        })),
                                 ),
                             )
                             .child(

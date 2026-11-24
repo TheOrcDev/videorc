@@ -38,6 +38,8 @@ global-hotkey = "0.7"
 # The smoke command server (`src/smoke/`, plan 260 S2.5, L6), the backend's admin requests
 # and untyped event payloads (Videorc Camera).
 serde_json = "1.0"
+# Public release notes only; same HTTP/TLS version already used by the backend.
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 # The smoke UI driver and the OS interface (`src/platform/`, S2.6a): raw-window-handle
 # reaches the native window under a GPUI window on every platform; the
 # preview's layer reaches its NSView through it too (S2.3a).
