@@ -12,7 +12,18 @@
     "theme",
     "tooltip",
     "shortcut-keys",
-    "kbd"
+    "kbd",
+    "button",
+    "badge",
+    "switch",
+    "slider",
+    "tabs",
+    "input",
+    "select",
+    "dialog",
+    "popover",
+    "sonner",
+    "scroll-area"
   ],
   "keepLocal": []
 }
