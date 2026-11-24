@@ -20,12 +20,12 @@ use videorc_app_core::studio::session::{
     KEEP_STREAMING_LABEL, StopConfirmation, end_livestream_body, end_livestream_confirm_label,
     end_livestream_title,
 };
-use videorc_app_core::studio::transport::{RecordButtonState, TransportView};
+use videorc_app_core::studio::transport::{RecordButtonState, TransportView, stop_overrun_copy};
 use videorc_app_core::{BackendClient, StopOrigin, Studio, StudioSnapshot};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
-use videorc_kit::{Button, ButtonSize, ButtonVariant, ShortcutKeys};
+use videorc_kit::{Alert, AlertVariant, Button, ButtonSize, ButtonVariant, ShortcutKeys};
 
 use super::space::ToggleRecord;
 use crate::app::bridge::Mirror;
@@ -270,6 +270,16 @@ impl Render for Transport {
                     )
                 },
             )
+            // B-16: a stop that drags on says what is happening and what
+            // Force stop does.
+            .when(view.stop_overrun, |section| {
+                section.child(
+                    Alert::new("session-stop-overrun")
+                        .variant(AlertVariant::Warning)
+                        .title(stop_overrun_copy::TITLE)
+                        .description(stop_overrun_copy::DESCRIPTION),
+                )
+            })
             .when_some(controls.stop_question, |section, question| {
                 section.child(
                     div()
