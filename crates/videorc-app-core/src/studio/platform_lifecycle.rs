@@ -22,6 +22,13 @@
 //!   released.
 //! - **Handed off** (plan 243 D7): a session a hand-off stopped completes
 //!   nothing; the show goes on from the other device.
+//! - **The activation fence**: a YouTube LIVE, a saved event's activate and
+//!   an X publish are admitted against the run in the same lock a stop
+//!   moves it in, after every awaited preparation, and the stop claims the
+//!   owner with the mutation in one step. A finished mutation commits the
+//!   owner and the END cache before it answers. So a stop either waits for
+//!   the activation's answer or the activation never starts; Electron gets
+//!   the same from JS running each continuation to its next `await`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -81,11 +88,34 @@ struct Book {
     run: u64,
     /// `platformLifecycleSettlementRef`: the owner being settled.
     settling: Option<(String, Done)>,
-    /// `platformLifecycleMutationRef`: an X publish in flight for a session,
-    /// whose answer the session's cleanup waits for.
-    mutation: Option<(String, watch::Receiver<Option<Value>>)>,
+    /// `platformLifecycleMutationRef`: a platform activation for a session
+    /// (an X publish, a YouTube LIVE or a saved event's activate), whose
+    /// answer the session's cleanup waits for. A finished one stays until a
+    /// cleanup takes it.
+    mutation: Option<MutationEntry>,
+    mutations: u64,
     x_end: Flights,
     youtube_complete: Flights,
+}
+
+struct MutationEntry {
+    session_id: String,
+    generation: u64,
+    done: watch::Receiver<Option<Value>>,
+}
+
+/// The session's mutation, out of the book for the one cleanup that waits
+/// for it.
+fn take_mutation(book: &mut Book, session_id: &str) -> Option<watch::Receiver<Option<Value>>> {
+    if book
+        .mutation
+        .as_ref()
+        .is_some_and(|entry| entry.session_id == session_id)
+    {
+        book.mutation.take().map(|entry| entry.done)
+    } else {
+        None
+    }
 }
 
 fn lock(book: &Mutex<Book>) -> MutexGuard<'_, Book> {
@@ -126,6 +156,18 @@ impl PlatformLifecycle {
         lock(&self.book).owners.claim(session_id)
     }
 
+    /// The stop's claim: the owner and its mutation in one step, so a
+    /// mutation that finishes after the claim still reaches this cleanup.
+    fn claim_with_mutation(
+        &self,
+        session_id: &str,
+    ) -> Option<(Owner, Option<watch::Receiver<Option<Value>>>)> {
+        let mut book = lock(&self.book);
+        let owner = book.owners.claim(session_id)?;
+        let done = take_mutation(&mut book, session_id);
+        Some((owner, done))
+    }
+
     fn retain(&self, owner: Owner) {
         lock(&self.book).owners.retain(owner);
     }
@@ -138,11 +180,6 @@ impl PlatformLifecycle {
             book.run += 1;
         }
         dropped
-    }
-
-    /// A publish answered for this broadcast: its END is due again.
-    pub(super) fn forget_x_end(&self, key: &str) {
-        lock(&self.book).x_end.forget(key);
     }
 
     /// A prepare answered for this broadcast: its completion is due again.
@@ -172,24 +209,38 @@ impl PlatformLifecycle {
         })
     }
 
-    /// An X publish for `session_id` starts: its cleanup waits for the
-    /// answer.
-    pub(super) fn begin_mutation(&self, session_id: &str) -> Mutation {
-        let (sender, receiver) = watch::channel(None);
-        lock(&self.book).mutation = Some((session_id.to_string(), receiver));
-        Mutation {
-            book: Arc::clone(&self.book),
-            session_id: session_id.to_string(),
-            done: sender,
+    /// A platform activation starts, after every awaited preparation and
+    /// right before its request, admitted only while `run` is current. A
+    /// stop, a hand-off and the show's end move the run on under this lock,
+    /// so either the cleanup finds this mutation and waits for it, or it
+    /// never starts (`None`).
+    pub(super) fn begin_mutation(&self, session_id: Option<&str>, run: u64) -> Option<Mutation> {
+        let mut book = lock(&self.book);
+        if book.run != run {
+            return None;
         }
+        let (sender, receiver) = watch::channel(None);
+        let generation = session_id.map(|session_id| {
+            book.mutations += 1;
+            let generation = book.mutations;
+            book.mutation = Some(MutationEntry {
+                session_id: session_id.to_string(),
+                generation,
+                done: receiver,
+            });
+            generation
+        });
+        Some(Mutation {
+            book: Arc::clone(&self.book),
+            session_id: session_id.map(str::to_string),
+            generation,
+            done: sender,
+            finished: false,
+        })
     }
 
     fn mutation_for(&self, session_id: &str) -> Option<watch::Receiver<Option<Value>>> {
-        lock(&self.book)
-            .mutation
-            .as_ref()
-            .filter(|(id, _)| id == session_id)
-            .map(|(_, done)| done.clone())
+        take_mutation(&mut lock(&self.book), session_id)
     }
 
     /// The single-flight request for `key`: a finished one's answer, the
@@ -264,27 +315,45 @@ impl Drop for Settlement {
     }
 }
 
-/// An X publish in flight; dropped unfinished, the cleanup keeps the
-/// streaming it had.
+/// A platform activation in flight; dropped unfinished, the cleanup keeps
+/// the streaming it had.
 pub(super) struct Mutation {
     book: Arc<Mutex<Book>>,
-    session_id: String,
+    session_id: Option<String>,
+    generation: Option<u64>,
     done: watch::Sender<Option<Value>>,
+    finished: bool,
 }
 
 impl Mutation {
-    pub(super) fn finish(self, streaming: &Value) {
+    /// What the activation left, committed in one locked step: the owner's
+    /// streaming, a published X broadcast's END due again (`x_end_due`),
+    /// then the answer for whoever waits. A cleanup sees the mutation either
+    /// pending or with all of it committed.
+    pub(super) fn finish(mut self, streaming: &Value, x_end_due: Option<&str>) {
+        let mut book = lock(&self.book);
+        if let Some(key) = x_end_due {
+            book.x_end.forget(key);
+        }
+        if let Some(session_id) = &self.session_id {
+            book.owners.update_streaming(session_id, streaming);
+        }
         self.done.send_replace(Some(streaming.clone()));
+        self.finished = true;
+        drop(book);
     }
 }
 
 impl Drop for Mutation {
     fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
         let mut book = lock(&self.book);
         if book
             .mutation
             .as_ref()
-            .is_some_and(|(id, _)| *id == self.session_id)
+            .is_some_and(|entry| Some(entry.generation) == self.generation)
         {
             book.mutation = None;
         }
@@ -304,6 +373,24 @@ async fn joined(mut done: Done) -> Result<CleanupResult, String> {
             .clone()
             .ok_or_else(|| LIVESTREAM_STILL_SETTLING.to_string()),
         Err(_) => Err(LIVESTREAM_STILL_SETTLING.to_string()),
+    }
+}
+
+/// The owner with what its activation in flight answered.
+async fn resolve_mutation(owner: Owner, done: Option<watch::Receiver<Option<Value>>>) -> Owner {
+    let Some(mut done) = done else {
+        return owner;
+    };
+    let streaming = match done.wait_for(Option::is_some).await {
+        Ok(streaming) => (*streaming).clone(),
+        Err(_) => None,
+    };
+    match streaming {
+        Some(streaming) => Owner {
+            session_id: owner.session_id,
+            streaming,
+        },
+        None => owner,
     }
 }
 
@@ -668,25 +755,6 @@ impl<B: StudioBackend> Studio<B> {
             complete,
         }
     }
-
-    /// The owner with what an X publish in flight for it answered.
-    async fn resolve_mutation(&self, owner: Owner) -> Owner {
-        let Some(mut done) = self.platform.mutation_for(&owner.session_id) else {
-            return owner;
-        };
-        let streaming = match done.wait_for(Option::is_some).await {
-            Ok(streaming) => (*streaming).clone(),
-            Err(_) => None,
-        };
-        match streaming {
-            Some(streaming) => Owner {
-                session_id: owner.session_id,
-                streaming,
-            },
-            None => owner,
-        }
-    }
-
     /// `settleClaimedPlatformLifecycleOwner`: one settlement at a time; an
     /// incomplete one keeps its owner. Unlike Electron, an owner refused
     /// because another settles is retained too, so its broadcasts are never
@@ -700,7 +768,8 @@ impl<B: StudioBackend> Studio<B> {
                 return Err(LIVESTREAM_STILL_SETTLING.to_string());
             }
         };
-        let owner = self.resolve_mutation(owner).await;
+        let done = self.platform.mutation_for(&owner.session_id);
+        let owner = resolve_mutation(owner, done).await;
         let session_id =
             (!is_prepared_owner(&owner.session_id)).then_some(owner.session_id.as_str());
         let result = self
@@ -816,8 +885,8 @@ impl<B: StudioBackend> Studio<B> {
             }
             match self.platform.begin(&session_id) {
                 Begin::Run(settlement) => {
-                    let owner = self.platform.claim(&session_id)?;
-                    let mut owner = self.resolve_mutation(owner).await;
+                    let (owner, done) = self.platform.claim_with_mutation(&session_id)?;
+                    let mut owner = resolve_mutation(owner, done).await;
                     owner.streaming = self
                         .end_prepared_x(owner.streaming, Some(&session_id), Some(X_END_TIMEOUT))
                         .await;
@@ -1003,17 +1072,72 @@ mod tests {
         assert_eq!(lifecycle.run(), run + 1);
     }
 
-    #[tokio::test]
-    async fn the_cleanup_waits_for_an_x_publish_in_flight() {
+    fn owned(lifecycle: &PlatformLifecycle) {
+        lifecycle.install(Owner {
+            session_id: "s-1".into(),
+            streaming: json!({ "published": false }),
+        });
+    }
+
+    #[test]
+    fn an_activation_a_stop_overtook_never_starts() {
         let lifecycle = PlatformLifecycle::default();
-        let mutation = lifecycle.begin_mutation("s-1");
-        assert!(lifecycle.mutation_for("s-2").is_none());
-        let mut done = lifecycle
-            .mutation_for("s-1")
-            .expect("the publish in flight");
-        mutation.finish(&json!({ "published": true }));
-        let streaming = done.wait_for(Option::is_some).await.unwrap().clone();
-        assert_eq!(streaming, Some(json!({ "published": true })));
+        owned(&lifecycle);
+        let run = lifecycle.run();
+        lifecycle.next_run();
+        assert!(lifecycle.begin_mutation(Some("s-1"), run).is_none());
         assert!(lifecycle.mutation_for("s-1").is_none());
+        assert!(lifecycle.begin_mutation(None, run).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stop_that_claims_first_waits_for_the_publish() {
+        let lifecycle = PlatformLifecycle::default();
+        owned(&lifecycle);
+        let mutation = lifecycle
+            .begin_mutation(Some("s-1"), lifecycle.run())
+            .expect("admitted");
+        assert!(lifecycle.mutation_for("s-2").is_none());
+        lifecycle.next_run();
+        let (owner, done) = lifecycle.claim_with_mutation("s-1").expect("the owner");
+        assert_eq!(owner.streaming, json!({ "published": false }));
+        mutation.finish(&json!({ "published": true }), None);
+        let owner = resolve_mutation(owner, done).await;
+        assert_eq!(owner.streaming, json!({ "published": true }));
+    }
+
+    #[tokio::test]
+    async fn a_finished_publish_is_committed_before_anyone_hears_of_it() {
+        let lifecycle = PlatformLifecycle::default();
+        owned(&lifecycle);
+        let key = broadcast_key(Some("a"), "b");
+        lock(&lifecycle.book)
+            .x_end
+            .completed
+            .insert(key.clone(), json!({ "message": "X broadcast ended." }));
+        let mutation = lifecycle
+            .begin_mutation(Some("s-1"), lifecycle.run())
+            .expect("admitted");
+        mutation.finish(&json!({ "published": true }), Some(&key));
+        assert!(lock(&lifecycle.book).x_end.completed.get(&key).is_none());
+        let (owner, done) = lifecycle.claim_with_mutation("s-1").expect("the owner");
+        assert_eq!(owner.streaming, json!({ "published": true }));
+        let mut done = done.expect("the finished publish stays for the cleanup");
+        let answer = done.wait_for(Option::is_some).await.unwrap().clone();
+        assert_eq!(answer, Some(json!({ "published": true })));
+        assert!(lifecycle.mutation_for("s-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_activation_leaves_the_owner_as_it_was() {
+        let lifecycle = PlatformLifecycle::default();
+        owned(&lifecycle);
+        let mutation = lifecycle
+            .begin_mutation(Some("s-1"), lifecycle.run())
+            .expect("admitted");
+        let (owner, done) = lifecycle.claim_with_mutation("s-1").expect("the owner");
+        drop(mutation);
+        let owner = resolve_mutation(owner, done).await;
+        assert_eq!(owner.streaming, json!({ "published": false }));
     }
 }

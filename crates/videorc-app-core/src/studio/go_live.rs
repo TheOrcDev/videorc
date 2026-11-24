@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
+use super::platform_lifecycle::Mutation;
 use super::{Studio, StudioBackend};
 use crate::client::RpcError;
 use crate::livestream::golive::{Phase, Preflight};
@@ -728,7 +729,9 @@ impl<B: StudioBackend> Studio<B> {
                 status_patch("connecting", go_live_copy::WAITING_FOR_YOUTUBE_INGEST),
             )
             .await;
-            let result: Result<(), RpcError> = async {
+            // `Ok(None)`: a stop, a hand-off or the show's end overtook it,
+            // and the cleanup owns the destination's status from here.
+            let result: Result<Option<Mutation>, RpcError> = async {
                 if let (true, Some(show)) = (talk_show, &session_id) {
                     self.wait_for_cloud_provider_output(show, &id, run).await?;
                 }
@@ -737,7 +740,7 @@ impl<B: StudioBackend> Studio<B> {
                     let mut last = None;
                     for attempt in 0..YOUTUBE_INGEST_ATTEMPTS {
                         if !self.session_owns_transport() || self.platform.run() != run {
-                            return Ok(());
+                            return Ok(None);
                         }
                         let status = self
                             .backend
@@ -771,6 +774,14 @@ impl<B: StudioBackend> Studio<B> {
                         ));
                     }
                 }
+                // The LIVE transition (or the saved event's activate) is the
+                // session's mutation: a stop that began during the ingest
+                // reads stops it here, and a later one completes only after
+                // it answers, so LIVE and COMPLETE never overlap.
+                let Some(mutation) = self.platform.begin_mutation(session_id.as_deref(), run)
+                else {
+                    return Ok(None);
+                };
                 match &scheduled {
                     Some(event) => {
                         self.scheduled_operation(
@@ -799,11 +810,22 @@ impl<B: StudioBackend> Studio<B> {
                         )?;
                     }
                 }
-                Ok(())
+                Ok(Some(mutation))
             }
             .await;
             let patch = match result {
-                Ok(()) => status_patch("live", go_live_copy::YOUTUBE_LIVE),
+                Ok(None) => return,
+                Ok(Some(mutation)) => {
+                    let patch = status_patch("live", go_live_copy::YOUTUBE_LIVE);
+                    patch_prepared_target(&mut streaming, &id, &patch, &now_iso());
+                    mutation.finish(&streaming, None);
+                    if self.platform.run() != run {
+                        return;
+                    }
+                    self.save_target_patch(&id, patch).await;
+                    continue;
+                }
+                Err(_) if self.platform.run() != run => return,
                 Err(error) => {
                     let message = if error.code == YOUTUBE_QUOTA_PAUSED_CODE {
                         error.message.clone()
@@ -837,13 +859,23 @@ impl<B: StudioBackend> Studio<B> {
                 status_patch("connecting", go_live_copy::WAITING_FOR_X_INGEST),
             )
             .await;
-            // The session's cleanup waits for this publish's answer.
-            let mutation = session_id
-                .as_deref()
-                .map(|session_id| self.platform.begin_mutation(session_id));
             let waited = match (talk_show, &session_id) {
                 (true, Some(show)) => self.wait_for_cloud_provider_output(show, &id, run).await,
                 _ => Ok(()),
+            };
+            if self.platform.run() != run {
+                return;
+            }
+            // The publish is the session's mutation, admitted after every
+            // awaited preparation and right before the request: a stop that
+            // began during the save or the cloud wait stops it here, and a
+            // later one ends the broadcast only after the publish answers.
+            let mutation = match &waited {
+                Ok(()) => match self.platform.begin_mutation(session_id.as_deref(), run) {
+                    Some(mutation) => Some(mutation),
+                    None => return,
+                },
+                Err(_) => None,
             };
             // S3.5d: a saved X broadcast goes live through its schedule
             // (`scheduledStreams.activate`, as Electron's
@@ -888,18 +920,20 @@ impl<B: StudioBackend> Studio<B> {
                         patch.insert("platformStreamId".into(), media_key.clone());
                     }
                     patch_prepared_target(&mut streaming, &id, &patch, &now_iso());
+                    // The published broadcast's END is due again, committed
+                    // with the owner before a waiting cleanup hears of it.
+                    let x_end_due =
+                        published
+                            .get("broadcastId")
+                            .and_then(Value::as_str)
+                            .map(|broadcast| {
+                                broadcast_key(
+                                    published.get("accountId").and_then(Value::as_str),
+                                    broadcast,
+                                )
+                            });
                     if let Some(mutation) = mutation {
-                        mutation.finish(&streaming);
-                    }
-                    // The published broadcast's END is due again.
-                    if let Some(broadcast) = published.get("broadcastId").and_then(Value::as_str) {
-                        self.platform.forget_x_end(&broadcast_key(
-                            published.get("accountId").and_then(Value::as_str),
-                            broadcast,
-                        ));
-                    }
-                    if let Some(session_id) = &session_id {
-                        self.platform.update_streaming(session_id, &streaming);
+                        mutation.finish(&streaming, x_end_due.as_deref());
                     }
                     if self.platform.run() != run {
                         return;
@@ -942,7 +976,7 @@ impl<B: StudioBackend> Studio<B> {
                 }
                 Err(error) => {
                     if let Some(mutation) = mutation {
-                        mutation.finish(&streaming);
+                        mutation.finish(&streaming, None);
                     }
                     // `showXBroadcastProblem('start')`: a warning, the
                     // stream goes on.
