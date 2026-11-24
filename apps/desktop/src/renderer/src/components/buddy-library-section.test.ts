@@ -21,6 +21,7 @@ import {
 import { BUDDY_OFFICIAL_CATALOG, officialAliveFallback } from '../../../shared/buddy-library'
 
 import { BuddyLibrarySection } from './buddy-library-section'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
@@ -156,7 +157,6 @@ beforeEach(() => {
   mocked.openCreator.mockClear()
   clearBuddyOnboardingDraft()
   clearBuddyOnboardingRequest()
-  localStorage.clear()
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
@@ -615,14 +615,14 @@ describe('BuddyLibrarySection: My avatars (plan 170 D16, plan 239)', () => {
     await settle()
     await click(byTestId('buddy-library-invitation-dismiss'))
     expect(byTestId('buddy-library-invitation')).toBeNull()
-    expect(localStorage.getItem(BUDDY_INVITATION_STORAGE_KEY)).toBe('1')
+    expect(uiSettingsStorage().getItem(BUDDY_INVITATION_STORAGE_KEY)).toBe('1')
   })
 
   it('never invites an avatar of your own, or once dismissed on this machine', async () => {
     await render(fakeBackend(library({ activeAvatarId: GRUM })).client, settings())
     expect(byTestId('buddy-library-invitation')).toBeNull()
     await act(async () => root.unmount())
-    localStorage.setItem(BUDDY_INVITATION_STORAGE_KEY, '1')
+    uiSettingsStorage().setItem(BUDDY_INVITATION_STORAGE_KEY, '1')
     root = createRoot(container)
     await render(
       fakeBackend(library({ activeAvatarId: 'official:golem' })).client,

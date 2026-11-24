@@ -167,14 +167,14 @@ async function command(smoke, name, params) {
 async function seedRenderer(smoke, mode, selectedMicrophoneId) {
   await command(smoke, 'eval-js', {
     code: `
-    const current = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}')
-    localStorage.setItem('videorc.captureConfig', JSON.stringify({ ...current,
+    const current = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}')
+    window.__videorcUiSettings.setItem('videorc.captureConfig', JSON.stringify({ ...current,
       recordEnabled: true, streamEnabled: false,
       captions: { ...current.captions, enabled: false },
       audio: { ...current.audio, microphoneGainDb: 0, microphoneMuted: false, microphoneNoiseSuppression: ${JSON.stringify(mode)}, systemAudioEnabled: false },
       sources: { testPattern: true, microphoneId: ${JSON.stringify(selectedMicrophoneId)} }
     }))
-    localStorage.setItem('videorc.onboardingComplete', 'permissions-v1')
+    window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'permissions-v1')
     ${reloadKeepingSeedJs({ delayMs: 100 })}
     return true
   `

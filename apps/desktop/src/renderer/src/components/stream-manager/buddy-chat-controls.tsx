@@ -26,6 +26,7 @@ import {
   buddyTalkLabel,
   type BuddyBehaviourId
 } from '@/lib/buddy-auto-chat-view'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 /**
  * A change of "{name} talks" with its one consent (plan 211 D5): Off and
@@ -246,7 +247,7 @@ export function BuddyPostingConsentDialog({
 
 function readPostingConsent(): boolean {
   try {
-    return localStorage.getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY) === '1'
+    return uiSettingsStorage().getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY) === '1'
   } catch {
     return false
   }
@@ -254,7 +255,7 @@ function readPostingConsent(): boolean {
 
 function persistPostingConsent(): void {
   try {
-    localStorage.setItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY, '1')
+    uiSettingsStorage().setItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY, '1')
   } catch {
     // Private storage can refuse; the dialog then asks again next time.
   }

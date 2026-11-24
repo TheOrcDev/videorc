@@ -224,8 +224,9 @@ export function outputProfileStep({ id = 'output-profile', profileParam = 'profi
       const profile = OUTPUT_PROFILES[name]
       if (!profile) throw new Error(`unknown output profile "${name}"`)
       const saved = JSON.parse(
-        (await ctx.ui.evaluate(`localStorage.getItem(${JSON.stringify(CAPTURE_CONFIG_KEY)})`)) ??
-          'null'
+        (await ctx.ui.evaluate(
+          `window.__videorcUiSettings?.getItem(${JSON.stringify(CAPTURE_CONFIG_KEY)})`
+        )) ?? 'null'
       )
       if (!saved?.streaming) throw new Error('the Studio config is not seeded')
       const next = {
@@ -241,7 +242,7 @@ export function outputProfileStep({ id = 'output-profile', profileParam = 'profi
         }
       }
       await ctx.ui.evaluate(
-        `(() => { localStorage.setItem(${JSON.stringify(CAPTURE_CONFIG_KEY)}, ${JSON.stringify(JSON.stringify(next))}); return true })()`
+        `(() => { window.__videorcUiSettings.setItem(${JSON.stringify(CAPTURE_CONFIG_KEY)}, ${JSON.stringify(JSON.stringify(next))}); return true })()`
       )
       // The backend relays a remote intent once, to the renderer connected at
       // that moment; one sent before the reloaded renderer is back is lost
@@ -255,8 +256,9 @@ export function outputProfileStep({ id = 'output-profile', profileParam = 'profi
       await ctx.ui.reload()
       await rendererBack
       const check = JSON.parse(
-        (await ctx.ui.evaluate(`localStorage.getItem(${JSON.stringify(CAPTURE_CONFIG_KEY)})`)) ??
-          'null'
+        (await ctx.ui.evaluate(
+          `window.__videorcUiSettings?.getItem(${JSON.stringify(CAPTURE_CONFIG_KEY)})`
+        )) ?? 'null'
       )
       const applied = (check?.streaming?.targets ?? [])
         .filter((target) => target?.enabled)

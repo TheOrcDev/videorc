@@ -128,7 +128,7 @@ async function seedRendererProfile(smoke) {
       code: `
         const key = 'videorc.captureConfig';
         let current = {};
-        try { current = JSON.parse(localStorage.getItem(key) ?? '{}') ?? {}; } catch {}
+        try { current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}') ?? {}; } catch {}
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
         const seeded = {
           ...current,
@@ -138,7 +138,7 @@ async function seedRendererProfile(smoke) {
           streamEnabled: false,
           replayBuffer: { enabled: true, explicit: false }
         };
-        localStorage.setItem(key, JSON.stringify(seeded));
+        window.__videorcUiSettings.setItem(key, JSON.stringify(seeded));
         ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,

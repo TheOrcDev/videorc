@@ -15,6 +15,7 @@ import {
   type BackgroundAssetRegistry
 } from '@/lib/background-assets'
 import { STORAGE_KEYS, loadJson } from '@/lib/capture'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 type BackgroundAssetsValue = {
   registry: BackgroundAssetRegistry
@@ -25,9 +26,9 @@ const BackgroundAssetsContext = createContext<BackgroundAssetsValue | null>(null
 
 // One shared background-asset registry (Assets Tab plan, slice A5): Assets edits
 // it, Scene reads/edits per-scene overrides, and useStudio reads it to resolve
-// Scene.background for session/preview params. A single localStorage-backed
-// source of truth keeps all three reactive and in sync, so an "Apply" on Assets
-// is visible to Studio without a reload.
+// Scene.background for session/preview params. A single source of truth (in
+// the UI settings store since plan 220 S1.4b) keeps all three reactive and in
+// sync, so an "Apply" on Assets is visible to Studio without a reload.
 export function BackgroundAssetsProvider({ children }: { children: ReactNode }): ReactElement {
   const [registry, setRegistry] = useState<BackgroundAssetRegistry>(() =>
     reconcileRegistry(loadJson(STORAGE_KEYS.backgroundAssets, null))
@@ -50,7 +51,7 @@ export function BackgroundAssetsProvider({ children }: { children: ReactNode }):
   }, [])
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.backgroundAssets, JSON.stringify(registry))
+    uiSettingsStorage().setItem(STORAGE_KEYS.backgroundAssets, JSON.stringify(registry))
   }, [registry])
 
   return (

@@ -1,7 +1,7 @@
 /**
  * How long the smoke command server's `openTab` waits for a tab trigger.
  *
- * Smokes seed `localStorage` and reload the renderer, then open a tab. Since
+ * Smokes seed the renderer's settings and reload it, then open a tab. Since
  * first-run setup (plans 203 and 207) the shell shows a placeholder until the
  * runtime info arrives over IPC, so for a moment after a reload there is no
  * sidebar. On a slow Linux laptop that moment outlasted the old single lookup,

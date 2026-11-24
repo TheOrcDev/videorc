@@ -94,10 +94,10 @@ try {
       code: `
         const key = ${JSON.stringify(CAPTURE_CONFIG_STORAGE_KEY)};
         let current = {};
-        try { current = JSON.parse(localStorage.getItem(key) ?? '{}') ?? {}; } catch {}
+        try { current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}') ?? {}; } catch {}
         // Camera None on purpose: no id (capture.ts drops cameraOff beside one).
         const sources = { ...(current.sources ?? {}), cameraId: undefined, cameraName: undefined, cameraOff: true };
-        localStorage.setItem(key, JSON.stringify({ ...current, sources }));
+        window.__videorcUiSettings.setItem(key, JSON.stringify({ ...current, sources }));
         window.__remoteSmokeBeforeReload = true;
         ${RELOAD_KEEPING_SEED_JS}
         return true;
@@ -213,7 +213,7 @@ try {
     'eval-js',
     {
       code: `
-        const library = JSON.parse(localStorage.getItem('videorc.scenes.v2'));
+        const library = JSON.parse(window.__videorcUiSettings.getItem('videorc.scenes.v2'));
         const scene = library.scenes.find((entry) => entry.layouts.horizontal.layoutPreset === 'screen-only');
         scene.shows = {kind: 'test-pattern'};
         if (!await window.__videorcSmokeScenePresets.edit(scene)) throw new Error('Synthetic fixture scene edit refused');
@@ -681,7 +681,7 @@ try {
         smoke,
         'eval-js',
         {
-          code: `const state = window.__videorcSmokeScenePresets.state(); const library = JSON.parse(localStorage.getItem('videorc.scenes.v2')); return {activeId: state.activeId, sources: state.visual.sources, shows: library.scenes.find((scene) => scene.id === state.activeId)?.shows}`
+          code: `const state = window.__videorcSmokeScenePresets.state(); const library = JSON.parse(window.__videorcUiSettings.getItem('videorc.scenes.v2')); return {activeId: state.activeId, sources: state.visual.sources, shows: library.scenes.find((scene) => scene.id === state.activeId)?.shows}`
         },
         { timeoutMs }
       )
@@ -711,7 +711,7 @@ try {
     smoke,
     'eval-js',
     {
-      code: `const scene = JSON.parse(localStorage.getItem('videorc.scenes.v2')).scenes.find((scene) => scene.layouts.horizontal.layoutPreset === 'side-by-side'); if (!scene) throw new Error('No Side by side scene to prepare'); scene.layouts.horizontal.layoutPreset = 'screen-only'; return window.__videorcSmokeScenePresets.edit(scene)`
+      code: `const scene = JSON.parse(window.__videorcUiSettings.getItem('videorc.scenes.v2')).scenes.find((scene) => scene.layouts.horizontal.layoutPreset === 'side-by-side'); if (!scene) throw new Error('No Side by side scene to prepare'); scene.layouts.horizontal.layoutPreset = 'screen-only'; return window.__videorcSmokeScenePresets.edit(scene)`
     },
     { timeoutMs }
   )

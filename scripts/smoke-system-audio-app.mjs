@@ -512,7 +512,7 @@ async function seedRenderer(smoke, sources) {
       code: `
         const key = 'videorc.captureConfig';
         let current = {};
-        try { current = JSON.parse(localStorage.getItem(key) ?? '{}') ?? {}; } catch {}
+        try { current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}') ?? {}; } catch {}
         // Screen-only on the synthetic source (the dev app has no camera
         // grant), with Clips on. The idle case starts with System audio On.
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
@@ -523,7 +523,7 @@ async function seedRenderer(smoke, sources) {
         const sources = params.sources ?? (params.noMicrophone
           ? { ...(current.sources ?? {}), microphoneId: undefined, microphoneName: undefined, microphoneOff: true }
           : current.sources);
-        localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, sources, layout, audio, recordEnabled: true, streamEnabled: false, replayBuffer: { enabled: true, explicit: false } }));
+        window.__videorcUiSettings.setItem(key, JSON.stringify({ ...current, video: params.video, sources, layout, audio, recordEnabled: true, streamEnabled: false, replayBuffer: { enabled: true, explicit: false } }));
         ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,

@@ -14,7 +14,8 @@ import { isLinux } from './platform.mjs'
 //    key travels only as an RPC parameter over loopback; it is never put in
 //    localStorage, the environment, argv or a log.
 // 3. `remote.control.enable` (backend): the remote surface and its discovery file.
-// 4. The renderer's saved Studio (localStorage, written over CDP, then a
+// 4. The renderer's saved Studio (the UI settings store since plan 260 S1.4b,
+//    written over CDP through `window.__videorcUiSettings`, then a
 //    reload): lab display as Screen, camera off, BlackHole as mic, the
 //    screen-only scene on stream, stream on, record off, captions off, and
 //    only the seeded destinations enabled. Since scenes v2 the Studio starts
@@ -427,7 +428,7 @@ export async function seedProfile({
   }
   const readKey = async (key) => {
     try {
-      const text = await evaluate(`localStorage.getItem(${JSON.stringify(key)})`)
+      const text = await evaluate(`window.__videorcUiSettings?.getItem(${JSON.stringify(key)})`)
       return text ? JSON.parse(text) : null
     } catch {
       return null
@@ -452,7 +453,7 @@ export async function seedProfile({
     [ONBOARDING_KEY, ONBOARDING_DISMISSED_VALUE]
   ]
   await evaluate(
-    `(() => { for (const [key, value] of ${JSON.stringify(writes)}) localStorage.setItem(key, value); return true })()`
+    `(() => { for (const [key, value] of ${JSON.stringify(writes)}) window.__videorcUiSettings.setItem(key, value); return true })()`
   )
   await reloadAndWait()
   // The reloaded Studio commits its scene to the backend and saves its config

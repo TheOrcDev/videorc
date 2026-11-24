@@ -5,41 +5,32 @@ import {
   cleanCutAutoFromStorage,
   cleanCutAutoToStorage
 } from '@/lib/clean-cut-auto'
+import { subscribeUiSetting, uiSettingsStorage } from '@/lib/ui-settings-storage'
 
-// "Make a clean cut of every recording" is a renderer-local preference (one
-// localStorage flag, off by default), like the Buddy sensitivity. The Clean
-// cut card writes it; the auto-run reads the same key when a recording
-// finalizes (lib/clean-cut-auto.ts), so there is no second copy to sync.
-
-const listeners = new Set<() => void>()
+// "Make a clean cut of every recording" is a renderer-owned preference (one
+// flag in the UI settings store since plan 220 S1.4b, off by default), like
+// the Buddy sensitivity. The Clean cut card writes it; the auto-run reads the
+// same key when a recording finalizes (lib/clean-cut-auto.ts), so there is no
+// second copy to sync. The hook hears the store's changes, every window's.
 
 function readCleanCutAuto(): boolean {
   try {
-    return cleanCutAutoFromStorage(localStorage.getItem(CLEAN_CUT_AUTO_STORAGE_KEY))
+    return cleanCutAutoFromStorage(uiSettingsStorage().getItem(CLEAN_CUT_AUTO_STORAGE_KEY))
   } catch {
     return false
   }
 }
 
 function subscribe(listener: () => void): () => void {
-  const onStorage = (event: StorageEvent): void => {
-    if (event.key === null || event.key === CLEAN_CUT_AUTO_STORAGE_KEY) listener()
-  }
-  listeners.add(listener)
-  window.addEventListener('storage', onStorage)
-  return () => {
-    listeners.delete(listener)
-    window.removeEventListener('storage', onStorage)
-  }
+  return subscribeUiSetting(CLEAN_CUT_AUTO_STORAGE_KEY, listener)
 }
 
 export function setCleanCutAuto(enabled: boolean): void {
   try {
-    localStorage.setItem(CLEAN_CUT_AUTO_STORAGE_KEY, cleanCutAutoToStorage(enabled))
+    uiSettingsStorage().setItem(CLEAN_CUT_AUTO_STORAGE_KEY, cleanCutAutoToStorage(enabled))
   } catch {
-    // Storage unavailable: the choice simply does not outlive this window.
+    // Not saved: the choice simply does not outlive this window.
   }
-  for (const listener of listeners) listener()
 }
 
 export function useCleanCutAuto(): boolean {

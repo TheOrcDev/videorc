@@ -30,8 +30,11 @@ import {
   firstRunShellSurface,
   type FirstRunDecision,
   type FirstRunLeave,
-  type FirstRunSetupMode
+  type FirstRunSetupMode,
+  type FirstRunStartup
 } from '@/lib/first-run'
+import { windowUiSettingsHydrated, windowUiSettingsStore } from '@/lib/ui-settings-storage'
+import { UI_SETTINGS_HYDRATE_TIMEOUT_MS } from '@/lib/ui-settings-limits'
 import {
   OPEN_CLEAN_CUT_EVENT,
   readCleanCutOpenRequest,
@@ -173,10 +176,24 @@ const AgentsWatcher = lazy(async () => ({
   default: (await import('@/components/agents-watcher')).AgentsWatcher
 }))
 
-// Snapshot before the first render, before What's New can initialize its key.
-// Writes wait for runtime info so suppressed smoke profiles remain untouched.
-const firstRunStartup =
-  typeof localStorage === 'undefined' ? null : createFirstRunStartup(localStorage)
+// Snapshot once, before What's New can initialize its key, from the UI
+// settings store (plan 220 S1.4b). The first render waits for its snapshot;
+// a store still without one (a slow engine start) keeps the placeholder up
+// while it comes in, for up to FIRST_RUN_STORE_WAIT_MS more. Past that the
+// window is treated like one with no storage (no setup, nothing written),
+// never as a fresh install. Writes wait for runtime info so suppressed smoke
+// profiles remain untouched. Undefined: not taken yet.
+const FIRST_RUN_STORE_WAIT_MS = UI_SETTINGS_HYDRATE_TIMEOUT_MS
+let firstRunStartupValue: FirstRunStartup | null | undefined
+function takeFirstRunStartup(): FirstRunStartup | null | undefined {
+  if (firstRunStartupValue !== undefined) return firstRunStartupValue
+  try {
+    if (windowUiSettingsHydrated()) firstRunStartupValue = createFirstRunStartup()
+  } catch {
+    firstRunStartupValue = null
+  }
+  return firstRunStartupValue
+}
 
 /**
  * The window before the first-run decision is final, and while the setup
@@ -212,6 +229,26 @@ export function AppShell(): ReactElement {
 }
 
 function AppShellContent(): ReactElement {
+  // Taken here, on the first render, before any effect can write a key; a
+  // store without its snapshot yet is waited for (the placeholder shows).
+  const [firstRunStartupKnown, setFirstRunStartupKnown] = useState(
+    () => takeFirstRunStartup() !== undefined
+  )
+  useEffect(() => {
+    if (firstRunStartupKnown) return
+    let live = true
+    const settle = (): void => {
+      if (!live) return
+      if (takeFirstRunStartup() === undefined) firstRunStartupValue = null
+      setFirstRunStartupKnown(true)
+    }
+    const timer = window.setTimeout(settle, FIRST_RUN_STORE_WAIT_MS)
+    void windowUiSettingsStore().whenHydrated().then(settle)
+    return () => {
+      live = false
+      window.clearTimeout(timer)
+    }
+  }, [firstRunStartupKnown])
   const {
     wsStatus,
     runtimeInfo,
@@ -319,9 +356,9 @@ function AppShellContent(): ReactElement {
   const [commandOpen, setCommandOpen] = useState(false)
   const [firstRunVisibility, setFirstRunVisibility] = useState<FirstRunDecision | null>(null)
   useEffect(() => {
-    if (!runtimeInfo || firstRunVisibility !== null) return
-    setFirstRunVisibility(firstRunStartup?.finalize(runtimeInfo) ?? 'hide')
-  }, [firstRunVisibility, runtimeInfo])
+    if (!runtimeInfo || firstRunVisibility !== null || !firstRunStartupKnown) return
+    setFirstRunVisibility(takeFirstRunStartup()?.finalize(runtimeInfo) ?? 'hide')
+  }, [firstRunStartupKnown, firstRunVisibility, runtimeInfo])
   // Plan 203 S5: setup opens as soon as the decision says so (its rows handle
   // the backend still loading), and "Run setup again…" replays it over the
   // workspace. While it is open the provider holds preview and global keys.
@@ -335,7 +372,10 @@ function AppShellContent(): ReactElement {
   const setupOpenRef = useRef(setupOpen)
   setupOpenRef.current = setupOpen
   const surface = firstRunShellSurface({
-    snapshot: firstRunStartup?.snapshot ?? 'existing-install',
+    // Not known yet: the placeholder, as for a first launch still deciding.
+    snapshot: firstRunStartupKnown
+      ? (takeFirstRunStartup()?.snapshot ?? 'existing-install')
+      : 'fresh',
     decision: firstRunVisibility,
     setupOpen
   })
@@ -440,7 +480,7 @@ function AppShellContent(): ReactElement {
         setActive(openTab ?? replay.returnTo)
         return
       }
-      firstRunStartup?.complete(completion)
+      takeFirstRunStartup()?.complete(completion)
       setFirstRunVisibility('hide')
       setActive(openTab ?? 'studio')
     },
@@ -621,10 +661,10 @@ function AppShellContent(): ReactElement {
         <Suspense fallback={<FirstRunPlaceholder />}>
           <FirstRunSetup
             mode={setupMode}
-            initialStep={replay ? 'permissions' : firstRunStartup?.step}
-            initialGoal={firstRunStartup?.goal ?? null}
-            onEnterStep={(step) => firstRunStartup?.enterStep(step, setupMode)}
-            onGoalChange={(goal) => firstRunStartup?.setGoal(goal, setupMode)}
+            initialStep={replay ? 'permissions' : takeFirstRunStartup()?.step}
+            initialGoal={takeFirstRunStartup()?.goal ?? null}
+            onEnterStep={(step) => takeFirstRunStartup()?.enterStep(step, setupMode)}
+            onGoalChange={(goal) => takeFirstRunStartup()?.setGoal(goal, setupMode)}
             onLeave={leaveFirstRunSetup}
           />
         </Suspense>

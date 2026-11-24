@@ -118,6 +118,8 @@ export interface UiSettingsStore {
   /** Loads the snapshot once; later calls return the same promise. Never rejects. */
   hydrate(options?: { timeoutMs?: number }): Promise<UiSettingsHydration>
   status(): UiSettingsStatus
+  /** Resolves once the snapshot is in (at once when it already is), however late. */
+  whenHydrated(): Promise<void>
   get(key: string): UiSettingsValue | undefined
   has(key: string): boolean
   keys(): string[]
@@ -277,6 +279,7 @@ export function createUiSettingsStore(deps: UiSettingsStoreDeps): UiSettingsStor
   let retryStep = 0
   let unsubscribeChange: (() => void) | null = null
   let unsubscribeReconnect: (() => void) | null = null
+  const hydratedWaiters: (() => void)[] = []
 
   function notify(keys: ReadonlySet<string>): void {
     if (keys.size === 0) return
@@ -564,6 +567,7 @@ export function createUiSettingsStore(deps: UiSettingsStoreDeps): UiSettingsStor
       replayed
     }
     hydration = result
+    for (const resolve of hydratedWaiters.splice(0)) resolve()
     if (readsBeforeHydration.length > 0) {
       log.warn(
         `[ui-settings] ${readsBeforeHydration.length} key(s) were read before the snapshot: ${readsBeforeHydration.join(', ')}`
@@ -723,6 +727,10 @@ export function createUiSettingsStore(deps: UiSettingsStoreDeps): UiSettingsStor
         })
       })
       return hydratePromise
+    },
+    whenHydrated() {
+      if (hydrated) return Promise.resolve()
+      return new Promise<void>((resolve) => hydratedWaiters.push(resolve))
     },
     status() {
       return {

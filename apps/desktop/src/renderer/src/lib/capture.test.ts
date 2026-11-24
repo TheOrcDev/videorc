@@ -58,6 +58,7 @@ import {
   resetAudioSyncCalibration,
   resolveProviderStreamOutputPlan,
   smokePreviewCompositorCaptureConfig,
+  STORAGE_KEYS,
   STREAM_OUTPUT_GOP_SECONDS,
   streamVideoProfileValidationReason,
   streamOutputVideoForTarget,
@@ -69,6 +70,12 @@ import {
   withoutRetiredSettings
 } from './capture'
 import { returningSourceChoices } from './source-return'
+import { uiSettingsStorage } from './ui-settings-storage'
+
+/** What the previous launch left in the UI settings store for the capture config. */
+function seedStoredCaptureConfig(raw: string): void {
+  uiSettingsStorage().setItem(STORAGE_KEYS.captureConfig, raw)
+}
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -1464,12 +1471,10 @@ describe('system audio settings (plan 069)', () => {
     }
   })
 
-  it('reads a stored localStorage config without system audio keys as Off', () => {
-    vi.stubGlobal('localStorage', {
-      getItem: () => JSON.stringify({ audio: { microphoneGainDb: 2, microphoneMuted: false } }),
-      setItem: vi.fn(),
-      removeItem: vi.fn()
-    })
+  it('reads a stored config without system audio keys as Off', () => {
+    seedStoredCaptureConfig(
+      JSON.stringify({ audio: { microphoneGainDb: 2, microphoneMuted: false } })
+    )
     expect(loadCaptureConfig().audio).toMatchObject({
       microphoneGainDb: 2,
       systemAudioEnabled: false,
@@ -2135,18 +2140,15 @@ describe('legacy stream key migration', () => {
   })
 
   it('heals old persisted configs that still contain the synthetic diagnostic source', () => {
-    vi.stubGlobal('localStorage', {
-      getItem: () =>
-        JSON.stringify({
-          sources: {
-            screenId: 'screen:screencapturekit:1',
-            screenName: 'Display 1',
-            testPattern: true
-          }
-        }),
-      setItem: vi.fn(),
-      removeItem: vi.fn()
-    })
+    seedStoredCaptureConfig(
+      JSON.stringify({
+        sources: {
+          screenId: 'screen:screencapturekit:1',
+          screenName: 'Display 1',
+          testPattern: true
+        }
+      })
+    )
 
     expect(loadCaptureConfig().sources).toMatchObject({
       screenId: 'screen:screencapturekit:1',
@@ -2156,30 +2158,24 @@ describe('legacy stream key migration', () => {
   })
 
   it('keeps per-mode scene memory across reloads and heals cross-class values', () => {
-    vi.stubGlobal('localStorage', {
-      getItem: () =>
-        JSON.stringify({
-          lastHorizontalPreset: 'side-by-side',
-          lastVerticalPreset: 'vertical-split'
-        }),
-      setItem: vi.fn(),
-      removeItem: vi.fn()
-    })
+    seedStoredCaptureConfig(
+      JSON.stringify({
+        lastHorizontalPreset: 'side-by-side',
+        lastVerticalPreset: 'vertical-split'
+      })
+    )
     expect(loadCaptureConfig()).toMatchObject({
       lastHorizontalPreset: 'side-by-side',
       lastVerticalPreset: 'vertical-split'
     })
 
     // A cross-class or junk memory would strand the mode toggle — reset it.
-    vi.stubGlobal('localStorage', {
-      getItem: () =>
-        JSON.stringify({
-          lastHorizontalPreset: 'vertical-split',
-          lastVerticalPreset: 'diagonal'
-        }),
-      setItem: vi.fn(),
-      removeItem: vi.fn()
-    })
+    seedStoredCaptureConfig(
+      JSON.stringify({
+        lastHorizontalPreset: 'vertical-split',
+        lastVerticalPreset: 'diagonal'
+      })
+    )
     expect(loadCaptureConfig()).toMatchObject({
       lastHorizontalPreset: 'screen-camera',
       lastVerticalPreset: 'vertical-camera-top'
@@ -2478,7 +2474,7 @@ describe('freeform arrangement (plan phase 4)', () => {
         }
       }
     })
-    // The exact localStorage round-trip: serialize, parse, normalize.
+    // The exact stored round-trip: serialize, parse, normalize.
     const layout = normalizeLayoutSettings(
       (JSON.parse(JSON.stringify(persisted)) as CaptureConfig).layout
     )
@@ -2807,15 +2803,12 @@ describe('canvas orientation lock (the Studio mode owns the orientation)', () =>
   it('normalizes a persisted landscape canvas under a vertical scene on load', () => {
     // A pre-lock build could persist exactly the owner-screenshot state:
     // vertical-split scene with a landscape 2K canvas.
-    vi.stubGlobal('localStorage', {
-      getItem: () =>
-        JSON.stringify({
-          layout: { layoutPreset: 'vertical-split' },
-          video: { preset: 'custom', width: 2560, height: 1440, fps: 30, bitrateKbps: 8000 }
-        }),
-      setItem: vi.fn(),
-      removeItem: vi.fn()
-    })
+    seedStoredCaptureConfig(
+      JSON.stringify({
+        layout: { layoutPreset: 'vertical-split' },
+        video: { preset: 'custom', width: 2560, height: 1440, fps: 30, bitrateKbps: 8000 }
+      })
+    )
     expect(loadCaptureConfig().video).toMatchObject({
       preset: 'custom',
       width: 1440,
@@ -2823,22 +2816,19 @@ describe('canvas orientation lock (the Studio mode owns the orientation)', () =>
     })
 
     // And the remembered landscape profile can never be portrait.
-    vi.stubGlobal('localStorage', {
-      getItem: () =>
-        JSON.stringify({
-          layout: { layoutPreset: 'vertical-split' },
-          video: { preset: 'custom', width: 1080, height: 1920, fps: 30, bitrateKbps: 9000 },
-          verticalRestoreVideo: {
-            preset: 'custom',
-            width: 1080,
-            height: 1920,
-            fps: 30,
-            bitrateKbps: 9000
-          }
-        }),
-      setItem: vi.fn(),
-      removeItem: vi.fn()
-    })
+    seedStoredCaptureConfig(
+      JSON.stringify({
+        layout: { layoutPreset: 'vertical-split' },
+        video: { preset: 'custom', width: 1080, height: 1920, fps: 30, bitrateKbps: 9000 },
+        verticalRestoreVideo: {
+          preset: 'custom',
+          width: 1080,
+          height: 1920,
+          fps: 30,
+          bitrateKbps: 9000
+        }
+      })
+    )
     expect(loadCaptureConfig().verticalRestoreVideo).toMatchObject({
       width: 1920,
       height: 1080

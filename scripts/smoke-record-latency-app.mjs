@@ -198,8 +198,8 @@ function log(message) {
 }
 
 /**
- * The renderer keeps its capture config in localStorage (lib/capture.ts
- * STORAGE_KEYS.captureConfig) and merges it over the defaults on load. Seed the
+ * The renderer keeps its capture config in the UI settings store (lib/capture.ts
+ * STORAGE_KEYS.captureConfig, plan 220 S1.4b) and merges it over the defaults on load. Seed the
  * requested video profile and reload so the Record path uses it.
  */
 async function seedRendererVideoProfile(smoke) {
@@ -210,7 +210,7 @@ async function seedRendererVideoProfile(smoke) {
       code: `
         const key = 'videorc.captureConfig';
         let current = {};
-        try { current = JSON.parse(localStorage.getItem(key) ?? '{}') ?? {}; } catch {}
+        try { current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}') ?? {}; } catch {}
         // Screen-only scene: the dev app has no camera permission grant and the
         // renderer auto-selects the first listed camera, which would make the
         // start preflight refuse ("camera preview source produced no frames")
@@ -220,7 +220,7 @@ async function seedRendererVideoProfile(smoke) {
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
         const seeded = { ...current, video: params.video, layout, recordEnabled: true, streamEnabled: false };
         if (params.systemAudio) seeded.audio = { ...(current.audio ?? {}), systemAudioEnabled: true };
-        localStorage.setItem(key, JSON.stringify(seeded));
+        window.__videorcUiSettings.setItem(key, JSON.stringify(seeded));
         ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,

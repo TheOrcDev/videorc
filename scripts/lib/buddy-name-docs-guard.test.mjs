@@ -54,6 +54,17 @@ const ORCLE_ALLOWED = [
     reason: 'the saved Buddy sub-tab key; renaming it forgets the tab (D22)'
   },
   {
+    file: 'docs/rust-ui/ui-settings.md',
+    text: '`videorc.orcleListenPromptDismissed`',
+    reason:
+      'a saved dismissal key the settings migration keeps; renaming it shows the prompt again (D22)'
+  },
+  {
+    file: 'docs/rust-ui/ui-settings.md',
+    text: '`videorc.orcleTab`',
+    reason: 'the saved Buddy sub-tab key; renaming it forgets the tab (D22)'
+  },
+  {
     file: 'docs/buddy.md',
     text: 'the Orcle spellings, "oracle" and "orca" are gone',
     reason: ALIASES

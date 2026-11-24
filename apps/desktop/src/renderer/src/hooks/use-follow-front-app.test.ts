@@ -23,6 +23,7 @@ import {
   useFollowFrontApp,
   type FollowFrontAppHost
 } from './use-follow-front-app'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 const VIDEORC = 'dev.theorcdev.videorc'
 const ONE_PASSWORD = 'com.1password.1password'
@@ -145,8 +146,8 @@ afterEach(async () => {
   vi.unstubAllGlobals()
   vi.useRealTimers()
   vi.restoreAllMocks()
-  localStorage.removeItem(FOLLOW_SETTINGS_STORAGE_KEY)
-  localStorage.removeItem(PRIVACY_SETTINGS_STORAGE_KEY)
+  uiSettingsStorage().removeItem(FOLLOW_SETTINGS_STORAGE_KEY)
+  uiSettingsStorage().removeItem(PRIVACY_SETTINGS_STORAGE_KEY)
   resetFollowSettingsForTest()
   resetPrivacySettingsForTest()
 })

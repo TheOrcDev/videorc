@@ -17,7 +17,6 @@
     "videorc.cohostSensitivity": "balanced",
     "videorc.firstRun": "{\"version\":2,\"status\":\"completed\",\"step\":\"destinations\",\"goal\":\"stream\",\"updatedAt\":\"2026-10-27T12:00:00.000Z\"}",
     "videorc.followSettings.v1": "{\"followFrontApp\":false}",
-    "videorc.livestream.technicalDetails": "open",
     "videorc.livestreamView": "upcoming",
     "videorc.onboardingComplete": "permissions-v1",
     "videorc.orcleListenPromptDismissed": "1",

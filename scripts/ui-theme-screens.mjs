@@ -2,7 +2,8 @@
 //
 // Launches an isolated instance (fresh profile — proves the dark default),
 // captures the requested tabs in dark, flips the theme to light via CDP
-// (localStorage + reload, the same mechanism the toggle persists through),
+// (the UI settings store plus the theme's pre-paint copy, then a reload: the
+// same places the toggle persists to, plan 220 S1.4b),
 // and captures again. PNGs land in VIDEORC_SMOKE_OUTPUT_DIR (/tmp).
 //
 // Usage: node scripts/ui-theme-screens.mjs [tab ...]   (default: studio streaming)
@@ -358,12 +359,12 @@ try {
   }
 
   // Dismiss onboarding for clean captures (fresh profiles always show it).
-  // The Dialog unmounts on Escape/Skip; mutating localStorage alone is
-  // not enough, but a reload after setting the flag never shows it again.
+  // The Dialog unmounts on Escape/Skip; writing the flag alone is not
+  // enough, but a reload after setting it never shows it again.
   if (process.env.VIDEORC_SHOTS_NO_RELOAD !== '1') {
     await cdpEvaluate(
       host,
-      `localStorage.setItem('videorc.onboardingComplete', 'creator-ux-v1'); location.reload(); 'ok'`
+      `window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'creator-ux-v1'); location.reload(); 'ok'`
     )
     await sleep(5000)
     if (process.env.VIDEORC_SHOTS_DEBUG === '1') {
@@ -394,7 +395,7 @@ try {
   await captureCommentsRail(smoke, host, 'dark')
 
   console.log('flipping to light...')
-  await cdpEvaluate(host, `localStorage.setItem('videorc.theme', 'light'); location.reload(); 'ok'`)
+  await cdpEvaluate(host, `window.__videorcUiSettings.setItem('videorc.theme', 'light'); localStorage.setItem('videorc.theme', 'light'); location.reload(); 'ok'`)
   await sleep(6000)
   const lightThemeClass = await cdpEvaluate(host, 'document.documentElement.className')
   console.log(`light root class: "${lightThemeClass}"`)

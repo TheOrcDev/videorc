@@ -699,7 +699,7 @@ async function captureStudioShots(smoke, stage, raise) {
   const { host } = new URL(devtools.replace('ws://', 'http://'))
   await cdpEvaluate(
     host,
-    `localStorage.setItem('videorc.onboardingComplete', 'creator-ux-v1'); location.reload(); 'ok'`
+    `window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'creator-ux-v1'); location.reload(); 'ok'`
   )
   await waitFor(
     async () =>

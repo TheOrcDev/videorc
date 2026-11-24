@@ -150,7 +150,7 @@ try {
   if (!mainTarget) throw new Error('main window target not found')
   const cdp = await CdpClient.connect(mainTarget.webSocketDebuggerUrl)
   await cdp.send('Runtime.evaluate', {
-    expression: `localStorage.setItem('videorc.onboardingComplete', 'creator-ux-v1'); localStorage.setItem('videorc.theme', 'dark'); location.reload()`
+    expression: `window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'creator-ux-v1'); window.__videorcUiSettings.setItem('videorc.theme', 'dark'); localStorage.setItem('videorc.theme', 'dark'); location.reload()`
   })
   await sleep(6000)
 

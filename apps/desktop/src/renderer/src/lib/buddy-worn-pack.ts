@@ -1,5 +1,6 @@
 import type { BuddyPetSummary } from './backend'
 import { buddyFirstPack } from './buddy-pet-view'
+import { uiSettingsStorage } from './ui-settings-storage'
 
 // Which moves the Buddy wore last (plan 174 S3.15a, G-10): Still forgets the
 // pack on the wire (`avatar: { kind: 'still' }`), so switching back to Alive
@@ -8,17 +9,9 @@ import { buddyFirstPack } from './buddy-pet-view'
 
 const KEY_PREFIX = 'videorc.buddyWornPack:'
 
-function localStorageOrNull(): Storage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage
-  } catch {
-    return null
-  }
-}
-
 export function readBuddyWornPack(
   personaId: string,
-  storage: Pick<Storage, 'getItem'> | null = localStorageOrNull()
+  storage: Pick<Storage, 'getItem'> | null = uiSettingsStorage()
 ): string | null {
   try {
     const raw = storage?.getItem(KEY_PREFIX + personaId)
@@ -32,7 +25,7 @@ export function readBuddyWornPack(
 export function writeBuddyWornPack(
   personaId: string,
   packId: string,
-  storage: Pick<Storage, 'setItem'> | null = localStorageOrNull()
+  storage: Pick<Storage, 'setItem'> | null = uiSettingsStorage()
 ): void {
   try {
     storage?.setItem(KEY_PREFIX + personaId, packId)
@@ -48,7 +41,7 @@ export function writeBuddyWornPack(
 export function buddyPackToWear(
   personaId: string,
   packs: readonly BuddyPetSummary[],
-  storage: Pick<Storage, 'getItem'> | null = localStorageOrNull()
+  storage: Pick<Storage, 'getItem'> | null = uiSettingsStorage()
 ): BuddyPetSummary | null {
   const remembered = readBuddyWornPack(personaId, storage)
   return (

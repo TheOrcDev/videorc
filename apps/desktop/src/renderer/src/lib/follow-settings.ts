@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from 'react'
 
+import { uiSettingsStorage } from './ui-settings-storage'
+
 // Plan 210 D10: "Follow the app in front", per device. On by default, and
 // nothing is stored until the streamer changes it (like
 // `privacy-settings.ts`). The Scene list header's switch edits it; S10's
@@ -28,7 +30,7 @@ export function parseFollowSettings(value: unknown): FollowSettings {
 }
 
 export function loadFollowSettings(
-  storage: Pick<Storage, 'getItem'> | undefined = globalThis.localStorage
+  storage: Pick<Storage, 'getItem'> | undefined = uiSettingsStorage()
 ): FollowSettings {
   try {
     const raw = storage?.getItem(FOLLOW_SETTINGS_STORAGE_KEY)
@@ -41,7 +43,7 @@ export function loadFollowSettings(
 /** Stores the settings; the default stores nothing, so a fresh device keeps none. */
 export function saveFollowSettings(
   settings: FollowSettings,
-  storage: Pick<Storage, 'setItem' | 'removeItem'> | undefined = globalThis.localStorage
+  storage: Pick<Storage, 'setItem' | 'removeItem'> | undefined = uiSettingsStorage()
 ): void {
   try {
     if (settings.followFrontApp === DEFAULT_FOLLOW_SETTINGS.followFrontApp)

@@ -273,7 +273,7 @@ async function seedRenderer(smoke) {
       code: `
         const key = 'videorc.captureConfig';
         let current = {};
-        try { current = JSON.parse(localStorage.getItem(key) ?? '{}') ?? {}; } catch {}
+        try { current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}') ?? {}; } catch {}
         // Screen-only on the synthetic source (the dev app has no camera
         // grant), record only, System audio Off until a case turns it on.
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
@@ -281,7 +281,7 @@ async function seedRenderer(smoke) {
         // No microphone (the Studio's None): Windows has no CoreAudio input for
         // VIDEORC_SMOKE_DISABLE_NATIVE_MICROPHONE to drop.
         const sources = { ...(current.sources ?? {}), microphoneId: undefined, microphoneName: undefined, microphoneOff: true };
-        localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, sources, layout, audio, recordEnabled: true, streamEnabled: false }));
+        window.__videorcUiSettings.setItem(key, JSON.stringify({ ...current, video: params.video, sources, layout, audio, recordEnabled: true, streamEnabled: false }));
         ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,

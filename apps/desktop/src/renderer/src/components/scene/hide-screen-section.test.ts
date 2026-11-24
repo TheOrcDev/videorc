@@ -10,6 +10,7 @@ import {
   resetPrivacySettingsForTest
 } from '@/lib/privacy-settings'
 import { HideScreenSection, hideScreenShortcutHint } from './hide-screen-section'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 // Plan 210 S8b (D9, D11, D12): the Scene page's Hide screen section. What
 // viewers see, the key and its home, and on macOS the password-manager hide
@@ -50,7 +51,6 @@ let container: HTMLDivElement
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-  localStorage.clear()
   resetPrivacySettingsForTest()
   openWorkspaceTab.mockReset()
   mocked.apps = []
@@ -63,7 +63,6 @@ afterEach(async () => {
   await act(async () => root.unmount())
   container.remove()
   document.body.innerHTML = ''
-  localStorage.clear()
   resetPrivacySettingsForTest()
   vi.unstubAllGlobals()
 })
@@ -144,7 +143,7 @@ describe('Scene page: Hide screen (plan 210 S8b)', () => {
     ])
     await act(async () => managerSwitch().click())
     expect(getPrivacySettings().hideForPasswordManagers).toBe(false)
-    expect(JSON.parse(localStorage.getItem(PRIVACY_SETTINGS_STORAGE_KEY)!)).toMatchObject({
+    expect(JSON.parse(uiSettingsStorage().getItem(PRIVACY_SETTINGS_STORAGE_KEY)!)).toMatchObject({
       hideForPasswordManagers: false
     })
   })

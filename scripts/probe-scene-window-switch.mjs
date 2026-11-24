@@ -227,7 +227,7 @@ try {
   // The default Clips ring (plan 181) runs a buffer-only session that stops
   // and restarts on every scene apply; it would hide the switch itself. Off.
   await renderer.evaluate(`
-    const current = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}');
+    const current = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}');
     window.__videorcSmokeScenePresets.configure({
       replayBuffer: { ...(current.replayBuffer ?? {}), enabled: false, explicit: true }
     });

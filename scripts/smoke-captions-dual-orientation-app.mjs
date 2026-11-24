@@ -393,7 +393,7 @@ async function seedRendererDualProfile(smoke) {
   await smokeCommand(smoke, 'eval-js', {
     code: `
       let current = {}
-      try { current = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}') } catch {}
+      try { current = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}') } catch {}
       const next = {
         ...current,
         recordEnabled: true,
@@ -402,8 +402,8 @@ async function seedRendererDualProfile(smoke) {
         streaming: { ...current.streaming, ...${JSON.stringify(streamingSettings())} },
         captions: ${JSON.stringify(captionsProfile)}
       }
-      localStorage.setItem('videorc.captureConfig', JSON.stringify(next))
-      localStorage.setItem('videorc.onboardingComplete', 'permissions-v1')
+      window.__videorcUiSettings.setItem('videorc.captureConfig', JSON.stringify(next))
+      window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'permissions-v1')
       ${reloadKeepingSeedJs({ forgetWorkingScene: false, delayMs: 150 })}
       return true
     `
@@ -415,7 +415,7 @@ async function seedRendererDualProfile(smoke) {
     try {
       latest = await smokeCommand(smoke, 'eval-js', {
         code: `
-          const stored = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}')
+          const stored = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}')
           return {
             ready: document.readyState === 'complete',
             burnTarget: stored.captions?.burnTarget,

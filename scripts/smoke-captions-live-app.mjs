@@ -175,7 +175,7 @@ try {
       request(backend, timeoutMs, 'recording.status', {}).catch(() => null),
       smokeCommand(smoke, 'eval-js', {
         code: `
-          const stored = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}')
+          const stored = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}')
           return {
             ready: document.readyState,
             captions: stored.captions,
@@ -676,7 +676,7 @@ async function seedRendererCaptionsProfile(smoke, recordEnabled = true) {
   const seeded = await smokeCommand(smoke, 'eval-js', {
     code: `
       let current = {}
-      try { current = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}') } catch {}
+      try { current = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}') } catch {}
       const next = {
         ...current,
         // Mirror the direct backend record+stream shape so the renderer owns
@@ -695,8 +695,8 @@ async function seedRendererCaptionsProfile(smoke, recordEnabled = true) {
           textSize: 'l'
         }
       }
-      localStorage.setItem('videorc.captureConfig', JSON.stringify(next))
-      localStorage.setItem('videorc.onboardingComplete', 'permissions-v1')
+      window.__videorcUiSettings.setItem('videorc.captureConfig', JSON.stringify(next))
+      window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'permissions-v1')
       // The reload rides the seed's own eval: a second eval could find the
       // renderer's own write already over the seed (plan 0008).
       ${reloadKeepingSeedJs({ forgetWorkingScene: false, delayMs: 150 })}
@@ -727,7 +727,7 @@ async function seedRendererCaptionsProfile(smoke, recordEnabled = true) {
     try {
       latest = await smokeCommand(smoke, 'eval-js', {
         code: `
-          const stored = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}')
+          const stored = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}')
           return {
             ready: document.readyState === 'complete',
             styleId: stored.captions?.styleId,
