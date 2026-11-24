@@ -9,5 +9,6 @@ pub mod layout;
 pub mod program;
 pub mod session;
 pub mod stage_screens;
+pub mod tile;
 pub mod view;
 pub mod wire;
