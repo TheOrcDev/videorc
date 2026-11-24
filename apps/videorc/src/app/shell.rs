@@ -27,6 +27,7 @@ use crate::screens::destinations::DestinationsPanel;
 use crate::screens::go_live::GoLiveDialog;
 use crate::screens::guests::GuestsPanel;
 use crate::screens::output::OutputPanel;
+use crate::screens::sidekick::SidekickScreen;
 use crate::screens::sources::SourcesPanel;
 use crate::screens::studio::{StudioPage, transport::OpenPage};
 
@@ -85,6 +86,8 @@ pub struct Shell {
     destinations: Entity<DestinationsPanel>,
     /// Phase 3: Guests ⌘7.
     guests: Entity<GuestsPanel>,
+    /// Phase 3: Sidekick ⌘9.
+    sidekick: Entity<SidekickScreen>,
     /// Phase 3: Go Live confirmation (over any page).
     go_live: Entity<GoLiveDialog>,
     settings: Entity<SettingsScreen>,
@@ -107,6 +110,7 @@ impl Shell {
         output: Entity<OutputPanel>,
         destinations: Entity<DestinationsPanel>,
         guests: Entity<GuestsPanel>,
+        sidekick: Entity<SidekickScreen>,
         go_live: Entity<GoLiveDialog>,
         settings: Entity<SettingsScreen>,
         health: Entity<crate::screens::health::HealthScreen>,
@@ -173,6 +177,7 @@ impl Shell {
         cx.observe(&output, |_, _, cx| cx.notify()).detach();
         cx.observe(&destinations, |_, _, cx| cx.notify()).detach();
         cx.observe(&guests, |_, _, cx| cx.notify()).detach();
+        cx.observe(&sidekick, |_, _, cx| cx.notify()).detach();
         cx.observe(&go_live, |_, _, cx| cx.notify()).detach();
         // Both routes use the same lifecycle, title and focus updates.
         cx.subscribe_in(&studio, window, |this, _, open: &OpenPage, window, cx| {
@@ -220,6 +225,7 @@ impl Shell {
             output,
             destinations,
             guests,
+            sidekick,
             go_live,
             settings,
             health,
@@ -367,6 +373,7 @@ impl Render for Shell {
         let output = self.output.clone();
         let destinations = self.destinations.clone();
         let guests = self.guests.clone();
+        let sidekick = self.sidekick.clone();
         div()
             .size_full()
             .on_mouse_down(
@@ -458,6 +465,15 @@ impl Render for Shell {
                             .gap(px(8.))
                             .child(div().type_scale(text::SECTION).child(page.label()))
                             .child(guests)
+                    } else if page == PageId::Ai {
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .child(sidekick)
                     } else {
                         div()
                             .flex_1()

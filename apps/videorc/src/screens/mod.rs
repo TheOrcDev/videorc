@@ -11,6 +11,7 @@ pub mod notes;
 pub mod notifications;
 pub mod output;
 pub mod settings;
+pub mod sidekick;
 pub mod sources;
 
 // The tabs, badges and Sidekick's cards are read by the kit's Tabs and Badge
