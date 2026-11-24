@@ -381,7 +381,10 @@ pub fn simulcast_video_of(capture: &serde_json::Value, recording: &Video) -> Vid
 }
 
 /// The saved streaming settings the plan reads.
-fn streaming_of<'a>(capture: &'a serde_json::Value, targets: &'a [Target]) -> Streaming<'a> {
+pub(crate) fn streaming_of<'a>(
+    capture: &'a serde_json::Value,
+    targets: &'a [Target],
+) -> Streaming<'a> {
     let streaming = &capture["streaming"];
     Streaming {
         enabled: streaming["enabled"].as_bool().unwrap_or(false),

@@ -43,6 +43,7 @@
 pub mod accounts;
 pub mod captions_preflight;
 pub mod chat_commands;
+pub mod cloud_outputs;
 pub mod cloud_show;
 pub mod cloud_status;
 pub mod cloud_view;

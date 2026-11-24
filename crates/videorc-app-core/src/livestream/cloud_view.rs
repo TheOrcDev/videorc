@@ -626,6 +626,42 @@ pub fn cloud_show_cap_toast(
     ))
 }
 
+/// `cloudAllowancePastToast` (plan 222 U5): once per show, when it first
+/// runs past the month's cloud hours. The title and the description.
+pub fn cloud_allowance_past_toast(
+    previous: Option<&CloudStatus>,
+    next: &CloudStatus,
+) -> Option<(String, &'static str)> {
+    let past = next.allowance_past?.seconds;
+    let show_id = &next.show.as_ref()?.id;
+    if show_id.is_empty() {
+        return None;
+    }
+    if previous.is_some_and(|previous| {
+        previous
+            .show
+            .as_ref()
+            .is_some_and(|show| &show.id == show_id)
+            && previous.allowance_past.is_some()
+    }) {
+        return None;
+    }
+    Some((
+        format!(
+            "You're {} past this month's cloud hours",
+            format_cloud_countdown(past as f64)
+        ),
+        CLOUD_ALLOWANCE_PAST_DESCRIPTION,
+    ))
+}
+pub const CLOUD_ALLOWANCE_PAST_DESCRIPTION: &str = "The show keeps going.";
+
+/// `CLOUD_ANNOUNCE_TOAST` (plan 222 U1): the once-per-account notice, with
+/// "Open Destinations".
+pub const CLOUD_ANNOUNCE_TITLE: &str = "Videorc Cloud is on";
+pub const CLOUD_ANNOUNCE_DESCRIPTION: &str =
+    "Your stream stays on air if this computer drops. Set it up in Destinations.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1023,6 +1059,27 @@ mod tests {
         );
         assert_eq!(
             cloud_show_cap_toast(None, &managed, at("2035-01-01T11:30:00Z"), &mut warned),
+            None
+        );
+    }
+
+    #[test]
+    fn running_past_the_hours_is_said_once_per_show() {
+        let past = |show: &str| {
+            CloudStatus::from_value(&serde_json::json!({
+                "show": { "id": show },
+                "allowancePast": { "seconds": 90 },
+            }))
+            .expect("a status")
+        };
+        let first = past("show1");
+        let (title, description) = cloud_allowance_past_toast(None, &first).expect("a toast");
+        assert!(title.starts_with("You're ") && title.ends_with(" past this month's cloud hours"));
+        assert_eq!(description, "The show keeps going.");
+        assert_eq!(cloud_allowance_past_toast(Some(&first), &first), None);
+        assert!(cloud_allowance_past_toast(Some(&first), &past("show2")).is_some());
+        assert_eq!(
+            cloud_allowance_past_toast(None, &CloudStatus::default()),
             None
         );
     }

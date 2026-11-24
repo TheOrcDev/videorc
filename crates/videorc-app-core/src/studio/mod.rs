@@ -80,6 +80,7 @@ pub mod chat_commands_store;
 pub mod clips;
 mod clips_actions;
 pub mod clips_ring;
+pub mod cloud;
 pub mod families;
 pub mod go_live;
 pub mod health;
@@ -208,7 +209,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 27] = [
+pub const STUDIO_EVENTS: [&str; 28] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -248,6 +249,8 @@ pub const STUDIO_EVENTS: [&str; 27] = [
     scheduled::CHANGED_EVENT,
     // S1.6c: X's playback check (`go_live`).
     go_live::X_PLAYBACK_EVENT,
+    // S1.6c: Videorc Cloud's status (`cloud`).
+    cloud::CHANGED_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -888,6 +891,8 @@ pub struct Studio<B: StudioBackend> {
     /// S1.6c: what the running livestream prepared on its platforms; the
     /// stop ends and completes it.
     go_live_streaming: Mutex<Option<Value>>,
+    /// S1.6c: Videorc Cloud's status, apart from the snapshot.
+    cloud_tx: watch::Sender<cloud::CloudState>,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -949,6 +954,7 @@ impl<B: StudioBackend> Studio<B> {
             watch::channel(chat_commands_store::ChatCommandsStore::default());
         let (scheduled_tx, _) = watch::channel(scheduled::ScheduledState::default());
         let (go_live_tx, _) = watch::channel(go_live::GoLiveState::default());
+        let (cloud_tx, _) = watch::channel(cloud::CloudState::default());
         Self {
             backend,
             config,
@@ -976,6 +982,7 @@ impl<B: StudioBackend> Studio<B> {
             scheduled_tx,
             go_live_tx,
             go_live_streaming: Mutex::new(None),
+            cloud_tx,
         }
     }
 
@@ -1265,6 +1272,7 @@ impl<B: StudioBackend> Studio<B> {
             BackendEvent::Untyped { event, payload } => {
                 // S1.6c: the live area's events are its own.
                 if self.handle_chat_commands_event(&event, &payload)
+                    || self.handle_cloud_event(&event, &payload)
                     || self.handle_platforms_event(&event, &payload).await
                     || self.handle_details_event(&event, &payload).await
                     || self.handle_scheduled_event(&event).await
@@ -1555,11 +1563,12 @@ impl<B: StudioBackend> Studio<B> {
         // S1.6a part 6c: the Clips ring's state, and the launch's arming.
         self.read_replay_status(generation).await;
         // S1.6c: the platform accounts, Stream details and Discord, the chat
-        // commands, and Upcoming.
+        // commands, Upcoming, and Videorc Cloud.
         self.read_platforms().await;
         self.read_details().await;
         self.read_chat_commands().await;
         self.read_scheduled().await;
+        self.read_cloud().await;
         // The other areas' first reads (the agents line, takeovers and the
         // soundboard, chat, Sidekick, destinations, chat commands, scheduled
         // streams, the performance check, Hide screen, captions, the working
