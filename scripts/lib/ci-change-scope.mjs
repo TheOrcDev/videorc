@@ -94,7 +94,25 @@ export const RUST_READS_DESKTOP_FILES = Object.freeze([
   'apps/desktop/src/renderer/src/lib/settings-tabs.ts',
   'apps/desktop/src/renderer/src/lib/buddy-tabs.ts',
   'apps/desktop/src/renderer/src/lib/avatar-tabs.ts',
-  'apps/desktop/src/renderer/src/lib/livestream-tabs.ts'
+  'apps/desktop/src/renderer/src/lib/livestream-tabs.ts',
+  // buddy::copy's words are checked against these (S1.6e part 2).
+  'apps/desktop/src/renderer/src/components/buddy-avatar-section.tsx',
+  'apps/desktop/src/renderer/src/components/buddy-consent-dialog.tsx',
+  'apps/desktop/src/renderer/src/components/buddy-library-section.tsx',
+  'apps/desktop/src/renderer/src/components/buddy-look-section.tsx',
+  'apps/desktop/src/renderer/src/components/buddy-motion-section.tsx',
+  'apps/desktop/src/renderer/src/components/buddy-persona-section.tsx',
+  'apps/desktop/src/renderer/src/components/cohost-settings-section.tsx',
+  'apps/desktop/src/renderer/src/components/cohost-status.tsx',
+  'apps/desktop/src/renderer/src/components/tabs/avatar-tab.tsx',
+  'apps/desktop/src/renderer/src/components/tabs/buddy-tab.tsx',
+  'apps/desktop/src/renderer/src/lib/buddy-auto-chat-view.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-create-gate.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-library-view.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-onboarding-copy.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-persona-view.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-tab-view.ts',
+  'apps/desktop/src/renderer/src/lib/cohost-view.ts'
 ])
 
 export function isRustReachableDesktopPath(path) {
