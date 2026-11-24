@@ -1,0 +1,592 @@
+{
+  "name": "Fixture Collection",
+  "sources": [
+    {
+      "name": "BatMic",
+      "kind": "microphone",
+      "obsKind": "coreaudio_input_capture",
+      "volume": 1
+    },
+    {
+      "name": "VS Code",
+      "kind": "application",
+      "obsKind": "screen_capture",
+      "applicationHint": "com.microsoft.VSCode"
+    },
+    {
+      "name": "Browser",
+      "kind": "application",
+      "obsKind": "screen_capture",
+      "applicationHint": "app.zen-browser.zen"
+    },
+    {
+      "name": "Terminal",
+      "kind": "application",
+      "obsKind": "screen_capture",
+      "applicationHint": "com.googlecode.iterm2"
+    },
+    {
+      "name": "Batarang",
+      "kind": "camera",
+      "obsKind": "av_capture_input",
+      "deviceName": "MacBook Pro Camera",
+      "presetWidth": 3840,
+      "presetHeight": 2160,
+      "volume": 1
+    },
+    {
+      "name": "Batarang wide",
+      "kind": "camera",
+      "obsKind": "av_capture_input",
+      "deviceName": "iPhone Camera",
+      "volume": 1
+    },
+    {
+      "name": "Batarang Shorts Full",
+      "kind": "camera",
+      "obsKind": "av_capture_input",
+      "deviceName": "Cam Link 4K",
+      "volume": 1
+    },
+    {
+      "name": "mail",
+      "kind": "application",
+      "obsKind": "screen_capture",
+      "applicationHint": "com.apple.mail"
+    },
+    {
+      "name": "Whole Monitor",
+      "kind": "display",
+      "obsKind": "screen_capture"
+    },
+    {
+      "name": "batarang square",
+      "kind": "camera",
+      "obsKind": "av_capture_input",
+      "deviceName": "iPhone Camera",
+      "volume": 1
+    },
+    {
+      "name": "Cursor ai",
+      "kind": "application",
+      "obsKind": "screen_capture",
+      "applicationHint": "com.todesktop.230313mzl4w4u92"
+    },
+    {
+      "name": "BatMickey",
+      "kind": "microphone",
+      "obsKind": "coreaudio_input_capture",
+      "volume": 1
+    },
+    {
+      "name": "bg browser",
+      "kind": "display",
+      "obsKind": "screen_capture"
+    },
+    {
+      "name": "macOS Screen Capture",
+      "kind": "display",
+      "obsKind": "screen_capture"
+    },
+    {
+      "name": "The Bat",
+      "kind": "microphone",
+      "obsKind": "coreaudio_input_capture",
+      "volume": 1
+    },
+    {
+      "name": "Shure",
+      "kind": "microphone",
+      "obsKind": "coreaudio_input_capture",
+      "volume": 1
+    },
+    {
+      "name": "macOS Screen Capture 2",
+      "kind": "application",
+      "obsKind": "screen_capture",
+      "applicationHint": "app.zen-browser.zen"
+    },
+    {
+      "name": "Audio Input Capture",
+      "kind": "microphone",
+      "obsKind": "coreaudio_input_capture",
+      "volume": 1
+    },
+    {
+      "name": "macOS Screen Capture 3",
+      "kind": "display",
+      "obsKind": "screen_capture"
+    },
+    {
+      "name": "dji",
+      "kind": "microphone",
+      "obsKind": "coreaudio_input_capture",
+      "volume": 1
+    },
+    {
+      "name": "Audio Input Capture 2",
+      "kind": "microphone",
+      "obsKind": "coreaudio_input_capture",
+      "volume": 1
+    },
+    {
+      "name": "MIc",
+      "kind": "microphone",
+      "obsKind": "coreaudio_input_capture",
+      "volume": 1
+    }
+  ],
+  "scenes": [
+    {
+      "name": "YouTube Shorts",
+      "current": false,
+      "items": [
+        {
+          "sourceName": "VS Code",
+          "visible": false,
+          "x": -727,
+          "y": -213,
+          "scaleX": 1.1000827550888062,
+          "scaleY": 1.1003055572509766,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "BatMic",
+          "visible": false,
+          "x": 257.5,
+          "y": 0,
+          "scaleX": 1.0997962951660156,
+          "scaleY": 1.0997962951660156,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "Terminal",
+          "visible": false,
+          "x": 257.5,
+          "y": -135,
+          "scaleX": 1.223086953163147,
+          "scaleY": 1.2229918241500854,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "Batarang",
+          "visible": false,
+          "x": -227.5,
+          "y": 1178,
+          "scaleX": 1.141611933708191,
+          "scaleY": 1.1415481567382812,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "mail",
+          "visible": false,
+          "x": -1399.5,
+          "y": 464,
+          "scaleX": 1.0550625324249268,
+          "scaleY": 1.0549980401992798,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 385,
+          "cropRight": 0,
+          "cropBottom": 410
+        },
+        {
+          "sourceName": "Batarang Shorts Full",
+          "visible": true,
+          "x": -204,
+          "y": 0,
+          "scaleX": 1.9550025463104248,
+          "scaleY": 1.9551938772201538,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "Cursor ai",
+          "visible": false,
+          "x": -766,
+          "y": -82.5,
+          "scaleX": 1.0997962951660156,
+          "scaleY": 1.0997962951660156,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "Browser",
+          "visible": true,
+          "x": 881.5,
+          "y": 47,
+          "scaleX": 1.3704493045806885,
+          "scaleY": 1.370324969291687,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 221,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "Shure",
+          "visible": true,
+          "x": 1312.5,
+          "y": 0,
+          "scaleX": 1.125,
+          "scaleY": 1.125,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "Audio Input Capture 2",
+          "visible": true,
+          "x": 1312.5,
+          "y": 0,
+          "scaleX": 1.125,
+          "scaleY": 1.125,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        }
+      ]
+    },
+    {
+      "name": "Long",
+      "current": false,
+      "items": [
+        {
+          "sourceName": "BatMic",
+          "visible": false,
+          "x": 257,
+          "y": 0,
+          "scaleX": 1.099796175956726,
+          "scaleY": 1.099796175956726,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "VS Code",
+          "visible": false,
+          "x": 257,
+          "y": 0,
+          "scaleX": 1.1676743030548096,
+          "scaleY": 1.1677110195159912,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 71,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "Terminal",
+          "visible": false,
+          "x": 257,
+          "y": -233,
+          "scaleX": 1.39656662940979,
+          "scaleY": 1.3965845108032227,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "Browser",
+          "visible": false,
+          "x": -76,
+          "y": 254,
+          "scaleX": 1.094068169593811,
+          "scaleY": 1.0941030979156494,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 35,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "bg browser",
+          "visible": false,
+          "x": 257,
+          "y": 0,
+          "scaleX": 2.4264252185821533,
+          "scaleY": 2.4265167713165283,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 23,
+          "cropRight": 0,
+          "cropBottom": 78
+        },
+        {
+          "sourceName": "batarang square",
+          "visible": false,
+          "x": 2836,
+          "y": 1740,
+          "scaleX": 0.388938307762146,
+          "scaleY": 0.3890020251274109,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "Batarang wide",
+          "visible": false,
+          "x": 200,
+          "y": 65,
+          "scaleX": 2.2293779850006104,
+          "scaleY": 2.2291243076324463,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "BatMickey",
+          "visible": false,
+          "x": 257,
+          "y": 0,
+          "scaleX": 1.099796175956726,
+          "scaleY": 1.099796175956726,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "Whole Monitor",
+          "visible": true,
+          "x": -185,
+          "y": -38,
+          "scaleX": 1.1526042222976685,
+          "scaleY": 1.1523077487945557,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 49,
+          "cropRight": 0,
+          "cropBottom": 161
+        },
+        {
+          "sourceName": "The Bat",
+          "visible": true,
+          "x": 0,
+          "y": 0,
+          "scaleX": 1,
+          "scaleY": 1,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "macOS Screen Capture 2",
+          "visible": true,
+          "x": 60,
+          "y": -53,
+          "scaleX": 1.25,
+          "scaleY": 1.25,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "macOS Screen Capture 3",
+          "visible": true,
+          "x": 0,
+          "y": 0,
+          "scaleX": 1.5,
+          "scaleY": 1.5,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "Batarang",
+          "visible": true,
+          "x": 2584,
+          "y": 162,
+          "scaleX": 0.38854163885116577,
+          "scaleY": 0.38842591643333435,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "dji",
+          "visible": true,
+          "x": 0,
+          "y": 0,
+          "scaleX": 1,
+          "scaleY": 1,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        }
+      ]
+    },
+    {
+      "name": "zen",
+      "current": false,
+      "items": [
+        {
+          "sourceName": "macOS Screen Capture",
+          "visible": true,
+          "x": 257,
+          "y": 0,
+          "scaleX": 1.0997962951660156,
+          "scaleY": 1.0997962951660156,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        }
+      ]
+    },
+    {
+      "name": "talking head",
+      "current": false,
+      "items": [
+        {
+          "sourceName": "Audio Input Capture",
+          "visible": true,
+          "x": 0,
+          "y": 0,
+          "scaleX": 1,
+          "scaleY": 1,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        },
+        {
+          "sourceName": "Sony",
+          "visible": true,
+          "x": 0,
+          "y": 0,
+          "scaleX": 1,
+          "scaleY": 1,
+          "boundsType": 2,
+          "boundsX": 3840,
+          "boundsY": 2160,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        }
+      ]
+    },
+    {
+      "name": "voice",
+      "current": true,
+      "items": [
+        {
+          "sourceName": "MIc",
+          "visible": true,
+          "x": 0,
+          "y": 0,
+          "scaleX": 1,
+          "scaleY": 1,
+          "boundsType": 0,
+          "boundsX": 0,
+          "boundsY": 0,
+          "cropLeft": 0,
+          "cropTop": 0,
+          "cropRight": 0,
+          "cropBottom": 0
+        }
+      ]
+    }
+  ],
+  "hasDesktopAudio": false
+}
