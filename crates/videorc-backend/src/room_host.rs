@@ -20,7 +20,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use livekit::prelude::{DisconnectReason, Room, RoomEvent, RoomOptions};
+// The room's reason (LiveKit's protocol enum), not the participant's.
+use livekit::DisconnectReason;
+use livekit::prelude::{Room, RoomEvent, RoomOptions};
 use tokio::sync::{broadcast, oneshot};
 
 use crate::cloud_talk::{CloudRoomClientState, RoomClientReportParams, TAKEN_OVER_DETAIL};
