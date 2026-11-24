@@ -15,10 +15,21 @@
 //!   reads, with Videorc Cloud's show and the stream [`watchdog`]'s top
 //!   alert.
 //!
+//! - [`plan`]: the stream output plan (each leg's quality, the shared or
+//!   separate encode) and the output check's request.
+//! - [`ready`]: Ready to go live, the Go Live panel's checklist.
+//! - [`details`]: Stream details' draft and its checks.
+//! - [`discord`]: Destinations → Discord.
+//! - [`golive`]: the Go Live dialog as data and its confirm gate, with
+//!   [`go_live_copy`]'s words, [`go_live_privacy`]'s privacy step and
+//!   [`captions_preflight`]'s captions rules.
+//! - [`lifecycle`]: each platform's prepare, start and end steps, with
+//!   [`lifecycle_copy`]'s status lines.
+//!
 //! Plan 260 S1.6c lands this area in parts, caught up with Electron: the
-//! destinations first (this part); the Go Live dialog, the output plan,
-//! Ready to go live and Stream details next; then Upcoming and the
-//! schedule, and Videorc Cloud.
+//! destinations; the Go Live dialog, the output plan, Ready to go live and
+//! Stream details (this part); then Upcoming and the schedule, the Studio's
+//! drivers, and Videorc Cloud.
 //!
 //! The platform accounts themselves live in the Studio
 //! ([`crate::studio::Studio::platforms`]), which reads them on each
@@ -26,9 +37,19 @@
 //! (connect, disconnect, the stream key through the backend's secrets).
 
 pub mod accounts;
+pub mod captions_preflight;
 pub mod chat_commands;
 pub mod copy;
+pub mod details;
+pub mod discord;
+pub mod go_live_copy;
+pub mod go_live_privacy;
+pub mod golive;
+pub mod lifecycle;
+pub mod lifecycle_copy;
 pub mod on_air;
+pub mod plan;
+pub mod ready;
 pub mod setup;
 pub mod targets;
 pub mod watchdog;
@@ -113,4 +134,26 @@ impl PlatformsState {
     pub fn credentials(&self, platform: &str) -> Option<&ProviderCredentials> {
         self.credentials.iter().find(|c| c.platform == platform)
     }
+}
+
+/// S3.5b: Stream details, the output check and Discord, apart from the
+/// snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DetailsState {
+    /// The draft as edited (the backend's until the first edit).
+    pub draft: Option<details::MetadataDraft>,
+    pub validation: Option<details::Validation>,
+    pub save_pending: bool,
+    /// The category search's results (id, name), and what was searched.
+    pub category_results: Vec<(String, String)>,
+    pub category_pending: bool,
+    pub category_searched: Option<String>,
+    /// The output check (`stream.output.topology.probe`): the request's
+    /// key, and its answer or failure.
+    pub topology: ready::Topology,
+    pub discord: Option<discord::Snapshot>,
+    pub discord_preview: Option<discord::Preview>,
+    pub discord_error: Option<String>,
+    /// The announcement failure already toasted (`discordFailureToastedAt`).
+    pub discord_toasted_at: Option<String>,
 }

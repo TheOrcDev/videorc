@@ -451,6 +451,8 @@ pub fn choose_stream_safe(quality: &str) -> String {
     format!("{quality} · choose a stream-safe preset")
 }
 pub const VARIES_BY_DESTINATION: &str = "Varies by destination";
+/// The Captions row's detail when a captioned stream fits.
+pub const ON: &str = "On";
 pub const RECORDING: &str = "Recording";
 pub fn matches_the_stream(quality: &str) -> String {
     format!("{quality} · matches the stream")
@@ -472,27 +474,12 @@ pub const FFMPEG: &str = "FFmpeg";
 pub const MISSING: &str = "Missing";
 /// `videoProfileCompatibility`'s warning (lib/capture.ts).
 pub const FOUR_K_RECORDING_WARNING: &str = "4K local recording while livestreaming is known to drop recorded video to ~8fps (audio keeps running). Until the split-output fix ships, record at 1080p/2K while streaming, stream without local 4K recording, or record 4K without streaming.";
-pub const ENCODER: &str = "Encoder";
 pub const STREAM: &str = "Stream";
-pub fn requested(effective: &str, requested: &str) -> String {
-    format!("{effective} (requested {requested})")
-}
-pub const BADGE_READY: &str = "Ready";
-pub const BADGE_UNKNOWN: &str = "Unknown";
-pub const BADGE_FALLBACK: &str = "Fallback";
 
 // --- S3.5e: the stream on air (`go-live-panel.tsx`: `LiveStreamRow`,
-// `streamHealthBadge`, `streamHealthDescription`) ---
+// `streamHealthDescription`) ---
 
 pub const BADGE_HEALTHY: &str = "Healthy";
-/// `streamHealthBadge`'s other verdicts: the attribution, capitalised.
-pub const BADGE_DEVICE: &str = "Device";
-pub const BADGE_AUDIO: &str = "Audio";
-pub const BADGE_CAPTURE: &str = "Capture";
-pub const BADGE_RENDER: &str = "Render";
-pub const BADGE_ENCODER: &str = "Encoder";
-pub const BADGE_NETWORK: &str = "Network";
-pub const BADGE_PREVIEW: &str = "Preview";
 pub const LIVE_DEVICE: &str = "A disconnected capture device is interrupting the stream.";
 pub const LIVE_AUDIO: &str = "Audio capture is dropping data before the stream encode.";
 pub const LIVE_CHOPPY: &str = "The stream is skipping frames that could not be sent in time, so viewers see a stutter. The recording is unaffected.";
@@ -505,17 +492,6 @@ pub const LIVE_NETWORK: &str = "Media is healthy, but delivery or a destination 
 pub const LIVE_PREVIEW: &str = "The stream is healthy; only the local preview is degraded.";
 pub const LIVE_HEALTHY: &str = "Media and delivery are healthy.";
 pub const LIVE_UNKNOWN: &str = "Waiting for enough evidence to judge the stream.";
-pub const BITRATE: &str = "Bitrate";
-pub const ENCODER_SPEED: &str = "Encoder speed";
-pub const DROPPED_FRAMES: &str = "Dropped frames";
-/// `formatDeliveredFps`: "21 of 30 fps".
-pub fn delivered_fps(delivered: i64, target: &str) -> String {
-    format!("{delivered} of {target} fps")
-}
-/// `formatLoweredBitrate`: "4.8 of 6 Mbps".
-pub fn lowered_bitrate(current: &str, chosen: &str) -> String {
-    format!("{current} of {chosen} Mbps")
-}
 
 // --- S3.5b: Discord (`discord-section.tsx`, `lib/discord-announce.ts`) ---
 

@@ -41,6 +41,8 @@ pub struct Target {
     pub status: Option<TargetStatus>,
     pub scheduled_event_id: Option<String>,
     pub scheduled_event_title: Option<String>,
+    /// The scheduled event's privacy as saved when it was prepared.
+    pub scheduled_privacy: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
