@@ -53,7 +53,9 @@ use super::{
 };
 use crate::desktop::permissions::MediaAccessSnapshot;
 use crate::notices::{self, NoticeCommand};
-use crate::user_error::{UserErrorContext, backend_error_toast, toast_offline};
+use crate::user_error::{
+    UserErrorContext, backend_error_toast, backend_error_toast_without_context, toast_offline,
+};
 
 /// `replay.status`: the ring's state, read at the bootstrap.
 pub const REPLAY_STATUS_METHOD: &str = "replay.status";
@@ -336,6 +338,18 @@ impl<B: StudioBackend> Drop for ClipsOrientationHold<'_, B> {
     }
 }
 
+/// The ring's Stop is answered (`stop_answered`) however its request ends:
+/// answered, failed, or dropped with the future that ran it. Electron's
+/// promise can't be dropped; a Rust future can, and a "stopping" left set
+/// counts as a start in flight forever.
+struct ClipsStopAnswer<'a, B: StudioBackend>(&'a Studio<B>);
+
+impl<B: StudioBackend> Drop for ClipsStopAnswer<'_, B> {
+    fn drop(&mut self) {
+        self.0.lock().clips.ring.stop_answered();
+    }
+}
+
 impl<B: StudioBackend> Studio<B> {
     /// The previews' last status, read apart from the Studio's lock.
     pub(super) fn clips_previews(&self) -> (Option<Value>, Option<Value>) {
@@ -487,8 +501,12 @@ impl<B: StudioBackend> Studio<B> {
                 }
                 ClipsCommand::Start => self.start_ring().await,
                 ClipsCommand::Stop => {
+                    // The ring's "stopping" clears however the Stop ends,
+                    // the caller's future dropped during `session.stop`
+                    // included (a layout transaction's step-aside runs it
+                    // inline); left set, the ring would never start again.
+                    let _answered = ClipsStopAnswer(self);
                     self.stop_buffer_only_session().await;
-                    self.lock().clips.ring.stop_answered();
                     Vec::new()
                 }
                 ClipsCommand::RestartForSources {
@@ -679,10 +697,24 @@ impl<B: StudioBackend> Studio<B> {
                     .await;
             }
             Err(error) if is_scene_reload_superseded(&error) => {}
-            Err(error) => self.config.logger.warn(format!(
-                "[replay-buffer] the scene reload before the ring failed: {} ({})",
-                error.message, error.code
-            )),
+            Err(error) => self.report_ring_reload_failure(&error),
+        }
+    }
+
+    /// `restartReplayForSources`'s `.catch`: the failed reload is logged,
+    /// and reported when nothing records (`isActiveRecordingState`), so the
+    /// scene doesn't silently stay on the old sources.
+    fn report_ring_reload_failure(&self, error: &crate::client::RpcError) {
+        self.config.logger.warn(format!(
+            "[replay-buffer] the scene reload before the ring failed: {} ({})",
+            error.message, error.code
+        ));
+        if self.lock().session.is_active() {
+            return;
+        }
+        let connected = self.is_connected();
+        if let Some(command) = backend_error_toast_without_context(error, connected) {
+            self.post(vec![command]);
         }
     }
 
