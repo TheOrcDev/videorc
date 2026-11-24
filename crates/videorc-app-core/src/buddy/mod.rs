@@ -11,6 +11,7 @@
 //! reports, Clean cut's page and jobs, onboarding, the pet store and the
 //! page store.
 
+pub mod chat;
 pub mod clean_cut_drafts;
 pub mod clean_cut_review;
 pub mod community;
