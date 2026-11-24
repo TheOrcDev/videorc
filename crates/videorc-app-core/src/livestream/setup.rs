@@ -924,6 +924,11 @@ pub enum Question {
         webhook_id: String,
         name: Option<String>,
     },
+    /// S3.5d: cancel a scheduled stream on its platform, or move a draft (one
+    /// the platform never got) to Past.
+    CancelScheduled {
+        event: Box<super::scheduled::Event>,
+    },
 }
 
 /// The question's words.
@@ -934,6 +939,8 @@ pub struct QuestionView {
     pub confirm: String,
     pub destructive: bool,
     pub warning: Option<String>,
+    /// The button that keeps things as they are; `None` is "Cancel".
+    pub cancel: Option<String>,
 }
 
 /// `requestManualKeySave`: what a Save (or Return) does. `Ok(None)` saves at
@@ -996,6 +1003,7 @@ pub fn question_view(question: &Question, list: &[Target]) -> Option<QuestionVie
                     confirm: copy::replace_confirm(credential),
                     destructive: warning.is_some(),
                     warning: warning.clone(),
+                    cancel: None,
                 }
             } else {
                 QuestionView {
@@ -1004,6 +1012,7 @@ pub fn question_view(question: &Question, list: &[Target]) -> Option<QuestionVie
                     confirm: copy::save_confirm(credential),
                     destructive: warning.is_some(),
                     warning: warning.clone(),
+                    cancel: None,
                 }
             })
         }
@@ -1024,6 +1033,7 @@ pub fn question_view(question: &Question, list: &[Target]) -> Option<QuestionVie
                 confirm: copy::remove_confirm(credential),
                 destructive: true,
                 warning: None,
+                cancel: None,
             })
         }
         Question::Disconnect { platform } => {
@@ -1038,6 +1048,7 @@ pub fn question_view(question: &Question, list: &[Target]) -> Option<QuestionVie
                 confirm: copy::disconnect_confirm(name),
                 destructive: true,
                 warning: None,
+                cancel: None,
             })
         }
         Question::YouTubeConsent => Some(QuestionView {
@@ -1046,6 +1057,7 @@ pub fn question_view(question: &Question, list: &[Target]) -> Option<QuestionVie
             confirm: copy::CONTINUE_TO_GOOGLE.into(),
             destructive: false,
             warning: None,
+            cancel: None,
         }),
         Question::RemoveWebhook { name, .. } => Some(QuestionView {
             title: match name {
@@ -1056,7 +1068,32 @@ pub fn question_view(question: &Question, list: &[Target]) -> Option<QuestionVie
             confirm: copy::REMOVE_WEBHOOK.into(),
             destructive: true,
             warning: None,
+            cancel: None,
         }),
+        Question::CancelScheduled { event } => {
+            use super::{scheduled, scheduled_copy};
+            let provider = event.provider();
+            let label = scheduled::provider_label(provider);
+            Some(if event.provider_event_id.is_some() {
+                QuestionView {
+                    title: scheduled_copy::cancel_title(label, scheduled::provider_noun(provider)),
+                    description: scheduled_copy::cancel_description(label),
+                    confirm: scheduled_copy::CANCEL_EVENT.into(),
+                    destructive: true,
+                    warning: None,
+                    cancel: Some(scheduled_copy::KEEP_EVENT.into()),
+                }
+            } else {
+                QuestionView {
+                    title: scheduled_copy::MOVE_DRAFT_TO_PAST.into(),
+                    description: scheduled_copy::draft_description(label),
+                    confirm: scheduled_copy::MOVE_TO_PAST.into(),
+                    destructive: true,
+                    warning: None,
+                    cancel: Some(scheduled_copy::KEEP_DRAFT.into()),
+                }
+            })
+        }
     }
 }
 
