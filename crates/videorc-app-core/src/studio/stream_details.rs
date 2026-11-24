@@ -414,24 +414,37 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     /// `probeStreamOutputTopology`: asks the backend once per request (a
-    /// settled answer for the same request stands unless `force`); the
-    /// last request wins.
-    pub async fn check_stream_output(&self, params: Value, force: bool) {
+    /// settled answer for the same request stands unless `force`, and a
+    /// check already running for it is joined); the last request wins.
+    /// Answers this request's settled check (`Ready` or `Failed`), or
+    /// `None` when it couldn't settle: offline, superseded by another
+    /// request, or reset. Go Live reads `None` as a check that didn't pass.
+    pub async fn check_stream_output(&self, params: Value, force: bool) -> Option<Topology> {
         let key = crate::livestream::ready::probe_key(&params);
         let current = self.details_now().topology;
+        let in_flight = matches!(&current, Topology::Pending { key: pending } if *pending == key);
+        if !force && in_flight {
+            return self.join_output_check(&key).await;
+        }
         if !force && current.key() == Some(key.as_str()) {
-            return;
+            return Some(current);
         }
         if !self.is_connected() {
-            return;
+            return None;
         }
         self.edit_details(|state| {
             state.topology = Topology::Pending { key: key.clone() };
         });
+        let mut running = RunningCheck {
+            studio: self,
+            key: key.clone(),
+            settled: false,
+        };
         let answer = self
             .backend
             .livestream_request(methods::TOPOLOGY_PROBE, params)
             .await;
+        running.settled = true;
         self.edit_details(|state| {
             if state.topology.key() != Some(key.as_str()) {
                 return;
@@ -446,6 +459,54 @@ impl<B: StudioBackend> Studio<B> {
                     message: error.message,
                 },
             };
+        });
+        settled_check(&self.details_now().topology, &key)
+    }
+
+    /// The check running for `key`, waited for.
+    async fn join_output_check(&self, key: &str) -> Option<Topology> {
+        let mut details = self.details();
+        let state = details
+            .wait_for(|state| {
+                !matches!(&state.topology, Topology::Pending { key: pending } if pending == key)
+            })
+            .await
+            .ok()?
+            .clone();
+        settled_check(&state.topology, key)
+    }
+}
+
+/// `topology` when it is `key`'s settled check.
+fn settled_check(topology: &Topology, key: &str) -> Option<Topology> {
+    match topology {
+        Topology::Ready { key: settled, .. } | Topology::Failed { key: settled, .. }
+            if settled == key =>
+        {
+            Some(topology.clone())
+        }
+        _ => None,
+    }
+}
+
+/// A check in flight; dropped before its answer (its caller went away), it
+/// takes its `Pending` back, so whoever joined it stops waiting.
+struct RunningCheck<'a, B: StudioBackend> {
+    studio: &'a Studio<B>,
+    key: String,
+    settled: bool,
+}
+
+impl<B: StudioBackend> Drop for RunningCheck<'_, B> {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let key = &self.key;
+        self.studio.edit_details(|state| {
+            if matches!(&state.topology, Topology::Pending { key: pending } if pending == key) {
+                state.topology = Topology::NotRequested;
+            }
         });
     }
 }

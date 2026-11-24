@@ -95,6 +95,8 @@ struct Script {
     resolver_calls: Vec<Value>,
     scene_load: Option<Value>,
     scene_loads: Vec<Value>,
+    /// A livestream RPC waits for a permit here when set.
+    livestream_gate: Option<Arc<Semaphore>>,
 }
 
 struct Scripted {
@@ -289,6 +291,10 @@ impl StudioBackend for Scripted {
         method: &'static str,
         params: Value,
     ) -> Result<Value, RpcError> {
+        let gate = self.script.lock().unwrap().livestream_gate.clone();
+        if let Some(gate) = gate {
+            gate.acquire().await.unwrap().forget();
+        }
         let mut script = self.script.lock().unwrap();
         script.livestream_calls.push((method.to_string(), params));
         script
@@ -3706,6 +3712,58 @@ fn livestream_methods(backend: &Scripted) -> Vec<String> {
         .iter()
         .map(|(method, _)| method.clone())
         .collect()
+}
+
+#[tokio::test]
+async fn a_second_output_check_joins_the_one_running_and_hears_its_rejection() {
+    use videorc_app_core::livestream::ready::Topology;
+
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| {
+        script.livestream_gate = Some(gate.clone());
+        script
+            .livestream
+            .entry("stream.output.topology.probe".to_string())
+            .or_default()
+            .push_back(Err(RpcError::new(
+                "stream.output.topology.probe",
+                "rejected",
+                "The split output isn't available.",
+            )));
+    });
+    let params = json!({ "stream": { "width": 1920 } });
+    let first = studio.check_stream_output(params.clone(), false);
+    let second = studio.check_stream_output(params.clone(), false);
+    let release = async {
+        tokio::task::yield_now().await;
+        gate.add_permits(1);
+    };
+    let (first, second, ()) = tokio::join!(first, second, release);
+    let failed = Topology::Failed {
+        key: videorc_app_core::livestream::ready::probe_key(&params),
+        message: "The split output isn't available.".to_string(),
+    };
+    assert_eq!(first, Some(failed.clone()));
+    assert_eq!(second, Some(failed));
+    assert_eq!(
+        livestream_methods(&backend)
+            .iter()
+            .filter(|method| *method == "stream.output.topology.probe")
+            .count(),
+        1
+    );
+
+    // A check that never answers (its caller went away) is no pass either.
+    let abandoned = studio.check_stream_output(json!({ "stream": { "width": 1280 } }), false);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), abandoned)
+            .await
+            .is_err()
+    );
+    assert_eq!(studio.details_now().topology, Topology::NotRequested);
 }
 
 #[tokio::test]
