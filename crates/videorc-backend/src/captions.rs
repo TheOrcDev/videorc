@@ -1212,11 +1212,14 @@ pub fn build_caption_track_concat(cues: &[CaptionCue], blank_seq: u64) -> String
     list
 }
 
-/// Kick off the cue-frame render round-trip (R2): ask the renderer for one
-/// full-frame transparent PNG per cue (plus the blank gap frame), collect
-/// them under a request-unique private directory, and hand off to the overlay
-/// burn when complete. A watchdog degrades to SRT-only if frames don't
-/// arrive (renderer closed, error) — the session is never affected.
+/// Kick off the cue frames (R2): one full-frame transparent PNG per cue (plus
+/// the blank gap frame), collected under a request-unique private directory
+/// and handed to the overlay burn when complete. Since plan 260 S1.2e the
+/// backend draws them itself (`draw_caption_cue_frames`), from the cue text
+/// and the session's frozen caption style, with no round trip to a UI; a
+/// client's `captions.cues.submit` frame is still taken for one release. A
+/// watchdog degrades to SRT-only if frames stop arriving (a sick disk, an
+/// error); the session is never affected.
 pub async fn begin_caption_cue_render(
     state: &AppState,
     session_id: &str,
@@ -1224,7 +1227,7 @@ pub async fn begin_caption_cue_render(
     recording_path: &std::path::Path,
     artifact: &FinalizedCaptionArtifact,
 ) {
-    let request_id = match begin_caption_cue_render_with_preparer(
+    let job = match begin_caption_cue_render_with_preparer(
         state,
         session_id,
         ffmpeg_path,
@@ -1236,7 +1239,7 @@ pub async fn begin_caption_cue_render(
     )
     .await
     {
-        Ok(Some(request_id)) => request_id,
+        Ok(Some(job)) => job,
         Ok(None) => return,
         Err(error) => {
             let _ = crate::recording::emit_health_event(
@@ -1254,7 +1257,7 @@ pub async fn begin_caption_cue_render(
     // seconds in total. It only degrades when no new requested frame arrives
     // for the full inactivity interval.
     let watchdog_state = state.clone();
-    let watchdog_request = request_id.clone();
+    let watchdog_request = job.request_id.clone();
     tokio::spawn(async move {
         loop {
             let watchdog = {
@@ -1299,6 +1302,107 @@ pub async fn begin_caption_cue_render(
             return;
         }
     });
+    tokio::spawn(draw_caption_cue_frames(state.clone(), job));
+}
+
+/// The frames one cue render draws (plan 260 S1.2e): the blank gap frame,
+/// then each cue in order, on the session's output canvas in its frozen
+/// caption style. The cue text never leaves the backend.
+struct CaptionCueFrameJob {
+    request_id: String,
+    canvas: (u32, u32),
+    style: CaptionStyleSnapshot,
+    frames: Vec<(u64, String)>,
+}
+
+/// Draw each frame of a cue render off the async runtime and store it
+/// through the same fenced path a client's `captions.cues.submit` frame
+/// takes, so sign-out, the artifact generation and the watchdog hold it as
+/// they held the renderer's. A request that is gone (sign-out, the
+/// watchdog) ends the job; a frame that could not be drawn or stored ends it
+/// too, and the watchdog degrades to the SRT alone, as it did when a
+/// renderer stopped answering.
+async fn draw_caption_cue_frames(state: AppState, job: CaptionCueFrameJob) {
+    let CaptionCueFrameJob {
+        request_id,
+        canvas,
+        style,
+        frames,
+    } = job;
+    for (seq, text) in frames {
+        if !caption_cue_render_wants_frames(&state, &request_id).await {
+            return;
+        }
+        let drawn =
+            tokio::task::spawn_blocking(move || draw_caption_cue_frame(&text, canvas, style))
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|drawn| drawn);
+        let bytes = match drawn {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(
+                    request_id,
+                    seq,
+                    "Could not draw a caption cue frame: {error:#}"
+                );
+                return;
+            }
+        };
+        match submit_caption_cue_frame_with_writer(
+            &state,
+            &request_id,
+            seq,
+            bytes,
+            |path, bytes| async move { tokio::fs::write(path, bytes).await },
+        )
+        .await
+        {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::info!(request_id, seq, "Caption cue frames stopped: {error:#}");
+                return;
+            }
+        }
+    }
+}
+
+/// Whether a cue render still takes frames: still pending, not expiring,
+/// and no sign-out under way. Checked before each frame is drawn, so a
+/// sign-out stops the drawing of transcript text at once.
+async fn caption_cue_render_wants_frames(state: &AppState, request_id: &str) -> bool {
+    let coordinator = state.captions.lock().await;
+    !coordinator.privacy_teardown_in_progress
+        && coordinator
+            .pending_cue_renders
+            .get(request_id)
+            .is_some_and(|pending| !pending.cleanup_in_progress)
+}
+
+/// Blocking: the cue frame `renderCaptionCueFramePng` drew, as a PNG.
+fn draw_caption_cue_frame(
+    text: &str,
+    canvas: (u32, u32),
+    style: CaptionStyleSnapshot,
+) -> Result<Vec<u8>> {
+    use crate::overlay_raster::{self, OverlayState};
+
+    let frame = overlay_raster::caption_frame(
+        text,
+        canvas,
+        style.position,
+        style.text_size,
+        style.style_id,
+    );
+    let drawn = overlay_raster::render(&OverlayState::CaptionFrame(frame)).ok_or_else(|| {
+        anyhow::anyhow!(
+            "A caption frame could not be drawn for a {}x{} canvas.",
+            canvas.0,
+            canvas.1
+        )
+    })?;
+    overlay_raster::encode_png(&drawn)
 }
 
 async fn begin_caption_cue_render_with_preparer<Prepare, PrepareFuture>(
@@ -1308,7 +1412,7 @@ async fn begin_caption_cue_render_with_preparer<Prepare, PrepareFuture>(
     recording_path: &std::path::Path,
     artifact: &FinalizedCaptionArtifact,
     prepare: Prepare,
-) -> Result<Option<String>>
+) -> Result<Option<CaptionCueFrameJob>>
 where
     Prepare: FnOnce(std::path::PathBuf, String) -> PrepareFuture,
     PrepareFuture: std::future::Future<Output = std::io::Result<()>>,
@@ -1394,27 +1498,22 @@ where
     coordinator
         .pending_cue_render_order
         .push_back(request_id.clone());
-    // Transcript-bearing emission is part of the same privacy-generation
-    // critical section as registration. Sign-out either observes and
-    // purges this request, or wins first and suppresses the event.
-    state.emit_event(
-        "captions.cues.render-request",
-        serde_json::json!({
-            "requestId": request_id,
-            "canvasWidth": artifact.style.output_width.max(2),
-            "canvasHeight": artifact.style.output_height.max(2),
-            "position": artifact.style.position,
-            "textSize": artifact.style.text_size,
-            "styleId": artifact.style.style_id,
-            "styleRevision": artifact.style.style_revision,
-            "blankSeq": CAPTION_BLANK_FRAME_SEQ,
-            "cues": cues
-                .iter()
-                .map(|cue| serde_json::json!({ "seq": cue.seq, "text": cue.text }))
-                .collect::<Vec<_>>(),
-        }),
-    );
-    Ok(Some(request_id))
+    // Plan 260 S1.2e: no `captions.cues.render-request` to a UI any more; the
+    // job is registered inside the same privacy-generation critical section,
+    // and each frame it draws is fenced again when it is stored, so sign-out
+    // either purges this request or wins first and nothing is drawn.
+    let frames = std::iter::once((CAPTION_BLANK_FRAME_SEQ, String::new()))
+        .chain(cues.into_iter().map(|cue| (cue.seq, cue.text)))
+        .collect();
+    Ok(Some(CaptionCueFrameJob {
+        request_id,
+        canvas: (
+            artifact.style.output_width.max(2),
+            artifact.style.output_height.max(2),
+        ),
+        style: artifact.style,
+        frames,
+    }))
 }
 
 fn caption_frame_request_dir(
@@ -1634,8 +1733,58 @@ fn cue_render_is_inactive(
     now.saturating_duration_since(last_progress_at) >= CAPTION_CUE_RENDER_INACTIVITY_TIMEOUT
 }
 
-/// One rendered cue frame from the renderer. Returns whether the request is
-/// now complete (which triggers the overlay burn).
+/// `captions.preview.render` (plan 260 S1.2e): the Captions page's preview,
+/// drawn by the cue frames' painter: the line at its place on a canvas of the
+/// page's preview size, in the style, size and position chosen. Text that is
+/// only spaces draws the transparent frame, as a blank cue does.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CaptionPreviewRenderParams {
+    pub text: String,
+    pub canvas_width: u32,
+    pub canvas_height: u32,
+    pub position: CaptionOverlayPosition,
+    pub text_size: CaptionTextSize,
+    /// Missing: glass, the renderer's default.
+    #[serde(default)]
+    pub style_id: Option<CaptionStyleId>,
+}
+
+/// The longest line the preview draws (the bar keeps two lines and the tail).
+const CAPTION_PREVIEW_TEXT_MAX_CHARS: usize = 2000;
+
+pub async fn render_caption_preview(
+    params: CaptionPreviewRenderParams,
+) -> Result<crate::overlay_raster::OverlayPng> {
+    use crate::overlay_raster::{self, OverlayState, PAGE_SAMPLE_MAX_SIDE};
+
+    let side_ok = |side: u32| (2..=PAGE_SAMPLE_MAX_SIDE).contains(&side);
+    if !side_ok(params.canvas_width) || !side_ok(params.canvas_height) {
+        bail!(
+            "The caption preview's canvas must be 2 to {PAGE_SAMPLE_MAX_SIDE} pixels on each side."
+        );
+    }
+    if params.text.chars().count() > CAPTION_PREVIEW_TEXT_MAX_CHARS {
+        bail!(
+            "The caption preview's text is longer than {CAPTION_PREVIEW_TEXT_MAX_CHARS} characters."
+        );
+    }
+    let frame = overlay_raster::caption_frame(
+        &params.text,
+        (params.canvas_width, params.canvas_height),
+        params.position,
+        params.text_size,
+        params.style_id.unwrap_or(CaptionStyleId::Glass),
+    );
+    overlay_raster::render_png(OverlayState::CaptionFrame(frame))
+        .await?
+        .context("The caption preview could not be drawn.")
+}
+
+/// One rendered cue frame from a client: the renderer's path before plan 220
+/// S1.2e, still taken for one release (the backend draws the frames itself
+/// now, and a frame it already stored is not replaced). Returns whether the
+/// request is now complete (which triggers the overlay burn).
 pub async fn submit_caption_cue_frame(
     state: &AppState,
     request_id: &str,
@@ -10558,7 +10707,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_privacy_generation_cannot_publish_srt_or_renderer_cues() {
+    async fn stale_privacy_generation_cannot_publish_srt_or_draw_cues() {
         let root = std::env::temp_dir().join(format!(
             "videorc-caption-generation-{}",
             uuid::Uuid::new_v4().simple()
@@ -10585,9 +10734,8 @@ mod tests {
         assert!(!srt_path.exists());
         assert!(!frames_dir.exists());
         assert!(
-            std::iter::from_fn(|| events.try_recv().ok())
-                .all(|event| event.event != "captions.cues.render-request"),
-            "a request invalidated by sign-out generation must emit no cue text"
+            state.captions.lock().await.pending_cue_renders.is_empty(),
+            "a request invalidated by sign-out generation draws no cue text"
         );
 
         let current = FinalizedCaptionArtifact {
@@ -10601,14 +10749,88 @@ mod tests {
             "a current-generation SRT is fully published before write returns"
         );
         begin_caption_cue_render(&state, "current", "ffmpeg", &recording_path, &current).await;
-        let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
-        assert!(emitted.iter().any(|event| {
-            event.event == "captions.cues.render-request"
-                && event.payload["cues"][0]["text"] == "current cue"
-        }));
+        // Plan 260 S1.2e: the backend draws every frame itself (the blank gap
+        // frame and the cue) and hands the request to the burn; no cue text
+        // goes out to a UI.
+        let drawn_dir = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                {
+                    let coordinator = state.captions.lock().await;
+                    if coordinator.pending_cue_renders.is_empty()
+                        && let Some(task) = coordinator.caption_burn_tasks.first()
+                    {
+                        break task.frames_dir.clone();
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the backend draws every frame of the current request");
+        // The cue's frame is named by its seq (the chunk's, 2 here).
+        let cue =
+            tiny_skia::Pixmap::decode_png(&tokio::fs::read(drawn_dir.join("2.png")).await.unwrap())
+                .expect("the cue frame is a PNG");
+        assert_eq!((cue.width(), cue.height()), (1_920, 1_080));
+        assert!(cue.pixels().iter().any(|pixel| pixel.alpha() == 255));
+        let blank = tiny_skia::Pixmap::decode_png(
+            &tokio::fs::read(drawn_dir.join(format!("{CAPTION_BLANK_FRAME_SEQ}.png")))
+                .await
+                .unwrap(),
+        )
+        .expect("the gap frame is a PNG");
+        assert_eq!((blank.width(), blank.height()), (1_920, 1_080));
+        assert!(blank.pixels().iter().all(|pixel| pixel.alpha() == 0));
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .all(|event| event.event != "captions.cues.render-request"),
+            "no cue text is sent to a UI to draw"
+        );
 
         shutdown_caption_artifacts(&state).await;
         let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    /// Plan 260 S1.2e: the Captions page's preview is the cue frames' painter
+    /// at the preview's canvas; it carries text, never pixels, and stays
+    /// inside the page sample's 4K bound.
+    #[tokio::test]
+    async fn the_captions_preview_is_the_cue_frame_painter_at_the_pages_canvas() {
+        use base64::Engine as _;
+        let params = |width: u32, extra: serde_json::Value| {
+            let mut value = serde_json::json!({
+                "text": "Your words become clear, live captions.",
+                "canvasWidth": width,
+                "canvasHeight": 540,
+                "position": "bottom",
+                "textSize": "m",
+                "styleId": "classic"
+            });
+            if let (Some(object), Some(extra)) = (value.as_object_mut(), extra.as_object()) {
+                object.extend(extra.clone());
+            }
+            serde_json::from_value::<CaptionPreviewRenderParams>(value)
+        };
+        let png = render_caption_preview(params(960, serde_json::json!({})).unwrap())
+            .await
+            .expect("the preview is drawn");
+        assert_eq!((png.width, png.height), (960, 540));
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&png.png_base64)
+            .unwrap();
+        let frame = tiny_skia::Pixmap::decode_png(&bytes).expect("a PNG");
+        assert!(frame.pixels().iter().any(|pixel| pixel.alpha() == 255));
+        assert_eq!(frame.pixel(480, 10).unwrap().alpha(), 0);
+
+        assert!(params(960, serde_json::json!({ "pngBase64": "iVBORw0KGgo=" })).is_err());
+        for width in [1, 5000] {
+            let error = render_caption_preview(params(width, serde_json::json!({})).unwrap())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("2 to 4096"), "{error:#}");
+        }
+        let long = params(960, serde_json::json!({ "text": "x".repeat(2001) })).unwrap();
+        assert!(render_caption_preview(long).await.is_err());
     }
 
     #[tokio::test]
@@ -13307,6 +13529,10 @@ mod tests {
                 .iter()
                 .all(|event| event.event != "captions.cues.render-request"),
             "unpresented records never reach the compositor"
+        );
+        assert!(
+            state.captions.lock().await.pending_cue_renders.is_empty(),
+            "unpresented records draw no cue frame"
         );
         assert!(!recording_path.with_extension("captions-frames").exists());
         let _ = tokio::fs::remove_dir_all(root).await;

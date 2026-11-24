@@ -4,48 +4,56 @@ import { useEffect, useState, type ReactElement } from 'react'
 import { PanelSection } from '@/components/panel-section'
 import { Badge } from '@/components/ui/badge'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
+import { useOwnBackendClient } from '@/hooks/use-own-backend-client'
 import { useStudioCaptions, useStudioCore } from '@/hooks/use-studio'
-import { renderCaptionCueFramePng } from '@/lib/caption-overlay'
+import { CAPTION_PREVIEW_SAMPLE, captionPreviewCanvas } from '@/lib/captions-ui'
 import { CAPTIONS_PREVIEW_PIN } from '@/lib/page-layout'
 import { formatResolution } from '@/lib/format-video'
 import { cn } from '@/lib/utils'
 
 type PreviewBackdrop = 'dark' | 'light' | 'motion'
 
-const PREVIEW_WIDTH = 960
-const SAMPLE_CAPTION = 'Your words become clear, live captions.'
-
+/**
+ * The Captions page's preview: the bar as the captioned copy burns it, drawn
+ * by the backend's cue-frame painter (plan 260 S1.2e) on a canvas of the
+ * preview's size at the video's aspect ratio, over a stand-in backdrop.
+ */
 export function CaptionPreview(): ReactElement {
   const { captureConfig } = useStudioCore()
+  const client = useOwnBackendClient()
   const { captionLines } = useStudioCaptions()
   const [backdrop, setBackdrop] = useState<PreviewBackdrop>('motion')
   const [overlayUrl, setOverlayUrl] = useState<string | null>(null)
   const latest = captionLines.at(-1)
-  const text = latest?.text.trim() || SAMPLE_CAPTION
-  const aspect = captureConfig.video.width / Math.max(1, captureConfig.video.height)
-  const previewHeight = Math.max(360, Math.round(PREVIEW_WIDTH / aspect))
+  const text = latest?.text.trim() || CAPTION_PREVIEW_SAMPLE
+  const { width: previewWidth, height: previewHeight } = captionPreviewCanvas(captureConfig.video)
   const isSample = !latest
 
+  const { styleId, position, textSize } = captureConfig.captions
   useEffect(() => {
+    if (!client) return
     let cancelled = false
-    void renderCaptionCueFramePng({
-      text,
-      canvasWidth: PREVIEW_WIDTH,
-      canvasHeight: previewHeight,
-      styleId: captureConfig.captions.styleId,
-      position: captureConfig.captions.position,
-      textSize: captureConfig.captions.textSize
-    })
-      .then((png) => {
-        if (!cancelled) setOverlayUrl(png ? `data:image/png;base64,${png}` : null)
+    client
+      .requestTyped('captions.preview.render', {
+        text,
+        canvasWidth: previewWidth,
+        canvasHeight: previewHeight,
+        styleId,
+        position,
+        textSize
       })
-      .catch(() => {
-        if (!cancelled) setOverlayUrl(null)
-      })
+      .then(
+        (png) => {
+          if (!cancelled) setOverlayUrl(`data:image/png;base64,${png.pngBase64}`)
+        },
+        () => {
+          if (!cancelled) setOverlayUrl(null)
+        }
+      )
     return () => {
       cancelled = true
     }
-  }, [captureConfig.captions, previewHeight, text])
+  }, [client, position, previewHeight, previewWidth, styleId, text, textSize])
 
   const backdropClass = CAPTION_PREVIEW_BACKDROPS[backdrop]
 
@@ -67,7 +75,7 @@ export function CaptionPreview(): ReactElement {
           backdropClass
         )}
         role="img"
-        style={{ aspectRatio: `${PREVIEW_WIDTH} / ${previewHeight}` }}
+        style={{ aspectRatio: `${previewWidth} / ${previewHeight}` }}
       >
         <div
           aria-hidden

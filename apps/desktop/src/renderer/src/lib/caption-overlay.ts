@@ -462,7 +462,10 @@ export async function renderCaptionOverlayPng(params: {
 /**
  * Render one FULL-FRAME transparent PNG for the burned caption track (R2):
  * the bar composited at its on-video position inside a canvas-sized frame.
- * Empty text renders the blank (fully transparent) gap frame.
+ * Empty text renders the blank (fully transparent) gap frame. The captioned
+ * copy's frames and the Captions page's preview before plan 260 S1.2e; the
+ * backend draws both now (`overlay_raster::caption_frame`), and this is the
+ * golden its drawing is held to.
  */
 export async function renderCaptionCueFramePng(params: {
   text: string

@@ -141,6 +141,9 @@ import type {
   BannerReorderParams,
   BannerUpdateParams,
   BuddyOverlaySnapshot,
+  BuddyBubbleRenderParams,
+  CaptionPreviewRenderParams,
+  OverlayPng,
   OverlayTargetsInfo,
   SetBuddyOverlayParams,
   ClearBuddyOverlayParams,
@@ -924,6 +927,10 @@ export interface BackendRpcMethodMap {
   'cohost.buddy.status': BackendRpcDefinition<undefined, BuddyOverlaySnapshot>
   'buddy.overlay.set': BackendRpcDefinition<SetBuddyOverlayParams, OverlayTargetsInfo>
   // --- end Buddy overlay (plan 164) ---
+  // --- Drawings for the pages (plan 260 S1.2e) ---
+  'captions.preview.render': BackendRpcDefinition<CaptionPreviewRenderParams, OverlayPng>
+  'buddy.bubble.render': BackendRpcDefinition<BuddyBubbleRenderParams, OverlayPng>
+  // --- end Drawings for the pages (plan 260 S1.2e) ---
   // --- Buddy pets (plan 168, Phase A) ---
   'cohost.pet.list': BackendRpcDefinition<undefined, BuddyPetSummary[]>
   'cohost.pet.import': BackendRpcDefinition<CohostPetImportParams, BuddyPetSummary>
@@ -6262,6 +6269,41 @@ const setBuddyOverlayParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<SetBuddyOverlayParams>
 // --- end Buddy overlay (plan 164) ---
+// --- Drawings for the pages (plan 260 S1.2e) ---
+// The backend's 4K bound for a page's sample (the Buddy page's zoomed sample
+// and stream demo draw on a 4K canvas). A PNG of that is far under the wire's
+// 16 M characters.
+const pageSampleSideSchema = numberSchema({ integer: true, min: 1, max: 4096 })
+const overlayPngSchema = objectSchema(
+  {
+    pngBase64: stringSchema({ minLength: 4, maxLength: 12_000_000 }),
+    width: pageSampleSideSchema,
+    height: pageSampleSideSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<OverlayPng>
+const captionPreviewRenderParamsSchema = objectSchema(
+  {
+    text: stringSchema({ maxLength: 2000 }),
+    canvasWidth: numberSchema({ integer: true, min: 2, max: 4096 }),
+    canvasHeight: numberSchema({ integer: true, min: 2, max: 4096 }),
+    position: enumSchema(['top', 'bottom']),
+    textSize: enumSchema(['s', 'm', 'l']),
+    styleId: optionalSchema(enumSchema(['classic', 'glass', 'lower-third', 'high-contrast']))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CaptionPreviewRenderParams>
+const buddyBubbleRenderParamsSchema = objectSchema(
+  {
+    text: stringSchema({ minLength: 1, maxLength: 1000 }),
+    style: enumSchema(['speech', 'thought', 'shout']),
+    canvasWidth: pageSampleSideSchema,
+    canvasHeight: pageSampleSideSchema,
+    rect: overlayRectSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<BuddyBubbleRenderParams>
+// --- end Drawings for the pages (plan 260 S1.2e) ---
 // --- Buddy pets (plan 168, Phase B) ---
 const clearBuddyOverlayParamsSchema = objectSchema(
   { target: optionalSchema(enumSchema(['primary', 'auxiliary'])) },
@@ -8194,6 +8236,13 @@ const runtimeContracts = {
   'cohost.buddy.status': { params: undefinedSchema, result: buddyOverlaySnapshotSchema },
   'buddy.overlay.set': { params: setBuddyOverlayParamsSchema, result: overlayTargetsInfoSchema },
   // --- end Buddy overlay (plan 164) ---
+  // --- Drawings for the pages (plan 260 S1.2e) ---
+  'captions.preview.render': {
+    params: captionPreviewRenderParamsSchema,
+    result: overlayPngSchema
+  },
+  'buddy.bubble.render': { params: buddyBubbleRenderParamsSchema, result: overlayPngSchema },
+  // --- end Drawings for the pages (plan 260 S1.2e) ---
   // --- Buddy pets (plan 168, Phase A) ---
   'cohost.pet.list': {
     params: undefinedSchema,

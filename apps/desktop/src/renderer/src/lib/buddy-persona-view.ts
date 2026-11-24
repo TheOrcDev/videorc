@@ -24,6 +24,21 @@ export const BUDDY_BUBBLE_LABELS: Record<CohostBubbleStyle, string> = {
   shout: 'Shout'
 }
 
+/** The bubble sample's canvas: the bubble as it goes on a 1080p stream at the
+ * Buddy's default placement (`DEFAULT_OVERLAY_LAYOUT.buddy.horizontal`). */
+export const BUDDY_BUBBLE_SAMPLE_CANVAS = { width: 1920, height: 1080 } as const
+/**
+ * The zoomed sample is drawn on a canvas twice that size (36 px type, a
+ * 691 px Buddy), never a small bitmap scaled up: shown at about a 1080p
+ * stream's own scale, it stays crisp on a Retina screen.
+ */
+export const BUDDY_BUBBLE_SAMPLE_ZOOM = 2
+
+/** The line the bubble sample says. */
+export function buddyBubbleSampleLine(name: string): string {
+  return `Welcome to the horde, ${name} says hi.`
+}
+
 /** Three personalities one click away (⚑ copy, plan 164 S-A4). */
 export const BUDDY_PERSONALITY_EXAMPLES: readonly string[] = [
   'Grumpy old orc who secretly loves chat',

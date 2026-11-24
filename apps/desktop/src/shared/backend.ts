@@ -8515,6 +8515,41 @@ export interface SetBuddyOverlayParams {
   rect: OverlayRect
 }
 
+/** `buddy.bubble.render` (plan 260 S1.2e): a sample bubble for the Sidekick
+ * page (the stream demo, the test dialog, the settings sample), drawn by the
+ * live bubble's painter for the canvas the sample stands in for and the
+ * Sidekick's rect there. Nothing reaches the stream. Mirrors Rust
+ * `BuddyBubbleRenderParams`. */
+export interface BuddyBubbleRenderParams {
+  text: string
+  style: CohostBubbleStyle
+  canvasWidth: number
+  canvasHeight: number
+  rect: OverlayRect
+}
+
+/** `captions.preview.render` (plan 260 S1.2e): the Captions page's preview,
+ * drawn by the backend with the captioned copy's cue-frame painter: the line
+ * at its place on a transparent canvas of the preview's size. Mirrors Rust
+ * `CaptionPreviewRenderParams`. */
+export interface CaptionPreviewRenderParams {
+  text: string
+  canvasWidth: number
+  canvasHeight: number
+  position: 'top' | 'bottom'
+  textSize: 's' | 'm' | 'l'
+  /** Omitted: glass. */
+  styleId?: CaptionStyleId
+}
+
+/** A drawing the backend made for a page (plan 260 S1.2e): the PNG as base64
+ * (no `data:` prefix) and its size. Mirrors Rust `OverlayPng`. */
+export interface OverlayPng {
+  pngBase64: string
+  width: number
+  height: number
+}
+
 export interface OverlayTargetInfo {
   active: boolean
   width: number

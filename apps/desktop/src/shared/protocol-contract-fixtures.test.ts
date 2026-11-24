@@ -1506,6 +1506,62 @@ describe('shared high-risk protocol fixture', () => {
     expect(validateBackendRpcResult('buddy.overlay.clear', info)).toStrictEqual(info)
   })
 
+  it("carries text, not pixels, to the pages' drawings (plan 260 S1.2e)", () => {
+    // The Captions page's preview: the cue-frame painter on the preview's canvas.
+    const preview = {
+      text: 'Your words become clear, live captions.',
+      canvasWidth: 960,
+      canvasHeight: 540,
+      position: 'bottom',
+      textSize: 'm',
+      styleId: 'classic'
+    }
+    expect(validateBackendRpcParams('captions.preview.render', preview)).toStrictEqual(preview)
+    const glass = {
+      text: preview.text,
+      canvasWidth: 720,
+      canvasHeight: 1280,
+      position: 'top',
+      textSize: 'l'
+    }
+    expect(validateBackendRpcParams('captions.preview.render', glass)).toStrictEqual(glass)
+    for (const wrong of [
+      { ...preview, canvasWidth: 1 },
+      { ...preview, canvasHeight: 5000 },
+      { ...preview, position: 'middle' },
+      { ...preview, textSize: 'xl' },
+      { ...preview, styleId: 'neon' },
+      { ...preview, text: 'x'.repeat(2001) },
+      { ...preview, pngBase64: 'iVBORw0KGgo=' }
+    ]) {
+      expect(() => validateBackendRpcParams('captions.preview.render', wrong)).toThrow()
+    }
+    // The Sidekick page's samples: the live bubble's painter, any line.
+    const sample = {
+      text: 'Welcome to the horde! Grab a seat.',
+      style: 'shout',
+      canvasWidth: 3840,
+      canvasHeight: 2160,
+      rect: { x: 0.7975, y: 0.64, w: 0.18, h: 0.32 }
+    }
+    expect(validateBackendRpcParams('buddy.bubble.render', sample)).toStrictEqual(sample)
+    for (const wrong of [
+      { ...sample, text: '' },
+      { ...sample, style: 'whisper' },
+      { ...sample, canvasWidth: 0 },
+      { ...sample, canvasHeight: 8192 },
+      { ...sample, rect: undefined },
+      { ...sample, target: 'primary' }
+    ]) {
+      expect(() => validateBackendRpcParams('buddy.bubble.render', wrong)).toThrow()
+    }
+    const png = { pngBase64: 'iVBORw0KGgo=', width: 367, height: 103 }
+    expect(validateBackendRpcResult('buddy.bubble.render', png)).toStrictEqual(png)
+    expect(validateBackendRpcResult('captions.preview.render', png)).toStrictEqual(png)
+    expect(() => validateBackendRpcResult('buddy.bubble.render', { ...png, width: 0 })).toThrow()
+    expect(() => validateBackendRpcResult('captions.preview.render', { pngBase64: 'x' })).toThrow()
+  })
+
   it('keeps Sidekick voice commands, their answers and settings identical across languages (plan 140 S3)', () => {
     // The Rust side round-trips the same objects in protocol.rs
     // (`shared_high_risk_contract_fixture_matches_cohost_dtos`).

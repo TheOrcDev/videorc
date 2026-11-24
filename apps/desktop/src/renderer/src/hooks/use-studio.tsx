@@ -662,13 +662,11 @@ import {
   captionOverlayKey,
   captionOverlayTargetPlan,
   captionSessionFloor,
-  CaptionCueRenderGuard,
   captionsBarRunning,
   captionsStatusIsActive,
   decideCaptionsRuntimeIntent,
   decideOverlayPush,
   LatestWinsScheduler,
-  shouldCancelCaptionCueRender,
   type CaptionSessionFloor
 } from '@/lib/captions-ui'
 import {
@@ -8445,87 +8443,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     let liveChatRecovery: Promise<void> | null = null
     let liveChatRecoveryRetryTimer: number | null = null
     let commentHighlightRevision = 0
-    type CaptionCueRenderRequest = {
-      requestId: string
-      canvasWidth: number
-      canvasHeight: number
-      position: 'top' | 'bottom'
-      textSize: 's' | 'm' | 'l'
-      styleId?: import('@/lib/backend').CaptionStyleId
-      styleRevision?: number
-      blankSeq: number
-      cues: { seq: number; text: string }[]
-    }
-    const captionCueRenderGuard = new CaptionCueRenderGuard()
-    let captionCueRenderGeneration = captionCueRenderGuard.begin()
-    const captionCueRenderQueue: CaptionCueRenderRequest[] = []
-    let captionCueRenderWorkerActive = false
-    let captionCueRenderAbort: AbortController | null = null
-    const cancelCaptionCueRender = (): void => {
-      captionCueRenderGuard.cancel()
-      captionCueRenderGeneration = captionCueRenderGuard.begin()
-      captionCueRenderQueue.splice(0)
-      captionCueRenderAbort?.abort()
-      captionCueRenderAbort = null
-    }
-    const drainCaptionCueRenderQueue = async (): Promise<void> => {
-      if (captionCueRenderWorkerActive) return
-      captionCueRenderWorkerActive = true
-      try {
-        const { renderCaptionCueFramePng } = await loadCaptionOverlay()
-        while (captionCueRenderQueue.length > 0) {
-          const request = captionCueRenderQueue.shift()
-          if (!request) continue
-          const cueRenderGeneration = captionCueRenderGeneration
-          const cueRenderAbort = new AbortController()
-          captionCueRenderAbort = cueRenderAbort
-          const jobs = [{ seq: request.blankSeq, text: '' }, ...request.cues]
-          for (const cue of jobs) {
-            if (
-              !generationIsCurrent() ||
-              cueRenderAbort.signal.aborted ||
-              !captionCueRenderGuard.isCurrent(cueRenderGeneration)
-            ) {
-              break
-            }
-            const pngBase64 = await renderCaptionCueFramePng({
-              text: cue.text,
-              canvasWidth: request.canvasWidth,
-              canvasHeight: request.canvasHeight,
-              position: request.position,
-              textSize: request.textSize,
-              styleId: request.styleId ?? 'glass'
-            })
-            if (
-              !pngBase64 ||
-              !generationIsCurrent() ||
-              cueRenderAbort.signal.aborted ||
-              !captionCueRenderGuard.isCurrent(cueRenderGeneration)
-            ) {
-              continue
-            }
-            try {
-              await nextClient.request(
-                'captions.cues.submit',
-                {
-                  requestId: request.requestId,
-                  seq: cue.seq,
-                  pngBase64
-                },
-                { signal: cueRenderAbort.signal }
-              )
-            } catch {
-              // Skip this cue; the backend watchdog handles incompleteness.
-            }
-          }
-          if (captionCueRenderAbort === cueRenderAbort) {
-            captionCueRenderAbort = null
-          }
-        }
-      } finally {
-        captionCueRenderWorkerActive = false
-      }
-    }
     type LiveChatRecoveryResult =
       | { kind: 'disposed' | 'superseded' }
       | {
@@ -9484,10 +9401,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       nextClient.on('captions.status', (payload) =>
         commitCaptionsStatus(payload as CaptionsStatus)
       ),
-      nextClient.on('captions.cleared', (payload) => {
-        if (shouldCancelCaptionCueRender((payload as { reason?: string }).reason)) {
-          cancelCaptionCueRender()
-        }
+      nextClient.on('captions.cleared', () => {
         captionSessionFloorRef.current = null
         setCaptionLines([])
       }),
@@ -9498,13 +9412,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             : current
         )
       ),
-      // Burned-copy cue frames (R2): the backend asks for one full-frame PNG
-      // per cue at finalize; render + submit sequentially, best-effort (the
-      // backend watchdog degrades to SRT-only if we never finish).
-      nextClient.on('captions.cues.render-request', (payload) => {
-        captionCueRenderQueue.push(payload as CaptionCueRenderRequest)
-        void drainCaptionCueRenderQueue()
-      }),
       nextClient.on('streamTargets.metadata.changed', (payload) => {
         bootstrapGuard.mark('streamMetadata')
         const draft = payload as StreamMetadataDraft
@@ -10082,7 +9989,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       sessionDetailRequests.clear()
       sessionDetailSingleFlight.clear()
       sessionDetailLiveEntries.clear()
-      cancelCaptionCueRender()
       bootstrapAbort.abort()
       liveChatMessageBatcher.dispose()
       dashboard?.dispose()

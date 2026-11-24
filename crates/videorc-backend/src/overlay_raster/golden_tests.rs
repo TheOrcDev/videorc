@@ -367,7 +367,7 @@ fn the_caption_smokes_bars_are_golden_cases() {
     }
 }
 
-/// Plan 220 S1.2e: the cue frame the backend draws for `smoke:captions-live`'s
+/// Plan 260 S1.2e: the cue frame the backend draws for `smoke:captions-live`'s
 /// captioned copy (its line on the 640x360 recording, high contrast, large,
 /// at the bottom: the session's frozen caption style) is exactly a golden
 /// case's state, as is the Captions page preview's sample at 960x540.
