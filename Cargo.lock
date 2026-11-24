@@ -3265,6 +3265,10 @@ version = "0.1.0"
 [[package]]
 name = "videorc-preview-ring"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "videorc-protocol"

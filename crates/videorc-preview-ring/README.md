@@ -4,4 +4,4 @@
 
 The shared-memory BGRA ring for CPU-composed previews.
 
-Empty until plan 260 **S1.7** fills it. Plan 260 S1.0 created it, with its entry in the root `Cargo.toml` (`members` and `[workspace.dependencies]`), so no later slice edits the root manifest to add it. Depend on it with `videorc-preview-ring = { workspace = true }`.
+Moved from `TheOrcDev/videorc-rust` (`crates/videorc-preview-ring` at `1e097e52c`) by plan 260 **S1.7**, unchanged. Plan 260 S1.0 created the member. Depend on it with `videorc-preview-ring = { workspace = true }`.
