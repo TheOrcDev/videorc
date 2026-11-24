@@ -391,7 +391,9 @@ and Library playback come from the backend through the same element (plan
   costs nothing.
 - **Liquid Chrome needs more than GPUI draws.** Five-stop linear fills,
   radial beads and the metallic red Record are beyond `linear_gradient`'s
-  two stops. Routes, to be judged by eye in S0.4: stacked two-stop bands
+  two stops. **S0.4 took the raster route (the owner, 2026-11-24;
+  [results](#s04-results-on-macos-2026-11-24-lane-l3)).** The routes judged
+  by eye in S0.4: stacked two-stop bands
   clipped to the control (GPUI's content mask is rectangular, so rounded
   ends need care); chrome rasterised once per size and scale with
   tiny-skia into an image with corner radii; or a multi-stop gradient
@@ -807,6 +809,47 @@ platform. S0.8 and S0.9 inform the plan and do not gate it.
 | S0.11 | The parity list from the code: `docs/gpui/parity.md`, one line per control, a column per platform | Docs only, no build | L6 | Research · `gpt-6.1-sol` · 8 | Every row of [What parity means](#what-parity-means) expanded; its Windows column is the testing plan's checklist |
 | S0.12 | The spikes branch: `spikes/gpui` in `TheOrcDev/videorc` with a spikes workspace, S0.0's spike as the model, the `summary.json` format and a README per spike | This Mac, no slot | L6 | Implementation · `gpt-6.1-sol` · 7 | A contributor can clone it, build the model and see the summary format; nothing reaches `main` |
 
+#### S0.4 results on macOS (2026-11-24, lane L3)
+
+**The owner judged the macOS look equal to Electron on 2026-11-24: D3's
+look passes on macOS.** Side-by-side sheets of the spike
+(`~/gpui-scratch/spike-liquid-chrome`, `gpui-pre` 0.3.14 with
+`runtime_shaders`) against a static build of the real components, in dark,
+light and Increase Contrast, two rounds. Evidence:
+`~/cloud-test/reports/2026-11-23-plan-260/s0-4/` (`comparison.html`,
+`NOTES.md`). The Windows (WC-0.6) and Linux (L5) shots are still owed for
+the rest of S0.4's line.
+
+- **Metal: the raster route.** Each multi-stop fill and bead is rasterised
+  once per size and scale (resvg) into an image with the corner radii; the
+  light and shade lines stay GPUI quads. The kit takes this route; the
+  stacked two-stop bands were the other candidate.
+- **The kit owns the window frame.** Every kit window uses a transparent
+  title bar (`appears_transparent: true`) with the traffic lights at
+  (14, 13), as `window-glass.ts` places them, over the window's own solid
+  (#070707 dark, #FAFAFA light). GPUI's default title bar is AppKit's grey
+  strip (#212324, dark even in the light theme): round 1's "header is a
+  different colour" was that strip, so no kit window uses it.
+- **Medium (500) is SF Medium.** Unpatched, GPUI reads Core Text's weight
+  on font-kit's scale (SF Medium comes out as 530), so 500 matches Regular.
+  The first GPUI patch (a fourth is a STOP): our pinned copy of only
+  `gpui-pre-apple` 0.3.14 reads the weight on Apple's `NSFontWeight` scale
+  (+55 −1, through `[patch.crates-io]`, as D1 says; the patch file and the
+  upstream draft are in the evidence). The owner opens the upstream PR to
+  Zed; drop the patch when a `gpui-pre` release carries it.
+- **The chromatic button's ring turns on GPUI's animation clock** (SVG
+  sprites under `with_timed_transformation`, so the view is not rebuilt per
+  frame; reduced motion stops it; a minimized window costs nothing). **The
+  owner capped it at 60 fps** (`with_max_fps(60.)`). In front, at 120 Hz on
+  the M4: 5.6–5.7 % of a core and 69–70 ms of GPU per second at 60 fps,
+  against 6.8 % and 128 ms at 120 fps, and 24.4 % when the page redraws
+  every frame. The GPU cost is GPUI redrawing the whole window (about 1 ms
+  per frame at 3024×1770), so other motion at the same time adds little.
+- **Disabled controls are pre-blended over the solid.** GPUI fades each
+  primitive on its own where Chromium fades the control as one group, so
+  the kit blends a disabled control's colours over the ground instead of
+  using `opacity`.
+
 #### S0.9 results on macOS (2026-11-24, lane L4)
 
 The spikes workspace (`spikes/gpui`), `gpui-pre` 0.3.14, the owner's M4
@@ -1185,8 +1228,9 @@ recommended; the rest are the recommended defaults.
 - **D3. The look's building blocks. Decided 2026-11-23: Videorc's own kit
   over gpui-kit's unstyled `gpui-base`,** borrowing gpui-component's input,
   editor, virtual list and table where `gpui-base` has none, built after
-  the owner has judged S0.4's look. **And, the owner's note: the kit is the
-  GPUI flavour of videorc-ui** (ui.videorc.com), beside the React
+  the owner has judged S0.4's look (macOS judged equal on 2026-11-24,
+  [S0.4's results](#s04-results-on-macos-2026-11-24-lane-l3)). **And, the
+  owner's note: the kit is the GPUI flavour of videorc-ui** (ui.videorc.com), beside the React
   components, with the same names, tokens and design language, published
   and synced as [The GPUI flavour of videorc-ui](#the-gpui-flavour-of-videorc-ui-d3-d10)
   describes.

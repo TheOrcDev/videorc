@@ -7,9 +7,11 @@
 //! `videorc-rust`, so the crates that move from there (L1's
 //! `videorc-preview`) compile unchanged.
 
+pub mod buddy;
 pub mod client;
 pub mod crash_log;
 pub mod desktop;
+mod encoding;
 mod http;
 pub mod interruption;
 pub mod ledger;
