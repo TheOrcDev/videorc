@@ -16,10 +16,12 @@ use super::devices::{CURRENT_SESSION, OPEN_AUDIO_LABEL, SYSTEM_AUDIO_ECHO_KEY};
 use super::{Door, HealthPage, OPEN_HEALTH_LABEL, Transport};
 use crate::notices::Store;
 use crate::notices::health_kinds::{HEALTH_SOURCE, HealthDoor, HealthRow, health_kind_for};
+use crate::notices::toasts::RuntimeActivity;
 use crate::notices::toasts::{
     NoticeKind, recording_startup_health_toast, separate_file_failed_copy, separate_file_role,
 };
 use crate::notices::types::{Action, ActionKind, Input, Resolution, Tone};
+use crate::studio::session::RecordingFailedNotice;
 
 /// `SEPARATE_FILES_SHED_WORDS`.
 pub const SEPARATE_FILES_SHED_TITLE: &str = "Separate files stopped so the main recording keeps up";
@@ -275,6 +277,53 @@ fn publish_custom(
                 _ => false,
             }
         }
+    }
+}
+
+/// `publishRecordingQuality`: "This recording has dropped frames", once per
+/// recording, with Open in Library.
+pub fn recording_quality(event: &HealthEvent) -> Input {
+    Input {
+        key: format!(
+            "recording-quality:{}",
+            event.session_id.as_deref().unwrap_or(CURRENT_SESSION)
+        ),
+        kind: "recording-quality".into(),
+        title: "This recording has dropped frames".into(),
+        detail: words(&event.message),
+        actions: vec![open_in_library()],
+        once: true,
+        ..Input::default()
+    }
+}
+
+/// `publishRecordingFailure`: the take ended on its own, urgent wherever
+/// the streamer is (the kind is urgent). A full disk says so instead. A take
+/// that saved a file offers Open in Library, and the reveal when the file is
+/// known.
+pub fn recording_failure(notice: &RecordingFailedNotice) -> Input {
+    if is_disk_full_message(Some(&notice.message)) {
+        return disk_full(notice.session_id.as_deref());
+    }
+    let saves = RuntimeActivity::from(notice.activity).saves_recording();
+    let mut actions = Vec::new();
+    if saves {
+        actions.push(open_in_library());
+        if notice.session_id.is_some() && notice.output_path.is_some() {
+            actions.push(action("reveal", super::reveal_label(), ActionKind::Fix));
+        }
+    }
+    Input {
+        key: format!(
+            "recording-failed:{}",
+            notice.session_id.as_deref().unwrap_or(CURRENT_SESSION)
+        ),
+        kind: "recording-failed".into(),
+        title: notice.title().into(),
+        detail: words(&notice.message),
+        actions,
+        once: true,
+        ..Input::default()
     }
 }
 
@@ -640,6 +689,52 @@ mod tests {
         // The overload is still open; the choppy stream cleared (its resolve
         // is the last word); a blip is never replayed.
         assert_eq!(ids, ["2", "3"]);
+    }
+
+    #[test]
+    fn a_failed_take_is_urgent_and_offers_what_it_saved() {
+        use crate::studio::session::SessionActivity;
+        let failed = |activity, output: Option<&str>, message: &str| RecordingFailedNotice {
+            activity,
+            message: message.into(),
+            session_id: Some("take-1".into()),
+            output_path: output.map(str::to_string),
+            at: std::time::Instant::now(),
+        };
+        let mut store = Store::new(0, 0);
+        store.publish(
+            recording_failure(&failed(
+                SessionActivity::Recording,
+                Some("/x.mkv"),
+                "Encoder died.",
+            )),
+            1_000,
+        );
+        let entry = &store.snapshot()[0];
+        assert_eq!(entry.tone, Tone::Urgent);
+        assert_eq!(entry.key, "recording-failed:take-1");
+        assert_eq!(
+            entry
+                .actions
+                .iter()
+                .map(|each| each.id.as_str())
+                .collect::<Vec<_>>(),
+            ["open-library", "reveal"]
+        );
+        let full = recording_failure(&failed(
+            SessionActivity::Recording,
+            None,
+            "The disk ran out of space.",
+        ));
+        assert_eq!(full.title, DISK_FULL_TITLE);
+        let quality = recording_quality(&health(
+            "1",
+            "recording-quality-not-100",
+            HealthLevel::Warn,
+            "a",
+        ));
+        assert_eq!(quality.key, "recording-quality:take-1");
+        assert!(quality.once);
     }
 
     /// The words are Electron's.
