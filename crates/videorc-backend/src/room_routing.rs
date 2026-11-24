@@ -9,9 +9,17 @@
 //! the auxiliary track only to a consumer whose media v2 receipt is current;
 //! and during a stream-screen takeover an egress page that cannot route
 //! audio (no current receipt, or no `audioRouting: 1`) loses the host's
-//! speech (the legacy whole-program silence). LiveKit's Rust SDK scopes a
-//! permission by identity where the browser SDK scoped it by session id; the
-//! plan is recomputed whenever a participant comes or goes.
+//! speech (the legacy whole-program silence).
+//!
+//! Sessions (review, option D): LiveKit's Rust SDK scopes a permission by
+//! identity, where the browser SDK scoped it by session id. So no grant
+//! rests on an identity alone: a consumer takes nothing until its capability
+//! receipt is current for the session it is in now. Every participant
+//! connect (a first join or a replacement under the same identity)
+//! recomputes the plan, and the new session, with no receipt of its own yet,
+//! is revoked to nothing in that same permissions update; it earns its grant
+//! when a receipt from that session (matching its SID) has been validated,
+//! the same way a first join does.
 //!
 //! Routing: the Studio's program audio settings (speech and auxiliary gain
 //! and mute, `cloud.room.routing.set`) go to every routing-capable program
@@ -104,6 +112,11 @@ pub(crate) fn subscription_plan(
     consumers
         .iter()
         .map(|consumer| {
+            // Nothing rests on an identity alone: no current receipt for the
+            // session it is in now, no tracks.
+            if !consumer.current {
+                return (consumer.identity.clone(), BTreeSet::new());
+            }
             let egress = is_egress(&consumer.identity);
             let legacy_silenced = egress && takeover && !(consumer.current && consumer.routing);
             let allowed = tracks
@@ -334,7 +347,18 @@ mod tests {
             false,
         );
         assert_eq!(allowed(&plan, "g_a"), vec!["TR_aux", "TR_cam", "TR_mic"]);
-        assert_eq!(allowed(&plan, "g_old"), vec!["TR_cam", "TR_mic"]);
+        // No current receipt for its session: nothing at all.
+        assert!(allowed(&plan, "g_old").is_empty());
+    }
+
+    #[test]
+    fn a_replaced_session_starts_with_nothing_and_earns_its_grant() {
+        // The same identity in a new session: its receipt was the old one's.
+        let replaced = subscription_plan(&[consumer("g_a", false, false)], &tracks(), false);
+        assert!(allowed(&replaced, "g_a").is_empty());
+        // A receipt from the new session, validated: the first join's grant.
+        let earned = subscription_plan(&[consumer("g_a", true, false)], &tracks(), false);
+        assert_eq!(allowed(&earned, "g_a"), vec!["TR_aux", "TR_cam", "TR_mic"]);
     }
 
     #[test]
@@ -363,7 +387,8 @@ mod tests {
             vec!["TR_aux", "TR_cam", "TR_mic", "TR_sheet"]
         );
         assert_eq!(allowed(&plan, "EG_legacy"), vec!["TR_cam", "TR_sheet"]);
-        assert_eq!(allowed(&plan, "EG_stale"), vec!["TR_cam", "TR_sheet"]);
+        // Not current for its session: nothing, takeover or not.
+        assert!(allowed(&plan, "EG_stale").is_empty());
         // Guests keep hearing the host.
         assert_eq!(allowed(&plan, "g_a"), vec!["TR_aux", "TR_cam", "TR_mic"]);
     }
