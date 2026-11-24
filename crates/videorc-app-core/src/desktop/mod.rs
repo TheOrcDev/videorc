@@ -11,6 +11,7 @@ pub mod camera_extension;
 pub mod capture_protection;
 pub mod capture_state;
 pub mod deep_link;
+pub mod exit_guard;
 pub mod global_shortcuts;
 pub mod grant_watch;
 #[cfg(target_os = "linux")]
