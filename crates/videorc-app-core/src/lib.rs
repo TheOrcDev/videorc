@@ -9,6 +9,7 @@
 
 pub mod crash_log;
 pub mod desktop;
+mod http;
 pub mod interruption;
 pub mod ledger;
 pub mod log;

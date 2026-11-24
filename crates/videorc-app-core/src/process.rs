@@ -13,10 +13,17 @@
 //! then SIGTERM, a bounded wait, SIGKILL, and an exact liveness check of
 //! every owned PID. Nothing here scans the process table.
 //!
+//! Every owned PID is recorded the moment it is known (the spawned child
+//! right after spawn, the real backend on `OWNERSHIP`), so a crash of this
+//! app mid-startup leaves them for the next launch to reap. Only the spawned
+//! child, while unreaped, is signalled directly; any other PID only after
+//! its recorded identity is read again (`signalRecordedOwnership`), so a PID
+//! the OS handed to an unrelated process is never signalled.
+//!
 //! Moved here from `videorc-dev-client` in plan 220 S2.1a; the supervisor
 //! ([`crate::supervisor`]) drives one of these per backend generation.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
@@ -24,10 +31,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::TcpStream;
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStdout, Command};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
+
+use crate::ledger::{
+    ProbeResult, ProcessIdentity, probe_process_retrying, recorded_is_alive, signal_recorded,
+};
 
 const OWNERSHIP_PREFIX: &str = "OWNERSHIP ";
 const READY_PREFIX: &str = "READY ";
@@ -398,157 +410,208 @@ pub struct BackendReapReport {
     pub stray_pids: Vec<u32>,
 }
 
-/// One running backend generation and every PID it owns.
-pub struct BackendProcess {
-    child: Child,
-    wrapper_pid: u32,
-    ownership: BackendOwnership,
-    bootstrap: BackendBootstrap,
-    owned_pids: BTreeSet<u32>,
-    stderr_tail: Arc<Mutex<VecDeque<String>>>,
-    stderr_task: JoinHandle<()>,
-    stdout_task: Option<JoinHandle<()>>,
-    data_dir: PathBuf,
-    started_at: Instant,
-    /// `stop` or `reap_after_exit` ran: `Drop` has nothing left to kill.
-    settled: bool,
-    /// `wait_exit` observed the child's exit.
-    exit_status: Option<ExitStatus>,
+/// Persists one PID a generation owns the moment it is known and returns
+/// the identity it recorded (`recordBackendOwnedProcess`: the spawned child
+/// right after spawn, the real backend on `OWNERSHIP`). An error ends the
+/// generation: a backend the ledger does not cover must not keep running.
+pub type OwnershipRecorder =
+    Arc<dyn Fn(u32, &str) -> Result<Option<ProcessIdentity>> + Send + Sync>;
+
+/// Electron's `BACKEND_PRE_BOOTSTRAP_SHUTDOWN_KILL_GRACE_MS`: a startup the
+/// app abandons before READY gets SIGTERM, this long, then SIGKILL.
+pub const PRE_BOOTSTRAP_KILL_GRACE: Duration = Duration::from_secs(5);
+/// How long the SIGKILL of an abandoned startup may take to be confirmed
+/// (Electron's 10 s pre-bootstrap timeout, less the grace).
+const PRE_BOOTSTRAP_KILL_CONFIRM: Duration = Duration::from_secs(5);
+
+/// How [`BackendProcess::spawn_with`] records and stops a startup.
+#[derive(Clone, Default)]
+pub struct SpawnOptions {
+    /// Persists each owned PID as soon as it is known. Without one, nothing
+    /// is persisted, but every PID's identity is still read for the signals.
+    pub recorder: Option<OwnershipRecorder>,
+    /// Turns true when the app quits: a startup still waiting for READY is
+    /// abandoned at once (SIGTERM, [`PRE_BOOTSTRAP_KILL_GRACE`], SIGKILL)
+    /// instead of running out its ready timeout.
+    pub cancel: Option<watch::Receiver<bool>>,
 }
 
-impl BackendProcess {
-    /// Spawns the backend and waits for `OWNERSHIP` and `READY`.
-    pub async fn spawn(launch: BackendLaunch) -> Result<Self> {
-        std::fs::create_dir_all(&launch.data_dir)
-            .with_context(|| format!("could not create {}", launch.data_dir.display()))?;
-        let logs_dir = launch.data_dir.join("logs");
-        std::fs::create_dir_all(&logs_dir)?;
-        let ownership_token = uuid::Uuid::new_v4().to_string();
-        let started_at = Instant::now();
+/// A startup that never reached READY, and what it left behind. Every PID
+/// it owned was signalled (the spawned child directly, any other PID only
+/// through its recorded identity) before this is returned.
+#[derive(Debug)]
+pub struct StartupError {
+    pub error: anyhow::Error,
+    /// `cancel` turned true before READY: the app is quitting.
+    pub cancelled: bool,
+    /// Owned PIDs confirmed gone: the caller clears them from its ledger.
+    pub reaped_pids: Vec<u32>,
+    /// Owned PIDs still alive or unprobeable after the kill: they stay
+    /// recorded, so the next launch reaps them.
+    pub stray_pids: Vec<u32>,
+}
 
-        let mut command = Command::new(&launch.program);
-        command
-            .args(&launch.args)
-            .current_dir(&launch.cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        for (name, _) in std::env::vars_os() {
-            let name_text = name.to_string_lossy();
-            if STRIPPED_ENV.contains(&name_text.as_ref())
-                || STRIPPED_ENV_PREFIXES
-                    .iter()
-                    .any(|prefix| name_text.starts_with(prefix))
-            {
-                command.env_remove(&name);
+impl StartupError {
+    fn nothing_spawned(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            cancelled: false,
+            reaped_pids: Vec::new(),
+            stray_pids: Vec::new(),
+        }
+    }
+}
+
+impl std::fmt::Display for StartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.error)?;
+        if !self.stray_pids.is_empty() {
+            write!(
+                f,
+                "; owned pid(s) {} are still running",
+                join_pids(&self.stray_pids)
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for StartupError {}
+
+fn join_pids(pids: &[u32]) -> String {
+    pids.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Every PID one generation owns, and how each may be signalled
+/// (`signalRecordedOwnership`): the spawned child directly while it is
+/// unreaped (its PID cannot be reused before we wait on it); every other PID
+/// only after its recorded identity is read again, so a PID the OS handed
+/// to an unrelated process is never signalled.
+#[derive(Debug, Default)]
+struct OwnedPids {
+    wrapper_pid: u32,
+    /// The child's exit was observed and it is reaped: its PID is never
+    /// signalled again (it may already belong to someone else).
+    wrapper_exited: bool,
+    /// PIDs that are not our child, with the identity read when they were
+    /// recorded. `None`: the identity could not be read; never signalled.
+    others: BTreeMap<u32, Option<ProcessIdentity>>,
+}
+
+impl OwnedPids {
+    fn new(wrapper_pid: u32) -> Self {
+        Self {
+            wrapper_pid,
+            wrapper_exited: false,
+            others: BTreeMap::new(),
+        }
+    }
+
+    fn all(&self) -> Vec<u32> {
+        std::iter::once(self.wrapper_pid)
+            .chain(self.others.keys().copied())
+            .collect()
+    }
+
+    fn contains(&self, pid: u32) -> bool {
+        pid == self.wrapper_pid || self.others.contains_key(&pid)
+    }
+
+    fn signal(&self, pids: &[u32], signal: Signal) {
+        for &pid in pids {
+            if pid == self.wrapper_pid {
+                if !self.wrapper_exited {
+                    signal_pids([pid], signal);
+                }
+            } else if let Some(Some(identity)) = self.others.get(&pid) {
+                let _ = signal_recorded(pid, identity, signal);
             }
         }
-        if cfg!(target_os = "macos") {
-            command.env("CARGO_INCREMENTAL", "0");
-        }
-        if !launch.path_prepend.is_empty() {
-            let mut entries: Vec<PathBuf> = launch.path_prepend.clone();
-            if let Some(existing) = std::env::var_os("PATH") {
-                entries.extend(std::env::split_paths(&existing));
-            }
-            if let Ok(joined) = std::env::join_paths(entries) {
-                command.env("PATH", joined);
-            }
-        }
-        // Full isolation or none (backend-isolation.ts): sqlite, secrets and
-        // recordings move together, never the owner's real profile.
-        if launch.isolation == Isolation::Profile {
-            let isolated = IsolatedBackendPaths::under(&launch.data_dir);
-            command
-                .env("VIDEORC_DATABASE_PATH", isolated.database)
-                .env("VIDEORC_SECRETS_PATH", isolated.secrets)
-                .env("VIDEORC_RECORDINGS_DIR", isolated.recordings);
-        }
-        command
-            .env("VIDEORC_LOGS_DIR", &logs_dir)
-            .env(
-                "VIDEORC_MANAGED_THUMBNAIL_ROOT",
-                launch.data_dir.join("scheduled-thumbnails"),
-            )
-            .env("VIDEORC_ENABLE_SMOKE_RPC", "0")
-            // The backend's watchdog also exits when THIS process dies; the
-            // ppid check alone misses the dev chain, where cargo is the parent.
-            .env("VIDEORC_SUPERVISOR_PID", std::process::id().to_string())
-            // Root of the process tree Windows system audio excludes.
-            .env("VIDEORC_ELECTRON_MAIN_PID", std::process::id().to_string())
-            .env(OWNERSHIP_TOKEN_ENV, &ownership_token);
-        if let Some(version) = &launch.app_version {
-            command.env("VIDEORC_APP_VERSION", version);
-        }
-        if std::env::var_os("RUST_LOG").is_none() {
-            command.env("RUST_LOG", "videorc_backend=info");
-        }
-        for (name, value) in &launch.extra_env {
-            command.env(name, value);
-        }
+    }
 
-        let mut child = command.spawn().with_context(|| {
-            format!(
-                "could not start the backend {} {}",
-                launch.program.display(),
-                launch.args.join(" ")
-            )
-        })?;
-        let wrapper_pid = child
-            .id()
-            .ok_or_else(|| anyhow!("the backend child has no pid"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("the backend child has no stdout"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow!("the backend child has no stderr"))?;
+    /// Whether `pid` may still be ours and running. A reused PID counts as
+    /// gone; an unprobeable one, or one whose identity was never read, as
+    /// alive (never assumed gone).
+    fn is_alive(&self, pid: u32) -> bool {
+        if pid == self.wrapper_pid {
+            return !self.wrapper_exited && process_is_alive(pid);
+        }
+        match self.others.get(&pid) {
+            Some(Some(identity)) => recorded_is_alive(pid, identity),
+            Some(None) => process_is_alive(pid),
+            None => false,
+        }
+    }
 
-        let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
-        let stderr_task = tokio::spawn(drain_stderr(
-            stderr,
-            stderr_tail.clone(),
-            launch.echo_stderr,
-            launch.stderr_sink.clone(),
-        ));
+    fn alive(&self) -> Vec<u32> {
+        self.all()
+            .into_iter()
+            .filter(|pid| self.is_alive(*pid))
+            .collect()
+    }
 
-        let mut stdout_lines = BufReader::new(stdout).lines();
+    fn reaped(&self, strays: &[u32]) -> Vec<u32> {
+        self.all()
+            .into_iter()
+            .filter(|pid| !strays.contains(pid))
+            .collect()
+    }
+}
+
+/// A generation between spawn and READY. Anything that ends it early goes
+/// through [`Startup::abandon`]; a panic or a dropped future through `Drop`.
+struct Startup {
+    /// Always `Some` until [`Startup::into_process`] takes it.
+    child: Option<Child>,
+    owned: OwnedPids,
+    ownership: Option<BackendOwnership>,
+    settled: bool,
+}
+
+impl Startup {
+    fn child(&mut self) -> &mut Child {
+        self.child.as_mut().expect("a startup holds its child")
+    }
+
+    /// Reads `OWNERSHIP` and `READY`, recording the real backend the moment
+    /// it names itself.
+    async fn handshake(
+        &mut self,
+        lines: &mut Lines<BufReader<ChildStdout>>,
+        launch: &BackendLaunch,
+        ownership_token: &str,
+        recorder: Option<&OwnershipRecorder>,
+        stderr_tail: &Arc<Mutex<VecDeque<String>>>,
+    ) -> Result<BackendBootstrap> {
         let deadline = Instant::now() + launch.ready_timeout;
-        let mut ownership: Option<BackendOwnership> = None;
         let bootstrap = loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                let tail = stderr_tail
-                    .lock()
-                    .map(|tail| tail.iter().cloned().collect::<Vec<_>>())
-                    .unwrap_or_default();
-                kill_pids(
-                    std::iter::once(wrapper_pid).chain(ownership.map(|ownership| ownership.pid)),
-                );
-                let _ = child.wait().await;
                 bail!(
                     "the backend did not print READY within {:?}; stderr tail:\n{}",
                     launch.ready_timeout,
-                    tail.join("\n")
+                    tail_text(stderr_tail)
                 );
             }
-            let line = match tokio::time::timeout(remaining, stdout_lines.next_line()).await {
+            let line = match tokio::time::timeout(remaining, lines.next_line()).await {
                 Ok(Ok(Some(line))) => line,
                 Ok(Ok(None)) => {
-                    let status = child.wait().await.ok();
-                    let tail = stderr_tail
-                        .lock()
-                        .map(|tail| tail.iter().cloned().collect::<Vec<_>>())
-                        .unwrap_or_default();
+                    let status = tokio::time::timeout(Duration::from_secs(2), self.child().wait())
+                        .await
+                        .ok()
+                        .and_then(Result::ok);
+                    if status.is_some() {
+                        self.owned.wrapper_exited = true;
+                    }
                     bail!(
                         "the backend exited before READY ({}); stderr tail:\n{}",
                         status
                             .map(|status| status.to_string())
                             .unwrap_or_else(|| "no exit status".to_string()),
-                        tail.join("\n")
+                        tail_text(stderr_tail)
                     );
                 }
                 Ok(Err(error)) => bail!("could not read the backend's stdout: {error}"),
@@ -558,17 +621,33 @@ impl BackendProcess {
             if let Some(json) = trimmed.strip_prefix(OWNERSHIP_PREFIX) {
                 let value: Value =
                     serde_json::from_str(json).context("the OWNERSHIP line is not JSON")?;
-                let parsed = BackendOwnership::parse(&value, &ownership_token)?;
-                if let Some(previous) = ownership
-                    && previous.pid != parsed.pid
-                {
-                    bail!(
+                let parsed = BackendOwnership::parse(&value, ownership_token)?;
+                match self.ownership {
+                    Some(previous) if previous.pid != parsed.pid => bail!(
                         "two backend PIDs claimed one generation ({} and {})",
                         previous.pid,
                         parsed.pid
+                    ),
+                    Some(_) => continue,
+                    None => {}
+                }
+                // Lineage (backendOwnershipLineageMatches): a direct binary is
+                // the child itself; the cargo chain's backend is the
+                // wrapper's child. A PID that is neither is not ours: it is
+                // never recorded nor signalled.
+                let wrapper_pid = self.owned.wrapper_pid;
+                if parsed.pid != wrapper_pid && parsed.parent_pid != Some(wrapper_pid) {
+                    bail!(
+                        "backend pid {} is not the spawned process {} nor its child (parent {:?})",
+                        parsed.pid,
+                        wrapper_pid,
+                        parsed.parent_pid
                     );
                 }
-                ownership = Some(parsed);
+                self.ownership = Some(parsed);
+                if parsed.pid != wrapper_pid {
+                    self.own_backend(parsed.pid, recorder)?;
+                }
                 continue;
             }
             if let Some(json) = trimmed.strip_prefix(READY_PREFIX) {
@@ -580,32 +659,305 @@ impl BackendProcess {
                 eprintln!("[backend stdout] {trimmed}");
             }
         };
-        let Some(ownership) = ownership else {
-            kill_pids([wrapper_pid]);
-            let _ = child.wait().await;
+        let Some(ownership) = self.ownership else {
             bail!("the backend printed READY without an OWNERSHIP marker");
         };
         if bootstrap.pid != ownership.pid {
-            kill_pids([wrapper_pid, ownership.pid, bootstrap.pid]);
-            let _ = child.wait().await;
+            // The READY PID is unverified: it is never signalled.
             bail!(
                 "READY pid {} does not match the OWNERSHIP pid {}",
                 bootstrap.pid,
                 ownership.pid
             );
         }
-        // Lineage: a direct binary is the child itself; the cargo chain's
-        // backend is the wrapper's child (backendOwnershipLineageMatches).
-        if ownership.pid != wrapper_pid && ownership.parent_pid != Some(wrapper_pid) {
-            kill_pids([wrapper_pid, ownership.pid]);
-            let _ = child.wait().await;
-            bail!(
-                "backend pid {} is not the spawned process {} nor its child (parent {:?})",
-                ownership.pid,
-                wrapper_pid,
-                ownership.parent_pid
-            );
+        Ok(bootstrap)
+    }
+
+    /// Records the real backend behind a wrapper (Electron: on OWNERSHIP).
+    /// Its identity is kept either way, so the cleanup can signal it safely
+    /// even when the ledger could not take it; a failed record still ends
+    /// the generation.
+    fn own_backend(&mut self, pid: u32, recorder: Option<&OwnershipRecorder>) -> Result<()> {
+        let recorded = match recorder {
+            Some(recorder) => recorder(pid, "videorc-backend"),
+            None => Ok(None),
+        };
+        let identity = match &recorded {
+            Ok(Some(identity)) => Some(identity.clone()),
+            _ => match probe_process_retrying(pid) {
+                ProbeResult::Live(identity) => Some(identity),
+                _ => None,
+            },
+        };
+        self.owned.others.insert(pid, identity);
+        recorded
+            .map(|_| ())
+            .with_context(|| format!("could not record the backend process {pid}"))
+    }
+
+    /// Ends a startup that never reached READY. A cancelled one gets
+    /// SIGTERM and [`PRE_BOOTSTRAP_KILL_GRACE`] first; a failed one is
+    /// killed at once. Then SIGKILL and an exact liveness check.
+    async fn abandon(
+        mut self,
+        error: anyhow::Error,
+        cancelled: bool,
+        mut stderr_task: JoinHandle<()>,
+    ) -> StartupError {
+        self.settled = true;
+        if cancelled {
+            self.owned.signal(&self.owned.all(), Signal::Terminate);
+            self.wait_gone(PRE_BOOTSTRAP_KILL_GRACE).await;
         }
+        let alive = self.wait_gone(Duration::ZERO).await;
+        if !alive.is_empty() {
+            self.owned.signal(&alive, Signal::Kill);
+        }
+        let stray_pids = self.wait_gone(PRE_BOOTSTRAP_KILL_CONFIRM).await;
+        if tokio::time::timeout(Duration::from_secs(1), &mut stderr_task)
+            .await
+            .is_err()
+        {
+            stderr_task.abort();
+        }
+        StartupError {
+            error,
+            cancelled,
+            reaped_pids: self.owned.reaped(&stray_pids),
+            stray_pids,
+        }
+    }
+
+    /// Probes every owned PID until none is alive or `timeout` passes;
+    /// returns the ones still alive. Reaps the child when it exits.
+    async fn wait_gone(&mut self, timeout: Duration) -> Vec<u32> {
+        let until = Instant::now() + timeout;
+        loop {
+            if !self.owned.wrapper_exited && matches!(self.child().try_wait(), Ok(Some(_))) {
+                self.owned.wrapper_exited = true;
+            }
+            let alive = self.owned.alive();
+            if alive.is_empty() || Instant::now() >= until {
+                return alive;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+impl Drop for Startup {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        // A panic, or the spawn future dropped mid-handshake: the child dies
+        // with `kill_on_drop`; the real backend behind a wrapper only by
+        // this identity-checked kill.
+        self.owned.signal(&self.owned.all(), Signal::Kill);
+    }
+}
+
+fn tail_text(tail: &Arc<Mutex<VecDeque<String>>>) -> String {
+    tail.lock()
+        .map(|tail| tail.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default()
+        .join("\n")
+}
+
+/// Becomes ready when `cancel` turns true; never without one (or once its
+/// sender is gone).
+async fn cancelled(cancel: &mut Option<watch::Receiver<bool>>) {
+    if let Some(cancel) = cancel {
+        loop {
+            if *cancel.borrow_and_update() {
+                return;
+            }
+            if cancel.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+    std::future::pending::<()>().await
+}
+
+/// One running backend generation and every PID it owns.
+pub struct BackendProcess {
+    child: Child,
+    owned: OwnedPids,
+    ownership: BackendOwnership,
+    bootstrap: BackendBootstrap,
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
+    stderr_task: JoinHandle<()>,
+    stdout_task: Option<JoinHandle<()>>,
+    data_dir: PathBuf,
+    started_at: Instant,
+    /// `stop` or `reap_after_exit` ran: `Drop` has nothing left to kill.
+    settled: bool,
+    /// `wait_exit` observed the child's exit.
+    exit_status: Option<ExitStatus>,
+}
+
+fn backend_command(launch: &BackendLaunch, ownership_token: &str) -> Result<Command> {
+    std::fs::create_dir_all(&launch.data_dir)
+        .with_context(|| format!("could not create {}", launch.data_dir.display()))?;
+    let logs_dir = launch.data_dir.join("logs");
+    std::fs::create_dir_all(&logs_dir)?;
+
+    let mut command = Command::new(&launch.program);
+    command
+        .args(&launch.args)
+        .current_dir(&launch.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    for (name, _) in std::env::vars_os() {
+        let name_text = name.to_string_lossy();
+        if STRIPPED_ENV.contains(&name_text.as_ref())
+            || STRIPPED_ENV_PREFIXES
+                .iter()
+                .any(|prefix| name_text.starts_with(prefix))
+        {
+            command.env_remove(&name);
+        }
+    }
+    if cfg!(target_os = "macos") {
+        command.env("CARGO_INCREMENTAL", "0");
+    }
+    if !launch.path_prepend.is_empty() {
+        let mut entries: Vec<PathBuf> = launch.path_prepend.clone();
+        if let Some(existing) = std::env::var_os("PATH") {
+            entries.extend(std::env::split_paths(&existing));
+        }
+        if let Ok(joined) = std::env::join_paths(entries) {
+            command.env("PATH", joined);
+        }
+    }
+    // Full isolation or none (backend-isolation.ts): sqlite, secrets and
+    // recordings move together, never the owner's real profile.
+    if launch.isolation == Isolation::Profile {
+        let isolated = IsolatedBackendPaths::under(&launch.data_dir);
+        command
+            .env("VIDEORC_DATABASE_PATH", isolated.database)
+            .env("VIDEORC_SECRETS_PATH", isolated.secrets)
+            .env("VIDEORC_RECORDINGS_DIR", isolated.recordings);
+    }
+    command
+        .env("VIDEORC_LOGS_DIR", &logs_dir)
+        .env(
+            "VIDEORC_MANAGED_THUMBNAIL_ROOT",
+            launch.data_dir.join("scheduled-thumbnails"),
+        )
+        .env("VIDEORC_ENABLE_SMOKE_RPC", "0")
+        // The backend's watchdog also exits when THIS process dies; the
+        // ppid check alone misses the dev chain, where cargo is the parent.
+        .env("VIDEORC_SUPERVISOR_PID", std::process::id().to_string())
+        // Root of the process tree Windows system audio excludes.
+        .env("VIDEORC_ELECTRON_MAIN_PID", std::process::id().to_string())
+        .env(OWNERSHIP_TOKEN_ENV, ownership_token);
+    if let Some(version) = &launch.app_version {
+        command.env("VIDEORC_APP_VERSION", version);
+    }
+    if std::env::var_os("RUST_LOG").is_none() {
+        command.env("RUST_LOG", "videorc_backend=info");
+    }
+    for (name, value) in &launch.extra_env {
+        command.env(name, value);
+    }
+    Ok(command)
+}
+
+impl BackendProcess {
+    /// Spawns the backend and waits for `OWNERSHIP` and `READY`, with no
+    /// ledger and no cancel ([`Self::spawn_with`]).
+    pub async fn spawn(launch: BackendLaunch) -> Result<Self, StartupError> {
+        Self::spawn_with(launch, SpawnOptions::default()).await
+    }
+
+    /// Spawns the backend and waits for `OWNERSHIP` and `READY`. The
+    /// spawned child is recorded right after spawn and the real backend on
+    /// `OWNERSHIP`; a failed record, a bad line, the ready timeout or a
+    /// cancel ends the startup and stops every PID it owned.
+    pub async fn spawn_with(
+        launch: BackendLaunch,
+        options: SpawnOptions,
+    ) -> Result<Self, StartupError> {
+        let ownership_token = uuid::Uuid::new_v4().to_string();
+        let started_at = Instant::now();
+        let mut command =
+            backend_command(&launch, &ownership_token).map_err(StartupError::nothing_spawned)?;
+        let mut child = command
+            .spawn()
+            .with_context(|| {
+                format!(
+                    "could not start the backend {} {}",
+                    launch.program.display(),
+                    launch.args.join(" ")
+                )
+            })
+            .map_err(StartupError::nothing_spawned)?;
+        // `kill_on_drop` ends the child on every early return below.
+        let Some(wrapper_pid) = child.id() else {
+            return Err(StartupError::nothing_spawned(anyhow!(
+                "the backend child has no pid"
+            )));
+        };
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            return Err(StartupError::nothing_spawned(anyhow!(
+                "the backend child has no stdout or stderr"
+            )));
+        };
+
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
+        let stderr_task = tokio::spawn(drain_stderr(
+            stderr,
+            stderr_tail.clone(),
+            launch.echo_stderr,
+            launch.stderr_sink.clone(),
+        ));
+        let mut startup = Startup {
+            child: Some(child),
+            owned: OwnedPids::new(wrapper_pid),
+            ownership: None,
+            settled: false,
+        };
+
+        // Recorded the moment it exists, so a crash of this app during a slow
+        // startup (cargo compiling, a stalled device probe) leaves it in the
+        // ledger for the next launch to reap.
+        if let Some(recorder) = &options.recorder
+            && let Err(error) = recorder(wrapper_pid, launch.wrapper_label())
+        {
+            let error = error.context(format!(
+                "could not record the spawned backend process {wrapper_pid}"
+            ));
+            return Err(startup.abandon(error, false, stderr_task).await);
+        }
+
+        let mut stdout_lines = BufReader::new(stdout).lines();
+        let mut cancel = options.cancel.clone();
+        let handshake = tokio::select! {
+            biased;
+            _ = cancelled(&mut cancel) => None,
+            result = startup.handshake(
+                &mut stdout_lines,
+                &launch,
+                &ownership_token,
+                options.recorder.as_ref(),
+                &stderr_tail,
+            ) => Some(result),
+        };
+        let bootstrap = match handshake {
+            Some(Ok(bootstrap)) => bootstrap,
+            Some(Err(error)) => return Err(startup.abandon(error, false, stderr_task).await),
+            None => {
+                let error = anyhow!("the app quit before the backend printed READY");
+                return Err(startup.abandon(error, true, stderr_task).await);
+            }
+        };
+        let ownership = startup
+            .ownership
+            .expect("the handshake checked the OWNERSHIP marker");
 
         let echo = launch.echo_stderr;
         let stdout_task = tokio::spawn(async move {
@@ -616,15 +968,14 @@ impl BackendProcess {
             }
         });
 
-        let mut owned_pids = BTreeSet::new();
-        owned_pids.insert(wrapper_pid);
-        owned_pids.insert(ownership.pid);
+        startup.settled = true;
+        let child = startup.child.take().expect("a startup holds its child");
+        let owned = std::mem::take(&mut startup.owned);
         Ok(Self {
             child,
-            wrapper_pid,
+            owned,
             ownership,
             bootstrap,
-            owned_pids,
             stderr_tail,
             stderr_task,
             stdout_task: Some(stdout_task),
@@ -645,7 +996,7 @@ impl BackendProcess {
 
     /// The PID this process spawned (the backend, or the cargo wrapper).
     pub fn wrapper_pid(&self) -> u32 {
-        self.wrapper_pid
+        self.owned.wrapper_pid
     }
 
     /// The real backend's PID from the `OWNERSHIP` line.
@@ -664,13 +1015,25 @@ impl BackendProcess {
 
     /// Every PID this generation owns: spawned by us or reported by the backend.
     pub fn owned_pids(&self) -> impl Iterator<Item = u32> + '_ {
-        self.owned_pids.iter().copied()
+        self.owned.all().into_iter()
     }
 
     /// Records a PID the backend reported as its own (a child it started).
-    pub fn record_owned_pid(&mut self, pid: u32) {
-        if pid > 1 {
-            self.owned_pids.insert(pid);
+    /// Its identity is read now; a PID whose identity cannot be read is
+    /// refused (false), since it could never be signalled safely.
+    pub fn record_owned_pid(&mut self, pid: u32) -> bool {
+        if pid <= 1 || pid == std::process::id() {
+            return false;
+        }
+        if self.owned.contains(pid) {
+            return true;
+        }
+        match probe_process_retrying(pid) {
+            ProbeResult::Live(identity) => {
+                self.owned.others.insert(pid, Some(identity));
+                true
+            }
+            _ => false,
         }
     }
 
@@ -691,44 +1054,31 @@ impl BackendProcess {
         }
         let status = self.child.wait().await?;
         self.exit_status = Some(status);
+        self.owned.wrapper_exited = true;
         Ok(status)
     }
 
     /// After [`Self::wait_exit`]: confirms every owned PID is gone, killing
-    /// the ones that outlived the child (the cargo chain's real backend) and
-    /// probing until ESRCH or `deadline`. Exact PIDs only.
+    /// the ones that outlived the child (the cargo chain's real backend,
+    /// identity-checked) and probing until gone or `deadline`.
     pub async fn reap_after_exit(mut self, deadline: Duration) -> BackendReapReport {
         self.settled = true;
         let mut report = BackendReapReport::default();
-        let pids: Vec<u32> = self
-            .owned_pids
-            .iter()
-            .copied()
-            .filter(|pid| *pid != self.wrapper_pid || self.exit_status.is_none())
-            .collect();
-        let alive: Vec<u32> = pids
-            .iter()
-            .copied()
-            .filter(|pid| process_is_alive(*pid))
-            .collect();
+        let alive = self.owned.alive();
         if !alive.is_empty() {
-            signal_pids(alive.iter().copied(), Signal::Kill);
+            self.owned.signal(&alive, Signal::Kill);
             report.killed_pids = alive;
         }
-        report.stray_pids = wait_until_gone(&pids, deadline).await;
-        report.reaped_pids = self
-            .owned_pids
-            .iter()
-            .copied()
-            .filter(|pid| !report.stray_pids.contains(pid))
-            .collect();
+        report.stray_pids = self.wait_until_gone(deadline).await;
+        report.reaped_pids = self.owned.reaped(&report.stray_pids);
         self.finish_tasks().await;
         report
     }
 
     /// `POST /process/shutdown/prepare` with the admin credential, then
     /// SIGTERM, wait `grace`, SIGKILL, and an exact liveness check of every
-    /// owned PID (`kill(pid, 0)` until ESRCH, never a process-table scan).
+    /// owned PID (never a process-table scan). PIDs that are not our child
+    /// are signalled only while they still carry their recorded identity.
     pub async fn stop(mut self, grace: Duration) -> Result<BackendStopReport> {
         self.settled = true;
         let mut report = BackendStopReport {
@@ -752,20 +1102,18 @@ impl BackendProcess {
             )
             .await
             {
-                Ok(Ok((status, body))) => {
-                    let payload: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-                    if let Some(pid) = payload
-                        .get("backendPid")
-                        .and_then(Value::as_u64)
-                        .and_then(|pid| u32::try_from(pid).ok())
-                    {
-                        self.record_owned_pid(pid);
-                    }
-                    if status == 200 {
+                // The answer's `backendPid` never adds a PID to signal:
+                // Electron only trusts one it already owns, and every PID
+                // this generation owns is already here.
+                Ok(Ok(response)) => {
+                    let payload: Value =
+                        serde_json::from_str(&response.body).unwrap_or(Value::Null);
+                    if response.status == 200 {
                         report.preparation = Some(payload);
                     } else {
                         report.preparation_error = Some(format!(
-                            "shutdown preparation answered HTTP {status}: {body}"
+                            "shutdown preparation answered HTTP {}: {}",
+                            response.status, response.body
                         ));
                     }
                 }
@@ -782,14 +1130,14 @@ impl BackendProcess {
 
         // SIGTERM reaches the backend's shutdown_signal; the cargo wrapper
         // forwards nothing, so signal every owned PID exactly.
-        signal_pids(self.owned_pids.iter().copied(), Signal::Terminate);
+        self.owned.signal(&self.owned.all(), Signal::Terminate);
         let status = match self.exit_status {
             Some(status) => Some(status),
             None => match tokio::time::timeout(grace, self.child.wait()).await {
                 Ok(result) => result.ok(),
                 Err(_) => {
                     report.forced = true;
-                    signal_pids(self.owned_pids.iter().copied(), Signal::Kill);
+                    self.owned.signal(&self.owned.all(), Signal::Kill);
                     tokio::time::timeout(Duration::from_secs(10), self.child.wait())
                         .await
                         .ok()
@@ -797,48 +1145,38 @@ impl BackendProcess {
                 }
             },
         };
+        if status.is_some() {
+            self.exit_status = status;
+            self.owned.wrapper_exited = true;
+        }
         report.exit_status = status;
 
         // The child is reaped by `wait`; a backend behind a cargo wrapper is
-        // not our child, so confirm it by probing until ESRCH.
-        let pids: Vec<u32> = self
-            .owned_pids
-            .iter()
-            .copied()
-            .filter(|pid| *pid != self.wrapper_pid || status.is_none())
-            .collect();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut killed_once = false;
-        loop {
-            let alive: Vec<u32> = pids
-                .iter()
-                .copied()
-                .filter(|pid| process_is_alive(*pid))
-                .collect();
-            if alive.is_empty() {
-                break;
-            }
-            if Instant::now() >= deadline {
-                report.stray_pids = alive;
-                break;
-            }
-            if !killed_once {
-                signal_pids(alive.iter().copied(), Signal::Kill);
-                killed_once = true;
-                report.forced = true;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        // not our child, so confirm it by probing its identity.
+        let alive = self.owned.alive();
+        if !alive.is_empty() {
+            report.forced = true;
+            self.owned.signal(&alive, Signal::Kill);
         }
-        report.reaped_pids = self
-            .owned_pids
-            .iter()
-            .copied()
-            .filter(|pid| !report.stray_pids.contains(pid))
-            .collect();
+        report.stray_pids = self.wait_until_gone(Duration::from_secs(10)).await;
+        report.reaped_pids = self.owned.reaped(&report.stray_pids);
 
         self.finish_tasks().await;
         report.stderr_tail = self.stderr_tail();
         Ok(report)
+    }
+
+    /// Probes every owned PID until none is alive or `deadline` passes;
+    /// returns the ones still alive.
+    async fn wait_until_gone(&self, deadline: Duration) -> Vec<u32> {
+        let until = Instant::now() + deadline;
+        loop {
+            let alive = self.owned.alive();
+            if alive.is_empty() || Instant::now() >= until {
+                return alive;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     async fn finish_tasks(&mut self) {
@@ -856,37 +1194,13 @@ impl Drop for BackendProcess {
         }
         // A panic or an early return must not leave a backend behind. The
         // wrapper dies with `kill_on_drop`; the real backend behind a cargo
-        // wrapper would not. A PID whose exit `wait` observed is never
-        // signalled again (it may already belong to someone else).
-        let exited_wrapper = self.exit_status.map(|_| self.wrapper_pid);
-        signal_pids(
-            self.owned_pids
-                .iter()
-                .copied()
-                .filter(|pid| Some(*pid) != exited_wrapper),
-            Signal::Kill,
-        );
+        // wrapper only by this identity-checked kill. A PID whose exit
+        // `wait` observed is never signalled again.
+        self.owned.signal(&self.owned.all(), Signal::Kill);
         self.stderr_task.abort();
         if let Some(task) = self.stdout_task.take() {
             task.abort();
         }
-    }
-}
-
-/// Probes `pids` until none is alive or `deadline` passes; returns the ones
-/// still alive.
-async fn wait_until_gone(pids: &[u32], deadline: Duration) -> Vec<u32> {
-    let until = Instant::now() + deadline;
-    loop {
-        let alive: Vec<u32> = pids
-            .iter()
-            .copied()
-            .filter(|pid| process_is_alive(*pid))
-            .collect();
-        if alive.is_empty() || Instant::now() >= until {
-            return alive;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -924,8 +1238,9 @@ pub enum Signal {
     Kill,
 }
 
-/// Signals exact PIDs: ones this process spawned or the backend reported.
-/// Never a process-table scan.
+/// Signals exact PIDs, unchecked: callers pass only this process's own
+/// unreaped child, or a PID whose recorded identity they just re-read
+/// ([`crate::ledger::signal_recorded`]). Never a process-table scan.
 pub fn signal_pids(pids: impl IntoIterator<Item = u32>, signal: Signal) {
     for pid in pids {
         if pid <= 1 {
@@ -957,10 +1272,6 @@ pub fn signal_pids(pids: impl IntoIterator<Item = u32>, signal: Signal) {
     }
 }
 
-fn kill_pids(pids: impl IntoIterator<Item = u32>) {
-    signal_pids(pids, Signal::Kill);
-}
-
 /// Exact liveness: `kill(pid, 0)` answers ESRCH only once the process is gone
 /// (a zombie still counts as alive until its parent reaps it).
 pub fn process_is_alive(pid: u32) -> bool {
@@ -984,8 +1295,11 @@ pub fn process_is_alive(pid: u32) -> bool {
 }
 
 /// A bodyless HTTP/1.1 POST over loopback: the status code and the body.
-/// Small enough that the app does not need an HTTP client crate.
-async fn http_post(host: &str, port: u16, path_and_query: &str) -> Result<(u16, String)> {
+async fn http_post(
+    host: &str,
+    port: u16,
+    path_and_query: &str,
+) -> Result<crate::http::HttpResponse> {
     let mut stream = TcpStream::connect((host, port))
         .await
         .with_context(|| format!("could not connect to {host}:{port}"))?;
@@ -995,40 +1309,7 @@ async fn http_post(host: &str, port: u16, path_and_query: &str) -> Result<(u16, 
     stream.write_all(request.as_bytes()).await?;
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).await?;
-    let text = String::from_utf8_lossy(&raw).into_owned();
-    let (head, body) = text
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| anyhow!("malformed HTTP response: {text}"))?;
-    let status = head
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| anyhow!("malformed HTTP status line: {head}"))?;
-    let chunked = head
-        .lines()
-        .any(|line| line.to_ascii_lowercase().trim() == "transfer-encoding: chunked");
-    let body = if chunked {
-        decode_chunked(body)
-    } else {
-        body.to_string()
-    };
-    Ok((status, body))
-}
-
-fn decode_chunked(body: &str) -> String {
-    let mut decoded = String::new();
-    let mut rest = body;
-    while let Some((size_line, after)) = rest.split_once("\r\n") {
-        let size = usize::from_str_radix(size_line.trim().split(';').next().unwrap_or("0"), 16)
-            .unwrap_or(0);
-        if size == 0 || after.len() < size {
-            break;
-        }
-        decoded.push_str(&after[..size]);
-        rest = after[size..].strip_prefix("\r\n").unwrap_or("");
-    }
-    decoded
+    crate::http::parse_response(&raw)
 }
 
 #[cfg(test)]
@@ -1099,12 +1380,6 @@ mod tests {
         assert!(BackendOwnership::parse(&json!({"token": token, "pid": 1}), token).is_err());
         let no_parent = BackendOwnership::parse(&json!({"token": token, "pid": 5}), token).unwrap();
         assert_eq!(no_parent.parent_pid, None);
-    }
-
-    #[test]
-    fn chunked_bodies_decode() {
-        assert_eq!(decode_chunked("5\r\nhello\r\n0\r\n\r\n"), "hello");
-        assert_eq!(decode_chunked("2\r\n{}\r\n0\r\n\r\n"), "{}");
     }
 
     #[test]

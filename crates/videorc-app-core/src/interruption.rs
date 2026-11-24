@@ -146,45 +146,13 @@ async fn http_request(
         .take((MAX_RESPONSE_BYTES * 2) as u64)
         .read_to_end(&mut raw)
         .await?;
-    let text = String::from_utf8_lossy(&raw).into_owned();
-    let (head, body) = text
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| anyhow!("malformed HTTP response"))?;
-    let status = head
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| anyhow!("malformed HTTP status line"))?;
-    let chunked = head
-        .lines()
-        .any(|line| line.to_ascii_lowercase().trim() == "transfer-encoding: chunked");
-    let body = if chunked {
-        decode_chunked(body)
-    } else {
-        body.to_string()
-    };
+    let crate::http::HttpResponse { status, body } = crate::http::parse_response(&raw)?;
     if body.len() > MAX_RESPONSE_BYTES {
         return Err(anyhow!(
             "Backend interruption response exceeded 4096 bytes."
         ));
     }
     Ok(HttpResponse { status, body })
-}
-
-fn decode_chunked(body: &str) -> String {
-    let mut decoded = String::new();
-    let mut rest = body;
-    while let Some((size_line, after)) = rest.split_once("\r\n") {
-        let size = usize::from_str_radix(size_line.trim().split(';').next().unwrap_or("0"), 16)
-            .unwrap_or(0);
-        if size == 0 || after.len() < size {
-            break;
-        }
-        decoded.push_str(&after[..size]);
-        rest = after[size..].strip_prefix("\r\n").unwrap_or("");
-    }
-    decoded
 }
 
 /// `interruptionPath`: the reason is cut at 256 characters, the query

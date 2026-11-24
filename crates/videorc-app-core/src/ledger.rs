@@ -75,22 +75,17 @@ impl OwnedProcessLedger {
         &self.path
     }
 
-    /// Records a live PID with its identity. Fails when the process is
-    /// already dead or its identity cannot be read (after three tries), so
-    /// the caller knows the ledger does not cover it.
-    pub fn record(&self, pid: u32, label: &str) -> Result<()> {
+    /// Records a live PID with its identity and returns that identity, which
+    /// later signals to the PID are checked against ([`signal_recorded`]).
+    /// Fails when the process is already dead, its identity cannot be read
+    /// (after three tries) or the ledger cannot be written, so the caller
+    /// knows the ledger does not cover it. `None` for a PID that is never
+    /// recorded (this process, or 0 and 1).
+    pub fn record(&self, pid: u32, label: &str) -> Result<Option<ProcessIdentity>> {
         if pid <= 1 || pid == self.current_pid {
-            return Ok(());
+            return Ok(None);
         }
-        let mut probe = probe_process(pid);
-        for _ in 0..2 {
-            if probe != ProbeResult::Unprobeable {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-            probe = probe_process(pid);
-        }
-        let identity = match probe {
+        let identity = match probe_process_retrying(pid) {
             ProbeResult::Live(identity) => identity,
             ProbeResult::Dead => {
                 bail!("could not record {label} process {pid}: it is already dead")
@@ -110,9 +105,46 @@ impl OwnedProcessLedger {
             pid,
             label: label.to_string(),
             started_at: crate::log::iso8601_utc_now(),
-            identity: Some(identity),
+            identity: Some(identity.clone()),
         });
-        self.write(&records)
+        self.write(&records)?;
+        Ok(Some(identity))
+    }
+
+    /// A ledger that cannot be parsed would refuse every later record, and
+    /// with it every cleanup. Moves it aside (`<name>.corrupt-<ms>`, kept as
+    /// evidence) so the next record starts a fresh file; returns where it
+    /// went. `None` when the ledger is absent or parses.
+    pub fn recover_corrupt(&self) -> Result<Option<PathBuf>> {
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "could not read the owned process ledger {}",
+                        self.path.display()
+                    )
+                });
+            }
+        };
+        if serde_json::from_str::<Vec<OwnedProcessRecord>>(&text).is_ok() {
+            return Ok(None);
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or(0);
+        let mut aside = self.path.clone().into_os_string();
+        aside.push(format!(".corrupt-{stamp}"));
+        let aside = PathBuf::from(aside);
+        std::fs::rename(&self.path, &aside).with_context(|| {
+            format!(
+                "could not move the unreadable owned process ledger {} aside",
+                self.path.display()
+            )
+        })?;
+        Ok(Some(aside))
     }
 
     /// Re-stamps a record whose executable path changed after `exec` (the
@@ -244,9 +276,24 @@ impl OwnedProcessLedger {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("could not create {}", parent.display()))?;
         }
+        // Write a sibling and rename it over the ledger: a crash mid-write
+        // leaves the old ledger or the new one, never half of either.
         let text = serde_json::to_string_pretty(records)?;
-        std::fs::write(&self.path, format!("{text}\n"))
-            .with_context(|| format!("could not write {}", self.path.display()))
+        let mut temporary = self.path.clone().into_os_string();
+        temporary.push(format!(".{}.tmp", std::process::id()));
+        let temporary = PathBuf::from(temporary);
+        let written = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&temporary)?;
+            file.write_all(format!("{text}\n").as_bytes())?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, &self.path)
+        })();
+        if let Err(error) = written {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error).with_context(|| format!("could not write {}", self.path.display()));
+        }
+        Ok(())
     }
 }
 
@@ -303,6 +350,57 @@ enum RawProbe {
     #[cfg_attr(windows, allow(dead_code))]
     Zombie,
     Unreadable,
+}
+
+/// What a signal to a recorded PID did ([`signal_recorded`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordedSignal {
+    /// The PID still carried the recorded identity and was signalled.
+    Signalled,
+    /// Dead, or the PID now belongs to another process: not signalled.
+    Gone,
+    /// The identity could not be read: not signalled, not known gone.
+    Unconfirmed,
+}
+
+/// `signalRecordedOwnership`: signals a PID that is not this process's own
+/// child only after re-reading its identity, so a PID the OS handed to an
+/// unrelated process is never signalled. Signal acceptance is not exit
+/// evidence; confirm with [`recorded_is_alive`].
+pub fn signal_recorded(pid: u32, identity: &ProcessIdentity, signal: Signal) -> RecordedSignal {
+    match probe_process(pid) {
+        ProbeResult::Dead => RecordedSignal::Gone,
+        ProbeResult::Unprobeable => RecordedSignal::Unconfirmed,
+        ProbeResult::Live(current) if current != *identity => RecordedSignal::Gone,
+        ProbeResult::Live(_) => {
+            signal_pids([pid], signal);
+            RecordedSignal::Signalled
+        }
+    }
+}
+
+/// Whether a recorded PID may still be the process recorded: dead or
+/// reused counts as gone; unprobeable counts as alive (never assumed gone).
+pub fn recorded_is_alive(pid: u32, identity: &ProcessIdentity) -> bool {
+    match probe_process(pid) {
+        ProbeResult::Dead => false,
+        ProbeResult::Unprobeable => true,
+        ProbeResult::Live(current) => current == *identity,
+    }
+}
+
+/// [`probe_process`], retried twice 10 ms apart while unprobeable (`ps` can
+/// miss a process that is still starting).
+pub fn probe_process_retrying(pid: u32) -> ProbeResult {
+    let mut probe = probe_process(pid);
+    for _ in 0..2 {
+        if probe != ProbeResult::Unprobeable {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        probe = probe_process(pid);
+    }
+    probe
 }
 
 /// Exact identity of one PID, or dead, or unprobeable.
@@ -520,7 +618,7 @@ mod tests {
         let ledger =
             OwnedProcessLedger::new(dir.path().join("owned-processes").join("rust-x.json"));
         // Our own PID is never recorded.
-        ledger.record(std::process::id(), "self").unwrap();
+        assert_eq!(ledger.record(std::process::id(), "self").unwrap(), None);
         assert!(ledger.records().unwrap().is_empty());
 
         // A child we own: `sleep` is alive long enough to probe.
@@ -537,9 +635,11 @@ mod tests {
             }
             other => panic!("expected the child to be live and probeable, got {other:?}"),
         }
-        ledger.record(pid, "sleep").unwrap();
+        let identity = ledger.record(pid, "sleep").unwrap().unwrap();
         let records = ledger.records().unwrap();
         assert_eq!(records.len(), 1);
+        assert_eq!(records[0].identity.as_ref(), Some(&identity));
+        assert!(recorded_is_alive(pid, &identity));
         assert_eq!(records[0].pid, pid);
         assert!(records[0].identity.is_some());
         let text = std::fs::read_to_string(ledger.path()).unwrap();
@@ -594,5 +694,73 @@ mod tests {
         assert!(ledger.records().unwrap().is_empty());
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    fn a_signal_to_a_reused_pid_is_refused() {
+        let mut child = std::process::Command::new(if cfg!(windows) { "timeout" } else { "sleep" })
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let someone_else = ProcessIdentity {
+            birth_token: "someone else".to_string(),
+            executable_path: "/nowhere".to_string(),
+        };
+        assert_eq!(
+            signal_recorded(pid, &someone_else, Signal::Kill),
+            RecordedSignal::Gone
+        );
+        assert!(!recorded_is_alive(pid, &someone_else));
+        assert!(process_is_alive(pid), "a reused PID is never signalled");
+
+        let ProbeResult::Live(identity) = probe_process(pid) else {
+            panic!("expected the child to be live and probeable");
+        };
+        assert_eq!(
+            signal_recorded(pid, &identity, Signal::Kill),
+            RecordedSignal::Signalled
+        );
+        let _ = child.wait();
+        assert_eq!(
+            signal_recorded(pid, &identity, Signal::Kill),
+            RecordedSignal::Gone
+        );
+    }
+
+    #[test]
+    fn a_corrupt_ledger_is_moved_aside_and_recording_works_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owned-processes").join("rust-x.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // A crash mid-write under the old, non-atomic writer.
+        std::fs::write(&path, "[{\"pid\": 12, \"lab").unwrap();
+        let ledger = OwnedProcessLedger::new(path.clone());
+        assert!(ledger.records().is_err());
+        let aside = ledger.recover_corrupt().unwrap().expect("moved aside");
+        assert!(aside.exists());
+        assert!(!path.exists());
+        assert!(
+            aside
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("rust-x.json.corrupt-")
+        );
+        assert!(ledger.records().unwrap().is_empty());
+        // A readable ledger (or none) is left where it is.
+        assert_eq!(ledger.recover_corrupt().unwrap(), None);
+        ledger.write(&[]).unwrap();
+        assert_eq!(ledger.recover_corrupt().unwrap(), None);
+        assert!(path.exists());
+        // The atomic writer leaves no temporary file behind.
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 }

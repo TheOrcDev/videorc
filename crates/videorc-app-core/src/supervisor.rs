@@ -25,7 +25,10 @@ use crate::crash_log::{
 use crate::ledger::OwnedProcessLedger;
 use crate::log::Logger;
 use crate::paths::AppPaths;
-use crate::process::{BackendBootstrap, BackendLaunch, BackendProcess, BackendStopReport};
+use crate::process::{
+    BackendBootstrap, BackendLaunch, BackendProcess, BackendStopReport, OwnershipRecorder,
+    SpawnOptions,
+};
 use crate::restart::{RestartDecision, RestartPolicy};
 
 /// Electron: 30 s for the backend to finish its ordered shutdown after the
@@ -439,6 +442,20 @@ async fn run(
         records: read_crash_log(&config.paths.backend_crash_log_file()),
     };
 
+    // A ledger a crash left unreadable would refuse every record, and with
+    // it every cleanup: move it aside and start a fresh one.
+    match ledger.recover_corrupt() {
+        Ok(Some(aside)) => logger.warn(format!(
+            "The owned process ledger {} could not be parsed; moved it to {} and started a fresh one. PIDs it named are not reaped.",
+            ledger.path().display(),
+            aside.display()
+        )),
+        Ok(None) => {}
+        Err(error) => logger.warn(format!(
+            "Could not check the owned process ledger: {error:#}"
+        )),
+    }
+
     // Owned processes a dead supervisor left behind (reapStaleBackendProcesses).
     {
         let ledger = ledger.clone();
@@ -483,13 +500,14 @@ async fn run(
                     logger.error(format!(
                         "Refusing backend startup because owned pid(s) {pids} remain live or unprobeable."
                     ));
+                    let reason = format!(
+                        "An earlier Videorc backend (pid {pids}) is still running and could not be stopped. Quit it, then restart Videorc."
+                    );
                     set(BackendState::Failed {
                         generation: 0,
-                        reason: format!(
-                            "An earlier Videorc backend (pid {pids}) is still running and could not be stopped. Quit it, then restart Videorc."
-                        ),
+                        reason: reason.clone(),
                     });
-                    wait_stop(&mut stop_rx).await;
+                    wait_stop_refusing(&mut stop_rx, &mut restart_rx, &reason).await;
                     set(BackendState::Stopped {
                         stray_pids: report.unconfirmed.iter().map(|record| record.pid).collect(),
                     });
@@ -512,6 +530,13 @@ async fn run(
         }
     }
 
+    // Each PID is in the ledger the moment it is known: the spawned child
+    // right after spawn, the real backend on OWNERSHIP (Electron's
+    // recordBackendOwnedProcess). A failed record ends the generation.
+    let recorder: OwnershipRecorder = {
+        let ledger = ledger.clone();
+        Arc::new(move |pid, label| ledger.record(pid, label))
+    };
     let mut policy = RestartPolicy::new();
     let mut generation: u32 = 0;
     let mut attempt: Option<u32> = None;
@@ -521,6 +546,11 @@ async fn run(
             generation,
             attempt,
         });
+        // A restart asked for just as the last generation died: this start
+        // is that restart.
+        while let Ok(request) = restart_rx.try_recv() {
+            let _ = request.reply.send(Ok(()));
+        }
         let started_at = Instant::now();
         policy.started(started_at);
         logger.info(format!(
@@ -530,20 +560,47 @@ async fn run(
             config.launch.args.join(" ")
         ));
 
-        let process = match BackendProcess::spawn(config.launch.clone()).await {
+        let options = SpawnOptions {
+            recorder: Some(recorder.clone()),
+            // A quit while the backend starts stops it now, not after the
+            // ready timeout (Electron's stopPreBootstrapBackendProcess).
+            cancel: Some(stop_rx.clone()),
+        };
+        let process = match BackendProcess::spawn_with(config.launch.clone(), options).await {
             Ok(process) => process,
-            Err(error) => {
-                logger.error(format!(
-                    "Backend generation {generation} exited before READY: {error:#}"
-                ));
-                if *stop_rx.borrow() {
-                    set(BackendState::Stopped {
-                        stray_pids: Vec::new(),
-                    });
-                    return StopOutcome::default();
+            Err(startup) => {
+                for pid in &startup.reaped_pids {
+                    if let Err(error) = ledger.remove(*pid) {
+                        logger.warn(format!(
+                            "Could not update the owned process ledger: {error:#}"
+                        ));
+                    }
                 }
+                if !startup.stray_pids.is_empty() {
+                    logger.error(format!(
+                        "Owned pid(s) {:?} of generation {generation} survived the kill; they stay in the ledger {}.",
+                        startup.stray_pids,
+                        ledger.path().display()
+                    ));
+                }
+                if startup.cancelled || *stop_rx.borrow() {
+                    logger.info(format!(
+                        "Backend generation {generation} stopped before READY: {startup}"
+                    ));
+                    set(BackendState::Stopped {
+                        stray_pids: startup.stray_pids.clone(),
+                    });
+                    return StopOutcome {
+                        report: None,
+                        stray_pids: startup.stray_pids,
+                    };
+                }
+                let error = startup;
+                logger.error(format!(
+                    "Backend generation {generation} exited before READY: {error}"
+                ));
                 let decision = policy.on_crash(Instant::now());
-                let tail: Vec<String> = format!("{error:#}").lines().map(str::to_string).collect();
+                let tail: Vec<String> = error.to_string().lines().map(str::to_string).collect();
                 evidence.record(
                     &logger,
                     CrashRecord {
@@ -568,6 +625,7 @@ async fn run(
                     &logger,
                     &set,
                     &mut stop_rx,
+                    &mut restart_rx,
                 )
                 .await
                 {
@@ -584,7 +642,7 @@ async fn run(
             "Backend generation {generation} spawned as pid {}.",
             process.wrapper_pid()
         ));
-        record_generation(&ledger, &logger, &process, &config.launch);
+        refresh_wrapper_identity(&ledger, &logger, &process);
         let bootstrap = process.bootstrap().clone();
         logger.info(format!(
             "Backend generation {generation} ready: pid {} on {}:{} after {:.2}s.",
@@ -595,7 +653,8 @@ async fn run(
         ));
 
         if *stop_rx.borrow() {
-            return stop_generation(process, generation, &config, &ledger, &logger, &set).await;
+            return stop_generation(process, generation, &config, &ledger, &logger, &set, true)
+                .await;
         }
         set(BackendState::Ready {
             generation,
@@ -606,7 +665,8 @@ async fn run(
         let exit = tokio::select! {
             status = process.wait_exit() => status.ok(),
             _ = wait_stop(&mut stop_rx) => {
-                return stop_generation(process, generation, &config, &ledger, &logger, &set).await;
+                return stop_generation(process, generation, &config, &ledger, &logger, &set, true)
+                    .await;
             }
             Some(request) = restart_rx.recv() => {
                 // S2.6b: a permission grant's restart. Every request waiting
@@ -616,8 +676,11 @@ async fn run(
                     replies.push(also.reply);
                 }
                 logger.info(&request.reason);
+                // Not `Stopped`: a fresh generation follows, and `wait_ready`
+                // takes `Stopped` as final.
                 let outcome =
-                    stop_generation(process, generation, &config, &ledger, &logger, &set).await;
+                    stop_generation(process, generation, &config, &ledger, &logger, &set, false)
+                        .await;
                 if !outcome.stray_pids.is_empty() || outcome.report.is_none() {
                     for reply in replies {
                         let _ = reply.send(Err(RESTART_REFUSED_UNCONFIRMED.to_string()));
@@ -627,7 +690,8 @@ async fn run(
                         generation,
                         reason: RESTART_REFUSED_UNCONFIRMED.to_string(),
                     });
-                    wait_stop(&mut stop_rx).await;
+                    wait_stop_refusing(&mut stop_rx, &mut restart_rx, RESTART_REFUSED_UNCONFIRMED)
+                        .await;
                     set(BackendState::Stopped {
                         stray_pids: outcome.stray_pids.clone(),
                     });
@@ -637,6 +701,9 @@ async fn run(
                     for reply in replies {
                         let _ = reply.send(Err("Videorc is quitting.".to_string()));
                     }
+                    set(BackendState::Stopped {
+                        stray_pids: outcome.stray_pids.clone(),
+                    });
                     return outcome;
                 }
                 for reply in replies {
@@ -725,7 +792,17 @@ async fn run(
                 },
             );
         }
-        match handle_decision(decision, generation, summary, &logger, &set, &mut stop_rx).await {
+        match handle_decision(
+            decision,
+            generation,
+            summary,
+            &logger,
+            &set,
+            &mut stop_rx,
+            &mut restart_rx,
+        )
+        .await
+        {
             Flow::Restart(next_attempt) => attempt = Some(next_attempt),
             Flow::Stopped(outcome) => return outcome,
         }
@@ -737,6 +814,7 @@ enum Flow {
     Stopped(StopOutcome),
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_decision(
     decision: RestartDecision,
     generation: u32,
@@ -744,6 +822,7 @@ async fn handle_decision(
     logger: &Logger,
     set: &impl Fn(BackendState),
     stop_rx: &mut watch::Receiver<bool>,
+    restart_rx: &mut mpsc::UnboundedReceiver<RestartRequest>,
 ) -> Flow {
     match decision {
         RestartDecision::Restart { attempt, delay } => {
@@ -769,8 +848,11 @@ async fn handle_decision(
         RestartDecision::GiveUp { .. } => {
             let reason = GAVE_UP_REASON.to_string();
             logger.error(&reason);
-            set(BackendState::Failed { generation, reason });
-            wait_stop(stop_rx).await;
+            set(BackendState::Failed {
+                generation,
+                reason: reason.clone(),
+            });
+            wait_stop_refusing(stop_rx, restart_rx, &reason).await;
             set(BackendState::Stopped {
                 stray_pids: Vec::new(),
             });
@@ -779,30 +861,14 @@ async fn handle_decision(
     }
 }
 
-fn record_generation(
+/// The rustup proxy execs the toolchain cargo after spawn; READY is late
+/// enough to re-stamp the wrapper's recorded path (refreshIdentity).
+fn refresh_wrapper_identity(
     ledger: &OwnedProcessLedger,
     logger: &Logger,
     process: &BackendProcess,
-    launch: &BackendLaunch,
 ) {
     let wrapper = process.wrapper_pid();
-    if let Err(error) = ledger.record(wrapper, launch.wrapper_label()) {
-        logger.error(format!(
-            "Could not record owned process {wrapper} in {}: {error:#}",
-            ledger.path().display()
-        ));
-    }
-    let backend = process.backend_pid();
-    if backend != wrapper
-        && let Err(error) = ledger.record(backend, "videorc-backend")
-    {
-        logger.error(format!(
-            "Could not record owned process {backend} in {}: {error:#}",
-            ledger.path().display()
-        ));
-    }
-    // The rustup proxy execs the toolchain cargo after spawn; READY is late
-    // enough to re-stamp the path (refreshIdentity).
     match ledger.refresh_identity(wrapper) {
         Ok(true) => logger.info(format!(
             "Refreshed the recorded executable path of owned process {wrapper}."
@@ -814,6 +880,33 @@ fn record_generation(
     }
 }
 
+/// Waits for the quit while no backend will come back on its own (the
+/// restart budget is spent, or a stale or unconfirmed process blocks one),
+/// refusing every restart asked for meanwhile, so none waits until the quit.
+async fn wait_stop_refusing(
+    stop_rx: &mut watch::Receiver<bool>,
+    restart_rx: &mut mpsc::UnboundedReceiver<RestartRequest>,
+    reason: &str,
+) {
+    loop {
+        tokio::select! {
+            _ = wait_stop(stop_rx) => return,
+            request = restart_rx.recv() => match request {
+                Some(request) => {
+                    let _ = request.reply.send(Err(reason.to_string()));
+                }
+                None => {
+                    wait_stop(stop_rx).await;
+                    return;
+                }
+            },
+        }
+    }
+}
+
+/// Stops one generation with the shutdown handshake. `final_stop`: the app
+/// is quitting, so `Stopped` is published; a restart publishes nothing after
+/// `Stopping`, since the next generation's `Starting` follows.
 async fn stop_generation(
     process: BackendProcess,
     generation: u32,
@@ -821,6 +914,7 @@ async fn stop_generation(
     ledger: &OwnedProcessLedger,
     logger: &Logger,
     set: &impl Fn(BackendState),
+    final_stop: bool,
 ) -> StopOutcome {
     set(BackendState::Stopping { generation });
     logger.info(format!(
@@ -833,9 +927,11 @@ async fn stop_generation(
             logger.error(format!(
                 "Backend generation {generation} stop failed: {error:#}"
             ));
-            set(BackendState::Stopped {
-                stray_pids: owned.clone(),
-            });
+            if final_stop {
+                set(BackendState::Stopped {
+                    stray_pids: owned.clone(),
+                });
+            }
             return StopOutcome {
                 report: None,
                 stray_pids: owned,
@@ -872,9 +968,11 @@ async fn stop_generation(
         ));
     }
     let stray_pids = report.stray_pids.clone();
-    set(BackendState::Stopped {
-        stray_pids: stray_pids.clone(),
-    });
+    if final_stop {
+        set(BackendState::Stopped {
+            stray_pids: stray_pids.clone(),
+        });
+    }
     StopOutcome {
         report: Some(report),
         stray_pids,
@@ -895,6 +993,38 @@ mod tests {
             parent_pid: None,
             managed_asset_roots: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_restart_asked_for_while_nothing_will_come_back_is_refused_not_left_waiting() {
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let (restart_tx, mut restart_rx) = mpsc::unbounded_channel();
+        // Queued just as the backend died, before the budget ran out.
+        let (reply, early) = oneshot::channel();
+        restart_tx
+            .send(RestartRequest {
+                reason: "camera granted".to_string(),
+                reply,
+            })
+            .unwrap();
+        let waiting = tokio::spawn(async move {
+            wait_stop_refusing(&mut stop_rx, &mut restart_rx, GAVE_UP_REASON).await;
+        });
+        assert_eq!(early.await.unwrap(), Err(GAVE_UP_REASON.to_string()));
+        // And one asked for later.
+        let (reply, late) = oneshot::channel();
+        restart_tx
+            .send(RestartRequest {
+                reason: "microphone granted".to_string(),
+                reply,
+            })
+            .unwrap();
+        assert_eq!(late.await.unwrap(), Err(GAVE_UP_REASON.to_string()));
+        stop_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
