@@ -8,11 +8,15 @@
 //! the module keeps the code name `buddy`, as Electron's files do.
 //!
 //! Still to land in S1.6e: the chat and voice commands, Sidekick Live, the
-//! reports, Clean cut, onboarding, the pet store and the page store.
+//! reports, Clean cut's page and jobs, onboarding, the pet store and the
+//! page store.
 
+pub mod clean_cut_drafts;
+pub mod clean_cut_review;
 pub mod copy;
 pub mod library;
 pub mod look;
+pub mod moments;
 /// The avatar's body motion, the backend's own file (its fixture,
 /// `protocol-fixtures/buddy-motion.json`, pins it to Electron's
 /// `shared/buddy-motion.ts`): the living preview moves as the stream does.
