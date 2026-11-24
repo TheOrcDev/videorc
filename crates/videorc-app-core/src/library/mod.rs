@@ -26,10 +26,12 @@
 //!
 //! Its words are [`copy`], its pure logic [`view`], the page as one value
 //! [`page`] and the Markers dialog [`markers`]. The Cloud tab (Local |
-//! Cloud) is [`cloud`], and noise cleanup's row control [`noise`]. The
-//! player (`SessionPlayer`) waits for the playback client methods (S1.7b).
+//! Cloud) is [`cloud`] with its local program archive [`cloud_archive`],
+//! and noise cleanup's row control [`noise`]. The player (`SessionPlayer`)
+//! waits for the playback client methods (S1.7b).
 
 pub mod cloud;
+pub mod cloud_archive;
 pub mod copy;
 pub mod markers;
 pub mod noise;
