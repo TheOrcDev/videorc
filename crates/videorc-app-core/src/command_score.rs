@@ -102,7 +102,7 @@ impl Inner<'_> {
                         .filter(|&&c| is_gap(c))
                         .count();
                     if breaks > 0 && string_index > 0 {
-                        score *= PENALTY_SKIPPED.powi(breaks as i32);
+                        score *= PENALTY_SKIPPED.powf(breaks as f64);
                     }
                 } else if before.is_some_and(is_space) {
                     score *= SCORE_SPACE_WORD_JUMP;
@@ -111,12 +111,12 @@ impl Inner<'_> {
                         .filter(|&&c| is_space(c))
                         .count();
                     if breaks > 0 && string_index > 0 {
-                        score *= PENALTY_SKIPPED.powi(breaks as i32);
+                        score *= PENALTY_SKIPPED.powf(breaks as f64);
                     }
                 } else {
                     score *= SCORE_CHARACTER_JUMP;
                     if string_index > 0 {
-                        score *= PENALTY_SKIPPED.powi((found - string_index) as i32);
+                        score *= PENALTY_SKIPPED.powf((found - string_index) as f64);
                     }
                 }
                 if self.string.get(found) != self.abbreviation.get(abbreviation_index) {

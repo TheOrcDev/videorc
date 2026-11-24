@@ -323,20 +323,44 @@ pub fn resolve_local_time(
     Some(wall.and_utc() - chrono::Duration::minutes(i64::from(offset)))
 }
 
-/// `defaultPlannedEnd`: two hours after the start, read as this computer's
-/// local time (`datetime-local`), and written back as its wall clock.
+/// A wall time in `zone` as JavaScript's `new Date(local)` reads it: the
+/// earlier instant when the clocks go back over it, and, when they jump over
+/// it, the offset in force before the jump (so 02:30 becomes 03:30).
+fn local_instant<Z: TimeZone>(wall: NaiveDateTime, zone: &Z) -> DateTime<Utc> {
+    match zone.from_local_datetime(&wall) {
+        chrono::LocalResult::Single(at) => at.with_timezone(&Utc),
+        chrono::LocalResult::Ambiguous(a, b) => a.with_timezone(&Utc).min(b.with_timezone(&Utc)),
+        chrono::LocalResult::None => {
+            let before = zone
+                .from_local_datetime(&(wall - chrono::Duration::hours(3)))
+                .earliest()
+                .map_or(0, |at| at.offset().fix().local_minus_utc());
+            wall.and_utc() - chrono::Duration::seconds(i64::from(before))
+        }
+    }
+}
+
+fn wall_time<Z: TimeZone>(at: DateTime<Utc>, zone: &Z) -> String {
+    at.with_timezone(zone)
+        .naive_local()
+        .format("%Y-%m-%dT%H:%M")
+        .to_string()
+}
+
+/// `defaultPlannedEnd`: two hours of real time after the start, read as this
+/// computer's local time (`datetime-local`) and written back as its wall clock.
 pub fn default_planned_end(local_start: &str) -> String {
-    use chrono::Local;
+    default_planned_end_in(local_start, &chrono::Local)
+}
+
+fn default_planned_end_in<Z: TimeZone>(local_start: &str, zone: &Z) -> String {
     let Some(start) = parse_local(local_start) else {
         return String::new();
     };
-    let end = match Local.from_local_datetime(&start) {
-        chrono::LocalResult::Single(at) | chrono::LocalResult::Ambiguous(at, _) => {
-            (at + chrono::Duration::hours(2)).naive_local()
-        }
-        chrono::LocalResult::None => start + chrono::Duration::hours(2),
-    };
-    end.format("%Y-%m-%dT%H:%M").to_string()
+    wall_time(
+        local_instant(start, zone) + chrono::Duration::hours(2),
+        zone,
+    )
 }
 
 /// `timeZoneName: 'short'` under en-US: "EST" where the zone has a US name,
@@ -371,7 +395,7 @@ pub fn format_scheduled_start(start_utc: &str, time_zone: &str, now: DateTime<Ut
 /// ("12:00 – 2:00 PM GMT+1"): the end is a wall time in the start's zone,
 /// resolved on its own (#1479), so a DST change between them shows the real
 /// end. ICU's range drops the hour's leading zero, says the shared date and
-/// AM/PM once, and names the end's zone.
+/// AM/PM once, names the end's zone, and puts thin spaces around the dash.
 pub fn when_label(event: &Event) -> String {
     let requested = &event.requested;
     let (Ok(start), Some(tz)) = (
@@ -406,7 +430,7 @@ pub fn when_label(event: &Event) -> String {
     let end = end.with_timezone(&tz);
     if local.date_naive() != end.date_naive() {
         return format!(
-            "{}, {} {} – {}, {} {}",
+            "{}, {} {}\u{2009}–\u{2009}{}, {} {}",
             date(&local),
             local.format("%-I:%M %p"),
             zone_name(&local),
@@ -421,7 +445,7 @@ pub fn when_label(event: &Event) -> String {
         local.format("%-I:%M %p").to_string()
     };
     format!(
-        "{}, {start_time} – {} {}",
+        "{}, {start_time}\u{2009}–\u{2009}{} {}",
         date(&local),
         end.format("%-I:%M %p"),
         zone_name(&end)
@@ -513,19 +537,22 @@ pub fn planned_end_error(
     }
 }
 
-/// `freshMetadata`: an hour from now in the system's zone; X gets its
-/// planned end and replay.
-pub fn fresh_metadata(
+/// `freshMetadata`: an hour of real time from now, in this computer's zone;
+/// X gets its planned end and replay.
+pub fn fresh_metadata(provider: &str, now: DateTime<Utc>, time_zone: &str) -> Requested {
+    fresh_metadata_in(provider, now, time_zone, &chrono::Local)
+}
+
+fn fresh_metadata_in<Z: TimeZone>(
     provider: &str,
-    now_local: chrono::NaiveDateTime,
+    now: DateTime<Utc>,
     time_zone: &str,
+    zone: &Z,
 ) -> Requested {
-    let local = (now_local + chrono::Duration::hours(1))
-        .format("%Y-%m-%dT%H:%M")
-        .to_string();
+    let local = wall_time(now + chrono::Duration::hours(1), zone);
     Requested {
         privacy: "private".into(),
-        planned_end_local: (provider == "x").then(|| default_planned_end(&local)),
+        planned_end_local: (provider == "x").then(|| default_planned_end_in(&local, zone)),
         local_start: local,
         time_zone: time_zone.to_string(),
         available_for_replay: Some(true),
@@ -647,7 +674,7 @@ mod tests {
         assert_eq!(when_label(&events[0]), "Mon, Jan 1, 2035, 12:00 PM GMT+1");
         assert_eq!(
             when_label(&events[1]),
-            "Mon, Jan 1, 2035, 12:00 – 2:00 PM GMT+1"
+            "Mon, Jan 1, 2035, 12:00\u{2009}–\u{2009}2:00 PM GMT+1"
         );
     }
 
@@ -667,11 +694,11 @@ mod tests {
         let local = "2035-01-01T12:00";
         assert_eq!(
             when_label(&x_ending(start, local, "2035-01-01T13:30", None)),
-            "Mon, Jan 1, 2035, 12:00 – 1:30 PM GMT+1"
+            "Mon, Jan 1, 2035, 12:00\u{2009}–\u{2009}1:30 PM GMT+1"
         );
         assert_eq!(
             when_label(&x_ending(start, local, "2035-01-02T01:00", None)),
-            "Mon, Jan 1, 2035, 12:00 PM GMT+1 – Tue, Jan 2, 2035, 1:00 AM GMT+1"
+            "Mon, Jan 1, 2035, 12:00 PM GMT+1\u{2009}–\u{2009}Tue, Jan 2, 2035, 1:00 AM GMT+1"
         );
         assert_eq!(
             when_label(&x_ending(start, local, "2035-01-01T11:00", None)),
@@ -691,19 +718,19 @@ mod tests {
                 "2027-03-28T00:30:00Z",
                 "2027-03-28T01:30",
                 "2027-03-28T03:30",
-                "Sun, Mar 28, 2027, 1:30 – 3:30 AM GMT+2",
+                "Sun, Mar 28, 2027, 1:30\u{2009}–\u{2009}3:30 AM GMT+2",
             ),
             (
                 "2027-10-30T23:30:00Z",
                 "2027-10-31T01:30",
                 "2027-10-31T03:30",
-                "Sun, Oct 31, 2027, 1:30 – 3:30 AM GMT+1",
+                "Sun, Oct 31, 2027, 1:30\u{2009}–\u{2009}3:30 AM GMT+1",
             ),
             (
                 "2027-03-27T00:30:00Z",
                 "2027-03-27T01:30",
                 "2027-03-27T03:30",
-                "Sat, Mar 27, 2027, 1:30 – 3:30 AM GMT+1",
+                "Sat, Mar 27, 2027, 1:30\u{2009}–\u{2009}3:30 AM GMT+1",
             ),
         ];
         for (start, local, end, label) in cases {
@@ -719,11 +746,11 @@ mod tests {
         };
         assert_eq!(
             repeated(Some("earlier")),
-            "Sun, Oct 31, 2027, 1:30 – 2:30 AM GMT+2"
+            "Sun, Oct 31, 2027, 1:30\u{2009}–\u{2009}2:30 AM GMT+2"
         );
         assert_eq!(
             repeated(Some("later")),
-            "Sun, Oct 31, 2027, 1:30 – 2:30 AM GMT+1"
+            "Sun, Oct 31, 2027, 1:30\u{2009}–\u{2009}2:30 AM GMT+1"
         );
         assert!(!repeated(None).contains('–'));
     }
@@ -787,6 +814,28 @@ mod tests {
             Vec::<i32>::new()
         );
         assert_eq!(default_planned_end("2035-01-01T23:30"), "2035-01-02T01:30");
+        // New York's clocks go back at 02:00 on 2035-11-04 and forward on
+        // 2035-03-11: two real hours, from the earlier 01:30 and from the 02:30
+        // that doesn't exist (read as 03:30), as JavaScript's Date does.
+        let ny = chrono_tz::America::New_York;
+        assert_eq!(
+            default_planned_end_in("2035-11-04T01:30", &ny),
+            "2035-11-04T02:30"
+        );
+        assert_eq!(
+            default_planned_end_in("2035-03-11T02:30", &ny),
+            "2035-03-11T05:30"
+        );
+        assert_eq!(
+            default_planned_end_in("2035-03-11T00:30", &ny),
+            "2035-03-11T03:30"
+        );
+        let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        // 01:30 EST on the spring night: an hour on is 03:30, not the 02:30
+        // that doesn't exist.
+        let fresh = fresh_metadata_in("x", at("2035-03-11T06:30:00Z"), "America/New_York", &ny);
+        assert_eq!(fresh.local_start, "2035-03-11T03:30");
+        assert_eq!(fresh.planned_end_local.as_deref(), Some("2035-03-11T05:30"));
         assert_eq!(
             planned_end_error("x", "2035-01-01T12:00", Some("2035-01-01T11:00")),
             Some("The planned end must be after the start.")

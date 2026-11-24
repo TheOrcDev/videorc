@@ -3,15 +3,16 @@
 //! lists, UTC first, and its search (cmdk's filter over the zone's id and
 //! the id with spaces for underscores, best first).
 //!
-//! The list is ICU's canonical set as Node 24 (ICU 78.3, tz 2026e) answers
-//! it; Electron 39 asks Chromium's ICU, which lists the same canonical ids.
+//! The list is ICU's canonical set. It was generated from Node 24 (ICU 78.3,
+//! tz 2026e) and matches what the shipped Electron 39 (ICU 74.2, tz 2025b,
+//! the tz data chrono-tz carries) lists, zone for zone.
 //! A link the IANA data keeps for old names (`Europe/Kyiv` for ICU's
 //! `Europe/Kiev`) is not in it, as it is not in Electron's. The zones' en-US
 //! short names ("EST", "PDT") come from the same ICU.
 
 use crate::command_score;
 
-// Generated from Node 24.22.1 (ICU 78.3, tz 2026e): Intl.supportedValuesOf('timeZone'), UTC first.
+// Generated from Node 24.22.1 (ICU 78.3): Intl.supportedValuesOf('timeZone'), UTC first; Electron 39 lists the same set.
 pub const SUPPORTED: [&str; 419] = [
     "UTC",
     "Africa/Abidjan",
@@ -437,8 +438,10 @@ pub const SUPPORTED: [&str; 419] = [
 /// `timeZoneName: "short"` under en-US where it is not a GMT offset: (zone,
 /// UTC offset in minutes, name). Every other zone and offset reads as
 /// `formatGmtOffset`.
-// Generated from Node 24.22.1 (ICU 78.3, tz 2026e): the en-US short name of every
-// supported zone on the 15th of January, April, July and October 2026.
+// Generated from Node 24.22.1 (ICU 78.3): the en-US short name of every
+// supported zone on the 15th of January, April, July and October 2026. The
+// names are ICU's; the offsets they pair with come from the tz data, which is
+// 2025b in Electron 39 and in chrono-tz.
 pub const EN_US_SHORT_NAMES: [(&str, i32, &str); 145] = [
     ("UTC", 0, "UTC"),
     ("America/Adak", -600, "HAST"),
