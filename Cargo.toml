@@ -16,6 +16,10 @@ members = [
     "crates/videorc-kit",
     "apps/videorc",
 ]
+# The patched GPUI platform crate below is a path dependency inside this
+# folder: keep it out of the workspace so `cargo fmt --all` and clippy leave
+# Zed's code as it was published.
+exclude = ["patches"]
 resolver = "3"
 
 # Plan 260: depend on a plan crate with `<name> = { workspace = true }`.
@@ -35,6 +39,24 @@ videorc-kit = { path = "crates/videorc-kit" }
 # `wayland`/`x11` on Linux.
 gpui = { package = "gpui-pre", version = "=0.3.14" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.14" }
+# The kit's own (`pnpm ui:check` compares them with videorc-ui's): gpui-base
+# is cut against gpui-pre 0.3.14; resvg and image are the chrome raster's, at
+# the versions gpui-pre itself builds.
+gpui_base = { package = "gpui-base", version = "=0.11.0" }
+resvg = { version = "=0.46.0", default-features = false }
+image = { version = "0.25", default-features = false }
+smallvec = "1"
+
+# GPUI patches (plan 260 D1: our own copy of only the patched crate, pinned to
+# the version it was cut from; a fourth patch is a STOP), copied from
+# videorc-ui's gpui/patches/.
+#
+# 1. gpui-pre-apple 0.3.14: system-font instances, and font weights read on
+#    Apple's NSFontWeight scale, so weight 500 draws SF Medium instead of
+#    Regular (S0.4). The diff is `patches/gpui-pre-apple.patch`. Drop it when
+#    a gpui-pre release carries the fix upstream (zed-industries/zed#67416).
+[patch.crates-io]
+gpui-pre-apple = { path = "patches/gpui-pre-apple" }
 
 # Disable incremental codegen for dev builds. On macOS arm64, stale incremental
 # serde codegen artifacts have produced invalid links for the backend binary.

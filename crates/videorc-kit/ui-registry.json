@@ -1,6 +1,29 @@
 {
   "$comment": "GPUI items synced from the @videorc-gpui registry (ui.videorc.com/r/gpui, source TheOrcDev/videorc-ui's registry-gpui.json; plan 260 S2.2b). pnpm ui:sync --flavour gpui <item> writes them into this crate, formatted with rustfmt; pnpm ui:check fails when one drifts, when the root Cargo.toml pins GPUI differently, or when it lacks a patch the kit builds with (gpui-pre-apple until zed-industries/zed#67416 ships): edit them in videorc-ui, never here. src/lib.rs is this crate's own. keepLocal lists files (relative to this crate) an item would write that Videorc keeps as its own.",
   "registry": "https://ui.videorc.com/r/gpui/{name}.json",
-  "items": [],
+  "items": [
+    "alert",
+    "section-label",
+    "list-row",
+    "navigable-row",
+    "panel-section",
+    "skeleton",
+    "icons",
+    "theme",
+    "tooltip",
+    "shortcut-keys",
+    "kbd",
+    "button",
+    "badge",
+    "switch",
+    "slider",
+    "tabs",
+    "input",
+    "select",
+    "dialog",
+    "popover",
+    "sonner",
+    "scroll-area"
+  ],
   "keepLocal": []
 }
