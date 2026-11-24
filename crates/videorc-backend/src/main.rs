@@ -103,6 +103,8 @@ mod room_frame_bridge;
 mod room_camera_source;
 #[cfg(target_os = "macos")]
 mod room_host;
+#[cfg(target_os = "macos")]
+mod room_overlays;
 mod room_program_camera;
 mod room_system_audio;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).

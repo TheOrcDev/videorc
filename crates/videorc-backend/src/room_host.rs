@@ -13,7 +13,8 @@
 //! removal ends it; a duplicate identity is another device taking the seat
 //! (`TAKEN_OVER_DETAIL` after 3 s). S1.8b moves the data topics (the stage
 //! first, `stage_message`: on every join and every change, as the renderer
-//! sent it), S1.8c the host's media, S1.8d the subscriptions (the plan's S1.8
+//! sent it; then the managed show's overlays, `room_overlays`, straight from
+//! the `cloud.room.overlay` hand-off), S1.8c the host's media, S1.8d the subscriptions (the plan's S1.8
 //! cut).
 //!
 //! macOS only for now: the SDK is a macOS dependency until the native
@@ -26,7 +27,7 @@ use std::time::Duration;
 use livekit::DisconnectReason;
 use livekit::prelude::{DataPacket, Room, RoomEvent, RoomOptions};
 use serde_json::Value;
-use tokio::sync::{broadcast, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::cloud_talk::{CloudRoomClientState, RoomClientReportParams, TAKEN_OVER_DETAIL};
 use crate::state::AppState;
@@ -133,6 +134,8 @@ fn room_open(payload: &serde_json::Value) -> bool {
 async fn follow(state: AppState) {
     let mut events = state.events.subscribe();
     let mut holding: Option<oneshot::Sender<()>> = None;
+    // The overlay hand-offs, for the hold that has the seat.
+    let mut overlays: Option<mpsc::UnboundedSender<Value>> = None;
     // The latest stage message, for the hold to publish on join and change.
     let (stage, _) = watch::channel::<Option<Vec<u8>>>(None);
     // A hold that ended by itself (a take-over, a deleted room) is not
@@ -144,6 +147,12 @@ async fn follow(state: AppState) {
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
             Err(broadcast::error::RecvError::Closed) => break,
         };
+        if event.event == crate::cloud_talk::CLOUD_ROOM_OVERLAY_EVENT {
+            if let Some(overlays) = overlays.as_ref() {
+                let _ = overlays.send(event.payload);
+            }
+            continue;
+        }
         if event.event != "cloud.state" {
             continue;
         }
@@ -166,14 +175,22 @@ async fn follow(state: AppState) {
         match (open, holding.is_some()) {
             (true, false) if !ended_while_open => {
                 let (stop, stopped) = oneshot::channel();
+                let (overlay_sender, overlay_receiver) = mpsc::unbounded_channel();
                 HOLDS_SEAT.store(true, Ordering::Release);
-                tokio::spawn(hold(state.clone(), stopped, stage.subscribe()));
+                tokio::spawn(hold(
+                    state.clone(),
+                    stopped,
+                    stage.subscribe(),
+                    overlay_receiver,
+                ));
                 holding = Some(stop);
+                overlays = Some(overlay_sender);
             }
             (false, true) => {
                 if let Some(stop) = holding.take() {
                     let _ = stop.send(());
                 }
+                overlays = None;
             }
             _ => {}
         }
@@ -204,6 +221,7 @@ async fn hold(
     state: AppState,
     mut stop: oneshot::Receiver<()>,
     mut stage: watch::Receiver<Option<Vec<u8>>>,
+    mut overlays: mpsc::UnboundedReceiver<Value>,
 ) {
     let mut attempt = 0usize;
     loop {
@@ -215,6 +233,7 @@ async fn hold(
                 .map_err(|error| format!("{error:#}")),
             None => Err("Videorc Cloud is unavailable".to_string()),
         };
+        let show_id = token.as_ref().map(|token| token.show_id.clone()).ok();
         let connected = match token {
             Ok(token) => {
                 tokio::select! {
@@ -238,10 +257,22 @@ async fn hold(
                 // join, then on every change.
                 let message = stage.borrow_and_update().clone();
                 publish_stage(&room, message).await;
+                // One sender per connection, so overlays go out in order (a
+                // set never overtakes the clear after it); it ends with the
+                // connection, and the backend hands the untimed ones over again
+                // on the next.
+                let (overlay_queue, overlay_worker) = overlay_sender(
+                    state.clone(),
+                    room.local_participant(),
+                    show_id.clone().unwrap_or_default(),
+                );
                 let reason = loop {
                     tokio::select! {
                         _ = &mut stop => return leave(&state, Some(room)).await,
-                        changed = stage.changed() => {
+                        Some(overlay) = overlays.recv() => {
+                        let _ = overlay_queue.send(overlay);
+                    }
+                    changed = stage.changed() => {
                             if changed.is_ok() {
                                 let message = stage.borrow_and_update().clone();
                                 publish_stage(&room, message).await;
@@ -260,6 +291,7 @@ async fn hold(
                         },
                     }
                 };
+                overlay_worker.abort();
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
                     DisconnectReason::DuplicateIdentity => {
@@ -291,6 +323,28 @@ async fn hold(
             _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
         }
     }
+}
+
+/// The connection's overlay sender: hand-offs for this show, one at a time.
+fn overlay_sender(
+    state: AppState,
+    local: livekit::prelude::LocalParticipant,
+    show_id: String,
+) -> (mpsc::UnboundedSender<Value>, tokio::task::JoinHandle<()>) {
+    let (queue, mut pending) = mpsc::unbounded_channel::<Value>();
+    let worker = tokio::spawn(async move {
+        while let Some(event) = pending.recv().await {
+            if !crate::room_overlays::overlay_is_for_show(&event, &show_id) {
+                continue;
+            }
+            match crate::room_overlays::send_overlay(&state, &local, &event).await {
+                Ok(crate::room_overlays::OverlaySent::Sent) => {}
+                Ok(outcome) => tracing::info!("An overlay was not sent to the room: {outcome:?}"),
+                Err(error) => tracing::warn!("An overlay did not reach the room: {error:#}"),
+            }
+        }
+    });
+    (queue, worker)
 }
 
 async fn publish_stage(room: &Room, message: Option<Vec<u8>>) {
