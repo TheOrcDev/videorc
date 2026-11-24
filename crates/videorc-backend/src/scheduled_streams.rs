@@ -213,14 +213,9 @@ pub struct MisresolvedStart {
     pub resolved_start_utc: Option<String>,
 }
 
-/// Saved events still ahead of their broadcast whose `start_utc` differs from
+/// A saved event still ahead of its broadcast whose `start_utc` differs from
 /// re-resolving `requested.local_start`. Ended, live and deleted events are
 /// left alone.
-pub fn misresolved_starts(events: &[ScheduledStreamEvent]) -> Vec<MisresolvedStart> {
-    events.iter().filter_map(misresolved_start).collect()
-}
-
-/// One event's entry for `misresolved_starts`.
 pub fn misresolved_start(event: &ScheduledStreamEvent) -> Option<MisresolvedStart> {
     if matches!(
         event.lifecycle.as_str(),
@@ -945,7 +940,10 @@ mod tests {
         unreadable.requested.time_zone = "Europe/Madrid".into();
         let draft = scheduled("youtube", "2035-01-01T12:00", "Europe/Madrid", None);
         assert_eq!(
-            misresolved_starts(&[stale.clone(), current, ended, unreadable.clone(), draft]),
+            [stale.clone(), current, ended, unreadable.clone(), draft]
+                .iter()
+                .filter_map(misresolved_start)
+                .collect::<Vec<_>>(),
             [
                 MisresolvedStart {
                     event_id: stale.id,

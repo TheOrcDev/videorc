@@ -1143,7 +1143,7 @@ fn x_candidates(
 /// The platform's start, as the event's own wall time. An instant the
 /// platform still holds as saved keeps the saved wall time: it is what the
 /// streamer typed, and an event sent with older tz data must keep it until it
-/// is repaired (`misresolved_starts`), not take the platform's wrong hour.
+/// is repaired (`misresolved_start`), not take the platform's wrong hour.
 fn apply_remote_start(event: &mut ScheduledStreamEvent, utc: chrono::DateTime<Utc>) -> Result<()> {
     let unchanged = chrono::DateTime::parse_from_rfc3339(&event.start_utc)
         .is_ok_and(|saved| saved.with_timezone(&Utc) == utc);
@@ -3180,13 +3180,13 @@ mod x_tests {
         let remote = json!({"snippet": {"scheduledStartTime": "2026-12-15T18:00:00Z"}});
         hydrate_requested_metadata(&mut youtube, &remote).unwrap();
         assert_eq!(youtube.requested.local_start, "2026-12-15T10:00");
-        assert_eq!(misresolved_starts(&[youtube.clone()]).len(), 1);
+        assert!(misresolved_start(&youtube).is_some());
         // Moved on YouTube: the new instant is read in the bundled tz data.
         let moved = json!({"snippet": {"scheduledStartTime": "2026-12-15T20:00:00Z"}});
         hydrate_requested_metadata(&mut youtube, &moved).unwrap();
         assert_eq!(youtube.requested.local_start, "2026-12-15T13:00");
         assert_eq!(youtube.requested.offset_choice, None);
-        assert!(misresolved_starts(&[youtube]).is_empty());
+        assert!(misresolved_start(&youtube).is_none());
 
         let mut x = x_event();
         x.requested.time_zone = "America/Vancouver".into();
