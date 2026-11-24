@@ -8,6 +8,7 @@
 mod account;
 mod agent_call;
 mod agent_chat;
+mod agent_config;
 mod agent_library;
 mod agent_look;
 mod agent_mcp;
@@ -6424,6 +6425,12 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
         }),
 
+        // Plan 260 S1.5c: another app's config file, or `claude mcp remove`
+        // then `add` (8 s + 20 s).
+        "agents.config.add" => Some(Mutation {
+            max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
         // Plan 168 S-F4: opening a build session waits on the web (15 s).
         "cohost.pet.creation.start" => Some(Mutation {
             max_execution_age: WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE,
@@ -6750,6 +6757,8 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         | "platformAccounts.youtube.selectChannel"
         | "discord.webhook.save"
         | "discord.webhook.sendTest"
+        // Plan 260 S1.5c: "Add to …" may wait on the `claude` CLI.
+        | "agents.config.add"
         | COMMAND_LANE_SMOKE_BLOCK_METHOD => {
             Some(WebSocketIsolatedCommandLaneKind::AccountMaintenance)
         }
@@ -15657,6 +15666,20 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "agents.config.add" => {
+            match serde_json::from_value::<agent_config::AgentConfigAddParams>(command.params) {
+                Ok(params) => ServerResponse::ok(
+                    command.id,
+                    agent_config::add_agent_to_app_for_rpc(params).await,
+                ),
+                // Never echo the params: they hold the agent token.
+                Err(_) => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "Expected { app, bridgePath, token }.".to_string(),
+                ),
+            }
+        }
         "discord.webhook.save" => {
             match serde_json::from_value::<discord_announce::SaveWebhookParams>(command.params) {
                 Ok(params) => discord_rpc(
@@ -22847,6 +22870,7 @@ mod tests {
             "backgrounds.import",
             "sessions.delete",
             "sessions.delete.complete",
+            "agents.config.add",
         ] {
             assert_eq!(
                 websocket_method_execution_policy(method),
@@ -23502,6 +23526,7 @@ mod tests {
             "entitlements.refresh",
             "platformAccounts.refresh",
             "platformAccounts.validate",
+            "agents.config.add",
             COMMAND_LANE_SMOKE_BLOCK_METHOD,
         ] {
             let command = json!({ "id": method, "method": method, "params": {} }).to_string();

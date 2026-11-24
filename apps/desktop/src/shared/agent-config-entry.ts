@@ -1,9 +1,10 @@
 // Plan 209 S7 and S22 (D6): the `videorc` server entry each agent app's own
 // config holds, with the bridge's absolute path and the agent's token in
 // VIDEORC_AGENT_TOKEN. The Connect dialog shows it as the line to paste
-// (`lib/agent-connect-lines.ts`), and Electron main writes the same entry
-// into the app's config file for "Add to …" (`main/agent-config-install.ts`),
-// so the two can never disagree. Pure: no DOM, no Node.
+// (`lib/agent-connect-lines.ts`); the backend writes the same entry into the
+// app's config file for "Add to …" (`crates/videorc-backend/src/agent_config.rs`),
+// and `protocol-fixtures/agent-config-entry.json` pins the two together.
+// Pure: no DOM, no Node.
 
 /** The server name agent apps show (`mcp__videorc__…`), D21. A test pins it
  * to the catalog's `serverName`. */

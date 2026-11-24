@@ -369,7 +369,6 @@ import {
   resolveAgentBridge,
   type AgentBridgeLocation
 } from './agent-bridge'
-import { AGENT_ADD_BRIDGE_MISSING, addAgentToApp } from './agent-config-install'
 import {
   requestMediaAccessWithRestart,
   requestScreenAccessWithWatch,
@@ -11356,25 +11355,30 @@ function resolveDevBackendBinary(root = workspaceRoot()): string {
   )
 }
 
-/** Plan 209 S22: "Add to …" for the app Connect just named (the IPC
- * contract has already checked the app and the token's shape). */
+const AGENT_ADD_BRIDGE_MISSING =
+  "This copy of Videorc is missing its agent bridge, so agents can't connect. Reinstall Videorc, then try again."
+/** `claude mcp remove` then `add` take up to 28 s in the backend. */
+const AGENT_ADD_TIMEOUT_MS = 35_000
+
+/** Plan 209 S22, plan 260 S1.5c: "Add to …" for the app Connect just named
+ * (the IPC contract has already checked the app and the token's shape).
+ * Main finds its own bridge; the backend writes the app's config. */
 async function addAgentToInstalledApp(app: AgentAddApp, token: string): Promise<AgentAddResult> {
   const bridge = await resolveAgentBridge(agentBridgeLocation(), true)
   if (!bridge.exists) return { added: false, message: AGENT_ADD_BRIDGE_MISSING }
-  return addAgentToApp(
-    app,
-    { bridgePath: bridge.path, token },
-    {
-      platform: process.platform,
-      homeDir: homedir(),
-      appData: process.env.APPDATA,
-      localAppData: process.env.LOCALAPPDATA,
-      xdgConfigHome: process.env.XDG_CONFIG_HOME,
-      codexHome: process.env.CODEX_HOME,
-      pathVariable: process.env.PATH ?? process.env.Path
-    },
-    { log: (message) => logBackend('warn', `[agents] ${message}`) }
-  )
+  try {
+    return await requestBackendAdmin<AgentAddResult>(
+      'agents.config.add',
+      { app, bridgePath: bridge.path, token },
+      AGENT_ADD_TIMEOUT_MS
+    )
+  } catch (error) {
+    logBackend(
+      'warn',
+      `[agents] agents.config.add failed: ${error instanceof Error ? error.message : String(error)}`
+    )
+    return { added: false, message: "Couldn't add Videorc. Copy the line instead." }
+  }
 }
 
 /** Plan 209 S7: where this install's `videorc-mcp` bridge lives (D6, D20). */
@@ -12250,6 +12254,8 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   // Plan 260 S1.5b: the picked image's decode, fit and copy run in the backend.
   'scheduledThumbnail.import',
   'backgrounds.import',
+  // Plan 260 S1.5c: "Add to …" writes another app's config.
+  'agents.config.add',
   // Plan 232: how an HTML overlay's page stands; only main hosts them.
   'htmlOverlays.host.report',
   ...SMOKE_BACKEND_RPC_METHOD_NAMES,

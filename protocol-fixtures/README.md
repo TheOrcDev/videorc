@@ -235,3 +235,15 @@ mapping tests and `pnpm smoke:obs-import` use the same files.
 
 - Rust: `cargo test -p videorc-backend obs_import`
 - TypeScript: `pnpm --filter @videorc/desktop test -- obs-import-map.test.ts`
+
+## `agent-config-entry.json`
+
+What "Add to …" writes into an agent app's config (plan 209 S22; the backend
+writes it since plan 260 S1.5c), and what the Connect dialog shows as the line
+to paste: the `videorc` JSON entry per app with its root key, Codex's
+`[mcp_servers.videorc]` lines, and the `claude mcp add` arguments. The bridge
+path has a space, quotes and backslashes so every escape is pinned. The token
+is a placeholder of the right shape, never a real one.
+
+- Rust: `cargo test -p videorc-backend agent_config_entry_fixture`
+- TypeScript: `pnpm --filter @videorc/desktop test -- agent-config-entry.test.ts`
