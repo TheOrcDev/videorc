@@ -129,6 +129,8 @@ mod room_media;
 mod room_overlays;
 mod room_program_camera;
 #[cfg(target_os = "macos")]
+mod room_routing;
+#[cfg(target_os = "macos")]
 mod room_scene;
 #[cfg(target_os = "macos")]
 mod room_screen;
@@ -6569,6 +6571,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.room.camera.set"
         | "cloud.room.screen.set"
         | "cloud.room.owner"
+        | "cloud.room.routing.set"
         | "cloud.recordings.download"
         | "cloud.archive.stop"
         | "cloud.archive.cancel"
@@ -13984,6 +13987,26 @@ async fn handle_text_message_with_role(
                 #[cfg(target_os = "macos")]
                 Ok(params) if room_host::holds_seat() => {
                     room_screen::set_screen(params.screen);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 260 S1.8c: what the program page plays of the host's speech
+        // and auxiliary audio, for the backend's room to route.
+        "cloud.room.routing.set" => {
+            match serde_json::from_value::<cloud_talk::ProgramAudioSettings>(command.params) {
+                Ok(settings) if !settings.valid() => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "The program gains are out of range.",
+                ),
+                #[cfg(target_os = "macos")]
+                Ok(settings) if room_host::holds_seat() => {
+                    room_routing::set_routing(settings);
                     ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
                 }
                 Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),

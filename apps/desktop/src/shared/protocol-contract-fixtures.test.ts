@@ -104,6 +104,7 @@ import type {
   BuddyPetSheetGeneratedEvent
 } from './buddy-pet-creator'
 import { normalizeSessionCommentsListParams } from './backend'
+import type { ProgramAudioSettings } from './program-audio-routing'
 import type {
   CohostAvatarAccepted,
   CohostAvatarCreateParams,
@@ -372,6 +373,7 @@ interface HighRiskContractFixtures {
     roomMicrophoneSetParams: CloudRoomMediaSetParams
     roomCameraSetParams: CloudRoomMediaSetParams
     roomScreenSetParams: CloudRoomMediaSetParams
+    roomRoutingSetParams: ProgramAudioSettings
     roomPresentationMediaEvent: CloudRoomPresentationEvent
     roomSceneCommitParams: CloudRoomSceneCommitParams
     // Plan 243 C1: another device on air, and a show waiting after a hand-off.
@@ -734,6 +736,7 @@ describe('shared high-risk protocol fixture', () => {
       roomMicrophoneSetParams,
       roomCameraSetParams,
       roomScreenSetParams,
+      roomRoutingSetParams,
       roomPresentationMediaEvent
     } = fixtures.cloud
     expect(jsonShape(validateBackendEventPayload('cloud.state', statusTalk))).toEqual(statusTalk)
@@ -816,6 +819,16 @@ describe('shared high-risk protocol fixture', () => {
     expect(() =>
       validateBackendRpcParams('cloud.room.microphone.set', roomCameraSetParams)
     ).toThrow()
+    // The program audio routing the backend's room sends its program pages.
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.routing.set', roomRoutingSetParams))
+    ).toEqual(roomRoutingSetParams)
+    for (const bad of [
+      { ...roomRoutingSetParams, speechGain: 1.5 },
+      { ...roomRoutingSetParams, auxiliaryGain: -0.1 },
+      { ...roomRoutingSetParams, extra: true }
+    ])
+      expect(() => validateBackendRpcParams('cloud.room.routing.set', bad)).toThrow()
     // The screen the room shares, by its native id; its privacy on the wire.
     expect(
       jsonShape(validateBackendRpcParams('cloud.room.screen.set', roomScreenSetParams))
