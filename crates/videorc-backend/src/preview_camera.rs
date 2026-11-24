@@ -1008,6 +1008,20 @@ pub async fn start_preview_camera(
         .status
 }
 
+/// A backend start whose caller needs the camera's outcome before it goes on
+/// (Separate source recordings arming the Camera file, #1631). It waits within
+/// the command budget on every platform, where the public command on Windows
+/// replies at admission (`public_camera_start_wait`), so a DirectShow camera
+/// still opening would read as `Starting` and refuse the take.
+pub(crate) async fn start_preview_camera_and_wait(
+    state: AppState,
+    params: PreviewCameraStartParams,
+) -> PreviewCameraStatus {
+    start_preview_camera_with_owner(state, params, None, None, PreviewCameraStartWait::Bounded)
+        .await
+        .status
+}
+
 pub(crate) async fn start_preview_camera_for_layout(
     state: AppState,
     params: PreviewCameraStartParams,

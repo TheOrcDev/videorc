@@ -356,7 +356,7 @@ pub async fn arm_camera_format(
         .and_then(|source| source.source_key())
         .is_some_and(|key| key.id == selected);
     let live = running
-        || crate::preview_camera::start_preview_camera(
+        || crate::preview_camera::start_preview_camera_and_wait(
             state.clone(),
             crate::protocol::PreviewCameraStartParams {
                 sources: params.sources.clone(),
@@ -1081,6 +1081,20 @@ impl SourceIsoRuntime {
     /// (async) follows in `abort`.
     fn abort_sync(&mut self) {
         for writer in self.writers.iter_mut() {
+            // A writer that failed before the shared start barrier returns
+            // without a reply anyone reads; name it so a stalled start says
+            // which file broke it (#1631).
+            if let Some(failure) = writer
+                .bridge
+                .as_ref()
+                .and_then(EncoderBridgeRecordingSession::terminal_failure)
+            {
+                tracing::warn!(
+                    role = writer.role.as_str(),
+                    failure = %failure,
+                    "separate source writer failed before the take committed"
+                );
+            }
             if let Some(child) = writer.child.as_mut() {
                 let _ = child.start_kill();
             }

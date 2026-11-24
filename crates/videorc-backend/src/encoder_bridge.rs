@@ -3650,6 +3650,12 @@ impl RecordingStartBarrier {
         let deadline = Instant::now() + Duration::from_secs(4);
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let index = state.stores.len();
+        tracing::debug!(
+            index,
+            participants = self.participants,
+            member = ?self.member_for(store.as_ref()).map(|member| member.role),
+            "ISO start barrier arrival"
+        );
         state.stores.push(store);
         if state.stores.len() == self.participants {
             state.frames = state
@@ -3668,6 +3674,10 @@ impl RecordingStartBarrier {
                     }
                 })
                 .collect();
+            tracing::debug!(
+                frames = ?state.frames.iter().map(Option::is_some).collect::<Vec<_>>(),
+                "ISO start barrier full"
+            );
             anyhow::ensure!(
                 state.frames.iter().all(Option::is_some),
                 "A separate recording encoder has no initial compositor frame"
@@ -4284,6 +4294,28 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     } else {
         None
     };
+    // #1631: a Windows named pipe's writer waits here until FFmpeg connects,
+    // and FFmpeg opens its inputs one at a time, probing each. A split stream
+    // leg's pipe is opened only once the recording input carries data, which
+    // the ISO start barrier holds back until every member has arrived, so a
+    // member waiting on its pipe first deadlocks the take. Windows members
+    // join the barrier before they open the pipe; Unix keeps a bootstrap
+    // reader on the FIFO instead.
+    #[cfg(target_os = "windows")]
+    let mut barrier_start = match start_barrier.as_ref() {
+        Some(barrier) => match barrier.prepared(frame_store.clone(), &video_epoch, &stop) {
+            Ok(start) => Some(start),
+            Err(error) => {
+                let error =
+                    record_encoder_bridge_terminal_failure(&terminal_failure, error.to_string());
+                signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error));
+                return;
+            }
+        },
+        None => None,
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut barrier_start: Option<(Instant, Option<FedCompositorFrame>)> = None;
     let fifo = match open_recording_fifo_writer(&fifo_path, &stop, true) {
         Ok(fifo) => {
             startup_trace.stamp(RecordingStartPhase::BridgeFifoOpen);
@@ -4639,7 +4671,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             thread::sleep(Duration::from_millis(delay.min(1000)));
         }
     }
-    let (clock_start, mut initial_frame) = if let Some(barrier) = start_barrier.as_ref() {
+    let (clock_start, mut initial_frame) = if let Some(start) = barrier_start.take() {
+        start
+    } else if let Some(barrier) = start_barrier.as_ref() {
         match barrier.prepared(frame_store.clone(), &video_epoch, &stop) {
             Ok(start) => start,
             Err(error) => {

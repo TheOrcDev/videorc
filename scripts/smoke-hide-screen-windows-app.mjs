@@ -44,6 +44,8 @@
 //                 (VIDEORC_WINDOWS_D3D11_MEDIA=disabled); auto (default) is
 //                 the shipping choice, and the summary names the path it took.
 //   --probe-capture  stops after the 5 s capture-rate sample.
+//   --no-screen-file keeps Separate source recordings off under --media cpu
+//                 (a baseline for the CPU bridge's cost without the files).
 //   VIDEORC_SMOKE_TIMEOUT_MS, VIDEORC_SMOKE_RTMP_PORT (13937),
 //   VIDEORC_SMOKE_FFMPEG_PATH, VIDEORC_SMOKE_FFPROBE_PATH
 
@@ -300,8 +302,9 @@ async function hideStep({ renderer, smoke, screen }) {
   const camera = (cameraList.devices ?? []).find(
     (device) => device.kind === 'camera' && device.status === 'available'
   )
-  const screenFileSkip =
-    options.media !== 'cpu'
+  const screenFileSkip = options.noScreenFile
+    ? '--no-screen-file: Separate source recordings off for this run'
+    : options.media !== 'cpu'
       ? 'the D3D11 media path cannot write separate source files, so this run takes no Screen file; run with --media cpu to judge it'
       : camera
         ? null
@@ -1020,6 +1023,7 @@ function parseArgs(argv) {
     // switch count belongs to the macOS-only switches step.
     else if (value === '--switches') index += 1
     else if (value === '--probe-capture') parsed.probeOnly = true
+    else if (value === '--no-screen-file') parsed.noScreenFile = true
     else if (value === '--media') {
       parsed.media = values[++index]
       if (!['auto', 'cpu'].includes(parsed.media))

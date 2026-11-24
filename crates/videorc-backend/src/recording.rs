@@ -18495,7 +18495,9 @@ async fn prepare_source_iso_selected_capture(
             {
                 status
             } else {
-                crate::preview_camera::start_preview_camera(
+                // #1631: wait for the outcome; on Windows the public start
+                // replies while a DirectShow camera is still opening.
+                crate::preview_camera::start_preview_camera_and_wait(
                     state.clone(),
                     crate::protocol::PreviewCameraStartParams {
                         sources: params.sources.clone(),
