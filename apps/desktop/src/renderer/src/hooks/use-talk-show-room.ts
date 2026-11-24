@@ -25,10 +25,12 @@ import type {
   CloudGuestAction,
   CloudRoomOpenParams,
   CloudRoomOverlayEvent,
+  CloudRoomPresentationEvent,
   CloudRoomStatus,
   CloudStage,
   CloudStatus,
-  Device
+  Device,
+  RoomPresentationStatus
 } from '@/lib/backend'
 import {
   IDLE_TALK_SHOW_SNAPSHOT,
@@ -240,6 +242,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   } = deps
   const controlsRef = deps.controlsRef
   const [snapshot, setSnapshot] = useState<TalkShowRoomSnapshot>(IDLE_SNAPSHOT)
+  // Plan 260 S1.8b: with the backend in the room (its dev switch), what the
+  // program pages draw of the graphics comes from it.
+  const [backendGraphics, setBackendGraphics] = useState<RoomPresentationStatus | null>(null)
   const clientRef = useRef<TalkShowRoomClient | null>(null)
   /** Plan 249 S24: the kept avatar per output view, so it is sent on change only. */
   const keptAvatarRef = useRef(new Map<string, string>())
@@ -874,6 +879,16 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   const cloudStatusRef = useRef(cloudStatus)
   cloudStatusRef.current = cloudStatus
   useEffect(() => {
+    if (!client || !roomOpen) {
+      setBackendGraphics(null)
+      return
+    }
+    return client.on('cloud.room.presentation', (event: CloudRoomPresentationEvent) => {
+      if (event.showId === cloudStatusRef.current?.show?.id)
+        setBackendGraphics(event.graphics ?? null)
+    })
+  }, [client, roomOpen])
+  useEffect(() => {
     if (!client || !roomOpen) return
     return client.on('cloud.room.overlay', (event: CloudRoomOverlayEvent) => {
       void (async () => {
@@ -1000,9 +1015,17 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     return () => clearTimeout(timer)
   }, [awaitingRejoin, snapshot.state])
 
-  const setGraphicsEnabled = useCallback(async (enabled: boolean) => {
-    clientRef.current?.setGraphicsEnabled(enabled)
-  }, [])
+  const setGraphicsEnabled = useCallback(
+    async (enabled: boolean) => {
+      clientRef.current?.setGraphicsEnabled(enabled)
+      // Plan 260 S1.8b: the backend's room takes the switch while it holds
+      // the host seat, and ignores it otherwise.
+      await client
+        ?.requestTyped('cloud.room.presentation.set', { graphics: enabled })
+        .catch(() => {})
+    },
+    [client]
+  )
 
   const setAvatarEnabled = useCallback(async (enabled: boolean) => {
     clientRef.current?.setAvatarEnabled(enabled)
@@ -1098,7 +1121,13 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   const previewReplaced = roomOpen || previewReplacedOverride
   const value = useMemo<TalkShowContextValue>(
     () => ({
-      room: snapshot,
+      room:
+        snapshot.graphics || !backendGraphics
+          ? snapshot
+          : {
+              ...snapshot,
+              graphics: { ...backendGraphics, preview: null, productionQualified: false }
+            },
       previewReplaced,
       twoScreens,
       hostIdentity,
@@ -1282,6 +1311,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       rejoining,
       setStage,
       snapshot,
+      backendGraphics,
       stage,
       twoScreens
     ]

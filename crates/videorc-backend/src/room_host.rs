@@ -21,6 +21,7 @@
 //! Windows and Linux builds pass (S0.8).
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 // The room's reason (LiveKit's protocol enum), not the participant's.
@@ -261,6 +262,7 @@ async fn hold(
                 report(&state, CloudRoomClientState::Disconnected, None);
             }
             Ok((room, mut events)) => {
+                let room = Arc::new(room);
                 attempt = 0;
                 report(&state, CloudRoomClientState::Connected, None);
                 // Data messages are not replayed: the stage goes out on every
@@ -274,7 +276,18 @@ async fn hold(
                 // Plan 249 S3: what each program page and guest draws, from
                 // their server-relayed receipts; the presentation publishers
                 // read it (S1.8b, next parts).
-                let mut receipts = crate::room_capability::CapabilityReceipts::default();
+                let receipts = Arc::new(StdMutex::new(
+                    crate::room_capability::CapabilityReceipts::default(),
+                ));
+                // The static graphics (S1.8b): one publisher per connection.
+                let (graphics_signals, graphics_heard) = mpsc::unbounded_channel();
+                let graphics_task = tokio::spawn(crate::room_graphics::run(
+                    state.clone(),
+                    room.clone(),
+                    show_id.clone().unwrap_or_default(),
+                    receipts.clone(),
+                    graphics_heard,
+                ));
                 let (overlay_queue, overlay_worker) = overlay_sender(
                     state.clone(),
                     room.local_participant(),
@@ -311,14 +324,28 @@ async fn hold(
                                 if topic.as_deref() == Some(crate::room_capability::CAPABILITY_TOPIC) =>
                             {
                                 let now = chrono::Utc::now().timestamp_millis();
-                                if let Some(capability) =
-                                    receipts.received(&payload, participant.is_some(), now)
-                                {
+                                let taken = receipts
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .received(&payload, participant.is_some(), now);
+                                if let Some(capability) = taken {
+                                    let _ = graphics_signals.send(
+                                        crate::room_graphics::GraphicsSignal::Heard(
+                                            capability.identity.clone(),
+                                        ),
+                                    );
                                     tracing::debug!(
                                         identity = %capability.identity,
                                         "A capability receipt reached the backend's room host"
                                     );
                                 }
+                            }
+                            Some(RoomEvent::ParticipantDisconnected(participant)) => {
+                                let _ = graphics_signals.send(
+                                    crate::room_graphics::GraphicsSignal::Left(
+                                        participant.identity().as_str().to_string(),
+                                    ),
+                                );
                             }
                             Some(RoomEvent::Disconnected { reason }) => break reason,
                             None => break DisconnectReason::UnknownReason,
@@ -327,6 +354,7 @@ async fn hold(
                     }
                 };
                 overlay_worker.abort();
+                graphics_task.abort();
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
                     DisconnectReason::DuplicateIdentity => {
@@ -439,13 +467,14 @@ async fn publish_stage(room: &Room, message: Option<Vec<u8>>) {
 }
 
 /// The room closed (or never opened) here: leave it and give the seat back.
-async fn leave(state: &AppState, room: Option<Room>) {
+async fn leave(state: &AppState, room: Option<Arc<Room>>) {
     if let Some(room) = room
         && let Err(error) = room.close().await
     {
         tracing::warn!("The backend could not leave the talk show's room cleanly: {error}");
     }
     report(state, CloudRoomClientState::Idle, None);
+    crate::room_graphics::reset_enabled();
     HOLDS_SEAT.store(false, Ordering::Release);
 }
 
