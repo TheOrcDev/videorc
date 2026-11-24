@@ -200,7 +200,8 @@ fn main() -> Result<()> {
                 STUDIO_EVENTS
                     .into_iter()
                     .chain([camera::VIRTUAL_CAMERA_CHANGED, app::exit::CLOUD_STATE])
-                    .chain(screens::settings::EVENTS),
+                    .chain(screens::settings::EVENTS)
+                    .chain(["session.log"]),
             ),
             logger: logger.clone(),
             ..ClientConfig::default()
@@ -274,7 +275,7 @@ fn main() -> Result<()> {
     );
     studio.set_clips_media_access(Some(permissions.snapshot()));
     // Videorc Camera's extension: activated when the backend's switch is on.
-    let _camera = camera::Camera::install(
+    let camera_controller = camera::Camera::install(
         runtime.handle(),
         supervisor.state(),
         client.subscribe(),
@@ -310,6 +311,7 @@ fn main() -> Result<()> {
     let instance = Rc::new(RefCell::new(instance));
     let quit_instance = instance.clone();
     let hotkey_logger = logger.clone();
+    let health_logger = logger.clone();
     let handoff_links = deep_links.clone();
     // The quit while on air: the guard follows the backend's events.
     let exit_events = client.subscribe();
@@ -384,6 +386,17 @@ fn main() -> Result<()> {
                 cx,
             )
         });
+        let health = cx.new(|cx| {
+            screens::health::HealthScreen::new(
+                studio.clone(),
+                core_handle.clone(),
+                health_logger.clone(),
+                paths.clone(),
+                settings_permissions.clone(),
+                camera_controller.clone(),
+                cx,
+            )
+        });
         let window_bounds = main_frame
             .restored(cx)
             .unwrap_or_else(|| Bounds::centered(None, size(px(1280.), px(800.)), cx));
@@ -438,6 +451,8 @@ fn main() -> Result<()> {
                         preview,
                         sources.clone(),
                         settings.clone(),
+                        health.clone(),
+                        window,
                         cx,
                     )
                 })
