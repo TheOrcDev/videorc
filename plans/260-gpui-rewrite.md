@@ -859,7 +859,8 @@ on ogre.
 | Start-up, launch to the first frame with content (measured from outside: the nested compositor's client list, then `grim` frames), **4 GHz** | GPUI `spike-text` (10,000-row chat) **351 to 355 ms** (3 rounds); `spike-desktop` 370 to 371 ms (3). Electron, the Linux Alpha on a fresh isolated profile, **1,429 and 1,701 ms** (2 rounds) |
 | The same, **800 MHz** | GPUI `spike-text` 1.50 to 1.67 s (5), `spike-desktop` 1.63 to 1.69 s (4); Electron 6.72 to 6.87 s (3) |
 | `backend.ready` | Electron spawns the backend 539 to 548 ms after launch at 4 GHz and it is ready 94 to 107 ms later (634 to 654 ms after launch); at 800 MHz 2.51 to 2.62 s and 2.60 to 2.70 s. A GPUI app spawns it first thing in `main`, so about 0.5 s earlier at 4 GHz |
-| Bump | Not rehearsed on Linux: the macOS count covers the shared code, and the Linux-only spike code (the preview presenter, `os.rs`) uses only `raw-window-handle` and `Window` |
+| Bump, one week (0.3.13 → 0.3.14), all six spike crates, `cargo check` on Linux | **0 lines break** (macOS's 2 are `gpui::NativeView`, macOS only); 240 s cold at 800 MHz |
+| Bump, one month (0.3.10 → 0.3.14) | **5 lines break**, the same 5 as macOS: the input element copied from GPUI's own example (`TextElement` no longer an `IntoElement` under 0.3.10's `Element` trait). The Linux-only code (the preview presenter in `spike-linux-preview`, `spike-desktop`'s Linux `os.rs`, `spike-a11y`) compiled unchanged against both |
 
 - Start-up passes S0.9's line on Linux too: GPUI shows content about 4x
   sooner than Electron at either clock (about 1.1 to 1.3 s sooner at 4 GHz).
