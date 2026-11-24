@@ -467,7 +467,10 @@ class StudioBackend {
   // waiting out the proof timeout.
   reportsActiveSceneRevision = false
   layoutApplyFailure:
-    'definite' | 'camera-not-ready' | 'request-outcome-unknown-after-commit' | null = null
+    | 'definite'
+    | 'camera-not-ready'
+    | 'request-outcome-unknown-after-commit'
+    | null = null
   screenActivateFailure: 'definite' | null = null
   screenClearFailure: 'request-outcome-unknown-before-commit' | null = null
   sessionStartResponseDelayMs = 0
@@ -1649,7 +1652,8 @@ class StudioBackend {
           this.revision += 1
         }
         const output = params.output as
-          { recordEnabled?: boolean; streamEnabled?: boolean } | undefined
+          | { recordEnabled?: boolean; streamEnabled?: boolean }
+          | undefined
         this.recordingReplayOnly =
           params.replay != null && !output?.recordEnabled && !output?.streamEnabled
         return {

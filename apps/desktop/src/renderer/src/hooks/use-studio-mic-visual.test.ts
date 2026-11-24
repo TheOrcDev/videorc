@@ -128,7 +128,8 @@ describe('Studio visual microphone consumers', () => {
 
     for (let frameIndex = 1; frameIndex <= 8; frameIndex += 1) {
       const next = scheduledFrames.entries().next().value as
-        [number, (at: number) => void] | undefined
+        | [number, (at: number) => void]
+        | undefined
       expect(next).toBeDefined()
       if (!next) break
       scheduledFrames.delete(next[0])

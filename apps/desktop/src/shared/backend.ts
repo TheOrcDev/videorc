@@ -101,7 +101,12 @@ export type EntitlementTier = 'basic' | 'premium' | 'developer'
  */
 export type EntitlementPlan = 'premium' | 'max'
 export type EntitlementSource =
-  'local-default' | 'env-override' | 'creem' | 'manual' | 'signed-cache' | 'future-license'
+  | 'local-default'
+  | 'env-override'
+  | 'creem'
+  | 'manual'
+  | 'signed-cache'
+  | 'future-license'
 
 export interface EntitlementCapability {
   featureId: FeatureId
@@ -143,7 +148,12 @@ export interface EntitlementsSnapshot {
 }
 
 export type NoiseCleanupJobStatus =
-  'queued' | 'processing' | 'validating' | 'completed' | 'failed' | 'cancelled'
+  | 'queued'
+  | 'processing'
+  | 'validating'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
 export type NoiseCleanupPreset = 'speech-v1'
 
 /** Durable backend-owned cleanup state. The renderer never infers completion
@@ -183,7 +193,15 @@ export type CleanCutJobState =
   | 'cancelled'
 
 export type CleanCutRemovalKind =
-  'head' | 'tail' | 'silence' | 'gap' | 'filler' | 'retake' | 'false_start' | 'condensed' | 'manual'
+  | 'head'
+  | 'tail'
+  | 'silence'
+  | 'gap'
+  | 'filler'
+  | 'retake'
+  | 'false_start'
+  | 'condensed'
+  | 'manual'
 
 export interface CleanCutKindStat {
   kind: CleanCutRemovalKind
@@ -355,7 +373,8 @@ export interface VideorcAccountSnapshot {
 /** Main defers product-account maintenance while capture is active. Deferral is
  * an expected answer, not a failure: the caller keeps its current snapshot. */
 export type VideorcAccountRefreshResult =
-  { outcome: 'refreshed'; snapshot: VideorcAccountSnapshot } | { outcome: 'deferred' }
+  | { outcome: 'refreshed'; snapshot: VideorcAccountSnapshot }
+  | { outcome: 'deferred' }
 
 /** Why the desktop's Videorc account changed (plan 215 A5). */
 export type AccountChangeReason = 'signed-in' | 'signed-out' | 'session-expired'
@@ -551,9 +570,19 @@ export type AudioTrackSource = 'microphone' | 'test-tone' | 'system-audio'
 export type RecordingContainer = 'none' | 'mkv' | 'flv' | 'tee'
 export type RecordingFinalizationState = 'none' | 'finalizing' | 'finalized' | 'failed'
 export type RecordingPipelineStage =
-  'capture' | 'render' | 'video-encoder' | 'audio-encoder' | 'muxer'
+  | 'capture'
+  | 'render'
+  | 'video-encoder'
+  | 'audio-encoder'
+  | 'muxer'
 export type RecordingPipelineStageState =
-  'pending' | 'starting' | 'running' | 'finalizing' | 'finished' | 'failed' | 'skipped'
+  | 'pending'
+  | 'starting'
+  | 'running'
+  | 'finalizing'
+  | 'finished'
+  | 'failed'
+  | 'skipped'
 
 export interface RecordingPipelineStatus {
   container: RecordingContainer
@@ -1166,7 +1195,12 @@ export type MutationKind =
 export type LiveEditStatus = 'started' | 'applied' | 'failed' | 'reverted'
 
 export type SourceRuntimePhase =
-  'idle' | 'starting' | 'live' | 'reconnecting' | 'failed' | 'permission-needed'
+  | 'idle'
+  | 'starting'
+  | 'live'
+  | 'reconnecting'
+  | 'failed'
+  | 'permission-needed'
 
 export type SessionMode = 'idle' | 'recording' | 'streaming' | 'recording-streaming'
 
@@ -1610,7 +1644,11 @@ export interface PreparedKickBroadcast {
 }
 
 export type XNativeLiveCapabilityState =
-  'missing-credentials' | 'needs-authorization' | 'ready' | 'account-mismatch' | 'api-error'
+  | 'missing-credentials'
+  | 'needs-authorization'
+  | 'ready'
+  | 'account-mismatch'
+  | 'api-error'
 
 /** Result of `streamTargets.x.startLiveAuthorization` — the 3-legged OAuth 1.0a browser flow. */
 export interface XLiveAuthorizationStart {
@@ -2473,7 +2511,12 @@ export interface PerformanceCheckProgress {
 }
 
 export type WindowsD3d11MediaState =
-  'unavailable' | 'probing' | 'live' | 'draining' | 'fallback' | 'failed'
+  | 'unavailable'
+  | 'probing'
+  | 'live'
+  | 'draining'
+  | 'fallback'
+  | 'failed'
 
 export type WindowsD3d11CaptureBackend =
   | 'preview-bgra-upload'
@@ -2482,7 +2525,11 @@ export type WindowsD3d11CaptureBackend =
   | 'legacy-ffmpeg'
 
 export type WindowsD3d11CursorMode =
-  'embedded' | 'separate' | 'excluded-wgc' | 'embedded-wgc' | 'disabled-fallback'
+  | 'embedded'
+  | 'separate'
+  | 'excluded-wgc'
+  | 'embedded-wgc'
+  | 'disabled-fallback'
 
 /** Scalar-only diagnostics. No COM pointer, texture/shared handle, or HWND is wire-safe. */
 export interface WindowsD3d11MediaDiagnostics {
@@ -2750,9 +2797,16 @@ export interface NativePreviewHostCommand {
 export type PreviewSurfaceState = 'unavailable' | 'starting' | 'live' | 'stopped' | 'failed'
 export type PreviewSurfaceSource = 'synthetic' | 'camera' | 'screen' | 'window'
 export type PreviewSurfaceBacking =
-  'cametal-layer' | 'directcomposition-swapchain' | 'electron-browser-window' | 'none'
+  | 'cametal-layer'
+  | 'directcomposition-swapchain'
+  | 'electron-browser-window'
+  | 'none'
 export type NativePreviewHostKind =
-  'in-process' | 'helper-process' | 'external-module' | 'proof-surface' | 'backend-d3d11-presenter'
+  | 'in-process'
+  | 'helper-process'
+  | 'external-module'
+  | 'proof-surface'
+  | 'backend-d3d11-presenter'
 /** Which app window hosts the in-process CAMetalLayer (plan 213 D3): the main
  * window while the Preview is stuck to the app, the Preview window otherwise.
  * Only the in-process host sets it; status names the host, never silently. */
@@ -3240,7 +3294,12 @@ export interface PreviewSurfaceBoundsParams {
 }
 
 export type PreviewCameraState =
-  'disconnected' | 'starting' | 'live' | 'permission-needed' | 'device-missing' | 'failed'
+  | 'disconnected'
+  | 'starting'
+  | 'live'
+  | 'permission-needed'
+  | 'device-missing'
+  | 'failed'
 
 export interface PreviewCameraStartParams {
   sources: SourceSelection
@@ -3336,7 +3395,11 @@ export interface CameraCapabilityFormat {
 }
 
 export type PreviewScreenState =
-  'starting' | 'live' | 'permission-needed' | 'source-missing' | 'failed'
+  | 'starting'
+  | 'live'
+  | 'permission-needed'
+  | 'source-missing'
+  | 'failed'
 export type PreviewScreenSourceKind = 'screen' | 'window'
 
 export interface PreviewScreenStartParams {
@@ -3412,7 +3475,11 @@ export type WarmMicrophoneStatus = {
 }
 
 export type AudioMeterStatus =
-  'ready' | 'silent' | 'no-frames' | 'unavailable' | 'permission-required'
+  | 'ready'
+  | 'silent'
+  | 'no-frames'
+  | 'unavailable'
+  | 'permission-required'
 
 export interface AudioMeterResult {
   status: AudioMeterStatus
@@ -3525,11 +3592,23 @@ export interface StreamHealth {
 }
 
 export type DiagnosticBottleneck =
-  'none' | 'capture' | 'render' | 'encoder' | 'preview' | 'audio' | 'device' | 'unknown'
+  | 'none'
+  | 'capture'
+  | 'render'
+  | 'encoder'
+  | 'preview'
+  | 'audio'
+  | 'device'
+  | 'unknown'
 
 export type SourceRegistrySourceKind = 'camera' | 'screen' | 'window' | 'image' | 'synthetic'
 export type SourceRegistryLifecycleStatus =
-  'stopped' | 'starting' | 'live' | 'permission-needed' | 'source-missing' | 'failed'
+  | 'stopped'
+  | 'starting'
+  | 'live'
+  | 'permission-needed'
+  | 'source-missing'
+  | 'failed'
 export type SourceRegistryConsumerReason = 'preview' | 'recording' | 'streaming' | 'diagnostics'
 export type SourceRegistryIdentityConfidence = 'exact' | 'name-rematch' | 'fallback' | 'unknown'
 
@@ -3597,7 +3676,12 @@ export interface PreviewSourceSurfaceBackingStats {
 }
 
 export type CaptureRecoveryPhase =
-  'idle' | 'degraded' | 'restarting' | 'verifying' | 'recovered' | 'failed'
+  | 'idle'
+  | 'degraded'
+  | 'restarting'
+  | 'verifying'
+  | 'recovered'
+  | 'failed'
 
 export type CaptureRecoveryStage = 'camera-delivery' | 'screen-delivery' | 'compositor-render'
 export type CaptureRecoverySource = 'camera' | 'screen'
@@ -4185,7 +4269,12 @@ export type SystemPermissionPane = 'privacy' | 'screen-recording' | 'camera' | '
 // where Electron has no such API and no OS-level camera/mic grant exists (the
 // permission chips hide themselves for it instead of showing an unknown state).
 export type MediaAccessStatus =
-  'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown' | 'not-applicable'
+  | 'not-determined'
+  | 'granted'
+  | 'denied'
+  | 'restricted'
+  | 'unknown'
+  | 'not-applicable'
 
 export interface MediaAccessSnapshot {
   camera: MediaAccessStatus
@@ -4814,7 +4903,13 @@ export interface ScreenHideParams {
  * switch.
  */
 export type VirtualCameraState =
-  'off' | 'installing' | 'needs-approval' | 'needs-setup' | 'ready' | 'streaming' | 'unavailable'
+  | 'off'
+  | 'installing'
+  | 'needs-approval'
+  | 'needs-setup'
+  | 'ready'
+  | 'streaming'
+  | 'unavailable'
 
 /**
  * What main reports about the platform's half of the camera: the macOS
@@ -5151,10 +5246,19 @@ export interface DockSlotReport {
 }
 
 export type CommentsSendOperationPhase =
-  'sending' | 'sent' | 'partial' | 'failed' | 'delivery-unknown'
+  | 'sending'
+  | 'sent'
+  | 'partial'
+  | 'failed'
+  | 'delivery-unknown'
 
 export type DestinationDeliveryPhase =
-  'pending' | 'sent' | 'failed' | 'read-only' | 'unavailable' | 'timed-out-unknown'
+  | 'pending'
+  | 'sent'
+  | 'failed'
+  | 'read-only'
+  | 'unavailable'
+  | 'timed-out-unknown'
 
 export interface DestinationDelivery {
   destinationId: string
@@ -5401,7 +5505,8 @@ export interface CommentsCommandResolution<T> {
 }
 
 export type CommentsViewMode =
-  { kind: 'live' } | { kind: 'history'; sessionId: string; title: string; startedAt: string }
+  | { kind: 'live' }
+  | { kind: 'history'; sessionId: string; title: string; startedAt: string }
 
 export interface CommentsViewSnapshot {
   mode: CommentsViewMode
@@ -5477,7 +5582,10 @@ export type PreviewLifecycleState =
   | 'failed'
 
 export type PreviewPermissionStatus =
-  'ok' | 'screen-recording-required' | 'camera-required' | 'unknown'
+  | 'ok'
+  | 'screen-recording-required'
+  | 'camera-required'
+  | 'unknown'
 
 export type PreviewLifecycleTransport = PreviewTransport | 'none' | 'unknown'
 export type PreviewLifecycleBacking = PreviewSurfaceBacking | 'unknown'
@@ -5548,13 +5656,18 @@ export type StreamManagerScreen = 'presenting' | 'monitor'
 export type StreamManagerScreenMoves = 'supported' | 'wayland'
 
 export type StreamManagerScreenRefusal =
-  'same-screen' | 'screen-missing' | 'not-moved' | 'wayland' | 'unavailable'
+  | 'same-screen'
+  | 'screen-missing'
+  | 'not-moved'
+  | 'wayland'
+  | 'unavailable'
 
 /** A hold of the same key: what main did with the Stream Manager. */
 export type StreamManagerFrontOrCloseResult = 'front' | 'closed' | 'unavailable'
 
 export type StreamManagerScreenResult =
-  { ok: true; screen: StreamManagerScreen } | { ok: false; reason: StreamManagerScreenRefusal }
+  | { ok: true; screen: StreamManagerScreen }
+  | { ok: false; reason: StreamManagerScreenRefusal }
 
 export interface CommentsWindowState {
   open: boolean
@@ -5881,7 +5994,11 @@ export type CloudRoomRole = 'host' | 'guest'
 export type CloudGuestDevice = 'phone' | 'computer'
 /** The renderer's own room connection, as it reports it. */
 export type CloudRoomClientState =
-  'idle' | 'connecting' | 'connected' | 'reconnecting' | 'disconnected'
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'disconnected'
 
 /** Someone who asked to join and waits for Let in or Decline (D4). */
 export interface CloudRoomRequest {
@@ -6137,7 +6254,13 @@ export interface CloudRoomTokenAnswer {
 
 export type CloudGuestDecision = 'let-in' | 'decline'
 export type CloudGuestAction =
-  'mute' | 'unmute' | 'remove' | 'ban' | 'rename' | 'allow-screen-share' | 'disallow-screen-share'
+  | 'mute'
+  | 'unmute'
+  | 'remove'
+  | 'ban'
+  | 'rename'
+  | 'allow-screen-share'
+  | 'disallow-screen-share'
 
 export interface CloudGuestDecideParams {
   requestId: string
@@ -6454,7 +6577,12 @@ export interface RemoteLanPairing {
 
 /** Which app the streamer connected (D6): it picks the config line shown. */
 export type AgentClientKind =
-  'claude-desktop' | 'claude-code' | 'cursor' | 'codex' | 'vs-code' | 'other'
+  | 'claude-desktop'
+  | 'claude-code'
+  | 'cursor'
+  | 'codex'
+  | 'vs-code'
+  | 'other'
 
 /** How an agent action ended; the Activity list's word. */
 export type AgentActivityOutcome = 'ok' | 'refused' | 'failed' | 'timeout'
@@ -6663,7 +6791,8 @@ export type SessionMediaGrantRefusal =
   | 'not-ready'
 
 export type SessionMediaGrantResult =
-  { url: string; expiresAt: number } | { error: SessionMediaGrantRefusal }
+  | { url: string; expiresAt: number }
+  | { error: SessionMediaGrantRefusal }
 
 /** How the app is leaving: the whole app, or only its main window (plan 174 S3.1). */
 export type AppExitKind = 'quit' | 'close'
@@ -7934,7 +8063,11 @@ export type OverlayOrientation = 'horizontal' | 'vertical'
 
 /** Snap presets: the four corners plus the centred bottom bar captions use. */
 export type OverlaySnap =
-  'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'bottom-center'
+  | 'top-left'
+  | 'top-right'
+  | 'bottom-left'
+  | 'bottom-right'
+  | 'bottom-center'
 
 /** Smallest side a placed rect may have (canvas units); mirrors Rust. */
 export const OVERLAY_RECT_MIN_SIZE = 0.02
@@ -9115,7 +9248,12 @@ export interface CohostState {
  * comment was on stream.
  */
 export type CohostReportQuestionOutcome =
-  'open' | 'answered-on-air' | 'replied' | 'marked-answered' | 'dismissed' | 'shown'
+  | 'open'
+  | 'answered-on-air'
+  | 'replied'
+  | 'marked-answered'
+  | 'dismissed'
+  | 'shown'
 
 /** One question in the report's log. Optional lists are omitted while empty, never null. */
 export interface CohostReportQuestion {
@@ -10054,7 +10192,14 @@ export interface ScheduledStreamEvent {
   providerEventId: string | null
   watchUrl: string | null
   lifecycle:
-    'draft' | 'scheduled' | 'preparing' | 'live' | 'completed' | 'canceled' | 'missing' | 'unknown'
+    | 'draft'
+    | 'scheduled'
+    | 'preparing'
+    | 'live'
+    | 'completed'
+    | 'canceled'
+    | 'missing'
+    | 'unknown'
   operationState: 'idle' | 'pending' | 'needs-retry' | 'needs-reconciliation'
   thumbnailState: 'none' | 'pending' | 'uploaded' | 'error'
   error: { code: string; message: string } | null
