@@ -123,6 +123,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use futures_util::FutureExt;
+use futures_util::future::BoxFuture;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, broadcast, watch};
@@ -867,6 +869,9 @@ pub struct Studio<B: StudioBackend> {
     live_audio_kick: Notify,
     /// S1.6a part 6b: the app's recordings folder capability issuer.
     output_authorizer: Mutex<Option<OutputAuthorizer>>,
+    /// S1.6c: the bootstrap read Upcoming; the driver asks the platforms
+    /// beside the event receiver.
+    provider_refresh: Notify,
     /// S1.6c: the platform accounts, apart from the snapshot (`platforms`).
     platforms_tx: watch::Sender<crate::livestream::PlatformsState>,
     /// S1.6c: Stream details and Discord, apart from the snapshot.
@@ -955,6 +960,7 @@ impl<B: StudioBackend> Studio<B> {
             live_read_done: Notify::new(),
             live_audio_kick: Notify::new(),
             output_authorizer: Mutex::new(None),
+            provider_refresh: Notify::new(),
             platforms_tx,
             details_tx,
             chat_commands_tx,
@@ -1013,6 +1019,10 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     async fn drive_events(self: &Arc<Self>, mut events: broadcast::Receiver<BackendEvent>) {
+        // Upcoming's provider check runs here beside the receiver, never
+        // inside an event's handling; a reconnect's check replaces (drops)
+        // the last one.
+        let mut providers: Option<BoxFuture<'_, ()>> = None;
         loop {
             let (due, live_due, low_light_due, clips_due) = {
                 let inner = self.lock();
@@ -1051,6 +1061,12 @@ impl<B: StudioBackend> Studio<B> {
                     None => std::future::pending().await,
                 }
             };
+            let asking = async {
+                match providers.as_mut() {
+                    Some(asking) => asking.await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 received = events.recv() => match received {
                     Ok(event) => self.handle_event(event).await,
@@ -1060,6 +1076,11 @@ impl<B: StudioBackend> Studio<B> {
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
+                () = asking => providers = None,
+                () = self.provider_refresh.notified() => {
+                    let generation = self.lock().bootstrap_generation;
+                    providers = Some(self.refresh_upcoming_providers(generation).boxed());
+                }
                 () = retry => self.retry_settings().await,
                 () = live_read => self.live_sources_due().await,
                 () = low_light_read => self.camera_low_light_due().await,

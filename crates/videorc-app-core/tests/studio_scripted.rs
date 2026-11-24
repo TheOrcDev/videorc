@@ -97,6 +97,10 @@ struct Script {
     scene_loads: Vec<Value>,
     /// A livestream RPC waits for a permit here when set.
     livestream_gate: Option<Arc<Semaphore>>,
+    /// One livestream method waits for a permit here; the rest answer.
+    livestream_held: Option<(String, Arc<Semaphore>)>,
+    /// A gated livestream RPC is waiting.
+    held_reached: bool,
 }
 
 struct Scripted {
@@ -291,8 +295,18 @@ impl StudioBackend for Scripted {
         method: &'static str,
         params: Value,
     ) -> Result<Value, RpcError> {
-        let gate = self.script.lock().unwrap().livestream_gate.clone();
+        let gate = {
+            let script = self.script.lock().unwrap();
+            script.livestream_gate.clone().or_else(|| {
+                script
+                    .livestream_held
+                    .as_ref()
+                    .filter(|(held, _)| held == method)
+                    .map(|(_, gate)| gate.clone())
+            })
+        };
         if let Some(gate) = gate {
+            self.script.lock().unwrap().held_reached = true;
             gate.acquire().await.unwrap().forget();
         }
         let mut script = self.script.lock().unwrap();
@@ -4076,6 +4090,70 @@ async fn the_bootstrap_reads_upcoming_and_a_failed_read_says_why_with_a_period()
         error.starts_with("Couldn't load upcoming streams. "),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn upcoming_asks_the_platforms_without_holding_the_studio_events() {
+    use std::time::Duration;
+
+    let backend = Scripted::new();
+    answer_livestream(
+        &backend,
+        "scheduledStreams.list",
+        json!([{ "id": "e1", "lifecycle": "scheduled", "providerEventId": "p1" }]),
+    );
+    answer_livestream(
+        &backend,
+        "scheduledStreams.capabilities",
+        json!({ "available": true }),
+    );
+    answer_livestream(
+        &backend,
+        "scheduledStreams.refresh",
+        json!({ "state": "complete", "result": {} }),
+    );
+    answer_livestream(&backend, "scheduledStreams.list", json!([]));
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| {
+        script.livestream_held = Some(("scheduledStreams.refresh".to_string(), gate.clone()));
+    });
+    let studio = new_studio(&backend);
+    let (events, receiver) = broadcast::channel(16);
+    let driver = tokio::spawn(Arc::clone(&studio).drive(receiver));
+    events.send(ready()).unwrap();
+    let asked = async {
+        while !backend.script.lock().unwrap().held_reached {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), asked)
+        .await
+        .expect("the platforms are asked");
+
+    // The platforms are still answering; the session's status lands anyway.
+    events
+        .send(BackendEvent::RecordingStatus(Box::new(live("s-1"))))
+        .unwrap();
+    let landed = async {
+        while studio.snapshot().session.phase == SessionPhase::Idle {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), landed)
+        .await
+        .expect("the status lands while the platforms are asked");
+    assert_eq!(studio.scheduled_now().last_checked_at, None);
+
+    gate.add_permits(1);
+    let checked = async {
+        while studio.scheduled_now().last_checked_at.is_none() {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), checked)
+        .await
+        .expect("the check finishes");
+    driver.abort();
 }
 
 #[tokio::test]

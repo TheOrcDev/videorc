@@ -233,33 +233,54 @@ impl<B: StudioBackend> Studio<B> {
             state.loaded = true;
         });
         if refresh_provider && available {
-            let started = chrono::Utc::now().timestamp_millis();
-            self.edit_scheduled(|state| state.last_provider_refresh_ms = started);
-            for event in events
-                .iter()
-                .filter(|e| {
-                    e.provider_event_id.is_some()
-                        && e.operation_state.as_deref() != Some("pending")
-                        && e.lifecycle != "canceled"
-                })
-                .take(REFRESH_LIMIT)
-            {
-                if self
-                    .run_scheduled_operation(
-                        "refresh",
-                        json!({ "eventId": event.id, "expectedRevision": event.revision }),
-                    )
-                    .await
-                    .is_err()
-                {
-                    self.edit_scheduled(|state| {
-                        state.error = Some(copy::REFRESH_FAILED.to_string());
-                    });
-                }
+            self.ask_providers(&events, None).await?;
+        }
+        Ok(())
+    }
+
+    /// Every published event read again on its platform (up to 180 s each),
+    /// then the list. With a connection `generation`, a reconnect since
+    /// makes it stop and write nothing.
+    async fn ask_providers(
+        &self,
+        events: &[Event],
+        generation: Option<u64>,
+    ) -> Result<(), RpcError> {
+        let current =
+            || generation.is_none_or(|generation| self.lock().bootstrap_generation == generation);
+        let started = chrono::Utc::now().timestamp_millis();
+        self.edit_scheduled(|state| state.last_provider_refresh_ms = started);
+        for event in events
+            .iter()
+            .filter(|e| {
+                e.provider_event_id.is_some()
+                    && e.operation_state.as_deref() != Some("pending")
+                    && e.lifecycle != "canceled"
+            })
+            .take(REFRESH_LIMIT)
+        {
+            if !current() {
+                return Ok(());
             }
-            let list = self.scheduled_request("list", json!({})).await?;
-            let events: Vec<Event> = serde_json::from_value(list).unwrap_or_default();
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let refreshed = self
+                .run_scheduled_operation(
+                    "refresh",
+                    json!({ "eventId": event.id, "expectedRevision": event.revision }),
+                )
+                .await;
+            if refreshed.is_err() && current() {
+                self.edit_scheduled(|state| {
+                    state.error = Some(copy::REFRESH_FAILED.to_string());
+                });
+            }
+        }
+        if !current() {
+            return Ok(());
+        }
+        let list = self.scheduled_request("list", json!({})).await?;
+        let events: Vec<Event> = serde_json::from_value(list).unwrap_or_default();
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        if current() {
             self.edit_scheduled(|state| {
                 state.events = events;
                 state.last_checked_at = Some(now);
@@ -268,7 +289,23 @@ impl<B: StudioBackend> Studio<B> {
         Ok(())
     }
 
-    /// The bootstrap's read: the list with a provider check.
+    /// The bootstrap's provider check, which the driver runs beside the
+    /// event receiver (`drive`): the platforms can take minutes, and the
+    /// session, health and cloud events keep landing meanwhile. Electron's
+    /// Upcoming hook runs it on its own client path the same way.
+    pub(super) async fn refresh_upcoming_providers(&self, generation: u64) {
+        let state = self.scheduled_now();
+        let available = state
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.available);
+        if available && self.is_connected() {
+            let _ = self.ask_providers(&state.events, Some(generation)).await;
+        }
+    }
+
+    /// The bootstrap's read: the list and the capabilities; the provider
+    /// check is the driver's ([`Self::refresh_upcoming_providers`]).
     pub(super) async fn read_scheduled(&self) {
         if !self.is_connected() {
             self.edit_scheduled(|state| {
@@ -277,18 +314,21 @@ impl<B: StudioBackend> Studio<B> {
             });
             return;
         }
-        if let Err(error) = self.reload_scheduled(true).await {
-            let copy = user_error_message(
-                Failure::Rpc(&error),
-                Some(UserErrorContext {
-                    action: "load",
-                    object: "upcoming streams",
-                }),
-            );
-            self.edit_scheduled(|state| {
-                state.error = Some(error_text(&copy));
-                state.loaded = true;
-            });
+        match self.reload_scheduled(false).await {
+            Ok(()) => self.provider_refresh.notify_one(),
+            Err(error) => {
+                let copy = user_error_message(
+                    Failure::Rpc(&error),
+                    Some(UserErrorContext {
+                        action: "load",
+                        object: "upcoming streams",
+                    }),
+                );
+                self.edit_scheduled(|state| {
+                    state.error = Some(error_text(&copy));
+                    state.loaded = true;
+                });
+            }
         }
     }
 
