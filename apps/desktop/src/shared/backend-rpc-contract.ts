@@ -738,6 +738,7 @@ export interface BackendRpcMethodMap {
   'cloud.room.avatar.set': BackendRpcDefinition<CloudRoomAvatarSetParams, { held: boolean }>
   'cloud.room.microphone.set': BackendRpcDefinition<CloudRoomMediaSetParams, { held: boolean }>
   'cloud.room.camera.set': BackendRpcDefinition<CloudRoomMediaSetParams, { held: boolean }>
+  'cloud.room.screen.set': BackendRpcDefinition<CloudRoomMediaSetParams, { held: boolean }>
   'cloud.room.avatar.motion': BackendRpcDefinition<
     CloudRoomAvatarMotionParams,
     CloudRoomAvatarMotionResult
@@ -7311,6 +7312,21 @@ const cloudRoomMicrophoneSetParamsSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRoomMediaSetParams>
+// Plan 260 S1.8c: the screen the room shares, by its native source id.
+const cloudRoomScreenSetParamsSchema = objectSchema(
+  {
+    screen: nullableSchema(
+      objectSchema(
+        {
+          // The backend refuses an id that names no screen or window.
+          sourceId: stringSchema({ minLength: 1, maxLength: 512 })
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomMediaSetParams>
 // Plan 260 S1.8c: the camera the Studio has on (its effects are the scene
 // layout's, already the backend's).
 const cloudRoomCameraSetParamsSchema = objectSchema(
@@ -7365,7 +7381,32 @@ const cloudRoomPresentationEventSchema = objectSchema(
     showId: boundedString,
     graphics: optionalSchema(roomPresentationStatusSchema),
     avatar: optionalSchema(roomPresentationStatusSchema),
-    scene: optionalSchema(roomPresentationStatusSchema)
+    scene: optionalSchema(roomPresentationStatusSchema),
+    media: optionalSchema(
+      objectSchema(
+        {
+          camera: booleanSchema,
+          microphone: booleanSchema,
+          screen: optionalSchema(
+            objectSchema(
+              {
+                sourceId: stringSchema({ minLength: 1, maxLength: 512 }),
+                epoch: stringSchema({ minLength: 1, maxLength: 64 }),
+                generation: nonNegativeInteger,
+                hidden: booleanSchema,
+                published: booleanSchema,
+                sourceBlockedAt: nullableSchema(nonNegativeInteger),
+                status: enumSchema(['visible', 'hiding', 'observed', 'unconfirmed', 'paused']),
+                observations: recordSchema(nonNegativeInteger, { maxKeys: 256 }),
+                reason: optionalSchema(stringSchema({ maxLength: 512 }))
+              },
+              { allowUnknown: false }
+            )
+          )
+        },
+        { allowUnknown: false }
+      )
+    )
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRoomPresentationEvent>
@@ -8333,6 +8374,10 @@ const runtimeContracts = {
   },
   'cloud.room.camera.set': {
     params: cloudRoomCameraSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.screen.set': {
+    params: cloudRoomScreenSetParamsSchema,
     result: cloudRoomPresentationSetResultSchema
   },
   'cloud.room.avatar.motion': {

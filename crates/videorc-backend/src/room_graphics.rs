@@ -582,6 +582,7 @@ async fn send_due(
                 graphics: Some(status),
                 avatar: None,
                 scene: None,
+                media: None,
             },
         );
     }

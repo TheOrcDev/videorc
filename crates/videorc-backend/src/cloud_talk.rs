@@ -991,8 +991,8 @@ pub struct CloudRoomAvatarSetParams {
 
 /// The host's media for the backend's room (plan 260 S1.8c), one method per
 /// kind: `cloud.room.microphone.set` sends `microphone` (the room microphone
-/// bridge's own settings shape), `cloud.room.camera.set` sends `camera`;
-/// `null` takes it off.
+/// bridge's own settings shape), `cloud.room.camera.set` sends `camera`,
+/// `cloud.room.screen.set` sends `screen`; `null` takes it off.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CloudRoomMediaSetParams {
@@ -1000,6 +1000,67 @@ pub(crate) struct CloudRoomMediaSetParams {
     pub(crate) microphone: Option<crate::room_microphone::Settings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) camera: Option<RoomCameraSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) screen: Option<RoomScreenSettings>,
+}
+
+/// The screen or window the room shares (plan 249 S14: the scene's own),
+/// by its native source id (`screen:screencapturekit:<id>`,
+/// `window:screencapturekit:<id>`). The backend shares it while the
+/// preview screen runs that source, behind Hide screen.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RoomScreenSettings {
+    pub(crate) source_id: String,
+}
+
+impl RoomScreenSettings {
+    pub(crate) fn valid(&self) -> bool {
+        (self.source_id.starts_with("screen:") || self.source_id.starts_with("window:"))
+            && self.source_id.len() <= 512
+            && !self.source_id.contains(['\0', '\r', '\n'])
+    }
+}
+
+/// The host's own media in the backend's room (plan 260 S1.8c), on
+/// `cloud.room.presentation`'s `media` entry: what is published, and the
+/// screen's privacy as the renderer's room reported it (`screenPrivacy`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMediaStatus {
+    pub camera: bool,
+    pub microphone: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<RoomScreenStatus>,
+}
+
+/// The shared screen and its Hide screen state on the wire (plan 249 S2):
+/// the publication (`vrc-privacy:<epoch>:<generation>:<hidden>`), when the
+/// source was blocked, and which receivers acknowledged the frost.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomScreenStatus {
+    pub source_id: String,
+    pub epoch: String,
+    pub generation: u64,
+    pub hidden: bool,
+    pub published: bool,
+    /// Milliseconds since the epoch; `null` while visible.
+    pub source_blocked_at: Option<i64>,
+    pub status: RoomScreenPrivacyState,
+    pub observations: std::collections::BTreeMap<String, i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RoomScreenPrivacyState {
+    Visible,
+    Hiding,
+    Observed,
+    Unconfirmed,
+    Paused,
 }
 
 /// The camera the Studio has on for the room (the Sources camera, which the
@@ -1061,6 +1122,9 @@ pub struct CloudRoomPresentationEvent {
     /// it (5 s), as it waited on the renderer's publisher.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scene: Option<RoomPresentationStatus>,
+    /// The host's own media (S1.8c): camera, microphone, screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<RoomMediaStatus>,
 }
 
 /// Plan 249 S14: what the program pages drew for the scene's background.
