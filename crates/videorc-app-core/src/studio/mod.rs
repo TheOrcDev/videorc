@@ -76,6 +76,7 @@ pub mod camera_frame_rate;
 pub mod camera_low_light;
 pub mod captions_readiness;
 pub mod capture_config;
+pub mod chat_commands_store;
 pub mod clips;
 mod clips_actions;
 pub mod clips_ring;
@@ -203,7 +204,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 23] = [
+pub const STUDIO_EVENTS: [&str; 25] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -236,6 +237,9 @@ pub const STUDIO_EVENTS: [&str; 23] = [
     // S1.6c: Stream details and Discord (`stream_details`).
     stream_details::METADATA_CHANGED_EVENT,
     crate::livestream::discord::CHANGED_EVENT,
+    // S1.6c: plan 226's chat commands (`chat_commands_store`).
+    crate::livestream::chat_commands::CHANGED_EVENT,
+    crate::livestream::chat_commands::REPLY_FAILED_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -864,6 +868,8 @@ pub struct Studio<B: StudioBackend> {
     platforms_tx: watch::Sender<crate::livestream::PlatformsState>,
     /// S1.6c: Stream details and Discord, apart from the snapshot.
     details_tx: watch::Sender<crate::livestream::DetailsState>,
+    /// S1.6c: the chat commands, apart from the snapshot.
+    chat_commands_tx: watch::Sender<chat_commands_store::ChatCommandsStore>,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -921,6 +927,8 @@ impl<B: StudioBackend> Studio<B> {
         let (levels, _) = watch::channel(audio_levels::MicLevels::default());
         let (platforms_tx, _) = watch::channel(crate::livestream::PlatformsState::default());
         let (details_tx, _) = watch::channel(crate::livestream::DetailsState::default());
+        let (chat_commands_tx, _) =
+            watch::channel(chat_commands_store::ChatCommandsStore::default());
         Self {
             backend,
             config,
@@ -943,6 +951,7 @@ impl<B: StudioBackend> Studio<B> {
             output_authorizer: Mutex::new(None),
             platforms_tx,
             details_tx,
+            chat_commands_tx,
         }
     }
 
@@ -1216,7 +1225,8 @@ impl<B: StudioBackend> Studio<B> {
             }
             BackendEvent::Untyped { event, payload } => {
                 // S1.6c: the live area's events are its own.
-                if self.handle_platforms_event(&event, &payload).await
+                if self.handle_chat_commands_event(&event, &payload)
+                    || self.handle_platforms_event(&event, &payload).await
                     || self.handle_details_event(&event, &payload).await
                 {
                     return;
@@ -1500,9 +1510,11 @@ impl<B: StudioBackend> Studio<B> {
         self.read_captions_status(generation).await;
         // S1.6a part 6c: the Clips ring's state, and the launch's arming.
         self.read_replay_status(generation).await;
-        // S1.6c: the platform accounts, then Stream details and Discord.
+        // S1.6c: the platform accounts, Stream details and Discord, and the
+        // chat commands.
         self.read_platforms().await;
         self.read_details().await;
+        self.read_chat_commands().await;
         // The other areas' first reads (the agents line, takeovers and the
         // soundboard, chat, Sidekick, destinations, chat commands, scheduled
         // streams, the performance check, Hide screen, captions, the working
