@@ -376,6 +376,62 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     send()
     return roomAudioRouting.subscribe(send)
   }, [client, roomOpen, backendHolds])
+  // Plan 260 S1.8d d2: the room's other people from the backend's room, as
+  // tracks the stage, the guest cards and the Program monitor draw as they
+  // drew the room client's. One feed per picture coming in.
+  const [backendFeeds, setBackendFeeds] = useState<Record<string, MediaStreamTrack>>({})
+  const [backendMonitor, setBackendMonitor] = useState(false)
+  const feedsRef = useRef(new Map<string, import('@/lib/room-remote-feed').RemoteFeed>())
+  useEffect(() => {
+    const feeds = feedsRef.current
+    const wanted = new Set<string>()
+    if (client && roomOpen && backendMedia) {
+      for (const person of backendMedia.people ?? []) {
+        if (person.camera) wanted.add(`${person.identity}|camera`)
+        if (person.screen) wanted.add(`${person.identity}|screen`)
+      }
+      if (backendMedia.monitor?.video) wanted.add('monitor|monitor')
+    }
+    let changed = false
+    for (const [key, feed] of feeds)
+      if (!wanted.has(key)) {
+        feed.close()
+        feeds.delete(key)
+        changed = true
+      }
+    const missing = [...wanted].filter((key) => !feeds.has(key))
+    if (!missing.length) {
+      if (changed) setBackendFeeds(Object.fromEntries([...feeds].map(([k, f]) => [k, f.track])))
+      return
+    }
+    let cancelled = false
+    void import('@/lib/room-remote-feed').then(({ createRemoteFeed, remoteFrameUrl }) => {
+      if (cancelled || !client) return
+      for (const key of missing) {
+        if (feeds.has(key)) continue
+        const [identity, source] = key.split('|') as [string, 'camera' | 'screen' | 'monitor']
+        try {
+          feeds.set(
+            key,
+            createRemoteFeed((after) => remoteFrameUrl(client.connection, identity, source, after))
+          )
+        } catch {
+          /* A canvas that cannot capture shows no picture. */
+        }
+      }
+      setBackendFeeds(Object.fromEntries([...feeds].map(([k, f]) => [k, f.track])))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [client, roomOpen, backendMedia])
+  useEffect(
+    () => () => {
+      for (const feed of feedsRef.current.values()) feed.close()
+      feedsRef.current.clear()
+    },
+    []
+  )
   // Plan 260 S1.8c c5: the backend's room publishes the HTML layers' sheet
   // only while this computer's devices are on (S24), as the renderer's did.
   useEffect(() => {
@@ -1353,6 +1409,33 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
                 productionQualified: false
               }
             }
+          : {}),
+        // Plan 260 S1.8d d2: with the backend in the room there is no room
+        // client; the people, the monitor and the connection come from it.
+        ...(clientRef.current === null && backendMedia
+          ? {
+              state: cloudStatus?.room?.client ?? snapshot.state,
+              identity:
+                cloudStatus?.room?.client === 'connected' && hostIdentity
+                  ? hostIdentity
+                  : snapshot.identity,
+              people: (backendMedia.people ?? []).map((person) => ({
+                identity: person.identity,
+                name: person.name,
+                video: backendFeeds[`${person.identity}|camera`] ?? null,
+                audio: null,
+                screen: backendFeeds[`${person.identity}|screen`] ?? null,
+                micMuted: person.micMuted,
+                cameraOff: person.cameraOff,
+                quality: person.quality,
+                speaking: person.speaking
+              })),
+              monitor: {
+                enabled: backendMonitor,
+                video: backendFeeds['monitor|monitor'] ?? null,
+                audio: null
+              }
+            }
           : {})
       },
       previewReplaced,
@@ -1494,6 +1577,11 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         const { isManagedShow } = await import('@/lib/talk-show-managed')
         if (isManagedShow(status)) return
         roomClient?.setMonitor(enabled)
+        // Plan 260 S1.8d: the backend's room takes the runner's return.
+        if (!roomClient && backendMediaRef.current) {
+          setBackendMonitor(enabled)
+          await client?.requestTyped('cloud.room.monitor.set', { enabled }).catch(() => {})
+        }
         await call(
           'cloud.return.set',
           { open: enabled },
@@ -1556,6 +1644,10 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       snapshot,
       backendGraphics,
       client,
+      backendMedia,
+      backendFeeds,
+      backendMonitor,
+      cloudStatus,
       backendAvatar,
       stage,
       twoScreens
