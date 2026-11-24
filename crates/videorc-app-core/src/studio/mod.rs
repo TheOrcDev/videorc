@@ -30,7 +30,9 @@
 //! - [`scenes`] (S1.6b): plan 231's scene library as the Studio holds it,
 //!   read once the settings snapshot is in (the #1706 repair, the v1
 //!   migration, the working setup over the capture config, the scene on
-//!   stream), named on the main display, and its edits.
+//!   stream), named on the main display, and its edits; [`scene_switch`]
+//!   (part 3b) switches them (`requestLayoutTransaction`, the saved scene
+//!   apply, a layout on the scene on stream, the delete flow).
 //! - [`backend`]: the requests the Studio makes, as a trait, so the driver
 //!   runs against a scripted fake in tests and the typed client in the app.
 //! - [`Studio`]: the driver. It takes the typed client's events, runs the
@@ -58,6 +60,7 @@ pub mod js_value;
 pub mod latency;
 pub mod linux_desktop;
 pub mod preview_scene;
+pub mod scene_switch;
 pub mod scenes;
 pub mod session;
 pub mod settings;
