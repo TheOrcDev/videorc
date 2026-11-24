@@ -426,7 +426,7 @@ pub struct RecordingStatus {
     pub accepts_live_scene_edits: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum RecordingState {
     Idle,
