@@ -3953,3 +3953,86 @@ async fn a_category_search_needs_two_characters_and_reads_numeric_ids() {
     assert_eq!(params["first"], 10);
     assert_eq!(params["query"], "ju");
 }
+
+// --- S1.6c: plan 226's chat commands -----------------------------------
+
+#[tokio::test]
+async fn a_failed_list_read_says_so_until_a_state_arrives() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let store = studio.chat_commands_now();
+    assert!(store.load_failed);
+    assert_eq!(store.state, None);
+
+    studio
+        .handle_event(BackendEvent::Untyped {
+            event: "chatCommands.changed".to_string(),
+            payload: json!({ "commands": [], "listEnabled": true }),
+        })
+        .await;
+    let store = studio.chat_commands_now();
+    assert!(!store.load_failed);
+    assert!(store.state.expect("a state").list_enabled);
+}
+
+#[tokio::test]
+async fn a_reply_failure_is_kept_once_per_chat_and_reason() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let failure = json!({
+        "sessionId": "s1",
+        "destinationId": "yt",
+        "platform": "youtube",
+        "command": "go",
+        "reason": "Chat is off.",
+    });
+    for _ in 0..2 {
+        studio
+            .handle_event(BackendEvent::Untyped {
+                event: "chatCommands.replyFailed".to_string(),
+                payload: failure.clone(),
+            })
+            .await;
+    }
+    let failures = studio.chat_commands_now().failures;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].reason, "Chat is off.");
+}
+
+#[tokio::test]
+async fn a_save_refusal_goes_under_its_field_and_a_saved_state_is_taken() {
+    use videorc_app_core::livestream::chat_commands::{Field, save_params};
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    backend
+        .script
+        .lock()
+        .unwrap()
+        .livestream
+        .entry("chatCommands.save".to_string())
+        .or_default()
+        .push_back(Err(RpcError::new(
+            "chatCommands.save",
+            "invalid-params",
+            "!go already exists.",
+        )));
+    let params = save_params(None, "go", "why", "because");
+    let refusal = studio.save_chat_command(&params).await.expect("refused");
+    assert_eq!(refusal.field, Some(Field::Name));
+    assert_eq!(refusal.message, "!go already exists.");
+
+    answer_livestream(
+        &backend,
+        "chatCommands.save",
+        json!({
+            "commands": [{ "id": "c1", "name": "go", "description": "why", "reply": "because", "enabled": true, "createdAt": "2035-01-01T00:00:00.000Z", "updatedAt": "2035-01-01T00:00:00.000Z" }],
+            "listEnabled": true,
+        }),
+    );
+    assert_eq!(studio.save_chat_command(&params).await, None);
+    let state = studio.chat_commands_now().state.expect("saved");
+    assert_eq!(state.commands.len(), 1);
+}
