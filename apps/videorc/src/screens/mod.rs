@@ -1,6 +1,7 @@
 //! The screens (plan 260 Phase 3), one folder each, owned by their lane.
 
 pub mod health;
+pub mod output;
 pub mod settings;
 pub mod sources;
 

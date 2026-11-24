@@ -60,6 +60,7 @@ use app::hide::HideFromStream;
 use app::permissions::Permissions;
 use app::shell::{Shell, StatusLine, connection_text};
 use app::{camera, capture, hotkeys, links, menus, sleep};
+use screens::output::OutputPanel;
 use screens::sources::SourcesPanel;
 use screens::stream_manager::frame::StreamManagerFrame;
 use screens::studio::{
@@ -375,6 +376,7 @@ fn main() -> Result<()> {
         let sources = cx.new(|cx| {
             SourcesPanel::new(studio.clone(), permissions.clone(), core_handle.clone(), cx)
         });
+        let output = cx.new(|cx| OutputPanel::new(studio.clone(), core_handle.clone(), cx));
         let settings = cx.new(|cx| {
             screens::settings::SettingsScreen::new(
                 studio.clone(),
@@ -450,6 +452,7 @@ fn main() -> Result<()> {
                         studio_page,
                         preview,
                         sources.clone(),
+                        output.clone(),
                         settings.clone(),
                         health.clone(),
                         window,
@@ -501,7 +504,8 @@ fn main() -> Result<()> {
         let focus_studio = studio.clone();
         let _ = main_window.update(cx, |_shell, window, cx| {
             let shell_weak = cx.weak_entity();
-            sources.update(cx, |panel, _| panel.bind_shell(shell_weak));
+            sources.update(cx, |panel, _| panel.bind_shell(shell_weak.clone()));
+            output.update(cx, |panel, _| panel.bind_shell(shell_weak));
             ExitGuard::watch_main_window(window, cx);
             cx.observe_window_activation(window, move |_, window, cx| {
                 if window.is_window_active() {

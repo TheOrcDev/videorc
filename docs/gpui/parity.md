@@ -973,14 +973,14 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P651 | Session lock alert | Settings are locked while live | `renderer/components/tabs/recording-tab.tsx:264` | [ ] | [ ] | [ ] |
-| P652 | "Save a local recording" switch | Saves an MP4, or stream only | `renderer/components/tabs/recording-tab.tsx:266-284` | [ ] | [ ] | [ ] |
-| P653 | "Separate source recordings" switch + warnings | Also saves Screen and Camera files *(macOS only (lib/capture.ts:255-257))* | `renderer/components/tabs/recording-tab.tsx:290-343` | [ ] | n/a | n/a |
-| P654 | "Recording preset" select | Quality preset ("Editing a value below switches the preset to Custom.") | `renderer/components/tabs/recording-tab.tsx:346-368` | [ ] | [ ] | [ ] |
+| P651 | Session lock alert | Settings are locked while live | `renderer/components/tabs/recording-tab.tsx:264` | [x] | [ ] | [ ] |
+| P652 | "Save a local recording" switch | Saves an MP4, or stream only | `renderer/components/tabs/recording-tab.tsx:266-284` | [x] | [ ] | [ ] |
+| P653 | "Separate source recordings" switch + warnings | Also saves Screen and Camera files *(macOS only (lib/capture.ts:255-257))* | `renderer/components/tabs/recording-tab.tsx:290-343` | [x] | n/a | n/a |
+| P654 | "Recording preset" select | Quality preset ("Editing a value below switches the preset to Custom.") | `renderer/components/tabs/recording-tab.tsx:346-368` | [x] | [ ] | [ ] |
 | P655 | Performance check line + "Use {preset}" + "Check this computer" / "Check again" | Verifies that the quality holds on this machine | `renderer/components/tabs/recording-tab.tsx:369-415; renderer/lib/performance-check-line.ts` | [ ] | [ ] | [ ] |
 | P656 | Entitlement lock alert | The quality needs a plan | `renderer/components/tabs/recording-tab.tsx:416-421` | [ ] | [ ] | [ ] |
 | P657 | Compatibility alert (destructive or warning) | The profile can't run or is risky *(per platform (lib/capture.ts:1075))* | `renderer/components/tabs/recording-tab.tsx:422-426` | [ ] | [ ] | [ ] |
-| P658 | "Resolution" "4K" / "1440p" / "1080p" / "720p" | One-click canvas size per orientation | `renderer/components/tabs/recording-tab.tsx:429-448; renderer/lib/capture.ts:542-554` | [ ] | [ ] | [ ] |
+| P658 | "Resolution" "4K" / "1440p" / "1080p" / "720p" | One-click canvas size per orientation | `renderer/components/tabs/recording-tab.tsx:429-448; renderer/lib/capture.ts:542-554` | [x] | [ ] | [ ] |
 | P659 | "Width" / "Height" / "FPS" / "Bitrate kbps" inputs | Exact values; Enter commits, Escape reverts, shows a refusal error | `renderer/components/tabs/recording-tab.tsx:601-681` | [ ] | [ ] | [ ] |
 | P660 | "Fallback video encoder" (Beta): "Automatic" / "Intel Quick Sync" / "Software only" | Backup H.264 encoder *(Windows with Intel Quick Sync only)* | `renderer/components/settings/encoder-preference-field.tsx:14-73; recording-tab.tsx:468-479` | n/a | [ ] | n/a |
 
@@ -988,11 +988,11 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P661 | "Keep the last seconds" switch + state line | Keeps a one-minute buffer while open; shows a blocked reason | `renderer/components/tabs/recording-tab.tsx:133-153` | [ ] | [ ] | [ ] |
-| P662 | "Disk use" "about {size}" | Estimated buffer size on disk | `renderer/components/tabs/recording-tab.tsx:154-160` | [ ] | [ ] | [ ] |
+| P661 | "Keep the last seconds" switch + state line | Keeps a one-minute buffer while open; shows a blocked reason | `renderer/components/tabs/recording-tab.tsx:133-153` | [x] | [ ] | [ ] |
+| P662 | "Disk use" "about {size}" | Estimated buffer size on disk | `renderer/components/tabs/recording-tab.tsx:154-160` | [x] | [ ] | [ ] |
 | P663 | "Save a 30-second clip" key recorder | Global clip key, conflict check | `renderer/components/tabs/recording-tab.tsx:161-185; renderer/lib/global-shortcuts.ts:123` | [ ] | [ ] | [ ] |
 | P664 | "Save a 1-minute clip" key recorder | Global long-clip key | `renderer/components/tabs/recording-tab.tsx:161-185; renderer/lib/global-shortcuts.ts:124` | [ ] | [ ] | [ ] |
-| P665 | "Where clips go" row | Says clips go to a Clips subfolder | `renderer/components/tabs/recording-tab.tsx:186-190` | [ ] | [ ] | [ ] |
+| P665 | "Where clips go" row | Says clips go to a Clips subfolder | `renderer/components/tabs/recording-tab.tsx:186-190` | [x] | [ ] | [ ] |
 | P666 | Cloud "Clips" (room open): "Clip program orientation" Horizontal / Vertical | Replaces the native section while a room is open | `renderer/components/tabs/cloud-clips-section.tsx:60-81; recording-tab.tsx:103-108` | [ ] | [ ] | [ ] |
 | P667 | Cloud "Enable cloud Clips" / "Disable Clips" | Opt into the cloud buffer | `renderer/components/tabs/cloud-clips-section.tsx:84-127` | [ ] | [ ] | [ ] |
 | P668 | Cloud jobs "Cancel clip" / "Retry clip" / "Dismiss job" / "Discard staging files" + error alert | Manages clip jobs | `renderer/components/tabs/cloud-clips-section.tsx:140-191` | [ ] | [ ] | [ ] |
@@ -1001,23 +1001,23 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P669 | "Camera for other apps" section | Hidden when the platform reports unsupported *(supported platforms only)* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/tabs/videorc-camera-section.tsx:37-68; renderer/lib/virtual-camera-view.ts:131` | [ ] | n/a | [ ] |
-| P670 | "Videorc Camera" switch | Turns the program-as-a-camera on or off *(all supported)* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/tabs/videorc-camera-section.tsx:70-104` | [ ] | n/a | [ ] |
-| P671 | Status line (installing, ready, in use, needs restart…) | Camera state with icon tone *(all supported)* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/tabs/videorc-camera-section.tsx:112-134; renderer/lib/virtual-camera-view.ts:58-75` | [ ] | n/a | [ ] |
-| P672 | Action button "Open System Settings" ("Opening…") | Opens the camera-extension approval *(macOS only)* | `renderer/lib/virtual-camera-view.ts:192-197` | [ ] | n/a | n/a |
+| P669 | "Camera for other apps" section | Hidden when the platform reports unsupported *(supported platforms only)* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/tabs/videorc-camera-section.tsx:37-68; renderer/lib/virtual-camera-view.ts:131` | [x] | n/a | [ ] |
+| P670 | "Videorc Camera" switch | Turns the program-as-a-camera on or off *(all supported)* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/tabs/videorc-camera-section.tsx:70-104` | [x] | n/a | [ ] |
+| P671 | Status line (installing, ready, in use, needs restart…) | Camera state with icon tone *(all supported)* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/tabs/videorc-camera-section.tsx:112-134; renderer/lib/virtual-camera-view.ts:58-75` | [x] | n/a | [ ] |
+| P672 | Action button "Open System Settings" ("Opening…") | Opens the camera-extension approval *(macOS only)* | `renderer/lib/virtual-camera-view.ts:192-197` | [x] | n/a | n/a |
 | P673 | Action "Set up" ("Setting up…") | One-time driver setup *(Windows only)* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/lib/virtual-camera-view.ts:205-207` | n/a | n/a | n/a |
 | P674 | Action "Load" ("Loading…") + install command with "Copy" / "Copied" | Loads v4l2loopback *(Linux only)* | `renderer/lib/virtual-camera-view.ts:208-215; videorc-camera-section.tsx:137-158` | n/a | n/a | [ ] |
-| P675 | Error line | Shows an action failure message *(all supported)* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/tabs/videorc-camera-section.tsx:80` | [ ] | n/a | [ ] |
+| P675 | Error line | Shows an action failure message *(all supported)* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/tabs/videorc-camera-section.tsx:80` | [x] | n/a | [ ] |
 
 ### Output ⌘5: Where recordings go (recording-tab.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P676 | "Recordings folder" path, detail and error | Shows the folder, checks it as it changes | `renderer/components/tabs/recording-tab.tsx:542-553` | [ ] | [ ] | [ ] |
-| P677 | "Choose…" | Picks the folder | `renderer/components/tabs/recording-tab.tsx:555-558` | [ ] | [ ] | [ ] |
-| P678 | "Show in Finder" / "Show in Explorer" / file-manager label | Reveals the folder *(label per platform)* | `renderer/components/tabs/recording-tab.tsx:559-568; renderer/lib/platform.ts:114-124` | [ ] | [ ] | [ ] |
-| P679 | "Use default" | Resets to the default folder | `renderer/components/tabs/recording-tab.tsx:569-582` | [ ] | [ ] | [ ] |
-| P680 | "Keep original recording" switch | Also keeps the capture MKV | `renderer/components/tabs/recording-tab.tsx:585-595` | [ ] | [ ] | [ ] |
+| P676 | "Recordings folder" path, detail and error | Shows the folder, checks it as it changes | `renderer/components/tabs/recording-tab.tsx:542-553` | [x] | [ ] | [ ] |
+| P677 | "Choose…" | Picks the folder | `renderer/components/tabs/recording-tab.tsx:555-558` | [x] | [ ] | [ ] |
+| P678 | "Show in Finder" / "Show in Explorer" / file-manager label | Reveals the folder *(label per platform)* | `renderer/components/tabs/recording-tab.tsx:559-568; renderer/lib/platform.ts:114-124` | [x] | [ ] | [ ] |
+| P679 | "Use default" | Resets to the default folder | `renderer/components/tabs/recording-tab.tsx:569-582` | [x] | [ ] | [ ] |
+| P680 | "Keep original recording" switch | Also keeps the capture MKV | `renderer/components/tabs/recording-tab.tsx:585-595` | [x] | [ ] | [ ] |
 
 
 ## Destinations ⌘6, Guests ⌘7, Stream Manager and Notes
