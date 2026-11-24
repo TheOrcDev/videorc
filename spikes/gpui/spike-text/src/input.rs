@@ -6,10 +6,10 @@ use std::ops::Range;
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
-    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, hsla,
-    point, prelude::*, px, relative, rgb, rgba, size,
+    EntityInputHandler, FocusHandle, Focusable, Font, GlobalElementId, KeyBinding, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
+    fill, hsla, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::*;
 
@@ -42,6 +42,11 @@ pub struct TextInput {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    /// The font and size the last paint shaped with. `bounds_for_range`
+    /// shapes the current text with them when the content has changed since
+    /// that paint (S0.5 D13: the IME asks for the caret rect between
+    /// `setMarkedText` and the next frame).
+    last_font: Option<(Font, Pixels)>,
     is_selecting: bool,
 }
 
@@ -56,6 +61,7 @@ impl TextInput {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            last_font: None,
             is_selecting: false,
         }
     }
@@ -452,27 +458,59 @@ impl EntityInputHandler for TextInput {
         cx.notify();
     }
 
+    /// The IME's caret rect (`firstRectForCharacterRange` on macOS).
+    ///
+    /// S0.5 D13: GPUI's `examples/input.rs` answers `None` whenever the last
+    /// paint's line is not the current text, and macOS then gets a zero rect
+    /// at screen (0, 0), so the candidate window opens by the Dock. That is
+    /// exactly when an input method asks: right after `setMarkedText`, before
+    /// the next frame, and on the first keystroke into an empty field (the
+    /// last line is the placeholder). So a stale line is shaped again here,
+    /// with the font the last paint used, and the rect is never `None` once
+    /// the field has painted.
     fn bounds_for_range(
         &mut self,
         range_utf16: Range<usize>,
         bounds: Bounds<Pixels>,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let last_layout = self.last_layout.as_ref()?;
-        if last_layout.text != self.content {
-            return None;
+        // Nothing painted yet: no position to give.
+        self.last_bounds?;
+        if self.content.is_empty() {
+            // An empty field's caret: its start (the line on screen is the
+            // placeholder).
+            return Some(Bounds::from_corners(
+                point(bounds.left(), bounds.top()),
+                point(bounds.left(), bounds.bottom()),
+            ));
         }
         let range = self.range_from_utf16(&range_utf16);
+        let start = range.start.min(self.content.len());
+        let end = range.end.min(self.content.len()).max(start);
+        let fresh;
+        let line = match self.last_layout.as_ref() {
+            Some(line) if line.text == self.content => line,
+            _ => {
+                let (font, font_size) = self.last_font.clone()?;
+                let run = TextRun {
+                    len: self.content.len(),
+                    font,
+                    color: hsla(0., 0., 0., 1.),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                fresh =
+                    window
+                        .text_system()
+                        .shape_line(self.content.clone(), font_size, &[run], None);
+                &fresh
+            }
+        };
         Some(Bounds::from_corners(
-            point(
-                bounds.left() + last_layout.x_for_index(range.start),
-                bounds.top(),
-            ),
-            point(
-                bounds.left() + last_layout.x_for_index(range.end),
-                bounds.bottom(),
-            ),
+            point(bounds.left() + line.x_for_index(start), bounds.top()),
+            point(bounds.left() + line.x_for_index(end), bounds.bottom()),
         ))
     }
 
@@ -513,6 +551,7 @@ struct PrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    font: (Font, Pixels),
 }
 
 impl Element for TextElement {
@@ -635,6 +674,7 @@ impl Element for TextElement {
             line: Some(line),
             cursor,
             selection,
+            font: (style.font(), font_size),
         }
     }
 
@@ -674,9 +714,11 @@ impl Element for TextElement {
             window.paint_quad(cursor);
         }
 
+        let font = prepaint.font.clone();
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
+            input.last_font = Some(font);
         });
     }
 }

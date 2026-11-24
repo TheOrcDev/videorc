@@ -64,7 +64,7 @@ text, and screen-reader names on all three platforms (spellcheck waits):
 
 | D13 item | macOS state | Needs |
 | --- | --- | --- |
-| IME | Real Kotoeri (Romaji) and Pinyin commit correctly on macOS (2026-11-24). Pinyin candidates were not clearly at the caret | Confirm SCIM uses GPUI's caret rect (or accept system placement). Windows (WC-0.7: IMM32). Linux: Wayland passes; X11 needs the XIM patch (see Linux) |
+| IME | Real Kotoeri (Romaji) and Pinyin commit correctly on macOS (2026-11-24). Pinyin candidates were not clearly at the caret: cause found and fixed in code (2026-11-24, see below), not yet seen on screen | The build pass: Pinyin's candidates at the caret. Windows (WC-0.7: IMM32). Linux: Wayland passes; X11 needs the XIM patch (see Linux) |
 | Colour emoji | Pass | Windows shots; Linux passes but for `❤️` (VS16) |
 | Inline emotes | They draw and wrap inline; animation is wasteful | The kit's timer-driven animated image (small, no GPUI patch) |
 | Selectable chat and Notes text | One block works (spike) | Chat rows as one `StyledText` each; Notes on the kit's input/editor (gpui-component, D3) |
@@ -218,3 +218,30 @@ The common fields, plus `renders`, `ui_redraws_per_second_idle`,
 `chat_rows_built`, `chat_remount_to_frame_ms`,
 `window_open_to_first_paint_ms`, `emotes`, `scroll`, `ime_steps`,
 `numbers`, `idle_with_emotes`, `selected_text`.
+
+## The Pinyin candidate window (S0.5 D13 gap, fix 2026-11-24)
+
+**Cause.** macOS places an input method's candidate window at
+`firstRectForCharacterRange`. GPUI 0.3.14's macOS window
+(`gpui-pre-macos/src/window.rs`, `first_rect_for_character_range`) answers it
+from the input handler's `bounds_for_range`, and when that is `None` it hands
+back `NSRect(0, 0, 0, 0)`: screen origin, the bottom-left corner, by the Dock.
+The spike's `bounds_for_range` came from GPUI's `examples/input.rs`, which
+answers `None` whenever the last painted line is not the current text. That is
+exactly when an input method asks: right after `setMarkedText`, before the next
+frame paints, and on the first keystroke into an empty field, whose last line
+is the placeholder. Kotoeri happened to ask after a frame; Pinyin asks at once.
+
+**Fix (`src/input.rs`).** Paint records the font and size it shaped with
+(`last_font`). `bounds_for_range` uses the painted line when it is current;
+otherwise it shapes the current text again with that font, so the rect is never
+`None` once the field has painted. An empty field answers its start.
+
+**Left in GPUI.** `with_input_handler` also yields `None` (so the same zero
+rect) if macOS asks while the handler is already taken by another call. Not
+seen here; if the build pass still shows the panel by the Dock, that is the
+next suspect (a GPUI patch, not the spike's).
+
+**Check (build pass).** Pinyin – Simplified into the empty field: the candidate
+panel opens under the marked text, and stays under it as more is typed.
+

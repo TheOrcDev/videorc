@@ -118,5 +118,5 @@ From `spike-native-preview` on the owner's M4 MacBook Pro (2026-11-23),
 
 | Check | Spike | Verdict | Notes |
 | --- | --- | --- | --- |
-| Real IME (Kotoeri Romaji + Pinyin) | [spike-text](spike-text/README.md) | **PASS** (one D13 gap) | `日本` and `中文` committed under `--ime-wait`. Pinyin candidates drew near the Dock, not clearly at the caret |
+| Real IME (Kotoeri Romaji + Pinyin) | [spike-text](spike-text/README.md) | **PASS** (one D13 gap, fix in code) | `日本` and `中文` committed under `--ime-wait`. Pinyin candidates drew near the Dock: `bounds_for_range` answered `None` for a not-yet-painted line, and GPUI turns that into a rect at screen (0, 0). Fixed in `spike-text/src/input.rs` (2026-11-24); seen on screen in the build pass |
 | VoiceOver speaks list + dialog | [spike-a11y](spike-a11y/README.md) | **OWED** | Owner said not to turn VoiceOver on; tree/driver/headless already pass |
