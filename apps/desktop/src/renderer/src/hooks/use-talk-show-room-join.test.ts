@@ -264,6 +264,9 @@ describe('the host room join', () => {
     const value = deps(vi.fn())
     act(() => root.render(createElement(Host, { value })))
     await settle()
+    // While online the Studio sets the backend room's devices (plan 260
+    // S1.8c); what matters is that nothing reaches the old client after.
+    vi.mocked(value.client!.requestTyped).mockClear()
     act(() => root.render(createElement(Host, { value: { ...value, client: null } })))
     reject(new Error('The old socket closed'))
     await settle()
