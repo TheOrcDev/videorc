@@ -1,7 +1,7 @@
 use super::*;
 use gpui::{AnyElement, ClipboardItem, SharedString, Window, div, prelude::*, px};
 use videorc_app_core::desktop::{permissions::PermissionPlatform, system_access as access};
-use videorc_app_core::studio::virtual_camera::copy as camera_copy;
+use videorc_app_core::studio::virtual_camera::camera_copy;
 use videorc_kit::{
     Alert, AlertVariant, Button, ButtonVariant, GroupedList, ListRow, PanelSection,
     dialog::Dialog,

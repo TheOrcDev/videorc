@@ -36,12 +36,15 @@ use videorc_app_core::studio::sources_section::copy as section_copy;
 use videorc_app_core::{BackendClient, Studio, StudioSnapshot};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
-use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::list_row::{GroupedList, ListRow};
+use videorc_kit::navigable_row::NavigableRow;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::select::Select;
 use videorc_kit::slider::{Slider, SliderEvent, SliderState};
+use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
@@ -119,13 +122,56 @@ fn permission_inputs<'a>(
     }
 }
 
-fn chip_badge(label: impl Into<SharedString>, tone: ChipTone) -> Badge {
-    Badge::new(label).variant(match tone {
-        ChipTone::Neutral => BadgeVariant::Neutral,
-        ChipTone::Good => BadgeVariant::Success,
-        ChipTone::Warn => BadgeVariant::Warning,
-        ChipTone::Error => BadgeVariant::Destructive,
-    })
+fn chip_tone(tone: ChipTone) -> StatusTone {
+    match tone {
+        ChipTone::Neutral => StatusTone::Neutral,
+        ChipTone::Good => StatusTone::Good,
+        ChipTone::Warn => StatusTone::Warn,
+        ChipTone::Error => StatusTone::Error,
+    }
+}
+
+/// Source status words use StatusDot (the second kit batch): ambient tone,
+/// monochrome label. Sync tags stay a Badge — a tag, not a status.
+fn status_chip(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    tone: ChipTone,
+) -> StatusDot {
+    let label = label.into();
+    let live = label.as_ref().eq_ignore_ascii_case("Live")
+        || label.as_ref().eq_ignore_ascii_case("Receiving");
+    StatusDot::new(id)
+        .tone(if live {
+            StatusTone::Live
+        } else {
+            chip_tone(tone)
+        })
+        .label(label)
+        .pulse(live)
+}
+
+fn tag_badge(label: impl Into<SharedString>) -> Badge {
+    Badge::new(label).variant(BadgeVariant::Neutral)
+}
+
+fn more_button(
+    id: impl Into<gpui::ElementId>,
+    open: bool,
+    t: &videorc_kit::tokens::Theme,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> Button {
+    Button::new(id)
+        .size(ButtonSize::IconXs)
+        .variant(ButtonVariant::Ghost)
+        .accessibility_label(if open { "Less" } else { "More" })
+        .tooltip(if open {
+            "Less settings"
+        } else {
+            "More settings"
+        })
+        .child(icon(IconName::CaretDown, 12.0, hsla(t.muted_foreground)))
+        .on_click(on_click)
 }
 
 fn meter_bar(
@@ -638,10 +684,18 @@ impl SourcesPanel {
         let disabled = video.disabled || video.row.disabled_reason.is_some();
         let mut chips = div().flex().items_center().gap(px(8.));
         if let Some(status) = video.status.as_ref() {
-            chips = chips.child(chip_badge(status.label.clone(), status.tone));
+            chips = chips.child(status_chip(
+                format!("{picker_id}-status"),
+                status.label.clone(),
+                status.tone,
+            ));
         }
         if let Some(line) = video.row.status.as_ref() {
-            chips = chips.child(chip_badge(line.message.clone(), ChipTone::Warn));
+            chips = chips.child(status_chip(
+                format!("{picker_id}-row-status"),
+                line.message.clone(),
+                ChipTone::Warn,
+            ));
         }
         let mut body = div()
             .flex()
@@ -678,18 +732,17 @@ impl SourcesPanel {
         }
         if let Some(scene) = video.scene.as_ref() {
             let entity = cx.entity();
-            let open_label = scene.open_label;
             body = body.child(
-                ListRow::new(format!("{picker_id}-scene"), scene.line.clone()).child(
-                    Button::new(format!("{picker_id}-open-scenes"))
-                        .label(open_label)
-                        .variant(ButtonVariant::Ghost)
-                        .on_click(move |_, window, cx| {
-                            entity.update(cx, |panel, cx| {
-                                panel.open_page(PageId::Studio, window, cx);
-                            });
-                        }),
-                ),
+                NavigableRow::new(
+                    format!("{picker_id}-scene"),
+                    scene.line.clone(),
+                    scene.open_label,
+                )
+                .on_navigate(move |_, window, cx| {
+                    entity.update(cx, |panel, cx| {
+                        panel.open_page(PageId::Studio, window, cx);
+                    });
+                }),
             );
         }
         if let Some(low_light) = video.low_light.as_ref() {
@@ -815,10 +868,10 @@ impl Render for SourcesPanel {
             let muted = mic.row.muted;
             let mut chips = div().flex().items_center().gap(px(8.));
             if let Some(chip) = mic.chip.as_ref() {
-                chips = chips.child(chip_badge(chip.label.clone(), chip.tone));
+                chips = chips.child(status_chip("mic-chip", chip.label.clone(), chip.tone));
             }
             if let Some(tag) = mic.sync_tag.as_ref() {
-                chips = chips.child(chip_badge(tag.clone(), ChipTone::Neutral));
+                chips = chips.child(tag_badge(tag.clone()));
             }
             let entity = cx.entity();
             let mute = Switch::new("mute-mic")
@@ -832,12 +885,9 @@ impl Render for SourcesPanel {
                     entity.update(cx, |panel, _| panel.mute_toggle());
                 });
             let entity = cx.entity();
-            let more_btn = Button::new("more-mic")
-                .label(if more { "Less" } else { "More" })
-                .variant(ButtonVariant::Ghost)
-                .on_click(move |_, _, cx| {
-                    entity.update(cx, |panel, cx| panel.toggle_more("mic", cx));
-                });
+            let more_btn = more_button("more-mic", more, t, move |_, _, cx| {
+                entity.update(cx, |panel, cx| panel.toggle_more("mic", cx));
+            });
             let mut card = div()
                 .id(mic.focus)
                 .flex()
@@ -1020,9 +1070,13 @@ impl Render for SourcesPanel {
             let more = self.ui.more.contains("system");
             let mut chips = div().flex().items_center().gap(px(8.));
             if let Some(chip) = system.chip.as_ref() {
-                chips = chips.child(chip_badge(chip.label.clone(), chip.tone));
+                chips = chips.child(status_chip("system-chip", chip.label.clone(), chip.tone));
             } else if let Some(chip) = system.row.chip.as_ref() {
-                chips = chips.child(chip_badge(chip.label, ChipTone::Neutral));
+                chips = chips.child(status_chip(
+                    "system-row-chip",
+                    chip.label,
+                    ChipTone::Neutral,
+                ));
             }
             let checked = system.row.checked;
             let disabled = system.row.disabled;
@@ -1040,12 +1094,9 @@ impl Render for SourcesPanel {
                     });
                 });
             let entity = cx.entity();
-            let more_btn = Button::new("more-system")
-                .label(if more { "Less" } else { "More" })
-                .variant(ButtonVariant::Ghost)
-                .on_click(move |_, _, cx| {
-                    entity.update(cx, |panel, cx| panel.toggle_more("system", cx));
-                });
+            let more_btn = more_button("more-system", more, t, move |_, _, cx| {
+                entity.update(cx, |panel, cx| panel.toggle_more("system", cx));
+            });
             let mut card = div()
                 .id(system.focus)
                 .flex()

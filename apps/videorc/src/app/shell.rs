@@ -10,6 +10,9 @@ use videorc_app_core::nav::{self, PageId, ZONES};
 use videorc_app_core::{BackendState, ConnectionState, Tone};
 use videorc_kit::{
     shortcut_keys::ShortcutKeys,
+    status_bar::StatusBar,
+    status_bar_action::StatusBarAction,
+    status_dot::{StatusDot, StatusTone},
     theme::{self, FONT, TypeScale, hsla},
     tokens::{Theme, radius, text},
 };
@@ -45,6 +48,15 @@ pub fn connection_text(state: &ConnectionState) -> String {
         ConnectionState::Disconnected { reason, .. } => format!("Disconnected: {reason}"),
         #[allow(unreachable_patterns)]
         _ => String::new(),
+    }
+}
+
+fn status_tone(tone: Tone) -> StatusTone {
+    match tone {
+        Tone::Ready => StatusTone::Good,
+        Tone::Busy => StatusTone::Warn,
+        Tone::Failed => StatusTone::Error,
+        Tone::Stopped => StatusTone::Neutral,
     }
 }
 
@@ -274,36 +286,20 @@ impl Render for Shell {
                     }),
             )
             .child(
-                videorc_kit::StatusBar::new()
+                StatusBar::new()
                     .leading(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(8.))
+                            .child(StatusDot::new("engine-status").tone(status_tone(status.tone)))
                             .child(
-                                videorc_kit::status_dot::StatusDot::new("engine-status").tone(
-                                    match status.tone {
-                                        Tone::Ready => videorc_kit::status_dot::StatusTone::Good,
-                                        Tone::Busy => videorc_kit::status_dot::StatusTone::Warn,
-                                        Tone::Failed => videorc_kit::status_dot::StatusTone::Error,
-                                        Tone::Stopped => {
-                                            videorc_kit::status_dot::StatusTone::Neutral
-                                        }
-                                    },
-                                ),
-                            )
-                            .child(
-                                videorc_kit::status_bar_action::StatusBarAction::new(
-                                    "open-health",
-                                    "Open Health",
-                                )
-                                .text(status.text)
-                                .tooltip("Open Health", None)
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
+                                StatusBarAction::new("open-health", "Open Health")
+                                    .text(status.text)
+                                    .tooltip("Open Health", None)
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.open_page(PageId::Diagnostics, window, cx)
-                                    },
-                                )),
+                                    })),
                             ),
                     )
                     .child(div().text_color(hsla(t.muted_foreground)).child(connection)),

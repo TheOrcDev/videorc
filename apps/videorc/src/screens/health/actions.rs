@@ -118,7 +118,7 @@ impl HealthScreen {
                 this.removing = false;
                 this.error = Some(match result {
                     Ok(Ok((true, message))) => message
-                        .unwrap_or(videorc_app_core::studio::virtual_camera::copy::REMOVED)
+                        .unwrap_or(videorc_app_core::studio::virtual_camera::camera_copy::REMOVED)
                         .into(),
                     Ok(Ok((false, message))) => {
                         message.unwrap_or("Couldn't remove Videorc Camera").into()
