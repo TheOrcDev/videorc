@@ -13,6 +13,7 @@ pub mod client;
 pub mod crash_log;
 pub mod desktop;
 mod encoding;
+pub mod first_run;
 pub mod format;
 pub mod guests;
 mod http;
