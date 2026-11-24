@@ -90,10 +90,18 @@ PROCHOT) and 4 GHz; each run's clock is given.
 | Colour emoji | Draw in colour | Skin tones, ZWJ sequences, the flag in colour; **`❤️` draws as a white text heart** (VS16 ignored) | Same text system | **PASS, one gap** |
 | Font fallback | No missing glyphs | Japanese, both Chinese scripts, Korean, Arabic and Hebrew (right to left, joined), Thai, Hindi (shaped), Greek, Cyrillic | Same | **PASS** |
 | Tabular numbers | Equal digit widths | `1111111111` 61.01 px and `8888888888` 92.80 px, **the same with `tnum`** | Same | **FAIL: cause found** (below) |
-| 10,000-row chat, scrolling | 60 fps | 30.0 fps, p95 33.5 ms, max 36.3 ms | 30.0 fps, p95 33.4 ms | **Not measurable at 60:** the output runs at 30 Hz and GPUI keeps up with it (at 800 MHz). 60 fps needs a 60 Hz output |
+| 10,000-row chat, scrolling | 60 fps | Lab output (30 Hz): 30.0 fps, p95 33.5 ms. **A 60 Hz output: 48.7, 48.2 and 48.3 fps** (three runs), interval p50 20.5 ms, p95 22.6 to 22.9 ms, worst 33.6 ms, **at 800 MHz** | 30 Hz output: 30.0 fps. **60 Hz output: 29.9 fps**, p95 33.4 ms | **MISS at 800 MHz on Wayland; X11 held at 30.** Open: a run at the box's normal clock (expected to clear 60: 20.5 ms at a fifth of the clock), and why GPUI paces X11 at 30 Hz on Xwayland |
 | Memory | +100 MB at most | 103.5 MB with 10,000 rows, 89.8 MB with none: **+13.7 MB** | 103.0 vs 89.5 MB: **+13.5 MB** | **PASS** |
 | First paint | 100 ms | Window open to first frame: 144 ms at 4 GHz (`--emotes timer` run), 600 ms at 800 MHz | 131 to 156 ms at 4 GHz, 506 to 524 ms at 800 MHz | **MISS** (as on macOS; S0.9 owns start-up) |
 | Animated emotes | Animate inline | GPUI's `img`: 61 % of a core at 30 redraws/s (800 MHz); timer-driven: 5.9 % at 12.6 redraws/s (4 GHz) | 63 % / 5.8 % | Same gap and fix as macOS |
+
+The 60 Hz scroll runs (2026-11-24) used a temporary 1920 x 1080 at 60 Hz
+headless output of the owner's Hyprland, removed after the runs. Every core
+stayed pinned at 800 MHz (the T2 PROCHOT) for all of them, so they measure
+GPUI at a fifth of the box's clock. **Two points stay open:** the 60 fps
+line at normal clocks, and X11 (Xwayland) pacing at exactly 30 Hz on a
+60 Hz output (the rate Xwayland reports to GPUI was not checked; ogre has
+no `xrandr`).
 
 Found on Linux:
 
