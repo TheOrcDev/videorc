@@ -1,0 +1,13 @@
+[package]
+name = "videorc-app"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "Plan 260: The Videorc binary on GPUI: windows, screens, the preview element's GPUI side, OS integration, the smoke UI driver."
+
+[[bin]]
+name = "Videorc"
+path = "src/main.rs"
+
+[dependencies]

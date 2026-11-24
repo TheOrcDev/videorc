@@ -1,0 +1,9 @@
+[package]
+name = "videorc-preview-ring"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "Plan 260: The shared-memory BGRA ring for CPU-composed previews."
+
+[dependencies]

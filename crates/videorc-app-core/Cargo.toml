@@ -1,0 +1,9 @@
+[package]
+name = "videorc-app-core"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "Plan 260: The Videorc app without a UI: the typed backend client, the supervisor, the Studio state machine and every page's view-model, the smoke command server, settings."
+
+[dependencies]
