@@ -61,6 +61,7 @@ use app::permissions::Permissions;
 use app::shell::{Shell, StatusLine, connection_text};
 use app::{camera, capture, hotkeys, links, menus, sleep};
 use screens::destinations::DestinationsPanel;
+use screens::first_run::FirstRunScreen;
 use screens::go_live::GoLiveDialog;
 use screens::guests::GuestsPanel;
 use screens::images_sounds::{ImagesPanel, SoundsPanel};
@@ -429,6 +430,7 @@ fn main() -> Result<()> {
         });
         let images = cx.new(|cx| ImagesPanel::new(studio.clone(), core_handle.clone(), cx));
         let go_live = cx.new(|cx| GoLiveDialog::new(studio.clone(), core_handle.clone(), cx));
+        let first_run = cx.new(|cx| FirstRunScreen::new(studio.clone(), core_handle.clone(), cx));
         let settings = cx.new(|cx| {
             screens::settings::SettingsScreen::new(
                 studio.clone(),
@@ -552,6 +554,7 @@ fn main() -> Result<()> {
                         images.clone(),
                         sounds,
                         go_live.clone(),
+                        first_run.clone(),
                         settings.clone(),
                         health.clone(),
                         library_page,
