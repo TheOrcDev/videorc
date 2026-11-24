@@ -25,6 +25,7 @@
 
 mod app;
 mod platform;
+mod screens;
 // Plan 260 S2.5 (L6): the smoke command server and the UI driver. The shell
 // starts it (`smoke::start`) in a later S2 part; until then nothing calls it.
 #[allow(dead_code)]
@@ -58,9 +59,12 @@ use app::exit::ExitGuard;
 use app::frames::MainFrame;
 use app::hide::HideFromStream;
 use app::permissions::Permissions;
-use app::session::{SessionControls, SessionPanel};
 use app::shell::{Shell, StatusLine, connection_text};
 use app::{camera, capture, hotkeys, links, menus, sleep};
+use screens::studio::{
+    self as studio_screen, StudioPage,
+    transport::{SessionControls, Transport},
+};
 
 /// Electron's app id (`electron-builder.yml`), kept on every platform: the
 /// macOS bundle id, Videorc Camera's host, Linux's desktop entry and the
@@ -301,7 +305,9 @@ fn main() -> Result<()> {
     application.run(move |cx: &mut App| {
         // The menu bar from the core's template, and the keys it names.
         ExitGuard::install(cx, &exit_runtime, exit_events);
+        videorc_kit::init(cx);
         menus::install(cx);
+        studio_screen::bind_keys(cx);
 
         // Hide from stream: content protection and the capture filter's
         // list, which the Studio sends with the screen capture when it lands.
@@ -332,8 +338,8 @@ fn main() -> Result<()> {
         let status = bridge::mirror(cx, backend_state.clone(), StatusLine::of);
         let connection = bridge::mirror(cx, connection_state.clone(), connection_text);
         let controls = bridge::mirror(cx, studio_state.clone(), SessionControls::of);
-        let session = cx
-            .new(|cx| SessionPanel::new(studio.clone(), core_handle.clone(), controls.clone(), cx));
+        let transport =
+            cx.new(|cx| Transport::new(studio.clone(), core_handle.clone(), controls.clone(), cx));
         let window_bounds = main_frame
             .restored(cx)
             .unwrap_or_else(|| Bounds::centered(None, size(px(1280.), px(800.)), cx));
@@ -348,8 +354,9 @@ fn main() -> Result<()> {
                 app_id: Some(APP_ID.into()),
                 ..Default::default()
             },
-            |_, cx| {
-                cx.new(|cx| Shell::new(status.clone(), connection.clone(), session.clone(), cx))
+            |window, cx| {
+                let studio_page = cx.new(|cx| StudioPage::new(transport.clone(), window, cx));
+                cx.new(|cx| Shell::new(status.clone(), connection.clone(), studio_page, cx))
             },
         );
         let main_window = match opened {

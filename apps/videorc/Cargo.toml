@@ -12,9 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
-# S2.4: the session clock counts from the backend's `startedAt` (already in
-# the tree through videorc-app-core).
-chrono = "0.4"
 # GPUI, pinned once in the root manifest (plan 260 D1). The platform's
 # features are the app's: `font-kit` on macOS, `wayland`/`x11` on Linux, and
 # `runtime_shaders`, which compiles the Metal shaders at run time so a build
@@ -24,6 +21,9 @@ gpui = { workspace = true }
 gpui_platform = { workspace = true, features = ["font-kit", "runtime_shaders", "wayland", "x11"] }
 # The core: the supervisor, the logs, the typed client, the stores.
 videorc-app-core = { workspace = true }
+# The design system, synced from videorc-ui's GPUI flavour (`ui:sync
+# --flavour gpui`); the screens draw only with it.
+videorc-kit = { workspace = true }
 # The core's own runtime (two workers), beside GPUI's executor.
 tokio = { version = "1.48", features = ["rt-multi-thread", "sync", "time", "macros"] }
 # Global shortcuts (S2.6a part 2): Carbon on macOS, RegisterHotKey on

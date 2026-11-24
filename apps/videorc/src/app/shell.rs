@@ -4,12 +4,15 @@
 //! line. The screens fill the pages in Phase 3; the kit (`videorc-kit`)
 //! replaces these plain elements when it lands.
 
-use gpui::{Context, Entity, FontWeight, SharedString, Window, div, prelude::*, px, rgb};
+use gpui::{
+    Context, Entity, Focusable, FontWeight, SharedString, Window, div, prelude::*, px, rgb,
+};
 use videorc_app_core::nav::{self, PageId, ZONES};
 use videorc_app_core::{BackendState, ConnectionState, Tone};
 
 use super::bridge::Mirror;
-use super::session::SessionPanel;
+use crate::screens::studio::StudioPage;
+use crate::screens::studio::transport::OpenPage;
 
 /// The status bar's line: the supervisor's words, and whether the typed
 /// client has the backend's `backend.ready`.
@@ -61,24 +64,28 @@ pub struct Shell {
     page: PageId,
     backend: Entity<Mirror<StatusLine>>,
     connection: Entity<Mirror<String>>,
-    /// S2.4: Record, the clock, Stop and Go Live, on the Studio page.
-    session: Entity<SessionPanel>,
+    /// Phase 3, L1: the Studio page (preview and session).
+    studio: Entity<StudioPage>,
 }
 
 impl Shell {
     pub fn new(
         backend: Entity<Mirror<StatusLine>>,
         connection: Entity<Mirror<String>>,
-        session: Entity<SessionPanel>,
+        studio: Entity<StudioPage>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&backend, |_, _, cx| cx.notify()).detach();
         cx.observe(&connection, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(&studio, |this, _, open: &OpenPage, window, cx| {
+            this.open(open.0, window, cx)
+        })
+        .detach();
         Self {
             page: PageId::Studio,
             backend,
             connection,
-            session,
+            studio,
         }
     }
 
@@ -90,6 +97,10 @@ impl Shell {
         if self.page != page {
             self.page = page;
             window.set_window_title(&nav::window_title(page));
+            if page == PageId::Studio {
+                let focus = self.studio.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
             cx.notify();
         }
     }
@@ -160,7 +171,7 @@ impl Render for Shell {
         let status = self.backend.read(cx).value().clone();
         let connection = self.connection.read(cx).value().clone();
         let page = self.page;
-        let session = self.session.clone();
+        let studio = self.studio.clone();
         div()
             .size_full()
             .flex()
@@ -173,33 +184,35 @@ impl Render for Shell {
                     .flex()
                     .flex_row()
                     .child(self.sidebar(cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .pt(px(40.))
-                            .px(px(24.))
-                            .gap(px(8.))
-                            .child(
+                    .map(|row| {
+                        if page == PageId::Studio {
+                            // The Studio fills its page edge to edge under
+                            // the toolbar band.
+                            row.child(div().flex_1().min_w_0().pt(px(40.)).child(studio))
+                        } else {
+                            row.child(
                                 div()
-                                    .text_size(px(20.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(page.label()),
-                            )
-                            .map(|content| {
-                                if page == PageId::Studio {
-                                    content.child(session)
-                                } else {
-                                    content.child(
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .pt(px(40.))
+                                    .px(px(24.))
+                                    .gap(px(8.))
+                                    .child(
+                                        div()
+                                            .text_size(px(20.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(page.label()),
+                                    )
+                                    .child(
                                         div()
                                             .text_size(px(13.))
                                             .text_color(rgb(MUTED))
                                             .child("This page comes in plan 260's Phase 3."),
-                                    )
-                                }
-                            }),
-                    ),
+                                    ),
+                            )
+                        }
+                    }),
             )
             .child(
                 div()
