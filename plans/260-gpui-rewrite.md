@@ -1018,7 +1018,16 @@ and Guests take `fable-5.1`.
 - **Linux** (L5, about 8 slices, with plan 257's beta work): the first run
   on Wayland and X11, the desktop entry and deep links, packages, every
   screen. _Done when:_ plan 257's matrix passes with the GPUI app on its
-  Tier 1 boxes (ogre and the second box).
+  Tier 1 boxes (ogre and the second box), and the shipping blockers below
+  are merged.
+  - **Linux shipping blockers** (each holds the Linux gate until it merges;
+    remove a row once it does):
+    - **#1914:** the X11 presenter's teardown, bounded from outside. x11rb's
+      flush and reply waits have no deadline, so a stalled X server could
+      hold the presenter thread and the UI thread's join on it. The drop
+      shuts the connection's socket down after a 500 ms grace, and the
+      setup's `shm_attach_fd` check gets 2 s (Codex r4682762154, deferred
+      from #1782).
 - **macOS** (L4): the remaining OS rows found by the screens.
 
 Routes: the first run on each machine and the preview: `fable-5.1` · 9;
