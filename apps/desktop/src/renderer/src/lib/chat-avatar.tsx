@@ -83,6 +83,9 @@ if (typeof window !== 'undefined' && typeof window.addEventListener === 'functio
   )
 }
 
+/** When a null answer (a refusal, or a backend that was away) is asked again. */
+export const CHAT_IMAGE_NULL_RETRY_DELAYS_MS: readonly number[] = [5_000, 20_000, 60_000]
+
 export function useCachedAvatar(
   remoteUrl: string | undefined | null,
   kind: CachedImageKind = 'avatar'
@@ -93,24 +96,38 @@ export function useCachedAvatar(
     currentChatImageEpoch,
     currentChatImageEpoch
   )
+  // A null answer leaves no <img> whose error could move the epoch, and a
+  // socket-less window never hears the backend come back: ask again a few
+  // times, further apart each time. A new URL or epoch starts over.
+  const retryKey = `${kind}:${remoteUrl ?? ''}:${epoch}`
+  const [retry, setRetry] = useState({ key: retryKey, attempt: 0 })
+  const attempt = retry.key === retryKey ? retry.attempt : 0
   useEffect(() => {
     if (!remoteUrl) {
       setLocalUrl(null)
       return
     }
     let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
     void import('./chat-image-cache')
-      .then(({ resolveAvatar }) => resolveAvatar(remoteUrl, kind))
+      .then(({ forgetFailedChatImage, resolveAvatar }) => {
+        if (attempt > 0) forgetFailedChatImage(remoteUrl, kind)
+        return resolveAvatar(remoteUrl, kind)
+      })
       .catch(() => null)
       .then((resolved) => {
-        if (!cancelled) {
-          setLocalUrl(resolved)
+        if (cancelled) return
+        setLocalUrl(resolved)
+        const delay = CHAT_IMAGE_NULL_RETRY_DELAYS_MS[attempt]
+        if (resolved === null && delay !== undefined) {
+          retryTimer = setTimeout(() => setRetry({ key: retryKey, attempt: attempt + 1 }), delay)
         }
       })
     return () => {
       cancelled = true
+      if (retryTimer !== undefined) clearTimeout(retryTimer)
     }
-  }, [remoteUrl, kind, epoch])
+  }, [remoteUrl, kind, epoch, attempt, retryKey])
   return localUrl
 }
 

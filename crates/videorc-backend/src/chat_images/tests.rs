@@ -323,6 +323,13 @@ fn only_public_addresses_are_connectable() {
         "::ffff:127.0.0.1",
         "::ffff:192.168.0.1",
         "64:ff9b::a00:1",
+        "64:ff9b::c0a8:101",
+        // Local-use NAT64 (RFC 8215): a /64 translator embeds 10.0.0.1 here,
+        // and the last 32 bits read as the public 1.0.0.0.
+        "64:ff9b:1:0:a:0:100:0",
+        "64:ff9b:1::808:808",
+        // Other 64:ff9b::/32 forms do not carry the IPv4 in the last 32 bits.
+        "64:ff9b:0:0:1::808:808",
         "2002:c0a8:0101::1",
         "2001::1",
         "2001:db8::1",

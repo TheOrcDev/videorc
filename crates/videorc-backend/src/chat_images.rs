@@ -574,8 +574,14 @@ fn is_public_v6(address: Ipv6Addr) -> bool {
     match segments[0] {
         // IPv4-compatible (deprecated), discard-only and other ::/8 forms.
         0x0000 | 0x0100 => false,
-        // NAT64 well-known prefix: judge the IPv4 it carries.
-        0x0064 if segments[1] == 0xff9b => is_public_v4(embedded_v4(segments[6], segments[7])),
+        // NAT64: only the well-known 64:ff9b::/96 puts the IPv4 in the last
+        // 32 bits, so judge that one. The rest of 64:ff9b::/32, including
+        // RFC 8215's local-use 64:ff9b:1::/48 (which may embed at other
+        // lengths), cannot be read safely: refuse it.
+        0x0064 if segments[1] == 0xff9b => {
+            segments[2..6].iter().all(|segment| *segment == 0)
+                && is_public_v4(embedded_v4(segments[6], segments[7]))
+        }
         // Teredo (2001::/32) tunnels anywhere; documentation is 2001:db8::/32.
         0x2001 if segments[1] == 0x0000 || segments[1] == 0x0db8 => false,
         // 6to4: judge the IPv4 it carries.

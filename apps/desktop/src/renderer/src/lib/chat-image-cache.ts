@@ -6,6 +6,9 @@ export type CachedImageKind = 'avatar' | 'gif'
 // pending and settled promises (including nulls) during long, busy streams.
 const AVATAR_URL_CACHE_MAX = 256
 const avatarUrlCache = new Map<string, Promise<string | null>>()
+// Answers that settled null: a refusal, or an engine that was away (main
+// answers null for both). `forgetFailedChatImage` drops only these.
+const settledNull = new WeakSet<Promise<string | null>>()
 
 export function resolveAvatar(remoteUrl: string, kind: CachedImageKind): Promise<string | null> {
   const key = `${kind}:${remoteUrl}`
@@ -27,6 +30,9 @@ export function resolveAvatar(remoteUrl: string, kind: CachedImageKind): Promise
       return null
     }
   })()
+  void resolved.then((local) => {
+    if (local === null) settledNull.add(resolved)
+  })
   avatarUrlCache.set(key, resolved)
   if (avatarUrlCache.size > AVATAR_URL_CACHE_MAX) {
     const oldest = avatarUrlCache.keys().next().value
@@ -41,4 +47,12 @@ export function resolveAvatar(remoteUrl: string, kind: CachedImageKind): Promise
  * its route URLs are stale (`reportChatImageFailure`). */
 export function clearResolvedChatImages(): void {
   avatarUrlCache.clear()
+}
+
+/** Forget one URL's null answer so the next resolve asks the backend again
+ * (`useCachedAvatar`'s bounded retry). A pending or resolved URL stays. */
+export function forgetFailedChatImage(remoteUrl: string, kind: CachedImageKind): void {
+  const key = `${kind}:${remoteUrl}`
+  const cached = avatarUrlCache.get(key)
+  if (cached && settledNull.has(cached)) avatarUrlCache.delete(key)
 }

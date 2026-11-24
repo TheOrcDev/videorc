@@ -495,7 +495,7 @@ function ChatGif({
 
 /** One frame of an animated image: drawn to a canvas as soon as it loads,
  * so the file's later frames never play (Still, or reduced motion). */
-function StillFrame({ alt, src }: { alt: string; src: string }): ReactElement {
+export function StillFrame({ alt, src }: { alt: string; src: string }): ReactElement {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   useEffect(() => {
     const canvas = canvasRef.current
@@ -509,10 +509,16 @@ function StillFrame({ alt, src }: { alt: string; src: string }): ReactElement {
       canvas.height = image.naturalHeight
       canvas.getContext('2d')?.drawImage(image, 0, 0)
     }
+    // A detached image is outside the document, so the window's capture
+    // listener never sees its error: report a dead route here.
+    image.onerror = () => {
+      if (!cancelled) reportChatImageFailure(src)
+    }
     image.src = src
     return () => {
       cancelled = true
       image.onload = null
+      image.onerror = null
     }
   }, [src])
   return (
