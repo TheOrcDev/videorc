@@ -1,0 +1,115 @@
+//! macOS (plan 260 S2.6a, lane L4): the AppKit and IOKit calls behind
+//! [`Platform`], as spike S0.7 (`spikes/gpui/spike-desktop/src/os.rs`)
+//! proved them under GPUI 0.3.14.
+
+use std::ffi::c_void;
+
+use gpui::Window;
+use objc2::rc::Retained;
+use objc2_app_kit::{NSView, NSWindow, NSWindowSharingType};
+use objc2_foundation::{NSBundle, NSString};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+use super::{OsResult, Platform};
+
+/// `NSFloatingWindowLevel`, what Electron's `setAlwaysOnTop(true)` uses.
+const FLOATING_LEVEL: isize = 3;
+const NORMAL_LEVEL: isize = 0;
+
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOPMAssertionCreateWithName(
+        assertion_type: *const c_void,
+        level: u32,
+        name: *const c_void,
+        id: *mut u32,
+    ) -> i32;
+    fn IOPMAssertionRelease(id: u32) -> i32;
+}
+
+/// `kIOPMAssertionLevelOn`.
+const ASSERTION_LEVEL_ON: u32 = 255;
+
+/// The window's `NSWindow`, from the content view GPUI hands out.
+fn ns_window(window: &Window) -> OsResult<Retained<NSWindow>> {
+    let handle = HasWindowHandle::window_handle(window)
+        .map_err(|error| format!("no window handle: {error}"))?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return Err("not an AppKit window".into());
+    };
+    // SAFETY: GPUI hands out its live content NSView, and this runs on the
+    // main thread (every GPUI window call does).
+    let view: &NSView = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+    view.window()
+        .ok_or_else(|| "the view has no NSWindow".into())
+}
+
+pub struct MacOs;
+
+impl Platform for MacOs {
+    fn name(&self) -> &'static str {
+        "macos"
+    }
+
+    /// `NSWindow.sharingType = .none`, what Electron's
+    /// `setContentProtection(true)` sets. The window number is what the
+    /// backend's ScreenCaptureKit filter excludes by id.
+    fn set_hidden_from_capture(&self, window: &Window, hidden: bool) -> OsResult<Option<u64>> {
+        let window = ns_window(window)?;
+        window.setSharingType(if hidden {
+            NSWindowSharingType::None
+        } else {
+            NSWindowSharingType::ReadOnly
+        });
+        if hidden && window.sharingType() != NSWindowSharingType::None {
+            return Err("the window's sharing type did not stick".into());
+        }
+        Ok(Some(window.windowNumber() as u64))
+    }
+
+    /// A normal window's level raised (panels hide when the app
+    /// deactivates, so the app keeps normal windows).
+    fn set_keep_on_top(&self, window: &Window, on_top: bool) -> OsResult<()> {
+        ns_window(window)?.setLevel(if on_top { FLOATING_LEVEL } else { NORMAL_LEVEL });
+        Ok(())
+    }
+
+    /// `PreventUserIdleDisplaySleep`, which `pmset -g assertions` lists
+    /// under the process.
+    fn keep_display_awake(&self, reason: &str) -> OsResult<u32> {
+        let kind = NSString::from_str("PreventUserIdleDisplaySleep");
+        let name = NSString::from_str(reason);
+        let mut id = 0u32;
+        // SAFETY: NSString is toll-free bridged to CFStringRef; both live for
+        // the call.
+        let status = unsafe {
+            IOPMAssertionCreateWithName(
+                Retained::as_ptr(&kind).cast(),
+                ASSERTION_LEVEL_ON,
+                Retained::as_ptr(&name).cast(),
+                &mut id,
+            )
+        };
+        if status == 0 {
+            Ok(id)
+        } else {
+            Err(format!("IOPMAssertionCreateWithName returned {status:#x}"))
+        }
+    }
+
+    fn release_display(&self, blocker: u32) -> OsResult<()> {
+        // SAFETY: the id came from IOPMAssertionCreateWithName.
+        let status = unsafe { IOPMAssertionRelease(blocker) };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(format!("IOPMAssertionRelease returned {status:#x}"))
+        }
+    }
+
+    fn bundle_id(&self) -> Option<String> {
+        NSBundle::mainBundle()
+            .bundleIdentifier()
+            .map(|id| id.to_string())
+    }
+}

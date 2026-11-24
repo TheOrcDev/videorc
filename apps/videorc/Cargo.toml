@@ -23,15 +23,20 @@ gpui_platform = { workspace = true, features = ["font-kit", "runtime_shaders", "
 videorc-app-core = { workspace = true }
 # The core's own runtime (two workers), beside GPUI's executor.
 tokio = { version = "1.48", features = ["rt-multi-thread", "sync", "time", "macros"] }
-# The smoke command server and the UI driver (`src/smoke/`, plan 260 S2.5, L6).
-raw-window-handle = "0.6"
+# The smoke command server (`src/smoke/`, plan 260 S2.5, L6).
 serde_json = "1.0"
+# The smoke UI driver and the OS interface (`src/platform/`, S2.6a): raw-window-handle
+# reaches the native window under a GPUI window on every platform.
+raw-window-handle = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# The driver asks its own window's view for its accessibility children, as
-# VoiceOver does first, so GPUI builds the tree in a smoke run.
+# The smoke driver asks its own window's view for its accessibility children,
+# as VoiceOver does first, so GPUI builds the tree in a smoke run (L6).
+# AppKit and IOKit, as spike S0.7 proved them under GPUI 0.3.14 (S2.6a).
 objc2 = { version = "0.6.4" }
+objc2-foundation = "0.3.2"
+objc2-app-kit = { version = "0.3.2", features = ["NSView", "NSWindow", "NSResponder", "NSPanel", "NSGraphics"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# The same question on Windows: `WM_GETOBJECT` to its own window.
+# The smoke driver's same question on Windows: `WM_GETOBJECT` to its own window.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
