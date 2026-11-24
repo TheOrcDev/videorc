@@ -157,10 +157,34 @@ pub(crate) fn needs_reopen(current: &Settings, next: &Settings) -> bool {
     current.device_id != next.device_id || current.offset_ms != next.offset_ms
 }
 
+/// Whether native capture owns the microphone (a recording or stream runs or
+/// is starting): the room microphone bridge refuses to open then.
+fn capture_owns_microphone(state: &AppState) -> bool {
+    let work = state.ffmpeg_work.snapshot();
+    work.capture_active
+        || work.capture_waiting > 0
+        || !state.capture_interruption.capture_admission_is_idle()
+}
+
+/// One 10 ms mono frame into the room's microphone.
+async fn push(source: &NativeAudioSource, samples: &[f32]) {
+    let audio = AudioFrame {
+        data: to_i16(samples).into(),
+        sample_rate: SAMPLE_RATE,
+        num_channels: 1,
+        samples_per_channel: FRAMES,
+    };
+    if let Err(error) = source.capture_frame(&audio).await {
+        tracing::debug!("A room microphone frame was dropped: {error}");
+    }
+}
+
 /// One connection's microphone: published once, fed while settings stand.
 /// Ends when `done` fires or its sender drops (the connection ended), closing
 /// the device first: the task is never aborted while it holds the
-/// microphone.
+/// microphone. While native capture owns the device (plan 260 S1.8c c4a) it
+/// takes the session's own processed microphone instead of opening the
+/// device a second time, and goes back to its own when the session ends.
 pub(crate) async fn run_microphone(
     state: AppState,
     room: Arc<Room>,
@@ -185,13 +209,19 @@ pub(crate) async fn run_microphone(
     let mut bridge = Bridge::default();
     let mut generation = 0u64;
     let mut open: Option<Settings> = None;
+    let mut session: Option<tokio::sync::mpsc::Receiver<Vec<f32>>> = None;
+    let mut carry: Vec<f32> = Vec::new();
     let mut pulse = tokio::time::interval(Duration::from_millis(10));
     pulse.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        update_media(&state, &show_id, |media| media.microphone = open.is_some());
+        let live = open.is_some() || session.is_some();
+        update_media(&state, &show_id, |media| media.microphone = live);
         tokio::select! {
             _ = &mut done => {
                 update_media(&state, &show_id, |media| media.microphone = false);
+                if session.take().is_some() {
+                    crate::room_microphone::session_tap::close();
+                }
                 if open.is_some() {
                     let _ = bridge.command(&state, command("close", generation, &show_id, None)).await;
                 }
@@ -201,6 +231,29 @@ pub(crate) async fn run_microphone(
             _ = CHANGED.notified() => {}
         }
         let wanted = microphone().filter(Settings::valid);
+        // c4a: a recording or stream owns the device; the room takes the
+        // session's processed microphone (its gain, mute, noise suppression
+        // and offset, never system audio or sounds).
+        if wanted.is_some() && capture_owns_microphone(&state) {
+            if open.take().is_some() {
+                let _ = bridge
+                    .command(&state, command("close", generation, &show_id, None))
+                    .await;
+            }
+            let receiver = session.get_or_insert_with(crate::room_microphone::session_tap::open);
+            while let Ok(samples) = receiver.try_recv() {
+                carry.extend_from_slice(&samples);
+            }
+            while carry.len() >= FRAMES as usize {
+                let chunk: Vec<f32> = carry.drain(..FRAMES as usize).collect();
+                push(&source, &chunk).await;
+            }
+            continue;
+        }
+        if session.take().is_some() {
+            crate::room_microphone::session_tap::close();
+            carry.clear();
+        }
         match (open.clone(), wanted) {
             (None, None) => continue,
             (Some(_), None) => {
@@ -274,17 +327,7 @@ pub(crate) async fn run_microphone(
                 .command(&state, command("pull", generation, &show_id, None))
                 .await
             {
-                Ok(Some(Reply::Frame(frame))) => {
-                    let audio = AudioFrame {
-                        data: to_i16(&frame.samples).into(),
-                        sample_rate: SAMPLE_RATE,
-                        num_channels: 1,
-                        samples_per_channel: FRAMES,
-                    };
-                    if let Err(error) = source.capture_frame(&audio).await {
-                        tracing::debug!("A room microphone frame was dropped: {error}");
-                    }
-                }
+                Ok(Some(Reply::Frame(frame))) => push(&source, &frame.samples).await,
                 Ok(_) => break,
                 Err(error) => {
                     tracing::warn!("The room microphone stopped: {error:#}");
