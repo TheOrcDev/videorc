@@ -25,9 +25,11 @@
 //!   for an older recording that has none yet.
 //!
 //! Its words are [`copy`], its pure logic [`view`], the page as one value
-//! [`page`] and the Markers dialog [`markers`]. The player (`SessionPlayer`)
-//! waits for the playback client methods (S1.7b).
+//! [`page`] and the Markers dialog [`markers`]. The Cloud tab (Local |
+//! Cloud) is [`cloud`]. The player (`SessionPlayer`) waits for the playback
+//! client methods (S1.7b).
 
+pub mod cloud;
 pub mod copy;
 pub mod markers;
 pub mod page;
