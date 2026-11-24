@@ -168,8 +168,11 @@ fn capture_owns_microphone(state: &AppState) -> bool {
 
 /// One 10 ms mono frame into the room's microphone.
 async fn push(source: &NativeAudioSource, samples: &[f32]) {
+    let mut data = to_i16(samples);
+    // S1.8d d3: the guests played here are cancelled out of it first.
+    crate::room_playout::cancel_echo(&mut data);
     let audio = AudioFrame {
-        data: to_i16(samples).into(),
+        data: data.into(),
         sample_rate: SAMPLE_RATE,
         num_channels: 1,
         samples_per_channel: FRAMES,
