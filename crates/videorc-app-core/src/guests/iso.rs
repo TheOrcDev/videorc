@@ -198,21 +198,32 @@ pub struct IsoEnableParams {
     pub consent: bool,
     pub max_active_entries: u32,
     pub max_minutes: u32,
-    pub cost_ceiling_micros: f64,
+    /// Whole micros: the backend's `cloud.iso.enable` takes a `u64` and
+    /// refuses `1440000.0`. The estimate stays `f64` for display.
+    pub cost_ceiling_micros: u64,
 }
 
+/// The ceiling the backend takes, in whole micros. Rounded up, so it never
+/// sits below the estimate; none when the estimate is not a finite,
+/// non-negative amount that fits a `u64`.
+pub fn iso_ceiling_micros(estimate: f64) -> Option<u64> {
+    let ceiling = estimate.ceil();
+    (ceiling.is_finite() && ceiling >= 0.0 && ceiling < u64::MAX as f64).then_some(ceiling as u64)
+}
+
+/// None only for a price that is not a real amount (never the published one).
 pub fn iso_enable_params(
     show_id: &str,
     limits: IsoLimits,
     micros_per_minute: f64,
-) -> IsoEnableParams {
-    IsoEnableParams {
+) -> Option<IsoEnableParams> {
+    Some(IsoEnableParams {
         show_id: show_id.to_string(),
         consent: true,
         max_active_entries: limits.max_active_entries,
         max_minutes: limits.max_minutes,
-        cost_ceiling_micros: iso_estimate_micros(limits, micros_per_minute),
-    }
+        cost_ceiling_micros: iso_ceiling_micros(iso_estimate_micros(limits, micros_per_minute))?,
+    })
 }
 
 /// A refusal's words, by the backend's error code.

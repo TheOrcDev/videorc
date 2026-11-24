@@ -40,9 +40,35 @@ fn limits_and_cost_say_the_worst_case_in_dollars() {
     assert_eq!(format_usd_micros(0.0), "$0.00");
     assert_eq!(format_usd_micros(2_500.0), "$0.003");
     assert_eq!(format_usd_micros(1_234_567.0), "$1.23");
-    let params = iso_enable_params("sh_talk", ISO_DEFAULT_LIMITS, ISO_MICROS_PER_FILE_MINUTE);
+    let params =
+        iso_enable_params("sh_talk", ISO_DEFAULT_LIMITS, ISO_MICROS_PER_FILE_MINUTE).unwrap();
     assert!(params.consent);
-    assert_eq!(params.cost_ceiling_micros, 1_440_000.0);
+    assert_eq!(params.cost_ceiling_micros, 1_440_000);
+    // The backend's `IsoEnableParams` takes the ceiling as a `u64`: the
+    // request carries a JSON integer, as Electron's JSON.stringify did,
+    // never `1440000.0`.
+    let wire = serde_json::to_value(&params).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "showId": "sh_talk",
+            "consent": true,
+            "maxActiveEntries": 12,
+            "maxMinutes": 120,
+            "costCeilingMicros": 1_440_000
+        })
+    );
+    assert!(wire["costCeilingMicros"].is_u64());
+    assert_eq!(iso_ceiling_micros(1_440_000.4), Some(1_440_001));
+    assert_eq!(iso_ceiling_micros(0.0), Some(0));
+    assert_eq!(iso_ceiling_micros(-1.0), None);
+    assert_eq!(iso_ceiling_micros(f64::NAN), None);
+    assert_eq!(iso_ceiling_micros(f64::INFINITY), None);
+    assert_eq!(iso_ceiling_micros(1e30), None);
+    assert_eq!(
+        iso_enable_params("sh_talk", ISO_DEFAULT_LIMITS, f64::NAN),
+        None
+    );
     // The web's published price wins when it sends one.
     let availability: IsoAvailability = serde_json::from_value(serde_json::json!({
         "enabled": true,
