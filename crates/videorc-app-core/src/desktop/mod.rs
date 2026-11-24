@@ -6,6 +6,7 @@
 //! the global shortcuts (S1.6f).
 
 pub mod camera_extension;
+pub mod capture_protection;
 pub mod capture_state;
 pub mod deep_link;
 pub mod global_shortcuts;
