@@ -253,10 +253,22 @@ fn format_reset_time(reset_at: Option<&str>) -> Option<String> {
     })
 }
 
-/// "2.3 s", rounded half up as `toFixed(1)` does.
+/// "2.3 s", rounded as `toFixed(1)` rounds.
 fn format_short_seconds(ms: u64) -> String {
-    let tenths = (ms + 50) / 100;
-    format!("{}.{} s", tenths / 10, tenths % 10)
+    format!("{} s", to_fixed_1(ms as f64 / 1000.0))
+}
+
+/// JavaScript's `toFixed(1)`: rounds the double's exact decimal value, ties
+/// up, so 1.15 (stored just under) gives "1.1".
+fn to_fixed_1(value: f64) -> String {
+    let exact = format!("{value:.60}");
+    let (whole, fraction) = exact.split_once('.').unwrap_or((&exact, "0"));
+    let mut tenths: u64 =
+        whole.parse::<u64>().unwrap_or(0) * 10 + u64::from(fraction.as_bytes()[0] - b'0');
+    if fraction.as_bytes().get(1).is_some_and(|&d| d >= b'5') {
+        tenths += 1;
+    }
+    format!("{}.{}", tenths / 10, tenths % 10)
 }
 
 /// "6.2 of 6 Mbps".
@@ -661,6 +673,21 @@ mod tests {
             orientation: orientation.into(),
             target_kbps: target,
             measured_kbps: measured,
+        }
+    }
+
+    #[test]
+    fn short_seconds_round_like_to_fixed() {
+        for (ms, text) in [
+            (0, "0.0 s"),
+            (950, "0.9 s"),
+            (1050, "1.1 s"),
+            (1150, "1.1 s"),
+            (2250, "2.3 s"),
+            (12_345, "12.3 s"),
+            (99_949, "99.9 s"),
+        ] {
+            assert_eq!(format_short_seconds(ms), text, "{ms} ms");
         }
     }
 
