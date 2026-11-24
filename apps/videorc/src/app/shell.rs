@@ -10,8 +10,10 @@ use videorc_app_core::nav::{self, PageId, ZONES};
 use videorc_app_core::{BackendState, ConnectionState, Tone};
 use videorc_kit::{
     shortcut_keys::ShortcutKeys,
+    status_bar::StatusBar,
+    status_dot::{StatusDot, StatusTone},
     theme::{self, FONT, TypeScale, hsla},
-    tokens::{Theme, radius, size, text},
+    tokens::{Theme, radius, text},
 };
 
 use super::bridge::Mirror;
@@ -48,12 +50,12 @@ pub fn connection_text(state: &ConnectionState) -> String {
     }
 }
 
-fn tone_colour(tone: Tone, t: &Theme) -> u32 {
+fn status_tone(tone: Tone) -> StatusTone {
     match tone {
-        Tone::Ready => t.success,
-        Tone::Busy => t.warning,
-        Tone::Failed => t.destructive,
-        Tone::Stopped => t.muted_foreground,
+        Tone::Ready => StatusTone::Good,
+        Tone::Busy => StatusTone::Warn,
+        Tone::Failed => StatusTone::Error,
+        Tone::Stopped => StatusTone::Neutral,
     }
 }
 
@@ -293,23 +295,18 @@ impl Render for Shell {
                     }),
             )
             .child(
-                div()
-                    .h(px(size::STATUS_BAR))
-                    .px(px(12.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .border_t_1()
-                    .border_color(hsla(t.border))
-                    .type_scale(text::META)
-                    .child(
-                        div()
-                            .size(px(8.))
-                            .rounded_full()
-                            .bg(hsla(tone_colour(status.tone, t))),
-                    )
-                    .child(status.text)
-                    .child(div().text_color(hsla(t.muted_foreground)).child(connection)),
+                StatusBar::new().leading(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .child(
+                            StatusDot::new("shell-status")
+                                .tone(status_tone(status.tone))
+                                .label(status.text.clone()),
+                        )
+                        .child(div().child(connection)),
+                ),
             )
     }
 }
