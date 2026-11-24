@@ -125,7 +125,7 @@ The page keys come from `assignPageKeys` (shared/sidebar-pages.ts:129). Fixed ke
 | P052 | ⌘P | Toggles Preview window | `renderer/lib/shell-shortcuts.ts:58` | [ ] | [ ] | [ ] |
 | P053 | ⇧⌘N | Toggles Notes; also works from aux windows | `renderer/lib/shell-shortcuts.ts:52; main/index.ts:3716` | [ ] | [ ] | [ ] |
 | P054 | ⌘J | Shows Stream Manager | `renderer/lib/shell-shortcuts.ts:61` | [ ] | [ ] | [ ] |
-| P055 | ⇧⌘J | Toggles Stream Manager | `renderer/lib/shell-shortcuts.ts:53` | [ ] | [ ] | [ ] |
+| P055 | ⇧⌘J | Toggles Stream Manager | `renderer/lib/shell-shortcuts.ts:53` | [x] | [ ] | [ ] |
 | P056 | ⇧⌘C | Toggles Captions reader | `renderer/lib/shell-shortcuts.ts:54` | [ ] | [ ] | [ ] |
 | P057 | ⇧⌘B | Toggles notification centre | `renderer/lib/shell-shortcuts.ts:51` | [ ] | [ ] | [ ] |
 | P058 | ⌘/ | Opens Settings → Shortcuts | `renderer/lib/shell-shortcuts.ts:62` | [ ] | [ ] | [ ] |
@@ -1412,7 +1412,7 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
 | P940 | Window header "Stream Manager" | Title-only row | `renderer/components/stream-manager/stream-manager.tsx:1317` | [ ] | [ ] | [ ] |
-| P941 | Default size 1120×720; legacy 420×640 frame migrated once; min width 320 | Window sizing | `main/stream-manager-frame.ts:7-8; main/index.ts:4728` | [ ] | [ ] | [ ] |
+| P941 | Default size 1120×720; legacy 420×640 frame migrated once; min width 320 | Window sizing | `main/stream-manager-frame.ts:7-8; main/index.ts:4728` | [x] | [ ] | [ ] |
 | P942 | Layout tiers: Wide ≥1040, Medium 640–1039, Narrow <640, labels hide <800 | Container-query layout | `renderer/lib/stream-manager-layout.ts:1-37` | [ ] | [ ] | [ ] |
 | P943 | History bar + "Back to live" | Session history view; return to live | `renderer/components/stream-manager/stream-manager.tsx:1319,1328` | [ ] | [ ] | [ ] |
 | P944 | Sidekick toasts (question, promise reminder, dead air) | Private live nudges | `renderer/components/stream-manager/stream-manager.tsx:675-695` | [ ] | [ ] | [ ] |

@@ -26,6 +26,7 @@
 mod app;
 mod platform;
 mod preview;
+mod screens;
 // Plan 260 S2.5 (L6): the smoke command server and the UI driver. The shell
 // starts it (`smoke::start`) in a later S2 part; until then nothing calls it.
 #[allow(dead_code)]
@@ -62,6 +63,7 @@ use app::permissions::Permissions;
 use app::session::{SessionControls, SessionPanel};
 use app::shell::{Shell, StatusLine, connection_text};
 use app::{camera, capture, hotkeys, links, menus, sleep};
+use screens::stream_manager::frame::StreamManagerFrame;
 
 /// Electron's app id (`electron-builder.yml`), kept on every platform: the
 /// macOS bundle id, Videorc Camera's host, Linux's desktop entry and the
@@ -288,6 +290,7 @@ fn main() -> Result<()> {
     let quit_after = args.quit_after;
     // The main window's frame, saved in the data directory.
     let main_frame = MainFrame::new(&paths.user_data_dir, logger.clone());
+    let stream_manager_frame = StreamManagerFrame::new(&paths.user_data_dir, logger.clone());
     let quit_guard = sleep_guard.clone();
     let quit_permissions = permissions.clone();
     let focus_permissions = permissions.clone();
@@ -392,6 +395,9 @@ fn main() -> Result<()> {
             }
         };
         cx.activate(true);
+        // The Stream Manager's menu command and keys, and the window when it
+        // was open at the last quit.
+        screens::stream_manager::window::install(cx, stream_manager_frame, APP_ID);
 
         // The main window coming to the front re-checks a grant System
         // Settings may have made meanwhile; a move or resize saves its frame
