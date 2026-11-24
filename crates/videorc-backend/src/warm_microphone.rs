@@ -22,6 +22,11 @@
 //! Keep microphone ready off the renderer arms it meter-only (D2, owner
 //! 2026-11-09): `session.start` never takes that source; it drops it and opens
 //! the device fresh, exactly as before.
+//!
+//! Plan 260 S1.3 (Linux): a PipeWire microphone (`microphone:linux-pulse:*`)
+//! stands by too, through the same capture worker a Linux session records it
+//! with, and only ever for the idle meter: a session never takes it (it
+//! disarms the slot and opens its own worker, as before).
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -35,8 +40,46 @@ use crate::protocol::{
 use crate::session_audio::InitialAudioSource;
 use crate::state::AppState;
 
+/// The microphone standing by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WarmDevice {
+    /// A CoreAudio device id (macOS).
+    CoreAudio(u32),
+    /// Plan 260 S1.3: a capture-worker microphone id (Linux's PipeWire
+    /// sources through pipewire-pulse), for the idle meter only.
+    Worker(String),
+}
+
+impl WarmDevice {
+    /// The device a renderer id names, where this platform's backend can
+    /// stand it by.
+    fn for_id(id: &str) -> Option<Self> {
+        if let Some(device_id) = parse_coreaudio_microphone_id(id) {
+            return Some(Self::CoreAudio(device_id));
+        }
+        (cfg!(target_os = "linux")
+            && crate::linux_pulse_audio::parse_linux_pulse_microphone_id(id).is_some())
+        .then(|| Self::Worker(id.to_string()))
+    }
+
+    fn coreaudio_id(&self) -> Option<u32> {
+        match self {
+            Self::CoreAudio(device_id) => Some(*device_id),
+            Self::Worker(_) => None,
+        }
+    }
+
+    /// For the log: "CoreAudio device 7", or the worker's id.
+    fn describe(&self) -> String {
+        match self {
+            Self::CoreAudio(device_id) => format!("CoreAudio device {device_id}"),
+            Self::Worker(id) => id.clone(),
+        }
+    }
+}
+
 pub struct WarmMicrophone {
-    device_id: u32,
+    device: WarmDevice,
     source: InitialAudioSource,
     armed_at: Instant,
     /// The configured gain, applied to standby meter readings only: the PCM
@@ -144,7 +187,7 @@ impl WarmMicrophoneSlot {
         match guard.as_ref() {
             Some(warm) => WarmMicrophoneStatus {
                 armed: true,
-                device_id: Some(warm.device_id),
+                device_id: warm.device.coreaudio_id(),
                 device_name: Some(warm.source.device_name()),
                 reason: None,
                 captured_frames: warm.source.stats_handle().captured_frames(),
@@ -167,7 +210,7 @@ impl WarmMicrophoneSlot {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_ref()
-            .is_some_and(|warm| warm.device_id == device_id)
+            .is_some_and(|warm| warm.device == WarmDevice::CoreAudio(device_id))
     }
 
     /// Installs an opened source; a previous one is dropped (stopped).
@@ -190,7 +233,7 @@ impl WarmMicrophoneSlot {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             guard.replace(WarmMicrophone {
-                device_id,
+                device: WarmDevice::CoreAudio(device_id),
                 source,
                 armed_at: Instant::now(),
                 gain_db: 0.0,
@@ -205,7 +248,7 @@ impl WarmMicrophoneSlot {
     fn install_if_current(
         &self,
         opening: &WarmOpenGuard<'_>,
-        device_id: u32,
+        device: WarmDevice,
         source: InitialAudioSource,
         gain_db: f32,
         meter_only: bool,
@@ -218,7 +261,7 @@ impl WarmMicrophoneSlot {
                 return None;
             }
             slot.replace(WarmMicrophone {
-                device_id,
+                device,
                 source,
                 armed_at: Instant::now(),
                 gain_db,
@@ -243,9 +286,19 @@ impl WarmMicrophoneSlot {
 
     /// Applies live gain/mute changes to the warm source of `device_id`, and
     /// whether it is the idle meter's only (Keep microphone ready switched).
+    #[cfg(test)]
     pub fn update_processing_settings(
         &self,
         device_id: u32,
+        settings: AudioProcessingSettings,
+        meter_only: bool,
+    ) -> bool {
+        self.update_settings_for(&WarmDevice::CoreAudio(device_id), settings, meter_only)
+    }
+
+    fn update_settings_for(
+        &self,
+        device: &WarmDevice,
         settings: AudioProcessingSettings,
         meter_only: bool,
     ) -> bool {
@@ -254,7 +307,7 @@ impl WarmMicrophoneSlot {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match guard.as_mut() {
-            Some(warm) if warm.device_id == device_id => {
+            Some(warm) if warm.device == *device => {
                 // Standby PCM stays raw; the session bus owns gain/mute. Only
                 // the standby meter applies the gain.
                 warm.gain_db = settings.gain_db;
@@ -295,7 +348,7 @@ impl WarmMicrophoneSlot {
                 .inner
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if guard.as_ref()?.device_id != device_id {
+            if guard.as_ref()?.device != WarmDevice::CoreAudio(device_id) {
                 return None;
             }
             guard.take()?
@@ -332,11 +385,7 @@ pub async fn arm_warm_microphone(
     {
         return refused("room-microphone-owned", None);
     }
-    let Some(device_id) = params
-        .microphone_id
-        .as_deref()
-        .and_then(parse_coreaudio_microphone_id)
-    else {
+    let Some(device) = params.microphone_id.as_deref().and_then(WarmDevice::for_id) else {
         return refused("not-coreaudio", None);
     };
     if crate::recording::native_microphone_disabled_for_smoke() {
@@ -347,7 +396,9 @@ pub async fn arm_warm_microphone(
         gain_db: params.microphone_gain_db,
         muted: params.microphone_muted,
     };
-    let meter_only = params.meter_only;
+    // Plan 260 S1.3: a capture-worker microphone stands by for the meter
+    // only; a session opens its own.
+    let meter_only = params.meter_only || matches!(device, WarmDevice::Worker(_));
     // Active-session admission precedes even an idempotent standby update.
     let work = state.ffmpeg_work.snapshot();
     if work.capture_active
@@ -361,7 +412,7 @@ pub async fn arm_warm_microphone(
     }
     if state
         .warm_microphone
-        .update_processing_settings(device_id, settings, meter_only)
+        .update_settings_for(&device, settings, meter_only)
     {
         return state.warm_microphone.status();
     }
@@ -377,12 +428,27 @@ pub async fn arm_warm_microphone(
             None,
         );
     };
-    let source = match crate::session_audio::prepare_initial_native(device_id).await {
+    let opened = match &device {
+        WarmDevice::CoreAudio(device_id) => {
+            crate::session_audio::prepare_initial_native(*device_id).await
+        }
+        WarmDevice::Worker(id) => {
+            crate::session_audio::prepare_initial_adapter(
+                id.clone(),
+                crate::ffmpeg::resolve_ffmpeg_path(None),
+            )
+            .await
+        }
+    };
+    let source = match opened {
         Ok(source) => source,
         Err(error) => {
             state.emit_log(
                 "warn",
-                format!("Warm microphone could not open CoreAudio device {device_id}: {error}"),
+                format!(
+                    "Warm microphone could not open {}: {error}",
+                    device.describe()
+                ),
             );
             return refused("open-failed", Some(error.to_string()));
         }
@@ -398,9 +464,10 @@ pub async fn arm_warm_microphone(
         return refused("session-active", None);
     }
     let generation = opening.generation;
+    let described = device.describe();
     let Some(status) = state.warm_microphone.install_if_current(
         &opening,
-        device_id,
+        device,
         source,
         settings.gain_db,
         meter_only,
@@ -411,7 +478,7 @@ pub async fn arm_warm_microphone(
     state.emit_log(
         "info",
         format!(
-            "Warm microphone armed{}: {} (CoreAudio device {device_id}).",
+            "Warm microphone armed{}: {} ({described}).",
             if meter_only {
                 " for the meter only"
             } else {
@@ -622,6 +689,59 @@ mod tests {
         assert!(slot.update_processing_settings(7, settings(0.0), true));
         assert!(slot.take_for_capture(7, settings(0.0)).is_none());
         assert!(!slot.status().armed);
+    }
+
+    #[test]
+    fn ids_name_the_microphone_this_platform_stands_by() {
+        assert_eq!(
+            WarmDevice::for_id("microphone:coreaudio:7"),
+            Some(WarmDevice::CoreAudio(7))
+        );
+        let pulse = crate::linux_pulse_audio::linux_pulse_microphone_id("alsa_input.usb-mic");
+        assert_eq!(
+            WarmDevice::for_id(&pulse),
+            cfg!(target_os = "linux").then(|| WarmDevice::Worker(pulse.clone())),
+            "a PipeWire microphone stands by on Linux only"
+        );
+        assert_eq!(WarmDevice::for_id("microphone:avfoundation:0"), None);
+        assert_eq!(WarmDevice::CoreAudio(7).describe(), "CoreAudio device 7");
+        assert_eq!(WarmDevice::Worker(pulse.clone()).coreaudio_id(), None);
+    }
+
+    #[test]
+    fn a_worker_microphone_meters_and_is_never_handed_to_a_session() {
+        let slot = WarmMicrophoneSlot::default();
+        let warm = test_native_audio_source(settings(0.0));
+        let warm_stats = warm.stats_handle();
+        let device = WarmDevice::Worker(crate::linux_pulse_audio::linux_pulse_microphone_id(
+            "alsa_input.usb-mic",
+        ));
+        let generation = slot.generation.load(Ordering::Acquire);
+        *slot.inner.lock().unwrap() = Some(WarmMicrophone {
+            device: device.clone(),
+            source: InitialAudioSource::warm(warm),
+            armed_at: Instant::now(),
+            gain_db: 0.0,
+            generation,
+            meter_only: true,
+        });
+        let status = slot.status();
+        assert!(status.armed);
+        assert_eq!(status.device_id, None, "only CoreAudio has a numeric id");
+        let (stats, _) = slot.standby_meter(generation).expect("it meters");
+        assert!(Arc::ptr_eq(&stats, &warm_stats));
+
+        // The gain follows the Studio's; another device's update misses it.
+        assert!(slot.update_settings_for(&device, settings(4.0), true));
+        let (_, gain_db) = slot.standby_meter(generation).unwrap();
+        assert!((gain_db - 4.0).abs() < f32::EPSILON);
+        assert!(!slot.update_settings_for(&WarmDevice::CoreAudio(7), settings(0.0), true));
+
+        // A session's take never finds it; the session's start disarms it.
+        assert!(slot.take_for_capture(7, settings(0.0)).is_none());
+        assert!(slot.status().armed);
+        assert!(slot.disarm());
+        assert!(slot.standby_meter(generation).is_none());
     }
 
     #[test]

@@ -3,11 +3,11 @@ import { join, relative, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 // Plan 260 S1.3: the backend owns audio. The renderer opens a Web Audio
-// context only behind the fences that wait for the Windows and Linux
-// machines (the idle meter of a non-CoreAudio microphone, S1.3a; the
-// soundboard monitor, S1.3b; the join chime, S1.3c: on macOS the backend
-// plays both), and in the talk-show room's media until rooms move into the
-// backend (S1.8). Each one that moves comes off this list.
+// context only behind the fences that wait for the Windows machines (the idle
+// meter of a Windows microphone, S1.3a; the soundboard monitor, S1.3b; the
+// join chime, S1.3c: on macOS and Linux the backend plays all three), and in
+// the talk-show room's media until rooms move into the backend (S1.8). Each
+// one that moves comes off this list.
 
 /** The talk-show room's own media (and its dev fixture): they leave the
  * renderer with `livekit-client` in S1.8. */
@@ -35,7 +35,7 @@ const sources = rendererSources(__dirname).map((path) => ({
 }))
 
 describe('Web Audio in the renderer (plan 260 S1.3)', () => {
-  it('creates an AudioContext only behind the Windows and Linux fences', () => {
+  it('creates an AudioContext only behind the Windows fences', () => {
     const creators = sources
       .filter(({ text }) => /\bnew\s+(?:webkit)?(?:Offline)?AudioContext\s*\(/.test(text))
       .map(({ path }) => path)

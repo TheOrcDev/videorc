@@ -161,6 +161,8 @@ mod linux_pipewire_stream;
 mod linux_portal_capture;
 mod linux_portal_session;
 mod linux_pulse_audio;
+#[cfg(target_os = "linux")]
+mod linux_sound_output;
 mod linux_v4l2_camera;
 #[cfg(any(test, target_os = "linux", feature = "live-background-gl-check"))]
 mod linux_vaapi;
@@ -19528,7 +19530,7 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
         }),
         // Plan 224: "Ada wants to join", one event per new request.
         // Plan 260 S1.3c: the backend rings the chime itself where it has an
-        // output (macOS); the renderer rings it elsewhere.
+        // output (macOS, Linux); the renderer rings it on Windows.
         request: std::sync::Arc::new(move |request| {
             join_chime::ring(&request_state);
             request_state.emit_event(cloud_talk::CLOUD_ROOM_REQUESTS_EVENT, request);

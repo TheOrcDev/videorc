@@ -20,7 +20,7 @@ import {
 import type { MicStreamFailureReason } from '@/lib/mic-stream'
 import { audioMixerMonitorState } from '@/lib/mic-visual-gate'
 import type { MicMonitorState } from '@/lib/state-labels'
-import { isCoreAudioMicrophoneId } from '@/lib/warm-microphone-gate'
+import { isBackendMeteredMicrophoneId } from '@/lib/warm-microphone-gate'
 
 // Plan 092: audiocn frame sources over the backend's `audio.levels` and, for a
 // Windows or Linux microphone between sessions only, the workspace's visual
@@ -189,7 +189,7 @@ export function useMicrophoneMeter(): MicrophoneMeter {
     unavailableReason:
       microphoneSelected && !audioBusActive && meterHasNoReading(meter)
         ? idleLevelUnavailableReason({
-            backendMetered: isCoreAudioMicrophoneId(selectedMicrophone?.id),
+            backendMetered: isBackendMeteredMicrophoneId(selectedMicrophone?.id),
             warmMicrophone,
             analyser: micVisual
           })

@@ -397,8 +397,8 @@ impl AudioCaptureStats {
     }
 
     /// Records one callback's raw peak and RMS into the standby level window.
-    /// Lock-free, so the realtime callback may call it.
-    #[cfg(any(target_os = "macos", test))]
+    /// Lock-free, so the realtime callback may call it. The CoreAudio callback
+    /// and the capture worker (plan 260 S1.3, Linux's idle meter) both fill it.
     pub(crate) fn record_level_window(&self, peak: f32, rms: f32) {
         let micro = |value: f32| (value.clamp(0.0, 4.0) * 1_000_000.0) as u64;
         self.window_peak_micro

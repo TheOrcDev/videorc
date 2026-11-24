@@ -102,7 +102,7 @@ describe('the soundboard host (plan 189)', () => {
   it('never loads the renderer monitor where the backend plays it (macOS)', async () => {
     expect(rendererPlaysMonitor('darwin')).toBe(false)
     expect(rendererPlaysMonitor('win32')).toBe(true)
-    expect(rendererPlaysMonitor('linux')).toBe(true)
+    expect(rendererPlaysMonitor('linux')).toBe(false)
     const { store, deps, monitor, stop } = host({ rendererMonitor: false })
     store.acceptBoard(board())
     store.acceptPlayback({
