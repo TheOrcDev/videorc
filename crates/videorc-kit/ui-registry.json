@@ -23,7 +23,11 @@
     "dialog",
     "popover",
     "sonner",
-    "scroll-area"
+    "scroll-area",
+    "window-frame",
+    "status-bar",
+    "status-bar-action",
+    "status-dot"
   ],
   "keepLocal": []
 }

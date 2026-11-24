@@ -101,7 +101,7 @@ pub(crate) fn glass_chip(element: gpui::Div, t: &Theme) -> gpui::Div {
 }
 
 /// The status dot: the tone, a 2 px halo at 22% and an 8 px glow.
-fn dot(tone: Color, glow: f32) -> impl IntoElement {
+pub(crate) fn dot(tone: Color, glow: f32) -> impl IntoElement {
     let mut halo = vec![box_shadow(&Shadow {
         inset: false,
         x: 0.0,
