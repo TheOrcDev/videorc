@@ -101,6 +101,8 @@ mod room_clock;
 mod room_frame_bridge;
 // Plan 249 S13b: the processed camera role's native producer.
 mod room_camera_source;
+#[cfg(target_os = "macos")]
+mod room_host;
 mod room_program_camera;
 mod room_system_audio;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
@@ -707,6 +709,10 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     tokio::spawn(banner_timers::run_banner_timers(state.clone()));
     // Plan 232: which HTML overlays main renders, and where each stands.
     tokio::spawn(html_overlay::run_html_overlay_targets(state.clone()));
+    // Plan 260 S1.8a: the backend holds the talk show's host seat (dev
+    // switch, macOS).
+    #[cfg(target_os = "macos")]
+    room_host::start(state.clone());
     // Plan 214 D4: Videorc Camera comes back on when it was on.
     virtual_camera_service::start_from_settings(&state).await;
     let app = Router::new()
@@ -13520,6 +13526,14 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 260 S1.8a: with the backend holding the host seat the
+        // renderer must stay out of the room (one `host:<showId>`).
+        #[cfg(target_os = "macos")]
+        "cloud.room.token.refresh" if room_host::holds_seat() => ServerResponse::error(
+            command.id,
+            "cloud-room-held-by-backend",
+            "The backend holds the talk show's host seat.",
+        ),
         "cloud.room.token.refresh" => match cloud_context(state) {
             Some(context) => match context.room_token(account::stored_session_token()).await {
                 Ok(answer) => ServerResponse::ok(command.id, answer),
@@ -13581,6 +13595,13 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 260 S1.8a: the backend reports its own room connection; the
+        // renderer's, refused a token, would only contradict it.
+        #[cfg(target_os = "macos")]
+        "cloud.room.client.report" if room_host::holds_seat() => match cloud_context(state) {
+            Some(context) => ServerResponse::ok(command.id, context.status()),
+            None => cloud_unavailable(command.id),
+        },
         "cloud.room.client.report" => {
             match serde_json::from_value::<cloud_talk::RoomClientReportParams>(command.params) {
                 Ok(params) => match cloud_context(state) {
