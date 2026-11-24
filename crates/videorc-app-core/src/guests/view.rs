@@ -60,7 +60,7 @@ impl CloudFacts for CloudRoomFacts {
 
 /// `plural` from `lib/format.ts`: "1 guest", "5 guests", "1,204 people".
 /// A stand-in until L4's `crate::format::plural` (#1757) is on `main`.
-fn plural(count: u32, one: &str, many: Option<&str>) -> String {
+pub(crate) fn plural(count: u32, one: &str, many: Option<&str>) -> String {
     let digits = count.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
@@ -682,6 +682,8 @@ pub enum Tone {
     Good,
     Warn,
     Error,
+    /// Recording or on air.
+    Live,
     Neutral,
 }
 
