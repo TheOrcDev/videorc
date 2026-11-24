@@ -426,6 +426,7 @@ impl AvatarState {
             revision: self.revision,
             observed,
             guests: Some(guests),
+            background: None,
         };
         if self.last_status.as_ref() == Some(&status) {
             return (None, accepted);
@@ -540,6 +541,7 @@ async fn send_due(
                 show_id: show_id.to_string(),
                 graphics: None,
                 avatar: Some(status),
+                scene: None,
             },
         );
     }

@@ -6116,6 +6116,13 @@ export interface RoomPresentationStatus {
   observed: Record<string, RoomPresentationObservation>
   /** The avatar's guest pages (plan 249 S6): avatar only. */
   guests?: { enabled: boolean; capable: number; applied: number }
+  /** What the program pages drew for the scene's background (plan 249
+   * S14): scene only, while the scene names one. */
+  background?: {
+    wanted: { h: string; v: string }
+    drawn: Record<string, import('./cloud-scene').BackgroundDrawn>
+    unsupported: number
+  }
 }
 
 /**
@@ -6187,6 +6194,8 @@ export interface CloudRoomPresentationEvent {
   showId: string
   graphics?: RoomPresentationStatus
   avatar?: RoomPresentationStatus
+  /** The committed scene; the Studio's commit waits on it (5 s). */
+  scene?: RoomPresentationStatus
 }
 
 /**

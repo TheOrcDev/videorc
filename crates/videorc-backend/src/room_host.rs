@@ -288,6 +288,15 @@ async fn hold(
                     receipts.clone(),
                     graphics_heard,
                 ));
+                // The committed scene (S1.8b): the same receipts.
+                let (scene_signals, scene_heard) = mpsc::unbounded_channel();
+                let scene_task = tokio::spawn(crate::room_scene::run(
+                    state.clone(),
+                    room.clone(),
+                    show_id.clone().unwrap_or_default(),
+                    receipts.clone(),
+                    scene_heard,
+                ));
                 // The avatar and its bubble (S1.8b): the same receipts.
                 let (avatar_signals, avatar_heard) = mpsc::unbounded_channel();
                 let avatar_task = tokio::spawn(crate::room_avatar::run(
@@ -358,6 +367,8 @@ async fn hold(
                                 let left = participant.identity().as_str().to_string();
                                 let _ = graphics_signals
                                     .send(crate::room_graphics::GraphicsSignal::Left(left.clone()));
+                                let _ = scene_signals
+                                    .send(crate::room_graphics::GraphicsSignal::Left(left.clone()));
                                 let _ = avatar_signals
                                     .send(crate::room_graphics::GraphicsSignal::Left(left));
                             }
@@ -370,6 +381,7 @@ async fn hold(
                 overlay_worker.abort();
                 graphics_task.abort();
                 avatar_task.abort();
+                scene_task.abort();
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
                     DisconnectReason::DuplicateIdentity => {

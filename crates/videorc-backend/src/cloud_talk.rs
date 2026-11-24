@@ -1025,6 +1025,28 @@ pub struct CloudRoomPresentationEvent {
     /// pages' count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<RoomPresentationStatus>,
+    /// The committed scene (plan 249 S12, S14): the Studio's commit waits on
+    /// it (5 s), as it waited on the renderer's publisher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene: Option<RoomPresentationStatus>,
+}
+
+/// Plan 249 S14: what the program pages drew for the scene's background.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomBackgroundStatus {
+    /// `backgroundKey` of what the scene asks for, per lane.
+    pub wanted: RoomBackgroundWanted,
+    /// Each capable lane's last drawn background, as its page reported it.
+    pub drawn: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Program pages that cannot draw scene backgrounds (older pages).
+    pub unsupported: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoomBackgroundWanted {
+    pub h: String,
+    pub v: String,
 }
 
 /// Plan 249 S6 (D4): the host's opt-in to show the stream's public avatar
@@ -1051,6 +1073,9 @@ pub struct RoomPresentationStatus {
     /// The avatar's guest pages (avatar only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guests: Option<RoomPresentationGuests>,
+    /// The scene's background (scene only, while the scene names one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<RoomBackgroundStatus>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
