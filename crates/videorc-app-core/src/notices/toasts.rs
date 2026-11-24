@@ -1211,7 +1211,7 @@ pub fn live_output_news(event: &HealthEvent) -> Option<Notice> {
 }
 
 /// `separateFileRoleFromMessage`: `screen` or `camera`, named first.
-fn separate_file_role(message: &str) -> Option<&'static str> {
+pub(crate) fn separate_file_role(message: &str) -> Option<&'static str> {
     let trimmed = message.trim();
     for role in ["screen", "camera"] {
         if trimmed.len() >= role.len()

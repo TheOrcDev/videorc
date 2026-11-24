@@ -9,6 +9,7 @@
 //! [`Input`]: super::Input
 
 pub mod devices;
+pub mod health;
 pub mod work;
 
 /// `OPEN_HEALTH_LABEL`: the Health door's one name, as S1.6a's Health
@@ -35,6 +36,13 @@ pub enum Door {
     Sources,
     /// `openSourcesSystemAudio`: Sources, at System audio ("Open Sources").
     SystemAudio,
+    /// `openOutputRecordings`: Output, at Recordings ("Open Output").
+    OutputRecordings,
+    /// Settings, at Permissions ("Open Permissions").
+    Permissions,
+    /// `openLibraryRecording(id)`, or the Library tab when the entry names
+    /// no take ("Open in Library").
+    Library { session_id: Option<String> },
 }
 
 /// The Studio's pages, as the doors need them.
