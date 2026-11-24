@@ -1038,3 +1038,117 @@ fn the_markers_dialog_hides_a_delete_until_its_toast_closes() {
         Some("This recording has no video file. Its marker times are still saved.")
     );
 }
+
+/// `library-view.test.ts`, `session-finalization.test.ts`,
+/// `separate-source-recordings{,-view}.test.ts`: the helpers part 6 adds.
+#[test]
+fn a_finished_cleanup_shows_only_when_nothing_hides_it() {
+    assert!(reveals_finished_cleanup(LibraryFilter::All, ""));
+    assert!(!reveals_finished_cleanup(LibraryFilter::All, "rust"));
+    assert!(!reveals_finished_cleanup(LibraryFilter::Recordings, ""));
+}
+
+#[test]
+fn saving_mp4_comes_back_after_a_relaunch_and_ready_is_said_once() {
+    let finalizing = |percent: u8| {
+        session(json!({"id": "s-1", "finalizationState": "finalizing",
+            "finalizationProgressPercent": percent}))
+    };
+    let finalized = session(json!({"id": "s-1", "finalizationState": "finalized"}));
+    let (mut active, mut announced) = (BTreeSet::new(), BTreeSet::new());
+    assert_eq!(
+        finalization_notices_for_rows(&[finalizing(40)], &mut active, &mut announced),
+        [FinalizationNotice::Finalizing {
+            session_id: "s-1".into(),
+            label: "Saving MP4 · 40%".into()
+        }]
+    );
+    let rows = [finalized.clone()];
+    assert_eq!(
+        finalization_notices_for_rows(&rows, &mut active, &mut announced),
+        [FinalizationNotice::Ready {
+            session_id: "s-1".into()
+        }]
+    );
+    assert!(finalization_notices_for_rows(&rows, &mut active, &mut announced).is_empty());
+
+    // A stale finalizing row after the finalized event never reopens it.
+    let mut active = BTreeSet::from(["s-1".to_string()]);
+    let mut announced = BTreeSet::from(["s-1".to_string()]);
+    assert!(
+        finalization_notices_for_rows(&[finalizing(98)], &mut active, &mut announced).is_empty()
+    );
+    assert!(finalization_notices_for_rows(&rows, &mut active, &mut announced).is_empty());
+    assert!(!active.contains("s-1"));
+
+    // A failed export a row opened, with its error.
+    let mut active = BTreeSet::from(["s-1".to_string()]);
+    let failed = session(json!({"id": "s-1", "finalizationState": "failed",
+        "finalizationError": "disk full"}));
+    assert_eq!(
+        finalization_notices_for_rows(&[failed], &mut active, &mut BTreeSet::new()),
+        [FinalizationNotice::Failed {
+            session_id: "s-1".into(),
+            error: Some("disk full".into())
+        }]
+    );
+    assert!(active.is_empty());
+}
+
+#[test]
+fn a_takes_siblings_and_the_separate_file_toast() {
+    let rows = [
+        session(json!({"id": "take-camera", "takeId": "take", "recordingRole": "camera"})),
+        session(json!({"id": "other"})),
+        session(json!({"id": "take", "takeId": "take", "recordingRole": "combined"})),
+        session(json!({"id": "take-screen", "takeId": "take", "recordingRole": "screen"})),
+    ];
+    assert_eq!(
+        ids(&take_siblings(&rows[2], &rows)),
+        strings(&["take-screen", "take-camera"])
+    );
+    assert!(take_siblings(&rows[1], &rows).is_empty());
+
+    assert_eq!(
+        separate_file_role_from_message("Screen muxer exited before Stop (exit status: 0)"),
+        Some("screen")
+    );
+    assert_eq!(
+        separate_file_role_from_message("Camera file: Audio teardown failed: x"),
+        Some("camera")
+    );
+    assert_eq!(
+        separate_file_role_from_message("Encoder writer could not be reaped"),
+        None
+    );
+    assert_eq!(separate_file_role_from_message("Screenshot failed"), None);
+
+    let toast = |message: &str, running| {
+        let (title, description) = separate_file_failed_toast(message, running);
+        (title, description)
+    };
+    assert_eq!(
+        toast("Screen capture failed after source recovery", true),
+        (
+            "Screen file stopped".to_string(),
+            "The screen stopped sending video and couldn't be restarted. Your Combined recording keeps going.".to_string()
+        )
+    );
+    assert_eq!(
+        toast("Camera file: Encoder writer could not be reaped", false),
+        (
+            "Camera file stopped early".to_string(),
+            "Videorc couldn't keep encoding this file.".to_string()
+        )
+    );
+    assert_eq!(
+        toast("Screen file was missing after Stop.", false),
+        (
+            "Screen file wasn't saved".to_string(),
+            "This file wasn't there when you stopped recording.".to_string()
+        )
+    );
+    let (title, description) = toast("Screen file: something new happened", true);
+    assert_eq!(title, "Screen file stopped");
+    assert!(!description.contains("something new"), "{description}");
+}

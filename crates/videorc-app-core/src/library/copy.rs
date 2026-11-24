@@ -313,6 +313,13 @@ pub fn repair_available(first: Option<&str>) -> String {
     format!("{first}Repair is available from this menu.")
 }
 
+/// `separateFileFailedToast`'s names and sentences.
+pub const CAMERA_FILE: &str = "Camera file";
+pub const SCREEN_FILE: &str = "Screen file";
+pub const SEPARATE_FILE: &str = "Separate file";
+pub const FILE_NOT_FINISHED: &str = "Videorc couldn't finish this file.";
+pub const COMBINED_KEEPS_GOING: &str = "Your Combined recording keeps going.";
+
 #[cfg(test)]
 pub(crate) mod tests {
     /// The renderer files these words come from. Listed in

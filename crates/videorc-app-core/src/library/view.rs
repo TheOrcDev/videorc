@@ -328,6 +328,13 @@ pub fn clear_label(filter: LibraryFilter, query: &str) -> &'static str {
     }
 }
 
+/// `revealsFinishedCleanup`: a finished noise cleanup shows its copy only
+/// when that cannot undo the streamer's own search or filter (E-19); an
+/// explicit "show this recording" still clears them.
+pub fn reveals_finished_cleanup(filter: LibraryFilter, query: &str) -> bool {
+    filter == LibraryFilter::All && query.trim().is_empty()
+}
+
 /// `LibraryPickModifier`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickModifier {
@@ -637,6 +644,62 @@ pub fn finalizing_badge_label(percent: Option<u8>) -> String {
     }
 }
 
+/// `FinalizationNotice`: an MP4 toast the Library rows call for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinalizationNotice {
+    Finalizing {
+        session_id: String,
+        label: String,
+    },
+    Ready {
+        session_id: String,
+    },
+    Failed {
+        session_id: String,
+        error: Option<String>,
+    },
+}
+
+/// `finalizationNoticesForRows`: "Saving MP4" restored after a relaunch,
+/// and the outcome of a notice whose terminal event was missed while
+/// disconnected. `active` (notices the rows opened) and `announced` (takes
+/// whose "MP4 ready" was shown) are updated in place. A row that still reads
+/// finalizing after its take was announced is stale and reopens nothing.
+pub fn finalization_notices_for_rows(
+    sessions: &[SessionListItem],
+    active: &mut BTreeSet<String>,
+    announced: &mut BTreeSet<String>,
+) -> Vec<FinalizationNotice> {
+    let mut notices = Vec::new();
+    for session in sessions {
+        if is_finalizing(session) {
+            if announced.contains(&session.id) {
+                continue;
+            }
+            active.insert(session.id.clone());
+            notices.push(FinalizationNotice::Finalizing {
+                session_id: session.id.clone(),
+                label: finalizing_badge_label(session.finalization_progress_percent),
+            });
+        } else if active.remove(&session.id) {
+            if session.finalization_state == Some(RecordingFinalizationState::Finalized)
+                && !announced.contains(&session.id)
+            {
+                announced.insert(session.id.clone());
+                notices.push(FinalizationNotice::Ready {
+                    session_id: session.id.clone(),
+                });
+            } else if finalization_failed(session) {
+                notices.push(FinalizationNotice::Failed {
+                    session_id: session.id.clone(),
+                    error: session.finalization_error.clone(),
+                });
+            }
+        }
+    }
+    notices
+}
+
 /// `applyFinalizationEvent`: the event patched onto its row; false when no
 /// row is its.
 pub fn apply_finalization_event(
@@ -850,4 +913,69 @@ pub fn separate_file_stopped(session: &SessionListItem) -> Option<FileStopped> {
         },
         exportable,
     })
+}
+
+/// `takeSiblings`: the other rows of the same take, in Combined → Screen →
+/// Camera order (a row with no role last).
+pub fn take_siblings<'a>(
+    session: &SessionListItem,
+    sessions: &'a [SessionListItem],
+) -> Vec<&'a SessionListItem> {
+    let Some(take) = session.take_id.as_deref().filter(|take| !take.is_empty()) else {
+        return Vec::new();
+    };
+    let rank = |row: &SessionListItem| match row.recording_role.as_deref() {
+        Some("combined") => 0,
+        Some("screen") => 1,
+        Some("camera") => 2,
+        _ => 3,
+    };
+    let mut siblings: Vec<_> = sessions
+        .iter()
+        .filter(|row| row.take_id.as_deref() == Some(take) && row.id != session.id)
+        .collect();
+    siblings.sort_by_key(|row| rank(row));
+    siblings
+}
+
+/// `separateFileRoleFromMessage`: the role a
+/// `separate-source-recordings-role-failed` message names first.
+pub fn separate_file_role_from_message(message: &str) -> Option<&'static str> {
+    let text = message.trim();
+    ["screen", "camera"].into_iter().find(|role| {
+        text.get(..role.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(role))
+            && !text[role.len()..]
+                .chars()
+                .next()
+                .is_some_and(|next| next.is_ascii_alphanumeric() || next == '_')
+    })
+}
+
+/// `separateFileFailedToast`: the Studio's toast when a Screen or Camera
+/// file stops (plan 198, D1), a warning with the reason in plain words.
+/// While the take runs it says the Combined recording carries on.
+/// (title, description).
+pub fn separate_file_failed_toast(message: &str, take_running: bool) -> (String, String) {
+    let role = separate_file_role_from_message(message);
+    let name = match role {
+        Some("camera") => copy::CAMERA_FILE,
+        Some("screen") => copy::SCREEN_FILE,
+        _ => copy::SEPARATE_FILE,
+    };
+    let kind = file_failure(Some(message));
+    let sentence = kind.map_or(copy::FILE_NOT_FINISHED, |kind| {
+        file_failure_sentence(kind, role == Some("camera"))
+    });
+    if take_running {
+        return (
+            format!("{name} stopped"),
+            format!("{sentence} {}", copy::COMBINED_KEEPS_GOING),
+        );
+    }
+    let title = match kind {
+        Some(FileFailure::Missing | FileFailure::Ownership) => format!("{name} wasn't saved"),
+        _ => format!("{name} stopped early"),
+    };
+    (title, sentence.to_string())
 }
