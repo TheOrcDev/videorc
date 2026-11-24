@@ -6256,6 +6256,8 @@ export interface RoomMediaAuxStatus {
   observed: Record<string, number>
   systemState: 'off' | 'opening' | 'capturing' | 'blocked'
   systemReason: string | null
+  /** A lost connection turned system audio off; it needs a fresh enable. */
+  systemDisarmed?: boolean
 }
 
 /** `cloud.room.aux.set` (plan 260 S1.8c c4d): room sounds on or off, and the

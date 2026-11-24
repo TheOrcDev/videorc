@@ -425,6 +425,10 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       observed: aux.observed,
       productionQualified: false
     })
+    // A lost connection turned the backend's system audio off: the Studio's
+    // switch goes off too, so only a fresh enable turns it on again.
+    if (aux.systemDisarmed && roomAudioRouting.getSnapshot().system.enabled)
+      roomAudioRouting.disarmSystem()
     roomAudioRouting.status(aux.systemState, aux.systemReason)
   }, [backendMedia])
   // Plan 260 S1.8c: with the backend in the room (its dev switch), the host's

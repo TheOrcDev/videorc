@@ -387,6 +387,9 @@ async fn hold(
                         event = events.recv() => match event {
                             Some(RoomEvent::Reconnecting) => {
                                 report(&state, CloudRoomClientState::Reconnecting, None);
+                                // System audio needs a fresh enable after any
+                                // loss, as the renderer's room did (c4d).
+                                crate::room_aux::disarm_system();
                                 let _ = screen_signals
                                     .send(crate::room_screen::ScreenSignal::Reconnecting);
                             }
@@ -479,6 +482,7 @@ async fn hold(
                 drop(screen_done);
                 drop(subscriptions_done);
                 drop(aux_done);
+                crate::room_aux::disarm_system();
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
                     DisconnectReason::DuplicateIdentity => {

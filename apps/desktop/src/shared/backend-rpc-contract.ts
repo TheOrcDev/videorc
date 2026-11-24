@@ -7446,7 +7446,8 @@ const cloudRoomPresentationEventSchema = objectSchema(
                 trackSid: nullableSchema(stringSchema({ minLength: 1, maxLength: 128 })),
                 observed: recordSchema(nonNegativeInteger, { maxKeys: 256 }),
                 systemState: enumSchema(['off', 'opening', 'capturing', 'blocked']),
-                systemReason: nullableSchema(stringSchema({ maxLength: 512 }))
+                systemReason: nullableSchema(stringSchema({ maxLength: 512 })),
+                systemDisarmed: optionalSchema(booleanSchema)
               },
               { allowUnknown: false }
             )
