@@ -4,8 +4,8 @@
 // command (dev server only, never the app's own bundle) and gets the PNG the
 // renderer's own painter sends for one overlay state: the caption bar
 // (`captions.overlay.set`), the captioned copy's cue frame, the highlight
-// card and the milestone card (`comments.highlight.set`) and the chat box
-// (`chat.overlay.set`). Each case calls the production function with the
+// card and the milestone card (`comments.highlight.set`), the Sidekick's
+// bubble (`buddy.overlay.set`) and the chat box (`chat.overlay.set`). Each case calls the production function with the
 // production defaults. The platforms' own marks (YouTube's icon, X's mark and
 // checks) are the bundled files; an avatar or emote is decoded from the bytes
 // the case sends in `images` (by the URL the card reads it for), never
@@ -14,6 +14,7 @@
 
 import type {
   CaptionStyleId,
+  CohostBubbleStyle,
   LiveChatAuthorVerified,
   LiveChatMessage,
   LiveChatMessageFragment,
@@ -56,6 +57,14 @@ export type OverlayGoldenRequest =
       canvasHeight: number
       rect?: OverlayRect
       images?: GoldenImages
+    }
+  | {
+      overlay: 'buddy'
+      text: string
+      style: CohostBubbleStyle
+      canvasWidth: number
+      canvasHeight: number
+      rect: OverlayRect
     }
   | {
       overlay: 'milestone'
@@ -179,6 +188,17 @@ export async function renderOverlayGoldenPng(
         images
       )
       return { pngBase64: cards?.pngBase64 ?? null }
+    }
+    case 'buddy': {
+      const { renderBuddyBubblePng } = await import('@/lib/buddy-overlay')
+      return {
+        pngBase64: await renderBuddyBubblePng({
+          bubble: request.text,
+          style: request.style,
+          canvas: { width: request.canvasWidth, height: request.canvasHeight },
+          rect: request.rect
+        })
+      }
     }
     case 'milestone': {
       const { renderMilestoneCards } = await import('@/lib/caption-overlay')

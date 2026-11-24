@@ -10,6 +10,8 @@ import {
   BUDDY_PET_FIXTURE_NEUTRAL,
   BUDDY_PET_FIXTURE_REACTIONS,
   BUDDY_PET_FIXTURE_SHEET,
+  buddyBubbleBox,
+  buddyBubbleRegion,
   classifyBuddyPetTag,
   buddyPetBodyTravel,
   buddyPetBox,
@@ -203,6 +205,51 @@ describe('buddy pet smoke fixture', () => {
       ]),
       [10, 10, 50, 90]
     )
+  })
+
+  it("finds the bubble's porcelain and nothing else the smoke's canvas shows", () => {
+    const width = 64
+    const height = 40
+    const rgb = Buffer.alloc(width * height * 3)
+    const paint = (x0, y0, x1, y1, colour) => {
+      for (let y = y0; y <= y1; y += 1) {
+        for (let x = x0; x <= x1; x += 1) rgb.set(colour, (y * width + x) * 3)
+      }
+    }
+    paint(0, 0, width - 1, height - 1, [60, 78, 96])
+    // The test pattern's stripe and marker, a saturated tag and the body.
+    paint(2, 0, 8, height - 1, [235, 235, 235])
+    paint(50, 2, 60, 12, [255, 245, 80])
+    paint(50, 20, 60, 30, [255, 255, 170])
+    paint(30, 30, 40, 38, BUDDY_PET_FIXTURE_BODY_RGB)
+    assert.equal(buddyBubbleBox(rgb, width, height, { minPixels: 1 }), null)
+    // An encoded porcelain body with dark ink inside it.
+    paint(12, 4, 41, 19, [248, 249, 250])
+    paint(20, 10, 30, 12, [13, 13, 15])
+    const found = buddyBubbleBox(rgb, width, height, { minPixels: 100 })
+    assert.deepEqual(found.box, [12, 4, 41, 19])
+    assert.equal(found.pixels, 30 * 16 - 11 * 3)
+    assert.equal(buddyBubbleBox(rgb, width, height, { minPixels: 1000 }), null)
+    // RGBA: only opaque pixels count.
+    const rgba = Buffer.alloc(4 * 4 * 4)
+    for (let index = 0; index < 16; index += 1)
+      rgba.set([250, 250, 251, index < 4 ? 255 : 0], index * 4)
+    assert.deepEqual(buddyBubbleBox(rgba, 4, 4, { channels: 4, minPixels: 1 }), {
+      box: [0, 0, 3, 0],
+      pixels: 4
+    })
+  })
+
+  it('looks for the bubble above the pet, inside the canvas', () => {
+    const box = buddyPetBox({ x: 0.7, y: 0.3, w: 0.2, h: 0.62 }, 1280, 720)
+    assert.deepEqual(box, [896, 406, 256, 256])
+    assert.deepEqual(buddyBubbleRegion(box, 1280, 720), { x: 845, y: 150, width: 358, height: 384 })
+    assert.deepEqual(buddyBubbleRegion([1100, 100, 200, 200], 1280, 720), {
+      x: 1060,
+      y: 0,
+      width: 220,
+      height: 200
+    })
   })
 
   it('records at the stream profile on Linux so one encode is not refused', () => {

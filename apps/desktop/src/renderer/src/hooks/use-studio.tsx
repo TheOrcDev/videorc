@@ -903,11 +903,6 @@ async function loadChatOverlayDriver(client: BackendClient): Promise<ChatOverlay
   })
 }
 
-// The Buddy's bubble rasterizer: lazy, never in the eager shell.
-function loadBuddyOverlay() {
-  return import('@/lib/buddy-overlay')
-}
-
 // Plan 210 S10: the follower and the password-manager list it reads load on
 // macOS once the backend is up, never in the eager shell.
 function loadFollowFrontApp() {
@@ -6161,14 +6156,16 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     cloudStatus?.show?.id,
     cloudStatus?.onAir?.thisDevice
   ])
-  // The Buddy on stream (plan 164 S-C2, plan 168 S-B1). The backend owns the
-  // state and the bubble and draws the pet itself from its atlas; this
-  // renderer rasterizes the bubble only, once per output canvas, and pushes
-  // each PNG into the `buddy_overlay` slot (the backend anchors it above the
-  // pet's head), or clears the slot when the bubble ends. A push happens on
-  // every change of bubble, style, placement or canvas, whether or not a
-  // session runs: the slot is app-global. Latest wins: a stale raster never
-  // lands after a newer state.
+  // The Buddy on stream (plan 164 S-C2, plan 168 S-B1, plan 260 S1.2d). The
+  // backend owns the state and the bubble and draws the pet from its atlas
+  // and the bubble from its line; this renderer names, once per output
+  // canvas, the line that is up, the persona's bubble style, the canvas and
+  // the Buddy's rect there (`buddy.overlay.set`, no pixels), and the backend
+  // draws it into the `buddy_overlay` slot (anchored above the pet's head),
+  // or clears the slot when the bubble ends. A push happens on every change
+  // of bubble, style, placement or canvas, whether or not a session runs: the
+  // slot is app-global. Latest wins: the backend draws only the line that is
+  // still up, and this effect stops at a newer state.
   const buddyPersona = cohostSettings?.persona ?? null
   const buddyTargetsKey = useMemo(
     () =>
@@ -6204,25 +6201,23 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       if (bubble === null) {
         await client.requestTyped('buddy.overlay.clear', {})
       } else {
-        const buddy = await loadBuddyOverlay()
         for (const target of targets) {
           if (epoch !== buddyPushEpochRef.current) return
-          const pngBase64 = await buddy.renderBuddyBubblePng({
-            bubble,
-            style,
-            canvas: { width: target.canvasWidth, height: target.canvasHeight },
-            rect: target.rect
-          })
-          if (!pngBase64 || epoch !== buddyPushEpochRef.current) return
           await client.requestTyped('buddy.overlay.set', {
             target: target.target,
-            pngBase64,
+            text: bubble,
+            style,
+            canvasWidth: target.canvasWidth,
+            canvasHeight: target.canvasHeight,
             rect: target.rect
           })
         }
       }
       if (epoch === buddyPushEpochRef.current) buddyPushedKeyRef.current = key
     })().catch((error: unknown) => {
+      // The line ended or was replaced while it was named: the newer state
+      // is already on its way here, so there is nothing to report.
+      if ((error as { code?: unknown } | null)?.code === 'buddy-overlay-stale') return
       console.warn(`Buddy overlay: ${error instanceof Error ? error.message : String(error)}`)
     })
   }, [client, wsStatus, buddyPersona, buddyOverlay, buddyTargetsKey])
