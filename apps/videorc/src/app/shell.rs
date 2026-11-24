@@ -192,6 +192,7 @@ impl Shell {
                 Command::StreamManager => {
                     window.dispatch_action(Box::new(super::menus::ToggleStreamManager), cx)
                 }
+                Command::Notes => window.dispatch_action(Box::new(super::menus::ToggleNotes), cx),
                 _ => {}
             },
         )

@@ -63,6 +63,7 @@ use app::{camera, capture, hotkeys, links, menus, sleep};
 use screens::destinations::DestinationsPanel;
 use screens::go_live::GoLiveDialog;
 use screens::guests::GuestsPanel;
+use screens::notes::frame::NotesFrame;
 use screens::output::OutputPanel;
 use screens::sources::SourcesPanel;
 use screens::stream_manager::frame::StreamManagerFrame;
@@ -320,6 +321,7 @@ fn main() -> Result<()> {
     // The main window's frame, saved in the data directory.
     let main_frame = MainFrame::new(&paths.user_data_dir, logger.clone());
     let stream_manager_frame = StreamManagerFrame::new(&paths.user_data_dir, logger.clone());
+    let notes_frame = NotesFrame::new(&paths.user_data_dir, logger.clone());
     let quit_guard = sleep_guard.clone();
     let quit_permissions = permissions.clone();
     let focus_permissions = permissions.clone();
@@ -548,6 +550,7 @@ fn main() -> Result<()> {
         // The Stream Manager's menu command and keys, and the window when it
         // was open at the last quit.
         screens::stream_manager::window::install(cx, stream_manager_frame, APP_ID);
+        screens::notes::window::install(cx, notes_frame, APP_ID);
         cx.on_action(move |_: &menus::ShowSettings, cx| {
             let _ = main_window.update(cx, |shell, window, cx| {
                 shell.open_settings(None, window, cx)

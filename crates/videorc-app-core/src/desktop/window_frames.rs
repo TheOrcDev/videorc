@@ -156,6 +156,8 @@ pub const MAIN_WINDOW_PREFS_FILE: &str = "main-window.json";
 /// The Stream Manager's file (`commentsWindowPrefsPath`), which holds its
 /// Hide from stream switch.
 pub const COMMENTS_WINDOW_PREFS_FILE: &str = "comments-window.json";
+/// The Notes teleprompter's prefs and document (`notes-window.json`).
+pub const NOTES_WINDOW_PREFS_FILE: &str = "notes-window.json";
 
 /// `previewWindowAutoRestoreEnabled`: smoke and probe runs drive the
 /// windows themselves, so they neither restore nor save (Electron's
