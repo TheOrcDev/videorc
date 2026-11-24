@@ -102,6 +102,12 @@ mod room_frame_bridge;
 // Plan 249 S13b: the processed camera role's native producer.
 mod room_camera_source;
 #[cfg(target_os = "macos")]
+#[allow(
+    dead_code,
+    reason = "plan 260 S1.8b: the presentation publishers (graphics, avatar, scene, HTML layers) read the receipts in its next parts"
+)]
+mod room_capability;
+#[cfg(target_os = "macos")]
 mod room_host;
 #[cfg(target_os = "macos")]
 mod room_overlays;

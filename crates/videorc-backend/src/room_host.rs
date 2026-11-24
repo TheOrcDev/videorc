@@ -271,6 +271,10 @@ async fn hold(
                 // set never overtakes the clear after it); it ends with the
                 // connection, and the backend hands the untimed ones over again
                 // on the next.
+                // Plan 249 S3: what each program page and guest draws, from
+                // their server-relayed receipts; the presentation publishers
+                // read it (S1.8b, next parts).
+                let mut receipts = crate::room_capability::CapabilityReceipts::default();
                 let (overlay_queue, overlay_worker) = overlay_sender(
                     state.clone(),
                     room.local_participant(),
@@ -302,6 +306,19 @@ async fn hold(
                             {
                                 let message = stage.borrow().clone();
                                 publish_stage(&room, message).await;
+                            }
+                            Some(RoomEvent::DataReceived { payload, topic, participant, .. })
+                                if topic.as_deref() == Some(crate::room_capability::CAPABILITY_TOPIC) =>
+                            {
+                                let now = chrono::Utc::now().timestamp_millis();
+                                if let Some(capability) =
+                                    receipts.received(&payload, participant.is_some(), now)
+                                {
+                                    tracing::debug!(
+                                        identity = %capability.identity,
+                                        "A capability receipt reached the backend's room host"
+                                    );
+                                }
                             }
                             Some(RoomEvent::Disconnected { reason }) => break reason,
                             None => break DisconnectReason::UnknownReason,
