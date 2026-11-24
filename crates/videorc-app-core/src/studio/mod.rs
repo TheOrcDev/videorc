@@ -449,6 +449,11 @@ pub struct StudioSnapshot {
     /// S1.6a part 6c: the Output page's Clips section (the switch, the
     /// ring's state, why it waits).
     pub clips: clips_ring::ClipsView,
+    /// S1.6b part 5e: the Scene page's canvas editor is open
+    /// (`sceneEditMode`). The scene editor holds the idle scene reload
+    /// (`shouldReloadSceneFromCaptureConfig`), so an idle screen or camera
+    /// pick made while it is open loads the scene itself.
+    pub scene_edit_mode: bool,
 }
 
 /// What a start did.
@@ -490,6 +495,65 @@ impl Drop for LiveAudioStartInFlight<'_> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .live_audio_start_in_flight = false;
+    }
+}
+
+/// A start's optimistic `starting`, ended when its future is dropped before
+/// the answer or the refusal (a dropped GPUI task, a timeout around the
+/// call). Electron's start promise can't be dropped; here every later
+/// Record or Go Live would be busy for good. Each answered way out clears
+/// `start_pending` first, so this does nothing then. Dropped with the
+/// Studio's lock free.
+struct AbandonStart<'a, B: StudioBackend>(&'a Studio<B>);
+
+impl<B: StudioBackend> Drop for AbandonStart<'_, B> {
+    fn drop(&mut self) {
+        let abandoned = self.0.lock().session.abandon_start();
+        if abandoned {
+            self.0
+                .config
+                .logger
+                .warn("Studio: a start was dropped before its answer; back to Idle.");
+            self.0.publish();
+        }
+    }
+}
+
+/// A stop's `stop_pending`, ended when its future is dropped before
+/// `session.stop` answered: the session would read Stopping for good and
+/// every later stop would answer at once without stopping. The answered
+/// ways out clear it first. Dropped with the Studio's lock free.
+struct AbandonStop<'a, B: StudioBackend>(&'a Studio<B>);
+
+impl<B: StudioBackend> Drop for AbandonStop<'_, B> {
+    fn drop(&mut self) {
+        let abandoned = {
+            let mut inner = self.0.lock();
+            let pending = inner.session.stop_pending();
+            if pending {
+                inner.session.end_stop();
+            }
+            pending
+        };
+        if abandoned {
+            self.0
+                .config
+                .logger
+                .warn("Studio: a stop was dropped before its answer.");
+            self.0.publish();
+        }
+    }
+}
+
+/// A settings batch whose future was dropped before the store answered: the
+/// writes stay in the journal and the retry is scheduled, so they land. The
+/// answered way out forgets it.
+struct FlushDropped<'a, B: StudioBackend>(&'a Studio<B>);
+
+impl<B: StudioBackend> Drop for FlushDropped<'_, B> {
+    fn drop(&mut self) {
+        let mut inner = self.0.lock();
+        self.0.schedule_settings_retry(&mut inner);
     }
 }
 
@@ -563,6 +627,9 @@ struct Inner {
     recordings_folder_facts: Option<(PathBuf, recordings_folder::DirectoryFacts)>,
     /// S1.6a part 6c: the Clips ring's controller, its timer and queue.
     clips: clips_actions::ClipsCore,
+    /// S1.6b part 5e: the Scene page's canvas editor is open
+    /// (`sceneEditMode`).
+    scene_edit_mode: bool,
 }
 
 /// S2.6c: the exclusion list's bookkeeping.
@@ -819,6 +886,7 @@ impl<B: StudioBackend> Studio<B> {
             live_audio_tokens: 0,
             recordings_folder_facts: None,
             clips: clips_actions::ClipsCore::default(),
+            scene_edit_mode: false,
         };
         // Writes a previous run journaled wait in the cache until the
         // snapshot is in; then they are sent.
@@ -1733,7 +1801,7 @@ impl<B: StudioBackend> Studio<B> {
         streaming: Option<StreamingSettings>,
     ) -> StartOutcome {
         let _running = self.start_lock.lock().await;
-        let (params, attempted) = {
+        let (params, attempted, start_sources) = {
             let mut inner = self.lock();
             if !inner.session.begin_start(intent) {
                 return StartOutcome::Busy;
@@ -1780,11 +1848,16 @@ impl<B: StudioBackend> Studio<B> {
                     },
                 ),
                 attempted,
+                // `sessionCaptureConfig.sources`: what the window rebind reads.
+                view.capture_doc["sources"].clone(),
             )
         };
+        // From here every await may be the last one: a dropped start goes
+        // back to Idle.
+        let _abandon = AbandonStart(self);
         self.publish();
         self.post(attempted);
-        let params = match params {
+        let mut params = match params {
             Ok(params) => params,
             Err(message) => return self.refuse_start(message),
         };
@@ -1794,6 +1867,13 @@ impl<B: StudioBackend> Studio<B> {
             Ok(folder) => folder,
             Err(message) => return self.refuse_start(message),
         };
+        // S1.6b part 5e (plan 219 S3): a picked window that is not already
+        // live may have been closed and reopened under a new id. One
+        // window-list read, only then; no match leaves the pick alone (never
+        // a display or another window), and the backend names the refusal.
+        if let Some(window_id) = self.rebind_window_before_start(&start_sources).await {
+            params.sources.window_id = Some(window_id);
+        }
         self.prepare_session_capture(&params.sources, &params.output.video)
             .await;
         // S1.6b part 5d (plan 069): the audio this start sends seeds the
@@ -2106,6 +2186,8 @@ impl<B: StudioBackend> Studio<B> {
                 .latency
                 .take_click_epoch_ms(LatencyKind::Stop, Instant::now(), epoch_ms())
         };
+        // A stop dropped before its answer lets the next one run.
+        let _abandon = AbandonStop(self);
         self.publish();
         // X's broadcasts end before the stream does (S1.6c).
         let params = SessionStopParams {
@@ -2321,7 +2403,13 @@ impl<B: StudioBackend> Studio<B> {
                 }
                 inner.journal.batch(&self.config.writer_id)
             };
-            match self.backend.settings_set(params.clone()).await {
+            // A flush dropped while the store answers leaves the batch
+            // pending: the retry is scheduled, as after a failed send, so it
+            // still lands (Electron's `flush()` always settles).
+            let retry = FlushDropped(self);
+            let answer = self.backend.settings_set(params.clone()).await;
+            std::mem::forget(retry);
+            match answer {
                 Ok(change) => {
                     {
                         let mut inner = self.lock();
@@ -2570,6 +2658,7 @@ impl<B: StudioBackend> Studio<B> {
             takeover_mute_ownership,
             recordings_folder,
             clips,
+            scene_edit_mode: inner.scene_edit_mode,
         }
     }
 }

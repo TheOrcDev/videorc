@@ -18,13 +18,17 @@
 //!   no scene commit waits for its proof (`reconcileWorkingSceneSources`): a
 //!   remembered device by UUID, id or name, a stand-in for one that is gone,
 //!   the first device for a profile that never chose (unless the config
-//!   withholds defaults).
+//!   withholds defaults). For a scene made for an app, what the resolver
+//!   said is the scene's app state (`resolvedAppStates`, part 5e).
+//! - Part 5e: an idle screen or camera pick made while the scene editor is
+//!   open loads the scene (the editor holds the idle reload), and a start
+//!   finds a picked window that was closed and reopened under its new id
+//!   (plan 219 S3, `rebindRememberedWindow`).
 //!
 //! Not here: rooms (plan 249: the room's camera and microphone controls, and
 //! "Use the room screen-share control."), Hide screen (plan 231 D8 moved it
-//! to the scene on stream's Screen field, the scenes section's), the scene
-//! editor's reload after an idle pick, and the bell (a returned pick is
-//! still a toast here, not `publishSourceReturn`).
+//! to the scene on stream's Screen field, the scenes section's), and the bell
+//! (a returned pick is still a toast here, not `publishSourceReturn`).
 
 use std::time::{Duration, Instant};
 
@@ -38,13 +42,15 @@ use super::scene_switch::RESOLVE_APP_WINDOW_METHOD;
 use super::source_selection::{
     ReconcileOptions, SourceKind, build_camera_sources, build_capture_sources,
     build_microphone_sources, camera_picker_devices, capture_picker_devices, merge_source_kind,
-    microphone_picker_devices, reconcile_source_selection, returning_source_choices,
+    microphone_picker_devices, rebind_remembered_window, reconcile_source_selection,
+    returning_source_choices, should_refresh_window_list_before_start,
     source_selection_change_events,
 };
 use super::{Connection, Inner, SettingWrite, Studio, StudioBackend, capture_config, keys};
 use crate::notices::{NoticeAction, NoticeCommand, NoticeLifetime, ToastRequest};
 use crate::scenes::model::{SceneMicrophone, visual_sources, without_scene_app};
 use crate::scenes::v2::shows_from_sources;
+use crate::scenes::window::{AppWindowFailure, SceneAppState};
 use crate::user_error::{self, Failure, UserErrorContext};
 
 /// A live source read's `finally`, on drop. Electron's read promise always
@@ -102,6 +108,42 @@ const SWITCH_THE_MICROPHONE: UserErrorContext = UserErrorContext {
 fn working_sources(inner: &mut Inner) -> Value {
     inner.capture.sync(inner.settings.get(keys::CAPTURE_CONFIG));
     inner.capture.config["sources"].clone()
+}
+
+/// A live switch's send whose future was dropped before the backend
+/// answered (Electron's `send` always settles). Left alone, `sending` stays
+/// set: Check again does nothing and a read never sends the lost request
+/// again. The answer counts as lost (`send_lost`), the send ends, and a
+/// read is due at once to find what the session did. The answered ways out
+/// forget it. Dropped with the Studio's lock free.
+struct SendDropped<'a, B: StudioBackend> {
+    studio: &'a Studio<B>,
+    epoch: u64,
+    generation: u64,
+}
+
+impl<B: StudioBackend> Drop for SendDropped<'_, B> {
+    fn drop(&mut self) {
+        let abandoned = {
+            let mut guard = self.studio.lock();
+            let inner = &mut *guard;
+            let live = &mut inner.live_sources;
+            let current =
+                live.sending && live.epoch == self.epoch && live.send_generation == self.generation;
+            if current {
+                live.send_lost();
+                live.end_send(self.epoch, self.generation);
+                if inner.live_due.is_none() {
+                    inner.live_due = Some((Instant::now(), self.epoch, false));
+                }
+            }
+            current
+        };
+        if abandoned {
+            self.studio.settings_retry.notify_one();
+            self.studio.publish();
+        }
+    }
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -252,10 +294,46 @@ impl<B: StudioBackend> Studio<B> {
             inner.capture.set(next, Some(stored));
         }
         self.publish();
-        match self.flush_settings().await {
+        let saved = match self.flush_settings().await {
             Ok(()) => Ok(()),
             Err(error) if super::settings_write_kept(&error) => Ok(()),
             Err(error) => Err(error.message),
+        };
+        // Part 5e (`switchSourceDeviceLive`): the scene editor holds the idle
+        // reload, so a screen or camera pick made while it is open loads the
+        // scene with the pick (`loadScene`, failures reported).
+        if kind != SourceKind::Microphone && self.lock().scene_edit_mode {
+            self.reload_editor_scene().await;
+        }
+        saved
+    }
+
+    /// The editor's `loadScene(...).catch(reportError)`.
+    async fn reload_editor_scene(&self) {
+        let Err(error) = self.load_scene_from_capture_config().await else {
+            return;
+        };
+        self.config.logger.warn(format!(
+            "Studio: the scene editor's reload after a pick failed: {} ({})",
+            error.message, error.code
+        ));
+        let connected = matches!(self.lock().connection, Connection::Connected { .. });
+        if let Some(command) = user_error::backend_error_toast(&error, connected, SWITCH_THE_SOURCE)
+        {
+            self.post(vec![command]);
+        }
+    }
+
+    /// `setSceneEditMode`: the Scene page's canvas editor opened or closed.
+    pub fn set_scene_edit_mode(&self, on: bool) {
+        let changed = {
+            let mut inner = self.lock();
+            let changed = inner.scene_edit_mode != on;
+            inner.scene_edit_mode = on;
+            changed
+        };
+        if changed {
+            self.publish();
         }
     }
 
@@ -384,10 +462,16 @@ impl<B: StudioBackend> Studio<B> {
         // no meter stream of its own (it reads the backend's levels).
         let generation = self.lock().live_sources.begin_send();
         let params = serde_json::to_value(&request).unwrap_or(Value::Null);
+        let dropped = SendDropped {
+            studio: self,
+            epoch,
+            generation,
+        };
         let answer = self
             .backend
             .sources_request(SOURCE_SWITCH_METHOD, params)
             .await;
+        std::mem::forget(dropped);
         let (accepted, failure, refresh) = {
             let mut inner = self.lock();
             if !inner
@@ -788,13 +872,62 @@ impl<B: StudioBackend> Studio<B> {
         self.select_source_device(kind, Some(device_id)).await
     }
 
+    // --- a reopened window at Record (plan 219 S3) ---
+
+    /// `shouldRefreshWindowListBeforeStart` and `rebindRememberedWindow`, on
+    /// the sources a start was built from (`sessionCaptureConfig.sources`):
+    /// a picked window the screen capture is not already live on gets one
+    /// window-list read. A rebound window lands in the capture config and
+    /// the list in the sources; the answer is its new id. A failed read or
+    /// no match leaves the pick alone, and the backend names the refusal if
+    /// the window is gone.
+    pub(super) async fn rebind_window_before_start(&self, sources: &Value) -> Option<String> {
+        let preview_screen = self.telemetry.borrow().preview_screen.clone();
+        if !should_refresh_window_list_before_start(sources, preview_screen.as_ref()) {
+            return None;
+        }
+        let devices = match self.backend.devices().await {
+            Ok(devices) => devices,
+            Err(error) => {
+                self.config.logger.warn(format!(
+                    "[session-start] window list read before start failed: {} ({})",
+                    error.message, error.code
+                ));
+                return None;
+            }
+        };
+        let (id, name) = rebind_remembered_window(sources, &devices.devices)?;
+        self.lock().sources.set_devices(devices);
+        if let Err(error) = self
+            .update_capture_config(|config| {
+                config["sources"]["windowId"] = json!(id);
+                config["sources"]["windowName"] = json!(name);
+            })
+            .await
+            && !super::settings_write_kept(&error)
+        {
+            // This start still goes to the window under its new id.
+            self.config.logger.warn(format!(
+                "[session-start] the rebound window was not saved: {}",
+                error.message
+            ));
+        }
+        self.config
+            .logger
+            .info(format!("[session-start] the picked window is back as {id}"));
+        Some(id)
+    }
+
     // --- every device list ---
 
     /// `reconcileWorkingSceneSources` on a device list, while nothing runs,
     /// no start is on its way and no scene commit waits for its proof: a
     /// scene made for an app finds its window first (a refusal holds Screen
-    /// None with the scene still on). A running camera that disconnected
-    /// keeps its last frame until it returns.
+    /// None with the scene still on), and what the resolver said is the
+    /// scene on stream's app state (`resolvedAppStates`, plan 210 D1). A
+    /// running camera that disconnected keeps its last frame until it
+    /// returns. A resolver that fails changes nothing, and a newer device
+    /// list drops the answer (its own reconcile runs).
     pub(super) async fn reconcile_working_sources(&self) {
         let disconnected_camera_id = self
             .telemetry
@@ -806,7 +939,7 @@ impl<B: StudioBackend> Studio<B> {
             .and_then(Value::as_str)
             .map(str::to_string);
         let start_in_flight = self.start_in_flight();
-        let (before, app, devices) = {
+        let (before, app, devices, revision) = {
             let mut guard = self.lock();
             let inner = &mut *guard;
             if start_in_flight || !reconcile_allowed(inner) {
@@ -817,6 +950,7 @@ impl<B: StudioBackend> Studio<B> {
                 before,
                 inner.scenes.switch.working_app_ref().cloned(),
                 inner.sources.devices.devices.clone(),
+                inner.sources.devices_revision,
             )
         };
         if devices.is_empty() {
@@ -827,12 +961,15 @@ impl<B: StudioBackend> Studio<B> {
             disconnected_camera_id,
             ..ReconcileOptions::default()
         };
-        let next = match app
+        let (next, app_state) = match app
             .as_ref()
             .and_then(|app| app.get("bundleId"))
             .and_then(Value::as_str)
         {
-            None => reconcile_source_selection(&before, &devices, &options),
+            None => (
+                reconcile_source_selection(&before, &devices, &options),
+                None,
+            ),
             Some(bundle_id) => {
                 let mut params = json!({ "bundleId": bundle_id });
                 if let Some(window) = before.get("windowId").filter(|id| id.is_string()) {
@@ -841,12 +978,12 @@ impl<B: StudioBackend> Studio<B> {
                 // A request that failed (offline, an older backend, a
                 // timeout) changes nothing, as Electron's rejection reaches
                 // only its `.catch`; only `{ ok: false }` holds Screen None.
-                match self
+                let answer = match self
                     .backend
                     .scene_request(RESOLVE_APP_WINDOW_METHOD, params)
                     .await
                 {
-                    Ok(answer) => resolved_app_sources(&before, &devices, &options, answer),
+                    Ok(answer) => answer,
                     Err(error) => {
                         self.config.logger.warn(format!(
                             "[scenes] working window resolution failed ({}): {}",
@@ -854,23 +991,47 @@ impl<B: StudioBackend> Studio<B> {
                         ));
                         return;
                     }
-                }
+                };
+                let app_state = resolved_app_state(&answer);
+                (
+                    resolved_app_sources(&before, &devices, &options, answer),
+                    app_state,
+                )
             }
         };
         let next = without_scene_app(&next);
         let start_in_flight = self.start_in_flight();
-        let changed = {
+        let (changed, app_state_changed) = {
             let mut guard = self.lock();
             let inner = &mut *guard;
-            if start_in_flight || !reconcile_allowed(inner) {
+            // A newer list disposed this reconcile (`disposed`).
+            if start_in_flight
+                || !reconcile_allowed(inner)
+                || inner.sources.devices_revision != revision
+            {
                 return;
             }
+            let same_app = inner.scenes.switch.working_app_ref() == app.as_ref();
+            // Plan 210 D1: the scene list and the start reason say what the
+            // resolver found ("Figma's window is minimized"), not the device
+            // list's guess. The answers clear with each device list
+            // (`sync_scenes`).
+            let mut app_state_changed = false;
+            if let (Some(state), Some(active), true) =
+                (app_state, inner.scenes.on_stream.clone(), same_app)
+            {
+                app_state_changed = inner.scenes.resolved.insert(active, state) != Some(state);
+            }
             let current = working_sources(inner);
-            current == before
-                && inner.scenes.switch.working_app_ref() == app.as_ref()
-                && next != before
+            (
+                current == before && same_app && next != before,
+                app_state_changed,
+            )
         };
         if !changed {
+            if app_state_changed {
+                self.publish();
+            }
             return;
         }
         for event in source_selection_change_events(&before, &next) {
@@ -943,6 +1104,20 @@ pub(super) fn source_switch_reason_of(
         return Some(live_sources::copy::SESSION_STARTING.into());
     }
     inner.live_sources.reason(kind)
+}
+
+/// `reconcileWorkingSceneSources`' `appState`: `ready` with the app's
+/// window, else the resolver's reason (`not-running`, `no-window`,
+/// `minimized`).
+fn resolved_app_state(answer: &Value) -> Option<SceneAppState> {
+    if answer.get("ok") == Some(&Value::Bool(true)) {
+        return Some(SceneAppState::Ready);
+    }
+    answer
+        .get("reason")
+        .and_then(Value::as_str)
+        .and_then(AppWindowFailure::parse)
+        .map(SceneAppState::Failed)
 }
 
 /// The working sources after the app's window resolution
@@ -1043,5 +1218,25 @@ mod tests {
         assert_eq!(refused["captureOff"], true);
         assert!(refused.get("windowId").is_none());
         assert!(refused.get("screenId").is_none());
+    }
+
+    #[test]
+    fn the_resolver_says_the_app_state() {
+        // Part 5e: `reconcileWorkingSceneSources`' `appState`.
+        assert_eq!(
+            resolved_app_state(&json!({"ok": true, "windowId": "window:9", "title": "Keynote"})),
+            Some(SceneAppState::Ready)
+        );
+        for (reason, failure) in [
+            ("not-running", AppWindowFailure::NotRunning),
+            ("no-window", AppWindowFailure::NoWindow),
+            ("minimized", AppWindowFailure::Minimized),
+        ] {
+            assert_eq!(
+                resolved_app_state(&json!({"ok": false, "reason": reason})),
+                Some(SceneAppState::Failed(failure))
+            );
+        }
+        assert_eq!(resolved_app_state(&json!({"ok": false})), None);
     }
 }
