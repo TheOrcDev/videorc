@@ -58,6 +58,11 @@ pub fn camera_format_ceiling(camera_id: &str) -> Option<(u32, u32)> {
 /// false return means a step-down is unavailable or already applied, so no
 /// restart is warranted (restart-for-slowness stays banned).
 pub fn arm_camera_step_down(camera_id: &str) -> bool {
+    // Plan 255 D6, D7: the sender picks the SRT Camera's format; there is no
+    // tier to step down to.
+    if crate::srt_camera::is_srt_camera_id(camera_id) {
+        return false;
+    }
     let mut registry = camera_adaptive_registry()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1589,6 +1594,14 @@ mod tests {
         );
         assert!(!super::arm_camera_step_down(id), "second arm is a no-op");
         super::clear_camera_step_down(id);
+        assert_eq!(super::camera_format_ceiling(id), None);
+    }
+
+    #[test]
+    fn srt_camera_never_arms_the_step_down() {
+        let id = crate::srt_camera::SRT_CAMERA_ID;
+        super::record_negotiated_camera_format(id, 3840, 2160);
+        assert!(!super::arm_camera_step_down(id));
         assert_eq!(super::camera_format_ceiling(id), None);
     }
 }

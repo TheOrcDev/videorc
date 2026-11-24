@@ -114,6 +114,16 @@ mac:
         - BUILD-CONFIG.txt
         - licenses/**/*
         - source-patches/**/*
+    # Plan 255: libsrt for the SRT Camera (MPL-2.0, OpenSSL linked in), built
+    # by scripts/build-libsrt-macos.sh. The backend loads it at run time from
+    # the path main passes in VIDEORC_BUNDLED_LIBSRT_PATH.
+    - from: ../../vendor/libsrt/current
+      to: libsrt
+      filter:
+        - lib/libsrt.dylib
+        - NOTICE.txt
+        - SOURCE.txt
+        - licenses/**/*
   hardenedRuntime: true
   icon: build-resources/icon.icns
   # Plan 214 B2 (Videorc Camera; shape proven by spike P0a on macOS 26, SIP on,

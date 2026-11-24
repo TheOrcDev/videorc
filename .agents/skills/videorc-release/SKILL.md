@@ -252,7 +252,7 @@ number, and normalize every origin endpoint to its host-only form before running
 
 ```sh
 pnpm ffmpeg:status:macos
-pnpm package:backend:macos && pnpm ffmpeg:build:macos \
+pnpm package:backend:macos && pnpm ffmpeg:build:macos && pnpm libsrt:build:macos \
   && pnpm package:preflight:macos \
   && pnpm --filter @videorc/desktop dist:release \
   && pnpm release:manifest:macos \

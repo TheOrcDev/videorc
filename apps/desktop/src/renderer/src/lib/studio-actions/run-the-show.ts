@@ -92,6 +92,7 @@ export const goLive: AgentToolExecutor = async (context, args, intent) => {
     allowPartial: args.allowPartial === true,
     withoutCaptions: args.withoutCaptions === true,
     allowNonPublic: args.allowNonPublic === true,
+    allowNoSignal: args.allowNoSignal === true,
     // Stop agents, Off or Remove while it checks: it never confirms.
     cancelled: intent?.cancelled
   })

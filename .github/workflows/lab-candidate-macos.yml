@@ -102,6 +102,7 @@ jobs:
         run: |
           pnpm package:backend:macos
           pnpm ffmpeg:build:macos
+          pnpm libsrt:build:macos
           pnpm package:preflight:macos
         env:
           # Plan 214 B2: the preflight requires the built extension only when

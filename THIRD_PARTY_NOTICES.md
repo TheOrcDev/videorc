@@ -51,3 +51,22 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## libsrt
+
+The SRT Camera (plan 255) receives SRT with libsrt, the Secure Reliable
+Transport library by Haivision, https://github.com/Haivision/srt.
+
+- Files: the macOS app's `Contents/Resources/libsrt/`, built from the
+  unmodified v1.5.7 source archive by `scripts/build-libsrt-macos.sh`.
+- Licence: Mozilla Public License 2.0, in `licenses/libsrt/LICENSE.txt`;
+  the source archive and its SHA-256 are in `licenses/libsrt/SOURCE.txt`.
+  MPL-2.0 lets a larger work be licensed under the AGPL-3.0 (its Secondary
+  License clause); libsrt's files carry no "Incompatible With Secondary
+  Licenses" notice.
+- libsrt includes code from UDT (Copyright (c) 2001 - 2011, The Board of
+  Trustees of the University of Illinois) under a BSD licence, in
+  `licenses/libsrt/UDT-LICENSE.txt`; the app's `libsrt/licenses/` carries it.
+- The library links OpenSSL 3 (Apache License 2.0) statically for SRT
+  encryption, as the bundled FFmpeg does; the app's `libsrt/licenses/`
+  carries OpenSSL's licence.

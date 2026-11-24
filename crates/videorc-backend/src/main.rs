@@ -38,6 +38,7 @@ mod camera_effect_metal;
 mod camera_fixture;
 mod camera_low_light;
 mod camera_system_effect;
+mod canvas_pace;
 mod captions;
 mod capture_health;
 mod capture_input;
@@ -199,6 +200,7 @@ mod source_iso;
 mod source_mask;
 mod source_registry;
 mod source_status;
+mod srt_camera;
 mod state;
 mod storage;
 mod stream_report;
@@ -710,6 +712,18 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     tokio::spawn(html_overlay::run_html_overlay_targets(state.clone()));
     // Plan 214 D4: Videorc Camera comes back on when it was on.
     virtual_camera_service::start_from_settings(&state).await;
+    // Plan 255: the SRT input setting, and its changes on the event stream.
+    {
+        let events = state.clone();
+        srt_camera::set_change_listener(move |srt_state| {
+            events.emit_event(srt_camera::SRT_INPUT_CHANGED_EVENT, srt_state);
+        });
+        if let Err(error) =
+            srt_camera::load_saved(&state.database, &srt_camera::settings::SecretStoreVault)
+        {
+            tracing::warn!("Could not load the SRT input setting: {error:#}");
+        }
+    }
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/preview/live.mjpeg", get(live_preview_handler))
@@ -6289,6 +6303,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "screen.show"
         | "virtualCamera.set"
         | "virtualCamera.platform.report"
+        | "srtInput.set"
+        | "srtInput.renewPassphrase"
         | "htmlOverlays.host.report"
         | "camera.lowLight.set"
         // Plan 258 S3: the smoke's segmentation stall (debug builds only).
@@ -6602,6 +6618,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "recording.status"
         | "screen.privacy.get"
         | "virtualCamera.status"
+        | "srtInput.get"
         // Issue #1066: reads the camera control; never waits behind a set.
         | "camera.lowLight.get"
         | "watchdog.alerts.list"
@@ -17262,6 +17279,52 @@ async fn handle_text_message_with_role(
                 ),
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 255: the SRT input setting. Its changes and the camera's
+        // status ride `srtInput.changed`.
+        "srtInput.get" => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "srtInput.get does not accept parameters",
+                )
+            } else {
+                ServerResponse::ok(command.id, srt_camera::current_state())
+            }
+        }
+        "srtInput.set" => {
+            match serde_json::from_value::<protocol::SrtInputSetParams>(command.params) {
+                Ok(params) => match srt_camera::apply(
+                    &state.database,
+                    &srt_camera::settings::SecretStoreVault,
+                    &params,
+                ) {
+                    Ok(srt_state) => ServerResponse::ok(command.id, srt_state),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "srt-input-setting", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "srtInput.renewPassphrase" => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "srtInput.renewPassphrase does not accept parameters",
+                )
+            } else {
+                match srt_camera::renew(&state.database, &srt_camera::settings::SecretStoreVault) {
+                    Ok(srt_state) => ServerResponse::ok(command.id, srt_state),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "srt-input-setting", error.to_string())
+                    }
                 }
             }
         }

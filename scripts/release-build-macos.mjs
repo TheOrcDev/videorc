@@ -64,6 +64,7 @@ async function main() {
       ['release:preflight:macos'],
       ['package:backend:macos'],
       ['ffmpeg:build:macos'],
+      ['libsrt:build:macos'],
       ['package:preflight:macos'],
       ['--filter', '@videorc/desktop', 'dist:release'],
       ['release:manifest:macos'],

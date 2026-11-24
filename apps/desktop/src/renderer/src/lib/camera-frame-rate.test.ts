@@ -8,6 +8,7 @@ import {
   sameCameraLowFrameRate,
   type CameraFrameRateWatch
 } from '@/lib/camera-frame-rate'
+import { SRT_CAMERA_ID } from '@/lib/srt-input-view'
 
 // Issue #1066: the C920 delivered ~15 of 30 fps while Sources said Receiving.
 
@@ -49,6 +50,13 @@ describe('cameraExpectedFps', () => {
 describe('nextCameraFrameRateWatch', () => {
   it('says nothing for a camera at its rate', () => {
     expect(feed(IDLE_CAMERA_FRAME_RATE_WATCH, repeat(29.6, 20)).watch.low).toBeNull()
+  })
+
+  // Plan 255 D6: the SRT Camera's sender picks its rate; its status line
+  // gives it.
+  it('says nothing for the SRT Camera, whatever its sender sends', () => {
+    const srt = { cameraId: SRT_CAMERA_ID }
+    expect(feed(IDLE_CAMERA_FRAME_RATE_WATCH, repeat(23.976, 20), 0, srt).watch.low).toBeNull()
   })
 
   it('says so only after the rate stays under 0.8× for 5 s', () => {

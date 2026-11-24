@@ -102,6 +102,7 @@ import type {
   SourceSelection,
   SessionSummary,
   SessionChatTotals,
+  SrtInputState,
   StreamOutputTopologyProbeResult,
   StreamScreen,
   StreamingSettings,
@@ -474,8 +475,12 @@ class StudioBackend {
   screenActivateFailure: 'definite' | null = null
   screenClearFailure: 'request-outcome-unknown-before-commit' | null = null
   sessionStartResponseDelayMs = 0
+  /** Answers these methods after a timer: a caller not awaited inside `act`
+   * then sees React render between its calls, as in the app. */
+  macrotaskMethods = new Set<string>()
   sessionStartCommitsScene = false
   sessionStartError: string | null = null
+  resumeFailuresRemaining = 0
   emitRecordingStatusBeforeStartResponse = false
   authoritativeRecordingStatusBeforeStartResponse: 'stopping' | 'idle' | 'failed' | null = null
   terminalRecordingStatusOnMethod: string | null = null
@@ -548,6 +553,25 @@ class StudioBackend {
     partial: false
   }
   private readonly deferredResponses = new Map<string, DeferredBackendResponse[]>()
+  /** Plan 255: `srtInput.get`, by default a backend off macOS answers. */
+  srtInput: SrtInputState = {
+    supported: false,
+    enabled: false,
+    port: 9000,
+    connection: 'wifi',
+    latencyMs: 120,
+    passphrase: '',
+    cameraId: 'camera:srt-input',
+    cameraName: 'SRT Camera (port 9000)',
+    status: {
+      listening: false,
+      senderConnected: false,
+      senderSession: 0,
+      framesDecoded: 0,
+      signal: 'waiting',
+      detail: ''
+    }
+  }
   deviceList: DeviceList = {
     devices: [
       {
@@ -1682,6 +1706,10 @@ class StudioBackend {
         if (!this.cloudStatus?.show?.resumable) {
           throw new Error('There is no Videorc Cloud show to resume.')
         }
+        if (this.resumeFailuresRemaining > 0) {
+          this.resumeFailuresRemaining -= 1
+          throw new Error('The cloud runner did not answer.')
+        }
         this.recordingState = 'recording'
         this.confirmedSources = { ...(params.sources as SourceSelection) }
         this.cloudStatus = {
@@ -1723,6 +1751,8 @@ class StudioBackend {
             aiArtifactBodies: 0
           }
         }
+      case 'srtInput.get':
+        return this.srtInput
       case 'encoder.preference.get':
         return { preference: 'auto', quickSyncAvailable: false, envOverride: false }
       case 'encoder.preference.set':
@@ -1898,6 +1928,8 @@ class TestWebSocket {
       void deferredResponse.ready.then(() => respond(deferredResponse.payload))
     } else if (responseDelayMs > 0) {
       setTimeout(respond, responseDelayMs)
+    } else if (this.backend.macrotaskMethods.has(command.method)) {
+      setTimeout(respond, 0)
     } else {
       queueMicrotask(respond)
     }
@@ -7029,6 +7061,98 @@ describe('real StudioProvider lifecycle', () => {
     )
     expect(latest().recording.recording.state).toBe('recording')
     expect(toastSpies.error).not.toHaveBeenCalled()
+  })
+
+  // Plan 255 D15 asks before a Go Live, and a resume is none: the show is
+  // already live. A Retry of a failed resume resumes again, with no SRT
+  // Camera signal, and never turns into an ordinary Go Live.
+  it('retries a failed cloud resume as a resume, whatever the SRT Camera signal', async () => {
+    const backend = new StudioBackend()
+    backend.cloudStatus = resumableCloudStatus()
+    backend.resumeFailuresRemaining = 1
+    backend.srtInput = {
+      supported: true,
+      enabled: true,
+      port: 45678,
+      connection: 'wifi',
+      latencyMs: 120,
+      passphrase: 'a'.repeat(32),
+      cameraId: 'camera:srt-input',
+      cameraName: 'SRT Camera (port 45678)',
+      status: {
+        listening: true,
+        senderConnected: false,
+        senderSession: 1,
+        framesDecoded: 0,
+        signal: 'waiting',
+        detail: 'Waiting'
+      }
+    }
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        ...backend.deviceList.devices,
+        {
+          id: 'camera:srt-input',
+          name: 'SRT Camera (port 45678)',
+          kind: 'camera',
+          status: 'available'
+        }
+      ]
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const config = youtubeOauthStreamCaptureConfig()
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...config,
+        sources: {
+          ...config.sources,
+          cameraId: 'camera:srt-input',
+          cameraName: 'SRT Camera (port 45678)'
+        },
+        layout: { ...config.layout, layoutPreset: 'screen-camera' }
+      })
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation => observations.at(-1)!
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    await waitForObservation(() => latest().cloud.cloudStatus?.show?.resumable === true)
+    // The SRT state must be in before the Retry, or no gate could refuse.
+    await waitForObservation(() =>
+      backend.commands.some((command) => command.method === 'srtInput.get')
+    )
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    const resumes = () =>
+      backend.commands.filter((command) => command.method === 'cloud.show.resume').length
+    await act(async () => {
+      await latest().cloud.resumeCloudShow()
+    })
+    expect(resumes()).toBe(1)
+    await act(async () => {
+      latest().core.retrySessionStart()
+    })
+    await waitForObservation(() => resumes() === 2)
+    await waitForObservation(
+      () => latest().recording.recording.sessionId === 'cloud-resume-session'
+    )
+    expect(latest().core.goLiveConfirmationOpen).toBe(false)
+    expect(backend.commands.map((command) => command.method)).not.toContain('session.start')
   })
 
   // Plan 174 S3.1 (D2): main holds a quit or a main-window close while on air
@@ -17674,6 +17798,420 @@ describe('real StudioProvider lifecycle', () => {
     })
     await waitForObservation(() => latest()?.recording.recording.state === 'idle')
   })
+
+  // Plan 255 D15: the confirm and the start await account,
+  // output and window checks before `session.start`. The SRT Camera's hold
+  // can run out during any of them; the start checks the composition it
+  // sends once more and refuses an agent without allowNoSignal, cleaning up
+  // what the confirm prepared. Both ways to start: the confirm, and the
+  // continuation on the ready destinations.
+  it("refuses an agent's go_live when the SRT Camera loses its signal right before the start", async () => {
+    const srt = (signal: SrtInputState['status']['signal']): SrtInputState => ({
+      supported: true,
+      enabled: true,
+      port: 45678,
+      connection: 'wifi',
+      latencyMs: 120,
+      passphrase: 'a'.repeat(32),
+      cameraId: 'camera:srt-input',
+      cameraName: 'SRT Camera (port 45678)',
+      status: {
+        listening: true,
+        senderConnected: signal !== 'waiting',
+        senderSession: 1,
+        framesDecoded: 10,
+        signal,
+        detail: 'x'
+      }
+    })
+    const backend = new StudioBackend()
+    enableYouTubeAndXOauthForTest(backend)
+    backend.confirmationRowsFromStreaming = true
+    backend.srtInput = srt('holding')
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        ...backend.deviceList.devices,
+        {
+          id: 'camera:srt-input',
+          name: 'SRT Camera (port 45678)',
+          kind: 'camera',
+          status: 'available'
+        }
+      ]
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    const srtCameraConfig = (): CaptureConfig => {
+      const config = youtubeAndXOauthStreamCaptureConfig()
+      return {
+        ...config,
+        sources: {
+          ...config.sources,
+          cameraId: 'camera:srt-input',
+          cameraName: 'SRT Camera (port 45678)'
+        },
+        layout: { ...config.layout, layoutPreset: 'screen-camera' }
+      }
+    }
+    await act(async () => {
+      latest()!.core.setCaptureConfig(srtCameraConfig())
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.streamOutputTopologyPreflight.state === 'ready' &&
+        latest()?.core.startBlockedReason === null
+    )
+    // The agents' link listens only once its module has loaded.
+    await act(async () => {
+      await import('@/lib/agent-studio-link')
+    })
+    const pushIntent = async (intentId: string, args: Record<string, unknown>): Promise<void> => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({
+            event: 'agent.intent',
+            payload: { intentId, agentId: 'agent-1', agentName: 'Claude', tool: 'go_live', args }
+          })
+        })
+        await Promise.resolve()
+      })
+    }
+    const ack = (intentId: string) =>
+      backend.sentCommands
+        .filter((command) => command.method === 'agent.intent.ack')
+        .map((command) => command.params as { intentId: string; ok: boolean; message?: string })
+        .find((params) => params.intentId === intentId)
+    const starts = () =>
+      backend.sentCommands.filter((command) => command.method === 'session.start')
+
+    const setSrt = async (state: SrtInputState): Promise<void> => {
+      backend.srtInput = state
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({ event: 'srtInput.changed', payload: state })
+        })
+      })
+    }
+    // The hold runs out while the start's last await before `session.start`
+    // (its account check, after the platform setup) is being answered.
+    // A real backend answers over the socket, after React has rendered.
+    backend.macrotaskMethods.add('platformAccounts.validate')
+    const answer = backend.response.bind(backend)
+    let flipAtTheStart = false
+    backend.response = (command) => {
+      if (command.method === 'streamTargets.youtube.prepare') flipAtTheStart = true
+      if (flipAtTheStart && command.method === 'platformAccounts.validate') {
+        flipAtTheStart = false
+        backend.srtInput = srt('waiting')
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({ event: 'srtInput.changed', payload: backend.srtInput })
+        })
+      }
+      return answer(command)
+    }
+    const completed = () =>
+      backend.sentCommands
+        .filter(
+          (command) =>
+            command.method === 'streamTargets.youtube.transition' &&
+            (command.params as { status?: string }).status === 'complete'
+        )
+        .map((command) => (command.params as { broadcastId?: string }).broadcastId)
+    const refusal = 'The SRT Camera has no signal. Pass allowNoSignal: true to go live anyway.'
+
+    // The confirm: refused at the start, nothing starts, the prepared
+    // YouTube broadcast is cleaned up as any failed start's is.
+    await pushIntent('go-1', { destinations: ['youtube'], title: 'SRT live', allowNonPublic: true })
+    await waitForObservation(() => ack('go-1') !== undefined)
+    expect(ack('go-1')).toMatchObject({ ok: false, message: refusal })
+    expect(starts()).toHaveLength(0)
+    await waitForObservation(() => completed().length === 1)
+    expect(completed()).toEqual(['youtube-broadcast-1'])
+    expect(latest()?.recording.recording.state).toBe('idle')
+
+    // The continuation on the ready destinations: X fails its setup, the
+    // call goes on with YouTube, and the start refuses the same way.
+    await setSrt(srt('holding'))
+    await act(async () => {
+      latest()!.core.setCaptureConfig(srtCameraConfig())
+    })
+    await waitForObservation(() => latest()?.core.startBlockedReason === null)
+    backend.xPrepareFailuresRemaining = 1
+    await pushIntent('go-2', { title: 'SRT live', allowPartial: true, allowNonPublic: true })
+    await waitForObservation(() => ack('go-2') !== undefined)
+    expect(ack('go-2')).toMatchObject({ ok: false, message: refusal })
+    expect(starts()).toHaveLength(0)
+    await waitForObservation(() => completed().length === 2)
+    expect(completed()).toEqual(['youtube-broadcast-1', 'youtube-broadcast-2'])
+
+    // With allowNoSignal the same start goes ahead.
+    await setSrt(srt('holding'))
+    await pushIntent('go-3', {
+      destinations: ['youtube'],
+      title: 'SRT live',
+      allowNonPublic: true,
+      allowNoSignal: true
+    })
+    await waitForObservation(() => ack('go-3') !== undefined)
+    expect(ack('go-3')).toMatchObject({ ok: true })
+    expect(starts()).toHaveLength(1)
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+  })
+
+  // Plan 255 D15, the dialog: it asked before platform setup, and the hold
+  // can run out since. Without "Go live anyway" the start refuses, cleans
+  // up, and Go Live opens again to ask.
+  it('opens Go Live again when the SRT Camera loses its signal right before the start', async () => {
+    const srt = (signal: SrtInputState['status']['signal']): SrtInputState => ({
+      supported: true,
+      enabled: true,
+      port: 45678,
+      connection: 'wifi',
+      latencyMs: 120,
+      passphrase: 'a'.repeat(32),
+      cameraId: 'camera:srt-input',
+      cameraName: 'SRT Camera (port 45678)',
+      status: {
+        listening: true,
+        senderConnected: signal !== 'waiting',
+        senderSession: 1,
+        framesDecoded: 10,
+        signal,
+        detail: 'x'
+      }
+    })
+    const backend = new StudioBackend()
+    enableYouTubeAndXOauthForTest(backend)
+    backend.confirmationRowsFromStreaming = true
+    backend.srtInput = srt('holding')
+    backend.deviceList = {
+      ...backend.deviceList,
+      devices: [
+        ...backend.deviceList.devices,
+        {
+          id: 'camera:srt-input',
+          name: 'SRT Camera (port 45678)',
+          kind: 'camera',
+          status: 'available'
+        }
+      ]
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    const srtCameraConfig = (): CaptureConfig => {
+      const config = youtubeAndXOauthStreamCaptureConfig()
+      return {
+        ...config,
+        sources: {
+          ...config.sources,
+          cameraId: 'camera:srt-input',
+          cameraName: 'SRT Camera (port 45678)'
+        },
+        layout: { ...config.layout, layoutPreset: 'screen-camera' }
+      }
+    }
+    await act(async () => {
+      latest()!.core.setCaptureConfig(srtCameraConfig())
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.streamOutputTopologyPreflight.state === 'ready' &&
+        latest()?.core.startBlockedReason === null
+    )
+    const starts = () =>
+      backend.sentCommands.filter((command) => command.method === 'session.start')
+
+    const setSrt = async (state: SrtInputState): Promise<void> => {
+      backend.srtInput = state
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({ event: 'srtInput.changed', payload: state })
+        })
+      })
+    }
+    // A real backend answers over the socket, after React has rendered.
+    backend.macrotaskMethods.add('platformAccounts.validate')
+    const answer = backend.response.bind(backend)
+    let flipAtTheStart = false
+    const signalAtStart: string[] = []
+    backend.response = (command) => {
+      if (command.method === 'session.start') signalAtStart.push(backend.srtInput.status.signal)
+      if (command.method === 'streamTargets.youtube.prepare') flipAtTheStart = true
+      if (flipAtTheStart && command.method === 'platformAccounts.validate') {
+        flipAtTheStart = false
+        backend.srtInput = srt('waiting')
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({ event: 'srtInput.changed', payload: backend.srtInput })
+        })
+      }
+      return answer(command)
+    }
+    const completed = () =>
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      ).length
+    const openGoLive = async (): Promise<void> => {
+      await act(async () => {
+        await latest()!.core.startSession()
+      })
+      await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    }
+
+    // Not awaited inside `act`: React renders while the start runs, as it
+    // does in the app, so the reopen meets the start still pending.
+    await openGoLive()
+    await act(async () => {
+      void latest()!.core.confirmGoLive(false)
+    })
+    await waitForObservation(() => completed() === 1)
+    await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    expect(starts()).toHaveLength(0)
+    expect(latest()?.recording.recording.state).toBe('idle')
+
+    // Cancelled while the confirm loads the gate: nothing starts.
+    await act(async () => {
+      void latest()!.core.confirmGoLive(true)
+      latest()!.core.cancelGoLiveConfirmation()
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(starts()).toHaveLength(0)
+    expect(latest()?.core.goLiveConfirmationOpen).toBe(false)
+    await openGoLive()
+
+    // "Go live anyway" in the dialog: the same start goes ahead.
+    await setSrt(srt('holding'))
+    await act(async () => {
+      await latest()!.core.confirmGoLive(true)
+    })
+    await waitForObservation(() => starts().length === 1)
+    expect(signalAtStart).toEqual(['waiting'])
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+
+    // A Retry is the streamer's own start: a signal lost after a failed
+    // start asks again, even after "Go live anyway".
+    const flipping = backend.response
+    backend.response = answer
+    await setSrt(srt('holding'))
+    backend.sessionStartError = 'The encoder rejected this start.'
+    await openGoLive()
+    await act(async () => {
+      await latest()!.core.confirmGoLive(true)
+    })
+    expect(starts()).toHaveLength(2)
+    await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === false)
+    backend.sessionStartError = null
+    await setSrt(srt('waiting'))
+    await act(async () => {
+      latest()!.core.retrySessionStart()
+    })
+    await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    expect(starts()).toHaveLength(2)
+
+    // "Go live on {ready}" gets the same check: X fails its setup, the
+    // signal goes meanwhile, and the start on YouTube asks again.
+    await setSrt(srt('holding'))
+    backend.response = flipping
+    backend.xPrepareFailuresRemaining = 1
+    await act(async () => {
+      await latest()!.core.confirmGoLive(false)
+    })
+    await waitForObservation(() => latest()?.core.goLivePartialSetup !== null)
+    await act(async () => {
+      void latest()!.core.continueGoLiveWithReadyDestinations(false)
+    })
+    await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    expect(starts()).toHaveLength(2)
+    // The reopen is the same attempt: X stays left out, in the list and in
+    // the preflight it runs.
+    const leftOut = latest()!.core.goLiveExcludedTargetIds
+    expect(leftOut).toHaveLength(1)
+    const reopenCheck = backend.sentCommands
+      .filter((command) => command.method === 'streamTargets.confirmation.validate')
+      .at(-1)?.params as { streaming: StreamingSettings }
+    // The failed setup already saved X's flag off; only the exclusion drops
+    // it from the list the backend preflight also reads.
+    expect(reopenCheck.streaming.enabledTargetIds).not.toContain(leftOut[0])
+
+    // A recording never asks (D15): its Retry records, with no signal.
+    await act(async () => {
+      latest()!.core.cancelGoLiveConfirmation()
+    })
+    await setSrt(srt('waiting'))
+    backend.response = answer
+    backend.sessionStartError = 'The encoder rejected this start.'
+    await act(async () => {
+      latest()!.core.setCaptureConfig({
+        ...srtCameraConfig(),
+        streamEnabled: false,
+        recordEnabled: true
+      })
+    })
+    await waitForObservation(() => latest()?.core.startBlockedReason === null)
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+    expect(starts()).toHaveLength(3)
+    backend.sessionStartError = null
+    await act(async () => {
+      latest()!.core.retrySessionStart()
+    })
+    await waitForObservation(() => starts().length === 4)
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    expect(latest()?.core.goLiveConfirmationOpen).toBe(false)
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+  }, 20_000)
 
   it('retains cancelled partial-setup cleanup and retries it before preparing again', async () => {
     const backend = new StudioBackend()

@@ -125,7 +125,7 @@ path, load release secrets, set `APPLE_TEAM_ID=C2PA37RB58`, set the exact Beta
 number, and normalize every origin endpoint to its host-only form before running:
 
 ```sh
-pnpm package:backend:macos && pnpm ffmpeg:build:macos \
+pnpm package:backend:macos && pnpm ffmpeg:build:macos && pnpm libsrt:build:macos \
   && pnpm package:preflight:macos \
   && pnpm --filter @videorc/desktop dist:release \
   && pnpm release:manifest:macos \

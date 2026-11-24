@@ -478,6 +478,8 @@ const TOAST_SITES: Record<string, number> = {
   'src/hooks/use-studio.tsx > applySavedSceneResult': 8,
   'src/hooks/use-studio.tsx > applySceneInRoom': 2,
   'src/hooks/use-studio.tsx > applyVideoPreset': 1,
+  // The answer to Go live: the start refused, and the dialog opens again.
+  'src/hooks/use-studio.tsx > askAgainAfterSrtRefusal': 1,
   'src/hooks/use-studio.tsx > authorizeXLive': 2,
   'src/hooks/use-studio.tsx > beginRemoteLanPairing': 1,
   'src/hooks/use-studio.tsx > clearActiveScreen': 3,

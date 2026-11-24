@@ -1328,6 +1328,32 @@ mod tests {
         }
     }
 
+    /// Plan 255: the SRT Camera's frames and stills take the same stage.
+    #[test]
+    fn invariant_1_holds_for_the_srt_camera() {
+        let mut harness = Harness::new();
+        let raw = || vec![RAW; (W * H * 4) as usize];
+        assert!(
+            super::super::publish_srt_frame(&harness.shared, W, H, raw(), None),
+            "Off stores the frame at once"
+        );
+        harness.apply(CameraBackgroundMode::Blur);
+        for frame in 0..10 {
+            // The stage stores it later: no frame news for the canvas pacer.
+            assert!(!super::super::publish_srt_frame(
+                &harness.shared,
+                W,
+                H,
+                raw(),
+                None
+            ));
+            harness.assert_never_raw(&format!("SRT frame {frame}"));
+            harness.segment();
+            harness.assert_never_raw(&format!("SRT seg {frame}"));
+        }
+        assert_eq!(harness.latest_tag(), Some(PROCESSED));
+    }
+
     #[test]
     fn a_healthy_segmenter_publishes_every_frame_processed_with_its_own_matte() {
         let mut harness = Harness::new();

@@ -264,6 +264,19 @@
   - Open, for the owner: stream keys pass through videorc.com and LiveKit
     (D7), the cost per hour against the plans' allowances (D19, private),
     and 1080p60 (D12). The node path stays in the code (D2).
+- 2026-11-13: [Plan 255](255-srt-camera.md), the ask: take an SRT
+  stream as a camera, "minimal on the Videorc side", with no knowledge of the
+  sender. DECIDED 2026-11-13 (D1–D18); S1 to S8 BUILT 2026-11-14 (libsrt
+  1.5.7 loaded at run time); checked with a real 4K HEVC sender 2026-11-18:
+  - A Beta "SRT input" setting (port, generated passphrase, Connection
+    picker) adds **SRT Camera (port N)** to the camera list. Videorc listens
+    only while a scene uses it.
+  - HEVC (incl. Main 10) and H.264 with VideoToolbox, video only, one sender
+    at a time, a calm waiting still, a 2 s hold on drops, a Go live ask with
+    no signal. macOS first.
+  - Lip sync stays with the existing microphone sync offset.
+  - D18: it heals by itself. A redial from the sender's own address gets in
+    at once; the listener reopens within 2 s; a busy camera answers 1402.
 - 2026-11-13: [Plan 233](233-green-screen-without-edge-snow.md), the owner's
   stream on 0.22.1: green "snow" still crawls along the head, ears, hair and
   shoulders, in a new place every frame. EXECUTING 2026-11-13 with the

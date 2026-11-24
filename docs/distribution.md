@@ -35,11 +35,12 @@ Build the default Electron Builder distribution target:
 pnpm dist:desktop
 ```
 
-Both commands first run the backend/helper release build and stage the macOS FFmpeg bundle:
+Both commands first run the backend/helper release build and stage the macOS FFmpeg bundle and libsrt:
 
 ```sh
 cargo build --release -p videorc-backend --bin videorc-backend --bin native_preview_host_helper
 pnpm ffmpeg:build:macos
+pnpm libsrt:build:macos
 pnpm package:preflight:macos
 ```
 

@@ -309,6 +309,15 @@ Output → Camera for other apps is its one home (a switch, off by default);
 " Windows Virtual Camera" to the name on its own. Plan 214.
 _Avoid_: virtual cam, vcam, webcam, virtual camera (in copy)
 
+**SRT Camera**:
+A camera made from an SRT stream another app or device sends to this
+computer, named "SRT Camera (port 9000)" in the camera list. Settings →
+General → SRT input (Beta, macOS) is the switch that adds it; its port,
+passphrase and Connection sit on the Camera row in Sources while it is the
+picked camera, as Sources is the home of every camera. Videorc only listens,
+and only while a scene uses the camera. Plan 255.
+_Avoid_: network camera, IP camera, SRT source
+
 ### Destinations and accounts
 
 **Destinations** (the page):
