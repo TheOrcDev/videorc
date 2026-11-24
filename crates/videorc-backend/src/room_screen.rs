@@ -1,9 +1,10 @@
 //! Plan 260 S1.8c c3: the host's screen in the backend's room, behind Hide
 //! screen, on the renderer room's wire contract (plan 249 S2, S14).
 //!
-//! The room shares the scene's own screen or window (`cloud.room.screen.set`
-//! names its native source id): the preview screen's frames while it runs
-//! that source. Every privacy change and every new source is a fresh
+//! The room shares the screen or window `cloud.room.screen.set` names by its
+//! native source id: the preview screen's frames while it runs that source
+//! (the scene's own), else the room's own capture of it (c4b, one the host
+//! picked on the stage), whose store holds the same Hide screen gate. Every privacy change and every new source is a fresh
 //! publication named `vrc-privacy:<epoch>:<generation>:<hidden>`, announced
 //! first on the privacy topic so receivers drop cached pictures. While hidden
 //! the track carries neutral grey frames (`#808080`) and the screen is never
@@ -269,6 +270,10 @@ pub(crate) async fn run_screen(
     let mut paused_ask: Option<u64> = None;
     let mut last_size: Option<(u32, u32)> = None;
     let mut last_frame: Option<(u64, u64)> = None;
+    // c4b: the room's own capture of a source the preview does not run, and
+    // a start that failed (not retried until the Studio asks again).
+    let mut own_capture: Option<(String, crate::preview_screen::RoomScreenCapture)> = None;
+    let mut capture_failed: Option<(String, u64, String)> = None;
     let mut pulse = tokio::time::interval(Duration::from_secs_f64(1.0 / SCREEN_FPS));
     pulse.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -339,6 +344,8 @@ pub(crate) async fn run_screen(
         let (wanted, ask) = screen();
         let Some(wanted) = wanted.filter(RoomScreenSettings::valid) else {
             unpublish(&room, &mut current).await;
+            own_capture = None;
+            capture_failed = None;
             paused_ask = None;
             if status.take().is_some() {
                 report(&state, &show_id, None);
@@ -351,16 +358,54 @@ pub(crate) async fn run_screen(
         }
         paused_ask = None;
         let view = state.screen_privacy.view();
-        let frame_source = crate::preview_screen::preview_screen_frame_source(&state).await;
-        let runs_it = frame_source
+        let preview = crate::preview_screen::preview_screen_frame_source(&state).await;
+        let preview_runs_it = preview
             .as_ref()
             .and_then(|source| source.source_key())
             .is_some_and(|key| key.id == wanted.source_id);
-        if !runs_it {
-            drop(frame_source);
-            // Only the scene's own screen (the one the preview runs) is shared.
+        // c4b: a screen or window the preview does not run (one the host
+        // picked on the stage) gets the room's own capture.
+        if preview_runs_it {
+            own_capture = None;
+            capture_failed = None;
+        } else if own_capture
+            .as_ref()
+            .is_none_or(|(source_id, _)| *source_id != wanted.source_id)
+        {
+            own_capture = None;
+            let tried = capture_failed
+                .as_ref()
+                .is_some_and(|(source_id, failed_ask, _)| {
+                    *source_id == wanted.source_id && *failed_ask == ask
+                });
+            if !tried {
+                match crate::preview_screen::RoomScreenCapture::start(&state, &wanted.source_id)
+                    .await
+                {
+                    Ok(capture) => {
+                        own_capture = Some((wanted.source_id.clone(), capture));
+                        capture_failed = None;
+                    }
+                    Err(message) => {
+                        tracing::warn!("The room's own screen capture did not start: {message}");
+                        capture_failed = Some((wanted.source_id.clone(), ask, message));
+                    }
+                }
+            }
+        }
+        let frame_source = if preview_runs_it {
+            preview.as_ref()
+        } else {
+            own_capture
+                .as_ref()
+                .map(|(_, capture)| capture.frame_source())
+        };
+        if frame_source.is_none() {
             unpublish(&room, &mut current).await;
-            let reason = "The room shares the scene's own screen; it is not running.".to_string();
+            let reason = capture_failed
+                .as_ref()
+                .map(|(_, _, message)| message.clone())
+                .unwrap_or_else(|| "The room's screen did not start.".to_string());
             if status.as_ref().is_none_or(|screen| {
                 screen.published || screen.reason.as_deref() != Some(reason.as_str())
             }) {
@@ -388,7 +433,7 @@ pub(crate) async fn run_screen(
         let taken = if view.hidden {
             None
         } else {
-            frame_source.as_ref().and_then(|source| {
+            frame_source.and_then(|source| {
                 let generation = source.generation();
                 let frame = source.latest_frame_blocking()?;
                 let key = (generation, frame.sequence);
@@ -408,7 +453,6 @@ pub(crate) async fn run_screen(
                 Some((key, bytes, frame.width, frame.height))
             })
         };
-        drop(frame_source);
         // A fresh publication for a new source, a hide or a show.
         let key = (wanted.source_id.clone(), view.hidden, view.span);
         if current
