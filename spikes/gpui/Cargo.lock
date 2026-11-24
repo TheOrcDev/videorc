@@ -5198,6 +5198,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "spike-chrome"
+version = "0.1.0"
+dependencies = [
+ "gpui-pre",
+ "gpui-pre-platform",
+ "image",
+ "objc2 0.6.5",
+ "raw-window-handle",
+ "resvg",
+ "smallvec",
+]
+
+[[package]]
 name = "spike-desktop"
 version = "0.1.0"
 dependencies = [

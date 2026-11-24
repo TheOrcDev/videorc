@@ -20,13 +20,13 @@ merged into `main`, and nothing in the shipping app depends on it.
 | [`spike-desktop/`](spike-desktop/) | Desktop integration: menus, the title bar over a custom header, a global shortcut, a deep link on a cold start, one instance, keep on top, hide from capture, the sleep guard, notifications, files. macOS complete; Windows and Linux report each OS call as a gap until WC-0.9 and L5 fill in `src/os.rs` | macOS (all rows); Windows and Linux (window, menus, shortcut, links, one instance, files) | Plan 260 S0.7, WC-0.9 |
 | [`spike-text/`](spike-text/) | Text: an IME-capable input (GPUI's own example), colour emoji and script fallback, tabular numbers, a selectable paragraph, and a 10,000-row chat with animated WebP emotes, with a scroll test, memory and first paint | macOS (all, IME by its `NSTextInputClient` calls); Windows and Linux (all but `--simulate-ime`: type with the real IME) | Plan 260 S0.5, WC-0.7 |
 | [`spike-a11y/`](spike-a11y/) | Accessibility: a Record button, a list and a modal dialog with roles and names through AccessKit, GPUI's own tree dump, and a headless test that clicks Record | All three (read it with VoiceOver, Narrator or Orca) | Plan 260 S0.6, WC-0.8 |
+| [`spike-chrome/`](spike-chrome/) | The look: Liquid Chrome drawn by GPUI (every Button variant, Record idle and lit, Go Live, Switch, Slider, the sidebar and toolbar), in dark, light and Increase Contrast, for shots judged by eye against Electron. Its README lists the shots and has the macOS ones | All three (shots on macOS and Windows; Linux from L5) | Plan 260 S0.4, WC-0.6 |
 | [`spike-linux-preview/`](spike-linux-preview/) | The Linux preview under GPUI's wgpu window: the backend's shared-memory ring shown by a Wayland subsurface **below** GPUI's surface, or an X11 child window (with GPUI's overlay in a second override-redirect window), or route (d) as a GPUI image; GPUI's selection, handles, pill and popup drawn over the video | Linux (Wayland, X11) | Plan 260 S0.3 |
 | [`spike-summary/`](spike-summary/) | The shared arguments, `summary.json` and `[spike] error` lines | All | — |
 
 Spikes still to come, by the slice that adds them: `spike-hello`
 (WC-0.1), the Windows native view and its patch (WC-0.2), the shared
-texture (WC-0.3), CPU frames (WC-0.4), `spike-preview-windows` (WC-0.5),
-`spike-chrome` (S0.4, WC-0.6).
+texture (WC-0.3), CPU frames (WC-0.4), `spike-preview-windows` (WC-0.5).
 
 ## Build and run
 
