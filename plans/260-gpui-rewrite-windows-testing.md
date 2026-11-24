@@ -399,6 +399,37 @@ Spike `spike-desktop`. Each item: **Expected** as written, verdict each.
 | 8 | A system notification | A Windows notification appears with the spike's name |
 | 9 | Files | The open dialog, "Show in folder" and drag-and-drop of a file onto the window all work |
 
+### S0.8: spike-room build
+
+Plan 260 S0.8 measured LiveKit's Rust SDK as the talk-show host on a Mac
+(spike `spike-room`; the results are in its pull request,
+[#1742](https://github.com/TheOrcDev/videorc/pull/1742)). The Mac cannot
+cross-build it for Windows, so this check is one native build on your PC.
+It needs no camera, microphone or room: only the build.
+
+1. Get the spike and build it twice, with and without the LiveKit SDK (the
+   first build downloads a 109 MB WebRTC library and takes several minutes):
+
+   ```powershell
+   cd videorc
+   git fetch origin
+   git switch spikes/gpui
+   git pull
+   cd spikes\gpui\spike-room
+   Measure-Command { cargo build --release } | Select-Object TotalMinutes
+   (Get-Item target\release\spike-room.exe).Length / 1MB
+   cargo build --release --no-default-features
+   (Get-Item target\release\spike-room.exe).Length / 1MB
+   ```
+
+**Expected:** both builds finish without an error; the first size is tens
+of megabytes larger than the second.
+
+**Send:** the build minutes, both sizes in MB (the first is with the SDK,
+the second without), and your machine table. If a build fails, send the
+last 50 lines of its output (`cargo build --release 2>&1 | Select-Object
+-Last 50`).
+
 ### S0.9: build and start-up
 
 From the S0.2a build: the clean build minutes and target size. Then start
