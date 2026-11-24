@@ -1,7 +1,7 @@
 //! `library-view.test.ts`, `session-finalization.test.ts` and
 //! `separate-source-recordings-view.test.ts`'s cases.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 use videorc_protocol::repair::GateStatus;
@@ -10,6 +10,8 @@ use videorc_protocol::{
     SessionListItem, SessionLogEntry,
 };
 
+use super::markers::{MarkersState, SessionMarker};
+use super::page::*;
 use super::view::*;
 
 fn session(overrides: Value) -> SessionListItem {
@@ -550,4 +552,190 @@ fn cloud_modes_mov_imports_and_upper_case_mkv() {
     assert_eq!(session_format_label(&mov).as_deref(), Some("MOV"));
     let mkv = session(json!({"mode": "imported", "outputPath": "/m/Take.MKV"}));
     assert!(can_export_mp4(&mkv));
+}
+
+// ── The page as one value ───────────────────────────────────────────────
+
+/// The Studio idle and connected: the pill reads Ready.
+struct IdleStudio(RecordingStatus);
+
+impl LibrarySession for IdleStudio {
+    fn status(&self) -> &RecordingStatus {
+        &self.0
+    }
+    fn status_pill(&self) -> (&'static str, StatusTone) {
+        ("Ready", StatusTone::Good)
+    }
+}
+
+/// No Clean cut job runs and no recording is eligible.
+struct NoCleanCut;
+
+impl CleanCutRules for NoCleanCut {
+    fn is_active(&self, _job: &videorc_protocol::CleanCutJob) -> bool {
+        false
+    }
+    fn is_eligible(&self, _session: &SessionListItem) -> bool {
+        false
+    }
+    fn status_label(
+        &self,
+        _job: &videorc_protocol::CleanCutJob,
+        _capture: CleanCutCapture,
+    ) -> String {
+        String::new()
+    }
+}
+
+#[test]
+fn the_page_view_reads_rows_menus_and_the_questions() {
+    let sessions = vec![
+        session(
+            json!({"id": "a", "title": "Alpha", "startedAt": "2026-11-01T10:00:00Z",
+            "mp4Path": "/a.mp4", "durationMs": 3000, "fileSizeBytes": 269312, "sceneLabel": "Screen only"}),
+        ),
+        session(
+            json!({"id": "b", "title": "Beta", "startedAt": "2026-11-02T10:00:00Z",
+            "outputPath": "/b.mkv", "finalizationState": "failed", "finalizationError": "ffmpeg died",
+            "commentCount": 3}),
+        ),
+    ];
+    let logs = BTreeMap::new();
+    let mut ui = LibraryUi::default();
+    ui.selection.selected = strings(&["a"]);
+    ui.delete = Some(DeleteState {
+        ids: strings(&["a", "b"]),
+        titles: strings(&["Alpha", "Beta"]),
+        pending: false,
+    });
+    let session_view = IdleStudio(status(RecordingState::Idle, None));
+    let input = ViewInput {
+        data: DataFacts {
+            sessions: &sessions,
+            has_more: false,
+            loading_more: false,
+            loaded: true,
+            online: true,
+            totals: Some((2, 269312)),
+            logs: &logs,
+        },
+        session: &session_view,
+        clean_cut: &NoCleanCut,
+        ui: &ui,
+        free_bytes: None,
+        now: chrono::Utc::now(),
+        clean_cuts: &[],
+    };
+    let page = library_view(&input);
+    assert_eq!(page.list_state, ListState::Rows);
+    assert_eq!(page.footer.as_deref(), Some("2 recordings · 263 KB"));
+    // Newest first: Beta, then Alpha.
+    assert_eq!(page.rows[0].id, "b");
+    assert!(page.rows[0].active);
+    let beta = &page.rows[0];
+    assert_eq!(
+        beta.file,
+        FileCell::Problem {
+            label: "MP4 failed".into(),
+            detail: "ffmpeg died".into()
+        }
+    );
+    let labels: Vec<&str> = beta.menu.iter().map(|item| item.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Play",
+            "Markers",
+            "Show in Finder",
+            "Retry MP4 export",
+            "Open in Stream Manager",
+            "Rename…",
+            "Duplicate",
+            "Check quality",
+            "Delete"
+        ]
+    );
+    let alpha = &page.rows[1];
+    assert!(alpha.selected);
+    assert_eq!(alpha.size, "263 KB");
+    assert_eq!(alpha.duration, "0:03");
+    assert_eq!(alpha.file, FileCell::Format("MP4".into()));
+    assert_eq!(alpha.scene.as_ref().unwrap().text, "Screen only");
+    assert_eq!(
+        alpha.poster,
+        PosterView::Picture {
+            version: Some(3000)
+        }
+    );
+    assert!(
+        alpha
+            .menu
+            .iter()
+            .find(|i| i.id == MenuId::StreamManager)
+            .unwrap()
+            .disabled
+    );
+    assert_eq!(page.selected_count, 1);
+    assert_eq!(page.select_all, SelectAllState::Some);
+    let delete = page.delete.unwrap();
+    assert_eq!(delete.title, "Move 2 recordings to the Trash?");
+    assert_eq!(delete.names, ["Alpha", "Beta"]);
+    assert_eq!(delete.confirm_label, "Move to Trash");
+}
+
+#[test]
+fn the_markers_dialog_hides_a_delete_until_its_toast_closes() {
+    let recording = session(json!({"id": "s1", "title": "Show", "mp4Path": "/s.mp4"}));
+    let mut state = MarkersState::open(&recording);
+    let generation = state.begin_load();
+    let marker = |id: &str, label: Option<&str>| SessionMarker {
+        id: id.into(),
+        session_id: "s1".into(),
+        at_seconds: 65.0,
+        label: label.map(str::to_string),
+        source: "voice".into(),
+        created_at: String::new(),
+        revision: 1,
+    };
+    state.loaded(
+        generation,
+        false,
+        vec![marker("m1", Some("Intro")), marker("m2", None)],
+        None,
+    );
+    let view = state.view(
+        std::slice::from_ref(&recording),
+        &status(RecordingState::Idle, None),
+        true,
+    );
+    assert_eq!(view.title, "Markers · Show");
+    assert_eq!(view.line, None);
+    assert_eq!(view.rows[0].time, "1:05");
+    assert_eq!(view.rows[0].context, "Voice");
+    assert_eq!(view.rows[1].name, "Untitled marker");
+    assert_eq!(view.rows[1].rename_label, "Rename marker");
+    assert!(state.hide("m1").is_some());
+    assert!(state.hide("m1").is_none());
+    // A reload while the Undo waits keeps it hidden.
+    let generation = state.begin_load();
+    state.loaded(
+        generation,
+        false,
+        vec![marker("m1", Some("Intro")), marker("m2", None)],
+        None,
+    );
+    assert_eq!(state.markers.len(), 1);
+    // A stale load is dropped.
+    state.loaded(generation - 1, false, Vec::new(), None);
+    assert_eq!(state.markers.len(), 1);
+    let none = session(json!({"id": "s1", "title": "Show"}));
+    let view = state.view(
+        std::slice::from_ref(&none),
+        &status(RecordingState::Idle, None),
+        true,
+    );
+    assert_eq!(
+        view.line,
+        Some("This recording has no video file. Its marker times are still saved.")
+    );
 }

@@ -20,7 +20,7 @@ pub use crate::format::{NO_VALUE, day_label, duration_ms_label, format_bytes, pl
 
 /// `isActiveRecordingState` (`shared/capture-state.ts`): a capture starts,
 /// runs or stops.
-fn is_active_state(state: &RecordingState) -> bool {
+pub fn is_active_recording_state(state: &RecordingState) -> bool {
     matches!(
         state,
         RecordingState::Starting
@@ -195,7 +195,7 @@ pub fn session_format_label(session: &SessionListItem) -> Option<String> {
 pub fn is_live_session(session: &SessionListItem, recording: &RecordingStatus) -> bool {
     session.status == "running"
         && recording.session_id.as_deref() == Some(session.id.as_str())
-        && is_active_state(&recording.state)
+        && is_active_recording_state(&recording.state)
 }
 
 /// `sessionPosterUrl`'s path and query on the backend's loopback server:
