@@ -596,6 +596,9 @@ pub(crate) fn on_sounds_changed(state: &AppState) -> Result<SoundboardState> {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let board = state.database.soundboard_state()?;
+    // The backend's monitor follows the switch, the board level and every
+    // sound's level and trim (plan 260 S1.3b).
+    state.soundboard.board_changed(&board);
     state.emit_event(SOUNDS_CHANGED_EVENT, board.clone());
     Ok(board)
 }

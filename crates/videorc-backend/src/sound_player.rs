@@ -6,6 +6,10 @@
 //! `SessionAudio::soundboard()`; without one a voice exists for the monitor
 //! and the UI only (`onAir: false`).
 //!
+//! The monitor ("Hear sounds yourself", plan 260 S1.3b) is the backend's own
+//! output (`sound_monitor.rs`): after every change to the voices or the board
+//! the player tells it which voices the streamer hears, at what gain.
+//!
 //! The bus renders by the same arithmetic (start sample plus duration), so
 //! no message ever comes back from the bus thread: a voice ends here on its
 //! timer, there at its last frame.
@@ -18,10 +22,12 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use crate::protocol::{
-    Sound, SoundMode, SoundPlayResult, SoundPressResult, SoundVoice, SoundsPlayback,
+    Sound, SoundMode, SoundPlayResult, SoundPressResult, SoundVoice, SoundboardState,
+    SoundsPlayback,
 };
 use crate::session_audio::{SoundPlacement, SoundVoiceStart, SoundboardHandle};
 use crate::sound_mix::SOUND_MAX_VOICES;
+use crate::sound_monitor::{MonitorVoice, SoundMonitor, late_join_offset};
 use crate::sound_store::load_sound_pcm;
 use crate::state::AppState;
 
@@ -49,6 +55,12 @@ struct PlayerVoice {
     /// mix (plan 260 S1.8c c4d), which renders by the same arithmetic.
     started: Instant,
     gain: f32,
+    /// Registered, but the bus has not answered yet: whether it is on air
+    /// (and so whether the monitor hears it with the monitor off) is unknown.
+    placing: bool,
+    /// `levelDb + volumeDb` at the press, for the monitor while it has no
+    /// board.
+    gain_db: f64,
 }
 
 /// A playing voice as the backend room's aux mix needs it.
@@ -86,6 +98,80 @@ struct PlayerState {
     /// A recording or stream published without a session bus: sounds can't
     /// reach it (release test 147, plan 0001). Its session id.
     unmixed_session: Option<String>,
+    /// What the monitor needs from the board: read once, then kept current
+    /// by `sound_store::on_sounds_changed`.
+    board: Option<MonitorBoard>,
+}
+
+/// The board as the monitor hears it.
+#[derive(Debug, Clone, PartialEq)]
+struct MonitorBoard {
+    /// "Hear sounds yourself": on-air voices too.
+    monitor: bool,
+    volume_db: i32,
+    /// Each sound's `levelDb + volumeDb`.
+    sound_gain_db: HashMap<String, f64>,
+}
+
+impl MonitorBoard {
+    fn from_state(board: &SoundboardState) -> Self {
+        Self {
+            monitor: board.monitor,
+            volume_db: board.volume_db,
+            sound_gain_db: board
+                .sounds
+                .iter()
+                .map(|sound| {
+                    (
+                        sound.id.clone(),
+                        sound.level_db + f64::from(sound.volume_db),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+impl PlayerState {
+    /// The voices the streamer hears (plan 189 D2: off air always, on air
+    /// with the monitor on), each with its gain and, for a voice the monitor
+    /// would start late, where in its sound to start.
+    fn monitor_voices(&self, now_ms: u64) -> Vec<MonitorVoice> {
+        self.voices
+            .iter()
+            .filter(|voice| !voice.placing)
+            .filter_map(|voice| {
+                let (monitor, board_db, sound_db) = match self.board.as_ref() {
+                    // A sound the board no longer has is never heard.
+                    Some(board) => (
+                        board.monitor,
+                        board.volume_db,
+                        *board.sound_gain_db.get(&voice.sound_id)?,
+                    ),
+                    None => (true, 0, voice.gain_db),
+                };
+                if voice.on_air && !monitor {
+                    return None;
+                }
+                let pcm = self.library.get(&voice.sound_id)?.clone();
+                let frames = pcm.len() / 2;
+                // The offset only places a voice the monitor starts now: a
+                // one-shot already over never starts, but one the monitor is
+                // playing plays on. Its wall-clock age runs a little ahead of
+                // the monitor, which started after the press.
+                let offset_frames =
+                    late_join_offset(voice.started_at_ms, now_ms, frames, voice.looping)
+                        .unwrap_or(frames);
+                Some(MonitorVoice {
+                    key: voice.key,
+                    pcm,
+                    gain: crate::audio::db_to_gain((sound_db + f64::from(board_db)) as f32),
+                    looping: voice.looping,
+                    offset_frames,
+                })
+            })
+            .collect()
+    }
 }
 
 /// The voice id on the wire: `v-<key>`.
@@ -98,6 +184,11 @@ fn voice_id(key: u64) -> String {
 #[derive(Default)]
 pub struct SoundPlayer {
     inner: StdMutex<PlayerState>,
+    monitor: SoundMonitor,
+}
+
+fn now_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
 impl SoundPlayer {
@@ -203,7 +294,36 @@ impl SoundPlayer {
     }
 
     fn emit(&self, state: &AppState) {
+        self.sync_monitor(state);
         state.emit_event(SOUNDS_PLAYBACK_EVENT, self.playback());
+    }
+
+    /// Tells the monitor which voices the streamer hears now. The plan is
+    /// built and handed over under the player's lock, so an older plan never
+    /// lands after a newer one.
+    fn sync_monitor(&self, state: &AppState) {
+        let board = if self.lock().board.is_none() {
+            state
+                .database
+                .soundboard_state()
+                .ok()
+                .map(|board| MonitorBoard::from_state(&board))
+        } else {
+            None
+        };
+        let mut inner = self.lock();
+        if inner.board.is_none() {
+            inner.board = board;
+        }
+        self.monitor.sync(&inner.monitor_voices(now_ms()));
+    }
+
+    /// The board changed (`sound_store::on_sounds_changed`): the monitor
+    /// follows the switch, the board level and each sound's level and trim.
+    pub(crate) fn board_changed(&self, board: &SoundboardState) {
+        let mut inner = self.lock();
+        inner.board = Some(MonitorBoard::from_state(board));
+        self.monitor.sync(&inner.monitor_voices(now_ms()));
     }
 
     /// The sound's PCM, from the library or its file.
@@ -248,7 +368,7 @@ impl SoundPlayer {
         // The press instant, before any load: the voice lands where the
         // streamer pressed, not where the file finished reading.
         let received_at = Instant::now();
-        let started_at_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let started_at_ms = now_ms();
         let sound = state.database.sound_by_id(sound_id)?;
         let restart = matches!(sound.mode, SoundMode::OneShot | SoundMode::Hold);
         if !restart
@@ -327,6 +447,8 @@ impl SoundPlayer {
                 on_air: false,
                 started: received_at,
                 gain,
+                placing: true,
+                gain_db: sound.level_db + f64::from(sound.volume_db),
             });
             (inner.bus.clone(), stopped)
         };
@@ -352,7 +474,10 @@ impl SoundPlayer {
         {
             let mut inner = self.lock();
             match inner.voices.iter_mut().find(|voice| voice.key == key) {
-                Some(voice) => voice.on_air = on_air,
+                Some(voice) => {
+                    voice.on_air = on_air;
+                    voice.placing = false;
+                }
                 // Stopped while the bus was answering: take it back out.
                 None => {
                     if let Some(bus) = bus.as_ref() {
@@ -433,14 +558,23 @@ impl SoundPlayer {
         self.lock().library.remove(sound_id);
     }
 
+    #[cfg(test)]
+    fn render_monitor_for_test(&self) {
+        self.monitor.render_for_test(512);
+    }
+
     /// The end timer of a one-shot voice: gone from the list, if a stop did
-    /// not take it first.
+    /// not take it first. The monitor lets it play out.
     fn end_voice(&self, state: &AppState, key: u64) {
         let ended = {
             let mut inner = self.lock();
             let before = inner.voices.len();
             inner.voices.retain(|voice| voice.key != key);
-            inner.voices.len() != before
+            let ended = inner.voices.len() != before;
+            if ended {
+                self.monitor.release(key);
+            }
+            ended
         };
         if ended {
             self.emit(state);
@@ -691,6 +825,214 @@ mod tests {
         player.evict(&state, &gong.id);
         assert!(player.playback().voices.is_empty());
         assert!(player.lock().library.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn key_of(voice_id: &str) -> u64 {
+        voice_id.trim_start_matches("v-").parse().unwrap()
+    }
+
+    /// The monitor's voices as (key, target gain, fading out).
+    fn monitored(player: &SoundPlayer) -> Vec<(u64, f32, bool)> {
+        player
+            .monitor
+            .voices_for_test()
+            .into_iter()
+            .map(|(key, gain, _, fading)| (key, gain, fading))
+            .collect()
+    }
+
+    fn settings(state: &AppState, params: crate::protocol::SoundboardSettingsParams) {
+        state.database.update_sound_settings(&params).unwrap();
+        crate::sound_store::on_sounds_changed(state).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_monitor_plays_what_the_streamer_hears_at_the_board_gain() {
+        // Plan 260 S1.3b: the backend's monitor, by plan 189 D2's rule: off
+        // air every press is heard, on air only with "Hear sounds yourself"
+        // on, at level + trim + board, following every board change.
+        use crate::audio::db_to_gain;
+        use crate::protocol::SoundboardSettingsParams;
+
+        let (dir, state, _events) = player_state();
+        let player = state.soundboard.clone();
+        let ding = seed_sound(&state, "Ding", SoundMode::OneShot, 10_000);
+        let gong = seed_sound(&state, "Gong", SoundMode::Toggle, 10_000);
+        // Before any board event: the first change reads the board.
+        state
+            .database
+            .update_sound_settings(&SoundboardSettingsParams {
+                volume_db: Some(-6),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let idle = key_of(&player.play(&state, &ding.id).await.unwrap().voice_id);
+        assert_eq!(
+            monitored(&player),
+            vec![(idle, db_to_gain(2.0 - 6.0), false)]
+        );
+
+        // A trim change glides the playing voice to its new gain.
+        state
+            .database
+            .update_sound(
+                &ding.id,
+                crate::sound_store::SoundUpdate {
+                    volume_db: Some(-3),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        crate::sound_store::on_sounds_changed(&state).unwrap();
+        assert_eq!(
+            monitored(&player),
+            vec![(idle, db_to_gain(2.0 - 3.0 - 6.0), false)]
+        );
+
+        // On air with the switch off: not heard; the idle voice still is.
+        let (handle, _starts) = SoundboardHandle::test_recording_bus();
+        player.session_started("record", handle, -6, true);
+        settings(
+            &state,
+            SoundboardSettingsParams {
+                monitor: Some(false),
+                ..Default::default()
+            },
+        );
+        let live = player.play(&state, &gong.id).await.unwrap();
+        assert!(live.on_air);
+        let live = key_of(&live.voice_id);
+        assert_eq!(monitored(&player), vec![(idle, db_to_gain(-7.0), false)]);
+
+        // The switch on: the on-air voice joins; off again: it fades out.
+        settings(
+            &state,
+            SoundboardSettingsParams {
+                monitor: Some(true),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            monitored(&player),
+            vec![
+                (idle, db_to_gain(-7.0), false),
+                (live, db_to_gain(-4.0), false)
+            ]
+        );
+        settings(
+            &state,
+            SoundboardSettingsParams {
+                monitor: Some(false),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            monitored(&player),
+            vec![
+                (idle, db_to_gain(-7.0), false),
+                (live, db_to_gain(-4.0), true)
+            ]
+        );
+
+        // The session ends: the voice is off air, so heard again (a fresh
+        // monitor voice for the same key, after the faded one).
+        player.render_monitor_for_test();
+        player.session_ended(&state, "record");
+        assert_eq!(
+            monitored(&player),
+            vec![
+                (idle, db_to_gain(-7.0), false),
+                (live, db_to_gain(-4.0), false)
+            ]
+        );
+        // The board level moves every voice; Stop all fades them all.
+        settings(
+            &state,
+            SoundboardSettingsParams {
+                volume_db: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            monitored(&player),
+            vec![
+                (idle, db_to_gain(-1.0), false),
+                (live, db_to_gain(2.0), false)
+            ]
+        );
+        player.stop(&state, None);
+        assert!(monitored(&player).iter().all(|(_, _, fading)| *fading));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_voice_the_monitor_plays_is_never_cut_by_its_wall_clock_age() {
+        // smoke:soundboard caught it: a sync near a one-shot's end (here a
+        // board change) saw its age past its length and faded it out, though
+        // the monitor, which starts after the press, still had 70 ms to play.
+        let (dir, state, _events) = player_state();
+        let player = state.soundboard.clone();
+        let ding = seed_sound(&state, "Ding", SoundMode::OneShot, 10_000);
+        let key = key_of(&player.play(&state, &ding.id).await.unwrap().voice_id);
+        player.lock().voices[0].started_at_ms -= 20_000;
+        let board = state.database.soundboard_state().unwrap();
+        player.board_changed(&board);
+        assert_eq!(
+            monitored(&player)
+                .iter()
+                .map(|(key, _, fading)| (*key, *fading))
+                .collect::<Vec<_>>(),
+            vec![(key, false)]
+        );
+        // A voice that old the monitor is not playing yet never starts.
+        player.stop(&state, None);
+        player.render_monitor_for_test();
+        assert!(monitored(&player).is_empty());
+        player.lock().voices.push(PlayerVoice {
+            key: key + 1,
+            sound_id: ding.id.clone(),
+            started_at_ms: now_ms() - 20_000,
+            duration_ms: 10_000,
+            looping: false,
+            on_air: false,
+            placing: false,
+            gain_db: 2.0,
+        });
+        player.board_changed(&board);
+        assert!(monitored(&player).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_one_shot_plays_out_in_the_monitor_past_its_timer_and_a_restart_fades_the_old_voice()
+    {
+        let (dir, state, _events) = player_state();
+        let player = state.soundboard.clone();
+        let short = seed_sound(&state, "Tick", SoundMode::OneShot, 100);
+        let first = key_of(&player.play(&state, &short.id).await.unwrap().voice_id);
+        let second = key_of(&player.play(&state, &short.id).await.unwrap().voice_id);
+        // Play once restarts: the old voice fades, the new one plays.
+        assert_eq!(
+            monitored(&player)
+                .iter()
+                .map(|(key, _, fading)| (*key, *fading))
+                .collect::<Vec<_>>(),
+            vec![(first, true), (second, false)]
+        );
+        player.render_monitor_for_test();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(player.playback().voices.is_empty(), "the timer ended it");
+        // Not faded: the monitor started it a little after the press, so it
+        // ends a little after the timer, on its own.
+        assert_eq!(
+            monitored(&player)
+                .iter()
+                .map(|(key, _, fading)| (*key, *fading))
+                .collect::<Vec<_>>(),
+            vec![(second, false)]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

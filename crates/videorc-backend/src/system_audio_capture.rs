@@ -24,7 +24,9 @@
 //! backend's parent process (the Electron main app) by pid, plus any app whose
 //! bundle id is the packaged Videorc id or one of its children. That only
 //! silences renderer audio because the Electron main process runs with
-//! `--disable-features=AudioServiceOutOfProcess` on macOS.
+//! `--disable-features=AudioServiceOutOfProcess` on macOS. The backend's own
+//! audio (the soundboard monitor, plan 260 S1.3b) is excluded by
+//! `excludesCurrentProcessAudio`.
 //!
 //! Evidence and numbers: `docs/acceptance/2026-09-27-system-audio-spike.md`.
 //!
@@ -1245,6 +1247,9 @@ mod capture {
             configuration.setQueueDepth(3);
             configuration.setShowsCursor(false);
             configuration.setCapturesAudio(true);
+            // The backend's own soundboard monitor (`sound_monitor.rs`, plan
+            // 260 S1.3b) plays from this process: this keeps it out of the
+            // capture, so a press is never doubled. `smoke:soundboard` holds it.
             configuration.setExcludesCurrentProcessAudio(true);
             configuration.setSampleRate(SYSTEM_AUDIO_SAMPLE_RATE as isize);
             configuration.setChannelCount(SYSTEM_AUDIO_CHANNELS as isize);

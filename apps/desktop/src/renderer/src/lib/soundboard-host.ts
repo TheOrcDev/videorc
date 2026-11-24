@@ -5,12 +5,18 @@
 // sounds once per profile. The provider loads this module at mount (the
 // eager bundle carries only the store), and the monitor, the seeding and the
 // relayed actions load on demand from here.
+//
+// Plan 260 S1.3b: on macOS the backend plays the monitor
+// (`sound_monitor.rs`), so this window loads no Web Audio there. Windows and
+// Linux keep the renderer's monitor (`sound-monitor.ts`) until S1.3d gives
+// the backend an output on them.
 
 import {
   soundboardSummary,
   type SoundRelayAction,
   type SoundboardSummary
 } from '../../../shared/sound-commands'
+import { currentPlatform, isMacPlatform } from './platform'
 import type { SoundboardSnapshot, SoundboardStore } from './soundboard-store'
 import type { SoundMonitor } from './sound-monitor'
 
@@ -29,6 +35,11 @@ type HostApi = {
 
 export interface SoundboardHostDeps {
   api: HostApi | undefined
+  /**
+   * The renderer plays the monitor: Windows and Linux only (plan 260 S1.3b).
+   * On macOS the backend plays every voice the streamer hears.
+   */
+  rendererMonitor: boolean
   loadMonitor: () => Promise<{ createSoundMonitor: () => SoundMonitor }>
   /** Seeds the starter sounds; resolves once it has tried. */
   seedStarters: (store: SoundboardStore) => Promise<void>
@@ -38,8 +49,14 @@ export interface SoundboardHostDeps {
   ) => Promise<{ ok: boolean; message?: string }>
 }
 
+/** Plan 260 S1.3b fence: the backend plays the monitor on macOS. */
+export function rendererPlaysMonitor(platform: string | undefined): boolean {
+  return !isMacPlatform(platform)
+}
+
 const browserDeps = (): SoundboardHostDeps => ({
   api: window.videorc,
+  rendererMonitor: rendererPlaysMonitor(currentPlatform()),
   loadMonitor: () => import('./sound-monitor'),
   seedStarters: async (store) => (await import('./sound-starters')).seedStarterSounds(store),
   runAction: async (store, action) => {
@@ -77,7 +94,9 @@ export function startSoundboardHost(
       pushed = body
       void deps.api?.pushCommentsSounds?.(board)?.catch(() => undefined)
     }
-    if (monitor) monitor.update(snapshot)
+    if (!deps.rendererMonitor) {
+      // The backend plays it (macOS).
+    } else if (monitor) monitor.update(snapshot)
     else if (snapshot.voices.length && !monitorLoading) {
       monitorLoading = true
       deps.loadMonitor().then(

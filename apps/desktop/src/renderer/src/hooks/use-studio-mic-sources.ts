@@ -7,14 +7,10 @@ import {
   useStudioMicVisualLifecycle,
   useStudioMicVisualPipeline
 } from '@/hooks/use-studio-mic-visual'
-import type { FrameSource, MeterFrame, VisualFrame } from '@/lib/audio/types'
+import type { FrameSource, MeterFrame } from '@/lib/audio/types'
 import { backendAudioLevels } from '@/lib/backend-audio-levels'
 import { createBackendLevelSource } from '@/lib/backend-level-sources'
-import {
-  createMicMeterSource,
-  createMicVisualSource,
-  type MicMeterSettings
-} from '@/lib/mic-frame-sources'
+import { createMicMeterSource, type MicMeterSettings } from '@/lib/mic-frame-sources'
 import {
   meterHasNoReading,
   micMeterInput,
@@ -24,28 +20,26 @@ import {
 import type { MicStreamFailureReason } from '@/lib/mic-stream'
 import { audioMixerMonitorState } from '@/lib/mic-visual-gate'
 import type { MicMonitorState } from '@/lib/state-labels'
+import { isCoreAudioMicrophoneId } from '@/lib/warm-microphone-gate'
 
-// Plan 092: audiocn frame sources over the workspace's visual mic pipeline.
-// Only lazy chunks (the Studio dashboard, the Studio tab, Sources) import this
-// module, so the adapters and audiocn's core stay out of the eager bundle.
+// Plan 092: audiocn frame sources over the backend's `audio.levels` and, for a
+// Windows or Linux microphone between sessions only, the workspace's visual
+// mic pipeline (plan 260 S1.3a). Only lazy chunks (the Studio dashboard, the
+// Studio tab, Sources) import this module, so the adapters and audiocn's core
+// stay out of the eager bundle.
 
 /**
- * The Studio microphone as a meter source: what the recording will hear (the
- * configured gain added, silence while muted). One stable source per
- * pipeline; gain and mute are read on every frame, so a Gain drag never
- * re-subscribes or reopens the device.
+ * The renderer analyser's microphone as a meter source: what the recording
+ * will hear (the configured gain added, silence while muted). One stable
+ * source per pipeline; gain and mute are read on every frame, so a Gain drag
+ * never re-subscribes or reopens the device. plan 260 S1.3a: it only ever
+ * runs for a Windows or Linux microphone between sessions (S1.3c removes it).
  */
 export function useStudioMicMeterSource(settings: MicMeterSettings): FrameSource<MeterFrame> {
   const pipeline = useStudioMicVisualPipeline()
   const settingsRef = useRef(settings)
   settingsRef.current = settings
   return useMemo(() => createMicMeterSource(pipeline, () => settingsRef.current), [pipeline])
-}
-
-/** The Studio microphone's bands and level history, raw, for bars and waveforms. */
-export function useStudioMicVisualSource(): FrameSource<VisualFrame> {
-  const pipeline = useStudioMicVisualPipeline()
-  return useMemo(() => createMicVisualSource(pipeline), [pipeline])
 }
 
 /**
@@ -87,8 +81,9 @@ export type MicrophoneMeter = Readonly<{
   meter: MeterInput
   monitorState: MicMonitorState
   /**
-   * Why no live level reads (plan 080 S3): set only when nothing else drives
-   * the meter and the renderer analyser, the last live input, failed.
+   * Why no live level reads (plan 080 S3): set only when nothing drives the
+   * idle meter because its feed failed (the backend's standing-by microphone
+   * for a CoreAudio input, the renderer analyser for a Windows or Linux one).
    */
   unavailableReason: MicStreamFailureReason | undefined
   /**
@@ -99,17 +94,37 @@ export type MicrophoneMeter = Readonly<{
 }>
 
 /**
+ * Why an idle meter has no level (plan 080 S3). A CoreAudio microphone's only
+ * idle feed is the backend's standing-by microphone (plan 260 S1.3a), so a
+ * failed open is the reason there; elsewhere the analyser's failure is.
+ */
+export function idleLevelUnavailableReason(input: {
+  backendMetered: boolean
+  warmMicrophone: Readonly<{ armed: boolean; reason?: string }> | null | undefined
+  analyser: Readonly<{ status: string; reason?: MicStreamFailureReason }>
+}): MicStreamFailureReason | undefined {
+  if (input.backendMetered) {
+    return input.warmMicrophone?.armed === false && input.warmMicrophone.reason === 'open-failed'
+      ? 'unknown'
+      : undefined
+  }
+  return input.analyser.status === 'unavailable' ? (input.analyser.reason ?? 'unknown') : undefined
+}
+
+/**
  * The selected microphone's meter input and state (plans 092 and 093), one
  * build for the Studio Microphone section and the Sources Audio mixer. The
  * level runs whenever either is open: the backend's levels (the warm
- * microphone between sessions, the bus during one), then, outside a session,
- * the renderer analyser, then the session's 1 Hz level. Issue 1064: while a
- * recording, livestream or Clips ring runs its bus, the analyser never paints
- * (it hears Chromium's microphone, not the recording's) and the backend's
- * silence watchdog owns the status word.
+ * microphone between sessions, the bus during one), then, outside a session
+ * and only for a Windows or Linux microphone (plan 260 S1.3a), the renderer
+ * analyser, then the session's 1 Hz level. Issue 1064: while a recording,
+ * livestream or Clips ring runs its bus, the analyser never paints (it hears
+ * Chromium's microphone, not the recording's) and the backend's silence
+ * watchdog owns the status word.
  */
 export function useMicrophoneMeter(): MicrophoneMeter {
-  const { captureConfig, selectedMicrophone, isSessionActive, audioBusActive } = useStudioCore()
+  const { captureConfig, selectedMicrophone, isSessionActive, audioBusActive, warmMicrophone } =
+    useStudioCore()
   const roomOpen = useStudioCloud().cloudStatus?.room?.phase === 'open'
   // The view, not the levels: a level re-rendering this hook's host 20 times
   // a second is what the meter's own frame source exists to avoid (PH-12).
@@ -172,11 +187,12 @@ export function useMicrophoneMeter(): MicrophoneMeter {
       silent: microphoneSelected && backendLevelsLive && backendMicrophoneSilent
     }),
     unavailableReason:
-      microphoneSelected &&
-      !audioBusActive &&
-      meterHasNoReading(meter) &&
-      micVisual.status === 'unavailable'
-        ? (micVisual.reason ?? 'unknown')
+      microphoneSelected && !audioBusActive && meterHasNoReading(meter)
+        ? idleLevelUnavailableReason({
+            backendMetered: isCoreAudioMicrophoneId(selectedMicrophone?.id),
+            warmMicrophone,
+            analyser: micVisual
+          })
         : undefined,
     sessionLevelUnavailable: micSessionLevelUnavailable({
       microphoneSelected,

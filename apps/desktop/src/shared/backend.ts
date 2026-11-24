@@ -3454,13 +3454,21 @@ export type WarmMicrophoneArmParams = {
   microphoneId?: string
   microphoneGainDb?: number
   microphoneMuted?: boolean
+  /**
+   * Plan 260 S1.3a (D2): for the idle meter only (Keep microphone ready off).
+   * Record never takes it: the backend drops it and opens the device fresh.
+   */
+  meterOnly?: boolean
 }
 
 export type WarmMicrophoneStatus = {
   armed: boolean
   deviceId?: number
   deviceName?: string
-  /** `not-coreaudio` | `session-active` | `disabled-for-smoke` | `open-failed` | `disarmed`. */
+  /**
+   * `not-coreaudio` | `session-active` | `disabled-for-smoke` | `open-failed` |
+   * `cleanup-pending` | `opening` | `superseded` | `disarmed`.
+   */
   reason?: string
   capturedFrames: number
   armedForMs?: number

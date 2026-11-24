@@ -39080,6 +39080,42 @@ mod tests {
         }
     }
 
+    /// Plan 260 S1.3a (D2, owner 2026-11-09): with Keep microphone ready off
+    /// the standby feeds the idle meter only. Record closes it and opens the
+    /// device fresh, exactly as when nothing stood by.
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepare_native_audio_source_opens_fresh_past_a_meter_only_standby() {
+        let state = test_state();
+        let params = base_params(true, false);
+        let meter = crate::audio::test_native_audio_source(audio_processing_settings(&params));
+        let meter_stats = meter.stats_handle();
+        state.warm_microphone.install_for_test(
+            4244,
+            crate::session_audio::InitialAudioSource::warm(meter),
+            true,
+        );
+        let mut capture = CaptureInputs {
+            video: VideoInput::MacScreen { index: 0 },
+            camera_index: None,
+            microphone: Some(MicrophoneInput::CoreAudio {
+                device_id: 4244,
+                fifo_path: None,
+            }),
+        };
+        let fresh = prepare_native_audio_source(&state, "meter-only", &mut capture, &params).await;
+        assert!(
+            !state.warm_microphone.status().armed,
+            "Record closes the meter-only standby"
+        );
+        if let Some(prepared) = fresh {
+            assert!(
+                !Arc::ptr_eq(&prepared.source.stats_handle(), &meter_stats),
+                "the session never records through the meter's source"
+            );
+            let _ = crate::fifo::cleanup(&prepared.fifo_path);
+        }
+    }
+
     fn test_state_with_file_database(directory: &Path) -> AppState {
         let (events, _) = broadcast::channel(16);
         AppState::new(
