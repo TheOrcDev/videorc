@@ -7,6 +7,7 @@ mod obs;
 mod permissions;
 mod phone;
 mod remote;
+mod shortcuts;
 
 use crate::app::permissions::Permissions;
 use gpui::{App, Context, EventEmitter, Window, prelude::*};
@@ -65,12 +66,16 @@ pub struct SettingsScreen {
     )>,
     confirmation: Option<remote::Confirmation>,
     obs: obs::ObsImport,
+    hotkeys: crate::app::hotkeys::Hotkeys,
+    shortcut: shortcuts::Recorder,
+    applied_shortcuts: Option<Value>,
 }
 
 impl SettingsScreen {
     pub fn new(
         studio: Arc<Studio<BackendClient>>,
         backend: tokio::sync::watch::Receiver<videorc_app_core::supervisor::BackendState>,
+        hotkeys: crate::app::hotkeys::Hotkeys,
         runtime: tokio::runtime::Handle,
         permissions: Arc<Permissions>,
         local_dir: PathBuf,
@@ -89,6 +94,12 @@ impl SettingsScreen {
                     state.session.phase,
                     state.connection_generation,
                     state.bootstrapped,
+                    state
+                        .scenes
+                        .scenes
+                        .iter()
+                        .map(|scene| (scene.id.clone(), scene.name.clone()))
+                        .collect::<Vec<_>>(),
                 )
             };
             let mut previous = relevant(&changes.borrow());
@@ -101,6 +112,7 @@ impl SettingsScreen {
                 if entity
                     .update(cx, |this, cx| {
                         this.apply_theme(cx);
+                        this.apply_shortcuts();
                         cx.notify();
                     })
                     .is_err()
@@ -237,13 +249,18 @@ impl SettingsScreen {
             phone_edit: None,
             confirmation: None,
             obs: obs::ObsImport::default(),
+            hotkeys,
+            shortcut: Default::default(),
+            applied_shortcuts: None,
         };
         this.apply_theme(cx);
+        this.apply_shortcuts();
         this.refresh(cx);
         this
     }
 
     pub fn select(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
+        self.disarm_shortcut(cx);
         self.tab = tab;
         // Reload before writing: other pages also own keys in ui-local.json.
         if UiLocal::in_dir(&self.local_dir)
@@ -453,6 +470,10 @@ impl Render for SettingsScreen {
         };
         div()
             .id("settings-page")
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.disarm_shortcut(cx)),
+            )
             .flex()
             .flex_col()
             .size_full()

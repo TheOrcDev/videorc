@@ -332,11 +332,15 @@ fn main() -> Result<()> {
         // list, which the Studio sends with the screen capture when it lands.
         let _capture_filter_ids = HideFromStream::install(cx);
 
-        // Global shortcuts: the registry behind the core's gate. The app runs
-        // no shortcut action until the Studio lands, so every key is named in
-        // the log and left unregistered (never taken from every app for
-        // nothing); the settings store's keys replace the defaults then.
-        let global_keys = hotkeys::Hotkeys::install(cx, Rc::new(hotkeys::NoActions), hotkey_logger);
+        // Only Studio-owned actions register; Settings keeps the bindings current.
+        let global_keys = hotkeys::Hotkeys::install(
+            cx,
+            Rc::new(hotkeys::StudioActions {
+                studio: studio.clone(),
+                runtime: core_handle.clone(),
+            }),
+            hotkey_logger,
+        );
         global_keys.apply(&GlobalShortcutsConfig::default(), hotkeys::node_platform());
         let quit_keys = global_keys.clone();
 
@@ -371,6 +375,7 @@ fn main() -> Result<()> {
             screens::settings::SettingsScreen::new(
                 studio.clone(),
                 backend_state.clone(),
+                global_keys.clone(),
                 core_handle.clone(),
                 settings_permissions.clone(),
                 paths.user_data_dir.clone(),
@@ -471,6 +476,8 @@ fn main() -> Result<()> {
                     focus_permissions.recheck();
                     focus_studio.set_clips_media_access(Some(focus_permissions.snapshot()));
                     settings.update(cx, |settings, cx| settings.refresh(cx));
+                } else {
+                    settings.update(cx, |settings, cx| settings.disarm_shortcut(cx));
                 }
             })
             .detach();

@@ -2,11 +2,9 @@ use super::*;
 use gpui::AnyElement;
 use videorc_app_core::{nav::PageId, settings_page::about as a};
 use videorc_kit::{
-    alert::Alert,
     button::{Button, ButtonVariant},
     list_row::{GroupedList, ListRow},
     panel_section::PanelSection,
-    shortcut_keys::ShortcutKeys,
 };
 
 impl SettingsScreen {
@@ -126,52 +124,6 @@ impl SettingsScreen {
             .items_start()
             .child(div().flex_1().min_w(px(360.)).child(about))
             .child(div().flex_1().min_w(px(360.)).child(support))
-            .into_any_element()
-    }
-
-    pub(super) fn shortcuts_page(
-        &self,
-        window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let _ = window;
-        // The shell still installs NoActions for global hotkeys. Do not
-        // accept a recording and pretend the OS registered a working key.
-        // The binding-backed reference grows with the screen dispatchers.
-        let mut globals = GroupedList::new();
-        for action in videorc_app_core::desktop::global_shortcuts::GLOBAL_ACTION_ROWS {
-            globals = globals.item(ListRow::new(
-                action,
-                videorc_app_core::desktop::global_shortcuts::global_shortcut_label(action),
-            ));
-        }
-        div()
-            .flex()
-            .flex_wrap()
-            .items_start()
-            .child(
-                div().flex_1().min_w(px(360.)).child(
-                    PanelSection::new("Global shortcuts")
-                        .title("Global shortcuts")
-                        .child(Alert::new("shortcuts-unavailable").title(view::NOT_IN_THIS_BUILD))
-                        .child(globals),
-                ),
-            )
-            .child(
-                div().flex_1().min_w(px(360.)).child(
-                    PanelSection::new("App shortcuts")
-                        .title("App shortcuts")
-                        .child(
-                            GroupedList::new()
-                                .item(ListRow::new("settings-key", "Settings").child(
-                                    ShortcutKeys::for_action(&crate::app::menus::ShowSettings),
-                                ))
-                                .item(ListRow::new("shortcuts-key", "Settings → Shortcuts").child(
-                                    ShortcutKeys::for_action(&crate::app::menus::ShowShortcuts),
-                                )),
-                        ),
-                ),
-            )
             .into_any_element()
     }
 }

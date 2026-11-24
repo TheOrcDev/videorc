@@ -134,6 +134,8 @@ impl Shell {
 
     pub fn open_page(&mut self, page: PageId, window: &mut Window, cx: &mut Context<Self>) {
         if self.page != page {
+            self.settings
+                .update(cx, |settings, cx| settings.disarm_shortcut(cx));
             self.page = page;
             if page == PageId::Settings {
                 self.settings
