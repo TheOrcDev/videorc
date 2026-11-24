@@ -11,8 +11,8 @@ use videorc_app_core::nav::{self, PageId, ZONES};
 use videorc_app_core::{BackendState, ConnectionState, Tone};
 
 use super::bridge::Mirror;
-use crate::screens::studio::StudioPage;
-use crate::screens::studio::transport::OpenPage;
+use crate::preview::Preview;
+use crate::screens::studio::{StudioPage, transport::OpenPage};
 
 /// The status bar's line: the supervisor's words, and whether the typed
 /// client has the backend's `backend.ready`.
@@ -64,8 +64,11 @@ pub struct Shell {
     page: PageId,
     backend: Entity<Mirror<StatusLine>>,
     connection: Entity<Mirror<String>>,
-    /// Phase 3, L1: the Studio page (preview and session).
+    /// The Studio page (plan 260 Phase 3): the preview, the transport and
+    /// the session inspector.
     studio: Entity<StudioPage>,
+    /// The preview (plan 260 S2.3a, L1): its slot is the Studio page's.
+    preview: Entity<Preview>,
 }
 
 impl Shell {
@@ -73,10 +76,15 @@ impl Shell {
         backend: Entity<Mirror<StatusLine>>,
         connection: Entity<Mirror<String>>,
         studio: Entity<StudioPage>,
+        preview: Entity<Preview>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&backend, |_, _, cx| cx.notify()).detach();
         cx.observe(&connection, |_, _, cx| cx.notify()).detach();
+        // The preview notifies only when its slot's words or its window
+        // change, never per video frame.
+        cx.observe(&preview, |_, _, cx| cx.notify()).detach();
+        // The blocked line's jump ("Open Accounts", …) opens that page.
         cx.subscribe_in(&studio, |this, _, open: &OpenPage, window, cx| {
             this.open(open.0, window, cx)
         })
@@ -86,6 +94,7 @@ impl Shell {
             backend,
             connection,
             studio,
+            preview,
         }
     }
 
@@ -97,6 +106,11 @@ impl Shell {
         if self.page != page {
             self.page = page;
             window.set_window_title(&nav::window_title(page));
+            // A docked slot that is not on screen presents nothing.
+            self.preview.update(cx, |preview, _| {
+                preview.set_docked_shown(page == PageId::Studio)
+            });
+            // Space records only while the Studio page holds focus.
             if page == PageId::Studio {
                 let focus = self.studio.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
@@ -171,7 +185,6 @@ impl Render for Shell {
         let status = self.backend.read(cx).value().clone();
         let connection = self.connection.read(cx).value().clone();
         let page = self.page;
-        let studio = self.studio.clone();
         div()
             .size_full()
             .flex()
@@ -184,34 +197,34 @@ impl Render for Shell {
                     .flex()
                     .flex_row()
                     .child(self.sidebar(cx))
-                    .map(|row| {
-                        if page == PageId::Studio {
-                            // The Studio fills its page edge to edge under
-                            // the toolbar band.
-                            row.child(div().flex_1().min_w_0().pt(px(40.)).child(studio))
-                        } else {
-                            row.child(
+                    .child(if page == PageId::Studio {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .child(self.studio.clone())
+                    } else {
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .px(px(24.))
+                            .gap(px(8.))
+                            .child(
                                 div()
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .pt(px(40.))
-                                    .px(px(24.))
-                                    .gap(px(8.))
-                                    .child(
-                                        div()
-                                            .text_size(px(20.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(page.label()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(13.))
-                                            .text_color(rgb(MUTED))
-                                            .child("This page comes in plan 260's Phase 3."),
-                                    ),
+                                    .text_size(px(20.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(page.label()),
                             )
-                        }
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(rgb(MUTED))
+                                    .child("This page comes in plan 260's Phase 3."),
+                            )
                     }),
             )
             .child(

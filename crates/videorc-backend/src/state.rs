@@ -1132,6 +1132,8 @@ pub struct AppState {
     /// renderer-serializable resource handle.
     pub(crate) windows_d3d11_media: WindowsD3d11MediaCoordinatorSlot,
     pub compositor: CompositorSlot,
+    /// Plan 260 S1.7: the CPU preview ring (route (d)) the backend writes.
+    pub preview_cpu_ring: Arc<crate::preview_cpu_ring::PreviewCpuRingService>,
     /// Serializes compositor worker stop/start handoffs so concurrent preview and
     /// recording ownership changes cannot orphan a `spawn_blocking` render worker.
     pub compositor_lifecycle: Arc<tokio::sync::Mutex<()>>,
@@ -1523,6 +1525,7 @@ impl AppState {
             preview_surface_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             windows_d3d11_media: Arc::new(StdMutex::new(WindowsD3d11MediaCoordinator::new())),
             compositor: Arc::new(tokio::sync::Mutex::new(initial_compositor_state())),
+            preview_cpu_ring: Arc::new(crate::preview_cpu_ring::PreviewCpuRingService::default()),
             compositor_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             scene: Arc::new(tokio::sync::Mutex::new(default_scene())),
             scene_commit: Arc::new(tokio::sync::Mutex::new(())),

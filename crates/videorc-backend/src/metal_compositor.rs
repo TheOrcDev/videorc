@@ -1668,41 +1668,56 @@ impl MetalCompositorTargetPixelBuffer {
     /// top-down BGRA rows. Holds the slot in flight while it reads, so the
     /// compositor never renders into the rows being copied.
     pub fn copy_bgra(&self) -> Option<Vec<u8>> {
+        let mut bytes = vec![0_u8; self.width.checked_mul(4)?.checked_mul(self.height)?];
+        self.copy_bgra_into(&mut bytes).then_some(bytes)
+    }
+
+    /// Plan 260 S1.7: [`Self::copy_bgra`] into `dest` (the CPU preview
+    /// ring's slot), which takes at least `width * 4 * height` bytes, with
+    /// no allocation. `false` when the buffer would not lock or `dest` is
+    /// short; `dest` is then left as it was or partly written, and the
+    /// caller does not publish it.
+    pub fn copy_bgra_into(&self, dest: &mut [u8]) -> bool {
         use objc2_core_video::{
             CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferLockBaseAddress,
             CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
         };
+        let Some(row_bytes) = self.width.checked_mul(4) else {
+            return false;
+        };
+        let Some(expected_len) = row_bytes.checked_mul(self.height) else {
+            return false;
+        };
+        if dest.len() < expected_len {
+            return false;
+        }
         let _in_flight = self.begin_in_flight();
         let pixel_buffer: &CVPixelBuffer = &self.pixel_buffer;
-        let row_bytes = self.width.checked_mul(4)?;
-        let expected_len = row_bytes.checked_mul(self.height)?;
         // SAFETY: a retained pixel buffer, locked read-only for the copy and
         // unlocked on every path below.
         if unsafe { CVPixelBufferLockBaseAddress(pixel_buffer, CVPixelBufferLockFlags::ReadOnly) }
             != 0
         {
-            return None;
+            return false;
         }
         let copied = (|| {
             let stride = CVPixelBufferGetBytesPerRow(pixel_buffer);
             let base = CVPixelBufferGetBaseAddress(pixel_buffer);
             if stride < row_bytes || base.is_null() {
-                return None;
+                return false;
             }
-            let mut bytes = vec![0_u8; expected_len];
             for row in 0..self.height {
+                let Some(offset) = row.checked_mul(stride) else {
+                    return false;
+                };
                 // SAFETY: `row < height` and `stride >= row_bytes`, inside
                 // the locked buffer's `stride * height` bytes.
-                let source = unsafe {
-                    std::slice::from_raw_parts(
-                        base.cast::<u8>().add(row.checked_mul(stride)?),
-                        row_bytes,
-                    )
-                };
+                let source =
+                    unsafe { std::slice::from_raw_parts(base.cast::<u8>().add(offset), row_bytes) };
                 let start = row * row_bytes;
-                bytes[start..start + row_bytes].copy_from_slice(source);
+                dest[start..start + row_bytes].copy_from_slice(source);
             }
-            Some(bytes)
+            true
         })();
         // SAFETY: paired with the lock above.
         unsafe {

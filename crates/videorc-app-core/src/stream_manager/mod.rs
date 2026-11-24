@@ -9,6 +9,7 @@
 
 pub mod buddy;
 pub mod copy;
+pub mod dashboard;
 pub mod format;
 pub mod links;
 pub mod list_window;

@@ -100,6 +100,7 @@ pub mod scene_editor;
 pub mod scene_switch;
 pub mod scenes;
 pub mod scheduled;
+pub mod screen_views;
 pub mod session;
 pub mod settings;
 pub mod source_actions;
@@ -118,6 +119,7 @@ pub mod ui_local;
 pub mod ui_settings_wire;
 pub mod vertical_stream;
 pub mod virtual_camera;
+pub mod watchdog_alerts;
 
 pub use platforms::BROWSER_APPROVAL_TOAST_ID;
 pub use stream_details::{DISCORD_FAILURE_ID, METADATA_CHANGED_EVENT};
@@ -210,7 +212,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 28] = [
+pub const STUDIO_EVENTS: [&str; 29] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -252,6 +254,8 @@ pub const STUDIO_EVENTS: [&str; 28] = [
     go_live::X_PLAYBACK_EVENT,
     // S1.6c: Videorc Cloud's status (`cloud`).
     cloud::CHANGED_EVENT,
+    // S1.6g: the stream watchdog's alerts (`watchdog_alerts`).
+    watchdog_alerts::CHANGED_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -894,6 +898,9 @@ pub struct Studio<B: StudioBackend> {
     platform: platform_lifecycle::PlatformLifecycle,
     /// S1.6c: Videorc Cloud's status, apart from the snapshot.
     cloud_tx: watch::Sender<cloud::CloudState>,
+    /// S1.6g: the stream watchdog's alerts, apart from the snapshot (their
+    /// titles carry a live clock).
+    watchdog_tx: watch::Sender<watchdog_alerts::WatchdogState>,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -956,6 +963,7 @@ impl<B: StudioBackend> Studio<B> {
         let (scheduled_tx, _) = watch::channel(scheduled::ScheduledState::default());
         let (go_live_tx, _) = watch::channel(go_live::GoLiveState::default());
         let (cloud_tx, _) = watch::channel(cloud::CloudState::default());
+        let (watchdog_tx, _) = watch::channel(watchdog_alerts::WatchdogState::default());
         Self {
             backend,
             config,
@@ -984,6 +992,7 @@ impl<B: StudioBackend> Studio<B> {
             go_live_tx,
             platform: platform_lifecycle::PlatformLifecycle::default(),
             cloud_tx,
+            watchdog_tx,
         }
     }
 
@@ -1273,6 +1282,7 @@ impl<B: StudioBackend> Studio<B> {
             BackendEvent::Untyped { event, payload } => {
                 // S1.6c: the live area's events are its own.
                 if self.handle_chat_commands_event(&event, &payload)
+                    || self.handle_watchdog_event(&event, &payload)
                     || self.handle_cloud_event(&event, &payload).await
                     || self.handle_platforms_event(&event, &payload).await
                     || self.handle_details_event(&event, &payload).await
@@ -1570,6 +1580,9 @@ impl<B: StudioBackend> Studio<B> {
         self.read_chat_commands().await;
         self.read_scheduled().await;
         self.read_cloud().await;
+        // S1.6g: the watchdog's open alerts (a relaunch mid-stream shows
+        // the open card).
+        self.read_watchdog().await;
         // The other areas' first reads (the agents line, takeovers and the
         // soundboard, chat, Sidekick, destinations, chat commands, scheduled
         // streams, the performance check, Hide screen, captions, the working

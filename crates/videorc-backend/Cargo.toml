@@ -7,6 +7,8 @@ license = "AGPL-3.0-only"
 [dependencies]
 # Plan 260 S1.1: the wire types, extracted from src/protocol.rs.
 videorc-protocol = { workspace = true }
+# Plan 260 S1.7: the CPU preview ring the backend writes (route (d)).
+videorc-preview-ring = { workspace = true }
 anyhow = "1.0"
 # Plan 190: optional here only for the `live-background-gl-check` feature; the
 # Linux target table below always enables them.

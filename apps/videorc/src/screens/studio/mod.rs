@@ -13,11 +13,17 @@ pub mod space;
 pub mod transport;
 
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, KeyDownEvent, Window,
-    canvas, div, prelude::*, px,
+    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding,
+    KeyDownEvent, Window, canvas, div, prelude::*, px,
 };
 use videorc_app_core::StopOrigin;
+use videorc_app_core::studio::screen_views::SHOW_HERE_LABEL;
 use videorc_kit::theme::{self, hsla};
+use videorc_kit::tokens::size;
+use videorc_kit::{Button, ButtonVariant};
+use videorc_preview::lifecycle::WindowMode;
+
+use crate::preview::Preview;
 
 use layout::{INSPECTOR_MAX_PX, StudioLayout};
 use space::{KEY_CONTEXT, SPACE, SpaceAction, SpacePress, ToggleRecord, space_action};
@@ -31,6 +37,7 @@ pub fn bind_keys(cx: &mut App) {
 pub struct StudioPage {
     focus: FocusHandle,
     transport: Entity<Transport>,
+    preview: Entity<Preview>,
     /// The page's width at the last paint, for the breakpoint.
     width: f32,
     /// The Space now dispatching is a held key's repeat.
@@ -48,14 +55,23 @@ impl Focusable for StudioPage {
 impl StudioPage {
     /// The page holds the focus from the start, so Space reaches it before
     /// anything else is clicked.
-    pub fn new(transport: Entity<Transport>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        transport: Entity<Transport>,
+        preview: Entity<Preview>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.subscribe(&transport, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
+        // The preview notifies only when its slot's words or its window
+        // change, never per video frame.
+        cx.observe(&preview, |_, _, cx| cx.notify()).detach();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         Self {
             focus,
             transport,
+            preview,
             width: 0.,
             space_held: false,
         }
@@ -86,6 +102,36 @@ impl StudioPage {
     }
 }
 
+impl StudioPage {
+    /// `preview-stage.tsx`'s dock control under the video: "Pop out" while
+    /// docked, "Show here" while the Preview floats. Close, Bring to front
+    /// and Keep on top wait for the preview crate's window controls.
+    fn dock_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let preview = self.preview.read(cx);
+        if !preview.can_float() {
+            return None;
+        }
+        let button = match preview.mode() {
+            WindowMode::Docked => Button::new("preview-pop-out")
+                .label("Pop out")
+                .variant(ButtonVariant::Secondary),
+            WindowMode::Floating => Button::new("preview-stick")
+                .label(SHOW_HERE_LABEL)
+                .variant(ButtonVariant::Default),
+        };
+        let preview = self.preview.clone();
+        Some(
+            div()
+                .flex()
+                .justify_end()
+                .items_center()
+                .child(button.on_click(move |_, _, cx| {
+                    preview.update(cx, |preview, cx| preview.toggle_floating(cx));
+                })),
+        )
+    }
+}
+
 impl Render for StudioPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::resolve(None, window, cx);
@@ -102,14 +148,21 @@ impl Render for StudioPage {
         .absolute()
         .size_full();
 
-        // The preview stage (P116–P146) joins with #1907's element; until
-        // then its column holds the bottom row's slot alone.
         let preview_column = div()
             .id("studio-preview-column")
             .flex()
             .flex_col()
+            .gap(px(8.))
+            .p(px(size::GUTTER))
             .min_w_0()
-            .min_h_0();
+            .min_h_0()
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(Preview::docked_slot(&self.preview, cx)),
+            )
+            .children(self.dock_row(cx));
         // "Session inspector" (P114): cloud resume, the session section,
         // chat, audio, quick settings and takeover, in that order.
         let inspector = div()

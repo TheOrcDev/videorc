@@ -1,6 +1,5 @@
-//! macOS and every other platform: no ring. The macOS preview is the
-//! native CAMetalLayer on the backend's IOSurface (plan 220 S2.3a); this
-//! crate compiles so the layout and its tests build everywhere.
+//! Every platform but macOS, Windows and Linux: no ring. This half lets the
+//! crate compile so the layout and its tests build everywhere.
 
 use std::sync::atomic::AtomicU32;
 use std::time::Duration;

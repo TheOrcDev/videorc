@@ -11,6 +11,10 @@ description = "Plan 260 S1.7 (from plan 220 S4.1d): the CPU preview's frames ove
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
+# Plan 260 S1.7: shm_open, mmap and clock_gettime for the macOS half.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 # Win32_Security: CreateFileMappingW and CreateEventW take SECURITY_ATTRIBUTES.
 # In videorc-rust another crate turned it on through feature unification.
