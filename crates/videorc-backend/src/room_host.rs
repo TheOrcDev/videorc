@@ -321,7 +321,19 @@ async fn hold(
                 tokio::spawn(crate::room_media::run_camera(
                     state.clone(),
                     room.clone(),
+                    show_id.clone().unwrap_or_default(),
                     camera_heard,
+                ));
+                // The host's screen behind Hide screen (S1.8c): its
+                // acknowledgements and leaves come from here.
+                let (screen_signals, screen_heard) = mpsc::unbounded_channel();
+                let (screen_done, screen_stopped) = oneshot::channel::<()>();
+                tokio::spawn(crate::room_screen::run_screen(
+                    state.clone(),
+                    room.clone(),
+                    show_id.clone().unwrap_or_default(),
+                    screen_heard,
+                    screen_stopped,
                 ));
                 let (overlay_queue, overlay_worker) = overlay_sender(
                     state.clone(),
@@ -343,6 +355,8 @@ async fn hold(
                         event = events.recv() => match event {
                             Some(RoomEvent::Reconnecting) => {
                                 report(&state, CloudRoomClientState::Reconnecting, None);
+                                let _ = screen_signals
+                                    .send(crate::room_screen::ScreenSignal::Reconnecting);
                             }
                             Some(RoomEvent::Reconnected) => {
                                 report(&state, CloudRoomClientState::Connected, None);
@@ -380,8 +394,23 @@ async fn hold(
                                     );
                                 }
                             }
+                            // Only server-relayed acknowledgements, bounded as
+                            // the renderer's: a participant cannot send one.
+                            Some(RoomEvent::DataReceived { payload, topic, participant, .. })
+                                if topic.as_deref() == Some(crate::room_screen::PRIVACY_ACK_TOPIC) =>
+                            {
+                                if participant.is_some()
+                                    || payload.len() > crate::room_screen::PRIVACY_ACK_MAX_BYTES
+                                {
+                                    continue;
+                                }
+                                let _ = screen_signals
+                                    .send(crate::room_screen::ScreenSignal::Ack(payload.to_vec()));
+                            }
                             Some(RoomEvent::ParticipantDisconnected(participant)) => {
                                 let left = participant.identity().as_str().to_string();
+                                let _ = screen_signals
+                                    .send(crate::room_screen::ScreenSignal::Left(left.clone()));
                                 let _ = graphics_signals
                                     .send(crate::room_graphics::GraphicsSignal::Left(left.clone()));
                                 let _ = scene_signals
@@ -401,6 +430,7 @@ async fn hold(
                 scene_task.abort();
                 drop(microphone_done);
                 drop(camera_done);
+                drop(screen_done);
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
                     DisconnectReason::DuplicateIdentity => {
@@ -524,6 +554,7 @@ async fn leave(state: &AppState, room: Option<Arc<Room>>) {
     crate::room_avatar::reset_enabled();
     crate::room_content::clear();
     crate::room_media::clear();
+    crate::room_screen::clear();
     HOLDS_SEAT.store(false, Ordering::Release);
 }
 

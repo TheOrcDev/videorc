@@ -6176,11 +6176,19 @@ export interface CloudRoomCameraSettings {
 
 /** The host's media for the backend's room while it holds the host seat
  * (plan 260 S1.8c), one method per kind: `cloud.room.microphone.set` sends
- * `microphone`, `cloud.room.camera.set` sends `camera`; `null` takes it off.
+ * `microphone`, `cloud.room.camera.set` sends `camera`, `cloud.room.screen.set`
+ * sends `screen`; `null` takes it off.
  * Mirrors Rust `CloudRoomMediaSetParams`. */
 export interface CloudRoomMediaSetParams {
   microphone?: CloudRoomMicrophoneSettings | null
   camera?: CloudRoomCameraSettings | null
+  screen?: CloudRoomScreenSettings | null
+}
+
+/** The screen the backend's room shares: the scene's own, by its native
+ * source id (`screen:screencapturekit:<id>`, `window:screencapturekit:<id>`). */
+export interface CloudRoomScreenSettings {
+  sourceId: string
 }
 
 /** `cloud.room.avatar.motion` (plan 260 S1.8b): one message of the
@@ -6223,6 +6231,32 @@ export interface CloudRoomPresentationEvent {
   avatar?: RoomPresentationStatus
   /** The committed scene; the Studio's commit waits on it (5 s). */
   scene?: RoomPresentationStatus
+  /** Plan 260 S1.8c: the host's own media in the backend's room. */
+  media?: RoomMediaStatus
+}
+
+/** What the backend's room publishes of the host's own media. Mirrors Rust
+ * `RoomMediaStatus`. */
+export interface RoomMediaStatus {
+  camera: boolean
+  microphone: boolean
+  screen?: RoomScreenStatus
+}
+
+/** The shared screen and its Hide screen state on the wire (plan 249 S2), as
+ * the renderer room's `screenPrivacy`: the publication, when the source was
+ * blocked, which receivers acknowledged the frost. Mirrors Rust
+ * `RoomScreenStatus`. */
+export interface RoomScreenStatus {
+  sourceId: string
+  epoch: string
+  generation: number
+  hidden: boolean
+  published: boolean
+  sourceBlockedAt: number | null
+  status: 'visible' | 'hiding' | 'observed' | 'unconfirmed' | 'paused'
+  observations: Record<string, number>
+  reason?: string
 }
 
 /**

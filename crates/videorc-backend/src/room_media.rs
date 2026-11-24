@@ -36,7 +36,9 @@ use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 use tokio::sync::{Notify, oneshot};
 
-use crate::cloud_talk::RoomCameraSettings;
+use crate::cloud_talk::{
+    CLOUD_ROOM_PRESENTATION_EVENT, CloudRoomPresentationEvent, RoomCameraSettings, RoomMediaStatus,
+};
 use crate::protocol::{CameraBackgroundMode, LayoutSettings};
 use crate::room_microphone::{Bridge, Command, Reply, Settings};
 use crate::state::AppState;
@@ -80,10 +82,48 @@ pub(crate) fn set_camera(settings: Option<RoomCameraSettings>) {
     CAMERA_CHANGED.notify_waiters();
 }
 
+static MEDIA: StdMutex<Option<(String, RoomMediaStatus)>> = StdMutex::new(None);
+
+/// What the host's media tasks publish, on `cloud.room.presentation`'s
+/// `media` entry, sent when it changes.
+pub(crate) fn update_media(
+    state: &AppState,
+    show_id: &str,
+    change: impl FnOnce(&mut RoomMediaStatus),
+) {
+    let changed = {
+        let mut media = MEDIA
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = media.get_or_insert_with(|| (show_id.to_string(), RoomMediaStatus::default()));
+        if entry.0 != show_id {
+            *entry = (show_id.to_string(), RoomMediaStatus::default());
+        }
+        let before = entry.1.clone();
+        change(&mut entry.1);
+        (entry.1 != before).then(|| entry.1.clone())
+    };
+    if let Some(media) = changed {
+        state.emit_event(
+            CLOUD_ROOM_PRESENTATION_EVENT,
+            CloudRoomPresentationEvent {
+                show_id: show_id.to_string(),
+                graphics: None,
+                avatar: None,
+                scene: None,
+                media: Some(media),
+            },
+        );
+    }
+}
+
 /// A hold ended.
 pub(crate) fn clear() {
     set_microphone(None);
     set_camera(None);
+    *MEDIA
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 }
 
 fn command(action: &str, generation: u64, show_id: &str, settings: Option<Settings>) -> Command {
@@ -145,8 +185,10 @@ pub(crate) async fn run_microphone(
     let mut pulse = tokio::time::interval(Duration::from_millis(10));
     pulse.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        update_media(&state, &show_id, |media| media.microphone = open.is_some());
         tokio::select! {
             _ = &mut done => {
+                update_media(&state, &show_id, |media| media.microphone = false);
                 if open.is_some() {
                     let _ = bridge.command(&state, command("close", generation, &show_id, None)).await;
                 }
@@ -265,13 +307,16 @@ const CAMERA_FPS: f64 = 30.0;
 /// The size the room's camera goes out at: the source's own shape, at most
 /// 1280 x 720, never scaled up, even on both sides.
 pub(crate) fn camera_size(width: u32, height: u32) -> Option<(u32, u32)> {
+    fit_within(width, height, CAMERA_MAX)
+}
+
+/// A source's own shape within `max`, never scaled up, even on both sides.
+pub(crate) fn fit_within(width: u32, height: u32, max: (u32, u32)) -> Option<(u32, u32)> {
     if width < 2 || height < 2 {
         return None;
     }
     let (w, h) = (f64::from(width), f64::from(height));
-    let scale = (f64::from(CAMERA_MAX.0) / w)
-        .min(f64::from(CAMERA_MAX.1) / h)
-        .min(1.0);
+    let scale = (f64::from(max.0) / w).min(f64::from(max.1) / h).min(1.0);
     let even = |value: f64| ((((value + 1e-6) / 2.0).floor() as u32) * 2).max(2);
     Some((even(w * scale), even(h * scale)))
 }
@@ -411,7 +456,12 @@ async fn unpublish_camera(room: &Room, published: &mut Option<PublishedCamera>) 
 /// One connection's camera: published while the Studio has it on and the
 /// preview camera gives frames, taken off otherwise. Ends when `done` fires
 /// or its sender drops (the connection ended).
-pub(crate) async fn run_camera(state: AppState, room: Arc<Room>, mut done: oneshot::Receiver<()>) {
+pub(crate) async fn run_camera(
+    state: AppState,
+    room: Arc<Room>,
+    show_id: String,
+    mut done: oneshot::Receiver<()>,
+) {
     let started = std::time::Instant::now();
     let mut published: Option<PublishedCamera> = None;
     let mut last: Option<(u64, u64)> = None;
@@ -421,9 +471,11 @@ pub(crate) async fn run_camera(state: AppState, room: Arc<Room>, mut done: onesh
     let mut pulse = tokio::time::interval(Duration::from_secs_f64(1.0 / CAMERA_FPS));
     pulse.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        update_media(&state, &show_id, |media| media.camera = published.is_some());
         tokio::select! {
             _ = &mut done => {
                 unpublish_camera(&room, &mut published).await;
+                update_media(&state, &show_id, |media| media.camera = false);
                 return;
             }
             _ = pulse.tick() => {}

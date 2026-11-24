@@ -757,8 +757,9 @@ pub mod macos {
         Some(RetainedIoSurface::new(surface))
     }
 
-    /// The BGRA pixels of a surface, tight rows (the round-trip test's reader).
-    #[cfg(test)]
+    /// The BGRA pixels of a surface, tight rows (the round-trip test's
+    /// reader, and the backend room's screen for a zero-copy frame, plan 260
+    /// S1.8c).
     pub fn read_bgra_from_iosurface(
         surface: &RetainedIoSurface,
         width: u32,

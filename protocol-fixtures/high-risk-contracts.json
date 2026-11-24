@@ -2884,6 +2884,30 @@
         "deviceId": "camera:avfoundation:0"
       }
     },
+    "roomScreenSetParams": {
+      "screen": {
+        "sourceId": "window:screencapturekit:4242"
+      }
+    },
+    "roomPresentationMediaEvent": {
+      "showId": "show_talk_1",
+      "media": {
+        "camera": true,
+        "microphone": true,
+        "screen": {
+          "sourceId": "window:screencapturekit:4242",
+          "epoch": "4f1c2b0a9d8e7f6a5b4c3d2e1f0a9b8c",
+          "generation": 3,
+          "hidden": true,
+          "published": true,
+          "sourceBlockedAt": 1764000000000,
+          "status": "observed",
+          "observations": {
+            "guest:ada": 1764000000420
+          }
+        }
+      }
+    },
     "roomAvatarMotionParams": {
       "message": {
         "v": 1,

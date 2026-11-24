@@ -8411,6 +8411,29 @@ mod tests {
                 .as_ref()
                 .is_some_and(|settings| settings.valid())
         );
+        // `cloud.room.screen.set`: the scene's screen by its native id.
+        let screen = high_risk_fixture("/cloud/roomScreenSetParams");
+        let params: crate::cloud_talk::CloudRoomMediaSetParams =
+            serde_json::from_value(screen.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&params).unwrap(), screen);
+        assert!(
+            params
+                .screen
+                .as_ref()
+                .is_some_and(|settings| settings.valid())
+        );
+        // The host's media on `cloud.room.presentation`, the screen's privacy
+        // as the renderer's room reported it.
+        let media = high_risk_fixture("/cloud/roomPresentationMediaEvent");
+        let event: crate::cloud_talk::CloudRoomPresentationEvent =
+            serde_json::from_value(media.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&event).unwrap(), media);
+        let screen = event.media.unwrap().screen.unwrap();
+        assert_eq!(
+            screen.status,
+            crate::cloud_talk::RoomScreenPrivacyState::Observed
+        );
+        assert_eq!(screen.observations.len(), 1);
         // `cloud.room.avatar.motion` carries one motion message as it is.
         let motion = high_risk_fixture("/cloud/roomAvatarMotionParams");
         assert!(motion["message"].is_object());
