@@ -45,6 +45,13 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 # preview's layer reaches its NSView through it too (S2.3a).
 raw-window-handle = "0.6"
 
+# Linux (plan 260 S2.6c, lane L5): the GlobalShortcuts portal through ashpd,
+# and the session bus (Inhibit, ScreenSaver, Secret Service) through ashpd's
+# zbus. Both are in the tree already through the backend's portal capture.
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "global_shortcuts"] }
+futures-util = "0.3"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # The smoke driver asks its own window's view for its accessibility children,
 # as VoiceOver does first, so GPUI builds the tree in a smoke run (L6).
