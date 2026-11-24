@@ -6,6 +6,8 @@
 //! - [`kinds`]: the registry, one row per kind with its tone and life.
 //! - [`policy`]: what pops up, what the number counts, merging two reports
 //!   on one subject, the list's order and size, and the words.
+//! - [`store`]: one entry per subject, updated in place; the app hands it
+//!   the clock and the session's state, and drains its effects.
 //!
 //! The owner's rules hold here: anything Videorc notices on its own is a
 //! bell entry, never a toast, while nothing is recording or live; nothing it
@@ -17,15 +19,17 @@
 //!
 //! `toasts` keeps the session's toasts as S1.6a (L7) ported them, with
 //! their words in `copy` and the raw-text guard; its names are re-exported
-//! here as they were when it was `notices.rs`. The store, this module's
-//! guard and the sources land in the next parts.
+//! here as they were when it was `notices.rs`. This module's guard and the
+//! sources land in the next parts.
 
 pub mod kinds;
 pub mod policy;
+pub mod store;
 pub mod types;
 
 mod toasts;
 pub use toasts::*;
 
 pub use policy::{LAUNCH_QUIET_MS, pop_up_decision};
+pub use store::{Effect, Store};
 pub use types::{Action, ActionKind, Count, Entry, Input, Resolution, Tone};
