@@ -2,6 +2,7 @@
 //! `lib/notifications/`): what Videorc tells the streamer, kept as entries
 //! behind the bell, and the one rule that lets an entry pop up as a toast.
 //!
+//! - [`guard`]: a provider's raw error never reaches a toast or the list.
 //! - [`types`]: the entry, the report that makes it, the bell's count.
 //! - [`kinds`]: the registry, one row per kind with its tone and life.
 //! - [`policy`]: what pops up, what the number counts, merging two reports
@@ -18,10 +19,11 @@
 //! two outcomes) stay their own toasts, outside this module.
 //!
 //! `toasts` keeps the session's toasts as S1.6a (L7) ported them, with
-//! their words in `copy` and the raw-text guard; its names are re-exported
-//! here as they were when it was `notices.rs`. This module's guard and the
-//! sources land in the next parts.
+//! their words in `copy`; its names are re-exported here as they were when
+//! it was `notices.rs`. [`guard`] is its raw-text guard, in the shape the
+//! store takes. The sources land in the next parts.
 
+pub mod guard;
 pub mod kinds;
 pub mod policy;
 pub mod store;
