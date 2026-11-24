@@ -4452,22 +4452,27 @@ fn i420_to_nv12_strided(
         output.len() == output_len,
         "I420/NV12 conversion output length mismatch"
     );
-    for row in 0..height {
-        let source_start = row * width;
-        let target_start = row * pitch;
-        output[target_start..target_start + width]
-            .copy_from_slice(&i420[source_start..source_start + width]);
+    let (luma_target, chroma_target) = output.split_at_mut(pitch * height);
+    for (target, source) in luma_target
+        .chunks_exact_mut(pitch)
+        .zip(i420[..y_len].chunks_exact(width))
+    {
+        target[..width].copy_from_slice(source);
     }
     let u = &i420[y_len..y_len + chroma_len];
     let v = &i420[y_len + chroma_len..];
     let chroma_width = width / 2;
-    let uv_offset = pitch * height;
-    for row in 0..height / 2 {
-        let source_start = row * chroma_width;
-        let target_start = uv_offset + row * pitch;
-        for column in 0..chroma_width {
-            output[target_start + column * 2] = u[source_start + column];
-            output[target_start + column * 2 + 1] = v[source_start + column];
+    // Row slices zipped pairwise, so the interleave has no per-byte bounds
+    // checks (#1631: every separate source file runs it once a frame).
+    for ((target, u_row), v_row) in chroma_target
+        .chunks_exact_mut(pitch)
+        .zip(u.chunks_exact(chroma_width))
+        .zip(v.chunks_exact(chroma_width))
+    {
+        for ((pair, u_value), v_value) in target[..width].chunks_exact_mut(2).zip(u_row).zip(v_row)
+        {
+            pair[0] = *u_value;
+            pair[1] = *v_value;
         }
     }
     Ok(())

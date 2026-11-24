@@ -44,8 +44,8 @@
 //                 (VIDEORC_WINDOWS_D3D11_MEDIA=disabled); auto (default) is
 //                 the shipping choice, and the summary names the path it took.
 //   --probe-capture  stops after the 5 s capture-rate sample.
-//   --no-screen-file keeps Separate source recordings off under --media cpu
-//                 (a baseline for the CPU bridge's cost without the files).
+//   --no-screen-file keeps Separate source recordings off under --media cpu,
+//                 camera still on (the A/B baseline for what the files cost).
 //   VIDEORC_SMOKE_TIMEOUT_MS, VIDEORC_SMOKE_RTMP_PORT (13937),
 //   VIDEORC_SMOKE_FFMPEG_PATH, VIDEORC_SMOKE_FFPROBE_PATH
 
@@ -349,10 +349,29 @@ async function hideStep({ renderer, smoke, screen }) {
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-01T00:00:00Z'
   }
+  // `--no-screen-file` keeps the camera, so it is the same take with the
+  // separate files off: the A/B control for what they cost.
+  const withCamera = camera && (!screenFileSkip || options.noScreenFile)
+  const cameraSources = withCamera
+    ? { ...visual.sources, cameraId: camera.id, cameraName: camera.name, cameraOff: false }
+    : null
+  if (cameraSources) {
+    // The camera live first, as the Studio's Preview has it: session.start
+    // only starts a camera for the separate files, so without this the
+    // baseline would record a camera that never captured.
+    await request(ws, timeoutMs, 'preview.camera.start', {
+      sources: cameraSources,
+      layout: visual.layout,
+      video
+    })
+    await waitForBackendState(
+      'preview.camera.status',
+      (status) => status.state === 'live' && status.framesCaptured > 0,
+      `camera ${camera.name} live with frames`
+    )
+  }
   const started = await request(ws, timeoutMs, 'session.start', {
-    sources: screenFileSkip
-      ? visual.sources
-      : { ...visual.sources, cameraId: camera.id, cameraName: camera.name, cameraOff: false },
+    sources: cameraSources ?? visual.sources,
     layout: visual.layout,
     background: null,
     output: {
