@@ -200,6 +200,59 @@ pub enum GuestAction {
     DisallowScreenShare,
 }
 
+/// Whether a failed guest action was an explicit refusal by the web (a 4xx
+/// answer): the action certainly did not happen. A transport failure, a
+/// timeout, a server error or anything not known to be the web's answer may
+/// have happened remotely (plan 260 S1.8, #1895: a removal's deny stays).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn guest_action_refused(error: &anyhow::Error) -> bool {
+    use crate::cloud_show::CloudApiError;
+    match error.downcast_ref::<CloudApiError>() {
+        Some(
+            CloudApiError::Transport(_)
+            | CloudApiError::NodeUnreachable
+            | CloudApiError::RoomsUnavailable
+            | CloudApiError::Full
+            | CloudApiError::Disabled,
+        ) => false,
+        Some(CloudApiError::Other { status, .. }) => (400..500).contains(status),
+        Some(_) => true,
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod guest_action_refusal_tests {
+    use super::guest_action_refused;
+    use crate::cloud_show::CloudApiError;
+
+    fn other(status: u16) -> anyhow::Error {
+        anyhow::Error::new(CloudApiError::Other {
+            status,
+            code: "x".to_string(),
+            message: "x".to_string(),
+        })
+    }
+
+    #[test]
+    fn only_an_explicit_web_refusal_counts() {
+        assert!(guest_action_refused(&other(404)));
+        assert!(guest_action_refused(&anyhow::Error::new(
+            CloudApiError::Unauthorized
+        )));
+        assert!(!guest_action_refused(&other(502)));
+        assert!(!guest_action_refused(&anyhow::Error::new(
+            CloudApiError::Transport("timed out".to_string())
+        )));
+        assert!(!guest_action_refused(&anyhow::Error::new(
+            CloudApiError::RoomsUnavailable
+        )));
+        assert!(!guest_action_refused(&anyhow::anyhow!(
+            "the deadline passed"
+        )));
+    }
+}
+
 /// `POST /api/cloud/shows/:id/guests/:guestId`'s body.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

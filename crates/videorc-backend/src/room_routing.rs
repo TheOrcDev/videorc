@@ -81,15 +81,35 @@ fn denied() -> std::sync::MutexGuard<'static, BTreeMap<String, bool>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// The host removes or bans a guest: their grant goes now, before the web
-/// takes them out of the room, so a rejoin with a still-valid token finds
-/// nothing whatever the timing.
-pub(crate) fn deny(identity: &str) {
-    denied().insert(identity.to_string(), false);
-    ROUTING_CHANGED.notify_waiters();
+/// The routing task runs (a connection holds the room), and the deny
+/// waiters it completes once their permissions update is out.
+static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static DENY_WAITERS: StdMutex<Vec<oneshot::Sender<()>>> = StdMutex::new(Vec::new());
+
+fn deny_waiters() -> std::sync::MutexGuard<'static, Vec<oneshot::Sender<()>>> {
+    DENY_WAITERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// The removal did not happen (the web refused it): the deny goes too.
+/// The host removes or bans a guest: their grant goes now, before the web
+/// takes them out of the room, so a rejoin with a still-valid token finds
+/// nothing whatever the timing. Resolves once the permissions update that
+/// carries the deny has been sent (or nothing needed revoking: no
+/// connection, or the identity held no grant).
+pub(crate) fn deny(identity: &str) -> oneshot::Receiver<()> {
+    let (applied, confirmed) = oneshot::channel();
+    denied().insert(identity.to_string(), false);
+    if RUNNING.load(std::sync::atomic::Ordering::Acquire) {
+        deny_waiters().push(applied);
+    } else {
+        let _ = applied.send(());
+    }
+    ROUTING_CHANGED.notify_waiters();
+    confirmed
+}
+
+/// The web explicitly refused the removal: the deny goes too.
 pub(crate) fn undeny(identity: &str) {
     denied().remove(identity);
     ROUTING_CHANGED.notify_waiters();
@@ -244,6 +264,7 @@ pub(crate) async fn run(
     mut changed: mpsc::UnboundedReceiver<()>,
     mut done: oneshot::Receiver<()>,
 ) {
+    RUNNING.store(true, std::sync::atomic::Ordering::Release);
     let mut events = state.events.subscribe();
     let mut takeover = state
         .database
@@ -276,6 +297,8 @@ pub(crate) async fn run(
             _ = ROUTING_CHANGED.notified() => {}
         }
         let now = chrono::Utc::now().timestamp_millis();
+        // The denies taken before this plan is made: confirmed once it is out.
+        let waiting: Vec<oneshot::Sender<()>> = std::mem::take(&mut *deny_waiters());
         let admitted: Vec<String> = crate::cloud_show::lock(&state.cloud_show)
             .status()
             .room
@@ -329,10 +352,22 @@ pub(crate) async fn run(
                 .set_track_subscription_permissions(false, permissions)
                 .await
             {
-                Ok(()) => planned = Some(plan),
+                Ok(()) => {
+                    planned = Some(plan);
+                    for waiter in waiting {
+                        let _ = waiter.send(());
+                    }
+                }
                 Err(error) => {
                     tracing::warn!("The room's subscriptions could not be set: {error}");
+                    // Not confirmed: tried again on the next pass.
+                    deny_waiters().extend(waiting);
                 }
+            }
+        } else {
+            // Nothing to change: the deny is already in force.
+            for waiter in waiting {
+                let _ = waiter.send(());
             }
         }
         // Routing: on a change, and once a second for the lease.
@@ -363,6 +398,11 @@ pub(crate) async fn run(
             tracing::debug!("The audio routing did not reach the program pages: {error}");
         }
         sent = Some((Instant::now(), settings));
+    }
+    // The connection is gone, and with it every grant it made.
+    RUNNING.store(false, std::sync::atomic::Ordering::Release);
+    for waiter in std::mem::take(&mut *deny_waiters()) {
+        let _ = waiter.send(());
     }
 }
 
