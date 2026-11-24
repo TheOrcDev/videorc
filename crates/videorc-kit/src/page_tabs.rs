@@ -95,6 +95,7 @@ impl RenderOnce for PageTabs {
         // The strip carries the list's accessible name (React's TabsList
         // aria-label); Tabs itself has no label slot yet.
         let strip = div()
+            .id(SharedString::from(format!("{}/strip", self.id)))
             .flex_none()
             .w_full()
             .px(px(size::GUTTER))

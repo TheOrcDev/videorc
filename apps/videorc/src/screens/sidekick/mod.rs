@@ -3,14 +3,20 @@
 //! `stream_manager::buddy`, drawn with `videorc-kit`. Words match Electron's
 //! `tabs/buddy-tab.tsx`.
 
+mod chat;
+mod clean_cut;
+mod community;
 mod live;
 mod overview;
+mod reports;
+mod voice;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{Context, Window, div, prelude::*, px};
+use gpui::{Context, Window, div, prelude::*};
 use serde_json::json;
+use videorc_app_core::buddy::chat::{self as buddy_chat, RULES_MAX};
 use videorc_app_core::buddy::copy as words;
 use videorc_app_core::stream_manager::buddy::{
     CLOUD_AI_KEEPS, CohostSettingsView, CohostState, cloud_ai_uses,
@@ -20,11 +26,16 @@ use videorc_app_core::studio::ui_local::UiLocal;
 use videorc_app_core::{BackendClient, BackendEvent, Studio};
 use videorc_kit::dialog::DialogHandle;
 use videorc_kit::page_tabs::PageTabs;
-use videorc_kit::theme::{self, FONT, TypeScale, hsla};
-use videorc_kit::tokens::{size, text};
+use videorc_kit::theme::FONT;
+use videorc_protocol::cohost::CohostAutoChat;
 
+use chat::{ChatWidgets, render_chat};
+use clean_cut::render_clean_cut;
+use community::render_community;
 use live::{LiveInput, LiveView, live_view};
 use overview::{OverviewState, render_overview};
+use reports::render_reports;
+use voice::render_voice;
 
 pub type AppStudio = Studio<BackendClient>;
 
@@ -101,6 +112,7 @@ pub struct SidekickScreen {
     live: bool,
     consent: DialogHandle,
     pending_on: bool,
+    chat: Option<ChatWidgets>,
 }
 
 impl SidekickScreen {
@@ -125,10 +137,20 @@ impl SidekickScreen {
             live: false,
             consent: DialogHandle::new(false),
             pending_on: false,
+            chat: None,
         };
         screen.refresh(cx);
         screen.watch(cx);
         screen
+    }
+
+    fn ensure_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat.is_none() {
+            self.chat = Some(ChatWidgets::new(window, cx));
+        }
+        if let Some(widgets) = self.chat.as_ref() {
+            widgets.sync_cooldowns(self.settings.as_ref(), window, cx);
+        }
     }
 
     fn watch(&self, cx: &mut Context<Self>) {
@@ -337,30 +359,119 @@ impl SidekickScreen {
         window.dispatch_action(Box::new(crate::app::menus::ToggleStreamManager), cx);
     }
 
-    fn later_tab(&self, name: &str, theme: &videorc_kit::tokens::Theme) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .p(px(size::GUTTER))
-            .child(
-                div()
-                    .type_scale(text::SECTION)
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(name.to_string()),
-            )
-            .child(
-                div()
-                    .type_scale(text::META)
-                    .text_color(hsla(theme.muted_foreground))
-                    .child("This Sidekick section comes in the next slice."),
-            )
+    pub(crate) fn patch_settings(&mut self, patch: serde_json::Value, cx: &mut Context<Self>) {
+        let backend = self.studio.backend().clone();
+        let job = self
+            .runtime
+            .spawn(async move { backend.request("cohost.settings.set", patch).await });
+        cx.spawn(async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |screen, cx| {
+                match result {
+                    Ok(Ok(value)) => {
+                        screen.settings = CohostSettingsView::from_json(&value);
+                    }
+                    Ok(Err(error)) => {
+                        eprintln!("[videorc-app] Sidekick settings: {error}");
+                    }
+                    Err(error) => {
+                        eprintln!("[videorc-app] Sidekick settings: {error}");
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn patch_auto_behaviour(
+        &mut self,
+        which: &str,
+        enabled: Option<bool>,
+        cooldown: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut next = self
+            .settings
+            .as_ref()
+            .and_then(|s| s.auto_chat.clone())
+            .unwrap_or_else(CohostAutoChat::default);
+        match which {
+            "answers" => {
+                if let Some(on) = enabled {
+                    next.answers.enabled = on;
+                }
+                if let Some(secs) = cooldown {
+                    next.answers.cooldown_seconds = secs;
+                }
+            }
+            "banter" => {
+                if let Some(on) = enabled {
+                    next.banter.enabled = on;
+                }
+                if let Some(secs) = cooldown {
+                    next.banter.cooldown_seconds = secs;
+                }
+            }
+            _ => return,
+        }
+        self.patch_settings(json!({ "autoChat": next }), cx);
+    }
+
+    pub(crate) fn add_chat_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(widgets) = self.chat.as_ref() else {
+            return;
+        };
+        let draft = widgets.rule_draft.read(cx).value().to_string();
+        let Some(rule) = buddy_chat::rule_to_save(&draft) else {
+            return;
+        };
+        let mut rules: Vec<String> = self
+            .settings
+            .as_ref()
+            .and_then(|s| s.raw.get("rules"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if rules.len() >= RULES_MAX {
+            return;
+        }
+        rules.push(rule);
+        if let Some(widgets) = self.chat.as_ref() {
+            widgets
+                .rule_draft
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.patch_settings(json!({ "rules": rules }), cx);
+    }
+
+    pub(crate) fn remove_chat_rule(&mut self, index: usize, cx: &mut Context<Self>) {
+        let mut rules: Vec<String> = self
+            .settings
+            .as_ref()
+            .and_then(|s| s.raw.get("rules"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if index >= rules.len() {
+            return;
+        }
+        rules.remove(index);
+        self.patch_settings(json!({ "rules": rules }), cx);
     }
 }
 
 impl Render for SidekickScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = theme::resolve(None, window, cx);
+        self.ensure_chat(window, cx);
         let view = self.view();
         let listen = self.settings.as_ref().map(|s| s.listen).unwrap_or(false);
         let overview = OverviewState {
@@ -370,21 +481,15 @@ impl Render for SidekickScreen {
             cloud_uses: cloud_ai_uses(),
             cloud_keeps: CLOUD_AI_KEEPS,
         };
+        let settings = self.settings.as_ref();
+        let widgets = self.chat.as_ref().expect("chat widgets");
         let body = match self.tab {
             Tab::Overview => render_overview(overview, window, cx),
-            Tab::Chat => self.later_tab(Tab::Chat.label(), &theme).into_any_element(),
-            Tab::Community => self
-                .later_tab(Tab::Community.label(), &theme)
-                .into_any_element(),
-            Tab::Voice => self
-                .later_tab(Tab::Voice.label(), &theme)
-                .into_any_element(),
-            Tab::Reports => self
-                .later_tab(Tab::Reports.label(), &theme)
-                .into_any_element(),
-            Tab::CleanCut => self
-                .later_tab(Tab::CleanCut.label(), &theme)
-                .into_any_element(),
+            Tab::Chat => render_chat(&view, settings, widgets, window, cx),
+            Tab::Community => render_community(&view, self.entitled, window, cx),
+            Tab::Voice => render_voice(&view, settings, window, cx),
+            Tab::Reports => render_reports(&view, window, cx),
+            Tab::CleanCut => render_clean_cut(&view, self.consented, window, cx),
         };
 
         let entity = cx.entity();
