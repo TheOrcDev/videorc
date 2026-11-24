@@ -244,6 +244,13 @@ fn zone(name: &str) -> Option<Zone> {
     BUNDLED.get(name).ok()
 }
 
+/// This computer's zone, by its IANA name (`/etc/localtime`'s link on Unix,
+/// the CLDR mapping on Windows), with the bundled rules for that name: the
+/// OS's own rules can lag the law. `None` when the system names no zone.
+fn system_zone() -> Option<Zone> {
+    zone(Zone::try_system().ok()?.iana_name()?)
+}
+
 /// Where a wall time falls in a zone, in seconds east of UTC.
 enum WallOffsets {
     Once(i32),
@@ -254,7 +261,7 @@ enum WallOffsets {
 }
 
 /// A zone that turns wall times into instants and back: a bundled IANA zone,
-/// or this computer's (`chrono::Local`), which JavaScript's `Date` reads.
+/// or `chrono::Local`, the OS's rules, when the system names no IANA zone.
 trait WallZone {
     fn offset_at(&self, at: DateTime<Utc>) -> i32;
     fn wall_offsets(&self, wall: NaiveDateTime) -> WallOffsets;
@@ -422,7 +429,10 @@ fn wall_time<Z: WallZone>(at: DateTime<Utc>, zone: &Z) -> String {
 /// `defaultPlannedEnd`: two hours of real time after the start, read as this
 /// computer's local time (`datetime-local`) and written back as its wall clock.
 pub fn default_planned_end(local_start: &str) -> String {
-    default_planned_end_in(local_start, &chrono::Local)
+    match system_zone() {
+        Some(zone) => default_planned_end_in(local_start, &zone),
+        None => default_planned_end_in(local_start, &chrono::Local),
+    }
 }
 
 fn default_planned_end_in<Z: WallZone>(local_start: &str, zone: &Z) -> String {
@@ -612,7 +622,10 @@ pub fn planned_end_error(
 /// `freshMetadata`: an hour of real time from now, in this computer's zone;
 /// X gets its planned end and replay.
 pub fn fresh_metadata(provider: &str, now: DateTime<Utc>, time_zone: &str) -> Requested {
-    fresh_metadata_in(provider, now, time_zone, &chrono::Local)
+    match system_zone() {
+        Some(zone) => fresh_metadata_in(provider, now, time_zone, &zone),
+        None => fresh_metadata_in(provider, now, time_zone, &chrono::Local),
+    }
 }
 
 fn fresh_metadata_in<Z: WallZone>(
