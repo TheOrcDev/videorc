@@ -10,6 +10,7 @@
 pub mod client;
 pub mod crash_log;
 pub mod desktop;
+pub mod editor;
 mod http;
 pub mod interruption;
 pub mod ledger;
