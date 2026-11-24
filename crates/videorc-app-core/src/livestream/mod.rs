@@ -24,7 +24,9 @@
 //!   [`go_live_copy`]'s words, [`go_live_privacy`]'s privacy step and
 //!   [`captions_preflight`]'s captions rules.
 //! - [`lifecycle`]: each platform's prepare, start and end steps, with
-//!   [`lifecycle_copy`]'s status lines.
+//!   [`lifecycle_copy`]'s status lines; [`platform_owner`]: who owns the
+//!   cleanup; [`cloud_provider`]: the cloud's leg as Go Live and the
+//!   cleanup wait for it.
 //! - [`watchdog_section`]: Destinations → Watchdog, the checks and where
 //!   alerts reach you.
 //! - [`stream_report`]: Destinations → After the stream, the stream report
@@ -44,6 +46,7 @@ pub mod accounts;
 pub mod captions_preflight;
 pub mod chat_commands;
 pub mod cloud_outputs;
+pub mod cloud_provider;
 pub mod cloud_show;
 pub mod cloud_status;
 pub mod cloud_view;
@@ -58,6 +61,7 @@ pub mod lifecycle;
 pub mod lifecycle_copy;
 pub mod on_air;
 pub mod plan;
+pub mod platform_owner;
 pub mod ready;
 pub mod scheduled;
 pub mod scheduled_copy;

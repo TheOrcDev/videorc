@@ -91,6 +91,7 @@ pub mod latency;
 pub mod linux_desktop;
 pub mod live_audio;
 pub mod live_sources;
+mod platform_lifecycle;
 mod platforms;
 pub mod preview_scene;
 pub mod recordings_folder;
@@ -888,9 +889,9 @@ pub struct Studio<B: StudioBackend> {
     scheduled_tx: watch::Sender<scheduled::ScheduledState>,
     /// S1.6c: the Go Live dialog, apart from the snapshot.
     go_live_tx: watch::Sender<go_live::GoLiveState>,
-    /// S1.6c: what the running livestream prepared on its platforms; the
-    /// stop ends and completes it.
-    go_live_streaming: Mutex<Option<Value>>,
+    /// S1.6c: who owns the livestream's platform cleanup; the stop ends
+    /// and completes it.
+    platform: platform_lifecycle::PlatformLifecycle,
     /// S1.6c: Videorc Cloud's status, apart from the snapshot.
     cloud_tx: watch::Sender<cloud::CloudState>,
 }
@@ -981,7 +982,7 @@ impl<B: StudioBackend> Studio<B> {
             chat_commands_tx,
             scheduled_tx,
             go_live_tx,
-            go_live_streaming: Mutex::new(None),
+            platform: platform_lifecycle::PlatformLifecycle::default(),
             cloud_tx,
         }
     }
@@ -1272,7 +1273,7 @@ impl<B: StudioBackend> Studio<B> {
             BackendEvent::Untyped { event, payload } => {
                 // S1.6c: the live area's events are its own.
                 if self.handle_chat_commands_event(&event, &payload)
-                    || self.handle_cloud_event(&event, &payload)
+                    || self.handle_cloud_event(&event, &payload).await
                     || self.handle_platforms_event(&event, &payload).await
                     || self.handle_details_event(&event, &payload).await
                     || self.handle_scheduled_event(&event).await
@@ -2299,7 +2300,8 @@ impl<B: StudioBackend> Studio<B> {
         };
         self.publish();
         // X's broadcasts end before the stream does (S1.6c).
-        self.end_x_broadcasts().await;
+        let session_id = self.snapshot().session.status.session_id.clone();
+        let platforms = self.begin_platform_stop(session_id).await;
         let params = SessionStopParams {
             requested_at_ms: Some(requested_at_ms),
         };
@@ -2321,9 +2323,7 @@ impl<B: StudioBackend> Studio<B> {
         // live sync starts again.
         self.follow_live_audio().await;
         // YouTube's broadcasts complete once the stream stopped (S1.6c).
-        if ok {
-            self.complete_youtube_broadcasts().await;
-        }
+        self.finish_platform_stop(platforms, ok).await;
         ok
     }
 

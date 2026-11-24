@@ -4323,3 +4323,86 @@ async fn cloud_actions_toast_under_one_id_and_focus_asks_once_per_ten_seconds() 
         .count();
     assert_eq!(checks, 2);
 }
+
+// --- S1.6c: the activation against the stop ---------------------------------
+
+#[tokio::test]
+async fn a_late_ingest_reply_never_overwrites_what_the_stop_wrote() {
+    let youtube = json!({
+        "id": "youtube", "platform": "youtube", "label": "YouTube", "enabled": true,
+        "authMode": "oauth", "accountId": "a1",
+        "platformBroadcastId": "b1", "platformStreamId": "st1",
+        "serverUrl": "rtmp://a.rtmp.youtube.com/live2", "streamKeyPresent": true,
+        "status": { "state": "ready", "message": "Ready." },
+        "createdAt": "2026-11-08T00:00:00Z", "updatedAt": "2026-11-08T00:00:00Z"
+    });
+    let mut capture = capture_config_with_twitch();
+    let mut saved = youtube.clone();
+    saved["enabled"] = json!(false);
+    capture["streaming"]["targets"]
+        .as_array_mut()
+        .unwrap()
+        .push(saved);
+    let backend = Scripted::new();
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| {
+        script.settings.insert(
+            keys::CAPTURE_CONFIG.to_string(),
+            Value::String(capture.to_string()),
+        );
+        script.start_answers.push_back(Ok(live("s1")));
+        script
+            .stop_answers
+            .push_back(Ok(status(RecordingState::Idle, Some("s1"))));
+        script.livestream_held = Some((
+            "streamTargets.youtube.streamStatus".to_string(),
+            gate.clone(),
+        ));
+    });
+    answer_livestream(
+        &backend,
+        "streamTargets.youtube.streamStatus",
+        json!({ "active": true, "message": "YouTube is receiving video." }),
+    );
+    answer_livestream(
+        &backend,
+        "streamTargets.youtube.transition",
+        json!({ "lifecycleStatus": "complete" }),
+    );
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    assert_eq!(studio.start_livestream(None).await, StartOutcome::Started);
+
+    // The ingest read is out when the streamer stops; the stop completes
+    // the broadcast and only then does the read answer.
+    let streaming = json!({ "enabled": true, "targets": [youtube] });
+    let stop_then_answer = async {
+        while !backend.script.lock().unwrap().held_reached {
+            tokio::task::yield_now().await;
+        }
+        assert!(studio.stop().await);
+        gate.add_permits(1);
+    };
+    tokio::join!(
+        studio.activate_prepared_for_tests(streaming, "s1"),
+        stop_then_answer
+    );
+
+    let capture = studio.snapshot().settings.capture_doc;
+    let target = capture["streaming"]["targets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|target| target["id"] == "youtube")
+        .cloned()
+        .expect("the YouTube destination");
+    assert_eq!(target["status"]["state"], "stopped", "{target}");
+    let script = backend.script.lock().unwrap();
+    let transitions: Vec<&Value> = script
+        .livestream_calls
+        .iter()
+        .filter(|(method, _)| method == "streamTargets.youtube.transition")
+        .map(|(_, params)| &params["status"])
+        .collect();
+    assert_eq!(transitions, [&json!("complete")]);
+}
