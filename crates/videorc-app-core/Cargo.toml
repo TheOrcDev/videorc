@@ -19,7 +19,9 @@ anyhow = "1.0"
 chrono = "0.4"
 # Scheduled streams' zone rules (`livestream::scheduled`): the IANA data
 # bundled into the binary, as the backend reads it, never the OS copy.
-jiff = { version = "1.0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
+# `tz-system` only names this computer's zone; its rules still come from the
+# bundle.
+jiff = { version = "1.0.2", default-features = false, features = ["std", "tz-system", "tzdb-bundle-always"] }
 # The Stream Manager's link finder (`stream_manager::links`) and the toast
 # guard's patterns (`guardToastText`).
 regex = "1.12"

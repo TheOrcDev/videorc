@@ -2525,6 +2525,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
