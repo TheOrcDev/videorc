@@ -924,6 +924,8 @@ fn the_page_view_reads_rows_menus_and_the_questions() {
         free_bytes: None,
         now: chrono::Utc::now(),
         clean_cuts: &[],
+        noise_jobs: &[],
+        noise_premium_locked: None,
     };
     let page = library_view(&input);
     assert_eq!(page.list_state, ListState::Rows);
@@ -945,7 +947,8 @@ fn the_page_view_reads_rows_menus_and_the_questions() {
         [
             "Play",
             "Markers",
-            "Show in Finder",
+            reveal_in_file_manager_label(),
+            "Reduce noise",
             "Retry MP4 export",
             "Open in Stream Manager",
             "Rename…",
@@ -1151,4 +1154,101 @@ fn a_takes_siblings_and_the_separate_file_toast() {
     let (title, description) = toast("Screen file: something new happened", true);
     assert_eq!(title, "Screen file stopped");
     assert!(!description.contains("something new"), "{description}");
+}
+
+fn noise_job(source: &str, status: &str) -> videorc_protocol::NoiseCleanupJob {
+    serde_json::from_value(json!({
+        "id": format!("cleanup-{source}"), "sourceSessionId": source, "status": status,
+        "progressPercent": 40, "preset": "speech-v1",
+        "createdAt": "2026-11-01T10:00:00Z", "updatedAt": "2026-11-01T10:00:01Z"
+    }))
+    .unwrap()
+}
+
+/// `library-tab.tsx`'s noise cleanup wiring: the hold, the menu item, the
+/// row's button, the bulk lock, and a cloud stream's file-less menu.
+#[test]
+fn noise_cleanup_holds_file_actions_and_locks_the_row() {
+    let sessions = vec![
+        session(
+            json!({"id": "a", "title": "Alpha", "startedAt": "2026-11-01T10:00:00Z",
+            "mp4Path": "/a.mp4"}),
+        ),
+        session(
+            json!({"id": "b", "title": "Beta", "startedAt": "2026-11-02T10:00:00Z",
+            "mp4Path": "/b.mp4"}),
+        ),
+        session(
+            json!({"id": "c", "title": "Gamma", "startedAt": "2026-11-03T10:00:00Z",
+            "mode": "cloud-stream"}),
+        ),
+    ];
+    let logs = BTreeMap::new();
+    let mut ui = LibraryUi::default();
+    ui.selection.selected = strings(&["a"]);
+    let session_view = IdleStudio(status(RecordingState::Idle, None));
+    let jobs = vec![noise_job("a", "processing")];
+    let page = library_view(&ViewInput {
+        data: DataFacts {
+            sessions: &sessions,
+            has_more: false,
+            loading_more: false,
+            loaded: true,
+            online: true,
+            totals: Some((3, 0)),
+            logs: &logs,
+        },
+        session: &session_view,
+        clean_cut: &NoCleanCut,
+        ui: &ui,
+        free_bytes: None,
+        now: chrono::Utc::now(),
+        clean_cuts: &[],
+        noise_jobs: &jobs,
+        noise_premium_locked: Some("Noise cleanup is part of Videorc Premium."),
+    });
+    let row = |id: &str| page.rows.iter().find(|row| row.id == id).unwrap();
+    let item = |id: &str, menu: MenuId| row(id).menu.iter().find(|item| item.id == menu).cloned();
+
+    // Alpha is being cleaned: its file actions wait and say why.
+    let alpha = row("a");
+    assert!(!alpha.selectable);
+    assert!(!alpha.can_delete);
+    let delete = item("a", MenuId::Delete).unwrap();
+    assert!(delete.disabled);
+    assert_eq!(
+        delete.reason.as_deref(),
+        Some(copy::NOISE_CLEANUP_HOLD_REASON)
+    );
+    let cleanup = item("a", MenuId::NoiseCleanup).unwrap();
+    assert_eq!(cleanup.label, "Cancel cleanup · 40%");
+    assert!(!cleanup.disabled);
+    assert_eq!(
+        alpha.noise.as_ref().unwrap().direct_label.as_deref(),
+        Some("Cleaning 40%")
+    );
+    assert_eq!(page.bulk_hold, Some(copy::NOISE_CLEANUP_HOLD_REASON));
+
+    // Beta is free; Premium is locked, so its item is the upgrade.
+    let beta = row("b");
+    assert!(beta.selectable);
+    let upgrade = item("b", MenuId::NoiseCleanup).unwrap();
+    assert_eq!(upgrade.label, "Reduce noise · Premium");
+    assert_eq!(upgrade.icon, "lock");
+    assert!(!item("b", MenuId::Delete).unwrap().disabled);
+
+    // A cloud stream has no file here: no Play, Reveal, export, duplicate,
+    // check or cleanup.
+    for hidden in [
+        MenuId::Play,
+        MenuId::Reveal,
+        MenuId::ExportMp4,
+        MenuId::Duplicate,
+        MenuId::Check,
+        MenuId::NoiseCleanup,
+    ] {
+        assert!(item("c", hidden).is_none(), "{hidden:?}");
+    }
+    assert!(item("c", MenuId::Rename).is_some());
+    assert_eq!(MenuId::parse("noise-cleanup"), Some(MenuId::NoiseCleanup));
 }
