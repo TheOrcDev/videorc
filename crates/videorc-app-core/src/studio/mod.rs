@@ -37,7 +37,9 @@
 //! - The Session section (part 6a): [`transport`] (the status words, the
 //!   status bar's clock, Record's and Go Live's states, the stop control),
 //!   [`inspector`] (why a start waits and where it is fixed, the Session
-//!   facts and notices) and [`captions_readiness`] (a Go Live's captions).
+//!   facts and notices) and [`captions_readiness`] (a Go Live's captions);
+//!   [`recordings_folder`] (part 6b) where recordings go, whose capability
+//!   every start carries.
 //! - [`scenes`] (S1.6b): plan 231's scene library as the Studio holds it,
 //!   read once the settings snapshot is in (the #1706 repair, the v1
 //!   migration, the working setup over the capture config, the scene on
@@ -84,6 +86,8 @@ pub mod linux_desktop;
 pub mod live_audio;
 pub mod live_sources;
 pub mod preview_scene;
+pub mod recordings_folder;
+mod recordings_folder_actions;
 pub mod scene_editor;
 pub mod scene_switch;
 pub mod scenes;
@@ -129,6 +133,7 @@ pub use health::{
     HealthSummary, HealthTelemetry, HealthTone, RECORDING_STOP_FINALIZE_OVERRUN_CODE,
 };
 pub use latency::{LatencyKind, RecordLatency};
+pub use recordings_folder_actions::OutputAuthorizer;
 pub use session::{
     RecordingFailedNotice, SessionActivity, SessionEffect, SessionPhase, SessionStartFailure,
     SessionStartFailureKind, SessionStartIntent, SessionState, StopConfirmation, StopExit,
@@ -435,6 +440,9 @@ pub struct StudioSnapshot {
     /// S1.6b part 5c: the takeover's mute ownership as stored
     /// (`loadScreenTakeoverMuteOwnership`), for "Muted for takeover".
     pub takeover_mute_ownership: Option<takeover_microphone::TakeoverMuteOwnership>,
+    /// S1.6a part 6b: the chosen recordings folder, and its facts once a
+    /// page read them.
+    pub recordings_folder: recordings_folder::RecordingsFolderState,
 }
 
 /// What a start did.
@@ -545,6 +553,8 @@ struct Inner {
     live_audio_applied: Option<(String, live_audio::MicValues)>,
     live_audio_waiters: live_audio::MicrophoneWaiters,
     live_audio_tokens: u64,
+    /// S1.6a part 6b: the facts last read, for the folder at that path.
+    recordings_folder_facts: Option<(PathBuf, recordings_folder::DirectoryFacts)>,
 }
 
 /// S2.6c: the exclusion list's bookkeeping.
@@ -759,6 +769,8 @@ pub struct Studio<B: StudioBackend> {
     /// S1.6b part 5d: the live audio queue has work nobody drains; the
     /// driver's drain takes it.
     live_audio_kick: Notify,
+    /// S1.6a part 6b: the app's recordings folder capability issuer.
+    output_authorizer: Mutex<Option<OutputAuthorizer>>,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -797,6 +809,7 @@ impl<B: StudioBackend> Studio<B> {
             live_audio_applied: None,
             live_audio_waiters: live_audio::MicrophoneWaiters::default(),
             live_audio_tokens: 0,
+            recordings_folder_facts: None,
         };
         // Writes a previous run journaled wait in the cache until the
         // snapshot is in; then they are sent.
@@ -830,6 +843,7 @@ impl<B: StudioBackend> Studio<B> {
             settings_retry: Notify::new(),
             live_read_done: Notify::new(),
             live_audio_kick: Notify::new(),
+            output_authorizer: Mutex::new(None),
         }
     }
 
@@ -1723,6 +1737,12 @@ impl<B: StudioBackend> Studio<B> {
             Ok(params) => params,
             Err(message) => return self.refuse_start(message),
         };
+        // S1.6a part 6b: the chosen folder's capability
+        // (`authorizeOutputDirectory`), or the start is refused by name.
+        let folder = match self.recordings_folder_capability().await {
+            Ok(folder) => folder,
+            Err(message) => return self.refuse_start(message),
+        };
         self.prepare_session_capture(&params.sources, &params.output.video)
             .await;
         // S1.6b part 5d (plan 069): the audio this start sends seeds the
@@ -1736,7 +1756,7 @@ impl<B: StudioBackend> Studio<B> {
             inner.live_audio_start_in_flight = true;
         }
         let start_in_flight = LiveAudioStartInFlight(&self.inner);
-        let answer = self.backend.session_start(params).await;
+        let answer = self.backend.session_start_into(params, folder).await;
         // The guard only covers a dropped future; an answered start clears
         // the flag under the lock that seeds the snapshot, so no status in
         // between makes a sync without it.
@@ -2440,6 +2460,10 @@ impl<B: StudioBackend> Studio<B> {
         // S1.6b part 5c: the System audio facts (the join latch moves on).
         let system_audio = inner.system_audio_facts();
         let takeover_mute_ownership = takeover_microphone::stored_mute_ownership(&inner.settings);
+        let recordings_folder = recordings_folder::RecordingsFolderState::of(
+            &inner.settings,
+            inner.recordings_folder_facts.as_ref(),
+        );
         let session = &inner.session;
         StudioSnapshot {
             connection: inner.connection.clone(),
@@ -2476,6 +2500,7 @@ impl<B: StudioBackend> Studio<B> {
             camera_low_light: inner.low_light.view.clone(),
             system_audio,
             takeover_mute_ownership,
+            recordings_folder,
         }
     }
 }
@@ -2557,10 +2582,11 @@ fn epoch_ms() -> u64 {
 /// sends it.
 /// The scene with its background is the start's (`Inner::start_scene`,
 /// set by `start_once`); this leaves it `None`.
-/// Camera looks, captions, simulcast, the
-/// replay ring and the output-directory capability are Phase 3; the backend
-/// records into its default directory (`VIDEORC_RECORDINGS_DIR` under an
-/// isolated profile).
+/// Camera looks, captions, simulcast and the replay ring are Phase 3. The
+/// chosen recordings folder rides apart, as its capability
+/// ([`StudioBackend::session_start_into`], S1.6a part 6b); without one the
+/// backend records into its default directory (`VIDEORC_RECORDINGS_DIR`
+/// under an isolated profile).
 pub fn build_start_params(
     capture: &CaptureConfig,
     studio: &StudioSettings,

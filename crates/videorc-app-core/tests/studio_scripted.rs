@@ -2920,3 +2920,143 @@ async fn no_camera_no_background_pick() {
             .await
     );
 }
+
+// --- S1.6a part 6b: where recordings go ----------------------------------
+
+async fn stop_to_idle(studio: &Studio<Scripted>) {
+    studio.request_stop(StopOrigin::Button).await;
+    studio
+        .handle_event(BackendEvent::RecordingStatus(Box::new(status(
+            RecordingState::Idle,
+            Some("s1"),
+        ))))
+        .await;
+}
+
+/// P3-D1: a chosen folder is a plain path in the store; every start
+/// carries its capability from the app's issuer. A folder the issuer
+/// refuses isn't available, a folder that is gone is refused by name, and
+/// neither sends `session.start`; Use default goes back to the backend's
+/// default folder. The facts land in the snapshot when a page reads them.
+#[tokio::test]
+async fn a_chosen_folder_rides_each_start_as_a_capability() {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use videorc_app_core::studio::OutputAuthorizer;
+    use videorc_app_core::studio::recordings_folder::{StoredFolder, copy};
+
+    let dir = tempfile::tempdir().unwrap();
+    let takes = dir.path().join("Takes");
+    std::fs::create_dir(&takes).unwrap();
+
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    studio.set_test_pattern(true).await.unwrap();
+
+    // The default folder: nothing rides, and there are no facts to read.
+    assert_eq!(studio.recordings_folder(), None);
+    assert_eq!(studio.read_recordings_folder_facts().await, None);
+    assert!(!studio.snapshot().recordings_folder.view().custom);
+    assert_eq!(studio.start_recording().await, StartOutcome::Started);
+    stop_to_idle(&studio).await;
+
+    // Choose…: the folder, and an issuer that answers with a capability.
+    let asked: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
+    let refuse = Arc::new(AtomicBool::new(false));
+    let authorize: OutputAuthorizer = {
+        let asked = asked.clone();
+        let refuse = refuse.clone();
+        Arc::new(move |path: PathBuf| {
+            asked.lock().unwrap().push(path);
+            let refused = refuse.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if refused {
+                    Err("The issuer said no.".to_string())
+                } else {
+                    Ok("resource:folder-1".to_string())
+                }
+            })
+        })
+    };
+    studio.set_output_authorizer(authorize);
+    studio
+        .set_recordings_folder(StoredFolder::picked(takes.clone()))
+        .await;
+    let stored = backend
+        .script
+        .lock()
+        .unwrap()
+        .settings
+        .get(keys::RECORDINGS_FOLDER)
+        .cloned();
+    let stored: Value =
+        serde_json::from_str(stored.as_ref().and_then(Value::as_str).unwrap()).unwrap();
+    assert_eq!(
+        stored,
+        json!({"path": takes.to_str().unwrap(), "displayName": "Takes"}),
+        "a plain path the backend's store holds, as the store keeps every value"
+    );
+    let snapshot = studio.snapshot();
+    assert_eq!(
+        snapshot
+            .recordings_folder
+            .folder
+            .as_ref()
+            .map(|folder| folder.display_name.as_str()),
+        Some("Takes")
+    );
+    assert_eq!(snapshot.recordings_folder.facts, None, "not read at launch");
+    let facts = studio.read_recordings_folder_facts().await.unwrap();
+    assert!(facts.exists && facts.writable);
+    let view = studio.snapshot().recordings_folder.view();
+    assert_eq!(view.path, "Takes");
+    assert!(view.custom && view.can_reveal && view.problem.is_none());
+
+    assert_eq!(studio.start_recording().await, StartOutcome::Started);
+    assert_eq!(*asked.lock().unwrap(), [takes.clone()]);
+    stop_to_idle(&studio).await;
+
+    // The issuer refuses: not available, nothing sent.
+    refuse.store(true, Ordering::SeqCst);
+    let starts = backend.count("session.start");
+    assert_eq!(
+        studio.start_recording().await,
+        StartOutcome::Refused {
+            message: copy::FOLDER_UNAVAILABLE.to_string()
+        }
+    );
+    assert_eq!(backend.count("session.start"), starts);
+    assert_eq!(studio.snapshot().session.phase, SessionPhase::Idle);
+
+    // The folder is gone: refused by its name, the issuer never asked.
+    refuse.store(false, Ordering::SeqCst);
+    std::fs::remove_dir(&takes).unwrap();
+    let asks = asked.lock().unwrap().len();
+    assert_eq!(
+        studio.start_recording().await,
+        StartOutcome::Refused {
+            message: copy::folder_missing("Takes")
+        }
+    );
+    assert_eq!(asked.lock().unwrap().len(), asks);
+    assert_eq!(backend.count("session.start"), starts);
+    assert_eq!(
+        studio
+            .snapshot()
+            .session
+            .start_failure
+            .map(|failure| failure.message),
+        Some(copy::folder_missing("Takes"))
+    );
+
+    // Use default: the store forgets it and the next start sends none.
+    studio.use_default_recordings_folder().await;
+    assert_eq!(studio.recordings_folder(), None);
+    assert_eq!(studio.snapshot().recordings_folder.folder, None);
+    assert_eq!(studio.start_recording().await, StartOutcome::Started);
+    assert_eq!(
+        backend.script.lock().unwrap().started_into,
+        [None, Some("resource:folder-1".to_string()), None]
+    );
+}
