@@ -28,7 +28,11 @@
 //! - [`sources`]: the devices and the committed scene as the backend reports
 //!   them; [`source_selection`] the pickers, the builders and the reconcile;
 //!   [`live_sources`] and [`source_actions`] (S1.6b part 5a) a pick, idle or
-//!   inside a session, on plan 231's scenes.
+//!   inside a session, on plan 231's scenes; [`sources_section`] (the
+//!   Studio's Sources mirror), [`sources_page`] and [`camera_low_light`]
+//!   (part 5b) their views; [`audio_section`], [`sources_audio`],
+//!   [`audio_mixer`], [`audio_actions`], [`audio_levels`] and
+//!   [`takeover_microphone`] (part 5c) the microphone and System audio.
 //! - [`scenes`] (S1.6b): plan 231's scene library as the Studio holds it,
 //!   read once the settings snapshot is in (the #1706 repair, the v1
 //!   migration, the working setup over the capture config, the scene on
@@ -51,6 +55,10 @@
 //! its state to the snapshot, its events to [`STUDIO_EVENTS`] and its reads
 //! to the bootstrap. Nothing here knows the UI framework.
 
+pub mod audio_actions;
+pub mod audio_levels;
+pub mod audio_mixer;
+pub mod audio_section;
 pub mod backend;
 pub mod camera_background;
 pub mod camera_background_migration;
@@ -74,8 +82,10 @@ pub mod settings;
 pub mod source_actions;
 pub mod source_selection;
 pub mod sources;
+pub mod sources_audio;
 pub mod sources_page;
 pub mod sources_section;
+pub mod takeover_microphone;
 pub mod timecode;
 pub mod ui_local;
 pub mod ui_settings_wire;
@@ -406,6 +416,12 @@ pub struct StudioSnapshot {
     pub captions_status: Option<Value>,
     /// S1.6b part 5b: the camera's low-light compensation (issue #1066).
     pub camera_low_light: camera_low_light::CameraLowLightView,
+    /// S1.6b part 5c: what the running session mixes for System audio, its
+    /// issue, and its join.
+    pub system_audio: audio_actions::SystemAudioFacts,
+    /// S1.6b part 5c: the takeover's mute ownership as stored
+    /// (`loadScreenTakeoverMuteOwnership`), for "Muted for takeover".
+    pub takeover_mute_ownership: Option<takeover_microphone::TakeoverMuteOwnership>,
 }
 
 /// What a start did.
@@ -487,6 +503,9 @@ struct Inner {
     /// low-light compensation with its reads.
     captions_status: Option<Value>,
     low_light: camera_low_light::LowLightCore,
+    /// S1.6b part 5c: System audio's issue (by session) and its join latch.
+    system_audio_issue: Option<(String, audio_mixer::SystemAudioIssue)>,
+    system_audio_join: Option<audio_mixer::SystemAudioJoin>,
 }
 
 /// S2.6c: the exclusion list's bookkeeping.
@@ -672,6 +691,9 @@ pub struct Studio<B: StudioBackend> {
     /// `diagnostics.stats` arrives four times a second, and only the Health
     /// page reads it.
     telemetry: watch::Sender<HealthTelemetry>,
+    /// S1.6b part 5c: the bus's levels, apart from the snapshot (about 20
+    /// a second).
+    levels: watch::Sender<audio_levels::MicLevels>,
     /// One support bundle export at a time.
     support_bundle: tokio::sync::Mutex<()>,
     /// The start in flight, which a second caller asking for the same start
@@ -725,6 +747,8 @@ impl<B: StudioBackend> Studio<B> {
             announced_returns: Vec::new(),
             captions_status: None,
             low_light: camera_low_light::LowLightCore::default(),
+            system_audio_issue: None,
+            system_audio_join: None,
         };
         // Writes a previous run journaled wait in the cache until the
         // snapshot is in; then they are sent.
@@ -738,6 +762,7 @@ impl<B: StudioBackend> Studio<B> {
         let (effects, _) = broadcast::channel(EFFECT_CHANNEL_CAPACITY);
         let (notices, _) = broadcast::channel(NOTICE_CHANNEL_CAPACITY);
         let (telemetry, _) = watch::channel(HealthTelemetry::default());
+        let (levels, _) = watch::channel(audio_levels::MicLevels::default());
         Self {
             backend,
             config,
@@ -746,6 +771,7 @@ impl<B: StudioBackend> Studio<B> {
             effects,
             notices,
             telemetry,
+            levels,
             support_bundle: tokio::sync::Mutex::new(()),
             in_flight: Mutex::new(None),
             stop_in_flight: Mutex::new(None),
@@ -789,6 +815,12 @@ impl<B: StudioBackend> Studio<B> {
     /// S3.1a: the telemetry as it is now.
     pub fn telemetry_now(&self) -> HealthTelemetry {
         self.telemetry.borrow().clone()
+    }
+
+    /// S1.6b part 5c: the bus's levels, as each `audio.levels` arrives (the
+    /// microphone and System audio meters read them).
+    pub fn mic_levels(&self) -> watch::Receiver<audio_levels::MicLevels> {
+        self.levels.subscribe()
     }
 
     /// Feeds the client's events until it closes, and runs the settings
@@ -901,6 +933,13 @@ impl<B: StudioBackend> Studio<B> {
                         session_context(&inner.session),
                         Instant::now(),
                     );
+                    // S1.6b part 5c: System audio's issue for its session.
+                    if let (Some(issue), Some(session_id)) = (
+                        audio_mixer::system_audio_issue_from_code(&event.code),
+                        event.session_id.clone(),
+                    ) {
+                        inner.system_audio_issue = Some((session_id, issue));
+                    }
                     if inner.health.push_event(*event) {
                         inner.session.note_stop_overrun();
                     }
@@ -962,8 +1001,12 @@ impl<B: StudioBackend> Studio<B> {
                         .warn(format!("Studio: \"{event}\" did not read ({error}).")),
                 }
             }
-            // The mic sliver reads these (the Session section, part 5).
-            BackendEvent::Untyped { event, .. } if event == AUDIO_LEVELS_EVENT => {}
+            // S1.6b part 5c: the microphone and System audio meters read
+            // these (the Session line's sliver lands with its section).
+            BackendEvent::Untyped { event, payload } if event == AUDIO_LEVELS_EVENT => {
+                let now = Instant::now();
+                self.levels.send_modify(|levels| levels.read(&payload, now));
+            }
             // S1.6b part 5a: the session's whole source authority, read again.
             BackendEvent::Untyped { event, .. } if event == live_sources::SOURCES_CHANGED_EVENT => {
                 self.kick_live_sources_read().await;
@@ -2328,6 +2371,9 @@ impl<B: StudioBackend> Studio<B> {
 
     fn snapshot_of(inner: &mut Inner) -> StudioSnapshot {
         let settings = inner.settings_view();
+        // S1.6b part 5c: the System audio facts (the join latch moves on).
+        let system_audio = inner.system_audio_facts();
+        let takeover_mute_ownership = takeover_microphone::stored_mute_ownership(&inner.settings);
         let session = &inner.session;
         StudioSnapshot {
             connection: inner.connection.clone(),
@@ -2362,6 +2408,8 @@ impl<B: StudioBackend> Studio<B> {
             source_reasons: inner.source_reasons.clone(),
             captions_status: inner.captions_status.clone(),
             camera_low_light: inner.low_light.view.clone(),
+            system_audio,
+            takeover_mute_ownership,
         }
     }
 }
