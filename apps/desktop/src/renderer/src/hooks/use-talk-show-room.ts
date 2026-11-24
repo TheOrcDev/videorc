@@ -340,6 +340,27 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   )
   const microphoneChoiceRef = useRef(microphoneChoice)
   microphoneChoiceRef.current = microphoneChoice
+  // Plan 260 S1.8c: with the backend in the room (its dev switch), the host's
+  // microphone goes there, in the room microphone bridge's settings and
+  // bounds. The backend keeps it only while it holds the host seat (it
+  // answers `held: false` otherwise) and lets it go when the room ends.
+  useEffect(() => {
+    if (!client || !roomOpen) return
+    const { deviceId, gainDb, muted, noise, offsetMs } = microphoneChoice
+    void client
+      .requestTyped('cloud.room.microphone.set', {
+        microphone: deviceId
+          ? {
+              deviceId,
+              gainDb: Math.min(24, Math.max(-24, gainDb)),
+              muted,
+              noise,
+              offsetMs: Math.min(1000, Math.max(0, Math.round(offsetMs)))
+            }
+          : null
+      })
+      .catch(() => {})
+  }, [client, roomOpen, microphoneChoice])
   useEffect(() => {
     const owner = clientRef.current
     if (!owner || snapshot.state !== 'connected' || roomPcmTestEnabled()) return

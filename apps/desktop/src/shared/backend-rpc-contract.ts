@@ -165,6 +165,7 @@ import type {
   CloudRoomAvatarSetParams,
   CloudRoomAvatarMotionParams,
   CloudRoomAvatarMotionResult,
+  CloudRoomMediaSetParams,
   CloudRoomSceneCommitParams,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
@@ -699,6 +700,7 @@ export interface BackendRpcMethodMap {
   /** The renderer's own room connection, for the status copy. */
   'cloud.room.client.report': BackendRpcDefinition<CloudRoomClientReportParams, CloudStatus>
   'cloud.room.avatar.set': BackendRpcDefinition<CloudRoomAvatarSetParams, { held: boolean }>
+  'cloud.room.microphone.set': BackendRpcDefinition<CloudRoomMediaSetParams, { held: boolean }>
   'cloud.room.avatar.motion': BackendRpcDefinition<
     CloudRoomAvatarMotionParams,
     CloudRoomAvatarMotionResult
@@ -7065,6 +7067,24 @@ const cloudRoomAvatarSetParamsSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRoomAvatarSetParams>
+// Plan 260 S1.8c: the room microphone bridge's settings (its own bounds).
+const cloudRoomMediaSetParamsSchema = objectSchema(
+  {
+    microphone: nullableSchema(
+      objectSchema(
+        {
+          deviceId: stringSchema({ minLength: 1, maxLength: 512 }),
+          gainDb: numberSchema({ min: -24, max: 24 }),
+          muted: booleanSchema,
+          noise: enumSchema(['off', 'rnnoise']),
+          offsetMs: numberSchema({ integer: true, min: 0, max: 1000 })
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomMediaSetParams>
 // One motion message, at most 16 KiB on the wire (AVATAR_MOTION_MAX_BYTES).
 const cloudRoomAvatarMotionParamsSchema = objectSchema(
   {
@@ -7994,6 +8014,10 @@ const runtimeContracts = {
   },
   'cloud.room.avatar.set': {
     params: cloudRoomAvatarSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.microphone.set': {
+    params: cloudRoomMediaSetParamsSchema,
     result: cloudRoomPresentationSetResultSchema
   },
   'cloud.room.avatar.motion': {

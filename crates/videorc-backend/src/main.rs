@@ -119,6 +119,8 @@ mod room_graphics;
 #[cfg(target_os = "macos")]
 mod room_host;
 #[cfg(target_os = "macos")]
+mod room_media;
+#[cfg(target_os = "macos")]
 mod room_overlays;
 mod room_program_camera;
 #[cfg(target_os = "macos")]
@@ -6447,6 +6449,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.room.avatar.set"
         | "cloud.room.avatar.motion"
         | "cloud.room.scene.commit"
+        // Plan 260 S1.8c: the host's own media in the backend's room.
+        | "cloud.room.microphone.set"
         | "cloud.recordings.download"
         | "cloud.archive.stop"
         | "cloud.archive.cancel"
@@ -13626,6 +13630,33 @@ async fn handle_text_message_with_role(
                 #[cfg(target_os = "macos")]
                 Ok(params) if room_host::holds_seat() => {
                     room_content::set_avatar(params);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 260 S1.8c: the host's microphone for the backend's room, in
+        // the room microphone bridge's settings shape (`null` takes it off).
+        "cloud.room.microphone.set" => {
+            match serde_json::from_value::<cloud_talk::CloudRoomMediaSetParams>(command.params) {
+                Ok(params)
+                    if !params
+                        .microphone
+                        .as_ref()
+                        .is_none_or(|settings| settings.valid()) =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "invalid-params",
+                        "The microphone settings are out of range.",
+                    )
+                }
+                #[cfg(target_os = "macos")]
+                Ok(params) if room_host::holds_seat() => {
+                    room_media::set_microphone(params.microphone);
                     ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
                 }
                 Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),

@@ -6060,6 +6060,25 @@ export interface CloudRoomAvatarSetParams {
   guests?: boolean
 }
 
+/** The host's microphone in the room microphone bridge's own settings shape
+ * (Rust `room_microphone::Settings`): an exact device id, gain within
+ * ±24 dB, offset within 1 s. */
+export interface CloudRoomMicrophoneSettings {
+  deviceId: string
+  gainDb: number
+  muted: boolean
+  noise: MicrophoneNoiseSuppression
+  offsetMs: number
+}
+
+/** `cloud.room.microphone.set` (plan 260 S1.8c): the host's microphone for
+ * the backend's room while it holds the host seat; `null` takes it off. The
+ * camera's device and effects join it in c2. Mirrors Rust
+ * `CloudRoomMediaSetParams`. */
+export interface CloudRoomMediaSetParams {
+  microphone: CloudRoomMicrophoneSettings | null
+}
+
 /** `cloud.room.avatar.motion` (plan 260 S1.8b): one message of the
  * renderer's avatar motion model, for the backend to send to the pages that
  * animate. The model moves to app-core with the content builders. */
