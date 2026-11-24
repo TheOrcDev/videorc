@@ -30,6 +30,7 @@ import type {
   CloudStage,
   CloudStatus,
   Device,
+  RoomMediaStatus,
   RoomPresentationStatus
 } from '@/lib/backend'
 import {
@@ -90,6 +91,9 @@ export type TalkShowRoomControllerDeps = {
   stopOutput?: (output: 'recording' | 'live') => Promise<boolean>
   controlsRef?: { current: TalkShowRoomClient | null }
   onMediaSnapshot?: (snapshot: TalkShowRoomSnapshot) => void
+  /** Plan 260 S1.8c: the host's media in the backend's room (its dev
+   * switch), or null when the backend does not hold it. */
+  onBackendMedia?: (media: RoomMediaStatus | null) => void
   microphoneAudio?: {
     microphoneGainDb: number
     microphoneNoiseSuppression?: 'off' | 'rnnoise'
@@ -247,6 +251,15 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   // program pages draw of the graphics comes from it.
   const [backendGraphics, setBackendGraphics] = useState<RoomPresentationStatus | null>(null)
   const [backendAvatar, setBackendAvatar] = useState<RoomPresentationStatus | null>(null)
+  const [backendMedia, setBackendMedia] = useState<RoomMediaStatus | null>(null)
+  const backendMediaRef = useRef(backendMedia)
+  backendMediaRef.current = backendMedia
+  // Plan 260 S1.8: who holds the room, decided before any browser client
+  // starts (`cloud.room.owner`); the backend's own room (its dev switch)
+  // leaves no renderer client, grant or microphone disarm behind.
+  const [backendOwned, setBackendOwned] = useState(false)
+  const backendOwnedRef = useRef(backendOwned)
+  backendOwnedRef.current = backendOwned
   // Plan 260 S1.8b: with the backend in the room, the avatar's motion model
   // runs here on its own and hands each message to the backend, which sends
   // it to the pages that animate (until the model moves to app-core).
@@ -340,6 +353,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   )
   const microphoneChoiceRef = useRef(microphoneChoice)
   microphoneChoiceRef.current = microphoneChoice
+  useEffect(() => {
+    mediaDepsRef.current.onBackendMedia?.(backendMedia)
+  }, [backendMedia])
   // Plan 260 S1.8c: with the backend in the room (its dev switch), the host's
   // microphone goes there, in the room microphone bridge's settings and
   // bounds. The backend keeps it only while it holds the host seat (it
@@ -428,6 +444,12 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       try {
         await leavingRef.current
         if (cancelled) return
+        const owner = await client.requestTyped('cloud.room.owner').catch(() => null)
+        if (cancelled) return
+        if (owner?.backend) {
+          setBackendOwned(true)
+          return
+        }
         // Plan 249 S13b: with the processed camera on (main + backend gated, DEV
         // renderer), the native camera stays the one owner: no browser camera grant.
         const processedCamera =
@@ -566,12 +588,23 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         await roomClient.connect()
       } catch (error) {
         if (cancelled) return
+        if ((error as { code?: string } | null)?.code === 'cloud-room-held-by-backend') {
+          // The backend took the seat after all: no browser client stays.
+          const stale = current
+          current = null
+          if (controlsRef?.current === stale) controlsRef.current = null
+          if (clientRef.current === stale) clientRef.current = null
+          void stale?.disconnect().catch(() => {})
+          setBackendOwned(true)
+          return
+        }
         callbacksRef.current.onError(error, ROOM_JOIN_ERROR_ACTION)
         report('disconnected', error instanceof Error ? error.message : String(error))
       }
     })()
     return () => {
       cancelled = true
+      setBackendOwned(false)
       if (controlsRef?.current === current) controlsRef.current = null
       if (clientRef.current === current) clientRef.current = null
       audioHostRef.current?.remove()
@@ -975,6 +1008,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     if (!client || !roomOpen) {
       setBackendGraphics(null)
       setBackendAvatar(null)
+      setBackendMedia(null)
       return
     }
     // Each event carries the topics that changed; the others stand.
@@ -982,6 +1016,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       if (event.showId !== cloudStatusRef.current?.show?.id) return
       if (event.graphics) setBackendGraphics(event.graphics)
       if (event.avatar) setBackendAvatar(event.avatar)
+      if (event.media) setBackendMedia(event.media)
     })
   }, [client, roomOpen])
   useEffect(() => {
@@ -1328,10 +1363,24 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       listDisplaySources: async () => (await window.videorc?.getTalkShowDisplaySources?.()) ?? [],
       startScreenShare: async (sourceId) => {
         const roomClient = clientRef.current
-        if (!roomClient) throw new Error('The room is not open.')
+        // Plan 260 S1.8c: the backend's room shares by native id (the
+        // scene's own screen, which its preview runs).
+        const backendShare =
+          !roomClient && (backendOwnedRef.current || backendMediaRef.current !== null)
+        if (!roomClient && !backendShare) throw new Error('The room is not open.')
         try {
-          await window.videorc?.setTalkShowMediaGrant?.({ video: true, screenSourceId: sourceId })
-          await roomClient.startScreenShare(sourceId)
+          if (backendShare) {
+            const { nativeIdForCapturer } = await import('@/lib/room-screen-source')
+            const native = nativeIdForCapturer(sourceId)
+            if (!native) throw new Error("This screen can't be shared into the room here.")
+            const answer = await client?.requestTyped('cloud.room.screen.set', {
+              screen: { sourceId: native }
+            })
+            if (!answer?.held) throw new Error('The room is not open.')
+          } else if (roomClient) {
+            await window.videorc?.setTalkShowMediaGrant?.({ video: true, screenSourceId: sourceId })
+            await roomClient.startScreenShare(sourceId)
+          }
           if (stage && hostIdentity) {
             // Plan 251: on Two screens it goes beside the screen already up;
             // otherwise it takes the one place, as it always did.
@@ -1343,6 +1392,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         }
       },
       stopScreenShare: async () => {
+        if (!clientRef.current && (backendOwnedRef.current || backendMediaRef.current !== null))
+          await client?.requestTyped('cloud.room.screen.set', { screen: null }).catch(() => {})
         await clientRef.current?.stopScreenShare()
         if (stage && hostIdentity && stageScreens(stage).includes(hostIdentity)) {
           // The other screen, when there is one, stays up.
@@ -1423,6 +1474,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       setStage,
       snapshot,
       backendGraphics,
+      client,
       backendAvatar,
       stage,
       twoScreens

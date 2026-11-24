@@ -6568,6 +6568,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.room.microphone.set"
         | "cloud.room.camera.set"
         | "cloud.room.screen.set"
+        | "cloud.room.owner"
         | "cloud.recordings.download"
         | "cloud.archive.stop"
         | "cloud.archive.cancel"
@@ -13954,6 +13955,15 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }
+        // Plan 260 S1.8: who holds the room's host seat, asked before the
+        // renderer starts a room client of its own.
+        "cloud.room.owner" => {
+            #[cfg(target_os = "macos")]
+            let backend = room_host::holds_seat();
+            #[cfg(not(target_os = "macos"))]
+            let backend = false;
+            ServerResponse::ok(command.id, serde_json::json!({ "backend": backend }))
         }
         // Plan 260 S1.8c: the screen the room shares (the scene's own, by its
         // native id), behind Hide screen; `null` stops sharing.
