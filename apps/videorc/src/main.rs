@@ -47,6 +47,13 @@ use app::bridge;
 use app::shell::{Shell, StatusLine, connection_text};
 use app::{hotkeys, links, menus, sleep};
 
+/// Electron's app id (`electron-builder.yml`), kept on every platform: the
+/// macOS bundle id, Videorc Camera's host, Linux's desktop entry and the
+/// portal app id. A new id would lose the TCC grants, the portal's
+/// permissions and shortcuts, and the `videorc://` handler at the crossover
+/// (S5.0 keeps every grant). Coordinator decision, 2026-11-24.
+const APP_ID: &str = "dev.theorcdev.videorc";
+
 fn main() -> Result<()> {
     let args = args::parse()?;
     let root = args::workspace_root(args.workspace.clone())?;
@@ -250,7 +257,7 @@ fn main() -> Result<()> {
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(14.), px(13.))),
                 }),
-                app_id: Some("com.videorc.desktop".into()),
+                app_id: Some(APP_ID.into()),
                 ..Default::default()
             },
             |_, cx| cx.new(|cx| Shell::new(status.clone(), connection.clone(), cx)),
