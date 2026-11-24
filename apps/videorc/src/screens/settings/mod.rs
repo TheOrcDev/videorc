@@ -2,6 +2,7 @@
 //! the backend, never through a second settings file. Only the selected tab
 //! is device-local. The kit owns every control and section.
 mod about;
+mod changelog;
 mod general;
 mod obs;
 mod permissions;
@@ -72,6 +73,7 @@ pub struct SettingsScreen {
     shortcut: shortcuts::Recorder,
     applied_shortcuts: Option<Value>,
     setup: setup::Replay,
+    changelog: changelog::Changelog,
     account: Option<videorc_app_core::protocol::VideorcAccountSnapshot>,
 }
 
@@ -265,6 +267,7 @@ impl SettingsScreen {
             shortcut: Default::default(),
             applied_shortcuts: None,
             setup: Default::default(),
+            changelog: Default::default(),
             account: None,
         };
         this.apply_theme(cx);
@@ -523,5 +526,6 @@ impl Render for SettingsScreen {
             .child(self.rename_dialog(cx))
             .child(self.obs_dialog(cx))
             .child(self.setup_dialog(window, cx))
+            .child(self.changelog_dialog(cx))
     }
 }

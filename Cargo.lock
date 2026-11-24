@@ -7948,6 +7948,7 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "objc2-system-extensions",
  "raw-window-handle",
+ "reqwest",
  "serde_json",
  "tokio",
  "videorc-app-core",
