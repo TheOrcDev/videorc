@@ -106,6 +106,8 @@ mod room_clock;
 mod room_frame_bridge;
 // Plan 249 S13b: the processed camera role's native producer.
 mod room_camera_source;
+#[cfg(target_os = "macos")]
+mod room_host;
 mod room_program_camera;
 mod room_system_audio;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
@@ -717,6 +719,10 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     tokio::spawn(banner_timers::run_banner_timers(state.clone()));
     // Plan 232: which HTML overlays main renders, and where each stands.
     tokio::spawn(html_overlay::run_html_overlay_targets(state.clone()));
+    // Plan 260 S1.8a: the backend holds the talk show's host seat (dev
+    // switch, macOS).
+    #[cfg(target_os = "macos")]
+    room_host::start(state.clone());
     // Plan 214 D4: Videorc Camera comes back on when it was on.
     virtual_camera_service::start_from_settings(&state).await;
     // Plan 260 S1.5b: the stored scheduled thumbnails are previewable again
@@ -13784,6 +13790,13 @@ async fn handle_text_message_with_role(
             }
         }
         "cloud.room.token.refresh" => match cloud_context(state) {
+            // Plan 260 S1.8a: with the backend holding the host seat the
+            // renderer must stay out of the room (one `host:<showId>`).
+            _ if backend_holds_room_seat() => ServerResponse::error(
+                command.id,
+                "cloud-room-held-by-backend",
+                "The backend holds the talk show's host seat.",
+            ),
             Some(context) => match context.room_token(account::stored_session_token()).await {
                 Ok(answer) => ServerResponse::ok(command.id, answer),
                 Err(error) => ServerResponse::error(
@@ -13846,6 +13859,12 @@ async fn handle_text_message_with_role(
         }
         "cloud.room.client.report" => {
             match serde_json::from_value::<cloud_talk::RoomClientReportParams>(command.params) {
+                // Plan 260 S1.8a: the backend reports its own room
+                // connection; the renderer's, refused a token, would only
+                // contradict it.
+                Ok(_) if backend_holds_room_seat() => {
+                    ServerResponse::ok(command.id, cloud_show_status(state))
+                }
                 Ok(params) => match cloud_context(state) {
                     Some(context) => ServerResponse::ok(command.id, context.report_client(params)),
                     None => cloud_unavailable(command.id),
@@ -19184,6 +19203,20 @@ fn cloud_talk_error_code(error: &anyhow::Error, default: &'static str) -> &'stat
         return code;
     }
     default
+}
+
+/// Plan 260 S1.8a: does the backend's own room hold the talk show's host
+/// seat? A match guard inside an RPC arm, never on the arm itself: the
+/// websocket inventory reads only plain top-level arms.
+#[cfg(target_os = "macos")]
+fn backend_holds_room_seat() -> bool {
+    room_host::holds_seat()
+}
+
+/// The backend's room is macOS only (plan 260 S1.8).
+#[cfg(not(target_os = "macos"))]
+fn backend_holds_room_seat() -> bool {
+    false
 }
 
 fn cloud_show_status(state: &AppState) -> cloud_show::CloudStatus {
