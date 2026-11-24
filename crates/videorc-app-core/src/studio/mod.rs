@@ -1472,10 +1472,21 @@ impl<B: StudioBackend> Studio<B> {
                 inner
                     .latency
                     .take_click_epoch_ms(LatencyKind::Start, Instant::now(), epoch_ms());
+            // #1643: read while this start holds its scene, so it is the
+            // scene the last switch left, with that switch's background.
+            let scene = inner.start_scene().unwrap_or_else(|error| {
+                // The start goes on without the scene rather than with a
+                // background the backend can't read.
+                self.config.logger.warn(format!(
+                    "[session-start] the working background isn't sendable: {error}"
+                ));
+                None
+            });
             (
                 build_start_params(&view.capture, &view.studio, intent, streaming).map(
                     |mut params| {
                         params.requested_at_ms = Some(requested_at_ms);
+                        params.scene = scene;
                         params
                     },
                 ),
@@ -2277,7 +2288,9 @@ fn epoch_ms() -> u64 {
 /// mode. The legacy `rtmp` block is the config's `rtmpPreset`,
 /// `rtmpServerUrl` and `streamKey` ([`CaptureConfig::rtmp`]), as the renderer
 /// sends it.
-/// Camera looks, the scene with its background, captions, simulcast, the
+/// The scene with its background is the start's (`Inner::start_scene`,
+/// set by `start_once`); this leaves it `None`.
+/// Camera looks, captions, simulcast, the
 /// replay ring and the output-directory capability are Phase 3; the backend
 /// records into its default directory (`VIDEORC_RECORDINGS_DIR` under an
 /// isolated profile).

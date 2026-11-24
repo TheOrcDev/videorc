@@ -2120,6 +2120,36 @@ async fn a_start_waits_for_the_switch_awaiting_its_proof_and_starts_with_its_sce
 }
 
 #[tokio::test]
+async fn a_switch_dropped_before_its_receipt_never_holds_a_start() {
+    let (backend, studio) = scenes_studio(capture_config_with_camera()).await;
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| script.apply_gate = Some(gate.clone()));
+
+    // A dropped GPUI task or a deck ack's timeout drops the switch's future
+    // while its request is out.
+    let switching = {
+        let studio = studio.clone();
+        tokio::spawn(async move { apply(&studio, "default-camera-only").await })
+    };
+    eventually("the switch is pending", || {
+        studio.snapshot().scenes.pending_scene_id.as_deref() == Some("default-camera-only")
+    })
+    .await;
+    switching.abort();
+    assert!(switching.await.unwrap_err().is_cancelled());
+
+    // Its `finally` ran: nothing waits for its proof, and the progress went.
+    let snapshot = studio.snapshot();
+    assert!(!snapshot.scenes.transaction_pending);
+    assert_eq!(snapshot.scenes.pending_scene_id, None);
+    let started = tokio::time::timeout(std::time::Duration::from_secs(2), studio.start_recording())
+        .await
+        .expect("the start never waits for a dropped switch");
+    assert_eq!(started, StartOutcome::Started);
+    gate.add_permits(8);
+}
+
+#[tokio::test]
 async fn a_switch_asked_for_during_a_start_waits_and_goes_to_the_session() {
     let (backend, studio) = scenes_studio(capture_config_with_camera()).await;
     let gate = Arc::new(Semaphore::new(0));

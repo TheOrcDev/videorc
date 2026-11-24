@@ -551,6 +551,24 @@ impl<B: StudioBackend> Drop for GoingOn<B> {
     }
 }
 
+/// The transaction's `finally` as a guard: minted, a transaction always
+/// ends (`end_transaction`), however its future ends. Electron's
+/// transaction is a promise nobody can cancel; a Rust future can be dropped
+/// at any `.await` (a dropped GPUI task, a deck ack's timeout), and without
+/// this `awaiting_proof` would stay set, so `wait_for_layout_proof` and every
+/// later Record or Go Live would wait forever. The receipt hands it to the
+/// settle task, which ends the transaction after the proof.
+pub(super) struct TransactionEnd<B: StudioBackend> {
+    studio: Arc<Studio<B>>,
+    intent: u64,
+}
+
+impl<B: StudioBackend> Drop for TransactionEnd<B> {
+    fn drop(&mut self) {
+        self.studio.end_transaction(self.intent);
+    }
+}
+
 /// #1643: a start's hold on the scene it carries, released when its
 /// answer is applied (or however the start ends).
 pub(super) struct StartSceneHold<'a, B: StudioBackend> {
@@ -736,6 +754,23 @@ impl Inner {
             "background": snapshot_background(self.scenes.switch.working_background.as_ref()),
         }))
         .ok()
+    }
+
+    /// The scene a start carries (`sceneWithBackground` through
+    /// `buildStartSessionParams`): the committed scene with the working
+    /// background, sent only when that background is set (`includeScene`;
+    /// the Studio has no scene edit mode). Without it the backend rebuilds
+    /// the scene from the layout and sources, with no background. An error
+    /// is a working background the backend couldn't read.
+    pub(super) fn start_scene(&self) -> Result<Option<videorc_protocol::Scene>, serde_json::Error> {
+        let Some(background) = self.scenes.switch.working_background.as_ref() else {
+            return Ok(None);
+        };
+        let Some(mut scene) = self.sources.scene.clone() else {
+            return Ok(None);
+        };
+        scene.background = Some(serde_json::from_value(background.clone())?);
+        Ok(Some(scene))
     }
 
     /// `rememberLayoutTransactionSnapshot`: the newest commit by revision.
@@ -1032,7 +1067,6 @@ impl<B: StudioBackend> Studio<B> {
                 Gate::Minted(minted) => break *minted,
             }
         };
-        self.publish();
         let Minted {
             intent,
             requested,
@@ -1043,6 +1077,12 @@ impl<B: StudioBackend> Studio<B> {
             session_active,
             generation,
         } = minted;
+        // From here the transaction ends however this future ends.
+        let ending = TransactionEnd {
+            studio: self.clone(),
+            intent,
+        };
+        self.publish();
 
         let sources = options
             .sources_override
@@ -1094,7 +1134,7 @@ impl<B: StudioBackend> Studio<B> {
                 );
                 self.report_switch_error(&error);
             }
-            self.end_transaction(intent);
+            drop(ending);
             return TransactionOutcome {
                 committed: false,
                 intent,
@@ -1178,7 +1218,7 @@ impl<B: StudioBackend> Studio<B> {
                         &options,
                     )
                     .await;
-                self.end_transaction(intent);
+                drop(ending);
                 drop(hold);
                 return TransactionOutcome { committed, intent };
             }
@@ -1217,11 +1257,13 @@ impl<B: StudioBackend> Studio<B> {
         };
         self.publish();
         // The receipt answers now; the proof and the Studio's state follow.
+        // The settle task owns the transaction's end from here.
         let studio = self.clone();
         tokio::spawn(async move {
             studio
                 .settle_commit(intent, committed, revision, session_active, generation)
                 .await;
+            drop(ending);
             drop(hold);
         });
         TransactionOutcome {
@@ -1232,8 +1274,8 @@ impl<B: StudioBackend> Studio<B> {
 
     /// After the receipt: the proof, then the commit applied while it is
     /// the latest switch (proven or not: the backend's commit is the
-    /// truth), then what a missed proof says, then the transaction's
-    /// `finally`.
+    /// truth), then what a missed proof says. The transaction's `finally`
+    /// is the caller's [`TransactionEnd`].
     async fn settle_commit(
         self: &Arc<Self>,
         intent: u64,
@@ -1252,7 +1294,6 @@ impl<B: StudioBackend> Studio<B> {
                 self.say_unproven(proof.err(), revision.unwrap_or(0), generation);
             }
         }
-        self.end_transaction(intent);
     }
 
     /// A latest switch whose request failed: the backend's truth (or the
