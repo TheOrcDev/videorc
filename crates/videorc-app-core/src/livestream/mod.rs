@@ -43,6 +43,9 @@
 pub mod accounts;
 pub mod captions_preflight;
 pub mod chat_commands;
+pub mod cloud_show;
+pub mod cloud_status;
+pub mod cloud_view;
 pub mod copy;
 pub mod details;
 pub mod discord;
