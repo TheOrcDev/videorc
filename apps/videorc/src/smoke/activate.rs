@@ -33,7 +33,7 @@ unsafe impl Send for NativeWindow {}
 
 /// The handle of `window`.
 pub fn native_window(window: &Window) -> NativeWindow {
-    match window.window_handle().map(|handle| handle.as_raw()) {
+    match HasWindowHandle::window_handle(window).map(|handle| handle.as_raw()) {
         #[cfg(target_os = "macos")]
         Ok(RawWindowHandle::AppKit(handle)) => NativeWindow::AppKit(handle.ns_view.as_ptr()),
         #[cfg(target_os = "windows")]

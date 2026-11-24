@@ -7951,6 +7951,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "videorc-app-core",
+ "videorc-kit",
  "videorc-preview",
  "videorc-protocol",
  "windows-sys 0.61.2",

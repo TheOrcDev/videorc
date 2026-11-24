@@ -3,8 +3,8 @@
 //! capture state, sleep guard, permissions, Videorc Camera, the saved
 //! window frame, Hide from stream and the quit while on air. The
 //! preview's GPUI side (`src/preview/`, L1) and the smoke UI driver
-//! (`src/smoke/`, L6) join as their slices land. The screens live in
-//! `src/screens/`.
+//! (`src/smoke/`, L6) join as their slices land. Phase 3 screens live
+//! under [`crate::screens`].
 
 pub mod args;
 pub mod bridge;

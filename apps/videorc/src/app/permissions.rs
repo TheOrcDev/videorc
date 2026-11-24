@@ -147,7 +147,6 @@ impl Permissions {
     }
 
     /// The OS's exact grants, for the permission rows and the Clips ring.
-    #[allow(dead_code)]
     pub fn snapshot(&self) -> MediaAccessSnapshot {
         MediaAccessSnapshot {
             camera: self.status(MediaAccessPermission::Camera),
@@ -187,7 +186,6 @@ impl Permissions {
     /// `handleSystemPermission`'s prompt: the OS's own camera or microphone
     /// prompt, or the screen asked in place (plan 203 S2). True when the
     /// grant is there now; a fresh one restarts the backend once.
-    #[allow(dead_code)]
     pub fn request(
         self: &Arc<Self>,
         cx: &App,
@@ -222,7 +220,6 @@ impl Permissions {
 
     /// `openSystemPermissions`: the OS settings page for `pane`, the grant
     /// watched from now (opening it is navigation, never a grant).
-    #[allow(dead_code)]
     pub fn open_settings(&self, cx: &App, pane: SystemPermissionPane) -> Result<(), String> {
         permission_shortcut_supported(self.platform)?;
         {
@@ -247,7 +244,6 @@ impl Permissions {
     /// idle) and when the backend won't admit it; otherwise the app quits
     /// the normal way and [`Self::relaunch_if_requested`] starts it again.
     /// True when the quit is under way.
-    #[allow(dead_code)]
     pub fn relaunch(self: &Arc<Self>, cx: &App) -> Task<Result<bool, String>> {
         let permissions = self.clone();
         let job = self.runtime.spawn(async move {

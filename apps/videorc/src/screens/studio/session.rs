@@ -3,22 +3,29 @@
 //! (plan 235 D3): the rows name themselves.
 //!
 //! The rows' icons and the on-air rows' status dots wait for the kit's
-//! icons and StatusDot; the start failure's Retry and Dismiss, the agents'
-//! Stop and the runtime alert's actions wait for the kit's Button.
+//! icons and StatusDot. The runtime alert's Open Audio waits for the Audio
+//! section and its reveal for the reveal command, as Electron leaves out a
+//! door it has no handler for.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
 use gpui::{Context, EventEmitter, Window, div, prelude::*, px};
 use tokio::sync::watch;
 use videorc_app_core::StudioSnapshot;
+use videorc_app_core::nav::PageId;
 use videorc_app_core::studio::HealthTelemetry;
 use videorc_app_core::studio::inspector::{
-    FactRow, SessionInputs, SessionSectionView, copy::CAMERA_SHARED_TITLE,
+    FactRow, RuntimeAlertView, SessionInputs, SessionSectionView, StartFailureAlert,
+    copy::{CAMERA_SHARED_TITLE, DISMISS, OPEN_LIBRARY, RETRY},
 };
-use videorc_kit::{Alert, AlertVariant, GroupedList, GroupedRow, NavigableRow, PanelSection};
+use videorc_kit::{
+    Alert, AlertVariant, Button, ButtonSize, ButtonVariant, GroupedList, GroupedRow, NavigableRow,
+    PanelSection,
+};
 
-use super::transport::OpenPage;
+use super::transport::{AppStudio, OpenPage};
 
 /// The Electron row's `pl-9.5`: a destination under the Destinations row.
 const NESTED_INDENT_PX: f32 = 38.;
@@ -37,6 +44,8 @@ pub fn section_view(snapshot: &StudioSnapshot, telemetry: &HealthTelemetry) -> S
 }
 
 pub struct SessionSection {
+    studio: Arc<AppStudio>,
+    runtime: tokio::runtime::Handle,
     view: SessionSectionView,
 }
 
@@ -46,6 +55,8 @@ impl SessionSection {
     /// Follows the snapshot and the telemetry; it redraws only when the
     /// view they make changes.
     pub fn new(
+        studio: Arc<AppStudio>,
+        runtime: tokio::runtime::Handle,
         mut snapshot: watch::Receiver<StudioSnapshot>,
         mut telemetry: watch::Receiver<HealthTelemetry>,
         cx: &mut Context<Self>,
@@ -76,7 +87,11 @@ impl SessionSection {
             }
         })
         .detach();
-        Self { view }
+        Self {
+            studio,
+            runtime,
+            view,
+        }
     }
 
     fn row(&self, fact: &FactRow, cx: &mut Context<Self>) -> NavigableRow {
@@ -89,6 +104,76 @@ impl SessionSection {
         }
         row
     }
+
+    fn retry_start(&self) {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            let outcome = studio.retry_start().await;
+            eprintln!("[videorc-app] Retry start: {outcome:?}");
+        });
+    }
+
+    /// The refused start (`session-start-failure`): the one place chrome
+    /// shows destructive red, with the backend's reason verbatim.
+    fn start_failure(&self, failure: &StartFailureAlert, cx: &mut Context<Self>) -> Alert {
+        let retry = Button::new("session-start-retry")
+            .label(RETRY)
+            .variant(ButtonVariant::Ghost)
+            .size(ButtonSize::Xs)
+            .disabled(!failure.retry_enabled)
+            .on_click(cx.listener(|this, _, _, _| this.retry_start()));
+        let dismiss = Button::new("session-start-dismiss")
+            .label(DISMISS)
+            .variant(ButtonVariant::Ghost)
+            .size(ButtonSize::Xs)
+            .on_click(cx.listener(|this, _, _, _| this.studio.dismiss_start_failure()));
+        Alert::new("session-start-failure")
+            .variant(AlertVariant::Destructive)
+            .title(failure.title)
+            .description(notice_body(&failure.message).child(actions().child(retry).child(dismiss)))
+    }
+
+    /// `SessionRuntimeAlert`: a mid-session notice, in the destructive tone
+    /// for a failed recording and the warning tone otherwise.
+    fn runtime_alert(&self, alert: &RuntimeAlertView, cx: &mut Context<Self>) -> Alert {
+        let mut row = actions();
+        if alert.open_library {
+            row = row.child(
+                Button::new("session-runtime-open-library")
+                    .label(OPEN_LIBRARY)
+                    .variant(ButtonVariant::Ghost)
+                    .size(ButtonSize::Xs)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage(PageId::Library)))),
+            );
+        }
+        row = row.child(
+            Button::new("session-runtime-dismiss")
+                .label(DISMISS)
+                .variant(ButtonVariant::Ghost)
+                .size(ButtonSize::Xs)
+                .on_click(cx.listener(|this, _, _, _| this.studio.dismiss_notice())),
+        );
+        Alert::new("session-runtime-notice")
+            .variant(if alert.failed {
+                AlertVariant::Destructive
+            } else {
+                AlertVariant::Warning
+            })
+            .title(alert.title.clone())
+            .description(notice_body(&alert.message).child(row))
+    }
+}
+
+/// A notice's message, at most three lines (`line-clamp-3`).
+fn notice_body(message: &str) -> gpui::Div {
+    div()
+        .min_w_0()
+        .child(div().line_clamp(3).child(message.to_string()))
+}
+
+/// The notice's buttons (`flex flex-wrap gap-1 pt-2`).
+fn actions() -> gpui::Div {
+    div().flex().flex_wrap().gap(px(4.)).pt(px(8.))
 }
 
 impl Render for SessionSection {
@@ -108,14 +193,26 @@ impl Render for SessionSection {
                 list.row(row)
             };
         }
+        let start_failure = self
+            .view
+            .start_failure
+            .clone()
+            .map(|failure| self.start_failure(&failure, cx));
         let camera_notice = self.view.camera_notice.clone().map(|notice| {
             Alert::new("session-camera-shared")
                 .variant(AlertVariant::Warning)
                 .title(CAMERA_SHARED_TITLE)
                 .description(notice)
         });
+        let runtime_alert = self
+            .view
+            .runtime_alert
+            .clone()
+            .map(|alert| self.runtime_alert(&alert, cx));
         PanelSection::new("studio-session")
             .child(list)
+            .children(start_failure)
             .children(camera_notice)
+            .children(runtime_alert)
     }
 }
