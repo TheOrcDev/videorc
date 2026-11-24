@@ -62,6 +62,7 @@ pub mod js_value;
 pub mod latency;
 pub mod linux_desktop;
 pub mod preview_scene;
+pub mod scene_editor;
 pub mod scene_switch;
 pub mod scenes;
 pub mod session;
