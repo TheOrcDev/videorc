@@ -29,6 +29,10 @@ platform, and S5.0 regenerates the list before the switch.
 - **IDs** (`P001`…) are stable for this generation. A screen slice cites
   them ("ticks P412–P437 on macOS"). S5.0's regeneration keeps the IDs of
   lines that still exist and adds new ones after the last.
+- **Checker:** `node scripts/gpui-parity.mjs check` names any malformed
+  row, duplicate ID, unknown cell, out-of-date Counts table or Source file
+  Electron no longer has, and `pnpm test:scripts` runs it; `stats` prints
+  done/lines per area and platform. A slice that ticks lines runs both.
 - **Windows** contributors: the Windows column is yours, together with the
   [Windows-only lines](#windows-only-lines) at the end, which are the
   [Windows testing plan's checklist](../../plans/260-gpui-rewrite-windows-testing.md#windows-parity-checklist).
@@ -517,7 +521,7 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
 | P330 | Hide/Show toggle | One shared hide state; error toast on failure | `renderer/components/studio/screen-privacy-control.tsx:63` | [ ] | [ ] | [ ] |
-| P331 | Default key | Control+Alt+H unless changed | `apps/desktop/shared/global-shortcuts.ts:3` | [ ] | [ ] | [ ] |
+| P331 | Default key | Control+Alt+H unless changed | `shared/global-shortcuts.ts:3` | [ ] | [ ] | [ ] |
 | P332 | Disabled reason | Refused hide or offline | `renderer/components/studio/screen-privacy-control.tsx:59` | [ ] | [ ] | [ ] |
 | P333 | Room privacy chip + tooltip | Room's own status and observations | `renderer/components/studio/screen-privacy-control.tsx:80` | [ ] | [ ] | [ ] |
 
