@@ -964,6 +964,18 @@ then the dependency widens and their renderer path goes in S1.8e. Traps
 from S0.8: `-ObjC` on macOS, `TrackPublished` only after the join, and the
 release strip on this Mac.
 
+Content and delivery (decided 2026-11-24): S1.8b moves the delivery only.
+The graphics content is the backend's already (`cloud.graphics.snapshot`);
+the avatar and scene content stay built where they are today (the avatar
+raster and its atlas, `renderCloudAvatar`; the scene adapter and its
+background pictures) and reach the backend through `cloud.room.avatar.set`
+and `cloud.room.scene.commit`. The backend owns the per-page delivery,
+leases, acknowledgements, references and the status on
+`cloud.room.presentation`; the avatar motion comes straight from its own
+`cohost.pet.animator`. The content builders move to `videorc-app-core` in
+Phase 2/3: the GPUI app builds the same content in Rust and sends it the
+same way.
+
 ### Phase 2: the shell, on all three platforms
 
 | # | Slice | Lane | Done when |
