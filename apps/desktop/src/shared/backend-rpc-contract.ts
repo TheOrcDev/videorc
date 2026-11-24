@@ -167,6 +167,8 @@ import type {
   CloudRoomPresentationEvent,
   CloudRoomPresentationSetParams,
   CloudRoomAvatarSetParams,
+  CloudRoomAvatarMotionParams,
+  CloudRoomAvatarMotionResult,
   CloudRoomSceneCommitParams,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
@@ -732,6 +734,10 @@ export interface BackendRpcMethodMap {
   /** The renderer's own room connection, for the status copy. */
   'cloud.room.client.report': BackendRpcDefinition<CloudRoomClientReportParams, CloudStatus>
   'cloud.room.avatar.set': BackendRpcDefinition<CloudRoomAvatarSetParams, { held: boolean }>
+  'cloud.room.avatar.motion': BackendRpcDefinition<
+    CloudRoomAvatarMotionParams,
+    CloudRoomAvatarMotionResult
+  >
   'cloud.room.scene.commit': BackendRpcDefinition<CloudRoomSceneCommitParams, { held: boolean }>
   'cloud.room.presentation.set': BackendRpcDefinition<
     CloudRoomPresentationSetParams,
@@ -7263,6 +7269,25 @@ const cloudRoomAvatarSetParamsSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRoomAvatarSetParams>
+// One motion message, at most 16 KiB on the wire (AVATAR_MOTION_MAX_BYTES).
+const cloudRoomAvatarMotionParamsSchema = objectSchema(
+  {
+    message: boundedJsonValueSchema({
+      maxDepth: 8,
+      maxNodes: 2_000,
+      maxStringLength: 4_096,
+      maxTotalStringLength: 16_384
+    })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomAvatarMotionParams>
+const cloudRoomAvatarMotionResultSchema = objectSchema(
+  {
+    held: booleanSchema,
+    targets: arraySchema(stringSchema({ maxLength: 160 }), { maxLength: 32 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomAvatarMotionResult>
 const cloudSceneAssetSchema = objectSchema(
   {
     hash: stringSchema({ minLength: 64, maxLength: 64 }),
@@ -8245,6 +8270,10 @@ const runtimeContracts = {
   'cloud.room.avatar.set': {
     params: cloudRoomAvatarSetParamsSchema,
     result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.avatar.motion': {
+    params: cloudRoomAvatarMotionParamsSchema,
+    result: cloudRoomAvatarMotionResultSchema
   },
   'cloud.room.scene.commit': {
     params: cloudRoomSceneCommitParamsSchema,

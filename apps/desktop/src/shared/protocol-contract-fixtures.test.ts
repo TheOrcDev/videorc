@@ -25,6 +25,7 @@ import type {
   CloudGuestDecideParams,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
+  CloudRoomAvatarMotionParams,
   CloudRoomAvatarSetParams,
   CloudRoomPresentationEvent,
   CloudRoomSceneCommitParams,
@@ -366,6 +367,7 @@ interface HighRiskContractFixtures {
     roomRequestEvent: CloudRoomRequest
     roomPresentationEvent: CloudRoomPresentationEvent
     roomAvatarSetParams: CloudRoomAvatarSetParams
+    roomAvatarMotionParams: CloudRoomAvatarMotionParams
     roomSceneCommitParams: CloudRoomSceneCommitParams
     // Plan 243 C1: another device on air, and a show waiting after a hand-off.
     statusOnAirElsewhere: CloudStatus
@@ -722,6 +724,7 @@ describe('shared high-risk protocol fixture', () => {
       roomRequestEvent,
       roomPresentationEvent,
       roomAvatarSetParams,
+      roomAvatarMotionParams,
       roomSceneCommitParams
     } = fixtures.cloud
     expect(jsonShape(validateBackendEventPayload('cloud.state', statusTalk))).toEqual(statusTalk)
@@ -767,6 +770,9 @@ describe('shared high-risk protocol fixture', () => {
     expect(
       jsonShape(validateBackendRpcParams('cloud.room.avatar.set', roomAvatarSetParams))
     ).toEqual(roomAvatarSetParams)
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.avatar.motion', roomAvatarMotionParams))
+    ).toEqual(roomAvatarMotionParams)
     expect(
       jsonShape(validateBackendRpcParams('cloud.room.scene.commit', roomSceneCommitParams))
     ).toEqual(roomSceneCommitParams)
