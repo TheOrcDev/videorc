@@ -6096,6 +6096,108 @@ export interface CloudRoomRequest {
   device: CloudGuestDevice
 }
 
+/** Plan 260 S1.8b: one topic's delivery to the room's program pages. */
+export type RoomPresentationState = 'off' | 'preview' | 'waiting' | 'applied' | 'failed'
+
+/** Plan 260 S1.8b: one program page that applied the view it was sent. */
+export interface RoomPresentationObservation {
+  revision: number
+  output: 'stream' | 'recording'
+  orientation: 'h' | 'v'
+}
+
+/** Plan 260 S1.8b: a presentation topic's status (the renderer's
+ * `RoomGraphicsStatus` without its preview). */
+export interface RoomPresentationStatus {
+  enabled: boolean
+  state: RoomPresentationState
+  reason: string | null
+  revision: number
+  observed: Record<string, RoomPresentationObservation>
+  /** The avatar's guest pages (plan 249 S6): avatar only. */
+  guests?: { enabled: boolean; capable: number; applied: number }
+  /** What the program pages drew for the scene's background (plan 249
+   * S14): scene only, while the scene names one. */
+  background?: {
+    wanted: { h: string; v: string }
+    drawn: Record<string, import('./cloud-scene').BackgroundDrawn>
+    unsupported: number
+  }
+}
+
+/**
+ * `cloud.room.presentation` (plan 260 S1.8b): what the room's program pages
+ * draw of the presentation topics the backend sends once it holds the host
+ * seat. Each topic is present once it is the backend's (graphics first).
+ * Mirrors Rust `CloudRoomPresentationEvent`.
+ */
+/** `cloud.room.presentation.set` (plan 260 S1.8b): the room's presentation
+ * switches, for the topics the backend sends while it holds the host seat. */
+export interface CloudRoomPresentationSetParams {
+  graphics?: boolean
+  avatar?: boolean
+}
+
+/** `cloud.room.avatar.set` (plan 260 S1.8b): the avatar content the Studio
+ * built, for the backend to deliver while it holds the host seat; `null`
+ * takes the avatar off. Mirrors Rust `CloudRoomAvatarSetParams`. */
+export interface CloudRoomAvatarSetParams {
+  content: {
+    h: import('./cloud-avatar').AvatarLayer[]
+    v: import('./cloud-avatar').AvatarLayer[]
+    stream: boolean
+    recording: boolean
+    animated?: {
+      h: import('./cloud-avatar').AvatarLayer[]
+      v: import('./cloud-avatar').AvatarLayer[]
+    }
+  } | null
+  /** The host's opt-in to show the stream's public layers to guest pages. */
+  guests?: boolean
+}
+
+/** `cloud.room.avatar.motion` (plan 260 S1.8b): one message of the
+ * renderer's avatar motion model, for the backend to send to the pages that
+ * animate. The model moves to app-core with the content builders. */
+export interface CloudRoomAvatarMotionParams {
+  message: import('./cloud-avatar-motion').MotionMessage
+}
+
+/** Who the motion went to (the model keyframes a page it has not served). */
+export interface CloudRoomAvatarMotionResult {
+  held: boolean
+  targets: string[]
+}
+
+/** A scene background picture, named by its SHA-256 (plan 249 S14). */
+export interface CloudSceneAsset {
+  hash: string
+  mime: string
+  width: number
+  height: number
+  base64: string
+}
+
+/** `cloud.room.scene.commit` (plan 260 S1.8b): what the program draws per
+ * orientation lane and the background pictures it names; `null` returns the
+ * room to its own layouts. Mirrors Rust `CloudRoomSceneCommitParams`. */
+export interface CloudRoomSceneCommitParams {
+  content: {
+    h: import('./cloud-scene').CloudScene | null
+    v: import('./cloud-scene').CloudScene | null
+    transition: { kind: 'cut' | 'motion'; durationMs: number }
+  } | null
+  assets: CloudSceneAsset[]
+}
+
+export interface CloudRoomPresentationEvent {
+  showId: string
+  graphics?: RoomPresentationStatus
+  avatar?: RoomPresentationStatus
+  /** The committed scene; the Studio's commit waits on it (5 s). */
+  scene?: RoomPresentationStatus
+}
+
 /**
  * `cloud.room.overlay` (plan 234 T3): an overlay for the host's renderer to
  * send to a managed talk show's room, where the program page draws it. Only

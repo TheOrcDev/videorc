@@ -164,6 +164,13 @@ import type {
   CloudRecordingsList,
   CloudRecordingStatus,
   CloudRoomOverlayEvent,
+  CloudRoomPresentationEvent,
+  RoomPresentationStatus,
+  CloudRoomPresentationSetParams,
+  CloudRoomAvatarSetParams,
+  CloudRoomAvatarMotionParams,
+  CloudRoomAvatarMotionResult,
+  CloudRoomSceneCommitParams,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
   CloudRoomRequest,
@@ -727,6 +734,21 @@ export interface BackendRpcMethodMap {
   'cloud.presentation.restore': BackendRpcDefinition<{ showId: string }, CloudPresentationRestore>
   /** The renderer's own room connection, for the status copy. */
   'cloud.room.client.report': BackendRpcDefinition<CloudRoomClientReportParams, CloudStatus>
+  'cloud.room.avatar.set': BackendRpcDefinition<CloudRoomAvatarSetParams, { held: boolean }>
+  'cloud.room.avatar.motion': BackendRpcDefinition<
+    CloudRoomAvatarMotionParams,
+    CloudRoomAvatarMotionResult
+  >
+  /** The commit's generation (the scene entry's `revision`) and, for an
+   * unchanged commit, the entry already reported for it. */
+  'cloud.room.scene.commit': BackendRpcDefinition<
+    CloudRoomSceneCommitParams,
+    { held: boolean; generation?: number; status?: RoomPresentationStatus | null }
+  >
+  'cloud.room.presentation.set': BackendRpcDefinition<
+    CloudRoomPresentationSetParams,
+    { held: boolean }
+  >
   'cloud.guest.decide': BackendRpcDefinition<CloudGuestDecideParams, CloudStatus>
   'cloud.guest.act': BackendRpcDefinition<CloudGuestActParams, CloudStatus>
   /** The whole stage in one frame (D8). */
@@ -1140,6 +1162,7 @@ export interface BackendEventMap {
   'cloud.room.requests': CloudRoomRequest
   /** Plan 234 T3: an overlay for the host's renderer to send to the room. */
   'cloud.room.overlay': CloudRoomOverlayEvent
+  'cloud.room.presentation': CloudRoomPresentationEvent
   'cloud.clip.job': CloudClipJob
   'cloud.recordings.download': CloudRecordingDownloadEvent
   /** Plan 249 S22: one file of a separate-files import job. */
@@ -7195,6 +7218,123 @@ const cloudOpenFlagSchema = objectSchema({ open: booleanSchema }, { allowUnknown
 // in the event (`imageId` names them on the backend's HTTP server).
 const cloudOverlaySlotSchema = enumSchema(['card', 'takeover', 'hold'])
 const cloudOverlayOrientationSchema = enumSchema(['h', 'v'])
+// Plan 260 S1.8b: the presentation topics' delivery, from the backend's room
+// host. At most a few program pages observe one view.
+const roomPresentationStatusSchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    state: enumSchema(['off', 'preview', 'waiting', 'applied', 'failed']),
+    reason: nullableSchema(stringSchema({ maxLength: 512 })),
+    revision: numberSchema({ integer: true, min: 0 }),
+    observed: recordSchema(
+      objectSchema(
+        {
+          revision: numberSchema({ integer: true, min: 0 }),
+          output: enumSchema(['stream', 'recording']),
+          orientation: enumSchema(['h', 'v'])
+        },
+        { allowUnknown: false }
+      ),
+      { maxKeys: 32 }
+    ),
+    guests: optionalSchema(
+      objectSchema(
+        {
+          enabled: booleanSchema,
+          capable: numberSchema({ integer: true, min: 0 }),
+          applied: numberSchema({ integer: true, min: 0 })
+        },
+        { allowUnknown: false }
+      )
+    ),
+    background: optionalSchema(
+      objectSchema(
+        {
+          wanted: objectSchema(
+            { h: stringSchema({ maxLength: 16 }), v: stringSchema({ maxLength: 16 }) },
+            { allowUnknown: false }
+          ),
+          drawn: recordSchema(boundedJsonValueSchema({ maxDepth: 3, maxNodes: 16 }), {
+            maxKeys: 32
+          }),
+          unsupported: numberSchema({ integer: true, min: 0 })
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+)
+const cloudRoomPresentationSetParamsSchema = objectSchema(
+  { graphics: optionalSchema(booleanSchema), avatar: optionalSchema(booleanSchema) },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomPresentationSetParams>
+const cloudRoomPresentationSetResultSchema = objectSchema(
+  { held: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<{ held: boolean }>
+// Plan 260 S1.8b: the avatar and scene content the Studio builds, for the
+// backend's room to deliver. The content is bounded JSON here; the program
+// pages parse every snapshot they are sent. A scene's pictures are a few,
+// of at most 4 MB each.
+const roomContentSchema = boundedJsonValueSchema({
+  maxDepth: 12,
+  maxNodes: 20_000,
+  maxStringLength: 6_000_000,
+  maxTotalStringLength: 24_000_000
+})
+const cloudRoomAvatarSetParamsSchema = objectSchema(
+  {
+    content: roomContentSchema,
+    guests: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomAvatarSetParams>
+// One motion message, at most 16 KiB on the wire (AVATAR_MOTION_MAX_BYTES).
+const cloudRoomAvatarMotionParamsSchema = objectSchema(
+  {
+    message: boundedJsonValueSchema({
+      maxDepth: 8,
+      maxNodes: 2_000,
+      maxStringLength: 4_096,
+      maxTotalStringLength: 16_384
+    })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomAvatarMotionParams>
+const cloudRoomAvatarMotionResultSchema = objectSchema(
+  {
+    held: booleanSchema,
+    targets: arraySchema(stringSchema({ maxLength: 160 }), { maxLength: 32 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomAvatarMotionResult>
+const cloudSceneAssetSchema = objectSchema(
+  {
+    hash: stringSchema({ minLength: 64, maxLength: 64 }),
+    mime: enumSchema(['image/png', 'image/jpeg', 'image/webp']),
+    width: numberSchema({ integer: true, min: 1, max: 8192 }),
+    height: numberSchema({ integer: true, min: 1, max: 8192 }),
+    base64: stringSchema({ minLength: 4, maxLength: 5_600_000 })
+  },
+  { allowUnknown: false }
+)
+const cloudRoomSceneCommitParamsSchema = objectSchema(
+  {
+    content: roomContentSchema,
+    assets: arraySchema(cloudSceneAssetSchema, { maxLength: 4 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomSceneCommitParams>
+const cloudRoomPresentationEventSchema = objectSchema(
+  {
+    showId: boundedString,
+    graphics: optionalSchema(roomPresentationStatusSchema),
+    avatar: optionalSchema(roomPresentationStatusSchema),
+    scene: optionalSchema(roomPresentationStatusSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomPresentationEvent>
 const cloudRoomOverlayEventSchema = unionSchema([
   objectSchema(
     {
@@ -8149,6 +8289,33 @@ const runtimeContracts = {
     ),
     result: presentationValueSchema as RuntimeSchema<CloudPresentationRestore>
   },
+  'cloud.room.avatar.set': {
+    params: cloudRoomAvatarSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.avatar.motion': {
+    params: cloudRoomAvatarMotionParamsSchema,
+    result: cloudRoomAvatarMotionResultSchema
+  },
+  'cloud.room.scene.commit': {
+    params: cloudRoomSceneCommitParamsSchema,
+    result: objectSchema(
+      {
+        held: booleanSchema,
+        generation: optionalSchema(nonNegativeInteger),
+        status: optionalSchema(nullableSchema(roomPresentationStatusSchema))
+      },
+      { allowUnknown: false }
+    ) as RuntimeSchema<{
+      held: boolean
+      generation?: number
+      status?: RoomPresentationStatus | null
+    }>
+  },
+  'cloud.room.presentation.set': {
+    params: cloudRoomPresentationSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
   'cloud.room.client.report': {
     params: cloudRoomClientReportParamsSchema,
     result: cloudStatusSchema
@@ -8791,6 +8958,7 @@ const runtimeEventSchemas = {
   'cloud.state': cloudStatusSchema,
   'cloud.room.requests': cloudRoomRequestSchema,
   'cloud.room.overlay': cloudRoomOverlayEventSchema,
+  'cloud.room.presentation': cloudRoomPresentationEventSchema,
   'cloud.clip.job': cloudClipJobSchema,
   'cloud.recordings.download': cloudRecordingDownloadEventSchema,
   'cloud.iso.import': cloudIsoImportEventSchema,

@@ -25,10 +25,12 @@ import type {
   CloudGuestAction,
   CloudRoomOpenParams,
   CloudRoomOverlayEvent,
+  CloudRoomPresentationEvent,
   CloudRoomStatus,
   CloudStage,
   CloudStatus,
-  Device
+  Device,
+  RoomPresentationStatus
 } from '@/lib/backend'
 import {
   IDLE_TALK_SHOW_SNAPSHOT,
@@ -51,6 +53,7 @@ import {
 } from '@/lib/stage-screens'
 import { cloudAvatarAtlasReason } from '@/lib/cloud-avatar-refusal'
 import type { AvatarMotionSource } from '../../../shared/cloud-avatar-view'
+import type { RoomAvatarMotion } from '@/lib/room-avatar-motion'
 
 // The host's room, from the Studio's side (plan 224 C-G4). The backend owns
 // the show and the room's facts (`cloud.state`); this hook owns the renderer's
@@ -240,6 +243,21 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   } = deps
   const controlsRef = deps.controlsRef
   const [snapshot, setSnapshot] = useState<TalkShowRoomSnapshot>(IDLE_SNAPSHOT)
+  // Plan 260 S1.8b: with the backend in the room (its dev switch), what the
+  // program pages draw of the graphics comes from it.
+  const [backendGraphics, setBackendGraphics] = useState<RoomPresentationStatus | null>(null)
+  const [backendAvatar, setBackendAvatar] = useState<RoomPresentationStatus | null>(null)
+  // Plan 260 S1.8b: with the backend in the room, the avatar's motion model
+  // runs here on its own and hands each message to the backend, which sends
+  // it to the pages that animate (until the model moves to app-core).
+  const backendMotionRef = useRef<{ motion: RoomAvatarMotion; timer: number } | null>(null)
+  const stopBackendMotion = useCallback(() => {
+    const running = backendMotionRef.current
+    backendMotionRef.current = null
+    if (!running) return
+    window.clearInterval(running.timer)
+    running.motion.close()
+  }, [])
   const clientRef = useRef<TalkShowRoomClient | null>(null)
   /** Plan 249 S24: the kept avatar per output view, so it is sent on change only. */
   const keptAvatarRef = useRef(new Map<string, string>())
@@ -633,16 +651,61 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   // Only the explicitly public avatar and bubble become raster assets. Private
   // Sidekick configuration remains in this process and is never serialized.
   useEffect(() => {
+    // Plan 260 S1.8b: with the backend in the room (its dev switch) there is
+    // no room client here; the content still goes to the backend.
     const current = clientRef.current
-    if (!current || !roomOpen || !deps.avatar) return
+    if (!roomOpen || !deps.avatar || (!current && !client)) return
     let cancelled = false
     const avatar = deps.avatar
+    const handOver = (
+      content: import('@/lib/room-avatar-publisher').AvatarContent | null,
+      seed: Parameters<TalkShowRoomClient['setAvatarMotion']>[0] = null
+    ): void => {
+      void client
+        ?.requestTyped('cloud.room.avatar.set', { content })
+        .then(async (answer) => {
+          if (cancelled) return
+          stopBackendMotion()
+          if (!answer.held || !seed || !client) return
+          const { RoomAvatarMotion, ROOM_AVATAR_MOTION_FLUSH_MS } =
+            await import('@/lib/room-avatar-motion')
+          if (cancelled) return
+          // The backend stamps the host's session and the room, and answers
+          // the pages that animate; one stand-in consumer keeps the model
+          // sending, and each page it has not served gets a keyframe.
+          const STAND_IN = 'backend'
+          let motion: RoomAvatarMotion | null = null
+          motion = new RoomAvatarMotion(
+            {
+              show: showId ?? '',
+              publisherSid: 'PA_backend',
+              now: Date.now,
+              send: async (bytes) => {
+                const message = JSON.parse(new TextDecoder().decode(bytes)) as unknown
+                const sent = await client.requestTyped('cloud.room.avatar.motion', {
+                  message: message as import('../../../shared/cloud-avatar-motion').MotionMessage
+                })
+                motion?.setConsumers([STAND_IN, ...sent.targets])
+              }
+            },
+            seed.settings,
+            seed.inputs
+          )
+          motion.setConsumers([STAND_IN])
+          const running = motion
+          const timer = window.setInterval(() => void running.flush(), ROOM_AVATAR_MOTION_FLUSH_MS)
+          backendMotionRef.current = { motion: running, timer }
+        })
+        .catch(() => {})
+    }
     // A hide or a lost persona clears at once. Otherwise every output keeps
     // the last picture until the new one is drawn: clearing first blanked the
     // avatar on all outputs whenever the Sidekick started or stopped talking.
     // A stale render is dropped (`cancelled`); `set` fences an older upload.
-    if (!avatar.persona || !(avatar.layout.showOnStream || avatar.layout.showInRecording))
-      current.setAvatar(null)
+    if (!avatar.persona || !(avatar.layout.showOnStream || avatar.layout.showInRecording)) {
+      current?.setAvatar(null)
+      handOver(null)
+    }
     if (!avatar.persona) return
     void (async () => {
       const { renderCloudAvatar } = await import('@/lib/buddy-overlay')
@@ -667,7 +730,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       }
       // Plan 249 S5: an Alive pack also travels as an atlas for consumers that
       // animate it; a failure keeps the static content above, never blocks it.
-      let seed: Parameters<typeof current.setAvatarMotion>[0] = null
+      let seed: Parameters<TalkShowRoomClient['setAvatarMotion']>[0] = null
       let refused: string | null = null
       const persona = avatar.persona!
       if ((content.stream || content.recording) && persona.avatar.kind === 'alive') {
@@ -712,19 +775,21 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         }
       }
       if (!cancelled) {
-        current.setAvatar(content)
-        current.setAvatarMotion(seed, refused)
+        current?.setAvatar(content)
+        current?.setAvatarMotion(seed, refused)
+        handOver(content, seed)
       }
     })().catch((error: unknown) => {
       if (!cancelled) {
-        current.failAvatar()
+        current?.failAvatar()
         callbacksRef.current.onError(error, 'render the room avatar')
       }
     })
     return () => {
       cancelled = true
+      stopBackendMotion()
     }
-  }, [deps.avatar, roomOpen, showId, snapshot.state])
+  }, [client, deps.avatar, roomOpen, showId, snapshot.state, stopBackendMotion])
 
   useEffect(() => {
     if (!client || !roomOpen || !showId || !deps.avatar || snapshot.state !== 'connected') return
@@ -758,6 +823,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     if (!client || !roomOpen) return
     return client.on('cohost.pet.animator', (payload) => {
       clientRef.current?.avatarMotionEvent(payload)
+      backendMotionRef.current?.motion.backend(payload)
     })
   }, [client, roomOpen])
 
@@ -873,6 +939,19 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   // on a node show; the check below holds that here too.
   const cloudStatusRef = useRef(cloudStatus)
   cloudStatusRef.current = cloudStatus
+  useEffect(() => {
+    if (!client || !roomOpen) {
+      setBackendGraphics(null)
+      setBackendAvatar(null)
+      return
+    }
+    // Each event carries the topics that changed; the others stand.
+    return client.on('cloud.room.presentation', (event: CloudRoomPresentationEvent) => {
+      if (event.showId !== cloudStatusRef.current?.show?.id) return
+      if (event.graphics) setBackendGraphics(event.graphics)
+      if (event.avatar) setBackendAvatar(event.avatar)
+    })
+  }, [client, roomOpen])
   useEffect(() => {
     if (!client || !roomOpen) return
     return client.on('cloud.room.overlay', (event: CloudRoomOverlayEvent) => {
@@ -1000,13 +1079,27 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     return () => clearTimeout(timer)
   }, [awaitingRejoin, snapshot.state])
 
-  const setGraphicsEnabled = useCallback(async (enabled: boolean) => {
-    clientRef.current?.setGraphicsEnabled(enabled)
-  }, [])
+  const setGraphicsEnabled = useCallback(
+    async (enabled: boolean) => {
+      clientRef.current?.setGraphicsEnabled(enabled)
+      // Plan 260 S1.8b: the backend's room takes the switch while it holds
+      // the host seat, and ignores it otherwise.
+      await client
+        ?.requestTyped('cloud.room.presentation.set', { graphics: enabled })
+        .catch(() => {})
+    },
+    [client]
+  )
 
-  const setAvatarEnabled = useCallback(async (enabled: boolean) => {
-    clientRef.current?.setAvatarEnabled(enabled)
-  }, [])
+  const setAvatarEnabled = useCallback(
+    async (enabled: boolean) => {
+      clientRef.current?.setAvatarEnabled(enabled)
+      // Plan 260 S1.8b: the backend's room takes the switch while it holds
+      // the host seat, and ignores it otherwise.
+      await client?.requestTyped('cloud.room.presentation.set', { avatar: enabled }).catch(() => {})
+    },
+    [client]
+  )
   const avatarMotionProbe = useCallback(() => clientRef.current?.avatarMotionProbe() ?? null, [])
   // Plan 249 S5: one stable source for the Program preview, whichever client is current.
   const avatarMotionSource = useMemo<AvatarMotionSource>(
@@ -1098,7 +1191,22 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   const previewReplaced = roomOpen || previewReplacedOverride
   const value = useMemo<TalkShowContextValue>(
     () => ({
-      room: snapshot,
+      room: {
+        ...snapshot,
+        ...(!snapshot.graphics && backendGraphics
+          ? { graphics: { ...backendGraphics, preview: null, productionQualified: false } }
+          : {}),
+        ...(!snapshot.avatar && backendAvatar
+          ? {
+              avatar: {
+                ...backendAvatar,
+                preview: null,
+                guests: backendAvatar.guests ?? { enabled: false, capable: 0, applied: 0 },
+                productionQualified: false
+              }
+            }
+          : {})
+      },
       previewReplaced,
       twoScreens,
       hostIdentity,
@@ -1282,6 +1390,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       rejoining,
       setStage,
       snapshot,
+      backendGraphics,
+      backendAvatar,
       stage,
       twoScreens
     ]

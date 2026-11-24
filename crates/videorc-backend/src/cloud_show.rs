@@ -8368,6 +8368,30 @@ mod tests {
             let status: CloudStatus = serde_json::from_value(wire.clone()).unwrap();
             assert_eq!(serde_json::to_value(status).unwrap(), wire, "{pointer}");
         }
+        // Plan 260 S1.8b: the room's presentation event, as the renderer
+        // validates it (`cloud.room.presentation`).
+        let presentation = high_risk_fixture("/cloud/roomPresentationEvent");
+        let event: crate::cloud_talk::CloudRoomPresentationEvent =
+            serde_json::from_value(presentation.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&event).unwrap(), presentation);
+        assert_eq!(
+            event.graphics.unwrap().state,
+            crate::cloud_talk::RoomPresentationState::Waiting
+        );
+        // The avatar and scene content the Studio hands the backend's room.
+        let avatar = high_risk_fixture("/cloud/roomAvatarSetParams");
+        let params: crate::cloud_talk::CloudRoomAvatarSetParams =
+            serde_json::from_value(avatar.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&params).unwrap(), avatar);
+        let scene = high_risk_fixture("/cloud/roomSceneCommitParams");
+        let params: crate::cloud_talk::CloudRoomSceneCommitParams =
+            serde_json::from_value(scene.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&params).unwrap(), scene);
+        assert_eq!(params.assets[0].mime, "image/webp");
+        // `cloud.room.avatar.motion` carries one motion message as it is.
+        let motion = high_risk_fixture("/cloud/roomAvatarMotionParams");
+        assert!(motion["message"].is_object());
+        assert!(serde_json::to_vec(&motion["message"]).unwrap().len() <= 16 * 1024);
         let patch: CloudSettingsPatch =
             serde_json::from_value(high_risk_fixture("/cloud/settingsPatch")).unwrap();
         assert_eq!(patch.enabled, Some(false));

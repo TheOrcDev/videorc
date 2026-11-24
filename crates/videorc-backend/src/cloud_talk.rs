@@ -966,6 +966,160 @@ impl CloudOverlayRect {
 
 /// `cloud.room.overlay`: what the host's renderer sends to the room.
 pub const CLOUD_ROOM_OVERLAY_EVENT: &str = "cloud.room.overlay";
+
+/// Plan 260 S1.8b: what the room's program pages draw of the presentation
+/// topics, once the backend holds the host seat and sends them (`room_host`):
+/// the Studio's chips and reasons read it, as they read the renderer's own
+/// publishers before. One event for every topic; each topic is present once
+/// it is the backend's (graphics first).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const CLOUD_ROOM_PRESENTATION_EVENT: &str = "cloud.room.presentation";
+
+/// `cloud.room.avatar.set` (plan 260 S1.8b): the avatar content the Studio
+/// built (the static layers per orientation, which outputs show it, and the
+/// atlas variant for animating pages), for the backend to deliver while it
+/// holds the host seat. `content: null` takes the avatar off. The builder
+/// moves to `videorc-app-core` in Phase 2/3.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudRoomAvatarSetParams {
+    pub content: Option<serde_json::Value>,
+    /// The host's opt-in to show the stream's public layers to guest pages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guests: Option<bool>,
+}
+
+/// One scene background picture, immutable and named by its hash.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSceneAsset {
+    pub hash: String,
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    pub base64: String,
+}
+
+/// `cloud.room.scene.commit` (plan 260 S1.8b): what the room's program draws
+/// per orientation lane, and the background pictures it names. `content:
+/// null` returns the room to its own layouts. The builder moves to
+/// `videorc-app-core` in Phase 2/3.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudRoomSceneCommitParams {
+    pub content: Option<serde_json::Value>,
+    #[serde(default)]
+    pub assets: Vec<CloudSceneAsset>,
+}
+
+/// `cloud.room.presentation`'s payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct CloudRoomPresentationEvent {
+    pub show_id: String,
+    /// The room's static graphics (captions, cards, banners, timers, the
+    /// chat box), as the renderer's `RoomGraphicsStatus` without its preview
+    /// (the Studio draws the preview from `cloud.graphics.snapshot` itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphics: Option<RoomPresentationStatus>,
+    /// The worn avatar and its bubble (plan 249 S4, S6), with the guest
+    /// pages' count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<RoomPresentationStatus>,
+    /// The committed scene (plan 249 S12, S14): the Studio's commit waits on
+    /// it (5 s), as it waited on the renderer's publisher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene: Option<RoomPresentationStatus>,
+}
+
+/// Plan 249 S14: what the program pages drew for the scene's background.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomBackgroundStatus {
+    /// `backgroundKey` of what the scene asks for, per lane.
+    pub wanted: RoomBackgroundWanted,
+    /// Each capable lane's last drawn background, as its page reported it.
+    pub drawn: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Program pages that cannot draw scene backgrounds (older pages).
+    pub unsupported: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomBackgroundWanted {
+    pub h: String,
+    pub v: String,
+}
+
+/// Plan 249 S6 (D4): the host's opt-in to show the stream's public avatar
+/// layers to guest pages, how many can draw them, how many applied them.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomPresentationGuests {
+    pub enabled: bool,
+    pub capable: u32,
+    pub applied: u32,
+}
+
+/// One topic's delivery, as the program pages report it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomPresentationStatus {
+    pub enabled: bool,
+    pub state: RoomPresentationState,
+    /// Why it is not applied, in the Studio's words; null when it is.
+    pub reason: Option<String>,
+    pub revision: u64,
+    /// Each program page that applied the view it was sent, by identity.
+    pub observed: std::collections::BTreeMap<String, RoomPresentationObservation>,
+    /// The avatar's guest pages (avatar only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guests: Option<RoomPresentationGuests>,
+    /// The scene's background (scene only, while the scene names one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<RoomBackgroundStatus>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum RoomPresentationState {
+    Off,
+    Preview,
+    Waiting,
+    Applied,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomPresentationObservation {
+    pub revision: u64,
+    pub output: PresentationOutput,
+    pub orientation: PresentationOrientation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum PresentationOutput {
+    Stream,
+    Recording,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum PresentationOrientation {
+    #[serde(rename = "h")]
+    H,
+    #[serde(rename = "v")]
+    V,
+}
 /// `GET /cloud/overlays/{imageId}?token=`: an overlay's bytes.
 pub const OVERLAY_IMAGE_ROUTE: &str = "/cloud/overlays/{id}";
 /// The program page takes an overlay of at most 2 MiB (wire section 6.3).

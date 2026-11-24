@@ -106,11 +106,28 @@ mod room_clock;
 mod room_frame_bridge;
 // Plan 249 S13b: the processed camera role's native producer.
 mod room_camera_source;
+// Plan 260 S1.8: the talk show's room from the backend (macOS first).
+#[cfg(target_os = "macos")]
+mod room_assets;
+#[cfg(target_os = "macos")]
+mod room_avatar;
+#[cfg(target_os = "macos")]
+#[allow(
+    dead_code,
+    reason = "plan 260 S1.8b: the presentation publishers (graphics, avatar, scene, HTML layers) read the receipts in its next parts"
+)]
+mod room_capability;
+#[cfg(target_os = "macos")]
+mod room_content;
+#[cfg(target_os = "macos")]
+mod room_graphics;
 #[cfg(target_os = "macos")]
 mod room_host;
 #[cfg(target_os = "macos")]
 mod room_overlays;
 mod room_program_camera;
+#[cfg(target_os = "macos")]
+mod room_scene;
 mod room_system_audio;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;
@@ -6537,6 +6554,12 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "watchdog.idle.report"
         | "cloud.show.check"
         | "cloud.room.client.report"
+        // Plan 260 S1.8b: the room's presentation switches and content (in
+        // memory).
+        | "cloud.room.presentation.set"
+        | "cloud.room.avatar.set"
+        | "cloud.room.avatar.motion"
+        | "cloud.room.scene.commit"
         | "cloud.recordings.download"
         | "cloud.archive.stop"
         | "cloud.archive.cancel"
@@ -13858,6 +13881,96 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }
+        // Plan 260 S1.8b: the avatar and scene content the Studio built, for
+        // the backend's room to deliver while it holds the host seat.
+        "cloud.room.avatar.set" => {
+            match serde_json::from_value::<cloud_talk::CloudRoomAvatarSetParams>(command.params) {
+                #[cfg(target_os = "macos")]
+                Ok(params) if room_host::holds_seat() => {
+                    room_content::set_avatar(params);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 260 S1.8b: one message of the renderer's avatar motion model,
+        // sent to the pages that animate; answers who they are.
+        "cloud.room.avatar.motion" => {
+            let Some(message) = command.params.get("message").cloned() else {
+                return ServerResponse::error(command.id, "invalid-params", "Send the message.");
+            };
+            #[cfg(target_os = "macos")]
+            {
+                if room_host::holds_seat() {
+                    return match room_avatar::send_motion(&message).await {
+                        Ok(targets) => ServerResponse::ok(
+                            command.id,
+                            serde_json::json!({ "held": true, "targets": targets }),
+                        ),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cloud-room-motion-failed",
+                            format!("{error:#}"),
+                        ),
+                    };
+                }
+            }
+            let _ = message;
+            ServerResponse::ok(
+                command.id,
+                serde_json::json!({ "held": false, "targets": [] }),
+            )
+        }
+        "cloud.room.scene.commit" => {
+            match serde_json::from_value::<cloud_talk::CloudRoomSceneCommitParams>(command.params) {
+                #[cfg(target_os = "macos")]
+                Ok(params) if room_host::holds_seat() => {
+                    // The commit's generation (the scene entry's revision),
+                    // and its standing result when nothing changed.
+                    let (generation, status) = room_content::commit_scene(params);
+                    ServerResponse::ok(
+                        command.id,
+                        serde_json::json!({
+                            "held": true,
+                            "generation": generation,
+                            "status": status,
+                        }),
+                    )
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 260 S1.8b: the room's presentation switches (Graphics first),
+        // for the topics the backend sends while it holds the host seat.
+        "cloud.room.presentation.set" => {
+            #[cfg(target_os = "macos")]
+            {
+                if room_host::holds_seat() {
+                    if let Some(enabled) = command
+                        .params
+                        .get("graphics")
+                        .and_then(serde_json::Value::as_bool)
+                    {
+                        room_graphics::set_enabled(enabled);
+                    }
+                    if let Some(enabled) = command
+                        .params
+                        .get("avatar")
+                        .and_then(serde_json::Value::as_bool)
+                    {
+                        room_avatar::set_enabled(enabled);
+                    }
+                    return ServerResponse::ok(command.id, serde_json::json!({ "held": true }));
+                }
+            }
+            ServerResponse::ok(command.id, serde_json::json!({ "held": false }))
         }
         "cloud.room.client.report" => {
             match serde_json::from_value::<cloud_talk::RoomClientReportParams>(command.params) {

@@ -25,6 +25,10 @@ import type {
   CloudGuestDecideParams,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
+  CloudRoomAvatarMotionParams,
+  CloudRoomAvatarSetParams,
+  CloudRoomPresentationEvent,
+  CloudRoomSceneCommitParams,
   CloudRoomRequest,
   CloudRoomTokenAnswer,
   CloudStage,
@@ -361,6 +365,10 @@ interface HighRiskContractFixtures {
     roomClientReportParams: CloudRoomClientReportParams
     roomTokenAnswer: CloudRoomTokenAnswer
     roomRequestEvent: CloudRoomRequest
+    roomPresentationEvent: CloudRoomPresentationEvent
+    roomAvatarSetParams: CloudRoomAvatarSetParams
+    roomAvatarMotionParams: CloudRoomAvatarMotionParams
+    roomSceneCommitParams: CloudRoomSceneCommitParams
     // Plan 243 C1: another device on air, and a show waiting after a hand-off.
     statusOnAirElsewhere: CloudStatus
     statusWaiting: CloudStatus
@@ -713,7 +721,11 @@ describe('shared high-risk protocol fixture', () => {
       guestActParams,
       roomClientReportParams,
       roomTokenAnswer,
-      roomRequestEvent
+      roomRequestEvent,
+      roomPresentationEvent,
+      roomAvatarSetParams,
+      roomAvatarMotionParams,
+      roomSceneCommitParams
     } = fixtures.cloud
     expect(jsonShape(validateBackendEventPayload('cloud.state', statusTalk))).toEqual(statusTalk)
     expect(jsonShape(validateBackendRpcResult('cloud.room.open', statusTalk))).toEqual(statusTalk)
@@ -751,6 +763,31 @@ describe('shared high-risk protocol fixture', () => {
     expect(jsonShape(validateBackendEventPayload('cloud.room.requests', roomRequestEvent))).toEqual(
       roomRequestEvent
     )
+    // Plan 260 S1.8b: the presentation topics' delivery, from the backend.
+    expect(
+      jsonShape(validateBackendEventPayload('cloud.room.presentation', roomPresentationEvent))
+    ).toEqual(roomPresentationEvent)
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.avatar.set', roomAvatarSetParams))
+    ).toEqual(roomAvatarSetParams)
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.avatar.motion', roomAvatarMotionParams))
+    ).toEqual(roomAvatarMotionParams)
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.scene.commit', roomSceneCommitParams))
+    ).toEqual(roomSceneCommitParams)
+    expect(() =>
+      validateBackendRpcParams('cloud.room.scene.commit', {
+        ...roomSceneCommitParams,
+        assets: [{ ...roomSceneCommitParams.assets[0], mime: 'image/gif' }]
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('cloud.room.presentation', {
+        ...roomPresentationEvent,
+        graphics: { ...roomPresentationEvent.graphics, state: 'sent' }
+      })
+    ).toThrow()
     expect(() =>
       validateBackendEventPayload('cloud.state', {
         ...statusTalk,
