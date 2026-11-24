@@ -1,12 +1,14 @@
-// Plan 092: Videorc's visual microphone pipeline as audiocn frame sources.
+// Plan 092: Videorc's visual microphone pipeline as an audiocn meter source.
 // The pipeline stays the single owner of the browser stream, the analyser and
-// the clock; these sources only read its frames and hand them to audiocn
-// components (LevelMeter, DbReadout, ClipIndicator, BarVisualizer,
-// LiveWaveform). No React here, and no import of the pipeline module: the
-// pipeline is described structurally, so eager code never pulls it in.
+// the clock; this source only reads its frames and hands them to audiocn
+// components (LevelMeter, DbReadout, ClipIndicator). No React here, and no
+// import of the pipeline module: the pipeline is described structurally, so
+// eager code never pulls it in. plan 260 S1.3a: it only feeds a Windows or
+// Linux microphone's idle meter (S1.3c removes it); the session sliver's bars
+// read the backend (`createBackendLoudnessBarsSource`).
 
 import { SILENCE_DB } from './audio/decibels'
-import type { ChannelLevel, FrameSource, MeterFrame, VisualFrame } from './audio/types'
+import type { ChannelLevel, FrameSource, MeterFrame } from './audio/types'
 import { createMicVisualFrameBuffer, type MicVisualFrameBuffer } from './mic-visual-frame'
 
 /** What the sources need from the visual mic pipeline (it satisfies this). */
@@ -98,37 +100,4 @@ export function createMicMeterSource(
     writeMicMeterLevel(feed.readFrame(buffer), settings(), level)
     return frame
   })
-}
-
-/**
- * Copy one pipeline frame into a reused audiocn visual frame: the bands into
- * one growable array, the level history ring borrowed as is. No gain: the
- * session sliver and the picker preview show the device's own signal ("is
- * this the right mic, and is it alive?").
- */
-export function writeMicVisualFrame(frame: MicVisualFrameBuffer, target: VisualFrame): VisualFrame {
-  if (target.bands.length !== frame.bands.length) {
-    target.bands = new Float32Array(frame.bands.length)
-  }
-  for (let index = 0; index < frame.bands.length; index += 1) {
-    target.bands[index] = frame.bands[index]
-  }
-  target.history = frame.historyRing
-  target.historyStart = frame.historyStart
-  target.historyLength = frame.historyLength
-  target.peakDb = frame.peakDbfs
-  return target
-}
-
-/** The microphone as a visual source (bands and level history) for bars and waveforms. */
-export function createMicVisualSource(feed: MicFrameFeed): FrameSource<VisualFrame> {
-  const buffer = createMicVisualFrameBuffer()
-  const frame: VisualFrame = {
-    bands: new Float32Array(0),
-    history: buffer.historyRing,
-    historyStart: 0,
-    historyLength: 0,
-    peakDb: SILENCE_DB
-  }
-  return createSharedSource(feed, () => writeMicVisualFrame(feed.readFrame(buffer), frame))
 }
