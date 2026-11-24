@@ -3429,6 +3429,140 @@ describe('backend RPC contract', () => {
   })
 })
 
+describe('UI settings store wire contract (plan 220 S1.4a)', () => {
+  const profile = (
+    JSON.parse(
+      readFileSync(
+        new URL(
+          '../../../../protocol-fixtures/ui-settings-previous-release-profile.json',
+          import.meta.url
+        ),
+        'utf8'
+      )
+    ) as { localStorage: Record<string, string> }
+  ).localStorage
+  // What `videorc_protocol::ui_settings` serializes: every field of a full
+  // value, and a default one with its skipped fields left out.
+  const wire = {
+    snapshotFull: {
+      entries: { 'videorc.theme': 'dark', 'videorc.settings': { textSize: 'm' } },
+      revision: 7,
+      localStorageMigrated: true
+    },
+    snapshotDefault: { entries: {}, revision: 0, localStorageMigrated: false },
+    changeFull: {
+      revision: 3,
+      put: { 'videorc.theme': 'dark' },
+      delete: ['videorc.notesTab'],
+      writer: 'window-notes'
+    },
+    changeDefault: { revision: 0, put: {}, delete: [] }
+  }
+
+  it('accepts a whole-store read, a read by keys, and the snapshot with every migrated key', () => {
+    expect(validateBackendRpcParams('ui.settings.get', undefined)).toBeUndefined()
+    expect(validateBackendRpcParams('ui.settings.get', {})).toEqual({})
+    expect(validateBackendRpcParams('ui.settings.get', { keys: ['videorc.theme'] })).toEqual({
+      keys: ['videorc.theme']
+    })
+    const snapshot = { entries: profile, revision: 1, localStorageMigrated: true }
+    expect(validateBackendRpcResult('ui.settings.get', snapshot)).toEqual(snapshot)
+    expect(validateBackendRpcResult('ui.settings.get', wire.snapshotFull)).toEqual(
+      wire.snapshotFull
+    )
+    expect(validateBackendRpcResult('ui.settings.get', wire.snapshotDefault)).toEqual(
+      wire.snapshotDefault
+    )
+  })
+
+  it('accepts the migration batch, a plain batch, and the change both as the answer and as the event', () => {
+    const migration = {
+      put: profile,
+      ifAbsent: true,
+      localStorageMigrated: true,
+      writer: 'window-main'
+    }
+    expect(validateBackendRpcParams('ui.settings.set', migration)).toEqual(migration)
+    const batch = {
+      put: { 'videorc.settings': { textSize: 'm', nested: [1, null, 'x'] } },
+      delete: ['videorc.orcleTab']
+    }
+    expect(validateBackendRpcParams('ui.settings.set', batch)).toEqual(batch)
+    const replay = {
+      put: { 'videorc.theme': 'dark' },
+      delete: ['videorc.orcleTab'],
+      unlessUpdatedAfter: { 'videorc.theme': 1_795_000_000_000, 'videorc.orcleTab': 0 },
+      writer: 'window-next'
+    }
+    expect(validateBackendRpcParams('ui.settings.set', replay)).toEqual(replay)
+    expect(validateBackendRpcParams('ui.settings.set', {})).toEqual({})
+    for (const change of [
+      wire.changeFull,
+      wire.changeDefault,
+      { revision: 2, put: {}, delete: ['videorc.theme'] }
+    ]) {
+      expect(validateBackendRpcResult('ui.settings.set', change)).toEqual(change)
+      expect(validateBackendEventPayload('ui.settings.changed', change)).toEqual(change)
+    }
+  })
+
+  it('refuses a null value, a bad key, an oversized batch, a forged field and a bad revision', () => {
+    for (const bad of [
+      { put: { 'videorc.theme': null } },
+      { put: { '': 'x' } },
+      { put: { ' videorc.theme': 'x' } },
+      { put: { 'videorc.a\nb': 'x' } },
+      { put: { ['k'.repeat(257)]: 'x' } },
+      { put: { 'videorc.theme': 'x' }, delete: ['videorc.theme'] },
+      { delete: ['videorc.theme', 'videorc.theme'] },
+      { put: { 'videorc.theme': 'x' }, extra: true },
+      { writer: '' },
+      { put: { 'videorc.theme': 'x' }, unlessUpdatedAfter: { 'videorc.other': 1 } },
+      { put: { 'videorc.theme': 'x' }, unlessUpdatedAfter: { 'videorc.theme': -1 } },
+      { put: { 'videorc.theme': 'x' }, unlessUpdatedAfter: { 'videorc.theme': 1.5 } },
+      {
+        put: Object.fromEntries(Array.from({ length: 257 }, (_, i) => [`videorc.k${i}`, i]))
+      }
+    ]) {
+      expect(() => validateBackendRpcParams('ui.settings.set', bad)).toThrow('ui.settings.set')
+    }
+    expect(() => validateBackendRpcParams('ui.settings.get', { keys: [''] })).toThrow(
+      'ui.settings.get'
+    )
+    for (const bad of [
+      { entries: {}, revision: 1 },
+      { entries: {}, revision: -1, localStorageMigrated: true },
+      { entries: {}, revision: 1.5, localStorageMigrated: true },
+      { entries: { 'videorc.theme': null }, revision: 1, localStorageMigrated: true },
+      { entries: {}, revision: 1, localStorageMigrated: true, extra: 1 }
+    ]) {
+      expect(() => validateBackendRpcResult('ui.settings.get', bad)).toThrow('ui.settings.get')
+    }
+    for (const bad of [
+      { revision: 1, put: {} },
+      { revision: 1, put: { 'videorc.theme': null }, delete: [] },
+      { revision: 1, put: {}, delete: [], writer: 'w'.repeat(129) },
+      { revision: 1, put: {}, delete: [], extra: 1 }
+    ]) {
+      expect(() => validateBackendEventPayload('ui.settings.changed', bad)).toThrow(
+        'ui.settings.changed'
+      )
+    }
+  })
+
+  it('types the two methods and the event', () => {
+    expectTypeOf<BackendRpcParams<'ui.settings.get'>>().toEqualTypeOf<
+      { keys?: string[] } | undefined
+    >()
+    expectTypeOf<BackendRpcResult<'ui.settings.set'>>().toEqualTypeOf<
+      BackendEventMap['ui.settings.changed']
+    >()
+    expect(runtimeValidatedBackendRpcMethods).toEqual(
+      expect.arrayContaining(['ui.settings.get', 'ui.settings.set'])
+    )
+  })
+})
+
 describe('session source backend wire results', () => {
   it('accepts Rust null source IDs for GET and switch without relaxing preference parameters', () => {
     const result = {

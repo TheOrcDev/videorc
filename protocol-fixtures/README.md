@@ -247,3 +247,18 @@ is a placeholder of the right shape, never a real one.
 
 - Rust: `cargo test -p videorc-backend agent_config_entry_fixture`
 - TypeScript: `pnpm --filter @videorc/desktop test -- agent-config-entry.test.ts`
+
+## `ui-settings-previous-release-profile.json`
+
+A renderer `localStorage` profile the previous release (0.37.x) wrote, every
+key with a value of the shape its writer produces (plan 260 S1.4, from plan
+220 S1.4a). The one-time migration copies each string verbatim into the
+backend UI settings store (`app_settings` rows under `ui:`, a JSON string per
+key); both halves prove the copy arrives intact, once, and never overwrites a
+value this release wrote first. Keys with a dynamic tail
+(`videorc.sources.more.<id>`, `videorc.buddyWornPack:<id>`) carry one
+representative id. No machine paths, tokens or account data.
+
+- Rust: `cargo test -p videorc-backend ui_settings`
+- TypeScript: `pnpm --filter @videorc/desktop test -- ui-settings-store.test.ts`
+  and `backend-rpc-contract.test.ts`

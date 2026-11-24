@@ -225,6 +225,7 @@ mod transcript;
 mod twitch;
 mod twitch_chat;
 mod tzdb;
+mod ui_settings;
 mod usage_stats;
 #[cfg(target_os = "macos")]
 mod video_toolbox_encoder;
@@ -6513,6 +6514,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "encoder.preference.set"
         | "diagnostics.metricsJournal.set"
         | "usageStats.set"
+        // Plan 220 S1.4a: one UI settings batch, one transaction, one event.
+        | "ui.settings.set"
         | "discord.announce.update"
         | "discord.webhook.remove"
         | "streamReport.email.set"
@@ -6651,6 +6654,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.emotes.get"
         | "usageStats.get"
         | "streamReport.email.get"
+        | "ui.settings.get"
         | "discord.announce.get"
         | "discord.links.preview"
         // Plan 260 S1.5a: an allowlisted chat image into the cache. It writes
@@ -11958,6 +11962,41 @@ async fn handle_text_message_with_role(
             command.id,
             comment_highlight::comment_highlight_canvases(state).await,
         ),
+        // Plan 220 S1.4a: the UI settings store every window reads its
+        // product state from (what localStorage held). A refused batch names
+        // its reason; a storage failure is its own code.
+        "ui.settings.get" => {
+            match serde_json::from_value::<ui_settings::UiSettingsGetParams>(command.params) {
+                Ok(params) => match ui_settings::get(&state.database, params) {
+                    Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+                    Err(ui_settings::UiSettingsError::Invalid(error)) => {
+                        ServerResponse::error(command.id, "invalid-params", error.to_string())
+                    }
+                    Err(ui_settings::UiSettingsError::Storage(error)) => {
+                        ServerResponse::error(command.id, "ui-settings-storage", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "ui.settings.set" => {
+            match serde_json::from_value::<ui_settings::UiSettingsSetParams>(command.params) {
+                Ok(params) => match ui_settings::set(state, params) {
+                    Ok(change) => ServerResponse::ok(command.id, change),
+                    Err(ui_settings::UiSettingsError::Invalid(error)) => {
+                        ServerResponse::error(command.id, "invalid-params", error.to_string())
+                    }
+                    Err(ui_settings::UiSettingsError::Storage(error)) => {
+                        ServerResponse::error(command.id, "ui-settings-storage", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "overlays.layout.get" => ServerResponse::ok(
             command.id,
             overlay_layout::load_overlay_layout(&state.database),

@@ -276,6 +276,11 @@ import type {
   StreamOutputTopologyProbeResult,
   StreamPlatform,
   StreamTargetsSnapshot,
+  UiSettingsChange,
+  UiSettingsGetParams,
+  UiSettingsSetParams,
+  UiSettingsSnapshot,
+  UiSettingsValue,
   VideorcAccountSnapshot,
   VideoSettings,
   LinuxDesktopCheck
@@ -324,7 +329,12 @@ import {
   SOUND_VOLUME_DB_MAX,
   SOUND_VOLUME_DB_MIN,
   SOUNDBOARD_VOLUME_DB_MAX,
-  SOUNDBOARD_VOLUME_DB_MIN
+  SOUNDBOARD_VOLUME_DB_MIN,
+  UI_SETTINGS_BATCH_MAX_BYTES,
+  UI_SETTINGS_BATCH_MAX_KEYS,
+  UI_SETTINGS_KEY_MAX_CHARS,
+  UI_SETTINGS_VALUE_MAX_BYTES,
+  UI_SETTINGS_WRITER_MAX_CHARS
 } from './backend'
 import { isBannerFileName } from './banner-assets'
 import { parseCohostPetAnimatorEvent, type CohostPetAnimatorEvent } from './buddy-animator-public'
@@ -836,6 +846,10 @@ export interface BackendRpcMethodMap {
   // --- Overlay layout (plan 164) ---
   'overlays.layout.get': BackendRpcDefinition<undefined, OverlayLayout>
   'overlays.layout.set': BackendRpcDefinition<OverlayLayout, OverlayLayout>
+  // --- UI settings store (plan 220 S1.4a) ---
+  'ui.settings.get': BackendRpcDefinition<UiSettingsGetParams | undefined, UiSettingsSnapshot>
+  'ui.settings.set': BackendRpcDefinition<UiSettingsSetParams, UiSettingsChange>
+  // --- end UI settings store ---
   'overlays.layout.migrate_highlight_anchor': BackendRpcDefinition<
     MigrateHighlightAnchorParams,
     OverlayLayout
@@ -1138,6 +1152,8 @@ export interface BackendEventMap {
   // --- Overlay layout (plan 164) ---
   'overlays.layout': OverlayLayout
   // --- end overlay layout (plan 164) ---
+  // --- UI settings store (plan 220 S1.4a): one batch, to every window ---
+  'ui.settings.changed': UiSettingsChange
   // --- Banners (plan 186): the full list, to every window ---
   'banners.changed': Banner[]
   // --- HTML overlays (plan 232): what main renders, and where each stands ---
@@ -4339,6 +4355,124 @@ const migrateHighlightAnchorParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<MigrateHighlightAnchorParams>
 // --- end overlay layout (plan 164) ---
+
+// --- UI settings store (plan 220 S1.4a) ---
+// The limits mirror `ui_settings.rs`: the backend refuses the same batches,
+// with the reason; this side refuses them before they are sent, and refuses
+// a forged snapshot or event before it reaches a window's cache.
+const uiSettingsKeySchema = runtimeSchema<string>('a UI setting key', (value, path) => {
+  const key = stringSchema({ minLength: 1, maxLength: UI_SETTINGS_KEY_MAX_CHARS }).parse(
+    value,
+    path
+  )
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(key)) {
+    throw new RuntimeSchemaError(path, 'a UI setting key without control characters')
+  }
+  if (key.trim() !== key) {
+    throw new RuntimeSchemaError(path, 'a UI setting key without surrounding whitespace')
+  }
+  return key
+})
+const uiSettingsBoundedJsonSchema = boundedJsonValueSchema({
+  maxStringLength: UI_SETTINGS_VALUE_MAX_BYTES,
+  maxTotalStringLength: UI_SETTINGS_BATCH_MAX_BYTES
+})
+const uiSettingsValueSchema = runtimeSchema<UiSettingsValue>(
+  'a UI setting value (JSON, never null)',
+  (value, path) => {
+    if (value === null) {
+      throw new RuntimeSchemaError(path, 'a UI setting value (JSON, never null)')
+    }
+    return uiSettingsBoundedJsonSchema.parse(value, path) as UiSettingsValue
+  }
+)
+/** A record of settings whose keys are checked too (`recordSchema` checks values only). */
+function uiSettingsEntriesSchema(maxKeys: number): RuntimeSchema<Record<string, UiSettingsValue>> {
+  const values = recordSchema(uiSettingsValueSchema, { maxKeys })
+  return runtimeSchema<Record<string, UiSettingsValue>>('UI settings entries', (value, path) => {
+    const entries = values.parse(value, path)
+    for (const key of Object.keys(entries)) uiSettingsKeySchema.parse(key, `${path}.${key}`)
+    return entries
+  })
+}
+const uiSettingsKeyListSchema = arraySchema(uiSettingsKeySchema, {
+  maxLength: UI_SETTINGS_BATCH_MAX_KEYS
+})
+const uiSettingsRevisionSchema = numberSchema({ integer: true, min: 0 })
+const uiSettingsWriterSchema = optionalSchema(
+  stringSchema({ minLength: 1, maxLength: UI_SETTINGS_WRITER_MAX_CHARS })
+)
+export const uiSettingsGetParamsSchema = objectSchema(
+  { keys: optionalSchema(uiSettingsKeyListSchema) },
+  { allowUnknown: false }
+) as RuntimeSchema<UiSettingsGetParams>
+/** The whole store: more keys than one batch (every `videorc.sources.more.<id>`). */
+export const uiSettingsSnapshotSchema = objectSchema(
+  {
+    entries: uiSettingsEntriesSchema(10_000),
+    revision: uiSettingsRevisionSchema,
+    localStorageMigrated: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<UiSettingsSnapshot>
+export const uiSettingsSetParamsSchema = runtimeSchema<UiSettingsSetParams>(
+  'a UI settings batch',
+  (value, path) => {
+    const batch = objectSchema(
+      {
+        put: optionalSchema(uiSettingsEntriesSchema(UI_SETTINGS_BATCH_MAX_KEYS)),
+        delete: optionalSchema(uiSettingsKeyListSchema),
+        ifAbsent: optionalSchema(booleanSchema),
+        localStorageMigrated: optionalSchema(booleanSchema),
+        unlessUpdatedAfter: optionalSchema(
+          recordSchema(numberSchema({ integer: true, min: 0 }), {
+            maxKeys: UI_SETTINGS_BATCH_MAX_KEYS
+          })
+        ),
+        writer: uiSettingsWriterSchema
+      },
+      { allowUnknown: false }
+    ).parse(value, path) as UiSettingsSetParams
+    const put = batch.put ?? {}
+    const deletes = batch.delete ?? []
+    for (const key of Object.keys(batch.unlessUpdatedAfter ?? {})) {
+      if (!(key in put) && !deletes.includes(key)) {
+        throw new RuntimeSchemaError(
+          `${path}.unlessUpdatedAfter`,
+          `a write time only for a key the batch puts or deletes (${key})`
+        )
+      }
+    }
+    if (Object.keys(put).length + deletes.length > UI_SETTINGS_BATCH_MAX_KEYS) {
+      throw new RuntimeSchemaError(
+        path,
+        `a UI settings batch naming at most ${UI_SETTINGS_BATCH_MAX_KEYS} keys`
+      )
+    }
+    const seen = new Set<string>()
+    for (const key of deletes) {
+      if (key in put) {
+        throw new RuntimeSchemaError(`${path}.delete`, `a key not also put (${key})`)
+      }
+      if (seen.has(key)) {
+        throw new RuntimeSchemaError(`${path}.delete`, `each key once (${key})`)
+      }
+      seen.add(key)
+    }
+    return batch
+  }
+)
+export const uiSettingsChangeSchema = objectSchema(
+  {
+    revision: uiSettingsRevisionSchema,
+    put: uiSettingsEntriesSchema(UI_SETTINGS_BATCH_MAX_KEYS),
+    delete: uiSettingsKeyListSchema,
+    writer: uiSettingsWriterSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<UiSettingsChange>
+// --- end UI settings store (plan 220 S1.4a) ---
 // --- Chat on stream (plan 215 G) ---
 // A 4 MB PNG cap on the Rust side: base64 of that is 5.6 M characters. The
 // rects are the overlay layout's, optional like the highlight's.
@@ -8164,6 +8298,13 @@ const runtimeContracts = {
   // --- Overlay layout (plan 164) ---
   'overlays.layout.get': { params: undefinedSchema, result: overlayLayoutSchema },
   'overlays.layout.set': { params: overlayLayoutSchema, result: overlayLayoutSchema },
+  // --- UI settings store (plan 220 S1.4a) ---
+  'ui.settings.get': {
+    params: optionalSchema(uiSettingsGetParamsSchema),
+    result: uiSettingsSnapshotSchema
+  },
+  'ui.settings.set': { params: uiSettingsSetParamsSchema, result: uiSettingsChangeSchema },
+  // --- end UI settings store ---
   'overlays.layout.migrate_highlight_anchor': {
     params: migrateHighlightAnchorParamsSchema,
     result: overlayLayoutSchema
@@ -8651,6 +8792,9 @@ const runtimeEventSchemas = {
   // --- Overlay layout (plan 164) ---
   'overlays.layout': overlayLayoutSchema,
   // --- end overlay layout (plan 164) ---
+  // --- UI settings store (plan 220 S1.4a) ---
+  'ui.settings.changed': uiSettingsChangeSchema,
+  // --- end UI settings store ---
   'banners.changed': bannerListSchema,
   'htmlOverlays.targets': htmlOverlayTargetsSchema,
   'htmlOverlays.status': htmlOverlayStatusesSchema,

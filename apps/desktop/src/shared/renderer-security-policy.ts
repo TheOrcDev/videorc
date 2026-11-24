@@ -8,6 +8,7 @@ const MAIN_ONLY = ['main'] as const
 const MAIN_AND_NOTES = ['main', 'notes'] as const
 const MAIN_AND_COMMENTS = ['main', 'comments'] as const
 const MAIN_AND_CAPTIONS = ['main', 'captions'] as const
+const EVERY_WINDOW = ['main', 'notes', 'comments', 'captions'] as const
 
 /**
  * The complete allowlist for renderer -> main invocations. Registration fails
@@ -157,6 +158,11 @@ export const IPC_INVOKE_ROLES = {
   'notes-window:close': MAIN_ONLY,
   'notes-window:get-state': MAIN_AND_NOTES,
   'notes-window:set-always-on-top': MAIN_AND_NOTES,
+  // Plan 220 S1.4a: the UI settings store, a get and a batch set, for the
+  // windows without a backend socket; main relays over its admin lane and
+  // never hands out the socket itself.
+  'ui-settings:get': EVERY_WINDOW,
+  'ui-settings:set': EVERY_WINDOW,
   'notes-window:get-document': MAIN_AND_NOTES,
   'notes-window:save-document': MAIN_AND_NOTES,
   'comments-window:open': MAIN_ONLY,

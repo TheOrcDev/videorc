@@ -6,7 +6,7 @@ mod cloud_recordings;
 mod cloud_speech;
 pub(crate) use cloud_speech::HostTranscriptCue;
 mod cloud_source_iso;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -72,6 +72,37 @@ const SCREEN_IMAGE_OPTIMIZER_TIMEOUT: Duration = Duration::from_secs(20);
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
     path: PathBuf,
+}
+
+/// The `app_settings` namespace of the UI settings store (plan 220 S1.4a):
+/// `ui:<renderer key>`. No backend-private row carries a colon, and the
+/// generic `load_setting`/`save_setting` refuse the prefix, so the two can
+/// never meet.
+pub const UI_SETTINGS_KEY_PREFIX: &str = "ui:";
+/// Backend-private row holding the store's revision (a JSON integer).
+const UI_SETTINGS_REVISION_KEY: &str = "uiSettingsRevision";
+/// Backend-private row holding the one-time `localStorage` migration mark.
+const UI_SETTINGS_LOCAL_STORAGE_MIGRATED_KEY: &str = "uiSettingsLocalStorageMigrated";
+/// Backend-private rows `uiSettingsDeleted/<renderer key>`: a deleted UI
+/// setting's tombstone, whose `updated_at` is when it was deleted. Outside
+/// the `ui:` namespace, so a `get` never lists them.
+const UI_SETTINGS_TOMBSTONE_PREFIX: &str = "uiSettingsDeleted/";
+
+fn reject_ui_settings_namespace(key: &str) -> Result<()> {
+    if key.starts_with(UI_SETTINGS_KEY_PREFIX) {
+        bail!(
+            "app_settings key {key:?} is in the UI settings namespace ({UI_SETTINGS_KEY_PREFIX}); use the ui_settings_* helpers"
+        );
+    }
+    Ok(())
+}
+
+/// What one UI settings batch landed, and the revision after it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiSettingsApplied {
+    pub revision: u64,
+    pub put: BTreeMap<String, serde_json::Value>,
+    pub delete: Vec<String>,
 }
 
 /// Persisted active-Screen selection before output reconciliation. An
@@ -188,6 +219,42 @@ enum StoredCredentialsPurge {
     /// The checkpoint reported busy (a reader still uses the write-ahead log,
     /// whose old frames may hold old copies): left pending for the next open.
     CheckpointBusy,
+}
+
+/// One `app_settings` row's JSON, read on `conn` (inside its transaction).
+fn setting_json<T: serde::de::DeserializeOwned>(conn: &Connection, key: &str) -> Result<Option<T>> {
+    conn.query_row(
+        "SELECT value_json FROM app_settings WHERE key = ?1",
+        params![key],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|value_json| serde_json::from_str::<T>(&value_json))
+    .transpose()
+    .with_context(|| format!("app setting {key} holds unreadable JSON"))
+}
+
+/// Every UI setting on `conn`, keyed by its renderer name (the `ui:` prefix
+/// removed).
+fn ui_settings_entries(conn: &Connection) -> Result<BTreeMap<String, serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT key, value_json FROM app_settings
+         WHERE substr(key, 1, ?1) = ?2
+         ORDER BY key ASC",
+    )?;
+    let prefix_len = UI_SETTINGS_KEY_PREFIX.len() as i64;
+    let rows = stmt.query_map(params![prefix_len, UI_SETTINGS_KEY_PREFIX], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut entries = BTreeMap::new();
+    for row in rows {
+        let (key, value_json) = row?;
+        let name = key[UI_SETTINGS_KEY_PREFIX.len()..].to_string();
+        let value: serde_json::Value = serde_json::from_str(&value_json)
+            .with_context(|| format!("UI setting {name} holds unreadable JSON"))?;
+        entries.insert(name, value);
+    }
+    Ok(entries)
 }
 
 fn setting_exists(conn: &Connection, key: &str) -> Result<bool> {
@@ -7067,6 +7134,7 @@ impl Database {
     }
 
     pub fn load_setting<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+        reject_ui_settings_namespace(key)?;
         let conn = self.lock()?;
         let value_json: Option<String> = conn
             .query_row(
@@ -7094,6 +7162,7 @@ impl Database {
     }
 
     pub fn save_setting<T: serde::Serialize>(&self, key: &str, value: &T) -> Result<()> {
+        reject_ui_settings_namespace(key)?;
         let conn = self.lock()?;
         conn.execute(
             "INSERT INTO app_settings (key, value_json, updated_at)
@@ -7106,9 +7175,173 @@ impl Database {
 
     /// Removes one app setting; a missing key is not an error.
     pub fn delete_setting(&self, key: &str) -> Result<()> {
+        reject_ui_settings_namespace(key)?;
         let conn = self.lock()?;
         conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
         Ok(())
+    }
+
+    // --- UI settings store (plan 220 S1.4a) -------------------------------
+    //
+    // The renderer's product state (what `localStorage` held), one
+    // `app_settings` row per key under the `ui:` namespace, so a UI key can
+    // never collide with a backend-private row (none carries a colon; the
+    // generic helpers above refuse the namespace outright). The bookkeeping
+    // rows (`uiSettingsRevision`, `uiSettingsLocalStorageMigrated`) stay
+    // outside the namespace, so a `get` of the whole store never lists them.
+
+    /// Every UI setting, keyed by its renderer name (the `ui:` prefix removed),
+    /// with the revision and the migration mark, all read in one transaction
+    /// under one lock: a batch is wholly in the snapshot or wholly after it.
+    pub fn ui_settings_snapshot(
+        &self,
+    ) -> Result<videorc_protocol::ui_settings::UiSettingsSnapshot> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let entries = ui_settings_entries(&transaction)?;
+        let revision = setting_json::<u64>(&transaction, UI_SETTINGS_REVISION_KEY)?.unwrap_or(0);
+        let local_storage_migrated =
+            setting_json::<bool>(&transaction, UI_SETTINGS_LOCAL_STORAGE_MIGRATED_KEY)?
+                .unwrap_or(false);
+        transaction.commit()?;
+        Ok(videorc_protocol::ui_settings::UiSettingsSnapshot {
+            entries,
+            revision,
+            local_storage_migrated,
+        })
+    }
+
+    /// One batch in one transaction: the puts (only onto absent keys when
+    /// `if_absent`), then the deletes, then the migration mark. A key named in
+    /// `unless_updated_after` is left out when its row (or, once deleted, its
+    /// tombstone) changed after that time (Unix ms); when it lands it is
+    /// stamped with that time, not now, so replays of several journals keep
+    /// the order the writes happened in. Every delete not left out leaves a
+    /// tombstone, the key held or not, which also keeps an `if_absent` copy
+    /// from bringing the key back. Returns what landed and the revision after
+    /// it; nothing landing (a delete of an absent key only moves its
+    /// tombstone) and no mark leaves the revision alone.
+    pub fn ui_settings_apply(
+        &self,
+        put: &BTreeMap<String, serde_json::Value>,
+        delete: &[String],
+        if_absent: bool,
+        mark_local_storage_migrated: bool,
+        unless_updated_after: &BTreeMap<String, u64>,
+    ) -> Result<UiSettingsApplied> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let now = Utc::now().to_rfc3339();
+        let mut landed_put = BTreeMap::new();
+        let mut landed_delete = Vec::new();
+        let updated_at = |key: &str| -> Result<Option<String>> {
+            Ok(transaction
+                .query_row(
+                    "SELECT updated_at FROM app_settings WHERE key = ?1",
+                    params![key],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        };
+        // The key's last change: its row's time, or its tombstone's once deleted.
+        let last_change = |name: &str| -> Result<Option<String>> {
+            match updated_at(&format!("{UI_SETTINGS_KEY_PREFIX}{name}"))? {
+                Some(time) => Ok(Some(time)),
+                None => updated_at(&format!("{UI_SETTINGS_TOMBSTONE_PREFIX}{name}")),
+            }
+        };
+        let changed_since = |name: &str| -> Result<bool> {
+            let Some(written_ms) = unless_updated_after.get(name) else {
+                return Ok(false);
+            };
+            let written_ms = i64::try_from(*written_ms).unwrap_or(i64::MAX);
+            Ok(match last_change(name)? {
+                None => false,
+                Some(time) => match chrono::DateTime::parse_from_rfc3339(&time) {
+                    Ok(changed) => changed.timestamp_millis() > written_ms,
+                    // A time that doesn't parse is treated as newer: the key stays.
+                    Err(_) => true,
+                },
+            })
+        };
+        let stamp = |name: &str| -> String {
+            unless_updated_after
+                .get(name)
+                .and_then(|ms| {
+                    chrono::DateTime::<Utc>::from_timestamp_millis(i64::try_from(*ms).ok()?)
+                })
+                .map_or_else(|| now.clone(), |written| written.to_rfc3339())
+        };
+        for (name, value) in put {
+            let key = format!("{UI_SETTINGS_KEY_PREFIX}{name}");
+            if if_absent && last_change(name)?.is_some() {
+                continue;
+            }
+            if changed_since(name)? {
+                continue;
+            }
+            transaction.execute(
+                "INSERT INTO app_settings (key, value_json, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+                params![key, serde_json::to_string(value)?, stamp(name)],
+            )?;
+            transaction.execute(
+                "DELETE FROM app_settings WHERE key = ?1",
+                params![format!("{UI_SETTINGS_TOMBSTONE_PREFIX}{name}")],
+            )?;
+            landed_put.insert(name.clone(), value.clone());
+        }
+        for name in delete {
+            let key = format!("{UI_SETTINGS_KEY_PREFIX}{name}");
+            if changed_since(name)? {
+                continue;
+            }
+            let removed =
+                transaction.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+            // Even a key already absent gets (or advances) its tombstone: two
+            // journals' delete at t20 and put at t10 must leave it deleted in
+            // either order. Only a removed row changes what windows see, so
+            // only that is announced and moves the revision.
+            transaction.execute(
+                "INSERT INTO app_settings (key, value_json, updated_at)
+                 VALUES (?1, 'true', ?2)
+                 ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at",
+                params![format!("{UI_SETTINGS_TOMBSTONE_PREFIX}{name}"), stamp(name)],
+            )?;
+            if removed > 0 {
+                landed_delete.push(name.clone());
+            }
+        }
+        let previous_revision =
+            setting_json::<u64>(&transaction, UI_SETTINGS_REVISION_KEY)?.unwrap_or(0);
+        let landed = !landed_put.is_empty() || !landed_delete.is_empty();
+        let revision = if landed || mark_local_storage_migrated {
+            let next = previous_revision + 1;
+            transaction.execute(
+                "INSERT INTO app_settings (key, value_json, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+                params![UI_SETTINGS_REVISION_KEY, next.to_string(), now],
+            )?;
+            next
+        } else {
+            previous_revision
+        };
+        if mark_local_storage_migrated {
+            transaction.execute(
+                "INSERT INTO app_settings (key, value_json, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+                params![UI_SETTINGS_LOCAL_STORAGE_MIGRATED_KEY, "true", now],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(UiSettingsApplied {
+            revision,
+            put: landed_put,
+            delete: landed_delete,
+        })
     }
 
     pub fn import_screen_image(&self, image_path: &str, ffmpeg_path: &str) -> Result<StreamScreen> {

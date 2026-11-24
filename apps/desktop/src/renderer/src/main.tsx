@@ -30,10 +30,19 @@ if (import.meta.env.DEV && localStorage.getItem('videorc.reactPerfTrack') !== '1
 
 void startLocalTimeSync()
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <AppErrorBoundary>
-      <App />
-    </AppErrorBoundary>
-  </React.StrictMode>
-)
+function render(): void {
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <AppErrorBoundary>
+        <App />
+      </AppErrorBoundary>
+    </React.StrictMode>
+  )
+}
+
+// Plan 220 S1.4a: the UI settings store is in before the first render, so
+// every read is synchronous; past its deadline the window renders anyway.
+// The store and its transport load as their own chunk, off the eager bundle.
+void import('./lib/ui-settings-window')
+  .then(({ hydrateUiSettingsBeforeFirstRender }) => hydrateUiSettingsBeforeFirstRender())
+  .then(render, render)

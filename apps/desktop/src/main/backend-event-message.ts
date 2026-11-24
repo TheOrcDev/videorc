@@ -9,6 +9,7 @@ import type {
   Scene,
   ServerEvent,
   ServerResponse,
+  UiSettingsChange,
   VirtualCameraStatus
 } from '../shared/backend'
 import {
@@ -45,7 +46,10 @@ export const MAIN_ISOLATED_BACKEND_EVENTS: ReadonlySet<string> = new Set([
   'scene.changed',
   // Plan 243 R2 B-M1: the exit guard reads a talk show's room from it, field
   // by field; a status this main cannot validate never retires the socket.
-  'cloud.state'
+  'cloud.state',
+  // Plan 220 S1.4a: a UI settings batch is relayed to the windows without a
+  // socket; a bad one is dropped with a warning, never the socket.
+  'ui.settings.changed'
 ])
 
 /** The privileged main-process socket uses the same bounded wire contract as the renderer. */
@@ -114,6 +118,11 @@ export function parseMainOverlayLayout(payload: unknown): OverlayLayout {
 /** `overlays.layout` event: the whole layout, strictly validated. */
 export function parseMainOverlayLayoutEvent(payload: unknown): OverlayLayout {
   return validateBackendEventPayload('overlays.layout', payload) as OverlayLayout
+}
+
+/** `ui.settings.changed` event (plan 220 S1.4a): one landed batch, strictly validated. */
+export function parseMainUiSettingsChangedEvent(payload: unknown): UiSettingsChange {
+  return validateBackendEventPayload('ui.settings.changed', payload) as UiSettingsChange
 }
 
 // The shared scene contract leaves the background as a bounded payload; the

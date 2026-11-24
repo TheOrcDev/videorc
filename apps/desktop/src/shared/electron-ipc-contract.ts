@@ -46,11 +46,18 @@ import type {
   NotesWindowState,
   OAuthCallbackEnvelope,
   PreviewWindowState,
+  UiSettingsChange,
   UpdateStatus,
   VideorcApi,
   ViewerSample,
   WatchdogFixRequest
 } from './backend'
+import {
+  uiSettingsChangeSchema,
+  uiSettingsGetParamsSchema,
+  uiSettingsSetParamsSchema,
+  uiSettingsSnapshotSchema
+} from './backend-rpc-contract'
 import type { MarkerContext, MarkerRelayCommand } from './session-markers'
 import {
   notificationActRequestSchema,
@@ -238,6 +245,10 @@ export const electronInvokeApiMethods = {
   'notes-window:close': 'closeNotesWindow',
   'notes-window:get-state': 'getNotesWindowState',
   'notes-window:set-always-on-top': 'setNotesWindowAlwaysOnTop',
+  // Plan 220 S1.4a: the UI settings store for the windows without a backend
+  // socket (Stream Manager, Captions, Notes), relayed over main's admin lane.
+  'ui-settings:get': 'getUiSettings',
+  'ui-settings:set': 'setUiSettings',
   'notes-window:get-document': 'getNotesDocument',
   'notes-window:save-document': 'saveNotesDocument',
   'comments-window:open': 'openCommentsWindow',
@@ -471,6 +482,8 @@ export interface ElectronIpcEventMap {
   'app:update-status': UpdateStatus
   /** Plan 174 S3.1 (D2): a quit or a main-window close while on air asks the renderer first. */
   'app:exit-request': 'quit' | 'close'
+  /** Plan 220 S1.4a: a UI settings batch that landed, relayed to every window. */
+  'ui-settings:changed': UiSettingsChange
 }
 
 export type ElectronEventChannel = keyof ElectronIpcEventMap
@@ -478,6 +491,7 @@ export type ElectronEventChannel = keyof ElectronIpcEventMap
 export const electronEventChannels = [
   'account:callback',
   'backend:connection',
+  'ui-settings:changed',
   'backend:lifecycle',
   'backend:log',
   'preview-window:state',
@@ -1896,6 +1910,15 @@ const chatCommandFailuresSchema = arraySchema(
 ) as RuntimeSchema<ChatCommandReplyFailed[]>
 
 const specificRuntimeInvokeContracts = {
+  // Plan 220 S1.4a: the same shapes the backend socket checks.
+  'ui-settings:get': invokeContract(
+    tupleSchema([optionalSchema(uiSettingsGetParamsSchema)]),
+    uiSettingsSnapshotSchema
+  ),
+  'ui-settings:set': invokeContract(
+    tupleSchema([uiSettingsSetParamsSchema]),
+    uiSettingsChangeSchema
+  ),
   'app:front-window-watch': invokeContract(
     tupleSchema([objectSchema({ enabled: booleanSchema }, { allowUnknown: false })]),
     undefinedSchema
@@ -2541,6 +2564,7 @@ const backendConnectionSchema = objectSchema(
 )
 
 const specificRuntimeEventSchemas = {
+  'ui-settings:changed': uiSettingsChangeSchema,
   'chat-gifs:mode': twitchGifModeSchema,
   'comments-window:marker-context': markerContextSchema,
   'comments-window:marker-request': markerRelayCommandSchema,
