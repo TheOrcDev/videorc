@@ -358,7 +358,15 @@ mod tests {
         assert!(matches!(first, Acquired::Primary(_)));
         drop(first);
         assert!(!dir.path().join(INSTANCE_FILE).exists());
-        assert!(matches!(acquire(dir.path()).unwrap(), Acquired::Primary(_)));
+        // `flock` belongs to the open file, so a child another test is
+        // spawning at this moment holds a copy of the descriptor until it
+        // execs (the ledger and process tests start `sleep` and `ps`): the
+        // lock can outlive the drop by that window. A relaunch waits the same
+        // way (`acquire_after_relaunch`), so the test does too.
+        assert!(matches!(
+            acquire_after_relaunch(dir.path(), Duration::from_secs(2)).unwrap(),
+            Acquired::Primary(_)
+        ));
     }
 
     #[test]
