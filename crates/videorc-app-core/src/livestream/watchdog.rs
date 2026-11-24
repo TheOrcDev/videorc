@@ -3,11 +3,12 @@
 //! Studio's Stream fact and the Stream Manager's chip say.
 //!
 //! The alerts are the backend's (`watchdog.alerts`); they are read leniently
-//! here until the protocol carries their type.
+//! here until the protocol carries their type. The Studio keeps the list
+//! (`studio::watchdog_alerts`); its cards are `studio::screen_views`.
 
 use serde::Deserialize;
 
-/// `WatchdogAlert`, the fields the ranks and the chip read.
+/// `WatchdogAlert`: the ranks, the chip and the card read it.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WatchdogAlert {
@@ -15,13 +16,47 @@ pub struct WatchdogAlert {
     pub check: String,
     /// `critical`, `warning` or `notice`.
     pub severity: String,
-    /// `open` or `snoozed` (D3).
+    /// `open`, `acknowledged` or `snoozed` (D3).
     pub state: String,
     /// RFC 3339: when it opened.
     pub since: String,
+    /// RFC 3339: the backend's last repeat (a new one asks again).
+    pub last_repeat_at: Option<String>,
+    /// The backend's exact words; the clock in them is live.
     pub title: String,
+    pub detail: String,
+    /// `desktop`, `cloud` or `platform` (D9).
+    pub source: String,
     pub platform: Option<String>,
     pub target_id: Option<String>,
+    /// The card's buttons, the first one primary.
+    pub fixes: Vec<WatchdogAlertFix>,
+    pub snoozed_until: Option<String>,
+    /// "I meant to" was pressed (the mute's own quiet button).
+    pub meant_to: Option<bool>,
+}
+
+/// `WatchdogAlertFix`: one of the card's buttons.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WatchdogAlertFix {
+    /// `unmute`, `end-takeover`, `switch-scene`, `open-audio`,
+    /// `open-health`, `open-livestream`, `reconnect-destination`,
+    /// `open-platform-dashboard` or `show-brb`.
+    pub kind: String,
+    pub label: String,
+    /// `open-platform-dashboard`'s page.
+    pub url: Option<String>,
+}
+
+/// `WatchdogAlertsView`: the `watchdog.alerts` event and the
+/// `watchdog.alerts.list` answer. `withdrawn` names the ids the backend took
+/// back (a fold, a replace, the session's end), which are no recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WatchdogAlertsView {
+    pub alerts: Vec<WatchdogAlert>,
+    pub withdrawn: Vec<String>,
 }
 
 /// `SEVERITY_RANK`; a severity the app does not know sorts last.
@@ -155,8 +190,8 @@ mod tests {
             state: "open".into(),
             since: "2026-11-24T10:00:00Z".into(),
             title: title.into(),
-            platform: None,
             target_id: target.map(str::to_string),
+            ..WatchdogAlert::default()
         }
     }
 
@@ -251,5 +286,38 @@ mod tests {
         .unwrap();
         assert_eq!(read.target_id.as_deref(), Some("mic"));
         assert_eq!(read.platform, None);
+        assert_eq!(read.detail, "…");
+        assert_eq!(read.source, "local");
+        assert!(read.fixes.is_empty());
+    }
+
+    #[test]
+    fn the_list_reads_its_fixes_and_the_withdrawn_ids() {
+        let view: WatchdogAlertsView = serde_json::from_value(serde_json::json!({
+            "alerts": [{
+                "id": "a", "check": "destination-down", "severity": "critical",
+                "state": "acknowledged", "since": "2026-11-24T10:00:00Z",
+                "title": "YouTube has been down for 0:20", "detail": "…",
+                "source": "cloud", "targetId": "yt",
+                "fixes": [
+                    { "kind": "reconnect-destination", "label": "Reconnect" },
+                    { "kind": "open-platform-dashboard", "label": "Open YouTube Studio",
+                      "url": "https://studio.youtube.com" }
+                ]
+            }],
+            "withdrawn": ["b"]
+        }))
+        .unwrap();
+        assert_eq!(view.withdrawn, ["b"]);
+        let alert = &view.alerts[0];
+        assert_eq!(alert.state, "acknowledged");
+        assert_eq!(alert.fixes.len(), 2);
+        assert_eq!(alert.fixes[0].kind, "reconnect-destination");
+        assert_eq!(
+            alert.fixes[1].url.as_deref(),
+            Some("https://studio.youtube.com")
+        );
+        let empty: WatchdogAlertsView = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(empty.alerts.is_empty());
     }
 }
