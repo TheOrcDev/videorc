@@ -460,27 +460,52 @@ pub(crate) struct CapabilityReceipts {
 }
 
 impl CapabilityReceipts {
-    /// A relayed receipt (no sending participant: the server's). Returns the
-    /// capability it carried, or None for one refused.
+    /// A relayed receipt (no sending participant: the server's), stamped by
+    /// the relay (`at`, a safe integer). An older or equal stamp than the one
+    /// held is ignored. Returns the capability it carried, or None for one
+    /// refused. `now` is this computer's clock, for the freshness check.
     pub(crate) fn received(
         &mut self,
         payload: &[u8],
         from_participant: bool,
         now: i64,
     ) -> Option<ConsumerCapability> {
+        const MAX_SAFE: i64 = (1 << 53) - 1;
         if from_participant || payload.len() > CAPABILITY_RECEIPT_MAX_BYTES {
             return None;
         }
         let value: Value = serde_json::from_slice(payload).ok()?;
         let capability = parse_consumer_capability(&value)?;
-        self.receipts.insert(
-            capability.identity.clone(),
-            CapabilityReceipt {
-                capability: capability.clone(),
-                at: now,
-            },
-        );
+        let at = value
+            .get("at")?
+            .as_i64()
+            .filter(|at| (-MAX_SAFE..=MAX_SAFE).contains(at))?;
+        let receipt = CapabilityReceipt {
+            capability: capability.clone(),
+            at,
+        };
+        if !capability_current(Some(&receipt), &capability.participant_sid, now) {
+            return None;
+        }
+        if self
+            .receipts
+            .get(&capability.identity)
+            .is_some_and(|old| old.at >= at)
+        {
+            return None;
+        }
+        self.receipts.insert(capability.identity.clone(), receipt);
         Some(capability)
+    }
+
+    /// A visible participant left: its receipt goes with it.
+    pub(crate) fn forget(&mut self, identity: &str) {
+        self.receipts.remove(identity);
+    }
+
+    /// The connection was lost: nothing heard before still holds.
+    pub(crate) fn clear(&mut self) {
+        self.receipts.clear();
     }
 
     pub(crate) fn get(&self, identity: &str) -> Option<&CapabilityReceipt> {
@@ -632,7 +657,17 @@ mod tests {
     #[test]
     fn receipts_are_relayed_bounded_and_fresh() {
         let mut receipts = CapabilityReceipts::default();
-        let payload = serde_json::to_vec(&base()).unwrap();
+        let stamped = |at: i64| {
+            let mut value = base();
+            value["at"] = json!(at);
+            serde_json::to_vec(&value).unwrap()
+        };
+        let payload = stamped(1_000);
+        let unstamped = serde_json::to_vec(&base()).unwrap();
+        assert!(
+            receipts.received(&unstamped, false, 1_000).is_none(),
+            "the relay stamps it"
+        );
         assert!(
             receipts.received(&payload, true, 1_000).is_none(),
             "a participant cannot send one"
@@ -643,6 +678,14 @@ mod tests {
                 .is_none()
         );
         assert!(receipts.received(&payload, false, 1_000).is_some());
+        // An older or equal stamp is ignored; a stale one is refused.
+        assert!(receipts.received(&stamped(900), false, 1_000).is_none());
+        assert!(receipts.received(&stamped(1_000), false, 1_000).is_none());
+        assert!(
+            receipts
+                .received(&stamped(-CAPABILITY_TTL_MS), false, 1_000)
+                .is_none()
+        );
         let visible = HashMap::new();
         // The hidden program page is a consumer while its receipt is fresh.
         assert_eq!(
