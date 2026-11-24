@@ -89,6 +89,43 @@ impl StreamManagerFrame {
         reopens(&self.inner.borrow().prefs.load())
     }
 
+    /// Keep on top (`commentsWindowAlwaysOnTopPreference`: version 1).
+    pub fn always_on_top(&self) -> bool {
+        let prefs = self.inner.borrow().prefs.load();
+        prefs
+            .get("alwaysOnTopPreferenceVersion")
+            .and_then(Value::as_u64)
+            == Some(1)
+            && prefs.get("alwaysOnTop") == Some(&Value::Bool(true))
+    }
+
+    pub fn set_always_on_top(&self, on: bool) {
+        let mut patch = Map::new();
+        patch.insert("alwaysOnTop".into(), Value::Bool(on));
+        patch.insert("alwaysOnTopPreferenceVersion".into(), Value::from(1u64));
+        self.write(patch);
+    }
+
+    /// Hide from stream (`commentsWindowHiddenFromStreamPreference`: version 1).
+    pub fn hidden_from_stream(&self) -> bool {
+        let prefs = self.inner.borrow().prefs.load();
+        prefs
+            .get("hiddenFromStreamPreferenceVersion")
+            .and_then(Value::as_u64)
+            == Some(1)
+            && prefs.get("hiddenFromStream") == Some(&Value::Bool(true))
+    }
+
+    pub fn set_hidden_from_stream(&self, hidden: bool) {
+        let mut patch = Map::new();
+        patch.insert("hiddenFromStream".into(), Value::Bool(hidden));
+        patch.insert(
+            "hiddenFromStreamPreferenceVersion".into(),
+            Value::from(1u64),
+        );
+        self.write(patch);
+    }
+
     /// The frame to open at, clamped into today's displays (`None` opens at
     /// the default, centred). Migrates an old layout and saves `open: true`.
     pub fn opening(&self, cx: &App) -> Option<Bounds<Pixels>> {
@@ -190,5 +227,43 @@ mod tests {
         let patch = patch.unwrap();
         assert_eq!(patch.len(), 1);
         assert_eq!(patch["layoutVersion"], json!(2));
+    }
+
+    #[test]
+    fn keep_on_top_needs_preference_version_one() {
+        assert!(!always_on_top_pref(&prefs(json!({ "alwaysOnTop": true }))));
+        assert!(!always_on_top_pref(&prefs(
+            json!({ "alwaysOnTop": true, "alwaysOnTopPreferenceVersion": 2 })
+        )));
+        assert!(always_on_top_pref(&prefs(
+            json!({ "alwaysOnTop": true, "alwaysOnTopPreferenceVersion": 1 })
+        )));
+    }
+
+    #[test]
+    fn hide_from_stream_needs_preference_version_one() {
+        assert!(!hidden_from_stream_pref(&prefs(
+            json!({ "hiddenFromStream": true })
+        )));
+        assert!(hidden_from_stream_pref(&prefs(json!({
+            "hiddenFromStream": true,
+            "hiddenFromStreamPreferenceVersion": 1
+        }))));
+    }
+
+    fn always_on_top_pref(prefs: &Map<String, Value>) -> bool {
+        prefs
+            .get("alwaysOnTopPreferenceVersion")
+            .and_then(Value::as_u64)
+            == Some(1)
+            && prefs.get("alwaysOnTop") == Some(&Value::Bool(true))
+    }
+
+    fn hidden_from_stream_pref(prefs: &Map<String, Value>) -> bool {
+        prefs
+            .get("hiddenFromStreamPreferenceVersion")
+            .and_then(Value::as_u64)
+            == Some(1)
+            && prefs.get("hiddenFromStream") == Some(&Value::Bool(true))
     }
 }

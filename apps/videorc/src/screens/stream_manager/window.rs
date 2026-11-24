@@ -19,7 +19,13 @@ use super::panes::{PaneKey, Panes, composer_available, key_runs};
 use super::sidekick::sidekick_pane;
 use super::stats::{SessionChip, stats_bar};
 use super::status::status_bar;
+use crate::app::hide::HideFromStream;
 use crate::app::menus::ToggleStreamManager;
+use crate::platform;
+use videorc_app_core::desktop::capture_protection::{
+    HideMethod, WindowRole, stream_manager_hide_method,
+};
+use videorc_app_core::desktop::permissions::PermissionPlatform;
 use videorc_app_core::stream_manager::copy::WINDOW_NAME;
 use videorc_kit::{
     theme::{self, hsla},
@@ -141,11 +147,14 @@ impl Facts {
 }
 
 pub struct StreamManager {
+    frame: StreamManagerFrame,
     notices: gpui::Entity<crate::screens::notifications::Centre>,
     panes: Panes,
     facts: Facts,
     chip: SessionChip,
     pinned: bool,
+    hidden: bool,
+    hide_method: HideMethod,
     focus: FocusHandle,
     _bounds: Subscription,
 }
@@ -162,16 +171,46 @@ impl StreamManager {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         frame.moved(window);
-        let bounds = cx.observe_window_bounds(window, move |_, window, _| frame.moved(window));
+        let bounds = cx.observe_window_bounds(window, {
+            let frame = frame.clone();
+            move |_, window, _| frame.moved(window)
+        });
+        let pinned = frame.always_on_top();
+        let hidden = frame.hidden_from_stream();
+        let hide_method = stream_manager_hide_method(PermissionPlatform::current().as_str());
+        let _ = platform::current().set_keep_on_top(window, pinned);
+        if hide_method != HideMethod::Unsupported {
+            let _ = HideFromStream::apply(window, WindowRole::Comments, hidden, cx);
+        }
         Self {
+            frame,
             notices,
             panes: Panes::default(),
             facts: Facts::default(),
             chip: SessionChip::OffAir,
-            pinned: false,
+            pinned,
+            hidden,
+            hide_method,
             focus,
             _bounds: bounds,
         }
+    }
+
+    fn set_pinned(&mut self, pinned: bool, window: &Window, cx: &mut Context<Self>) {
+        self.pinned = pinned;
+        self.frame.set_always_on_top(pinned);
+        let _ = platform::current().set_keep_on_top(window, pinned);
+        cx.notify();
+    }
+
+    fn set_hidden(&mut self, hidden: bool, window: &Window, cx: &mut Context<Self>) {
+        if self.hide_method == HideMethod::Unsupported {
+            return;
+        }
+        self.hidden = hidden;
+        self.frame.set_hidden_from_stream(hidden);
+        let _ = HideFromStream::apply(window, WindowRole::Comments, hidden, cx);
+        cx.notify();
     }
 
     fn run(&mut self, key: PaneKey, cx: &mut Context<Self>) {
@@ -224,7 +263,11 @@ impl Render for StreamManager {
             .into_iter()
             .filter_map(|pane| self.region(pane, tier, width, border));
         let pinned = self.pinned;
+        let hidden = self.hidden;
+        let hide_method = self.hide_method;
         let this = cx.entity().downgrade();
+        let pin = this.clone();
+        let hide = this;
         WindowFrame::new().child(
             div()
                 .size_full()
@@ -261,11 +304,13 @@ impl Render for StreamManager {
                 .child(status_bar(
                     self.notices.clone(),
                     pinned,
-                    move |next, _, _, app| {
-                        let _ = this.update(app, |this, cx| {
-                            this.pinned = next;
-                            cx.notify();
-                        });
+                    hidden,
+                    hide_method,
+                    move |next, _, window, app| {
+                        let _ = pin.update(app, |this, cx| this.set_pinned(next, window, cx));
+                    },
+                    move |next, _, window, app| {
+                        let _ = hide.update(app, |this, cx| this.set_hidden(next, window, cx));
                     },
                 ))
                 .child(self.notices.read(cx).toasts()),
