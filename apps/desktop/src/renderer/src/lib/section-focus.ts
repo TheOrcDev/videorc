@@ -13,7 +13,6 @@ export type SectionFocusId =
   | 'output-recordings'
   | 'output-clips'
   | 'output-videorc-camera'
-  | 'settings-notifications'
   | 'destinations-cloud'
 
 export const SECTION_FOCUS_EVENT = 'videorc:section-focus'

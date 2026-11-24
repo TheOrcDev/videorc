@@ -25,7 +25,6 @@ import { FieldGroup, SettingsRow } from '@/components/ui/field'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Switch } from '@/components/ui/switch'
 import { workspaceTabLabel } from '@/components/workspace-nav'
-import { useSectionFocus } from '@/hooks/use-section-focus'
 import { useVideorcAccount } from '@/hooks/use-account'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import { accountDisplayName, isSignedIn } from '@/lib/account'
@@ -37,11 +36,6 @@ import {
 } from '@/lib/first-run'
 import { gpuFallbackAge, gpuRenderingLabel } from '@/lib/gpu-fallback-view'
 import { platformCopy } from '@/lib/platform-copy'
-import {
-  QUIET_WHILE_LIVE_DESCRIPTION,
-  QUIET_WHILE_LIVE_LABEL,
-  quietWhileLiveOn
-} from '@/lib/quiet-while-live'
 import { studioChatOn } from '@/lib/studio-chat'
 import { openFirstRunSetup, openWorkspaceTab } from '@/lib/workspace-navigation'
 
@@ -60,8 +54,6 @@ const THEME_OPTIONS = [
  * narrow window.
  */
 export function GeneralSettings(): ReactElement {
-  // Plan 250 S4: the list's "Settings" link lands on the quiet switch.
-  useSectionFocus('settings-notifications')
   const { settings, setSettings, runtimeInfo, scheduleHardwareAccelerationRetry } = useStudioCore()
   const { theme, setTheme } = useTheme()
   const [obsImportOpen, setObsImportOpen] = useState(false)
@@ -168,26 +160,6 @@ export function GeneralSettings(): ReactElement {
               </SettingsRow>
             ) : null}
           </ChatEmoteSettingsFields>
-        </PanelSection>
-
-        {/* Notifications (plan 250, D4): the quiet rule's one home. The
-            list behind the bell says what it is doing and links here. */}
-        <PanelSection
-          data-section-focus="settings-notifications"
-          description="What Videorc notices on its own waits behind the bell in the status bar."
-          title="Notifications"
-        >
-          <FieldGroup variant="grouped">
-            <SettingsRow description={QUIET_WHILE_LIVE_DESCRIPTION} label={QUIET_WHILE_LIVE_LABEL}>
-              <Switch
-                checked={quietWhileLiveOn(settings)}
-                id="quiet-while-live"
-                onCheckedChange={(checked) =>
-                  setSettings((current) => ({ ...current, quietWhileLive: checked }))
-                }
-              />
-            </SettingsRow>
-          </FieldGroup>
         </PanelSection>
 
         <SetupSection platform={runtimeInfo?.platform} />

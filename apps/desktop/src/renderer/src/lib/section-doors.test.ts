@@ -9,7 +9,6 @@ import {
   openDestinationsCloud,
   openDestinationsDiscord,
   openLibraryRecording,
-  openNotificationSettings,
   openOutputClips,
   openOutputRecordings,
   openOutputVideorcCamera,
@@ -48,12 +47,6 @@ describe('doors (plan 250 S4)', () => {
       openOutputVideorcCamera,
       { tab: 'recording' },
       'output-videorc-camera'
-    ],
-    [
-      'Settings (the quiet switch)',
-      openNotificationSettings,
-      { tab: 'settings', settingsTab: 'general' },
-      'settings-notifications'
     ],
     [
       'Open Destinations (Videorc Cloud)',

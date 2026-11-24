@@ -112,6 +112,15 @@ jobs:
         # cannot see it (#1070).
         run: cargo clippy --release -p videorc-backend -- -D warnings
 
+      - name: Plan 260 crates (clippy + test)
+        # Plan 260 S1.0: every crate plan 260 adds (the workspace minus the
+        # backend, the addon and the WER helper, which have their own steps).
+        # A lane that fills one of them is linted and tested here with no
+        # workflow edit.
+        run: |
+          cargo clippy --workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper --all-targets -- -D warnings
+          cargo test --workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper
+
       - name: Compile tests
         # Split from the run so a slow compile and a hung test are told apart.
         # It takes 23-30 min on most runs; on a slow runner (Clippy at 9 min

@@ -120,7 +120,11 @@ export interface PopUpQuestion {
   hasDetail: boolean
   /** A recording or a livestream runs. */
   live: boolean
-  /** "Quiet while recording or live" is on. */
+  /**
+   * "Quiet while recording or live" is on. Since the owner's rule (only a
+   * press's answer or an urgent problem pops up) it no longer changes what
+   * pops up; the Stream Manager's footer still says it.
+   */
   quiet: boolean
   listOpen: boolean
   now: number
@@ -171,9 +175,12 @@ export function popUpDecision(question: PopUpQuestion): number | null {
   ) {
     return null
   }
+  // The owner's rule: a toast answers a press or says an urgent problem.
+  // Anything else Videorc found on its own (a finished MP4, a device that
+  // came back, a warning) goes to the bell, live or not, whatever "Quiet
+  // while recording or live" says.
   if (question.tone === 'urgent') return URGENT_POP_UP_MS
-  if (question.quiet) return null
-  return POP_UP_MS
+  return null
 }
 
 /** Still true: an open problem, or work in progress. The list's "Now" group. */

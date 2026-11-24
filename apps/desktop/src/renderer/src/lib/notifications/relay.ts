@@ -10,7 +10,6 @@ import type {
   NotificationEntry,
   NotificationPopUpDoor
 } from '@/lib/notifications/types'
-import { openNotificationSettings } from '@/lib/section-doors'
 import { toastUserError } from '@/lib/user-error'
 import type {
   NotificationActRequest,
@@ -44,13 +43,11 @@ export function relayedNotification(entry: NotificationEntry): RelayedNotificati
 }
 
 export function notificationsSnapshot(
-  store: Pick<NotificationStore, 'snapshot' | 'count'>,
-  quiet: boolean
+  store: Pick<NotificationStore, 'snapshot' | 'count'>
 ): NotificationsSnapshot {
   return {
     entries: store.snapshot().slice(0, RELAYED_NOTIFICATIONS_MAX).map(relayedNotification),
-    count: store.count(),
-    quiet
+    count: store.count()
   }
 }
 
@@ -80,9 +77,6 @@ export function applyNotificationAct(
       return
     case 'list-open':
       store.setListOpen(request.open, STREAM_MANAGER)
-      return
-    case 'open-settings':
-      openNotificationSettings()
       return
   }
 }
@@ -180,15 +174,11 @@ export function relayedPopUpDoor(
  * Starts the relay. Returns its stop function. Pushes are coalesced to one a
  * frame: an open watchdog alert rewrites its clock every second.
  */
-export function startNotificationRelay(
-  store: NotificationStore,
-  api: RelayApi,
-  quiet: () => boolean
-): () => void {
+export function startNotificationRelay(store: NotificationStore, api: RelayApi): () => void {
   let scheduled = false
   const push = (): void => {
     scheduled = false
-    void api.pushNotifications(notificationsSnapshot(store, quiet())).catch(() => {})
+    void api.pushNotifications(notificationsSnapshot(store)).catch(() => {})
   }
   const schedule = (): void => {
     if (scheduled) return

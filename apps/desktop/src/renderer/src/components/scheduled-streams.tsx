@@ -7,14 +7,15 @@ import { Spinner } from '@/components/ui/spinner'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { copyText } from '@/lib/copy-text'
-import { toastUserError } from '@/lib/user-error'
+import { inlineUserError, toastUserError } from '@/lib/user-error'
 import {
   CopyIcon,
   DeleteIcon,
   EditIcon,
   ExternalLinkIcon,
   LinkIcon,
-  RefreshIcon
+  RefreshIcon,
+  WarningIcon
 } from '@/components/icons'
 import { useScheduledStreams } from '@/hooks/use-scheduled-streams'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -55,6 +56,8 @@ import {
   scheduledProviderSections,
   scheduledProviderSite,
   scheduledThumbnailUrl,
+  scheduledStartRepair,
+  scheduledStartRepairParams,
   scheduledWhenLabel,
   selectScheduledStreamForTarget,
   type ScheduledLifecycleChip,
@@ -108,6 +111,14 @@ export function ScheduledStreams(): ReactElement {
       event: await state.request<ScheduledStreamEvent>('get', { eventId: event.id }),
       provider: event.provider
     })
+  }
+  const fixTime = async (event: ScheduledStreamEvent): Promise<string | null> => {
+    try {
+      await state.mutate('update', scheduledStartRepairParams(event), { inline: true })
+      return null
+    } catch (error) {
+      return inlineUserError(error, { action: 'fix', object: 'the time' }, 'scheduled-streams')
+    }
   }
   const recover = async (event: ScheduledStreamEvent) => {
     if (event.providerEventId && event.preparation?.phase !== 'creating-stream') {
@@ -173,6 +184,7 @@ export function ScheduledStreams(): ReactElement {
                   formTrigger.current = trigger
                   void edit(event).catch(() => undefined)
                 }}
+                onFixTime={() => fixTime(event)}
                 onGoLive={() => {
                   setStarting(event)
                   setTargetId('')
@@ -493,6 +505,60 @@ function LifecycleChip({ chip }: { chip: ScheduledLifecycleChip }): ReactElement
  * One saved stream: its picture, title and state, where and when it airs, one
  * primary action, and the rest behind ⋯.
  */
+/** A YouTube or X start sent with older time zone rules, and its one-click fix. */
+export function StartRepairLine({
+  action,
+  line,
+  pending,
+  savedError,
+  onEdit,
+  onFixTime
+}: {
+  action: 'fix' | 'edit'
+  line: string
+  pending: boolean
+  /** The event's own saved error (a refused Fix time), shown here once. */
+  savedError: string | null
+  onEdit: (trigger: HTMLElement | null) => void
+  onFixTime: () => Promise<string | null>
+}): ReactElement {
+  const [failure, setError] = useState<string | null>(null)
+  const error = failure ?? savedError
+  const [fixing, setFixing] = useState(false)
+  return (
+    <div className="flex flex-col gap-1" data-testid="scheduled-start-repair">
+      <div className="flex items-center gap-2 text-xs">
+        <WarningIcon aria-hidden className="size-3.5 shrink-0 text-warning" weight="fill" />
+        <span className="min-w-0 flex-1">{line}</span>
+        <Button
+          disabled={pending || fixing}
+          size="xs"
+          variant="outline"
+          onClick={(click) => {
+            if (action === 'edit') {
+              onEdit(click.currentTarget)
+              return
+            }
+            setFixing(true)
+            setError(null)
+            void onFixTime()
+              .then(setError)
+              .finally(() => setFixing(false))
+          }}
+        >
+          {fixing ? <Spinner aria-hidden data-icon="inline-start" /> : null}
+          {action === 'fix' ? 'Fix time' : 'Edit…'}
+        </Button>
+      </div>
+      {error ? (
+        <p className="text-xs" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
 function EventRow({
   event,
   pending,
@@ -502,6 +568,7 @@ function EventRow({
   onSchedule,
   onRecover,
   onEdit,
+  onFixTime,
   onDuplicate,
   onCancel
 }: {
@@ -513,6 +580,7 @@ function EventRow({
   onSchedule: () => void
   onRecover: () => void
   onEdit: (trigger: HTMLElement | null) => void
+  onFixTime: () => Promise<string | null>
   onDuplicate: () => void
   onCancel: () => void
 }): ReactElement {
@@ -521,6 +589,7 @@ function EventRow({
   const noun = scheduledProviderNoun(event.provider)
   const privacy = scheduledPrivacyLabel(event)
   const editable = eventCanEdit(event)
+  const repair = scheduledStartRepair(event)
   const needsRecovery =
     event.createUncertain ||
     Boolean(event.preparation) ||
@@ -609,13 +678,23 @@ function EventRow({
           lastSyncedAt={event.lastSyncedAt}
           text={`${event.accountLabel} · ${scheduledWhenLabel(event)}`}
         />
-        {event.error ? (
+        {event.error && !repair ? (
           <Alert variant="destructive">
             <AlertDescription>
               {event.thumbnailState === 'error' ? 'Event created; thumbnail upload failed. ' : ''}
               {event.error.message}
             </AlertDescription>
           </Alert>
+        ) : null}
+        {repair ? (
+          <StartRepairLine
+            action={repair.action}
+            line={repair.line}
+            pending={pending}
+            savedError={event.error?.message ?? null}
+            onEdit={onEdit}
+            onFixTime={onFixTime}
+          />
         ) : null}
         {event.operationState === 'pending' ? (
           <p className="text-xs text-muted-foreground" role="status">
