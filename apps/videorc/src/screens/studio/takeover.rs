@@ -205,7 +205,7 @@ impl Render for TakeoverSection {
                 .accessibility_label(OPEN_IMAGES)
                 .tooltip(OPEN_IMAGES)
                 .child(icon(IconName::GearSix, 16., ghost_ink))
-                .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage(PageId::Assets)))),
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Assets)))),
         );
         if view.buttons.is_empty() {
             return section.child(
@@ -223,7 +223,9 @@ impl Render for TakeoverSection {
                             .variant(ButtonVariant::Link)
                             .size(ButtonSize::Xs)
                             .label(ADD_IN_IMAGES)
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage(PageId::Assets)))),
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Assets))),
+                            ),
                     ),
             );
         }
