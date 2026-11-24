@@ -25,7 +25,7 @@
 //!
 //! A library from a newer Videorc is today's setup in memory and never
 //! written. The scene switch (`requestLayoutTransaction`, the apply, the
-//! delete flow) lands on this in the next part.
+//! delete flow) is [`super::scene_switch`] (part 3b).
 
 use std::collections::HashMap;
 
@@ -33,6 +33,7 @@ use serde_json::Value;
 use videorc_protocol::{Device, DeviceKind, DeviceStatus};
 
 use super::capture_config::{coerce_video_to_orientation, simulcast_armed};
+use super::scene_switch::{LayoutTarget, SwitchCore};
 use super::settings::{SettingWrite, StudioSettings, encode, keys};
 use super::{Inner, Studio, StudioBackend};
 use crate::notices::{NoticeCommand, ToastRequest};
@@ -88,6 +89,14 @@ pub struct ScenesView {
     pub app_states: HashMap<String, SceneAppState>,
     /// `videorc.scene-window-apps.v1`, in its stored order.
     pub remembered_apps: RememberedSceneApps,
+    /// Part 3b: the layout a switch is applying (`layoutSwitchPending`).
+    pub pending_layout: Option<LayoutTarget>,
+    /// The scene a switch is putting on stream (`savedScenePendingId`).
+    pub pending_scene_id: Option<String>,
+    /// A transaction is on its way (`visualTransactionPending`).
+    pub transaction_pending: bool,
+    /// The working background as the last commit drew it (`workingBackground`).
+    pub working_background: Option<Value>,
 }
 
 impl ScenesView {
@@ -105,11 +114,11 @@ impl ScenesView {
 /// The Studio's scene memory between events.
 #[derive(Default)]
 pub(super) struct ScenesCore {
-    state: Option<ScenesState>,
+    pub(super) state: Option<ScenesState>,
     /// `activeSavedSceneId`.
-    on_stream: Option<String>,
+    pub(super) on_stream: Option<String>,
     /// The app memory, as last stored.
-    apps: RememberedSceneApps,
+    pub(super) apps: RememberedSceneApps,
     /// What each app scene's resolver said, until the device list changes.
     pub(super) resolved: HashMap<String, SceneAppState>,
     /// The device list these answers and the main display were read from.
@@ -118,6 +127,8 @@ pub(super) struct ScenesCore {
     pub(super) notices: Vec<NoticeCommand>,
     /// A quiet write was staged that no flush has sent yet.
     unflushed: bool,
+    /// Part 3b: the switch's memory (`requestLayoutTransaction`'s refs).
+    pub(super) switch: SwitchCore,
 }
 
 /// `JSON.parse(localStorage.getItem(key))`, as `read` in `use-scenes.ts`.
@@ -158,7 +169,7 @@ fn main_display(devices: &[Device]) -> Option<MainDisplay> {
 impl Inner {
     /// Stages `writes` without a logger: the launch's writes are quiet (a
     /// refused one is read again next launch).
-    fn stage_quietly(&mut self, writes: &[SettingWrite]) -> bool {
+    pub(super) fn stage_quietly(&mut self, writes: &[SettingWrite]) -> bool {
         let staged = self
             .stage_writes(writes, &crate::log::Logger::silent())
             .is_ok();
@@ -267,7 +278,10 @@ impl Inner {
     /// its sources (never its app), its layout, the canvas turned to its
     /// orientation. Not a write: the stored config stays what it syncs on.
     fn overlay_working_scene(&mut self) {
-        let Some(working) = hydrate_working_scene(read(self, keys::WORKING_SCENE).as_ref()) else {
+        let working = hydrate_working_scene(read(self, keys::WORKING_SCENE).as_ref());
+        // Part 3b: the working app, background and origin come back with it.
+        self.scenes.switch.launch(working.as_ref());
+        let Some(working) = working else {
             return;
         };
         let mut config = self.capture.config.clone();
@@ -340,7 +354,7 @@ impl Inner {
 
     /// The app memory (`videorc.scene-window-apps.v1`) bounded to the scenes
     /// that exist; stored when that changes it (best effort).
-    fn remember_scene_apps(&mut self) {
+    pub(super) fn remember_scene_apps(&mut self) {
         if self.scenes.state.is_none() {
             return;
         }
@@ -366,7 +380,7 @@ impl Inner {
     }
 
     /// The studio's orientation (`layoutPresetOrientation(layoutPreset)`).
-    fn scene_orientation(&self) -> Orientation {
+    pub(super) fn scene_orientation(&self) -> Orientation {
         Orientation::of_layout(&self.capture.config["layout"])
     }
 
@@ -428,6 +442,10 @@ impl Inner {
             error: state.error,
             app_states,
             remembered_apps: self.scenes.apps.clone(),
+            pending_layout: self.scenes.switch.pending_layout.clone(),
+            pending_scene_id: self.scenes.switch.pending_id.clone(),
+            transaction_pending: self.scenes.switch.transaction_pending,
+            working_background: self.scenes.switch.working_background.clone(),
         }
     }
 }
