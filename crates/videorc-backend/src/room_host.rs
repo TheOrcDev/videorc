@@ -475,6 +475,7 @@ async fn leave(state: &AppState, room: Option<Arc<Room>>) {
     }
     report(state, CloudRoomClientState::Idle, None);
     crate::room_graphics::reset_enabled();
+    crate::room_content::clear();
     HOLDS_SEAT.store(false, Ordering::Release);
 }
 

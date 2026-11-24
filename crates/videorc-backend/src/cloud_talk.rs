@@ -974,6 +974,43 @@ pub const CLOUD_ROOM_OVERLAY_EVENT: &str = "cloud.room.overlay";
 /// it is the backend's (graphics first).
 pub const CLOUD_ROOM_PRESENTATION_EVENT: &str = "cloud.room.presentation";
 
+/// `cloud.room.avatar.set` (plan 260 S1.8b): the avatar content the Studio
+/// built (the static layers per orientation, which outputs show it, and the
+/// atlas variant for animating pages), for the backend to deliver while it
+/// holds the host seat. `content: null` takes the avatar off. The builder
+/// moves to `videorc-app-core` in Phase 2/3.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudRoomAvatarSetParams {
+    pub content: Option<serde_json::Value>,
+    /// The host's opt-in to show the stream's public layers to guest pages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guests: Option<bool>,
+}
+
+/// One scene background picture, immutable and named by its hash.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSceneAsset {
+    pub hash: String,
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    pub base64: String,
+}
+
+/// `cloud.room.scene.commit` (plan 260 S1.8b): what the room's program draws
+/// per orientation lane, and the background pictures it names. `content:
+/// null` returns the room to its own layouts. The builder moves to
+/// `videorc-app-core` in Phase 2/3.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudRoomSceneCommitParams {
+    pub content: Option<serde_json::Value>,
+    #[serde(default)]
+    pub assets: Vec<CloudSceneAsset>,
+}
+
 /// `cloud.room.presentation`'s payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

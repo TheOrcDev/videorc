@@ -8378,6 +8378,16 @@ mod tests {
             event.graphics.unwrap().state,
             crate::cloud_talk::RoomPresentationState::Waiting
         );
+        // The avatar and scene content the Studio hands the backend's room.
+        let avatar = high_risk_fixture("/cloud/roomAvatarSetParams");
+        let params: crate::cloud_talk::CloudRoomAvatarSetParams =
+            serde_json::from_value(avatar.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&params).unwrap(), avatar);
+        let scene = high_risk_fixture("/cloud/roomSceneCommitParams");
+        let params: crate::cloud_talk::CloudRoomSceneCommitParams =
+            serde_json::from_value(scene.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&params).unwrap(), scene);
+        assert_eq!(params.assets[0].mime, "image/webp");
         let patch: CloudSettingsPatch =
             serde_json::from_value(high_risk_fixture("/cloud/settingsPatch")).unwrap();
         assert_eq!(patch.enabled, Some(false));
