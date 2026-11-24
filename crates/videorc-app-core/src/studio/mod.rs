@@ -51,6 +51,8 @@
 
 pub mod backend;
 pub mod camera_background;
+pub mod camera_background_migration;
+pub mod camera_background_view;
 pub mod camera_frame_rate;
 pub mod capture_config;
 pub mod families;
@@ -1133,6 +1135,8 @@ impl<B: StudioBackend> Studio<B> {
         // The writes made while the engine was away (or journaled by a
         // previous run) land now, after the snapshot.
         let _ = self.flush_settings().await;
+        // S1.6b part 4: plan 258's D4 migration, once the scenes are read.
+        self.settle_camera_background_migration().await;
     }
 
     /// S3.0g: `diagnostics.stats` and the four `preview.*.status` reads of
@@ -2319,11 +2323,24 @@ pub fn build_start_params(
     // S3.1a: `cameraLookLayout`: the chosen camera's look from the settings
     // (`settings.cameraLooks`) replaces whatever look the layout held; no
     // look for that camera is the neutral one.
-    let layout = preview_scene::camera_look_layout(
+    let looked = preview_scene::camera_look_layout(
         &capture.layout,
         capture.sources.camera_id.as_deref(),
         studio,
     );
+    // S1.6b part 4 (plan 258): the camera's background too, and its key once
+    // the D4 migration settled (`cameraOutputLayout`).
+    let layout = serde_json::to_value(&looked)
+        .ok()
+        .map(|layout| {
+            camera_background::camera_output_layout(
+                &layout,
+                capture.sources.camera_id.as_deref(),
+                studio,
+            )
+        })
+        .and_then(|layout| serde_json::from_value(layout).ok())
+        .unwrap_or(looked);
     // `buildSimulcastParams` (the vertical leg from the on-stream scene's
     // 9:16 layout, #1543) lands with the scenes (S1.6b).
     let simulcast = None;
