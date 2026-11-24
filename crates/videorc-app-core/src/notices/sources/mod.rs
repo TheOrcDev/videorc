@@ -13,6 +13,7 @@ pub mod cloud;
 pub mod devices;
 pub mod health;
 pub mod platforms;
+pub mod session;
 pub mod stream_targets;
 pub mod watchdog;
 pub mod work;
