@@ -25,6 +25,10 @@
 //!   front and the password-manager hide.
 //! - [`view`]: a scene as the Studio applies it, and the D18/D19 rules for
 //!   a scene that draws no screen (`lib/scene-studio.ts`).
+//! - [`switch_progress`]: a switch's status line (#1275,
+//!   `lib/scene-switch-progress.ts`); [`transaction_policy`]: when a commit
+//!   applies, and what a failed one reconciles to
+//!   (`lib/layout-transaction-policy.ts`).
 
 pub mod background;
 pub mod follow;
@@ -37,6 +41,8 @@ pub mod picker;
 pub mod preflight;
 pub mod section;
 pub mod store;
+pub mod switch_progress;
+pub mod transaction_policy;
 pub mod v2;
 pub mod view;
 pub mod window;
