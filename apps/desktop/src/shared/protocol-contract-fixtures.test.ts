@@ -824,6 +824,11 @@ describe('shared high-risk protocol fixture', () => {
     expect(() =>
       validateBackendRpcParams('cloud.room.microphone.set', roomCameraSetParams)
     ).toThrow()
+    // Whether the backend's room may publish the HTML layers' sheet.
+    expect(validateBackendRpcParams('cloud.room.html.set', { enabled: true })).toEqual({
+      enabled: true
+    })
+    expect(() => validateBackendRpcParams('cloud.room.html.set', { enabled: 'yes' })).toThrow()
     // Room sounds and system audio on the backend room's aux track.
     expect(jsonShape(validateBackendRpcParams('cloud.room.aux.set', roomAuxSetParams))).toEqual(
       roomAuxSetParams

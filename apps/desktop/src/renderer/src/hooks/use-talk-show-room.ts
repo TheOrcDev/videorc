@@ -376,6 +376,12 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     send()
     return roomAudioRouting.subscribe(send)
   }, [client, roomOpen, backendHolds])
+  // Plan 260 S1.8c c5: the backend's room publishes the HTML layers' sheet
+  // only while this computer's devices are on (S24), as the renderer's did.
+  useEffect(() => {
+    if (!client || !roomOpen || !backendHolds) return
+    void client.requestTyped('cloud.room.html.set', { enabled: !devicesHeld }).catch(() => {})
+  }, [client, roomOpen, backendHolds, devicesHeld])
   // Plan 260 S1.8c c4d: room sounds and the room's system audio drive the
   // backend room's aux track; its status shows where the renderer room's did
   // (the soundboard's room sounds, the routing's system state).
