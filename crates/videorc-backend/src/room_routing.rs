@@ -69,11 +69,50 @@ pub(crate) fn set_routing(settings: ProgramAudioSettings) {
     ROUTING_CHANGED.notify_waiters();
 }
 
+/// Identities the host removed or banned (#1895): they take nothing, however
+/// they rejoin and whatever their receipts, until the host admits them again.
+/// `true` once the guest was seen gone from the show's admitted guests, so a
+/// status that still lists them right after the removal never lifts it.
+static DENIED: StdMutex<BTreeMap<String, bool>> = StdMutex::new(BTreeMap::new());
+
+fn denied() -> std::sync::MutexGuard<'static, BTreeMap<String, bool>> {
+    DENIED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The host removes or bans a guest: their grant goes now, before the web
+/// takes them out of the room, so a rejoin with a still-valid token finds
+/// nothing whatever the timing.
+pub(crate) fn deny(identity: &str) {
+    denied().insert(identity.to_string(), false);
+    ROUTING_CHANGED.notify_waiters();
+}
+
+/// The removal did not happen (the web refused it): the deny goes too.
+pub(crate) fn undeny(identity: &str) {
+    denied().remove(identity);
+    ROUTING_CHANGED.notify_waiters();
+}
+
+/// The deny lifts once the guest was gone from the admitted guests and is
+/// back among them (the host let them in again).
+pub(crate) fn readmitted(denied: &mut BTreeMap<String, bool>, admitted: &[String]) {
+    denied.retain(|identity, seen_gone| {
+        let present = admitted.iter().any(|guest| guest == identity);
+        if !present {
+            *seen_gone = true;
+        }
+        !(present && *seen_gone)
+    });
+}
+
 /// A hold ended: the defaults again.
 pub(crate) fn clear() {
     *ROUTING
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    denied().clear();
 }
 
 /// One consumer the host may serve, as its receipt describes it.
@@ -237,7 +276,28 @@ pub(crate) async fn run(
             _ = ROUTING_CHANGED.notified() => {}
         }
         let now = chrono::Utc::now().timestamp_millis();
-        let consumers = consumers(&room, &receipts, now);
+        let admitted: Vec<String> = crate::cloud_show::lock(&state.cloud_show)
+            .status()
+            .room
+            .map(|room| {
+                room.guests
+                    .into_iter()
+                    .map(|guest| guest.guest_id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut consumers = consumers(&room, &receipts, now);
+        {
+            let mut denied = denied();
+            readmitted(&mut denied, &admitted);
+            // A denied identity is never current: it takes nothing (option D's
+            // empty grant), receipt or not.
+            for consumer in &mut consumers {
+                if denied.contains_key(&consumer.identity) {
+                    consumer.current = false;
+                }
+            }
+        }
         let local = room.local_participant();
         let publications = local.track_publications();
         let tracks: Vec<HostTrack> = publications
@@ -349,6 +409,19 @@ mod tests {
         assert_eq!(allowed(&plan, "g_a"), vec!["TR_aux", "TR_cam", "TR_mic"]);
         // No current receipt for its session: nothing at all.
         assert!(allowed(&plan, "g_old").is_empty());
+    }
+
+    #[test]
+    fn a_removed_identity_stays_denied_until_it_is_admitted_again() {
+        let mut denied = BTreeMap::from([("g_ada".to_string(), false)]);
+        // The status still lists her right after the removal: no lift.
+        readmitted(&mut denied, &["g_ada".to_string()]);
+        assert!(denied.contains_key("g_ada"));
+        // Gone, then let in again: lifted.
+        readmitted(&mut denied, &[]);
+        assert!(denied.contains_key("g_ada"));
+        readmitted(&mut denied, &["g_ada".to_string()]);
+        assert!(!denied.contains_key("g_ada"));
     }
 
     #[test]
