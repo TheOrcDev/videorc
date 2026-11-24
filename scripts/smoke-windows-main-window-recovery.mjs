@@ -181,27 +181,32 @@ async function readPage(port) {
 }
 
 /**
- * Crash the main renderer through CDP and prove it died.
+ * Crash the main renderer through CDP and prove the app saw it.
  *
- * GitHub Actions run 45366114023 (commit 2a6789bc) recorded crashed:true after
- * a single fire-and-forget Page.crash, yet backend.log never saw
- * "Renderer process gone" and the screenshot still showed a live UI. Claiming
- * success before the target disappears left the recovery gate checking for a
- * reload that was never exercised. Retry a few times and only return true once
- * /json no longer lists the main page.
+ * Do not require the CDP page target to stay gone: a successful recovery
+ * remounts within seconds, so "/json has no page" is a race. PR 1855's
+ * installer failure (run 45402234509) crashed three times that way, burned
+ * ReloadBudget (max 2 automatic reloads), and then asked the user — so the
+ * remount gate failed even though the first crash recovered.
+ *
+ * Success is backend.log containing "Renderer process gone". Retry only when
+ * that line never appears (the fire-and-forget miss from run 45366114023).
  */
-async function crashRenderer(port) {
+async function crashRenderer(port, readLog) {
   const CRASH_ATTEMPTS = 3
-  const CRASH_WAIT_MS = 5_000
+  const CRASH_WAIT_MS = 8_000
+  const sawCrash = () => /Renderer process gone \(/.test(readLog() ?? '')
   for (let attempt = 1; attempt <= CRASH_ATTEMPTS; attempt += 1) {
-    if (!(await mainTarget(port))) return true
+    if (sawCrash()) return true
     let session
     try {
       const target = await mainTarget(port)
-      if (!target) return true
+      if (!target) {
+        const logged = await waitFor(async () => (sawCrash() ? true : null), CRASH_WAIT_MS)
+        if (logged) return true
+        continue
+      }
       session = await openSession(target.webSocketDebuggerUrl)
-      // Page.enable is best-effort; Page.crash itself does not require it, but
-      // attaching the domain first makes flaky CDP sessions fail loudly.
       await session.send('Page.enable').catch(() => undefined)
       // Page.crash never answers when it works: the process that would reply is gone.
       session.send('Page.crash').catch(() => undefined)
@@ -215,10 +220,10 @@ async function crashRenderer(port) {
         // Already dead with the renderer.
       }
     }
-    const gone = await waitFor(async () => ((await mainTarget(port)) ? null : true), CRASH_WAIT_MS)
-    if (gone) return true
+    const logged = await waitFor(async () => (sawCrash() ? true : null), CRASH_WAIT_MS)
+    if (logged) return true
   }
-  return false
+  return sawCrash()
 }
 
 async function launch(name, env, userData) {
@@ -293,20 +298,25 @@ const CLEAR_GLASS = { VIDEORC_GLASS: 'clear' }
       evaluateDefaultLaunch({ mounted: isMounted, glass })
     )
 
-    const crashed = await crashRenderer(app.port)
-    const recovered = crashed
-      ? await waitFor(
-          async () =>
-            /Reloading the main window/.test(app.log()) && (await readPage(app.port))?.mounted,
-          RECOVERY_DEADLINE_MS
-        )
-      : null
+    const crashed = await crashRenderer(app.port, () => app.log())
+    // Always give remount a chance when the log already proves a crash, even
+    // if the CDP helper timed out — otherwise a late log line is discarded.
+    const recovered = await waitFor(
+      async () =>
+        /Reloading the main window/.test(app.log()) && (await readPage(app.port))?.mounted,
+      RECOVERY_DEADLINE_MS
+    )
     screenshot(join(app.dir, 'screen-2-after-renderer-crash.png'))
     const remounted = Boolean(recovered)
+    const log = app.log()
     record(
       'crash-recovery',
-      { crashed, remounted },
-      evaluateCrashRecovery({ crashed, remounted, log: app.log() })
+      { crashed: crashed || /Renderer process gone \(/.test(log), remounted },
+      evaluateCrashRecovery({
+        crashed: crashed || /Renderer process gone \(/.test(log),
+        remounted,
+        log
+      })
     )
   } finally {
     await app.stop()
