@@ -81,6 +81,7 @@ pub mod clips;
 mod clips_actions;
 pub mod clips_ring;
 pub mod cloud;
+pub mod dashboard;
 pub mod families;
 pub mod go_live;
 pub mod health;
@@ -212,7 +213,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 31] = [
+pub const STUDIO_EVENTS: [&str; 35] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -256,6 +257,11 @@ pub const STUDIO_EVENTS: [&str; 31] = [
     cloud::CHANGED_EVENT,
     // S1.6g: the stream watchdog's alerts (`watchdog_alerts`).
     watchdog_alerts::CHANGED_EVENT,
+    // The Stream Manager's live dashboard (Electron's live-dashboard-relay).
+    dashboard::VIEWERS_EVENT,
+    dashboard::AUDIENCE_EVENT,
+    dashboard::CHAT_TOTALS_EVENT,
+    crate::client::names::EVENTS_LAGGED,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -901,6 +907,9 @@ pub struct Studio<B: StudioBackend> {
     /// S1.6g: the stream watchdog's alerts, apart from the snapshot (their
     /// titles carry a live clock).
     watchdog_tx: watch::Sender<watchdog_alerts::WatchdogState>,
+    /// The Stream Manager's live dashboard, coalesced at most once a second.
+    dashboard_tx: watch::Sender<crate::stream_manager::dashboard::LiveDashboard>,
+    dashboard: Arc<Mutex<dashboard::DashboardInner>>,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -964,6 +973,9 @@ impl<B: StudioBackend> Studio<B> {
         let (go_live_tx, _) = watch::channel(go_live::GoLiveState::default());
         let (cloud_tx, _) = watch::channel(cloud::CloudState::default());
         let (watchdog_tx, _) = watch::channel(watchdog_alerts::WatchdogState::default());
+        let (dashboard_tx, _) =
+            watch::channel(crate::stream_manager::dashboard::LiveDashboard::default());
+        let dashboard = Arc::new(Mutex::new(dashboard::DashboardInner::new(&now_iso())));
         Self {
             backend,
             config,
@@ -993,6 +1005,8 @@ impl<B: StudioBackend> Studio<B> {
             platform: platform_lifecycle::PlatformLifecycle::default(),
             cloud_tx,
             watchdog_tx,
+            dashboard_tx,
+            dashboard,
         }
     }
 
@@ -1140,7 +1154,9 @@ impl<B: StudioBackend> Studio<B> {
                 let (effects, state_changed, clips_woke) = {
                     let mut inner = self.lock();
                     let previous = inner.session.status().state.clone();
-                    let effects = inner.session.apply_reported_status(*status, Instant::now());
+                    let effects = inner
+                        .session
+                        .apply_reported_status(*status.clone(), Instant::now());
                     let state_changed = std::mem::discriminant(&previous)
                         != std::mem::discriminant(&inner.session.status().state);
                     // S1.6a part 6c: a session ended or began; the switch
@@ -1148,6 +1164,10 @@ impl<B: StudioBackend> Studio<B> {
                     let clips_woke = inner.clips_on_recording_status(&previous);
                     (effects, state_changed, clips_woke)
                 };
+                let _ = self.handle_dashboard_event(
+                    crate::client::names::RECORDING_STATUS,
+                    &serde_json::to_value(status.as_ref()).unwrap_or(Value::Null),
+                );
                 if clips_woke {
                     self.settings_retry.notify_one();
                 }
@@ -1216,6 +1236,8 @@ impl<B: StudioBackend> Studio<B> {
             }
             BackendEvent::EventsLagged(_) | BackendEvent::ClientLagged { .. } => {
                 // State built from events must be read again.
+                let _ =
+                    self.handle_dashboard_event(crate::client::names::EVENTS_LAGGED, &Value::Null);
                 self.resync().await;
                 self.follow_live_audio().await;
             }
@@ -1281,6 +1303,10 @@ impl<B: StudioBackend> Studio<B> {
             }
             BackendEvent::Untyped { event, payload } => {
                 // S1.6c: the live area's events are its own.
+                // The dashboard folds several of the same events the other
+                // stores do (`stream.targets`, `stream.health`); it never
+                // owns the early return.
+                let _ = self.handle_dashboard_event(&event, &payload);
                 if self.handle_chat_commands_event(&event, &payload)
                     || self.handle_watchdog_event(&event, &payload)
                     || self.handle_cloud_event(&event, &payload).await
@@ -1583,6 +1609,8 @@ impl<B: StudioBackend> Studio<B> {
         // S1.6g: the watchdog's open alerts (a relaunch mid-stream shows
         // the open card).
         self.read_watchdog().await;
+        // The Stream Manager's live dashboard: seed a mid-show cloud room.
+        self.read_dashboard().await;
         // The other areas' first reads (the agents line, takeovers and the
         // soundboard, chat, Sidekick, destinations, chat commands, scheduled
         // streams, the performance check, Hide screen, captions, the working

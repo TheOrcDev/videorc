@@ -357,7 +357,50 @@ impl LiveDashboard {
         };
         self.for_session(&sample.session_id.clone());
         self.viewer_history.push((sample.at.clone(), sample.total));
-        if let Some(latest) = parse_ms(&sample.at) {
+        self.trim_viewer_history(sample.at.as_str());
+        self.peak_viewers = Some(self.peak_viewers.unwrap_or(0).max(sample.total));
+        self.latest_viewers = Some(sample);
+        self.updated_at = now.to_string();
+    }
+
+    /// `mergeDashboardViewerHistory`: backfill from `sessions.viewers.list`.
+    /// Points already held win; the peak covers the whole session.
+    pub fn merge_viewer_history(&mut self, session_id: &str, samples: &[ViewerSample], now: &str) {
+        if self.session_id.as_deref() != Some(session_id) || samples.is_empty() {
+            return;
+        }
+        let known: std::collections::HashSet<&str> = self
+            .viewer_history
+            .iter()
+            .map(|(at, _)| at.as_str())
+            .collect();
+        let mut merged: Vec<(String, u64)> = samples
+            .iter()
+            .filter(|sample| sample.session_id == session_id && !known.contains(sample.at.as_str()))
+            .map(|sample| (sample.at.clone(), sample.total))
+            .chain(self.viewer_history.iter().cloned())
+            .collect();
+        merged.sort_by(|left, right| left.0.cmp(&right.0));
+        let latest_at = merged
+            .last()
+            .map(|(at, _)| at.as_str())
+            .unwrap_or(now)
+            .to_string();
+        let peak = samples
+            .iter()
+            .map(|sample| sample.total)
+            .chain(self.peak_viewers)
+            .max();
+        self.viewer_history = merged;
+        self.trim_viewer_history(&latest_at);
+        if !self.viewer_history.is_empty() {
+            self.peak_viewers = peak;
+        }
+        self.updated_at = now.to_string();
+    }
+
+    fn trim_viewer_history(&mut self, latest_at: &str) {
+        if let Some(latest) = parse_ms(latest_at) {
             let cutoff = latest - VIEWER_HISTORY_WINDOW_MS;
             self.viewer_history
                 .retain(|(at, _)| parse_ms(at).is_none_or(|at| at >= cutoff));
@@ -367,8 +410,52 @@ impl LiveDashboard {
             .len()
             .saturating_sub(VIEWER_HISTORY_POINTS);
         self.viewer_history.drain(..over);
-        self.peak_viewers = Some(self.peak_viewers.unwrap_or(0).max(sample.total));
-        self.latest_viewers = Some(sample);
+    }
+
+    /// `reduceDashboardHealth`: keep the latest sample and its bitrate
+    /// history as JSON so a round trip never drops it.
+    pub fn apply_health(&mut self, health: Value, now: &str) {
+        let Some(session_id) = health.get("sessionId").and_then(Value::as_str) else {
+            return;
+        };
+        self.for_session(session_id);
+        let previous = self
+            .health
+            .as_ref()
+            .and_then(|health| health.get("bitrateHistory"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut bitrate_history = previous;
+        if let Some(kbps) = health.get("bitrateKbps").and_then(Value::as_f64) {
+            if kbps.is_finite() {
+                let created = health
+                    .get("createdAt")
+                    .and_then(Value::as_str)
+                    .unwrap_or(now);
+                let mut point = json!({ "at": created, "kbps": kbps });
+                if let Some(dropped) = health.get("droppedFrames").and_then(Value::as_u64) {
+                    point["droppedFrames"] = json!(dropped);
+                }
+                bitrate_history.push(point);
+                if let Some(latest) = parse_ms(created) {
+                    let cutoff = latest - 10 * 60_000;
+                    bitrate_history.retain(|point| {
+                        point
+                            .get("at")
+                            .and_then(Value::as_str)
+                            .and_then(parse_ms)
+                            .is_none_or(|at| at >= cutoff)
+                    });
+                }
+                let over = bitrate_history.len().saturating_sub(300);
+                bitrate_history.drain(..over);
+            }
+        }
+        self.health = Some(json!({
+            "latest": health,
+            "bitrateHistory": bitrate_history,
+        }));
         self.updated_at = now.to_string();
     }
 

@@ -65,6 +65,7 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     fn commit_watchdog(&self, view: WatchdogAlertsView) {
+        self.feed_dashboard_alerts(&view);
         self.watchdog_tx.send_modify(|state| {
             state.alerts = view.alerts;
             state.withdrawn = view.withdrawn;
