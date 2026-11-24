@@ -7,8 +7,10 @@ import {
   cargoLine,
   cargoTable,
   declaredModules,
+  describePatch,
   describePin,
   gpuiItemFiles,
+  missingPatches,
   parseFlavourArgs,
   parseGpuiManifest,
   pinDifferences,
@@ -162,4 +164,20 @@ test('registryPatches gathers the patched crates once', () => {
     ]),
     ['gpui-pre-apple']
   )
+})
+
+test('missingPatches fails a synced kit whose patch the root Cargo.toml lacks', () => {
+  const items = [item('button', { gpui: GPUI }, { meta: { patches: ['gpui-pre-apple'] } })]
+  const missing = missingPatches(items, '[workspace.dependencies]\nsmallvec = "1"\n')
+  assert.deepEqual(
+    missing.map((patch) => patch.name),
+    ['gpui-pre-apple']
+  )
+  assert.match(describePatch(missing[0]), /SF Regular/)
+  assert.match(describePatch(missing[0]), /zed-industries\/zed#67416/)
+  const patched =
+    '[patch.crates-io]\ngpui-pre-apple = { path = "crates/videorc-kit/patches/gpui-pre-apple" }\n'
+  assert.deepEqual(missingPatches(items, patched), [])
+  // Once upstream ships the fix, videorc-ui drops the patch and nothing is asked.
+  assert.deepEqual(missingPatches([item('button', { gpui: GPUI })], ''), [])
 })

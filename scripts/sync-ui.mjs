@@ -14,8 +14,8 @@
 // is the above, into apps/desktop. `--flavour gpui` takes the GPUI items
 // (ui.videorc.com/r/gpui, crates/videorc-kit/ui-registry.json) into
 // crates/videorc-kit, formatted with rustfmt, and checks them the same way,
-// plus GPUI's pin: the app's must be the registry's. ui:check with no
-// --flavour checks both.
+// plus GPUI's pin and patches: the app's must be the registry's. ui:check
+// with no --flavour checks both.
 
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -61,7 +61,8 @@ import {
   parseFlavourArgs,
   parseGpuiManifest,
   pinDifferences,
-  registryPatches,
+  describePatch,
+  missingPatches,
   undeclaredModules
 } from './lib/ui-registry-gpui.mjs'
 
@@ -498,13 +499,10 @@ function reportGpuiCrate(items, files, crateToml) {
     console.log(`\nDeclare in ${GPUI_CRATE_DIR}/src/lib.rs (the crate's own, never synced):`)
     for (const module of modules) console.log(`  pub mod ${module};`)
   }
-  const patches = registryPatches(items)
-  const rootToml = readText(join(ROOT, 'Cargo.toml')) ?? ''
-  const unpatched = patches.filter((name) => !cargoTable(rootToml, 'patch.crates-io')[name])
+  const unpatched = missingPatches(items, readText(join(ROOT, 'Cargo.toml')) ?? '')
   if (unpatched.length > 0) {
-    console.log(
-      `\nvideorc-ui's kit builds with a patched ${unpatched.join(', ')} (its gpui/patches/); without it here, weight 500 draws SF Regular on macOS.`
-    )
+    console.log("\nui:check fails until the root Cargo.toml carries the kit's patches:")
+    for (const patch of unpatched) console.log(`  ${describePatch(patch)}`)
   }
 }
 
@@ -544,6 +542,12 @@ async function checkGpui(names, template) {
     )
   }
   const workspace = cargoTable(readText(join(ROOT, 'Cargo.toml')) ?? '', 'workspace.dependencies')
+  for (const patch of missingPatches(
+    [...items.values()],
+    readText(join(ROOT, 'Cargo.toml')) ?? ''
+  )) {
+    failures.push(describePatch(patch))
+  }
   for (const pin of pinDifferences([...items.values()], workspace).mismatched) {
     failures.push(
       `Cargo.toml: ${describePin(pin)}. One pin for the kit and the app (plan 260 D1): bump videorc-ui first, then here.`
@@ -562,7 +566,7 @@ async function checkGpui(names, template) {
   const skipped = files.length - compared.length
   console.log(
     `ui:check (gpui) OK: ${compared.length} files from ${checked.length} ${GPUI_NAMESPACE} items match ${source}` +
-      `${skipped > 0 ? ` (${skipped} kept local)` : ''}, and the app's pins are the registry's, in ${Date.now() - started} ms.`
+      `${skipped > 0 ? ` (${skipped} kept local)` : ''}, and the app's pins and patches are the registry's, in ${Date.now() - started} ms.`
   )
 }
 

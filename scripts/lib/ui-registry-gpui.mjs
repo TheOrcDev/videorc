@@ -208,3 +208,32 @@ export function undeclaredModules(files, libSource) {
 export function registryPatches(items) {
   return [...new Set(items.flatMap((item) => item.meta?.patches ?? []))].sort()
 }
+
+/**
+ * Why each patch matters, for the failure. gpui-pre-apple carries the SF
+ * Medium fix (plan 260 S0.4) until zed-industries/zed#67416 ships in a
+ * gpui-pre release; then videorc-ui drops the patch and no item lists it.
+ */
+const PATCH_REASONS = Object.freeze({
+  'gpui-pre-apple':
+    'without it, weight 500 draws SF Regular instead of SF Medium on macOS. It goes away when zed-industries/zed#67416 ships in a gpui-pre release'
+})
+
+/**
+ * The patches the items' kit builds with that the root Cargo.toml's
+ * `[patch.crates-io]` lacks. ui:check fails on each, so a synced kit never
+ * builds silently without one.
+ */
+export function missingPatches(items, rootToml) {
+  const patched = cargoTable(rootToml, 'patch.crates-io')
+  return registryPatches(items)
+    .filter((name) => !patched[name])
+    .map((name) => ({
+      name,
+      reason: PATCH_REASONS[name] ?? "the registry's kit builds with it"
+    }))
+}
+
+export function describePatch({ name, reason }) {
+  return `Cargo.toml has no [patch.crates-io] ${name}; copy it from videorc-ui's gpui/patches/ (${name}.patch says what changed): ${reason}.`
+}
