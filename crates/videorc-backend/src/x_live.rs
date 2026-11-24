@@ -3175,6 +3175,18 @@ mod tests {
         }
     }
 
+    /// The source Go Live publishes on, receiving video.
+    fn with_active_source(mock: &std::sync::Mutex<MockX>) {
+        let mut mock = mock.lock().unwrap();
+        mock.source_active = true;
+        mock.sources.push((
+            "9123456789012345001".to_string(),
+            "Videorc Primary Encoder".to_string(),
+            true,
+            "key".to_string(),
+        ));
+    }
+
     fn with_x_category(request: &mut XPublishRequest, id: &str) {
         let x = request
             .metadata
@@ -3231,7 +3243,7 @@ mod tests {
     #[tokio::test]
     async fn go_live_sends_the_picked_category() {
         let (base, mock, server) = mock_x().await;
-        mock.lock().unwrap().source_active = true;
+        with_active_source(&mock);
         let mut request = publish_request(&base, "9123456789012345001");
         request.credentials = credentials_for("cat-picked");
         with_x_category(&mut request, "gaming");
@@ -3256,7 +3268,7 @@ mod tests {
         // X dropped it since the draft saved it: its 400 creates nothing, so
         // Go Live goes again at once without it.
         let (base, mock, server) = mock_x().await;
-        mock.lock().unwrap().source_active = true;
+        with_active_source(&mock);
         let mut request = publish_request(&base, "9123456789012345001");
         request.credentials = credentials_for("cat-gone-400");
         request.conflict_attempts = 1;
@@ -3283,7 +3295,7 @@ mod tests {
     #[tokio::test]
     async fn a_category_missing_from_the_sessions_list_is_never_sent() {
         let (base, mock, server) = mock_x().await;
-        mock.lock().unwrap().source_active = true;
+        with_active_source(&mock);
         let client = reqwest::Client::new();
         let credentials = credentials_for("cat-gone-list");
         live_categories(&client, &credentials, &base, false)
