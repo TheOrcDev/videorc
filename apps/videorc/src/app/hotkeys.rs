@@ -56,15 +56,90 @@ pub trait ShortcutActions {
     fn run(&self, action: &str);
 }
 
-/// No action yet: every key is named in the log and left unregistered.
-pub struct NoActions;
-
-impl ShortcutActions for NoActions {
-    fn supported(&self, _action: &str) -> bool {
-        false
+/// Actions already owned by the Studio. Go Live waits for its confirmation
+/// route; Hide screen waits for the app's privacy controller, so neither
+/// steals a global key for a no-op.
+pub struct StudioActions {
+    pub studio: std::sync::Arc<videorc_app_core::Studio<videorc_app_core::BackendClient>>,
+    pub runtime: tokio::runtime::Handle,
+}
+pub fn supported(action: &str) -> bool {
+    matches!(
+        action,
+        "record-toggle"
+            | "mic-toggle"
+            | "system-audio-toggle"
+            | "clip-mark"
+            | "clip-mark-long"
+            | "layout-next"
+            | "layout-previous"
+    ) || action.starts_with("scene:")
+        || videorc_app_core::desktop::global_shortcuts::scene_slot_position(action).is_some()
+}
+impl ShortcutActions for StudioActions {
+    fn supported(&self, action: &str) -> bool {
+        supported(action)
     }
-
-    fn run(&self, _action: &str) {}
+    fn run(&self, action: &str) {
+        let studio = self.studio.clone();
+        let action = action.to_string();
+        self.runtime.spawn(async move {
+            use videorc_app_core::studio::MicrophoneMode;
+            use videorc_app_core::{SessionPhase, StopOrigin};
+            let snapshot = studio.snapshot();
+            match action.as_str() {
+                "record-toggle" => match snapshot.session.phase {
+                    SessionPhase::Idle | SessionPhase::Failed => {
+                        studio.start_recording().await;
+                    }
+                    SessionPhase::Recording => {
+                        studio.request_stop(StopOrigin::GlobalHotkey).await;
+                    }
+                    _ => {}
+                },
+                "mic-toggle" => {
+                    studio.set_microphone_muted(MicrophoneMode::Toggle).await;
+                }
+                "system-audio-toggle" => {
+                    studio
+                        .set_system_audio_enabled(!snapshot.capture.audio.system_audio_enabled)
+                        .await;
+                }
+                "clip-mark" => {
+                    studio.mark_clip(Some(30)).await;
+                }
+                "clip-mark-long" => {
+                    studio.mark_clip(Some(60)).await;
+                }
+                _ => {
+                    let scenes = &snapshot.scenes.scenes;
+                    let id = if let Some(id) = action.strip_prefix("scene:") {
+                        Some(id.to_string())
+                    } else if let Some(position) =
+                        videorc_app_core::desktop::global_shortcuts::scene_slot_position(&action)
+                    {
+                        scenes.get(position as usize - 1).map(|s| s.id.clone())
+                    } else if !scenes.is_empty() {
+                        let current = scenes
+                            .iter()
+                            .position(|s| Some(&s.id) == snapshot.scenes.on_stream_id.as_ref())
+                            .unwrap_or(0);
+                        let next = if action == "layout-previous" {
+                            (current + scenes.len() - 1) % scenes.len()
+                        } else {
+                            (current + 1) % scenes.len()
+                        };
+                        Some(scenes[next].id.clone())
+                    } else {
+                        None
+                    };
+                    if let Some(id) = id {
+                        studio.apply_saved_scene_by_id(&id).await;
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// An accelerator as `global-hotkey` reads it: Electron's spelling, with the
@@ -123,6 +198,7 @@ struct State {
     gate: Option<GlobalShortcutGate<HotkeyRegistry>>,
     actions: Rc<dyn ShortcutActions>,
     armed_at: Option<Instant>,
+    result: videorc_app_core::desktop::global_shortcuts::GlobalShortcutsResult,
     logger: Logger,
 }
 
@@ -157,6 +233,7 @@ impl Hotkeys {
                 gate,
                 actions,
                 armed_at: None,
+                result: Default::default(),
                 logger,
             })),
         };
@@ -193,11 +270,18 @@ impl Hotkeys {
                 ));
             }
         }
-        let State { gate, logger, .. } = &mut *state;
+        let State {
+            gate,
+            logger,
+            result: last_result,
+            ..
+        } = &mut *state;
         let Some(gate) = gate.as_mut() else {
+            last_result.unavailable = Some("Global shortcuts didn't register".into());
             return;
         };
         let result = gate.apply(requested);
+        *last_result = result.clone();
         match registration_notice(config, &result) {
             Some(RegistrationNotice::Problem { title, description }) => {
                 logger.warn(format!("[shortcuts] {title}: {description}"))
@@ -220,9 +304,18 @@ impl Hotkeys {
             gate.arm();
             *armed_at = Some(Instant::now());
         } else {
-            gate.disarm();
+            let result = gate.disarm();
             *armed_at = None;
+            if let Some(result) = result {
+                state.result = result;
+            }
         }
+    }
+
+    pub fn registration(
+        &self,
+    ) -> videorc_app_core::desktop::global_shortcuts::GlobalShortcutsResult {
+        self.state.borrow().result.clone()
     }
 
     /// At quit: every key goes back to the OS.
