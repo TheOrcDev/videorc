@@ -2,12 +2,13 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-// Plan 260 S1.3: the backend owns audio. The renderer opens a Web Audio
-// context only behind the fences that wait for the Windows machines (the idle
-// meter of a Windows microphone, S1.3a; the soundboard monitor, S1.3b; the
-// join chime, S1.3c: on macOS and Linux the backend plays all three), and in
-// the talk-show room's media until rooms move into the backend (S1.8). Each
-// one that moves comes off this list.
+// Plan 260 S1.3: the backend owns audio. Since S1.3 on Windows it meters the
+// idle microphone, plays the soundboard monitor and rings the join chime on
+// macOS, Linux and Windows, so the three renderer fallbacks below are reached
+// on no platform (the idle meter only for an input no backend can stand by,
+// the monitor and the chime only for a caller that asks). They go with their
+// cleanup; the talk-show room's media stays until rooms move into the
+// backend (S1.8). Each one that goes comes off this list.
 
 /** The talk-show room's own media (and its dev fixture): they leave the
  * renderer with `livekit-client` in S1.8. */
@@ -35,7 +36,7 @@ const sources = rendererSources(__dirname).map((path) => ({
 }))
 
 describe('Web Audio in the renderer (plan 260 S1.3)', () => {
-  it('creates an AudioContext only behind the Windows fences', () => {
+  it('creates an AudioContext only behind the S1.3 fallbacks and the room', () => {
     const creators = sources
       .filter(({ text }) => /\bnew\s+(?:webkit)?(?:Offline)?AudioContext\s*\(/.test(text))
       .map(({ path }) => path)
@@ -50,13 +51,13 @@ describe('Web Audio in the renderer (plan 260 S1.3)', () => {
     )
   })
 
-  it('loads the renderer monitor only where the backend does not play it', () => {
+  it('loads the renderer monitor only behind its gate, which is off everywhere', () => {
     const loaders = sources
       .filter(({ text }) => /import\(\s*['"]\.\/sound-monitor['"]\s*\)/.test(text))
       .map(({ path }) => path)
     expect(loaders).toEqual(['lib/soundboard-host.ts'])
     const host = sources.find(({ path }) => path === 'lib/soundboard-host.ts')!.text
-    expect(host).toMatch(/rendererMonitor: rendererPlaysMonitor\(currentPlatform\(\)\)/)
+    expect(host).toMatch(/rendererMonitor: rendererPlaysMonitor\(\)/)
   })
 
   it('keeps out the shared page context and the click that a ui:sync of the faders re-adds', () => {

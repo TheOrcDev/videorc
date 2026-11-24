@@ -6,11 +6,13 @@
 // the main window starts it (soundboard-host.ts), so there is one copy.
 // Loaded on the first voice: no Web Audio code rides the eager bundle.
 //
-// PLAN 260 S1.3 FENCE: Windows only. On macOS and Linux the backend plays
-// the monitor (`crates/videorc-backend/src/sound_monitor.rs`: CoreAudio, kept
-// out of System audio by ScreenCaptureKit's own-process exclusion; a marked
-// PipeWire stream on Linux) and `soundboard-host.ts` never loads this file
-// there. A backend output on Windows deletes it.
+// PLAN 260 S1.3 FENCE: no platform loads this as the monitor any more. The
+// backend plays it (`crates/videorc-backend/src/sound_monitor.rs`: CoreAudio,
+// kept out of System audio by ScreenCaptureKit's own-process exclusion; a
+// marked PipeWire stream on Linux; a WASAPI stream on Windows, left out by the
+// System audio process loopback's own-tree exclusion), and
+// `rendererPlaysMonitor()` is false. The room's media (`room-aux-sink.ts`)
+// still builds on `createSoundMonitor` until S1.8.
 
 import { soundAssetUrl } from '../../../shared/sound-assets'
 import type { Sound, SoundVoice } from './backend'

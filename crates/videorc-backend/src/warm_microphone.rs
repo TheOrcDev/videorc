@@ -27,6 +27,10 @@
 //! stands by too, through the same capture worker a Linux session records it
 //! with, and only ever for the idle meter: a session never takes it (it
 //! disarms the slot and opens its own worker, as before).
+//!
+//! Plan 260 S1.3 (Windows): a DirectShow microphone
+//! (`microphone:windows-dshow:*`) stands by the same way, through the capture
+//! worker a Windows session records it with, for the idle meter only.
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -46,7 +50,8 @@ enum WarmDevice {
     /// A CoreAudio device id (macOS).
     CoreAudio(u32),
     /// Plan 260 S1.3: a capture-worker microphone id (Linux's PipeWire
-    /// sources through pipewire-pulse), for the idle meter only.
+    /// sources through pipewire-pulse, Windows' DirectShow microphones), for
+    /// the idle meter only.
     Worker(String),
 }
 
@@ -57,9 +62,10 @@ impl WarmDevice {
         if let Some(device_id) = parse_coreaudio_microphone_id(id) {
             return Some(Self::CoreAudio(device_id));
         }
-        (cfg!(target_os = "linux")
+        let worker = (cfg!(target_os = "linux")
             && crate::linux_pulse_audio::parse_linux_pulse_microphone_id(id).is_some())
-        .then(|| Self::Worker(id.to_string()))
+            || (cfg!(windows) && crate::audio::parse_windows_dshow_microphone_id(id).is_some());
+        worker.then(|| Self::Worker(id.to_string()))
     }
 
     fn coreaudio_id(&self) -> Option<u32> {
@@ -702,6 +708,12 @@ mod tests {
             WarmDevice::for_id(&pulse),
             cfg!(target_os = "linux").then(|| WarmDevice::Worker(pulse.clone())),
             "a PipeWire microphone stands by on Linux only"
+        );
+        let dshow = "microphone:windows-dshow:4d6963726f70686f6e65204172726179";
+        assert_eq!(
+            WarmDevice::for_id(dshow),
+            cfg!(windows).then(|| WarmDevice::Worker(dshow.to_string())),
+            "a DirectShow microphone stands by on Windows only"
         );
         assert_eq!(WarmDevice::for_id("microphone:avfoundation:0"), None);
         assert_eq!(WarmDevice::CoreAudio(7).describe(), "CoreAudio device 7");
