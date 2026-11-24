@@ -8,6 +8,7 @@
 //!
 //! [`Input`]: super::Input
 
+pub mod devices;
 pub mod work;
 
 /// `OPEN_HEALTH_LABEL`: the Health door's one name, as S1.6a's Health
@@ -28,6 +29,12 @@ pub enum Door {
     CleanCut { session_id: String },
     /// A finished clean cut's review ("Review").
     CleanCutReview { job_id: String },
+    /// `openStudioAudio`: the Studio's Audio section ("Open Audio").
+    Audio,
+    /// The Sources page ("Open Sources").
+    Sources,
+    /// `openSourcesSystemAudio`: Sources, at System audio ("Open Sources").
+    SystemAudio,
 }
 
 /// The Studio's pages, as the doors need them.
@@ -35,7 +42,7 @@ pub trait HealthPage {
     fn open(&mut self, door: Door);
 }
 
-/// What a fix asks of the backend or the shell.
+/// What a fix asks of the Studio, the backend or the shell.
 pub trait Transport {
     /// `window.videorc.revealSession`: the take's file in Finder or Explorer.
     fn reveal_session(&mut self, session_id: &str);
@@ -43,6 +50,12 @@ pub trait Transport {
     fn retry_mp4_export(&mut self, session_id: &str);
     /// A downloaded cloud recording's file in Finder or Explorer.
     fn reveal_cloud_download(&mut self, recording_id: &str);
+    /// "Use it": the source that came back, by its key, in place of the
+    /// stand-in the session runs on.
+    fn use_returned_source(&mut self, key: &str);
+    /// `requestSystemAudioResume`: System audio on again after the echo
+    /// guard paused it.
+    fn resume_system_audio(&mut self);
 }
 
 /// `revealInFileManagerLabel`, as S1.6a's toasts keep it: "Show in
