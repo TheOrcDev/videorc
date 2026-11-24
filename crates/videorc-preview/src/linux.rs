@@ -18,12 +18,16 @@
 //!   frame the UI lays the slot out) and `set_destination`.
 //! - **X11** (XWayland on ogre; a real X server speaks the same
 //!   extensions): a child window of the host window, fed by MIT-SHM 1.2 fd
-//!   passing over the same memory file. A frame is one `shm::put_image`
-//!   from the slot's offset into a pixmap of the frame's size, then an
-//!   XRender composite of that pixmap, scaled to the child, so the picture
-//!   fits the slot as viewporter fits it on Wayland. The `ShmCompletion`
-//!   event is the release, and the lease is held until it arrives (the
-//!   server answers a put in order; only a dead connection ends the wait).
+//!   passing of a memory file of the presenter's own, three frames long. A
+//!   frame is a copy of the leased slot into one of those frames the server
+//!   is not reading, one `shm::put_image` from it into a pixmap of the
+//!   frame's size, then an XRender composite of that pixmap, scaled to the
+//!   child, so the picture fits the slot as viewporter fits it on Wayland.
+//!   The ring's lease goes once the copy is done; a frame of the presenter's
+//!   own is written again only after its `ShmCompletion` (or the X error
+//!   that refused its put). Nothing waits on the server without a bound, so
+//!   a quit or a stalled server never holds the thread, and the ring lease
+//!   never depends on the server at all.
 //!
 //! Both are the "layer route" of the element on Linux, named
 //! `wl-shm-subsurface` or `x11-shm-child-window` in the surface's status:
@@ -105,10 +109,9 @@ pub struct PresentReport {
     /// The buffer was committed to the server (`None`: nothing was shown,
     /// the reason in `error`, or the child is hidden).
     pub committed_at: Option<Instant>,
-    /// The ring's slot is no longer read: copied (Wayland), or the X
-    /// server's completion arrived. False only when the X connection died
-    /// first (a gone client's segment is not read again). The lease goes
-    /// once the report arrives, never before.
+    /// The ring's slot is no longer read: both routes copy it into a buffer
+    /// of the presenter's own before they answer. The lease goes once the
+    /// report arrives, never before.
     pub released: bool,
     /// Shown on screen (a hidden child acknowledges the frame and draws
     /// nothing).
@@ -247,9 +250,8 @@ impl PresenterClient {
     }
 
     /// Hands a leased slot to the thread. The receiver yields once the slot
-    /// is no longer read (copied into the subsurface's own buffer, or the X
-    /// server's completion), so the lease may go back as soon as the report
-    /// arrives, and not before.
+    /// is no longer read (copied into a buffer of the presenter's own), so
+    /// the lease may go back as soon as the report arrives, and not before.
     pub fn present(&self, slot: u32, frame_id: u64) -> Receiver<PresentReport> {
         let (reply, receiver) = mpsc::channel();
         self.send(Command::Present {
@@ -280,6 +282,10 @@ impl Presenter {
     /// fallback is the texture route, named).
     pub fn attach(window: &dyn NativeHost) -> Result<Self, String> {
         let handles = native_handles(window)?;
+        // The Wayland child borrows winit's display and the window's
+        // surface (raw pointers); the X11 child has a connection of its own
+        // and only the parent's window id.
+        let borrows_host = handles.wayland_display != 0 && handles.wayland_surface != 0;
         let bell = Arc::new(Doorbell::new()?);
         let (commands, inbox) = mpsc::channel::<Command>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<Backing, String>>();
@@ -329,13 +335,28 @@ impl Presenter {
             }
             Err(_) => {
                 // Stop it: a child built from now on closes at once, and one
-                // that got its answer in sees its commands end. The thread is
-                // joined when it ends within another wait, so it never uses
-                // the window's handles after this returns; one stuck in the
-                // display server's connection is left, named in the error.
+                // that got its answer in sees its commands end.
                 abandoned.store(true, Ordering::Release);
                 drop(commands);
                 bell.ring();
+                if borrows_host {
+                    // The thread may still be inside `registry_queue_init`
+                    // on winit's display, and would then use the window's
+                    // surface: nothing can cancel that, and nothing here can
+                    // keep the window alive, so it is joined before this
+                    // returns, however long it takes. Its wait is a roundtrip
+                    // on the display winit's own loop shares, so a compositor
+                    // that stalls it has stalled the UI already.
+                    while ready_rx.recv().is_ok() {}
+                    let _ = thread.join();
+                    return Err(format!(
+                        "the presenter thread did not connect within {ATTACH_WAIT:?}"
+                    ));
+                }
+                // X11: the thread holds only its own connection and the
+                // parent's id (an X id, not a pointer: a gone window is an X
+                // error, never a use after free). It is joined when it ends
+                // within another wait, and left to end by itself otherwise.
                 return Err(match ready_rx.recv_timeout(ATTACH_WAIT) {
                     Err(mpsc::RecvTimeoutError::Timeout) => format!(
                         "the presenter thread did not connect within {ATTACH_WAIT:?}, and did not stop within another {ATTACH_WAIT:?}"
@@ -497,6 +518,30 @@ impl Mapped {
         // self` keeps this the one slice.
         (end <= self.len)
             .then(|| unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr().add(offset), len) })
+    }
+}
+
+impl Mapped {
+    /// Copies `len` bytes from `from` to `to` inside a mapping this process
+    /// alone writes; the two ranges must not overlap. False when either is
+    /// outside the mapping or they overlap.
+    fn copy_within(&mut self, from: usize, to: usize, len: usize) -> bool {
+        let (Some(from_end), Some(to_end)) = (from.checked_add(len), to.checked_add(len)) else {
+            return false;
+        };
+        if from_end > self.len || to_end > self.len || (from < to_end && to < from_end) {
+            return false;
+        }
+        // SAFETY: both ranges are inside the mapping and disjoint; only this
+        // thread writes it, and `&mut self` keeps this the one access.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.ptr.as_ptr().add(from),
+                self.ptr.as_ptr().add(to),
+                len,
+            );
+        }
+        true
     }
 }
 
@@ -811,6 +856,9 @@ mod wayland {
             if index.is_none() {
                 let deadline = Instant::now() + RELEASE_WAIT;
                 while index.is_none() && Instant::now() < deadline {
+                    // A rung bell would wake the poll at once and spin; the
+                    // commands it announces wait in the inbox for `run`.
+                    bell.drain();
                     self.dispatch_for(bell, Duration::from_millis(5))?;
                     index = self.free_buffer();
                 }
@@ -853,6 +901,35 @@ mod wayland {
             // commit; the position applies with the parent's next commit
             // (Slint's redraw of the new layout).
             self.child.commit();
+        }
+
+        /// Shows the last frame again after a hide. A buffer is attached
+        /// again only once its earlier `release` has been consumed: the one
+        /// that was on screen may still be the compositor's (the release of
+        /// the commit before the hide not yet read), and a stale release
+        /// arriving after a new attach would mark it free while that commit
+        /// still uses it. So a busy last buffer is copied into a released
+        /// one, and that one is attached.
+        fn reshow(&mut self, last: usize) -> bool {
+            if self.state.released.get(last).copied() == Some(true) {
+                return self.attach_buffer(last);
+            }
+            // `free_buffer` only returns released buffers, so never `last`.
+            let Some(index) = self.free_buffer() else {
+                // All three are the compositor's: the next frame shows.
+                return false;
+            };
+            let Some(pool) = self.pool.as_mut() else {
+                return false;
+            };
+            let frame_bytes = pool.info.frame_bytes();
+            if !pool
+                .frames
+                .copy_within(last * frame_bytes, index * frame_bytes, frame_bytes)
+            {
+                return false;
+            }
+            self.attach_buffer(index)
         }
 
         fn attach_buffer(&mut self, index: usize) -> bool {
@@ -903,10 +980,10 @@ mod wayland {
                                 if hidden {
                                     self.child.attach(None, 0, 0);
                                     self.child.commit();
-                                } else if let Some(index) = self.attached {
-                                    // The last frame again (the buffer still
-                                    // holds it), until the next one lands.
-                                    self.attach_buffer(index);
+                                } else if let Some(last) = self.attached {
+                                    // The last frame again, until the next
+                                    // one lands.
+                                    self.reshow(last);
                                 }
                             }
                         }
@@ -1018,7 +1095,7 @@ mod wayland {
 mod x11 {
     //! The X11 child-window half (XWayland on ogre).
 
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsFd, AsRawFd};
     use std::sync::mpsc::{Receiver, TryRecvError};
     use std::time::{Duration, Instant};
 
@@ -1031,12 +1108,17 @@ mod x11 {
     use x11rb::rust_connection::RustConnection;
 
     use super::{
-        Command, Doorbell, IDLE_POLL, NativeHandles, Placement, RingMapping, poll_readable, report,
+        Command, Doorbell, IDLE_POLL, Mapped, NativeHandles, OWN_BUFFERS, Placement, RELEASE_WAIT,
+        RingMapping, own_memory, poll_readable, report,
     };
 
-    /// The shared segment and the pixmap over one ring.
+    /// One ring's frames on the X side: the ring itself, read-only (the
+    /// leased slot is copied out of it), the presenter's own frames in a
+    /// segment the server maps, and the pixmap they are put into.
     struct Segment {
         info: videorc_preview_ring::RingInfo,
+        ring: Mapped,
+        frames: Mapped,
         segment: u32,
         pixmap: u32,
         picture: u32,
@@ -1056,8 +1138,10 @@ mod x11 {
         child_size: (u32, u32),
         hidden: bool,
         mapped: bool,
-        pending_completion: Option<u64>,
-        completed: bool,
+        /// Per own frame: the sequence number of the put the server may
+        /// still be reading it for. Cleared by its `ShmCompletion` or by the
+        /// X error that refused the put; only a clear frame is written.
+        busy: Vec<Option<u64>>,
     }
 
     impl Child {
@@ -1160,8 +1244,7 @@ mod x11 {
                 child_size: (1, 1),
                 hidden: false,
                 mapped: false,
-                pending_completion: None,
-                completed: false,
+                busy: vec![None; OWN_BUFFERS],
             })
         }
 
@@ -1171,10 +1254,32 @@ mod x11 {
                 .poll_for_event()
                 .map_err(|error| format!("events: {error}"))?
             {
-                if let Event::ShmCompletion(_) = event
-                    && self.pending_completion.take().is_some()
-                {
-                    self.completed = true;
+                match event {
+                    Event::ShmCompletion(done) => {
+                        // Which own frame the server has finished reading:
+                        // the put's offset in this ring's segment.
+                        if let Some(segment) = self.segment.as_ref()
+                            && done.shmseg == segment.segment
+                        {
+                            let index = done.offset as usize / segment.info.frame_bytes().max(1);
+                            if let Some(busy) = self.busy.get_mut(index) {
+                                *busy = None;
+                            }
+                        }
+                    }
+                    Event::Error(error) => {
+                        // A refused put reads nothing: its frame is free.
+                        for busy in &mut self.busy {
+                            if busy.is_some_and(|sequence| sequence as u16 == error.sequence) {
+                                *busy = None;
+                            }
+                        }
+                        eprintln!(
+                            "[preview] x11 presenter: X error {:?} (request {}.{})",
+                            error.error_kind, error.major_opcode, error.minor_opcode
+                        );
+                    }
+                    _ => {}
                 }
             }
             Ok(())
@@ -1197,17 +1302,26 @@ mod x11 {
                 let _ = self.conn.free_pixmap(old.pixmap);
                 let _ = self.conn.shm_detach(old.segment);
             }
+            // The old segment's frames are never written again (the server
+            // unmaps its own mapping once it is done with them).
+            self.busy = vec![None; OWN_BUFFERS];
             let Some(ring) = ring else {
                 let _ = self.conn.flush();
                 return Ok(());
             };
             let info = ring.info;
+            let ring_map = Mapped::map(ring.fd.as_fd(), info.total_bytes as usize, false)
+                .map_err(|error| format!("mapping the ring: {error}"))?;
+            let frames_len = info.frame_bytes() * OWN_BUFFERS;
+            let frames_fd = own_memory(frames_len)?;
+            let frames = Mapped::map(frames_fd.as_fd(), frames_len, true)
+                .map_err(|error| format!("mapping the child window's frames: {error}"))?;
             let segment = self
                 .conn
                 .generate_id()
                 .map_err(|error| format!("{error}"))?;
             self.conn
-                .shm_attach_fd(segment, ring.fd, true)
+                .shm_attach_fd(segment, frames_fd, true)
                 .map_err(|error| format!("shm_attach_fd: {error}"))?
                 .check()
                 .map_err(|error| format!("shm_attach_fd (MIT-SHM 1.2 fd passing): {error}"))?;
@@ -1241,6 +1355,8 @@ mod x11 {
                 .map_err(|error| format!("set_picture_filter: {error}"))?;
             self.segment = Some(Segment {
                 info,
+                ring: ring_map,
+                frames,
                 segment,
                 pixmap,
                 picture,
@@ -1315,6 +1431,83 @@ mod x11 {
                 .flush()
                 .map_err(|error| format!("flush: {error}"))?;
             Ok(())
+        }
+
+        /// Copies the leased `slot` into an own frame the server is not
+        /// reading; the frame's index. Once this returns, the ring's slot is
+        /// not read again, so its lease may go.
+        fn fill(&mut self, slot: u32, bell: &Doorbell) -> Result<usize, String> {
+            let free = |busy: &[Option<u64>]| busy.iter().position(Option::is_none);
+            let mut index = free(self.busy.as_slice());
+            if index.is_none() {
+                let deadline = Instant::now() + RELEASE_WAIT;
+                while index.is_none() && Instant::now() < deadline {
+                    // A rung bell would wake the poll at once and spin; the
+                    // commands it announces wait in the inbox for `run`.
+                    bell.drain();
+                    self.wait_for(bell, Duration::from_millis(5))?;
+                    index = free(self.busy.as_slice());
+                }
+            }
+            let index = index.ok_or_else(|| {
+                format!("the X server is still reading every frame of the child window after {RELEASE_WAIT:?}")
+            })?;
+            let segment = self
+                .segment
+                .as_mut()
+                .ok_or("no ring is attached for the child window")?;
+            if slot >= segment.info.slot_count {
+                return Err(format!("slot {slot} is outside the ring"));
+            }
+            let frame_bytes = segment.info.frame_bytes();
+            // SAFETY: the reader holds this slot's lease until the report,
+            // which is sent after this copy, so the writer leaves it alone.
+            let source = unsafe {
+                segment
+                    .ring
+                    .slice(segment.info.slot_start(slot), frame_bytes)
+            }
+            .ok_or_else(|| format!("slot {slot} is outside the mapped ring"))?;
+            let target = segment
+                .frames
+                .slice_mut(index * frame_bytes, frame_bytes)
+                .ok_or_else(|| format!("frame {index} is outside the child window's memory"))?;
+            target.copy_from_slice(source);
+            Ok(index)
+        }
+
+        /// Puts own frame `index` into the pixmap; the put's sequence number.
+        fn put(&self, index: usize) -> Result<u64, String> {
+            let segment = self
+                .segment
+                .as_ref()
+                .ok_or("no ring is attached for the child window")?;
+            let info = segment.info;
+            let offset = u32::try_from(index * info.frame_bytes())
+                .map_err(|_| format!("frame {index} is past MIT-SHM's 32-bit offsets"))?;
+            let cookie = self
+                .conn
+                .shm_put_image(
+                    segment.pixmap,
+                    self.gc,
+                    info.width as u16,
+                    info.height as u16,
+                    0,
+                    0,
+                    info.width as u16,
+                    info.height as u16,
+                    0,
+                    0,
+                    self.depth,
+                    xproto::ImageFormat::Z_PIXMAP.into(),
+                    true,
+                    segment.segment,
+                    offset,
+                )
+                .map_err(|error| format!("shm_put_image: {error}"))?;
+            // Dropping the cookie sends a refusal to the event queue, where
+            // `drain_events` frees the frame by this number.
+            Ok(cookie.sequence_number())
         }
 
         fn composite(&self) -> Result<(), String> {
@@ -1392,7 +1585,7 @@ mod x11 {
                             reply,
                         } => {
                             let started_at = Instant::now();
-                            let Some(segment) = self.segment.as_ref() else {
+                            if self.segment.is_none() {
                                 let _ = reply.send(report(
                                     frame_id,
                                     started_at,
@@ -1402,7 +1595,7 @@ mod x11 {
                                     Some("no ring is attached for the child window".to_string()),
                                 ));
                                 continue;
-                            };
+                            }
                             if self.hidden || self.placement.is_none() {
                                 let _ = reply.send(report(
                                     frame_id,
@@ -1414,68 +1607,30 @@ mod x11 {
                                 ));
                                 continue;
                             }
-                            let info = segment.info;
-                            let put = self
-                                .conn
-                                .shm_put_image(
-                                    segment.pixmap,
-                                    self.gc,
-                                    info.width as u16,
-                                    info.height as u16,
-                                    0,
-                                    0,
-                                    info.width as u16,
-                                    info.height as u16,
-                                    0,
-                                    0,
-                                    self.depth,
-                                    xproto::ImageFormat::Z_PIXMAP.into(),
-                                    true,
-                                    segment.segment,
-                                    info.slot_start(slot) as u32,
-                                )
-                                .map_err(|error| format!("shm_put_image: {error}"))
-                                .and_then(|_| self.composite())
-                                .and_then(|_| {
-                                    self.conn.flush().map_err(|error| format!("flush: {error}"))
-                                });
-                            if let Err(error) = put {
-                                let _ = reply.send(report(
+                            let shown = self.fill(slot, bell).and_then(|index| {
+                                // The ring's slot is copied: the report lets
+                                // its lease go. The own frame stays the
+                                // server's until its completion.
+                                let sequence = self.put(index)?;
+                                if let Some(busy) = self.busy.get_mut(index) {
+                                    *busy = Some(sequence);
+                                }
+                                self.composite()?;
+                                self.conn.flush().map_err(|error| format!("flush: {error}"))
+                            });
+                            let _ = reply.send(match shown {
+                                Ok(()) => report(
                                     frame_id,
                                     started_at,
-                                    None,
+                                    Some(Instant::now()),
                                     true,
-                                    false,
-                                    Some(error),
-                                ));
-                                continue;
-                            }
-                            let committed_at = Instant::now();
-                            self.pending_completion = Some(frame_id);
-                            self.completed = false;
-                            // The lease holds until the server has read the
-                            // segment (`ShmCompletion`), with no deadline:
-                            // elapsed time does not make the slot free. The
-                            // server answers the put in order; a dead
-                            // connection ends the wait (the server reads
-                            // nothing more of a gone client's segment).
-                            let mut lost: Option<String> = None;
-                            while self.pending_completion.is_some() {
-                                if let Err(error) = self.wait_for(bell, Duration::from_millis(50)) {
-                                    lost = Some(error);
-                                    break;
+                                    true,
+                                    None,
+                                ),
+                                Err(error) => {
+                                    report(frame_id, started_at, None, true, false, Some(error))
                                 }
-                            }
-                            let released = self.completed;
-                            self.pending_completion = None;
-                            let _ = reply.send(report(
-                                frame_id,
-                                started_at,
-                                Some(committed_at),
-                                released,
-                                lost.is_none(),
-                                lost,
-                            ));
+                            });
                         }
                         Command::Quit => quit = true,
                     }
