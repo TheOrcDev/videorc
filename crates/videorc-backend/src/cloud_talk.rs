@@ -972,6 +972,7 @@ pub const CLOUD_ROOM_OVERLAY_EVENT: &str = "cloud.room.overlay";
 /// the Studio's chips and reasons read it, as they read the renderer's own
 /// publishers before. One event for every topic; each topic is present once
 /// it is the backend's (graphics first).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const CLOUD_ROOM_PRESENTATION_EVENT: &str = "cloud.room.presentation";
 
 /// `cloud.room.avatar.set` (plan 260 S1.8b): the avatar content the Studio
@@ -1014,6 +1015,7 @@ pub struct CloudRoomSceneCommitParams {
 /// `cloud.room.presentation`'s payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct CloudRoomPresentationEvent {
     pub show_id: String,
     /// The room's static graphics (captions, cards, banners, timers, the
@@ -1034,6 +1036,7 @@ pub struct CloudRoomPresentationEvent {
 /// Plan 249 S14: what the program pages drew for the scene's background.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct RoomBackgroundStatus {
     /// `backgroundKey` of what the scene asks for, per lane.
     pub wanted: RoomBackgroundWanted,
@@ -1044,6 +1047,7 @@ pub struct RoomBackgroundStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct RoomBackgroundWanted {
     pub h: String,
     pub v: String,
@@ -1053,6 +1057,7 @@ pub struct RoomBackgroundWanted {
 /// layers to guest pages, how many can draw them, how many applied them.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct RoomPresentationGuests {
     pub enabled: bool,
     pub capable: u32,
@@ -1062,6 +1067,7 @@ pub struct RoomPresentationGuests {
 /// One topic's delivery, as the program pages report it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct RoomPresentationStatus {
     pub enabled: bool,
     pub state: RoomPresentationState,
@@ -1080,6 +1086,7 @@ pub struct RoomPresentationStatus {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum RoomPresentationState {
     Off,
     Preview,
@@ -1090,6 +1097,7 @@ pub enum RoomPresentationState {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct RoomPresentationObservation {
     pub revision: u64,
     pub output: PresentationOutput,
@@ -1098,12 +1106,14 @@ pub struct RoomPresentationObservation {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum PresentationOutput {
     Stream,
     Recording,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum PresentationOrientation {
     #[serde(rename = "h")]
     H,
