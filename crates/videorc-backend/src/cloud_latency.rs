@@ -337,7 +337,8 @@ fn this_minute() -> i64 {
 }
 
 /// Is `show_id` the managed talk show this computer holds a room of (D10)?
-fn managed_show(state: &AppState, show_id: &str) -> bool {
+/// The backend's room measures only then (`room_latency`, S1.8c c6).
+pub(crate) fn managed_show(state: &AppState, show_id: &str) -> bool {
     let runtime = crate::cloud_show::lock(&state.cloud_show);
     runtime.talk_show_room_show_id().as_deref() == Some(show_id)
         && runtime.show.as_ref().is_some_and(|show| {

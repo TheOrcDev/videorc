@@ -125,6 +125,8 @@ mod room_host;
 #[cfg(target_os = "macos")]
 mod room_html;
 #[cfg(target_os = "macos")]
+mod room_latency;
+#[cfg(target_os = "macos")]
 mod room_media;
 #[cfg(target_os = "macos")]
 mod room_overlays;
