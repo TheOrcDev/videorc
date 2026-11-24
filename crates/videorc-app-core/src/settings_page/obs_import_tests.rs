@@ -1,5 +1,5 @@
 //! `lib/obs-import-map.test.ts`, `lib/obs-import-apply.test.ts` and the
-//! dialog's states, on the same fixture (`obs-fixtures/collection.parsed.json`,
+//! dialog's states, on the same fixture (`protocol-fixtures/obs/collection.parsed.json`,
 //! the backend parser's pinned output).
 
 use serde_json::{Value, json};
@@ -7,8 +7,7 @@ use videorc_protocol::{Device, DeviceKind, DeviceStatus};
 
 use super::*;
 
-const PARSED: &str =
-    include_str!("../../../../apps/desktop/src/main/obs-fixtures/collection.parsed.json");
+const PARSED: &str = include_str!("../../../../protocol-fixtures/obs/collection.parsed.json");
 
 /// `formatVideoQualityFull` for the tests (L6's account module answers it in
 /// the app).
