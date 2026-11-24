@@ -2,8 +2,8 @@
 //! that go to their pages, then the notices under them. It has no title
 //! (plan 235 D3): the rows name themselves.
 //!
-//! The rows' icons and the on-air rows' status dots wait for the kit's
-//! icons and StatusDot. The runtime alert's Open Audio waits for the Audio
+//! The rows' icons wait for the kit's Livestream, Frame and Alert icons.
+//! The runtime alert's Open Audio waits for the Audio
 //! section and its reveal for the reveal command, as Electron leaves out a
 //! door it has no handler for.
 
@@ -22,13 +22,26 @@ use videorc_app_core::studio::inspector::{
 };
 use videorc_kit::{
     Alert, AlertVariant, Button, ButtonSize, ButtonVariant, GroupedList, GroupedRow, NavigableRow,
-    PanelSection,
+    PanelSection, StatusDot, StatusTone,
 };
 
 use super::transport::{AppStudio, OpenPage};
 
 /// The Electron row's `pl-9.5`: a destination under the Destinations row.
 const NESTED_INDENT_PX: f32 = 38.;
+
+/// A fact's tone (`live`, `good`, `warn`, `error`, `neutral`), or none for a
+/// plain value.
+pub fn fact_tone(tone: &str) -> Option<StatusTone> {
+    match tone {
+        "live" => Some(StatusTone::Live),
+        "good" => Some(StatusTone::Good),
+        "warn" => Some(StatusTone::Warn),
+        "error" => Some(StatusTone::Error),
+        "neutral" => Some(StatusTone::Neutral),
+        _ => None,
+    }
+}
 
 /// The section's view now. The other areas' facts (agents, the watchdog's
 /// chip, the cloud show, Sidekick, the on-air encode) join as their lanes
@@ -95,7 +108,22 @@ impl SessionSection {
     }
 
     fn row(&self, fact: &FactRow, cx: &mut Context<Self>) -> NavigableRow {
-        let mut row = NavigableRow::new(fact.id, fact.label.clone(), fact.value.clone());
+        // A toned value is the status dot and its words, at the row's own
+        // size and colour (`dotClassName`: `text-sm text-foreground`).
+        let mut row = match fact_tone(fact.tone) {
+            Some(tone) => NavigableRow::with_control(
+                fact.id,
+                fact.label.clone(),
+                div()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(StatusDot::new((fact.id, 0usize)).tone(tone))
+                    .child(div().min_w_0().truncate().child(fact.value.clone())),
+            ),
+            None => NavigableRow::new(fact.id, fact.label.clone(), fact.value.clone()),
+        };
         if let Some(page) = fact.opens {
             let this = cx.entity().downgrade();
             row = row.on_navigate(move |_, _, cx| {
@@ -214,5 +242,20 @@ impl Render for SessionSection {
             .children(start_failure)
             .children(camera_notice)
             .children(runtime_alert)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_core_tone_has_a_dot_and_a_plain_value_none() {
+        assert_eq!(fact_tone("live"), Some(StatusTone::Live));
+        assert_eq!(fact_tone("good"), Some(StatusTone::Good));
+        assert_eq!(fact_tone("warn"), Some(StatusTone::Warn));
+        assert_eq!(fact_tone("error"), Some(StatusTone::Error));
+        assert_eq!(fact_tone("neutral"), Some(StatusTone::Neutral));
+        assert_eq!(fact_tone(""), None);
     }
 }
