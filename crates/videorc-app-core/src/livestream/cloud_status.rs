@@ -39,6 +39,26 @@ pub struct CloudStatus {
     pub announce: Option<bool>,
     pub room: Option<Value>,
     pub recording: Option<Value>,
+    /// The span the show is live on the platforms (`CloudLiveInterval`).
+    pub live_interval: Option<CloudLiveInterval>,
+    /// The runner's platform legs, keyed by target id.
+    pub legs: Vec<CloudLeg>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CloudLiveInterval {
+    pub id: String,
+    pub end_requested_at: Option<String>,
+}
+
+/// One leg as `waitForCloudProviderOutput` reads it (`StreamTargetRuntime`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CloudLeg {
+    pub target_id: String,
+    /// `idle`, `connecting`, `live`, `warning`, `failed` or `stopped`.
+    pub state: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

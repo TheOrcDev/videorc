@@ -3,6 +3,10 @@
 //! (`lib/cloud-notices.ts`). What the cloud reports on its own (a fallback,
 //! a lost show, a restart, the cap, the announcement) is a notification since
 //! plan 250 and lands with the notification centre (S1.6e).
+//!
+//! The status also drives the platform cleanup (`platform_lifecycle`): a
+//! hand-off drops the session's owner, and the show's end settles its
+//! cleanup unless the show was handed off (`cloudTerminalOwner`).
 
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -10,9 +14,11 @@ use tokio::sync::watch;
 use super::{Studio, StudioBackend};
 use crate::client::RpcError;
 use crate::livestream::cloud_outputs::{self, CloudTestOutput};
+use crate::livestream::cloud_provider::cloud_terminal_owner;
 use crate::livestream::cloud_show::HAND_OFF_UNCONFIRMED;
 use crate::livestream::cloud_status::CloudStatus;
 use crate::livestream::cloud_view::{CLOUD_TOAST_ID, UploadPlan};
+use crate::livestream::platform_owner::Owner;
 use crate::notices::{NoticeCommand, ToastRequest};
 use crate::user_error::{UserErrorContext, backend_error_toast};
 
@@ -77,10 +83,20 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     /// `commitCloudStatus`: a hand-off (`stoppedBy` new) latches the ids it
-    /// stopped, sent before the session stops so its stop completes nothing;
-    /// this computer back on air (Continue here) ends the latch.
-    pub(super) fn commit_cloud_status(&self, next: CloudStatus) {
-        let recording_session = self.lock().session.status().session_id.clone();
+    /// stopped, sent before the session stops so its stop completes nothing,
+    /// and drops the session's platform owner; this computer back on air
+    /// (Continue here) ends the latch. A show that ended (not handed off,
+    /// no stop running) gives its owner back to be settled.
+    fn commit_cloud_status(&self, next: CloudStatus) -> Option<Owner> {
+        let (recording_session, stopping) = {
+            let inner = self.lock();
+            (
+                inner.session.status().session_id.clone(),
+                inner.session.stop_pending(),
+            )
+        };
+        let mut latched = None;
+        let mut terminal = None;
         self.edit_cloud(|state| {
             let previous = state.status.take();
             let stopped_before = previous
@@ -96,27 +112,43 @@ impl<B: StudioBackend> Studio<B> {
                 .flatten()
                 .filter(|id| !id.is_empty())
                 .collect();
+                latched = Some(state.handed_off.clone());
             } else if on_air_here(Some(&next)) && !on_air_here(previous.as_ref()) {
                 state.handed_off.clear();
             }
+            terminal = cloud_terminal_owner(previous.as_ref(), &next)
+                .filter(|id| !state.handed_off.contains(id));
             state.status = Some(next);
             true
         });
+        if let Some(handed_off) = latched {
+            self.platform.drop_handed_off(&handed_off);
+        }
+        let terminal = terminal.filter(|_| !stopping)?;
+        self.platform.next_run();
+        self.platform.claim(&terminal)
+    }
+
+    /// `commitCloudStatus`, then the ended show's platform cleanup.
+    pub(super) async fn commit_cloud(&self, next: CloudStatus) {
+        if let Some(owner) = self.commit_cloud_status(next) {
+            self.settle_cloud_terminal(owner).await;
+        }
     }
 
     /// The status once per connection; an older backend has no cloud.
     pub(super) async fn read_cloud(&self) {
         if let Ok(status) = self.cloud_request(STATUS, Value::Null).await {
-            self.commit_cloud_status(status);
+            self.commit_cloud(status).await;
         }
     }
 
-    pub(super) fn handle_cloud_event(&self, event: &str, payload: &Value) -> bool {
+    pub(super) async fn handle_cloud_event(&self, event: &str, payload: &Value) -> bool {
         if event != CHANGED_EVENT {
             return false;
         }
         match CloudStatus::from_value(payload) {
-            Some(status) => self.commit_cloud_status(status),
+            Some(status) => self.commit_cloud(status).await,
             None => self
                 .config
                 .logger
@@ -125,7 +157,7 @@ impl<B: StudioBackend> Studio<B> {
         true
     }
 
-    async fn cloud_request(
+    pub(super) async fn cloud_request(
         &self,
         method: &'static str,
         params: Value,
@@ -157,7 +189,7 @@ impl<B: StudioBackend> Studio<B> {
         object: &'static str,
     ) {
         match self.cloud_request(method, params).await {
-            Ok(status) => self.commit_cloud_status(status),
+            Ok(status) => self.commit_cloud(status).await,
             Err(error) => self.toast_cloud_error(&error, action, object),
         }
     }
@@ -173,7 +205,7 @@ impl<B: StudioBackend> Studio<B> {
     /// had, and signed out says so itself.
     pub async fn refresh_cloud_allowance(&self) {
         if let Ok(status) = self.cloud_request(ALLOWANCE_REFRESH, Value::Null).await {
-            self.commit_cloud_status(status);
+            self.commit_cloud(status).await;
         }
     }
 

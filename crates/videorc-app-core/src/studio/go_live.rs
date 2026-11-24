@@ -18,8 +18,9 @@
 //!   with what was prepared. A destination that couldn't be prepared leaves
 //!   the dialog open with the ready ones offered.
 //! - **On air**: YouTube's broadcast goes live once its ingest is active,
-//!   X's is published. **The stop** ends X's broadcasts before
-//!   `session.stop` and completes YouTube's after it.
+//!   X's is published; with the talk-show room open, each waits for the
+//!   cloud's leg first. What the stop and the cleanup do is
+//!   `platform_lifecycle`'s.
 
 use std::time::Duration;
 
@@ -31,12 +32,11 @@ use crate::livestream::golive::{Phase, Preflight};
 use crate::livestream::lifecycle::{
     self, PartialSetup, SetupDecision, SetupFailure, patch_prepared_target, status_patch,
 };
-use crate::livestream::{
-    go_live_copy, lifecycle_copy, methods, plan, ready::Topology, scheduled_copy,
-};
+use crate::livestream::platform_owner::{Owner, broadcast_key};
+use crate::livestream::{go_live_copy, lifecycle_copy, methods, plan, ready::Topology};
 use crate::notices::{NoticeAction, NoticeCommand, ToastRequest, XPlaybackEvent};
 use crate::studio::session::SessionStartIntent;
-use crate::user_error::{Failure, START_THE_X_BROADCAST, UserErrorContext, user_error_message};
+use crate::user_error::{Failure, START_THE_X_BROADCAST, user_error_message};
 
 /// S3.5e: X's playback check (`streamTargets.x.playback`), which the
 /// backend sends after `x.publish` and again while it polls.
@@ -44,8 +44,6 @@ pub const X_PLAYBACK_EVENT: &str = "streamTargets.x.playback";
 
 /// `streamTargets.youtube.prepare`'s quota refusal (plan 094, G5).
 pub const YOUTUBE_QUOTA_PAUSED_CODE: &str = "youtube-quota-paused";
-/// `PLATFORM_CLEANUP_X_END_TIMEOUT_MS`: an X END never holds the stop longer.
-const X_END_TIMEOUT: Duration = Duration::from_secs(4);
 /// How long YouTube's ingest is waited for (`attempt < 8`, 2 s apart).
 const YOUTUBE_INGEST_ATTEMPTS: usize = 8;
 const YOUTUBE_INGEST_INTERVAL: Duration = Duration::from_secs(2);
@@ -67,15 +65,15 @@ pub struct GoLiveState {
 }
 
 /// One prepared answer's fields (`Prepared*` in `shared/capture-state.ts`).
-fn text(value: &Value, key: &str) -> Option<String> {
+pub(super) fn text(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-fn now_iso() -> String {
+pub(super) fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn target_value<'a>(streaming: &'a Value, id: &str) -> Option<&'a Value> {
+pub(super) fn target_value<'a>(streaming: &'a Value, id: &str) -> Option<&'a Value> {
     streaming
         .get("targets")
         .and_then(Value::as_array)?
@@ -256,7 +254,7 @@ impl<B: StudioBackend> Studio<B> {
         }
         self.edit_go_live(|state| *state = GoLiveState::default());
         if let Some(partial) = state.partial {
-            self.settle_prepared(&partial.streaming, None).await;
+            self.settle_prepared_platforms(partial.streaming).await;
         }
     }
 
@@ -409,29 +407,31 @@ impl<B: StudioBackend> Studio<B> {
         };
         // The dialog closes as the start goes (`setGoLiveConfirmationOpen(false)`).
         self.edit_go_live(|state| *state = GoLiveState::default());
-        *self.lock_go_live_streaming() = Some(streaming.clone());
         let record = self.snapshot().settings.capture.record_enabled;
         let outcome = self
             .start(SessionStartIntent::livestream(record), Some(typed))
             .await;
-        if outcome != super::StartOutcome::Started {
+        let session_id = self
+            .snapshot()
+            .session
+            .status
+            .session_id
+            .clone()
+            .filter(|id| !id.is_empty());
+        let (super::StartOutcome::Started, Some(session_id)) = (outcome, session_id) else {
             // A refused start leaves no broadcast behind.
-            *self.lock_go_live_streaming() = None;
-            self.settle_prepared(&streaming, None).await;
+            self.settle_prepared_platforms(streaming).await;
             return;
-        }
-        let session_id = self.snapshot().session.status.session_id.clone();
-        self.activate_platforms(streaming, session_id).await;
-    }
-
-    fn lock_go_live_streaming(&self) -> std::sync::MutexGuard<'_, Option<Value>> {
-        self.go_live_streaming
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        };
+        self.platform.install(Owner {
+            session_id: session_id.clone(),
+            streaming: streaming.clone(),
+        });
+        self.activate_platforms(streaming, Some(session_id)).await;
     }
 
     /// The prepared statuses into the saved config too.
-    async fn save_target_patch(&self, target_id: &str, patch: Map<String, Value>) {
+    pub(super) async fn save_target_patch(&self, target_id: &str, patch: Map<String, Value>) {
         let id = target_id.to_string();
         let now = now_iso();
         let _ = self
@@ -450,6 +450,9 @@ impl<B: StudioBackend> Studio<B> {
         preflight: &Preflight,
         excluded: &[String],
     ) -> Result<PartialSetup, String> {
+        if !self.settle_previous_platform_lifecycle().await {
+            return Err(lifecycle_copy::LIVESTREAM_STILL_SETTLING.to_string());
+        }
         let capture = self.snapshot().settings.capture_doc;
         let mut next = capture["streaming"].clone();
         let recording = plan::recording_video(&capture);
@@ -604,6 +607,13 @@ impl<B: StudioBackend> Studio<B> {
                         )
                         .await?,
                 };
+                // A fresh broadcast's completion is due again.
+                if let Some(broadcast) = prepared.get("broadcastId").and_then(Value::as_str) {
+                    self.platform.forget_youtube_completion(&broadcast_key(
+                        prepared.get("accountId").and_then(Value::as_str),
+                        broadcast,
+                    ));
+                }
                 if scheduled.is_some() {
                     patch.insert("scheduledAttemptId".into(), json!(attempt));
                     patch.insert("scheduledEventTitle".into(), json!(prepared.get("title")));
@@ -700,7 +710,12 @@ impl<B: StudioBackend> Studio<B> {
     /// On air: YouTube's broadcasts go live once their ingest is active
     /// (`activatePreparedYouTubeBroadcasts`), X's are published.
     async fn activate_platforms(&self, mut streaming: Value, session_id: Option<String>) {
+        let run = self.platform.run();
+        let talk_show = self.talk_show_room_open();
         for id in lifecycle::youtube_activation_targets(&streaming) {
+            if self.platform.run() != run {
+                return;
+            }
             let Some(target) = target_value(&streaming, &id).cloned() else {
                 continue;
             };
@@ -714,11 +729,14 @@ impl<B: StudioBackend> Studio<B> {
             )
             .await;
             let result: Result<(), RpcError> = async {
+                if let (true, Some(show)) = (talk_show, &session_id) {
+                    self.wait_for_cloud_provider_output(show, &id, run).await?;
+                }
                 if scheduled.is_none() {
                     let mut active = false;
                     let mut last = None;
                     for attempt in 0..YOUTUBE_INGEST_ATTEMPTS {
-                        if !self.session_owns_transport() {
+                        if !self.session_owns_transport() || self.platform.run() != run {
                             return Ok(());
                         }
                         let status = self
@@ -797,9 +815,15 @@ impl<B: StudioBackend> Studio<B> {
                 }
             };
             patch_prepared_target(&mut streaming, &id, &patch, &now_iso());
+            if let Some(session_id) = &session_id {
+                self.platform.update_streaming(session_id, &streaming);
+            }
             self.save_target_patch(&id, patch).await;
         }
         for id in lifecycle::x_activation_targets(&streaming) {
+            if self.platform.run() != run {
+                return;
+            }
             let Some(target) = target_value(&streaming, &id).cloned() else {
                 continue;
             };
@@ -813,12 +837,21 @@ impl<B: StudioBackend> Studio<B> {
                 status_patch("connecting", go_live_copy::WAITING_FOR_X_INGEST),
             )
             .await;
+            // The session's cleanup waits for this publish's answer.
+            let mutation = session_id
+                .as_deref()
+                .map(|session_id| self.platform.begin_mutation(session_id));
+            let waited = match (talk_show, &session_id) {
+                (true, Some(show)) => self.wait_for_cloud_provider_output(show, &id, run).await,
+                _ => Ok(()),
+            };
             // S3.5d: a saved X broadcast goes live through its schedule
             // (`scheduledStreams.activate`, as Electron's
             // `scheduledTargetOperation('activate')`), never through the
             // instant publish.
-            let published = match text(&target, "scheduledEventId") {
-                Some(event) => {
+            let published = match (waited, text(&target, "scheduledEventId")) {
+                (Err(error), _) => Err(error),
+                (Ok(()), Some(event)) => {
                     self.scheduled_operation(
                         "activate",
                         &event,
@@ -829,7 +862,7 @@ impl<B: StudioBackend> Studio<B> {
                     )
                     .await
                 }
-                None => {
+                (Ok(()), None) => {
                     let params = json!({
                         "accountId": text(&target, "accountId"),
                         "sourceId": text(&target, "platformStreamId"),
@@ -855,6 +888,22 @@ impl<B: StudioBackend> Studio<B> {
                         patch.insert("platformStreamId".into(), media_key.clone());
                     }
                     patch_prepared_target(&mut streaming, &id, &patch, &now_iso());
+                    if let Some(mutation) = mutation {
+                        mutation.finish(&streaming);
+                    }
+                    // The published broadcast's END is due again.
+                    if let Some(broadcast) = published.get("broadcastId").and_then(Value::as_str) {
+                        self.platform.forget_x_end(&broadcast_key(
+                            published.get("accountId").and_then(Value::as_str),
+                            broadcast,
+                        ));
+                    }
+                    if let Some(session_id) = &session_id {
+                        self.platform.update_streaming(session_id, &streaming);
+                    }
+                    if self.platform.run() != run {
+                        return;
+                    }
                     self.save_target_patch(&id, patch).await;
                     // S3.2f: X's chat follows the broadcast (`liveChat.x.start`,
                     // only with a session); when it can't, the stream goes on
@@ -892,6 +941,9 @@ impl<B: StudioBackend> Studio<B> {
                     }
                 }
                 Err(error) => {
+                    if let Some(mutation) = mutation {
+                        mutation.finish(&streaming);
+                    }
                     // `showXBroadcastProblem('start')`: a warning, the
                     // stream goes on.
                     let copy =
@@ -910,7 +962,6 @@ impl<B: StudioBackend> Studio<B> {
             }
         }
         self.remind_x_producer(&streaming);
-        *self.lock_go_live_streaming() = Some(streaming);
     }
 
     /// The X producer reminder: an X stream key only feeds X; the broadcast
@@ -934,109 +985,6 @@ impl<B: StudioBackend> Studio<B> {
                 )
                 .finish(),
         )]);
-    }
-
-    /// Before `session.stop`: X's broadcasts end first, so a stream that
-    /// still runs never outlives its broadcast's end.
-    pub(super) async fn end_x_broadcasts(&self) {
-        let Some(streaming) = self.lock_go_live_streaming().clone() else {
-            return;
-        };
-        let session_id = self.snapshot().session.status.session_id.clone();
-        for id in lifecycle::x_completion_targets(&streaming) {
-            let Some(target) = target_value(&streaming, &id).cloned() else {
-                continue;
-            };
-            self.save_target_patch(
-                &id,
-                status_patch("connecting", go_live_copy::ENDING_X_BROADCAST),
-            )
-            .await;
-            // S3.5d: a saved X broadcast ends through its schedule's release
-            // (`scheduledStreams.releasePreparation`: the backend ends the
-            // broadcast and completes the event, "Scheduled X broadcast
-            // completed." or "Upcoming broadcast preserved."); an instant one
-            // through `streamTargets.x.end`.
-            let ended = match text(&target, "scheduledEventId") {
-                Some(event_id) => {
-                    let mut fields = json!({ "attemptId": target.get("scheduledAttemptId") });
-                    if let Some(session_id) = &session_id {
-                        fields["sessionId"] = Value::String(session_id.clone());
-                    }
-                    tokio::time::timeout(
-                        Duration::from_secs(30),
-                        self.scheduled_operation("releasePreparation", &event_id, fields),
-                    )
-                    .await
-                }
-                None => {
-                    let params = json!({
-                        "accountId": text(&target, "accountId"),
-                        "broadcastId": text(&target, "platformBroadcastId"),
-                        "sessionId": session_id,
-                    });
-                    tokio::time::timeout(
-                        X_END_TIMEOUT,
-                        self.backend.livestream_request(methods::X_END, params),
-                    )
-                    .await
-                }
-            };
-            let scheduled = text(&target, "scheduledEventId").is_some();
-            let patch = match ended {
-                // S3.5e: a saved broadcast the release kept upcoming says so
-                // (`releaseScheduledXPreparations`); else the backend's
-                // words (`result.message`).
-                Ok(Ok(result))
-                    if scheduled && result["lifecycleStatus"].as_str() == Some("ready") =>
-                {
-                    status_patch("stopped", scheduled_copy::UPCOMING_BROADCAST_PRESERVED)
-                }
-                Ok(Ok(result)) => {
-                    status_patch("stopped", result["message"].as_str().unwrap_or_default())
-                }
-                // A saved broadcast's failed release is the destination's
-                // line alone (the scheduler raises no toast).
-                Ok(Err(error)) if scheduled => status_patch(
-                    "warning",
-                    &scheduled_copy::x_scheduled_cleanup_review(&error.message),
-                ),
-                Ok(Err(error)) => {
-                    let copy = user_error_message(
-                        Failure::Rpc(&error),
-                        Some(UserErrorContext {
-                            action: "end",
-                            ..START_THE_X_BROADCAST
-                        }),
-                    );
-                    self.post(vec![NoticeCommand::Show(
-                        ToastRequest::warning(copy.title)
-                            .id(format!("x-broadcast-end:{id}"))
-                            .description(go_live_copy::END_IT_IN_MEDIA_STUDIO)
-                            .action(
-                                go_live_copy::OPEN_MEDIA_STUDIO,
-                                NoticeAction::OpenUrl {
-                                    url: go_live_copy::X_MEDIA_STUDIO_URL.to_string(),
-                                },
-                            )
-                            .finish(),
-                    )]);
-                    let mut patch =
-                        status_patch("warning", &go_live_copy::x_cleanup_review(&error.message));
-                    if let Some(url) = target
-                        .pointer("/status/redactedUrl")
-                        .filter(|url| url.as_str().is_some_and(|u| !u.is_empty()))
-                    {
-                        patch["status"]["redactedUrl"] = url.clone();
-                    }
-                    patch
-                }
-                // Too slow to wait for: the target stays as it was, so a
-                // later cleanup can end it.
-                Err(_) => continue,
-            };
-            self.save_target_patch(&id, patch).await;
-        }
     }
 
     /// S3.5e: X's playback check (`streamTargets.x.playback`): the signed-in
@@ -1073,93 +1021,14 @@ impl<B: StudioBackend> Studio<B> {
         self.post(commands);
     }
 
-    /// After `session.stop`: YouTube's broadcasts complete
-    /// (`completeYouTubeBroadcastOnce`).
-    pub(super) async fn complete_youtube_broadcasts(&self) {
-        let Some(streaming) = self.lock_go_live_streaming().take() else {
-            return;
-        };
-        let session_id = self.snapshot().session.status.session_id.clone();
-        self.settle_prepared(&streaming, session_id).await;
-    }
-
-    /// Completes what a Go Live prepared and never started (a cancelled
-    /// partial setup, a refused start: no session), or what a stopped one
-    /// ran (its session).
-    async fn settle_prepared(&self, streaming: &Value, session_id: Option<String>) {
-        for id in lifecycle::youtube_completion_targets(streaming) {
-            let Some(target) = target_value(streaming, &id).cloned() else {
-                continue;
-            };
-            self.save_target_patch(
-                &id,
-                status_patch("connecting", go_live_copy::COMPLETING_YOUTUBE),
-            )
-            .await;
-            // A saved event releases its preparation (and may stay upcoming);
-            // an instant broadcast completes.
-            let completed = match text(&target, "scheduledEventId") {
-                Some(event_id) => {
-                    let mut fields = json!({ "attemptId": target.get("scheduledAttemptId") });
-                    if let Some(session_id) = &session_id {
-                        fields["sessionId"] = Value::String(session_id.clone());
-                    }
-                    self.scheduled_operation("releasePreparation", &event_id, fields)
-                        .await
-                        .map(|result| {
-                            if result["lifecycleStatus"].as_str() == Some("ready") {
-                                go_live_copy::UPCOMING_EVENT_PRESERVED
-                            } else {
-                                go_live_copy::YOUTUBE_ENDED
-                            }
-                        })
-                }
-                None => {
-                    let params = json!({
-                        "accountId": text(&target, "accountId"),
-                        "broadcastId": text(&target, "platformBroadcastId"),
-                        "status": "complete",
-                    });
-                    self.backend
-                        .livestream_request(methods::YOUTUBE_TRANSITION, params)
-                        .await
-                        .and_then(|result| {
-                            // `assertYouTubeTransitionConfirmed(result, 'complete')`.
-                            lifecycle::youtube_transition_confirmed(&result, "complete").map_err(
-                                |message| {
-                                    RpcError::new(
-                                        methods::YOUTUBE_TRANSITION,
-                                        "not-confirmed",
-                                        message,
-                                    )
-                                },
-                            )
-                        })
-                        .map(|_| go_live_copy::YOUTUBE_ENDED)
-                }
-            };
-            let patch = match completed {
-                Ok(message) => status_patch("stopped", message),
-                Err(error) => {
-                    self.toast_youtube_broadcast(false, &id, &target, &error.message);
-                    // Plan 094: a `complete` refused on quota (not a saved
-                    // event's) or for a gone broadcast is settled.
-                    let (status, _settled) = lifecycle::youtube_completion_failure(
-                        Some(error.code.as_str()),
-                        text(&target, "scheduledEventId").is_some(),
-                        &error.message,
-                    );
-                    let mut patch = Map::new();
-                    patch.insert("status".into(), status);
-                    patch
-                }
-            };
-            self.save_target_patch(&id, patch).await;
-        }
-    }
-
     /// `showYouTubeBroadcastToast`.
-    fn toast_youtube_broadcast(&self, start: bool, id: &str, target: &Value, message: &str) {
+    pub(super) fn toast_youtube_broadcast(
+        &self,
+        start: bool,
+        id: &str,
+        target: &Value,
+        message: &str,
+    ) {
         let (title, description) = go_live_copy::youtube_broadcast_toast(
             start,
             &text(target, "label").unwrap_or_default(),
@@ -1201,7 +1070,7 @@ impl<B: StudioBackend> Studio<B> {
 
     /// Whether the platform lifecycle holds a prepared livestream.
     pub fn go_live_prepared(&self) -> bool {
-        self.lock_go_live_streaming().is_some()
+        self.platform.holds_owner()
     }
 }
 
