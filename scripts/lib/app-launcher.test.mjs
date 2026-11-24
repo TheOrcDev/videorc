@@ -26,6 +26,9 @@ import {
   devAppSpawnSpec,
   launchDevApp,
   releaseBackendFakeOriginRefusal,
+  smokeAppIsGpui,
+  smokeAppKind,
+  smokeAppLaunchRefusal,
   macosAppBundlePath,
   macosLaunchServicesAppSpawnSpec,
   performanceAppSpawnSpec,
@@ -1200,4 +1203,27 @@ test('the async dev backend prebuild keeps the event loop running and names its 
   assert.equal(slotCalls.length, 4, 'every build took a slot')
   assert.equal(await prebuildDevBackend({ spec: null, buildSlot }), null, 'opted out')
   assert.equal(slotCalls.length, 4, 'an opted-out prebuild takes no slot')
+})
+
+// Plan 260 S2.5: VIDEORC_APP picks the app; gpui is refused until S2.1 builds it.
+test('VIDEORC_APP picks electron or gpui, and gpui stops before launching until the app exists', async () => {
+  assert.equal(smokeAppKind({}), 'electron')
+  assert.equal(smokeAppKind({ VIDEORC_APP: '' }), 'electron')
+  assert.equal(smokeAppKind({ VIDEORC_APP: 'electron' }), 'electron')
+  assert.equal(smokeAppKind({ VIDEORC_APP: 'gpui' }), 'gpui')
+  assert.equal(smokeAppIsGpui({ VIDEORC_APP: 'gpui' }), true)
+  assert.throws(
+    () => smokeAppKind({ VIDEORC_APP: 'rust' }),
+    /must be "electron" \(the default\) or "gpui", not "rust"/
+  )
+  assert.equal(smokeAppLaunchRefusal({}, {}), null)
+  assert.match(
+    smokeAppLaunchRefusal({ VIDEORC_APP: 'gpui' }, {}),
+    /apps\/videorc\) does not exist yet/
+  )
+  assert.match(smokeAppLaunchRefusal({}, { VIDEORC_APP: 'gpui' }), /Plan 260 S2.1/)
+  await assert.rejects(
+    launchDevApp({ env: { VIDEORC_APP: 'gpui' }, timeoutMs: 1000 }),
+    /does not exist yet/
+  )
 })
