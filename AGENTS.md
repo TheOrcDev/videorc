@@ -33,7 +33,7 @@ Use the smallest gate that proves the change, then run the broader gate before h
 - Pre-push hook: `pnpm install` points git at `.githooks/`, whose `pre-push` runs format, lint and typecheck on what the push changes (plan 242 S20). Fix what it reports; `--no-verify` is for an emergency, never to get past a red check.
 - JS production advisory audit: `pnpm audit:js`
 - Node logic tests: `pnpm test:scripts`
-- UI registry drift (files synced from `@videorc`, `apps/desktop/ui-registry.json`; needs the network): `pnpm ui:check`
+- UI registry drift (needs the network): `pnpm ui:check`. It checks both flavours: React files synced from `@videorc` into `apps/desktop` (`apps/desktop/ui-registry.json`), and GPUI files synced from `@videorc-gpui` into `crates/videorc-kit` (`crates/videorc-kit/ui-registry.json`, plan 260), whose GPUI pin must also be the registry's. `--flavour react|gpui` checks one.
 - Desktop unit tests: `pnpm --filter @videorc/desktop test`
 - Desktop build: `pnpm build`
 - Preview lifecycle probe: `pnpm probe:preview-lifecycle`

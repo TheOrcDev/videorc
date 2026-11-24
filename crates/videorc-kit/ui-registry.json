@@ -1,0 +1,6 @@
+{
+  "$comment": "GPUI items synced from the @videorc-gpui registry (ui.videorc.com/r/gpui, source TheOrcDev/videorc-ui's registry-gpui.json; plan 260 S2.2b). pnpm ui:sync --flavour gpui <item> writes them into this crate, formatted with rustfmt; pnpm ui:check fails when one drifts or when the root Cargo.toml pins GPUI differently: edit them in videorc-ui, never here. src/lib.rs is this crate's own. keepLocal lists files (relative to this crate) an item would write that Videorc keeps as its own.",
+  "registry": "https://ui.videorc.com/r/gpui/{name}.json",
+  "items": [],
+  "keepLocal": []
+}
