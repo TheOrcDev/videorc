@@ -1,7 +1,7 @@
-//! The few icons the primitives draw themselves (`components/icons.tsx`
-//! names them): Phosphor, MIT, in the weight the React twin draws (regular,
-//! fill for an alert's tone, bold for the kebab's dots), as SVG masks the
-//! element's text colour tints. Screens bring their own icons.
+//! The icons the primitives draw themselves, and the Studio's, under the
+//! slot names `components/icons.tsx` gives them: Phosphor, MIT, in the
+//! weight the React twin draws (regular, fill for an alert's tone, bold for
+//! the kebab's dots), as SVG masks the element's text colour tints.
 
 use gpui::{Hsla, IntoElement, Styled, Svg, px, svg};
 
@@ -37,6 +37,14 @@ pub enum IconName {
     DotsThreeBold,
     /// `SpinnerIcon` (Phosphor's CircleNotch): work that is running.
     CircleNotch,
+    /// `LivestreamIcon` (Phosphor's Broadcast).
+    Broadcast,
+    /// `FrameIcon` (Phosphor's FrameCorners).
+    FrameCorners,
+    /// `AlertIcon` (Phosphor's WarningCircle).
+    WarningCircle,
+    /// `ExternalLinkIcon` (Phosphor's ArrowSquareOut): the preview's Pop out.
+    ArrowSquareOut,
 }
 
 impl IconName {
@@ -57,6 +65,10 @@ impl IconName {
             IconName::LockFill => include_bytes!("../icons/lock-key-fill.svg"),
             IconName::DotsThreeBold => include_bytes!("../icons/dots-three-bold.svg"),
             IconName::CircleNotch => include_bytes!("../icons/circle-notch.svg"),
+            IconName::Broadcast => include_bytes!("../icons/broadcast.svg"),
+            IconName::FrameCorners => include_bytes!("../icons/frame-corners.svg"),
+            IconName::WarningCircle => include_bytes!("../icons/warning-circle.svg"),
+            IconName::ArrowSquareOut => include_bytes!("../icons/arrow-square-out.svg"),
         }
     }
 }
