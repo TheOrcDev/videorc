@@ -16,7 +16,10 @@
 //! (`cx.set_menus`), `videorc://` links (`on_open_urls`), opening a URL,
 //! window activation.
 
+use std::sync::Arc;
+
 use gpui::Window;
+use videorc_app_core::desktop::camera_extension::CameraExtensionBinding;
 use videorc_app_core::desktop::permissions::{
     MediaAccessPermission, MediaAccessStatus, MediaPane, PermissionFuture,
 };
@@ -87,6 +90,13 @@ pub trait Platform: Send + Sync {
     /// The default asks nothing: the core asks for the screen on macOS only.
     fn request_screen_access(&self) -> OsResult<()> {
         Ok(())
+    }
+
+    /// Videorc Camera's extension request (`desktop::camera_extension`), or
+    /// `None` where the OS has no such extension: the core's controller then
+    /// reports the camera unavailable, with its reason. `None` by default.
+    fn camera_extension(&self) -> Option<Arc<dyn CameraExtensionBinding>> {
+        None
     }
 }
 

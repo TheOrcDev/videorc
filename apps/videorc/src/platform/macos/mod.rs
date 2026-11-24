@@ -2,7 +2,10 @@
 //! [`Platform`], as spike S0.7 (`spikes/gpui/spike-desktop/src/os.rs`)
 //! proved them under GPUI 0.3.14.
 
+pub mod camera_extension;
+
 use std::ffi::c_void;
+use std::sync::Arc;
 
 use gpui::Window;
 use objc2::ClassType;
@@ -13,6 +16,7 @@ use objc2_av_foundation::{
 };
 use objc2_foundation::{NSBundle, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use videorc_app_core::desktop::camera_extension::CameraExtensionBinding;
 use videorc_app_core::desktop::permissions::{
     MediaAccessPermission, MediaAccessStatus, MediaPane, PermissionFuture,
 };
@@ -206,5 +210,12 @@ impl Platform for MacOs {
     fn request_screen_access(&self) -> OsResult<()> {
         let _ = objc2_core_graphics::CGRequestScreenCaptureAccess();
         Ok(())
+    }
+
+    /// `OSSystemExtensionRequest` ([`camera_extension`]): only a Developer
+    /// ID signed bundle in /Applications succeeds; the core's controller
+    /// reports a dev build unavailable before anything is submitted.
+    fn camera_extension(&self) -> Option<Arc<dyn CameraExtensionBinding>> {
+        Some(Arc::new(camera_extension::SystemExtensionBinding))
     }
 }

@@ -52,7 +52,7 @@ use app::args;
 use app::bridge;
 use app::permissions::Permissions;
 use app::shell::{Shell, StatusLine, connection_text};
-use app::{capture, hotkeys, links, menus, sleep};
+use app::{camera, capture, hotkeys, links, menus, sleep};
 
 /// Electron's app id (`electron-builder.yml`), kept on every platform: the
 /// macOS bundle id, Videorc Camera's host, Linux's desktop entry and the
@@ -173,12 +173,13 @@ fn main() -> Result<()> {
     });
 
     // The typed client on the backend's socket. Its event filter grows as
-    // the screens land: `backend.ready` always arrives, and the sleep guard
-    // reads `recording.status`.
+    // the screens land: `backend.ready` always arrives, the sleep guard and
+    // the permission restarts read `recording.status`, and Videorc Camera's
+    // extension follows `virtualCamera.changed`.
     let (client, events) = BackendClient::start(
         supervisor.state(),
         ClientConfig {
-            filter: EventFilter::include([names::RECORDING_STATUS]),
+            filter: EventFilter::include([names::RECORDING_STATUS, camera::VIRTUAL_CAMERA_CHANGED]),
             logger: logger.clone(),
             ..ClientConfig::default()
         },
@@ -221,6 +222,13 @@ fn main() -> Result<()> {
         runtime.handle(),
         supervisor.restarter(),
         capture_state,
+        logger.clone(),
+    );
+    // Videorc Camera's extension: activated when the backend's switch is on.
+    let _camera = camera::Camera::install(
+        runtime.handle(),
+        supervisor.state(),
+        client.subscribe(),
         logger.clone(),
     );
     let deep_links: links::Links = Arc::new(DeepLinks::new(client.clone(), logger.clone()));
