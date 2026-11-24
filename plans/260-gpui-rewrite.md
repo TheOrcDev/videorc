@@ -1013,6 +1013,13 @@ land, the switch `VIDEORC_BACKEND_ROOM` stays a dev switch):
   this Mac records.
 - c4b's hand-picked screen or window: without it the stage's picker shares
   only the scene's own screen, a parity gap with today's room.
+- Echo cancellation (S1.8d, decided 2026-11-24, option B): the backend
+  plays the guests itself (S1.3b's CoreAudio monitor output on macOS; L5's
+  PipeWire and L6's WASAPI outputs later) and runs LiveKit's own libwebrtc
+  `AudioProcessingModule` (`livekit::webrtc::native::apm`, no new
+  dependency): the guest mix as the far end, every room microphone frame
+  (own tap or session tap) through it before it is published. Without it a
+  host on speakers echoes the guests back; today's room has the browser's.
 
 ### Phase 2: the shell, on all three platforms
 
