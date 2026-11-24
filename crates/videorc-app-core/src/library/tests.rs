@@ -10,9 +10,14 @@ use videorc_protocol::{
     SessionListItem, SessionLogEntry,
 };
 
+use std::sync::{Arc, Mutex};
+
 use super::markers::{MarkersState, SessionMarker};
 use super::page::*;
 use super::view::*;
+use super::*;
+use crate::client::{BackendEvent, RpcError};
+use videorc_protocol::BackendConnection;
 
 fn session(overrides: Value) -> SessionListItem {
     let mut base = json!({
@@ -552,6 +557,300 @@ fn cloud_modes_mov_imports_and_upper_case_mkv() {
     assert_eq!(session_format_label(&mov).as_deref(), Some("MOV"));
     let mkv = session(json!({"mode": "imported", "outputPath": "/m/Take.MKV"}));
     assert!(can_export_mp4(&mkv));
+}
+
+// ── The Library against a scripted backend ──────────────────────────────
+
+#[derive(Default)]
+struct Script {
+    calls: Vec<String>,
+    answers: BTreeMap<String, Result<Value, RpcError>>,
+}
+
+#[derive(Default)]
+struct Fake(Mutex<Script>);
+
+impl Fake {
+    fn answer(&self, method: &str, value: Value) {
+        self.0
+            .lock()
+            .unwrap()
+            .answers
+            .insert(method.to_string(), Ok(value));
+    }
+    fn refuse(&self, method: &str, error: RpcError) {
+        self.0
+            .lock()
+            .unwrap()
+            .answers
+            .insert(method.to_string(), Err(error));
+    }
+    fn calls(&self) -> Vec<String> {
+        self.0.lock().unwrap().calls.clone()
+    }
+}
+
+impl LibraryBackend for Fake {
+    async fn library_request(
+        &self,
+        method: &'static str,
+        params: Value,
+    ) -> Result<Value, RpcError> {
+        let mut script = self.0.lock().unwrap();
+        script.calls.push(format!("{method} {params}"));
+        script
+            .answers
+            .get(method)
+            .cloned()
+            .unwrap_or(Ok(Value::Null))
+    }
+}
+
+#[derive(Default)]
+struct Trash {
+    moved: Mutex<Vec<String>>,
+    fail: Mutex<usize>,
+}
+
+impl LibraryFiles for Trash {
+    async fn trash_session_deletion(&self, operation_id: &str) -> Result<TrashOutcome, String> {
+        self.moved.lock().unwrap().push(operation_id.to_string());
+        Ok(TrashOutcome {
+            deleted: true,
+            failed_count: *self.fail.lock().unwrap(),
+            session_id: String::new(),
+        })
+    }
+}
+
+fn library() -> (Arc<Library<Fake, Trash>>, Arc<Fake>, Arc<Trash>) {
+    let fake = Arc::new(Fake::default());
+    let trash = Arc::new(Trash::default());
+    fake.answer(
+        "sessions.list",
+        json!({"items": [
+            {"id": "s1", "title": "First", "startedAt": "2026-11-01T10:00:00Z", "status": "completed",
+             "mode": "record", "healthEventCount": 0, "sessionLogCount": 0, "aiArtifactCount": 0,
+             "commentCount": 0, "outputPath": "/r/s1.mkv", "finalizationState": "finalizing"},
+            {"id": "s2", "title": "Second", "startedAt": "2026-11-02T10:00:00Z", "status": "failed",
+             "mode": "record", "healthEventCount": 0, "sessionLogCount": 1, "aiArtifactCount": 0,
+             "commentCount": 0}
+        ], "nextCursor": "c1"}),
+    );
+    fake.answer("sessions.storage", json!({"count": 2, "totalBytes": 2048}));
+    fake.answer("sessions.delete.pending", json!([]));
+    fake.answer(
+        "sessions.logs.list",
+        json!({"entries": [{"id": "l", "sessionId": "s2", "level": "error",
+            "code": "session-start-failed", "message": "reason=No screen chosen.",
+            "sourceId": null, "permissionPane": null, "createdAt": "2026-11-02T10:00:00Z"}]}),
+    );
+    (
+        Arc::new(Library::new(fake.clone(), trash.clone())),
+        fake,
+        trash,
+    )
+}
+
+#[tokio::test]
+async fn refresh_reads_the_first_page_the_totals_and_the_refused_rows_logs() {
+    let (library, fake, _) = library();
+    library.refresh().await.unwrap();
+    let data = library.data();
+    assert!(data.loaded);
+    assert_eq!(data.sessions.len(), 2);
+    assert_eq!(data.next_cursor.as_deref(), Some("c1"));
+    assert_eq!(data.totals, Some((2, 2048)));
+    assert_eq!(data.logs.get("s2").map(Vec::len), Some(1));
+    let calls = fake.calls();
+    assert!(calls[0].starts_with("sessions.delete.pending"));
+    assert!(
+        calls
+            .iter()
+            .any(|call| call == "sessions.list {\"limit\":50}")
+    );
+    // Asked once only.
+    library.refresh().await.unwrap();
+    assert_eq!(
+        fake.calls()
+            .iter()
+            .filter(|call| call.starts_with("sessions.logs.list"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn load_more_appends_the_next_page_once() {
+    let (library, fake, _) = library();
+    library.refresh().await.unwrap();
+    fake.answer(
+        "sessions.list",
+        json!({"items": [
+            {"id": "s2", "title": "Second", "startedAt": "2026-11-02T10:00:00Z", "status": "failed",
+             "mode": "record", "healthEventCount": 0, "sessionLogCount": 1, "aiArtifactCount": 0, "commentCount": 0},
+            {"id": "s3", "title": "Third", "startedAt": "2026-10-02T10:00:00Z", "status": "completed",
+             "mode": "stream", "healthEventCount": 0, "sessionLogCount": 0, "aiArtifactCount": 0, "commentCount": 0}
+        ]}),
+    );
+    library.load_more().await.unwrap();
+    let data = library.data();
+    assert_eq!(
+        data.sessions
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        ["s1", "s2", "s3"]
+    );
+    assert_eq!(data.next_cursor, None);
+    assert!(
+        fake.calls()
+            .iter()
+            .any(|call| call == "sessions.list {\"cursor\":\"c1\",\"limit\":50}")
+    );
+}
+
+#[tokio::test]
+async fn rows_follow_the_export_and_a_finished_take_rereads_the_totals() {
+    let (library, fake, _) = library();
+    library.refresh().await.unwrap();
+    let mut done = finalization("s1", RecordingFinalizationState::Finalized);
+    done.mp4_path = Some("/r/s1.mp4".into());
+    fake.answer("sessions.storage", json!({"count": 2, "totalBytes": 4096}));
+    library.on_event(BackendEvent::RecordingFinalization(Box::new(done)));
+    let data = library.data();
+    assert_eq!(data.sessions[0].mp4_path.as_deref(), Some("/r/s1.mp4"));
+    for _ in 0..50 {
+        if library.data().totals == Some((2, 4096)) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(library.data().totals, Some((2, 4096)));
+}
+
+#[tokio::test]
+async fn a_delete_moves_each_operations_files_and_keeps_what_would_not_move() {
+    let (library, fake, trash) = library();
+    fake.answer(
+        "sessions.delete",
+        json!([{"operationId": "op-1", "sessionId": "s1", "pathCount": 1, "blockedPathCount": 0}]),
+    );
+    library.delete(&["s1".to_string()]).await.unwrap();
+    assert_eq!(*trash.moved.lock().unwrap(), ["op-1"]);
+    assert!(
+        fake.calls()
+            .iter()
+            .any(|call| call == "sessions.delete {\"sessionIds\":[\"s1\"]}")
+    );
+    *trash.fail.lock().unwrap() = 1;
+    assert_eq!(
+        library.delete(&["s1".to_string()]).await,
+        Err(DeleteError::FilesKept(
+            "1 file couldn't be moved to the Trash, so its recording was kept.".into()
+        ))
+    );
+    fake.refuse(
+        "sessions.delete",
+        RpcError::new("sessions.delete", "noise-cleanup-mutation-blocked", "busy"),
+    );
+    assert!(matches!(
+        library.delete(&["s1".to_string()]).await,
+        Err(DeleteError::Rpc(_))
+    ));
+}
+
+#[tokio::test]
+async fn rename_duplicate_import_and_markers_ask_the_backend_by_name() {
+    let (library, fake, _) = library();
+    library.rename("s1", "New name").await.unwrap();
+    fake.answer("sessions.duplicate", json!({"sessionId": "s1-copy"}));
+    assert_eq!(
+        library.duplicate("s1").await.unwrap().as_deref(),
+        Some("s1-copy")
+    );
+    fake.answer("sessions.import", json!({"sessionId": "imported"}));
+    assert_eq!(
+        library.import("resource:1", None).await.unwrap().as_deref(),
+        Some("imported")
+    );
+    fake.answer(
+        "session.markers.list",
+        json!({"markers": [{"id": "m1", "sessionId": "s1", "atSeconds": 12.5, "label": "Intro",
+            "source": "manual", "createdAt": "2026-11-01T10:00:12Z", "revision": 1}], "nextCursor": "n"}),
+    );
+    let (markers, cursor) = library.markers("s1", None).await.unwrap();
+    assert_eq!(markers[0].label.as_deref(), Some("Intro"));
+    assert_eq!(cursor.as_deref(), Some("n"));
+    library.rename_marker("s1", "m1", None).await.unwrap();
+    let calls = fake.calls();
+    for wanted in [
+        "sessions.rename {\"sessionId\":\"s1\",\"title\":\"New name\"}",
+        "sessions.duplicate {\"sessionId\":\"s1\"}",
+        "sessions.import {\"sourceCapability\":\"resource:1\"}",
+        "session.marker.rename {\"markerId\":\"m1\",\"sessionId\":\"s1\"}",
+    ] {
+        assert!(
+            calls.iter().any(|call| call == wanted),
+            "{wanted} in {calls:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_capture_start_and_end_read_the_list_again_and_marker_news_is_counted() {
+    let (library, fake, _) = library();
+    library.on_event(BackendEvent::Ready(BackendConnection {
+        host: "127.0.0.1".into(),
+        port: 4620,
+        token: "tok".into(),
+        pid: 1,
+        parent_pid: None,
+    }));
+    let lists = || {
+        fake.calls()
+            .iter()
+            .filter(|call| call.starts_with("sessions.list"))
+            .count()
+    };
+    for _ in 0..50 {
+        if lists() >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(library.data().server, Some((4620, "tok".into())));
+    assert!(library.data().online);
+    library.on_event(BackendEvent::RecordingStatus(Box::new(status(
+        RecordingState::Recording,
+        Some("s9"),
+    ))));
+    // A tick that repeats the state reads nothing.
+    library.on_event(BackendEvent::RecordingStatus(Box::new(status(
+        RecordingState::Recording,
+        Some("s9"),
+    ))));
+    library.on_event(BackendEvent::RecordingStatus(Box::new(status(
+        RecordingState::Idle,
+        Some("s9"),
+    ))));
+    for _ in 0..50 {
+        if lists() >= 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert_eq!(lists(), 3);
+    library.on_event(BackendEvent::Untyped {
+        event: MARKER_CREATED_EVENT.into(),
+        payload: json!({"sessionId": "s1"}),
+    });
+    assert!(library.data().marker_changes.contains_key("s1"));
+    library.on_event(BackendEvent::ConnectionClosed {
+        reason: "gone".into(),
+    });
+    assert!(!library.data().online);
 }
 
 // ── The page as one value ───────────────────────────────────────────────
