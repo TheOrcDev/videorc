@@ -21,6 +21,7 @@ pub mod guests;
 mod http;
 pub mod interruption;
 pub mod ledger;
+pub mod library;
 pub mod livestream;
 pub mod log;
 pub mod nav;
