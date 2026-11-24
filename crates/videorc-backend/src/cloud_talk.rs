@@ -966,6 +966,71 @@ impl CloudOverlayRect {
 
 /// `cloud.room.overlay`: what the host's renderer sends to the room.
 pub const CLOUD_ROOM_OVERLAY_EVENT: &str = "cloud.room.overlay";
+
+/// Plan 260 S1.8b: what the room's program pages draw of the presentation
+/// topics, once the backend holds the host seat and sends them (`room_host`):
+/// the Studio's chips and reasons read it, as they read the renderer's own
+/// publishers before. One event for every topic; each topic is present once
+/// it is the backend's (graphics first).
+pub const CLOUD_ROOM_PRESENTATION_EVENT: &str = "cloud.room.presentation";
+
+/// `cloud.room.presentation`'s payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudRoomPresentationEvent {
+    pub show_id: String,
+    /// The room's static graphics (captions, cards, banners, timers, the
+    /// chat box), as the renderer's `RoomGraphicsStatus` without its preview
+    /// (the Studio draws the preview from `cloud.graphics.snapshot` itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphics: Option<RoomPresentationStatus>,
+}
+
+/// One topic's delivery, as the program pages report it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomPresentationStatus {
+    pub enabled: bool,
+    pub state: RoomPresentationState,
+    /// Why it is not applied, in the Studio's words; null when it is.
+    pub reason: Option<String>,
+    pub revision: u64,
+    /// Each program page that applied the view it was sent, by identity.
+    pub observed: std::collections::BTreeMap<String, RoomPresentationObservation>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RoomPresentationState {
+    Off,
+    Preview,
+    Waiting,
+    Applied,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomPresentationObservation {
+    pub revision: u64,
+    pub output: PresentationOutput,
+    pub orientation: PresentationOrientation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum PresentationOutput {
+    Stream,
+    Recording,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PresentationOrientation {
+    #[serde(rename = "h")]
+    H,
+    #[serde(rename = "v")]
+    V,
+}
 /// `GET /cloud/overlays/{imageId}?token=`: an overlay's bytes.
 pub const OVERLAY_IMAGE_ROUTE: &str = "/cloud/overlays/{id}";
 /// The program page takes an overlay of at most 2 MiB (wire section 6.3).

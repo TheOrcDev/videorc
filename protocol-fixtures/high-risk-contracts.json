@@ -2844,6 +2844,22 @@
       "askedAt": "2026-11-08T12:05:00.000Z",
       "device": "computer"
     },
+    "roomPresentationEvent": {
+      "showId": "show_7f3a",
+      "graphics": {
+        "enabled": true,
+        "state": "waiting",
+        "reason": "Graphics sent; waiting for each output to apply it.",
+        "revision": 12,
+        "observed": {
+          "EG_program_wide": {
+            "revision": 12,
+            "output": "stream",
+            "orientation": "h"
+          }
+        }
+      }
+    },
     "settingsPatch": { "enabled": false, "holdMaxSeconds": 900, "holdImageScreenId": null },
     "testRunParams": {
       "outputs": [

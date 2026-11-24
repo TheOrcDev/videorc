@@ -159,6 +159,7 @@ import type {
   CloudRecordingsList,
   CloudRecordingStatus,
   CloudRoomOverlayEvent,
+  CloudRoomPresentationEvent,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
   CloudRoomRequest,
@@ -1096,6 +1097,7 @@ export interface BackendEventMap {
   'cloud.room.requests': CloudRoomRequest
   /** Plan 234 T3: an overlay for the host's renderer to send to the room. */
   'cloud.room.overlay': CloudRoomOverlayEvent
+  'cloud.room.presentation': CloudRoomPresentationEvent
   'cloud.clip.job': CloudClipJob
   'cloud.recordings.download': CloudRecordingDownloadEvent
   /** Plan 249 S22: one file of a separate-files import job. */
@@ -6970,6 +6972,35 @@ const cloudOpenFlagSchema = objectSchema({ open: booleanSchema }, { allowUnknown
 // in the event (`imageId` names them on the backend's HTTP server).
 const cloudOverlaySlotSchema = enumSchema(['card', 'takeover', 'hold'])
 const cloudOverlayOrientationSchema = enumSchema(['h', 'v'])
+// Plan 260 S1.8b: the presentation topics' delivery, from the backend's room
+// host. At most a few program pages observe one view.
+const roomPresentationStatusSchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    state: enumSchema(['off', 'preview', 'waiting', 'applied', 'failed']),
+    reason: nullableSchema(stringSchema({ maxLength: 512 })),
+    revision: numberSchema({ integer: true, min: 0 }),
+    observed: recordSchema(
+      objectSchema(
+        {
+          revision: numberSchema({ integer: true, min: 0 }),
+          output: enumSchema(['stream', 'recording']),
+          orientation: enumSchema(['h', 'v'])
+        },
+        { allowUnknown: false }
+      ),
+      { maxKeys: 32 }
+    )
+  },
+  { allowUnknown: false }
+)
+const cloudRoomPresentationEventSchema = objectSchema(
+  {
+    showId: boundedString,
+    graphics: optionalSchema(roomPresentationStatusSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomPresentationEvent>
 const cloudRoomOverlayEventSchema = unionSchema([
   objectSchema(
     {
@@ -8431,15 +8462,13 @@ export function isTypedBackendRpcMethod(method: string): method is BackendRpcMet
 
 export function validateBackendRpcParams(method: string, params: unknown): unknown {
   const contract = runtimeContracts[method as keyof typeof runtimeContracts] as
-    | RuntimeBackendRpcContract
-    | undefined
+    RuntimeBackendRpcContract | undefined
   return (contract?.params ?? boundedBackendParamsSchema).parse(params, `backend.${method}.params`)
 }
 
 export function validateBackendRpcResult(method: string, result: unknown): unknown {
   const contract = runtimeContracts[method as keyof typeof runtimeContracts] as
-    | RuntimeBackendRpcContract
-    | undefined
+    RuntimeBackendRpcContract | undefined
   return (contract?.result ?? boundedBackendPayloadSchema).parse(result, `backend.${method}.result`)
 }
 
@@ -8480,6 +8509,7 @@ const runtimeEventSchemas = {
   'cloud.state': cloudStatusSchema,
   'cloud.room.requests': cloudRoomRequestSchema,
   'cloud.room.overlay': cloudRoomOverlayEventSchema,
+  'cloud.room.presentation': cloudRoomPresentationEventSchema,
   'cloud.clip.job': cloudClipJobSchema,
   'cloud.recordings.download': cloudRecordingDownloadEventSchema,
   'cloud.iso.import': cloudIsoImportEventSchema,
@@ -8564,8 +8594,7 @@ const runtimeEventSchemas = {
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {
   const schema = runtimeEventSchemas[event as keyof typeof runtimeEventSchemas] as
-    | RuntimeSchema<unknown>
-    | undefined
+    RuntimeSchema<unknown> | undefined
   return (schema ?? boundedBackendPayloadSchema).parse(payload, `backend.event.${event}`)
 }
 
