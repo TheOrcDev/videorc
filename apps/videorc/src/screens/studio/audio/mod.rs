@@ -3,13 +3,19 @@
 //! (plan 201 D1), in the default look and Retro LCD. Words and state come
 //! from app-core (`audio_section`, `audio_mixer`, `audio_levels`); this
 //! module draws them on the kit and calls the Studio.
+//!
+//! ⌘/Ctrl+↑/↓ (P218) moves focus between the channel strips, as Electron's
+//! MixerChannels does for `[data-slot=channel-strip]`.
 
 mod meter;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, Context, Entity, EventEmitter, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding,
+    SharedString, Window, actions, div, prelude::*, px,
+};
 use tokio::sync::watch;
 use videorc_app_core::studio::audio_levels::MicLevels;
 use videorc_app_core::studio::audio_mixer::{
@@ -39,8 +45,21 @@ use super::transport::{AppStudio, OpenPage};
 
 use meter::{lcd_meter, meta_line, segmented_meter};
 
+actions!(studio_audio, [FocusPreviousStrip, FocusNextStrip]);
+
+/// Key context while focus is inside the Audio Mixer (P218).
+pub const KEY_CONTEXT: &str = "StudioAudio";
+
 /// How often a falling meter redraws while nothing new arrives.
 const METER_TICK: Duration = Duration::from_millis(33);
+
+/// Binds ⌘/Ctrl+↑/↓ for the Audio section; call once at start.
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("secondary-up", FocusPreviousStrip, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-down", FocusNextStrip, Some(KEY_CONTEXT)),
+    ]);
+}
 
 pub struct AudioSection {
     studio: Arc<AppStudio>,
@@ -56,9 +75,19 @@ pub struct AudioSection {
     mic_gain_live: bool,
     sys_gain_live: bool,
     settling: bool,
+    /// Focus target for the Microphone channel strip (P218).
+    mic_focus: FocusHandle,
+    /// Focus target for the System audio channel strip (P218).
+    sys_focus: FocusHandle,
 }
 
 impl EventEmitter<OpenPage> for AudioSection {}
+
+impl Focusable for AudioSection {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.mic_focus.clone()
+    }
+}
 
 impl AudioSection {
     pub fn new(
@@ -138,6 +167,8 @@ impl AudioSection {
             mic_gain_live: false,
             sys_gain_live: false,
             settling: false,
+            mic_focus: cx.focus_handle(),
+            sys_focus: cx.focus_handle(),
         };
 
         cx.spawn(async move |this, cx| {
@@ -328,6 +359,52 @@ impl AudioSection {
                 .set_system_audio_gain(SYSTEM_AUDIO_GAIN_DEFAULT)
                 .await;
         });
+    }
+
+    /// ⌘/Ctrl+↑: move focus to the previous channel strip (P218).
+    fn focus_previous_strip(
+        &mut self,
+        _: &FocusPreviousStrip,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_strip_focus(-1, window, cx);
+    }
+
+    /// ⌘/Ctrl+↓: move focus to the next channel strip (P218).
+    fn focus_next_strip(
+        &mut self,
+        _: &FocusNextStrip,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_strip_focus(1, window, cx);
+    }
+
+    fn move_strip_focus(&mut self, direction: i8, window: &mut Window, cx: &mut Context<Self>) {
+        let has_system = self.view.system_audio.is_some();
+        let mic_here = self.mic_focus.contains_focused(window, cx);
+        let sys_here = self.sys_focus.contains_focused(window, cx);
+        let index = if sys_here {
+            1
+        } else if mic_here {
+            0
+        } else if direction > 0 {
+            0
+        } else if has_system {
+            1
+        } else {
+            0
+        };
+        let next = index + direction as isize;
+        let target = match (next, has_system) {
+            (0, _) => Some(self.mic_focus.clone()),
+            (1, true) => Some(self.sys_focus.clone()),
+            _ => None,
+        };
+        if let Some(handle) = target {
+            handle.focus(window, cx);
+        }
     }
 }
 
@@ -812,16 +889,29 @@ impl Render for AudioSection {
             }
         });
         // No "Audio" heading (plan 235 D3); the Mixer keeps the name for
-        // screen readers via aria-label on the channels column.
+        // screen readers via aria-label on the channels column. Each strip
+        // is a focus target so ⌘/Ctrl+↑/↓ can move between them (P218).
         PanelSection::new(STUDIO_AUDIO_FOCUS).child(
             div()
+                .key_context(KEY_CONTEXT)
+                .on_action(cx.listener(Self::focus_previous_strip))
+                .on_action(cx.listener(Self::focus_next_strip))
                 .flex()
                 .flex_col()
                 .gap(px(0.))
                 .aria_label(words::AUDIO)
-                .child(mic)
+                .child(
+                    div()
+                        .id("studio-channel-strip-microphone")
+                        .track_focus(&self.mic_focus)
+                        .tab_index(0)
+                        .child(mic),
+                )
                 .children(system.map(|row| {
                     div()
+                        .id("studio-channel-strip-system-audio")
+                        .track_focus(&self.sys_focus)
+                        .tab_index(0)
                         .border_t_1()
                         .border_color(border)
                         .pt(px(size::GUTTER))

@@ -42,6 +42,7 @@ use transport::{OpenPage, Transport};
 /// Binds the page's keys; call once at start.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new(SPACE, ToggleRecord, Some(KEY_CONTEXT))]);
+    audio::bind_keys(cx);
 }
 
 pub struct StudioPage {
