@@ -27,6 +27,7 @@ import type {
   CloudRoomOpenParams,
   CloudRoomAvatarMotionParams,
   CloudRoomAvatarSetParams,
+  CloudRoomMediaSetParams,
   CloudRoomPresentationEvent,
   CloudRoomSceneCommitParams,
   CloudRoomRequest,
@@ -368,6 +369,7 @@ interface HighRiskContractFixtures {
     roomPresentationEvent: CloudRoomPresentationEvent
     roomAvatarSetParams: CloudRoomAvatarSetParams
     roomAvatarMotionParams: CloudRoomAvatarMotionParams
+    roomMicrophoneSetParams: CloudRoomMediaSetParams
     roomSceneCommitParams: CloudRoomSceneCommitParams
     // Plan 243 C1: another device on air, and a show waiting after a hand-off.
     statusOnAirElsewhere: CloudStatus
@@ -725,7 +727,8 @@ describe('shared high-risk protocol fixture', () => {
       roomPresentationEvent,
       roomAvatarSetParams,
       roomAvatarMotionParams,
-      roomSceneCommitParams
+      roomSceneCommitParams,
+      roomMicrophoneSetParams
     } = fixtures.cloud
     expect(jsonShape(validateBackendEventPayload('cloud.state', statusTalk))).toEqual(statusTalk)
     expect(jsonShape(validateBackendRpcResult('cloud.room.open', statusTalk))).toEqual(statusTalk)
@@ -776,6 +779,21 @@ describe('shared high-risk protocol fixture', () => {
     expect(
       jsonShape(validateBackendRpcParams('cloud.room.scene.commit', roomSceneCommitParams))
     ).toEqual(roomSceneCommitParams)
+    // Plan 260 S1.8c: the host's microphone, in the bridge's own bounds.
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.microphone.set', roomMicrophoneSetParams))
+    ).toEqual(roomMicrophoneSetParams)
+    expect(validateBackendRpcParams('cloud.room.microphone.set', { microphone: null })).toEqual({
+      microphone: null
+    })
+    for (const microphone of [
+      { ...roomMicrophoneSetParams.microphone, gainDb: 30 },
+      { ...roomMicrophoneSetParams.microphone, offsetMs: 1001 },
+      { ...roomMicrophoneSetParams.microphone, deviceId: '' },
+      { ...roomMicrophoneSetParams.microphone, noise: 'loud' }
+    ]) {
+      expect(() => validateBackendRpcParams('cloud.room.microphone.set', { microphone })).toThrow()
+    }
     expect(() =>
       validateBackendRpcParams('cloud.room.scene.commit', {
         ...roomSceneCommitParams,

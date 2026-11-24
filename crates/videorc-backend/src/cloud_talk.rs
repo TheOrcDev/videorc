@@ -989,6 +989,15 @@ pub struct CloudRoomAvatarSetParams {
     pub guests: Option<bool>,
 }
 
+/// `cloud.room.microphone.set` (plan 260 S1.8c): the host's microphone for
+/// the backend's room, in the room microphone bridge's own settings shape;
+/// `null` takes it off. The camera's device and effects join it in c2.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CloudRoomMediaSetParams {
+    pub(crate) microphone: Option<crate::room_microphone::Settings>,
+}
+
 /// One scene background picture, immutable and named by its hash.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

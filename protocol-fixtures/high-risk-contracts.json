@@ -2870,6 +2870,15 @@
       },
       "guests": false
     },
+    "roomMicrophoneSetParams": {
+      "microphone": {
+        "deviceId": "microphone:coreaudio:7",
+        "gainDb": 4.5,
+        "muted": false,
+        "noise": "rnnoise",
+        "offsetMs": 40
+      }
+    },
     "roomAvatarMotionParams": {
       "message": {
         "v": 1,

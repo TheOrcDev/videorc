@@ -8388,6 +8388,17 @@ mod tests {
             serde_json::from_value(scene.clone()).unwrap();
         assert_eq!(serde_json::to_value(&params).unwrap(), scene);
         assert_eq!(params.assets[0].mime, "image/webp");
+        // `cloud.room.microphone.set`: the room microphone bridge's settings.
+        let microphone = high_risk_fixture("/cloud/roomMicrophoneSetParams");
+        let params: crate::cloud_talk::CloudRoomMediaSetParams =
+            serde_json::from_value(microphone.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&params).unwrap(), microphone);
+        assert!(
+            params
+                .microphone
+                .as_ref()
+                .is_some_and(|settings| settings.valid())
+        );
         // `cloud.room.avatar.motion` carries one motion message as it is.
         let motion = high_risk_fixture("/cloud/roomAvatarMotionParams");
         assert!(motion["message"].is_object());
