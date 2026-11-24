@@ -57,6 +57,7 @@ actions!(
         ToggleStreamManager,
         ToggleCaptions,
         OpenReleaseNotes,
+        ToggleSearch,
     ]
 );
 
@@ -262,6 +263,12 @@ const WINDOWS: &[WindowId] = &[WindowId::StreamManager];
 /// get theirs as they are ported.
 pub fn install(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new(
+            "secondary-k",
+            ToggleSearch,
+            Some("!Dialog && !Popover && !Select && !Menu"),
+        ),
+        KeyBinding::new("secondary-k", ToggleSearch, Some("CommandPalette")),
         KeyBinding::new("secondary-,", ShowSettings, None),
         KeyBinding::new("secondary-/", ShowShortcuts, None),
     ]);

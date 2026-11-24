@@ -32,7 +32,8 @@
     "dropdown-menu",
     "context-menu",
     "kebab-menu",
-    "kebab-context-menu"
+    "kebab-context-menu",
+    "command"
   ],
   "keepLocal": []
 }

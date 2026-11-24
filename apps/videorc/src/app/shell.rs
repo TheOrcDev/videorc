@@ -4,6 +4,7 @@
 //! line. The screens fill the pages in Phase 3; the kit (`videorc-kit`)
 //! replaces these plain elements when it lands.
 
+use crate::screens::command_palette::{Command, CommandPalette};
 use crate::screens::settings::{Navigate, SettingsScreen};
 use gpui::{Context, Entity, Focusable, Window, div, prelude::*, px};
 use videorc_app_core::nav::{self, PageId, ZONES};
@@ -76,6 +77,7 @@ pub struct Shell {
     output: Entity<OutputPanel>,
     settings: Entity<SettingsScreen>,
     health: Entity<crate::screens::health::HealthScreen>,
+    palette: Entity<CommandPalette>,
 }
 
 impl Shell {
@@ -88,6 +90,7 @@ impl Shell {
         output: Entity<OutputPanel>,
         settings: Entity<SettingsScreen>,
         health: Entity<crate::screens::health::HealthScreen>,
+        palette: Entity<CommandPalette>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -107,6 +110,27 @@ impl Shell {
             this.open_page(*page, window, cx);
         })
         .detach();
+        cx.subscribe_in(
+            &palette,
+            window,
+            |this, _, command: &Command, window, cx| match command {
+                Command::Page(page) => this.open_page(*page, window, cx),
+                Command::Settings(tab) => this.open_settings(Some(*tab), window, cx),
+                Command::Setup => {
+                    this.open_page(PageId::Settings, window, cx);
+                    this.settings
+                        .update(cx, |settings, cx| settings.open_setup(window, cx));
+                }
+                Command::Preview => this
+                    .preview
+                    .update(cx, |preview, cx| preview.toggle_floating(cx)),
+                Command::StreamManager => {
+                    window.dispatch_action(Box::new(super::menus::ToggleStreamManager), cx)
+                }
+                _ => {}
+            },
+        )
+        .detach();
         Self {
             page: PageId::Studio,
             backend,
@@ -117,7 +141,16 @@ impl Shell {
             output,
             settings,
             health,
+            palette,
         }
+    }
+
+    pub fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings
+            .update(cx, |settings, cx| settings.disarm_shortcut(cx));
+        self.palette
+            .update(cx, |palette, cx| palette.toggle(window, cx));
+        window.activate_window();
     }
 
     pub fn open_settings(
@@ -237,6 +270,11 @@ impl Render for Shell {
         let output = self.output.clone();
         div()
             .size_full()
+            .on_action(
+                cx.listener(|this, _: &super::menus::ToggleSearch, window, cx| {
+                    this.toggle_search(window, cx)
+                }),
+            )
             .font_family(FONT)
             .flex()
             .flex_col()
@@ -324,7 +362,18 @@ impl Render for Shell {
                                     })),
                             ),
                     )
-                    .child(div().text_color(hsla(t.muted_foreground)).child(connection)),
+                    .child(div().text_color(hsla(t.muted_foreground)).child(connection))
+                    .child(
+                        videorc_kit::status_bar::StatusBarHint::new(
+                            "search",
+                            "Search",
+                            ShortcutKeys::for_action(&super::menus::ToggleSearch),
+                        )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_search(window, cx)),
+                        ),
+                    ),
             )
+            .child(self.palette.clone())
     }
 }
