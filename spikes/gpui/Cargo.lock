@@ -5211,6 +5211,8 @@ dependencies = [
  "serde_json",
  "spike-summary",
  "trash",
+ "x11rb",
+ "zbus 5.19.0",
 ]
 
 [[package]]

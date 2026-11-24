@@ -138,12 +138,49 @@ events; idle draws nothing).
   them (`gpui-pre-macos` `system_notifications.rs`), so `os::can_notify`
   reports it as an error instead.
 
+## Verdicts on Linux (ogre, 2026-11-24, lane L5)
+
+ogre: Omarchy, Hyprland 0.56.2, release build, clocks pinned at 800 MHz.
+The owner's session was locked, so the spike ran in a **nested Hyprland**
+on the lab output, on Wayland and on its Xwayland, with a **private session
+bus** carrying stand-ins for the desktop's services
+([`linux/fake-session-services.py`](linux/fake-session-services.py):
+`org.freedesktop.Notifications` and `org.freedesktop.ScreenSaver`, each call
+logged) and a private `XDG_DATA_HOME`. The checks were pressed through
+AT-SPI by role and name ([`linux/press.py`](linux/press.py); the buttons
+now carry `Role::Button` and their label), since Linux has no native menu
+bar to drive instead. `src/os.rs` now has a Linux half.
+
+| # | Check | Wayland | X11 (Xwayland) | Verdict |
+| --- | --- | --- | --- | --- |
+| 1 | Menus | `cx.set_menus` stores them (`get_menus`); GPUI draws no menu bar on Linux | Same | **The app draws its menus**, as Zed does and as on Windows |
+| 2 | Title bar | Not run: the nested compositor takes no synthetic pointer drags | Same | **NOT RUN** |
+| 3 | Global shortcut | `global-hotkey` reports registered but has no Wayland backend | Ctrl+Alt+Shift+R through XTEST: 2 presses, 2 `[spike] hotkey` | **X11 PASS; Wayland gap:** the GlobalShortcuts portal (plan 257) |
+| 4 | Deep link, cold | `videorc-spike://hello?from=cold-start` on the command line: arrived 0.6 ms after start, before the main window | Same | **PASS** (the `.desktop` file that makes the scheme start the app was not installed: it writes into the owner's desktop database) |
+| 5 | One instance | A second start with `videorc-spike://warm` handed over and exited 0; the first got the link 15 s in | Same code | **PASS** |
+| 6 | Keep on top | No protocol: reported as a gap | `_NET_WM_STATE_ABOVE` sent; **Hyprland's Xwayland window manager does not set it** (level stays 0) | **Gap:** Wayland has no window level (a compositor rule or layer-shell); EWMH untested on a real X window manager |
+| 7 | Hide from stream | No protocol: reported as a gap | No protocol | **Gap** (plan 257 D8): the backend's capture filter, or a compositor rule such as Hyprland's `no_screen_share` |
+| 8 | Sleep guard | `org.freedesktop.ScreenSaver.Inhibit` → cookie 1, `UnInhibit` on toggle off (the stand-in's log) | Same | **PASS** (the call Chromium makes for Electron's `powerSaveBlocker`; hypridle answers it) |
+| 9 | Notification | `Notify` arrived: app and summary "spike-desktop", body "Notification 1 from GPUI", a `default` action | Same | **PASS** (through notify-rust on the session bus) |
+| 10 | Files | Show in Finder ran `xdg-open` on the folder (Nautilus opened it); Move to Trash put the sample in `/tmp/.Trash-1000` (the freedesktop per-mount trash); Open… needs the FileChooser portal, absent on the private bus; drop not run | Same | **Reveal and Trash PASS; Open… untested here** (needs `xdg-desktop-portal`, which the owner's session has) |
+
+Cost: 2.8 % of one core over a 46 s Wayland run, 89.7 MB peak, first
+frame 935 ms (Wayland) and 826 ms (X11) after start at 800 MHz.
+
+Found on Linux:
+
+- `reveal_path` with no FileManager1 on the bus falls back to `xdg-open`
+  on the folder, which starts the file manager.
+- The freedesktop trash puts a file from `/tmp` in `/tmp/.Trash-1000`,
+  not the home Trash; the app's recordings live in the home directory, so
+  theirs go to the home Trash.
+
 ## Windows and Linux
 
 The window, menus, global shortcut, links on the command line, one
 instance, notifications, files and the summary are cross-platform code.
-Each `os.rs` call (hide from capture, keep on top, sleep guard) returns
-`Err("… not written for <os> yet")` there and counts as a `[spike] error`:
+On Windows each `os.rs` call (hide from capture, keep on top, sleep guard)
+returns `Err("… not written for <os> yet")` and counts as a `[spike] error`:
 
 - **Windows (WC-0.9):** `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`,
   `HWND_TOPMOST`, `SetThreadExecutionState(ES_DISPLAY_REQUIRED |
@@ -151,9 +188,10 @@ Each `os.rs` call (hide from capture, keep on top, sleep guard) returns
   `HKCU\Software\Classes`, an AppUserModelID for notifications, and
   Windows' caption buttons in the header (`WindowControlArea::Min`, `Max`,
   `Close`, so snap layouts show on the maximise button).
-- **Linux (L5):** the Inhibit portal, a `.desktop` file for the scheme,
-  the GlobalShortcuts portal on Wayland (`global-hotkey` only covers X11),
-  and what Hide from stream can be there (plan 257 D8).
+- **Linux (L5):** written and run (above): the ScreenSaver inhibitor,
+  EWMH keep on top on X11, and the gaps that stay: the GlobalShortcuts
+  portal on Wayland (`global-hotkey` only covers X11), a `.desktop` file for
+  the scheme, and what Hide from stream can be there (plan 257 D8).
 
 Neither target could be checked from this Mac (the Windows build needs
 `llvm-rc`, the Linux build the Wayland libraries), so the first build on

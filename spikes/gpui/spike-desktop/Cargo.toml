@@ -22,3 +22,10 @@ trash = "5"
 objc2 = "0.6"
 objc2-foundation = "0.3.2"
 objc2-app-kit = { version = "0.3.2", features = ["NSView", "NSWindow", "NSResponder", "NSPanel", "NSGraphics"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The sleep guard (org.freedesktop.ScreenSaver on the session bus) and keep
+# on top (EWMH on X11), plan 260 S0.7 on Linux.
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+x11rb = "0.13"
+

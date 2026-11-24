@@ -184,8 +184,13 @@ fn button(
     label: impl Into<SharedString>,
     on: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let label: SharedString = label.into();
+    // A role and a name, so a UI driver (AT-SPI on Linux, where there is no
+    // native menu bar to drive instead) can find and press each check.
     div()
         .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
         .h(px(28.))
         .px_3()
         .flex()
@@ -200,7 +205,7 @@ fn button(
         .active(|s| s.bg(rgb(0x2e2e2e)))
         .cursor_pointer()
         .on_click(move |_, window, cx| on(window, cx))
-        .child(label.into())
+        .child(label)
 }
 
 fn row(title: &'static str, detail: String, control: impl IntoElement) -> impl IntoElement {
