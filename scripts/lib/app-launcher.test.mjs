@@ -1067,7 +1067,7 @@ test('dev backend prebuild failures name the compile race instead of GPU noise',
   assert.match(missing, /could not start/)
 })
 
-test('a fake API origin refuses the release dev backend, which would call the real service', async () => {
+test('debug-only backend env refuses the release dev backend, which would call the real service or run signed out', async () => {
   const fake = { VIDEORC_DISCORD_API_BASE_URL: 'http://127.0.0.1:4555' }
   const refusal = releaseBackendFakeOriginRefusal(fake, { VIDEORC_DEV_BACKEND_PROFILE: 'release' })
   assert.match(refusal, /VIDEORC_DISCORD_API_BASE_URL only works with the debug backend/)
@@ -1081,6 +1081,35 @@ test('a fake API origin refuses the release dev backend, which would call the re
     ),
     /VIDEORC_YOUTUBE_API_BASE_URL/
   )
+  // The Videorc API origin and the mock account are debug-only too (videorc_api.rs, account.rs).
+  assert.match(
+    releaseBackendFakeOriginRefusal(
+      { VIDEORC_DEV_BACKEND_PROFILE: 'release', VIDEORC_API_BASE_URL: 'http://127.0.0.1:1' },
+      {}
+    ),
+    /VIDEORC_API_BASE_URL only works with the debug backend.*calls the real Videorc API/
+  )
+  assert.match(
+    releaseBackendFakeOriginRefusal(
+      { VIDEORC_MOCK_ACCOUNT: 'baseline' },
+      {
+        VIDEORC_DEV_BACKEND_PROFILE: 'release'
+      }
+    ),
+    /VIDEORC_MOCK_ACCOUNT only works with the debug backend.*runs signed out/
+  )
+  assert.match(
+    releaseBackendFakeOriginRefusal(
+      {
+        VIDEORC_DEV_BACKEND_PROFILE: 'release',
+        VIDEORC_API_BASE_URL: 'http://127.0.0.1:1',
+        VIDEORC_MOCK_ACCOUNT: 'baseline'
+      },
+      {}
+    ),
+    /VIDEORC_API_BASE_URL, VIDEORC_MOCK_ACCOUNT .*calls the real Videorc API and runs signed out/
+  )
+  assert.equal(releaseBackendFakeOriginRefusal({ VIDEORC_MOCK_ACCOUNT: 'baseline' }, {}), null)
   // Debug backend, or no fake origin: launch as before.
   assert.equal(releaseBackendFakeOriginRefusal(fake, {}), null)
   assert.equal(
