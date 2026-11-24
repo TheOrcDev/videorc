@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use gpui::{Context, Entity, EventEmitter, Window, div, prelude::*, px};
 use videorc_app_core::nav::PageId;
+use videorc_app_core::settings_page::SettingsTab;
 use videorc_app_core::studio::cloud::CloudState;
 use videorc_app_core::studio::inspector::StartGates;
 use videorc_app_core::studio::screen_views::{
@@ -164,7 +165,7 @@ impl GoLiveFace {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenPage {
     pub page: PageId,
-    pub settings_tab: Option<&'static str>,
+    pub settings_tab: Option<SettingsTab>,
 }
 
 impl OpenPage {
@@ -175,7 +176,7 @@ impl OpenPage {
         }
     }
 
-    pub const fn settings(tab: &'static str) -> Self {
+    pub const fn settings(tab: SettingsTab) -> Self {
         Self {
             page: PageId::Settings,
             settings_tab: Some(tab),

@@ -25,7 +25,7 @@ use videorc_app_core::studio::screen_views::{
     CLOSE_THE_ROOM_UNAVAILABLE, PREVIEW_REPLACED_BY_SHOW_STAGE, SHOW_HERE_LABEL,
 };
 use videorc_kit::icon::{IconName, icon};
-use videorc_kit::theme::{self, hsla};
+use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
 use videorc_kit::{Button, ButtonSize, ButtonVariant};
 use videorc_preview::lifecycle::WindowMode;
