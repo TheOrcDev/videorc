@@ -120,7 +120,16 @@ export const RUST_READS_DESKTOP_FILES = Object.freeze([
   'apps/desktop/src/renderer/src/lib/buddy-tab-view.ts',
   'apps/desktop/src/renderer/src/lib/cohost-view.ts',
   // chat::highlight's shared words are checked against it (S1.6e part 1).
-  'apps/desktop/src/renderer/src/lib/studio-actions/studio-context.ts'
+  'apps/desktop/src/renderer/src/lib/studio-actions/studio-context.ts',
+  // desktop::global_shortcuts' tests read these (plan 260 S1.6f).
+  'apps/desktop/src/renderer/src/lib/global-shortcuts.ts',
+  'apps/desktop/src/renderer/src/components/settings/shortcuts-settings.tsx',
+  'apps/desktop/src/renderer/src/lib/go-live-copy.ts',
+  // desktop::accelerator's and shortcuts' tests read these (plan 260 S1.6f).
+  'apps/desktop/src/renderer/src/lib/accelerator.ts',
+  'apps/desktop/src/renderer/src/lib/global-shortcut-owner.ts',
+  'apps/desktop/src/renderer/src/lib/shortcuts.ts',
+  'apps/desktop/src/renderer/src/lib/shortcut-recorder.ts'
 ])
 
 export function isRustReachableDesktopPath(path) {
