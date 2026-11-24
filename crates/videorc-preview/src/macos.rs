@@ -446,7 +446,12 @@ impl Presenter {
             .name("videorc-layer-presenter".to_string())
             .spawn(move || {
                 let device = thread_device.0;
-                let worker = match Worker::new(device, thread_stamps, anchor) {
+                // A plain Rust thread has no autorelease pool: setup gets its
+                // own (the retained objects the worker keeps outlive it), and
+                // every command another one (`Worker::run`).
+                let built =
+                    objc2::rc::autoreleasepool(|_| Worker::new(device, thread_stamps, anchor));
+                let worker = match built {
                     Ok(worker) => {
                         let _ = ready_tx.send(Ok(()));
                         worker
@@ -621,23 +626,36 @@ impl Worker {
 
     fn run(mut self, inbox: Receiver<Command>) {
         while let Ok(command) = inbox.recv() {
-            match command {
-                Command::AddLayer { id, layer } => {
-                    self.layers.retain(|attached| attached.id != id);
-                    self.layers.push(AttachedLayer {
-                        id,
-                        layer: layer.0.0,
-                    });
-                }
-                Command::RemoveLayer { id } => {
-                    self.layers.retain(|attached| attached.id != id);
-                }
-                Command::Present(request) => {
-                    let report = self.present(&request);
-                    let _ = request.reply.send(report);
-                }
-                Command::Quit => break,
+            if matches!(command, Command::Quit) {
+                break;
             }
+            // One pool per command, drained before the next: Metal's
+            // autoreleased objects (the command buffer, its encoder, the
+            // drawable) would otherwise pile up for the thread's life. A
+            // present's pool drains after `waitUntilCompleted`, on every
+            // path out of `present`.
+            objc2::rc::autoreleasepool(|_| self.handle(command));
+        }
+    }
+
+    fn handle(&mut self, command: Command) {
+        match command {
+            Command::AddLayer { id, layer } => {
+                self.layers.retain(|attached| attached.id != id);
+                self.layers.push(AttachedLayer {
+                    id,
+                    layer: layer.0.0,
+                });
+            }
+            Command::RemoveLayer { id } => {
+                self.layers.retain(|attached| attached.id != id);
+            }
+            Command::Present(request) => {
+                let report = self.present(&request);
+                let _ = request.reply.send(report);
+            }
+            // `run` stops before handing it here.
+            Command::Quit => {}
         }
     }
 

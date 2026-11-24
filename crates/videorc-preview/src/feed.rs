@@ -83,9 +83,11 @@ pub use crate::stats::FeedReport;
 use crate::stats::attach_stamps;
 use crate::stats::{LayerFrameRecord, LayerRunSummary, Series, percentile};
 
-/// The presenter must answer within this after a frame is handed over (the
-/// spike's `BIND_DEADLINE`); a frame that misses it is released anyway so
-/// the next one can be leased.
+/// The presenter should answer within this after a frame is handed over
+/// (the spike's `BIND_DEADLINE`); a frame that misses it counts as dropped.
+/// Its lease is still held until the presenter answers (its GPU work is
+/// done) or its thread is gone: elapsed time never lets the backend reuse a
+/// surface the presenter may still sample ([`await_layer`]).
 const PRESENT_DEADLINE: Duration = Duration::from_millis(250);
 /// After a dropped socket or a failed session, before the next try
 /// (`ENGINE_RECONNECT_DELAY`).
@@ -1124,6 +1126,9 @@ struct FrameReady {
 struct Lease {
     socket: BackendSocket,
     outstanding: Option<String>,
+    /// This side closed the socket to free a lease whose outcome was lost
+    /// (the socket's own state may not say so until its reader ends).
+    abandoned: bool,
 }
 
 impl Lease {
@@ -1139,14 +1144,32 @@ impl Lease {
         if let Some(revision) = ready.scene_revision {
             params["sceneRevision"] = json!(revision);
         }
-        let payload = self
+        // The id is outstanding from the moment the request goes out: when
+        // its answer is lost (the reply missed its deadline), the backend may
+        // hold the lease on this socket, and only a release by id (or the
+        // socket closing) frees it. Forgetting it would leave every later
+        // acquire busy.
+        self.outstanding = Some(lease_id.clone());
+        let payload = match self
             .socket
             .request("preview.surface.frame.acquire", params)
-            .await?;
+            .await
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                if error.is_outcome_unknown() {
+                    self.give_back_unknown().await;
+                } else {
+                    // The backend answered: it holds nothing.
+                    self.outstanding = None;
+                }
+                return Err(error.into());
+            }
+        };
         if payload.is_null() {
+            self.outstanding = None;
             return Ok(None);
         }
-        self.outstanding = Some(lease_id.clone());
         let frame: CompositorFrameReady = match serde_json::from_value(payload) {
             Ok(frame) => frame,
             Err(error) => {
@@ -1171,6 +1194,35 @@ impl Lease {
             frame_scene_revision: frame.frame_scene_revision.or(frame.scene_revision),
             frame_age_ms: frame.frame_age_ms,
         }))
+    }
+
+    /// An acquire whose outcome is unknown: release the id it named (a
+    /// backend that never granted it answers so, and nothing is held). When
+    /// that answer is lost too, the socket closes: the backend frees a closed
+    /// socket's lease, and the closed socket ends this session, which the
+    /// feed starts again after `RETRY_DELAY`.
+    async fn give_back_unknown(&mut self) {
+        let Some(lease_id) = self.outstanding.take() else {
+            return;
+        };
+        let released = self
+            .socket
+            .request(
+                "preview.surface.frame.release",
+                json!({ "leaseId": lease_id }),
+            )
+            .await;
+        if let Err(error) = released
+            && error.is_outcome_unknown()
+        {
+            self.abandoned = true;
+            self.socket.close().await;
+        }
+    }
+
+    /// The socket can still lease frames.
+    fn is_live(&self) -> bool {
+        !self.abandoned && self.socket.is_open()
     }
 
     async fn release(&mut self) -> Result<()> {
@@ -1511,6 +1563,7 @@ async fn session(
     let mut lease = Lease {
         socket: lease_socket,
         outstanding: None,
+        abandoned: false,
     };
 
     // Subscribe before the surface exists so the first frame is not lost.
@@ -2247,7 +2300,7 @@ async fn present_one(
                 t.last_error = Some(format!("{error:#}"));
             }
             // A dead lease socket ends the session; a refused frame does not.
-            if !lease.socket.is_open() {
+            if !lease.is_live() {
                 return Err(error);
             }
             config
@@ -2305,8 +2358,7 @@ async fn present_one(
         return Ok(None);
     }
 
-    let layer_report = layer_reply
-        .map(|reply| tokio::task::block_in_place(|| reply.recv_timeout(PRESENT_DEADLINE)));
+    let layer_report = layer_reply.map(|reply| tokio::task::block_in_place(|| await_layer(&reply)));
     let mut texture_bound_at: Option<Instant> = None;
     let mut next: Option<FrameReady> = None;
     if let Some(rx) = bound_rx {
@@ -2377,6 +2429,27 @@ async fn present_one(
         layer_record,
     );
     Ok(next)
+}
+
+/// The presenter's answer for one frame. On time: the report. Late: the
+/// frame counts as missed (`Timeout`), but this still waits for the answer
+/// (the presenter sends it once every command buffer that samples the
+/// surface has completed) or for the presenter's thread to end, before the
+/// caller releases the lease. The wait is bounded by the presenter's own
+/// work: `nextDrawable` gives up after a second, and no other request is
+/// queued ahead of this one (the loop holds one lease at a time).
+fn await_layer<T>(
+    reply: &std::sync::mpsc::Receiver<T>,
+) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+    match reply.recv_timeout(PRESENT_DEADLINE) {
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            // Ownership stays with the presenter until it answers; what it
+            // answers late is not counted as a present.
+            let _ = reply.recv();
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        }
+        answered => answered,
+    }
 }
 
 /// The layer's present of one leased frame: the presenter's answer, when a

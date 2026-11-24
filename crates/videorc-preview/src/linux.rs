@@ -4,20 +4,26 @@
 //! itself, outside Slint's redraw.
 //!
 //! - **Wayland:** a `wl_subsurface` of the host window's own `wl_surface`,
-//!   fed by a `wl_shm` pool over the ring's memory file, one `wl_buffer` per
-//!   slot. A frame is `attach` + `damage` + `commit` of the leased slot; the
-//!   lease is held until the compositor's `release` (the reader thread
-//!   waits on the report). Viewporter scales the buffer to the slot on the
-//!   compositor's side; the subsurface follows the slot through
-//!   `set_position` (applied with the parent's commit, the same frame Slint
-//!   lays the slot out) and `set_destination`. The app copies no pixels.
+//!   fed by a `wl_shm` pool of the presenter's own: three buffers of the
+//!   frame's size in a memory file of its own. A frame is a copy of the
+//!   leased slot into a buffer the compositor has released, then `attach` +
+//!   `damage` + `commit`; the ring's lease goes back once the copy is done.
+//!   Wayland allows reusing a buffer only after its `release`, and no
+//!   deadline stands in for that: a pool over the ring itself would either
+//!   hold the ring's one reader lease until the compositor lets go (some
+//!   keep a buffer until the next one replaces it) or let the writer
+//!   overwrite pixels the compositor still reads. Viewporter scales the
+//!   buffer to the slot on the compositor's side; the subsurface follows the
+//!   slot through `set_position` (applied with the parent's commit, the same
+//!   frame the UI lays the slot out) and `set_destination`.
 //! - **X11** (XWayland on ogre; a real X server speaks the same
 //!   extensions): a child window of the host window, fed by MIT-SHM 1.2 fd
 //!   passing over the same memory file. A frame is one `shm::put_image`
 //!   from the slot's offset into a pixmap of the frame's size, then an
 //!   XRender composite of that pixmap, scaled to the child, so the picture
 //!   fits the slot as viewporter fits it on Wayland. The `ShmCompletion`
-//!   event is the release.
+//!   event is the release, and the lease is held until it arrives (the
+//!   server answers a put in order; only a dead connection ends the wait).
 //!
 //! Both are the "layer route" of the element on Linux, named
 //! `wl-shm-subsurface` or `x11-shm-child-window` in the surface's status:
@@ -32,8 +38,10 @@
 //! cross as integers, as the spike did (`crates/videorc-spike-slint`,
 //! S4.2b).
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::ptr::NonNull;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -46,9 +54,13 @@ use crate::LayerRect;
 
 /// How long `attach` waits for the thread to connect and build the child.
 const ATTACH_WAIT: Duration = Duration::from_secs(5);
-/// How long a frame's buffer may stay with the server before the lease is
-/// given back anyway (the writer has two other slots).
+/// Wayland: how long a frame waits for the compositor to release one of the
+/// presenter's own buffers before it is dropped (the ring's lease is never
+/// what waits for a release).
 const RELEASE_WAIT: Duration = Duration::from_millis(250);
+/// Wayland: the presenter's own buffers: the one on screen, one the
+/// compositor may still hold, one to fill.
+const OWN_BUFFERS: usize = 3;
 /// The thread's idle poll: it wakes for a command, a server event, or this.
 const IDLE_POLL: Duration = Duration::from_millis(250);
 
@@ -93,8 +105,10 @@ pub struct PresentReport {
     /// The buffer was committed to the server (`None`: nothing was shown,
     /// the reason in `error`, or the child is hidden).
     pub committed_at: Option<Instant>,
-    /// The server gave the slot's buffer back before the wait ran out; the
-    /// lease may go either way once the report arrives.
+    /// The ring's slot is no longer read: copied (Wayland), or the X
+    /// server's completion arrived. False only when the X connection died
+    /// first (a gone client's segment is not read again). The lease goes
+    /// once the report arrives, never before.
     pub released: bool,
     /// Shown on screen (a hidden child acknowledges the frame and draws
     /// nothing).
@@ -232,9 +246,10 @@ impl PresenterClient {
         self.send(Command::Ring(ring));
     }
 
-    /// Hands a leased slot to the thread. The receiver yields once the
-    /// server has released the slot (or the wait ran out), so the lease may
-    /// go back as soon as the report arrives.
+    /// Hands a leased slot to the thread. The receiver yields once the slot
+    /// is no longer read (copied into the subsurface's own buffer, or the X
+    /// server's completion), so the lease may go back as soon as the report
+    /// arrives, and not before.
     pub fn present(&self, slot: u32, frame_id: u64) -> Receiver<PresentReport> {
         let (reply, receiver) = mpsc::channel();
         self.send(Command::Present {
@@ -268,26 +283,33 @@ impl Presenter {
         let bell = Arc::new(Doorbell::new()?);
         let (commands, inbox) = mpsc::channel::<Command>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<Backing, String>>();
+        // Set when `attach` stopped waiting: a child built after that closes
+        // at once instead of serving a caller that is gone.
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let thread_abandoned = abandoned.clone();
         let thread_bell = bell.clone();
         let thread = std::thread::Builder::new()
             .name("videorc-linux-presenter".to_string())
             .spawn(move || {
+                let wanted = |backing: Backing| {
+                    !thread_abandoned.load(Ordering::Acquire) && ready_tx.send(Ok(backing)).is_ok()
+                };
                 if handles.wayland_display != 0 && handles.wayland_surface != 0 {
                     match wayland::Child::build(handles) {
-                        Ok(child) => {
-                            let _ = ready_tx.send(Ok(Backing::WaylandSubsurface));
+                        Ok(child) if wanted(Backing::WaylandSubsurface) => {
                             child.run(inbox, &thread_bell);
                         }
+                        Ok(child) => child.close(),
                         Err(error) => {
                             let _ = ready_tx.send(Err(format!("Wayland subsurface: {error}")));
                         }
                     }
                 } else if handles.x11_window != 0 {
                     match x11::Child::build(handles) {
-                        Ok(child) => {
-                            let _ = ready_tx.send(Ok(Backing::X11ChildWindow));
+                        Ok(child) if wanted(Backing::X11ChildWindow) => {
                             child.run(inbox, &thread_bell);
                         }
+                        Ok(child) => child.close(),
                         Err(error) => {
                             let _ = ready_tx.send(Err(format!("X11 child window: {error}")));
                         }
@@ -306,9 +328,26 @@ impl Presenter {
                 return Err(error);
             }
             Err(_) => {
-                return Err(format!(
-                    "the presenter thread did not connect within {ATTACH_WAIT:?}"
-                ));
+                // Stop it: a child built from now on closes at once, and one
+                // that got its answer in sees its commands end. The thread is
+                // joined when it ends within another wait, so it never uses
+                // the window's handles after this returns; one stuck in the
+                // display server's connection is left, named in the error.
+                abandoned.store(true, Ordering::Release);
+                drop(commands);
+                bell.ring();
+                return Err(match ready_rx.recv_timeout(ATTACH_WAIT) {
+                    Err(mpsc::RecvTimeoutError::Timeout) => format!(
+                        "the presenter thread did not connect within {ATTACH_WAIT:?}, and did not stop within another {ATTACH_WAIT:?}"
+                    ),
+                    _ => {
+                        // Its answer (or its end) arrived: the readiness
+                        // sender goes with the thread, so wait for the end.
+                        while ready_rx.recv().is_ok() {}
+                        let _ = thread.join();
+                        format!("the presenter thread did not connect within {ATTACH_WAIT:?}")
+                    }
+                });
             }
         };
         Ok(Self {
@@ -405,6 +444,86 @@ fn poll_readable(fds: &[libc::c_int], timeout: Duration) -> u32 {
         .fold(0, |mask, (index, _)| mask | (1 << index))
 }
 
+/// A shared mapping of a memory file, unmapped on drop. It never hands out
+/// the whole region: the ring's other slots and header are written by the
+/// backend while this lives.
+struct Mapped {
+    ptr: NonNull<u8>,
+    len: usize,
+}
+
+impl Mapped {
+    fn map(fd: BorrowedFd<'_>, len: usize, writable: bool) -> Result<Self, String> {
+        let prot = if writable {
+            libc::PROT_READ | libc::PROT_WRITE
+        } else {
+            libc::PROT_READ
+        };
+        // SAFETY: a fresh shared mapping of `len` bytes of a live descriptor.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                prot,
+                libc::MAP_SHARED,
+                fd.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return Err(format!("mmap: {}", std::io::Error::last_os_error()));
+        }
+        NonNull::new(ptr.cast::<u8>())
+            .map(|ptr| Self { ptr, len })
+            .ok_or_else(|| "mmap gave a null mapping".to_string())
+    }
+
+    /// `len` bytes at `offset`, when they are inside the mapping.
+    ///
+    /// # Safety
+    /// Nothing may write those bytes while the slice lives (a ring slot: the
+    /// reader holds its lease).
+    unsafe fn slice(&self, offset: usize, len: usize) -> Option<&[u8]> {
+        let end = offset.checked_add(len)?;
+        // SAFETY: inside the mapping; the caller rules out writers.
+        (end <= self.len)
+            .then(|| unsafe { std::slice::from_raw_parts(self.ptr.as_ptr().add(offset), len) })
+    }
+
+    /// `len` bytes at `offset` of a mapping this process alone writes.
+    fn slice_mut(&mut self, offset: usize, len: usize) -> Option<&mut [u8]> {
+        let end = offset.checked_add(len)?;
+        // SAFETY: inside the mapping; only this thread writes it, and `&mut
+        // self` keeps this the one slice.
+        (end <= self.len)
+            .then(|| unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr().add(offset), len) })
+    }
+}
+
+impl Drop for Mapped {
+    fn drop(&mut self) {
+        // SAFETY: the mapping `map` made, unmapped once.
+        unsafe { libc::munmap(self.ptr.as_ptr().cast(), self.len) };
+    }
+}
+
+/// A memory file of `len` bytes for the presenter's own buffers.
+fn own_memory(len: usize) -> Result<OwnedFd, String> {
+    // SAFETY: a static NUL-terminated name.
+    let raw = unsafe { libc::memfd_create(c"videorc-preview-frames".as_ptr(), libc::MFD_CLOEXEC) };
+    if raw < 0 {
+        return Err(format!("memfd_create: {}", std::io::Error::last_os_error()));
+    }
+    // SAFETY: memfd_create gave a fresh descriptor this now owns.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let size = libc::off_t::try_from(len).map_err(|_| format!("{len} bytes is too large"))?;
+    // SAFETY: sizing a descriptor this owns.
+    if unsafe { libc::ftruncate(fd.as_raw_fd(), size) } != 0 {
+        return Err(format!("ftruncate: {}", std::io::Error::last_os_error()));
+    }
+    Ok(fd)
+}
+
 fn report(
     frame_id: u64,
     started_at: Instant,
@@ -444,12 +563,16 @@ mod wayland {
     use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
     use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
+    use std::os::fd::AsFd;
+    use std::sync::mpsc::TryRecvError;
+
     use super::{
-        Command, Doorbell, IDLE_POLL, NativeHandles, Placement, RELEASE_WAIT, RingMapping,
-        poll_readable, report,
+        Command, Doorbell, IDLE_POLL, Mapped, NativeHandles, OWN_BUFFERS, Placement, RELEASE_WAIT,
+        RingMapping, own_memory, poll_readable, report,
     };
 
-    /// The dispatch state: which slots the compositor has given back.
+    /// The dispatch state: which of the presenter's own buffers the
+    /// compositor has given back.
     struct State {
         released: Vec<bool>,
     }
@@ -471,12 +594,12 @@ mod wayland {
             state: &mut Self,
             _: &WlBuffer,
             event: wl_buffer::Event,
-            slot: &usize,
+            index: &usize,
             _: &Connection,
             _: &QueueHandle<Self>,
         ) {
             if let wl_buffer::Event::Release = event
-                && let Some(released) = state.released.get_mut(*slot)
+                && let Some(released) = state.released.get_mut(*index)
             {
                 *released = true;
             }
@@ -493,10 +616,14 @@ mod wayland {
     delegate_noop!(State: ignore WpViewporter);
     delegate_noop!(State: ignore WpViewport);
 
-    /// The buffers over one ring.
+    /// One ring's frames: the ring itself, read-only (the leased slot is
+    /// copied out of it), and the presenter's own buffers of its frame size.
     struct Pool {
         info: videorc_preview_ring::RingInfo,
-        _fd: std::os::fd::OwnedFd,
+        ring: Mapped,
+        _ring_fd: std::os::fd::OwnedFd,
+        frames: Mapped,
+        _frames_fd: std::os::fd::OwnedFd,
         _pool: WlShmPool,
         buffers: Vec<WlBuffer>,
     }
@@ -521,7 +648,8 @@ mod wayland {
         pool: Option<Pool>,
         placement: Option<Placement>,
         hidden: bool,
-        /// The slot last attached, so a show after a hide re-attaches it.
+        /// The own buffer last attached (it holds the last frame shown), so a
+        /// show after a hide attaches it again.
         attached: Option<usize>,
     }
 
@@ -628,34 +756,88 @@ mod wayland {
                 return Ok(());
             };
             let info = ring.info;
+            let frame_bytes = info.frame_bytes();
+            let ring_map = Mapped::map(ring.fd.as_fd(), info.total_bytes as usize, false)
+                .map_err(|error| format!("mapping the ring: {error}"))?;
+            let frames_len = frame_bytes * OWN_BUFFERS;
+            let pool_len = i32::try_from(frames_len)
+                .map_err(|_| format!("{frames_len} bytes is too large for a wl_shm pool"))?;
+            let frames_fd = own_memory(frames_len)?;
+            let frames = Mapped::map(frames_fd.as_fd(), frames_len, true)
+                .map_err(|error| format!("mapping the subsurface's buffers: {error}"))?;
             let qh = self.queue.handle();
-            let pool = self.shm.create_pool(
-                std::os::fd::AsFd::as_fd(&ring.fd),
-                info.total_bytes as i32,
-                &qh,
-                (),
-            );
-            let buffers: Vec<WlBuffer> = (0..info.slot_count)
-                .map(|slot| {
+            let pool = self.shm.create_pool(frames_fd.as_fd(), pool_len, &qh, ());
+            let buffers: Vec<WlBuffer> = (0..OWN_BUFFERS)
+                .map(|index| {
                     pool.create_buffer(
-                        info.slot_start(slot) as i32,
+                        (index * frame_bytes) as i32,
                         info.width as i32,
                         info.height as i32,
                         info.stride as i32,
                         wl_shm::Format::Argb8888,
                         &qh,
-                        slot as usize,
+                        index,
                     )
                 })
                 .collect();
-            self.state.released = vec![true; info.slot_count as usize];
+            self.state.released = vec![true; OWN_BUFFERS];
             self.pool = Some(Pool {
                 info,
-                _fd: ring.fd,
+                ring: ring_map,
+                _ring_fd: ring.fd,
+                frames,
+                _frames_fd: frames_fd,
                 _pool: pool,
                 buffers,
             });
             Ok(())
+        }
+
+        /// A buffer the compositor has released, preferring one that is not
+        /// on screen.
+        fn free_buffer(&self) -> Option<usize> {
+            let released = |index: &usize| self.state.released.get(*index).copied() == Some(true);
+            (0..OWN_BUFFERS)
+                .filter(released)
+                .find(|index| Some(*index) != self.attached)
+                .or_else(|| (0..OWN_BUFFERS).find(released))
+        }
+
+        /// Copies the leased `slot` into a released buffer of the
+        /// presenter's own; the buffer's index. Once this returns, the ring's
+        /// slot is not read again, so its lease may go.
+        fn fill(&mut self, slot: u32, bell: &Doorbell) -> Result<usize, String> {
+            let mut index = self.free_buffer();
+            if index.is_none() {
+                let deadline = Instant::now() + RELEASE_WAIT;
+                while index.is_none() && Instant::now() < deadline {
+                    self.dispatch_for(bell, Duration::from_millis(5))?;
+                    index = self.free_buffer();
+                }
+            }
+            let index = index.ok_or_else(|| {
+                format!(
+                    "the compositor still holds every buffer of the subsurface after {RELEASE_WAIT:?}"
+                )
+            })?;
+            let pool = self
+                .pool
+                .as_mut()
+                .ok_or("no ring is mapped for the subsurface")?;
+            if slot >= pool.info.slot_count {
+                return Err(format!("slot {slot} is outside the ring"));
+            }
+            let frame_bytes = pool.info.frame_bytes();
+            // SAFETY: the reader holds this slot's lease until the report,
+            // which is sent after this copy, so the writer leaves it alone.
+            let source = unsafe { pool.ring.slice(pool.info.slot_start(slot), frame_bytes) }
+                .ok_or_else(|| format!("slot {slot} is outside the mapped ring"))?;
+            let target = pool
+                .frames
+                .slice_mut(index * frame_bytes, frame_bytes)
+                .ok_or_else(|| format!("buffer {index} is outside the subsurface's memory"))?;
+            target.copy_from_slice(source);
+            Ok(index)
         }
 
         fn place(&mut self, placement: Placement) {
@@ -673,16 +855,18 @@ mod wayland {
             self.child.commit();
         }
 
-        fn attach_slot(&mut self, slot: usize) -> bool {
+        fn attach_buffer(&mut self, index: usize) -> bool {
             let Some(pool) = self.pool.as_ref() else {
                 return false;
             };
-            let Some(buffer) = pool.buffers.get(slot) else {
+            let Some(buffer) = pool.buffers.get(index) else {
                 return false;
             };
             let info = &pool.info;
-            self.state.released[slot] = false;
-            self.attached = Some(slot);
+            if let Some(released) = self.state.released.get_mut(index) {
+                *released = false;
+            }
+            self.attached = Some(index);
             self.child.attach(Some(buffer), 0, 0);
             self.child
                 .damage_buffer(0, 0, info.width as i32, info.height as i32);
@@ -696,7 +880,16 @@ mod wayland {
             loop {
                 bell.drain();
                 let mut quit = false;
-                while let Ok(command) = inbox.try_recv() {
+                loop {
+                    let command = match inbox.try_recv() {
+                        Ok(command) => command,
+                        Err(TryRecvError::Empty) => break,
+                        // Every client is gone: nobody can send a Quit.
+                        Err(TryRecvError::Disconnected) => {
+                            quit = true;
+                            break;
+                        }
+                    };
                     match command {
                         Command::Ring(ring) => {
                             if let Err(error) = self.set_ring(ring) {
@@ -710,12 +903,10 @@ mod wayland {
                                 if hidden {
                                     self.child.attach(None, 0, 0);
                                     self.child.commit();
-                                } else if let Some(slot) = self.attached
-                                    && self.state.released.get(slot).copied().unwrap_or(false)
-                                {
-                                    // The last frame again, until the next
-                                    // one lands.
-                                    self.attach_slot(slot);
+                                } else if let Some(index) = self.attached {
+                                    // The last frame again (the buffer still
+                                    // holds it), until the next one lands.
+                                    self.attach_buffer(index);
                                 }
                             }
                         }
@@ -725,7 +916,6 @@ mod wayland {
                             reply,
                         } => {
                             let started_at = Instant::now();
-                            let slot = slot as usize;
                             if self.pool.is_none() {
                                 let _ = reply.send(report(
                                     frame_id,
@@ -748,62 +938,54 @@ mod wayland {
                                 ));
                                 continue;
                             }
-                            // The compositor may still read this slot (it
-                            // can only be the frame before last).
-                            if !self.state.released.get(slot).copied().unwrap_or(true) {
-                                let deadline = Instant::now() + RELEASE_WAIT;
-                                while !self.state.released[slot] && Instant::now() < deadline {
-                                    if let Err(error) =
-                                        self.dispatch_for(bell, Duration::from_millis(5))
-                                    {
-                                        eprintln!("[preview] wayland presenter: {error}");
-                                        break;
-                                    }
+                            let index = match self.fill(slot, bell) {
+                                Ok(index) => index,
+                                Err(error) => {
+                                    let _ = reply.send(report(
+                                        frame_id,
+                                        started_at,
+                                        None,
+                                        true,
+                                        false,
+                                        Some(error),
+                                    ));
+                                    continue;
                                 }
-                            }
-                            if !self.attach_slot(slot) {
+                            };
+                            // The ring's slot is copied: the report lets its
+                            // lease go. The buffer stays the compositor's
+                            // until its `release`.
+                            if !self.attach_buffer(index) {
                                 let _ = reply.send(report(
                                     frame_id,
                                     started_at,
                                     None,
                                     true,
                                     false,
-                                    Some(format!("slot {slot} has no buffer")),
+                                    Some(format!("buffer {index} is missing")),
                                 ));
                                 continue;
                             }
                             let committed_at = Instant::now();
-                            if let Err(error) = self.queue.flush() {
-                                let _ = reply.send(report(
+                            let flushed = self.queue.flush();
+                            let _ = reply.send(match flushed {
+                                Ok(_) => report(
+                                    frame_id,
+                                    started_at,
+                                    Some(committed_at),
+                                    true,
+                                    true,
+                                    None,
+                                ),
+                                Err(error) => report(
                                     frame_id,
                                     started_at,
                                     None,
                                     true,
                                     false,
                                     Some(format!("flush: {error}")),
-                                ));
-                                continue;
-                            }
-                            // The lease holds until the compositor gives the
-                            // buffer back (it copies a wl_shm buffer into
-                            // its texture at the commit, within a frame).
-                            let deadline = Instant::now() + RELEASE_WAIT;
-                            while !self.state.released[slot] && Instant::now() < deadline {
-                                if let Err(error) =
-                                    self.dispatch_for(bell, Duration::from_millis(5))
-                                {
-                                    eprintln!("[preview] wayland presenter: {error}");
-                                    break;
-                                }
-                            }
-                            let _ = reply.send(report(
-                                frame_id,
-                                started_at,
-                                Some(committed_at),
-                                self.state.released[slot],
-                                true,
-                                None,
-                            ));
+                                ),
+                            });
                         }
                         Command::Quit => quit = true,
                     }
@@ -816,7 +998,12 @@ mod wayland {
                     break;
                 }
             }
-            // Take the subsurface down with the thread.
+            self.close();
+        }
+
+        /// Takes the subsurface down: the end of `run`, or a child whose
+        /// caller stopped waiting for it (`Presenter::attach`).
+        pub(super) fn close(mut self) {
             self.pool = None;
             self.child.attach(None, 0, 0);
             self.child.commit();
@@ -832,7 +1019,7 @@ mod x11 {
     //! The X11 child-window half (XWayland on ogre).
 
     use std::os::fd::AsRawFd;
-    use std::sync::mpsc::Receiver;
+    use std::sync::mpsc::{Receiver, TryRecvError};
     use std::time::{Duration, Instant};
 
     use x11rb::connection::Connection;
@@ -844,8 +1031,7 @@ mod x11 {
     use x11rb::rust_connection::RustConnection;
 
     use super::{
-        Command, Doorbell, IDLE_POLL, NativeHandles, Placement, RELEASE_WAIT, RingMapping,
-        poll_readable, report,
+        Command, Doorbell, IDLE_POLL, NativeHandles, Placement, RingMapping, poll_readable, report,
     };
 
     /// The shared segment and the pixmap over one ring.
@@ -1158,7 +1344,16 @@ mod x11 {
             loop {
                 bell.drain();
                 let mut quit = false;
-                while let Ok(command) = inbox.try_recv() {
+                loop {
+                    let command = match inbox.try_recv() {
+                        Ok(command) => command,
+                        Err(TryRecvError::Empty) => break,
+                        // Every client is gone: nobody can send a Quit.
+                        Err(TryRecvError::Disconnected) => {
+                            quit = true;
+                            break;
+                        }
+                    };
                     match command {
                         Command::Ring(ring) => {
                             if let Err(error) = self.set_ring(ring) {
@@ -1259,11 +1454,15 @@ mod x11 {
                             self.pending_completion = Some(frame_id);
                             self.completed = false;
                             // The lease holds until the server has read the
-                            // segment (`ShmCompletion`).
-                            let deadline = Instant::now() + RELEASE_WAIT;
-                            while self.pending_completion.is_some() && Instant::now() < deadline {
-                                if let Err(error) = self.wait_for(bell, Duration::from_millis(5)) {
-                                    eprintln!("[preview] x11 presenter: {error}");
+                            // segment (`ShmCompletion`), with no deadline:
+                            // elapsed time does not make the slot free. The
+                            // server answers the put in order; a dead
+                            // connection ends the wait (the server reads
+                            // nothing more of a gone client's segment).
+                            let mut lost: Option<String> = None;
+                            while self.pending_completion.is_some() {
+                                if let Err(error) = self.wait_for(bell, Duration::from_millis(50)) {
+                                    lost = Some(error);
                                     break;
                                 }
                             }
@@ -1274,8 +1473,8 @@ mod x11 {
                                 started_at,
                                 Some(committed_at),
                                 released,
-                                true,
-                                None,
+                                lost.is_none(),
+                                lost,
                             ));
                         }
                         Command::Quit => quit = true,
@@ -1289,6 +1488,12 @@ mod x11 {
                     break;
                 }
             }
+            self.close();
+        }
+
+        /// Takes the child window down: the end of `run`, or a child whose
+        /// caller stopped waiting for it (`Presenter::attach`).
+        pub(super) fn close(mut self) {
             let _ = self.set_ring(None);
             let _ = self.conn.render_free_picture(self.window_picture);
             let _ = self.conn.free_gc(self.gc);
