@@ -999,11 +999,17 @@ open while native capture owns the device, and a host recording while in a
 room is the normal talk-show case); c5 the HTML layers' sheet track and its manifest; c6 the
 latency reports from RTC stats. With c2 and c3 the scene adapter's
 readiness checks and the cards for the avatar's motion read the backend's
-room.
+room. c4b, after c4: the stage's hand-picked screen or window shares into
+the room through a second capture (c3 shares only the scene's own screen,
+the one the preview runs; today's room shares any picked source).
 
-**Blocker for turning the backend's room on by default:** c4's session
-microphone. Until it lands, the room has no microphone while this Mac
-records, so the switch (`VIDEORC_BACKEND_ROOM`) stays a dev switch.
+**Blockers for turning the backend's room on by default** (until both
+land, the switch `VIDEORC_BACKEND_ROOM` stays a dev switch):
+
+- c4's session microphone: without it the room has no microphone while
+  this Mac records.
+- c4b's hand-picked screen or window: without it the stage's picker shares
+  only the scene's own screen, a parity gap with today's room.
 
 ### Phase 2: the shell, on all three platforms
 
