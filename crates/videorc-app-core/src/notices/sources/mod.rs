@@ -11,6 +11,7 @@
 pub mod devices;
 pub mod health;
 pub mod stream_targets;
+pub mod watchdog;
 pub mod work;
 
 /// `OPEN_HEALTH_LABEL`: the Health door's one name, as S1.6a's Health
