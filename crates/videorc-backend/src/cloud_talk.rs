@@ -1025,7 +1025,7 @@ impl RoomScreenSettings {
 /// The host's own media in the backend's room (plan 260 S1.8c), on
 /// `cloud.room.presentation`'s `media` entry: what is published, and the
 /// screen's privacy as the renderer's room reported it (`screenPrivacy`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomMediaStatus {
     pub camera: bool,
@@ -1037,7 +1037,7 @@ pub struct RoomMediaStatus {
 /// The shared screen and its Hide screen state on the wire (plan 249 S2):
 /// the publication (`vrc-privacy:<epoch>:<generation>:<hidden>`), when the
 /// source was blocked, and which receivers acknowledged the frost.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomScreenStatus {
     pub source_id: String,
