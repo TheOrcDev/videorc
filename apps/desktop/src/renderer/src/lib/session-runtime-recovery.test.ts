@@ -33,8 +33,8 @@ import {
 } from '@/lib/session-runtime-recovery'
 
 // These reports arrive while a recording runs, with "Quiet while recording or
-// live" off: the row of plan 250's table where a warning pops up, so the
-// tests see each pop-up's words. Idle is the bell only (store tests).
+// live" off. Since the owner's rule only an urgent problem or a press's
+// answer pops up there; a warning waits behind the bell, as it does idle.
 notifications.configure({ live: () => true, quiet: () => false })
 
 function failedSession(mode: string): SessionSummary {
@@ -204,7 +204,8 @@ describe('session runtime recovery', () => {
     })
 
     expect(toastSpies.success).toHaveBeenCalledTimes(1)
-    expect(toastSpies.warning).toHaveBeenCalledTimes(1)
+    // "X is still preparing your stream" is a warning: the bell, even live.
+    expect(toastSpies.warning).not.toHaveBeenCalled()
     expect(toastSpies.error).toHaveBeenCalledTimes(1)
     // `unavailable` means X ended the broadcast: X's API gives no playback
     // URL any more, so there is nothing else to "show".
@@ -500,8 +501,9 @@ describe('session health events are notifications (plans 076, 087, 218, 250)', (
           { id: 'open-sources', label: 'Open Sources', kind: 'door' }
         ]
       })
-      // Never pinned: the entry stays, the toast goes after 8 s.
-      expect(durations(toastSpies.warning)).toEqual([8_000])
+      // A warning Videorc found on its own: the entry, never a toast, even
+      // live with quiet off (the owner's rule).
+      expect(toastSpies.warning).not.toHaveBeenCalled()
       await notifications.runAction('system-audio-echo', 'resume')
       expect(dispatchEvent).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'videorc:resume-system-audio' })
@@ -639,8 +641,9 @@ describe('session health events are notifications (plans 076, 087, 218, 250)', (
       'Stream quality is back'
     ])
     expect(notifications.snapshot()).toHaveLength(1)
-    // One pop-up for the episode, not one per step.
-    expect(toastSpies.warning).toHaveBeenCalledTimes(1)
+    // One entry for the episode, and no pop-up: a warning waits behind the
+    // bell, even live with quiet off.
+    expect(toastSpies.warning).not.toHaveBeenCalled()
   })
 
   it('says once that a Screen file stopped, and that the Combined recording keeps going', () => {
@@ -722,7 +725,8 @@ describe('session health events are notifications (plans 076, 087, 218, 250)', (
       actions: [{ label: 'Open Output' }]
     })
     expect(notifications.snapshot()).toHaveLength(2)
-    expect(toastSpies.warning).toHaveBeenCalledTimes(2)
+    // Both wait behind the bell (the owner's rule).
+    expect(toastSpies.warning).not.toHaveBeenCalled()
   })
 
   it('the first-seconds notice holds for the session; a refused start stays a toast', () => {

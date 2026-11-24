@@ -57,8 +57,8 @@ describe('pop-ups (plan 250, "What pops up")', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    // A recording with quiet off: the row where the door is used. Idle is
-    // the bell only; the table below holds every row.
+    // A recording with quiet off. Since the owner's rule only an urgent
+    // problem or a press's answer pops up; the table below holds every row.
     live = true
     quiet = false
     store = createNotificationStore({ live: () => live, quiet: () => quiet })
@@ -68,12 +68,12 @@ describe('pop-ups (plan 250, "What pops up")', () => {
   // The plan's table, through the real door: [idle, live and quiet, quiet off].
   const table: [string, () => void, ReturnType<typeof vi.fn>, (number | null)[]][] = [
     ['urgent', () => problem('urgent'), toast.problem, [null, 15_000, 15_000]],
-    ['warning', () => problem('warning'), toast.warning, [null, null, 8_000]],
+    ['warning', () => problem('warning'), toast.warning, [null, null, null]],
     [
       'done',
       () => store.publish({ key: 'saved', kind: kind('finished'), title: 'Recording saved' }),
       toast.success,
-      [null, null, 8_000]
+      [null, null, null]
     ],
     [
       'news',
@@ -138,20 +138,20 @@ describe('pop-ups (plan 250, "What pops up")', () => {
   })
 
   it('closed by hand marks the entry read; timed out leaves it unread', () => {
-    problem('warning')
-    optionsOf(toast.warning).onAutoClose?.()
+    problem('urgent')
+    optionsOf(toast.problem).onAutoClose?.()
     expect(store.snapshot()[0].read).toBe(false)
     expect(store.count().unread).toBe(1)
 
     store.reset()
     vi.clearAllMocks()
-    problem('warning')
-    optionsOf(toast.warning).onDismiss?.()
+    problem('urgent')
+    optionsOf(toast.problem).onDismiss?.()
     expect(store.snapshot()[0].read).toBe(true)
   })
 
   it('a recovery replaces a toast still showing for 4 s, and never pops up alone', () => {
-    problem('warning')
+    problem('urgent')
     store.resolve('subject', { title: 'All good again' })
     expect(toast.success).toHaveBeenCalledWith(
       'All good again',
@@ -160,8 +160,8 @@ describe('pop-ups (plan 250, "What pops up")', () => {
 
     store.reset()
     vi.clearAllMocks()
-    problem('warning')
-    optionsOf(toast.warning).onAutoClose?.()
+    problem('urgent')
+    optionsOf(toast.problem).onAutoClose?.()
     store.resolve('subject', { title: 'All good again' })
     expect(toast.success).not.toHaveBeenCalled()
   })
@@ -192,12 +192,12 @@ describe('pop-ups (plan 250, "What pops up")', () => {
   })
 
   it('a failed action says so with a toast, because it answers the press', async () => {
-    problem('warning', {
+    problem('urgent', {
       actions: [
         { id: 'retry', label: 'Retry', kind: 'fix', run: () => Promise.reject(new Error('no')) }
       ]
     })
-    optionsOf(toast.warning).action?.onClick()
+    optionsOf(toast.problem).action?.onClick()
     await vi.waitFor(() => expect(toastUserError).toHaveBeenCalledTimes(1))
     expect(toastUserError).toHaveBeenCalledWith(expect.any(Error), { action: 'retry' })
   })
