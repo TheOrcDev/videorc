@@ -26,7 +26,11 @@ use videorc_protocol::{
     VirtualCameraStatus,
 };
 
+use super::camera_frame_rate::{CameraLowFrameRate, camera_low_frame_rate_line};
 use super::health::{HealthSummary, HealthTelemetry};
+use super::linux_desktop::{
+    LinuxKeyringStatus, LinuxSetupIssue, linux_desktop_checks, linux_desktop_issues,
+};
 use super::virtual_camera::{VIDEORC_CAMERA, camera_copy, camera_hidden};
 use crate::crash_log::CrashRecord;
 use crate::log::LogLine;
@@ -148,6 +152,70 @@ pub fn format_bitrate(kbps: Option<f64>) -> Option<String> {
     Some(format!("{} Mbps", trim_decimals(mbps, 1)))
 }
 
+/// `cameraFormatFacts` (`lib/source-facts.ts`, #1650): "1280 × 720 NV12 ·
+/// 30 fps", what the camera was opened with; `None` before a size is known.
+pub fn camera_format_facts(stats: Fields) -> Option<String> {
+    let width = stats
+        .num("previewCameraSelectedFormatWidth")
+        .filter(|w| *w > 0.0)?;
+    let height = stats
+        .num("previewCameraSelectedFormatHeight")
+        .filter(|h| *h > 0.0)?;
+    let size = format!("{} × {}", js_round(width), js_round(height));
+    let head = match stats
+        .text("previewCameraCapturePixelFormat")
+        .map(str::trim)
+        .filter(|format| !format.is_empty())
+    {
+        Some(format) => format!("{size} {format}"),
+        None => size,
+    };
+    match stats
+        .num("previewCameraSelectedFormatMaxFps")
+        .filter(|fps| fps.is_finite() && *fps > 0.0)
+    {
+        Some(fps) => Some(format!("{head} · {}", format_frame_rate(js_round(fps)))),
+        None => Some(head),
+    }
+}
+
+/// `formatDeliveredFps` (`lib/stream-delivery-format.ts`): "29 of 30 fps",
+/// `None` without a delivery window.
+pub fn format_delivered_fps(delivery: Fields) -> Option<String> {
+    let delivered = delivery.num("deliveredFps").filter(|fps| fps.is_finite())?;
+    if delivery
+        .num("windowSeconds")
+        .is_none_or(|seconds| seconds <= 0.0)
+    {
+        return None;
+    }
+    let target = delivery.get("targetFps")?;
+    Some(format!("{} of {} fps", js_round(delivered), target))
+}
+
+/// `formatLoweredBitrate`: "4.8 of 6 Mbps" while Videorc holds the stream
+/// under its chosen bitrate to fit the connection; `None` once it is back.
+pub fn format_lowered_bitrate(delivery: Fields) -> Option<String> {
+    let current = delivery
+        .num("bitrateKbps")
+        .filter(|kbps| kbps.is_finite())?;
+    let chosen = delivery
+        .num("chosenBitrateKbps")
+        .filter(|kbps| kbps.is_finite())?;
+    if current >= chosen {
+        return None;
+    }
+    let mbps = |kbps: f64| {
+        let value = kbps / 1000.0;
+        if value.fract() == 0.0 {
+            format!("{value}")
+        } else {
+            format!("{value:.1}")
+        }
+    };
+    Some(format!("{} of {} Mbps", mbps(current), mbps(chosen)))
+}
+
 /// `formatFrameRate`: "30 fps", "29.97 fps".
 pub fn format_frame_rate(fps: f64) -> String {
     let rounded = js_round(fps * 100.0) / 100.0;
@@ -236,6 +304,10 @@ impl<'a> Fields<'a> {
     }
     pub fn flag(self, key: &str) -> bool {
         self.get(key).and_then(Value::as_bool).unwrap_or(false)
+    }
+    /// `value === false`: absent or true is not false.
+    pub fn is_false(self, key: &str) -> bool {
+        self.get(key).and_then(Value::as_bool) == Some(false)
     }
     pub fn strings(self, key: &str) -> Vec<&'a str> {
         self.get(key)
@@ -499,12 +571,37 @@ pub fn camera_sends_no_video(camera: Fields) -> bool {
     camera.text("state") == Some("live") && camera.flag("noVideo")
 }
 
-/// `cameraCheck` (plan 216 D2): a camera that is on but sends no video.
-pub fn camera_check(camera: Fields) -> CheckWords {
+/// `cameraCheck` (plan 216 D2, #1271): a camera that is on but sends no
+/// video, then a live camera held under its rate ("15 of 30 fps").
+pub fn camera_check(camera: Fields, low: Option<CameraLowFrameRate>) -> CheckWords {
     if camera_sends_no_video(camera) {
         return words("No video", Tone::Warn);
     }
+    if camera.text("state") == Some("live")
+        && let Some(low) = low
+    {
+        return CheckWords {
+            value: format!(
+                "{} of {} fps",
+                (low.fps + 0.5).floor() as i64,
+                (low.expected_fps + 0.5).floor() as i64
+            ),
+            tone: Tone::Warn,
+        };
+    }
     preview_source_check(camera.text("state").unwrap_or("device-missing"))
+}
+
+/// `cameraLowFrameRateAdvice` (#1271): what to say about a live camera
+/// held under its rate, by name. Health never offers the low-light switch.
+pub fn camera_low_frame_rate_advice(
+    camera: Fields,
+    low: Option<CameraLowFrameRate>,
+    name: Option<&str>,
+) -> Option<String> {
+    let low = low?;
+    (camera.text("state") == Some("live") && !camera_sends_no_video(camera))
+        .then(|| camera_low_frame_rate_line(name, low, false))
 }
 
 /// `cameraNoVideoLine` (`lib/source-status.ts`): "MacBook Pro Camera isn't
@@ -574,6 +671,8 @@ pub struct PreviewInputs<'a> {
     pub live: Fields<'a>,
     pub screen: Fields<'a>,
     pub surface: Fields<'a>,
+    /// #1271: the live camera held under its rate.
+    pub camera_low: Option<CameraLowFrameRate>,
 }
 
 impl PreviewInputs<'_> {
@@ -621,15 +720,20 @@ pub fn preview_speed_check(input: &PreviewInputs) -> CheckWords {
     if !input.native_preview_surface_enabled {
         return words("Fallback", fallback_tone);
     }
-    if transport == Some("electron-proof-surface") {
+    // Plan 257 S3 (#1690): the proof surface is the Linux Preview, measured
+    // on its own presented rate below; on Windows it stays a named fallback.
+    let linux_proof = input.platform == "linux" && transport == Some("electron-proof-surface");
+    if transport == Some("electron-proof-surface") && !linux_proof {
         return words("Fallback", Tone::Warn);
     }
-    if !is_native_preview_capability(
-        transport,
-        stats.text("previewSurfaceBacking"),
-        input.surface.text("nativePreviewHostKind"),
-        input.platform,
-    ) {
+    if !linux_proof
+        && !is_native_preview_capability(
+            transport,
+            stats.text("previewSurfaceBacking"),
+            input.surface.text("nativePreviewHostKind"),
+            input.platform,
+        )
+    {
         return words("Fallback", fallback_tone);
     }
     let target = stats
@@ -656,19 +760,48 @@ pub fn preview_speed_check(input: &PreviewInputs) -> CheckWords {
     {
         return words("Screen slow", Tone::Warn);
     }
-    if stats
+    if linux_proof {
+        if input.surface.text("firstFrameContract") == Some("fallback") {
+            return words("Stalled", Tone::Warn);
+        }
+        // Every layer keeps up with what its source sends (or the target,
+        // when no rate is known). A hidden Preview fetches no frames:
+        // nothing to judge.
+        let rate = |check: bool, status: Fields| {
+            (check && status.text("state") == Some("live"))
+                .then(|| status.num("sourceFps"))
+                .flatten()
+                .filter(|fps| *fps > 0.0)
+        };
+        let rates: Vec<f64> = [
+            rate(check_camera, input.camera),
+            rate(check_screen, input.screen),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let slowest = rates.iter().copied().fold(target, f64::min);
+        if !rates.is_empty()
+            && !input.surface.flag("framePollingSuppressed")
+            && !input.surface.object("bounds").is_false("visible")
+            && input
+                .surface
+                .num("proofSourceFps")
+                .is_some_and(|shown| shown < slowest * 0.9)
+        {
+            return words("Slow display", Tone::Warn);
+        }
+    } else if stats
         .num("previewRenderFrameTimeP95Ms")
         .is_some_and(|frame| frame > (1000.0 / target.max(1.0)) * 1.5)
     {
         return words("Slow rendering", Tone::Warn);
-    }
-    if stats
+    } else if stats
         .num("previewPresentFps")
         .is_some_and(|fps| fps < minimum)
     {
         return words("Slow display", Tone::Warn);
-    }
-    if stats.count("previewDroppedFrames") > 0.0
+    } else if stats.count("previewDroppedFrames") > 0.0
         || stats.count("previewRepeatedFrames") > target
         || stats
             .num("previewCompositorFrameLag")
@@ -703,6 +836,8 @@ pub fn preview_path_check(
     }
     match transport {
         Some("native-surface" | "d3d11-shared-texture") => words("Native, unconfirmed", Tone::Warn),
+        // Plan 257 S3 (#1690): Linux's own Preview path, never called native.
+        Some("electron-proof-surface") if platform == "linux" => words("App window", Tone::Good),
         Some("electron-proof-surface") => words("Fallback window", Tone::Warn),
         Some("latest-jpeg-polling") => words("Fallback (JPEG)", Tone::Warn),
         Some("mjpeg-stream") => words("Fallback (MJPEG)", Tone::Warn),
@@ -806,7 +941,11 @@ pub fn health_checks(
         check("encoder", "Encoder", encoder_check(stats, stream)),
         check("rendering", "Rendering", rendering_check(stats)),
         check("sources", "Sources", sources_check(stats, capture_dropping)),
-        check("camera", "Camera", camera_check(input.camera)),
+        check(
+            "camera",
+            "Camera",
+            camera_check(input.camera, input.camera_low),
+        ),
         check(
             "screen",
             "Screen",
@@ -1136,10 +1275,12 @@ fn format_source_registry(stats: Fields) -> String {
         .join("; ")
 }
 
-fn format_preview_transport(transport: Option<&str>) -> &'static str {
+fn format_preview_transport(transport: Option<&str>, linux: bool) -> &'static str {
     match transport {
         Some("native-surface") => "Native",
         Some("d3d11-shared-texture") => "D3D11",
+        // Plan 257 S3 (#1690): Linux's own Preview path, never called native.
+        Some("electron-proof-surface") if linux => "App window",
         Some("electron-proof-surface") => "Fallback window",
         Some("latest-jpeg-polling") => "JPEG",
         Some("mjpeg-stream") => "MJPEG",
@@ -1523,6 +1664,12 @@ pub struct PageInputs<'a> {
     pub record_latency: &'a super::latency::RecordLatency,
     /// S3.6a: Videorc Camera's group.
     pub camera: CameraGroupInputs<'a>,
+    /// Plan 257 S18 (#1678), Linux only: the OS keyring as the shell found
+    /// it, `None` until it answers.
+    pub linux_keyring: Option<&'a LinuxKeyringStatus>,
+    /// Plan 257 S18, Linux only: the backend's `diagnostics.linuxDesktop`
+    /// answer, `None` until it arrives.
+    pub linux_desktop: Option<&'a Value>,
     pub now: Instant,
 }
 
@@ -1532,6 +1679,9 @@ pub struct HealthPageView {
     pub verdict: HealthVerdict,
     pub checks: Vec<HealthCheck>,
     pub ffmpeg_missing: Option<&'static str>,
+    /// Plan 257 S18: one alert per Linux setup problem, above the checks
+    /// (`LinuxSetupAlert`); empty off Linux.
+    pub linux_issues: Vec<LinuxSetupIssue>,
     pub groups: Vec<MetricGroupView>,
 }
 
@@ -1586,19 +1736,45 @@ pub fn health_page(inputs: &PageInputs) -> HealthPageView {
         live: Fields::of(telemetry.preview_live.as_ref()),
         screen: Fields::of(telemetry.preview_screen.as_ref()),
         surface: Fields::of(telemetry.preview_surface.as_ref()),
+        camera_low: telemetry.camera_low_frame_rate(),
     };
     let destination_states: Vec<&str> = telemetry
         .stream_targets
         .iter()
         .filter_map(|target| target.get("state").and_then(Value::as_str))
         .collect();
-    let checks = health_checks(
+    let mut checks = health_checks(
         &preview,
         stream,
         &destination_states,
         telemetry.capture_dropping(inputs.now),
     );
+    let linux = inputs.platform == "linux";
+    if linux {
+        checks.extend(
+            linux_desktop_checks(inputs.linux_keyring, inputs.linux_desktop)
+                .into_iter()
+                .map(|row| HealthCheck {
+                    id: row.id,
+                    label: row.label,
+                    value: row.words.value,
+                    tone: row.words.tone,
+                }),
+        );
+    }
+    let linux_issues = if linux {
+        linux_desktop_issues(inputs.linux_keyring, inputs.linux_desktop)
+    } else {
+        Vec::new()
+    };
     let advice = camera_no_video_advice(preview.camera, sources.text("cameraName"))
+        .or_else(|| {
+            camera_low_frame_rate_advice(
+                preview.camera,
+                preview.camera_low,
+                sources.text("cameraName"),
+            )
+        })
         .or_else(|| slowdown_advice(stats.text("bottleneck").unwrap_or("none")).map(str::to_string))
         .or_else(|| {
             stats
@@ -1671,7 +1847,7 @@ pub fn health_page(inputs: &PageInputs) -> HealthPageView {
         "preview-speed",
         "preview-path",
     ]);
-    preview_group.metrics = preview_metrics(&preview, mac);
+    preview_group.metrics = preview_metrics(&preview, mac, linux);
     groups.push(preview_group);
 
     let mut encoder = MetricGroupView::new("recording-and-encoder", "Recording and encoder");
@@ -1722,6 +1898,7 @@ pub fn health_page(inputs: &PageInputs) -> HealthPageView {
         } else {
             copy::FFMPEG_MISSING_PACKAGED
         }),
+        linux_issues,
         groups,
     }
 }
@@ -1846,13 +2023,31 @@ fn connection_metrics(transport: Fields) -> Vec<Metric> {
     metrics
 }
 
-fn preview_metrics(input: &PreviewInputs, mac: bool) -> Vec<Metric> {
+fn preview_metrics(input: &PreviewInputs, mac: bool, linux: bool) -> Vec<Metric> {
     let stats = input.stats;
-    let mut metrics = vec![
-        metric(
-            "Preview mode",
-            format_preview_transport(stats.text("previewTransport")),
-        ),
+    let transport = stats.text("previewTransport");
+    let mut metrics = vec![metric(
+        "Preview mode",
+        format_preview_transport(transport, linux),
+    )];
+    // Plan 257 S3 (#1690): the Linux app window's own numbers.
+    if linux && transport == Some("electron-proof-surface") {
+        metrics.push(metric(
+            "Preview frames shown",
+            input
+                .surface
+                .num("proofSourceFps")
+                .map_or(NO_VALUE.to_string(), |fps| format!("{fps:.1} fps")),
+        ));
+        metrics.push(metric(
+            "Preview latency (p95)",
+            input
+                .surface
+                .num("proofFrameLatencyP95Ms")
+                .map_or(NO_VALUE.to_string(), |ms| format!("{} ms", js_round(ms))),
+        ));
+    }
+    metrics.extend([
         metric("Graphics", format_graphics_path(stats)),
         metric("Preview source FPS", format_source_fps(stats)),
         metric(
@@ -1885,7 +2080,7 @@ fn preview_metrics(input: &PreviewInputs, mac: bool) -> Vec<Metric> {
             "Source fetch p95",
             format_ms(stats.num("compositorSourceFetchP95Ms")),
         ),
-    ];
+    ]);
     if mac {
         metrics.push(metric(
             "Metal p95",
@@ -1924,6 +2119,11 @@ fn preview_metrics(input: &PreviewInputs, mac: bool) -> Vec<Metric> {
         metric(
             "Surface resizes",
             (stats.count("previewSurfaceResizeCount") as i64).to_string(),
+        ),
+        // #1650: what the camera was opened with.
+        metric(
+            "Camera format",
+            camera_format_facts(stats).unwrap_or_else(|| NO_VALUE.to_string()),
         ),
         metric(
             "Camera source",
@@ -2006,6 +2206,18 @@ fn encoder_metrics(
         metric(
             "Stream bitrate",
             format_kbps(stats.num("streamMeasuredBitrateKbps")),
+        ),
+        // Plan 218 (#1592): the stream's own frame rate and the bitrate
+        // Videorc holds it at.
+        metric(
+            "Stream frame rate",
+            format_delivered_fps(stats.object("streamDelivery"))
+                .unwrap_or_else(|| NO_VALUE.to_string()),
+        ),
+        metric(
+            "Stream bitrate target",
+            format_lowered_bitrate(stats.object("streamDelivery"))
+                .unwrap_or_else(|| "Not lowered".to_string()),
         ),
         metric(
             "Stream bitrate range",

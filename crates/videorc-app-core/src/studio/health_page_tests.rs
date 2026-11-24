@@ -142,15 +142,80 @@ fn the_check_words_match_the_renderers() {
 }
 
 #[test]
+fn the_camera_format_and_the_stream_delivery_rows_read_as_electron_writes_them() {
+    let stats = json!({
+        "previewCameraSelectedFormatWidth": 1280,
+        "previewCameraSelectedFormatHeight": 720,
+        "previewCameraCapturePixelFormat": " NV12 ",
+        "previewCameraSelectedFormatMaxFps": 29.97,
+        "streamDelivery": {"deliveredFps": 28.6, "targetFps": 30, "windowSeconds": 5,
+                           "bitrateKbps": 4800, "chosenBitrateKbps": 6000}
+    });
+    assert_eq!(
+        camera_format_facts(f(&stats)).as_deref(),
+        Some("1280 × 720 NV12 · 30 fps")
+    );
+    assert_eq!(
+        camera_format_facts(f(&json!({"previewCameraSelectedFormatWidth": 640, "previewCameraSelectedFormatHeight": 480}))).as_deref(),
+        Some("640 × 480")
+    );
+    assert_eq!(camera_format_facts(f(&json!({}))), None);
+    let delivery = f(&stats).object("streamDelivery");
+    assert_eq!(
+        format_delivered_fps(delivery).as_deref(),
+        Some("29 of 30 fps")
+    );
+    assert_eq!(
+        format_lowered_bitrate(delivery).as_deref(),
+        Some("4.8 of 6 Mbps")
+    );
+    let back = json!({"bitrateKbps": 6000, "chosenBitrateKbps": 6000, "deliveredFps": 30, "targetFps": 30, "windowSeconds": 0});
+    assert_eq!(format_lowered_bitrate(f(&back)), None);
+    assert_eq!(format_delivered_fps(f(&back)), None, "no window yet");
+}
+
+#[test]
+fn a_live_camera_held_under_its_rate_is_named_with_its_rate() {
+    use crate::studio::camera_frame_rate::CameraLowFrameRate;
+    let low = Some(CameraLowFrameRate {
+        fps: 14.6,
+        expected_fps: 30.0,
+    });
+    let live = json!({"state": "live"});
+    assert_eq!(
+        camera_check(f(&live), low),
+        words("15 of 30 fps", Tone::Warn)
+    );
+    // No video outranks the rate; a camera that isn't live has none.
+    let silent = json!({"state": "live", "noVideo": true});
+    assert_eq!(camera_check(f(&silent), low), words("No video", Tone::Warn));
+    assert_eq!(
+        camera_check(f(&json!({"state": "starting"})), low),
+        preview_source_check("starting")
+    );
+    assert_eq!(
+        camera_low_frame_rate_advice(f(&live), low, Some("C920")).as_deref(),
+        Some("C920 is sending 15 of 30 fps. More light usually helps.")
+    );
+    assert_eq!(
+        camera_low_frame_rate_advice(f(&silent), low, Some("C920")),
+        None
+    );
+}
+
+#[test]
 fn a_camera_that_is_on_but_sends_no_video_is_named() {
     let silent = json!({"state": "live", "noVideo": true});
-    assert_eq!(camera_check(f(&silent)), words("No video", Tone::Warn));
     assert_eq!(
-        camera_check(f(&json!({"state": "live"}))),
+        camera_check(f(&silent), None),
+        words("No video", Tone::Warn)
+    );
+    assert_eq!(
+        camera_check(f(&json!({"state": "live"})), None),
         preview_source_check("live")
     );
     assert_eq!(
-        camera_check(f(&json!({"state": "starting", "noVideo": true}))),
+        camera_check(f(&json!({"state": "starting", "noVideo": true})), None),
         preview_source_check("starting")
     );
     assert_eq!(
@@ -458,6 +523,8 @@ fn an_idle_test_pattern_reads_as_the_electron_baseline_does() {
         crash: None,
         record_latency: &Default::default(),
         camera: Default::default(),
+        linux_keyring: None,
+        linux_desktop: None,
         now,
     });
     assert_eq!(view.checks.len(), 13);
@@ -549,6 +616,8 @@ fn a_missing_recorder_says_so_and_opens_its_group() {
         crash: None,
         record_latency: &Default::default(),
         camera: Default::default(),
+        linux_keyring: None,
+        linux_desktop: None,
         now,
     });
     assert_eq!(view.ffmpeg_missing, Some(copy::FFMPEG_MISSING_PACKAGED));
@@ -674,7 +743,11 @@ fn every_field_the_page_reads_is_one_the_backend_writes() {
         include_str!("../../../videorc-protocol/src/source_status.rs"),
     ];
     /// Read from outside the protocol, each with where it comes from.
-    const ELSEWHERE: [(&str, &str); 2] = [
+    const ELSEWHERE: [(&str, &str); 5] = [
+        (
+            "firstFrameContract",
+            "Electron main's first-frame contract, on the surface status (Linux app window)",
+        ),
         (
             "cameraName",
             "the capture config's sources (`lib/capture.ts`)",
@@ -683,10 +756,18 @@ fn every_field_the_page_reads_is_one_the_backend_writes() {
             "nativePreviewHostKind",
             "Electron main's field on the surface status; absent from the backend's",
         ),
+        (
+            "proofSourceFps",
+            "Electron main's proof poller, on the surface status (Linux app window)",
+        ),
+        (
+            "proofFrameLatencyP95Ms",
+            "Electron main's proof poller, on the surface status (Linux app window)",
+        ),
     ];
     let mut keys: Vec<String> = Vec::new();
     for name in [
-        "num", "count", "text", "flag", "strings", "object", "entries", "c", "ms", "n",
+        "num", "count", "text", "flag", "is_false", "strings", "object", "entries", "c", "ms", "n",
     ] {
         let needle = format!("{name}(\"");
         let mut from = 0;
@@ -743,4 +824,155 @@ fn every_field_the_page_reads_is_one_the_backend_writes() {
         missing.is_empty(),
         "fields the protocol does not write: {missing:?}"
     );
+}
+
+#[test]
+fn linux_adds_its_desktop_rows_alerts_and_app_window_numbers() {
+    // Plan 257 S18 (#1678) and S3 (#1690): Electron appends the Linux rows
+    // after File repair, shows one alert per problem, and names the app
+    // window's own preview numbers.
+    let now = Instant::now();
+    let mut telemetry = HealthTelemetry::default();
+    telemetry.apply(
+        DIAGNOSTICS_STATS_EVENT,
+        json!({"bottleneck": "none", "backendRssBytes": 104_857_600,
+            "previewTransport": "electron-proof-surface"}),
+        now,
+    );
+    telemetry.preview_surface =
+        Some(json!({"proofSourceFps": 29.96, "proofFrameLatencyP95Ms": 41.5}));
+    let summary = summary(true);
+    let log = RecordingLog::default();
+    let sources = json!({});
+    let keyring = crate::studio::linux_desktop::LinuxKeyringStatus {
+        backend: "gnome_libsecret".to_string(),
+        available: true,
+        user_password_store: None,
+    };
+    let desktop = json!({
+        "groups": [
+            {"name": "video", "exists": true, "member": false, "accessible": 0, "devices": 1},
+            {"name": "render", "exists": true, "member": true, "accessible": 1, "devices": 1}
+        ],
+        "portal": {"frontend": "running", "screenCastVersion": 5}
+    });
+    let latency = crate::studio::latency::RecordLatency::default();
+    let inputs = |platform| PageInputs {
+        telemetry: &telemetry,
+        summary: &summary,
+        capture_sources: f(&sources),
+        native_preview_surface_enabled: false,
+        platform,
+        development: true,
+        pipeline: None,
+        device_warnings: &[],
+        recording_log: &log,
+        app_log: &[],
+        crash: None,
+        record_latency: &latency,
+        camera: Default::default(),
+        linux_keyring: Some(&keyring),
+        linux_desktop: Some(&desktop),
+        now,
+    };
+    let view = health_page(&inputs("linux"));
+    let tail: Vec<(&str, &str)> = view.checks[13..]
+        .iter()
+        .map(|check| (check.label, check.value.as_str()))
+        .collect();
+    assert_eq!(
+        tail,
+        [
+            ("Keyring", "Secret Service"),
+            ("Device groups", "Not in video"),
+            ("Screen portal", "Ready")
+        ]
+    );
+    assert_eq!(view.checks[12].label, "File repair");
+    let issues: Vec<&str> = view.linux_issues.iter().map(|issue| issue.id).collect();
+    assert_eq!(issues, ["device-groups"]);
+    let preview = view
+        .groups
+        .iter()
+        .find(|group| group.id == "preview")
+        .unwrap();
+    let first: Vec<(&str, &str)> = preview.metrics[..3]
+        .iter()
+        .map(|m| (m.label.as_str(), m.value.as_str()))
+        .collect();
+    assert_eq!(
+        first,
+        [
+            ("Preview mode", "App window"),
+            ("Preview frames shown", "30.0 fps"),
+            ("Preview latency (p95)", "42 ms")
+        ]
+    );
+
+    let mac = health_page(&inputs("darwin"));
+    assert_eq!(mac.checks.len(), 13);
+    assert!(mac.linux_issues.is_empty());
+    let preview = mac
+        .groups
+        .iter()
+        .find(|group| group.id == "preview")
+        .unwrap();
+    assert_eq!(preview.metrics[0].value, "Fallback window");
+    assert_eq!(preview.metrics[1].label, "Graphics");
+}
+
+#[test]
+fn the_linux_app_window_is_its_own_preview_path_and_speed() {
+    // Plan 257 S3 (#1690): on Linux the proof surface is the Preview,
+    // "App window" and judged by what it shows; elsewhere it stays a fallback.
+    assert_eq!(
+        preview_path_check(
+            Some("electron-proof-surface"),
+            Some("electron-browser-window"),
+            None,
+            "linux"
+        ),
+        words("App window", Tone::Good)
+    );
+    assert_eq!(
+        preview_path_check(
+            Some("electron-proof-surface"),
+            Some("electron-browser-window"),
+            None,
+            "win32"
+        ),
+        words("Fallback window", Tone::Warn)
+    );
+    let stats = json!({"previewTransport": "electron-proof-surface", "previewTargetFps": 30,
+        "previewRenderFrameTimeP95Ms": 400, "previewDroppedFrames": 9});
+    let camera = json!({"state": "live", "sourceFps": 30});
+    let live = json!({"state": "live"});
+    let speed = |platform, surface: &Value| {
+        preview_speed_check(&PreviewInputs {
+            stats: f(&stats),
+            expects_camera: true,
+            expects_screen: false,
+            native_preview_surface_enabled: true,
+            platform,
+            camera: f(&camera),
+            live: f(&live),
+            screen: f(&Value::Null),
+            surface: f(surface),
+            camera_low: None,
+        })
+    };
+    let smooth = json!({"source": "camera", "proofSourceFps": 29});
+    // The Electron-path render and drop numbers don't judge the app window.
+    assert_eq!(speed("linux", &smooth), words("Smooth", Tone::Good));
+    assert_eq!(speed("win32", &smooth), words("Fallback", Tone::Warn));
+    let slow = json!({"source": "camera", "proofSourceFps": 20});
+    assert_eq!(speed("linux", &slow), words("Slow display", Tone::Warn));
+    let hidden = json!({"source": "camera", "proofSourceFps": 0, "bounds": {"visible": false}});
+    assert_eq!(speed("linux", &hidden), words("Smooth", Tone::Good));
+    let suppressed =
+        json!({"source": "camera", "proofSourceFps": 0, "framePollingSuppressed": true});
+    assert_eq!(speed("linux", &suppressed), words("Smooth", Tone::Good));
+    let stalled =
+        json!({"source": "camera", "proofSourceFps": 29, "firstFrameContract": "fallback"});
+    assert_eq!(speed("linux", &stalled), words("Stalled", Tone::Warn));
 }

@@ -11,6 +11,10 @@
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+
+use super::camera_frame_rate::{
+    CameraFrameRateWatch, CameraLowFrameRate, next_camera_frame_rate_watch,
+};
 use videorc_protocol::{BackendHealth, HealthEvent, HealthLevel};
 
 /// Which stages dropped within the window (`RecentStreamDrops`).
@@ -59,6 +63,10 @@ pub struct HealthTelemetry {
     pub preview_screen: Option<Value>,
     pub preview_surface: Option<Value>,
     drops: DropActivity,
+    /// #1271: the slow-camera watch over `preview.camera.status`
+    /// ([`super::camera_frame_rate`]), and the clock it counts from.
+    camera_rate: CameraFrameRateWatch,
+    camera_rate_origin: Option<Instant>,
 }
 
 impl HealthTelemetry {
@@ -81,12 +89,23 @@ impl HealthTelemetry {
                     .unwrap_or_default();
             }
             PREVIEW_LIVE_STATUS_EVENT => self.preview_live = Some(payload),
-            PREVIEW_CAMERA_STATUS_EVENT => self.preview_camera = Some(payload),
+            PREVIEW_CAMERA_STATUS_EVENT => {
+                let origin = *self.camera_rate_origin.get_or_insert(now);
+                let now_ms = now.saturating_duration_since(origin).as_millis() as u64;
+                self.camera_rate =
+                    next_camera_frame_rate_watch(&self.camera_rate, &payload, now_ms);
+                self.preview_camera = Some(payload);
+            }
             PREVIEW_SCREEN_STATUS_EVENT => self.preview_screen = Some(payload),
             PREVIEW_SURFACE_STATUS_EVENT => self.preview_surface = Some(payload),
             _ => return false,
         }
         true
+    }
+
+    /// #1271: the live camera held under its rate, once the watch says so.
+    pub fn camera_low_frame_rate(&self) -> Option<CameraLowFrameRate> {
+        self.camera_rate.low
     }
 
     /// A new session's start clears the last stream's health (`setStreamHealth(null)`).
@@ -297,7 +316,31 @@ impl HealthSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use videorc_protocol::ToolStatus;
+
+    #[test]
+    fn camera_statuses_drive_the_slow_camera_watch() {
+        let mut telemetry = HealthTelemetry::default();
+        let start = Instant::now();
+        let slow = serde_json::json!({
+            "state": "live", "cameraId": "cam", "targetFps": 30, "sourceFps": 12
+        });
+        telemetry.apply(PREVIEW_CAMERA_STATUS_EVENT, slow.clone(), start);
+        assert_eq!(telemetry.camera_low_frame_rate(), None);
+        telemetry.apply(
+            PREVIEW_CAMERA_STATUS_EVENT,
+            slow,
+            start + Duration::from_secs(5),
+        );
+        assert_eq!(
+            telemetry.camera_low_frame_rate(),
+            Some(CameraLowFrameRate {
+                fps: 12.0,
+                expected_fps: 30.0
+            })
+        );
+    }
 
     fn health(ok: bool, ffmpeg: bool) -> BackendHealth {
         BackendHealth {
