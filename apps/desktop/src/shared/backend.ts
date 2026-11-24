@@ -8437,14 +8437,23 @@ export interface SetCaptionOverlayParams {
   styleRevision: number
 }
 
-/** `buddy.overlay.set`: the renderer's raster of the bubble for one output
- * canvas (plan 168 D16: the bubble only, its tail tip on the bitmap's
- * bottom-centre; the backend draws the pet and anchors the bubble above its
- * head). `rect` is the Buddy's placed rect for that canvas orientation, the
- * width the bubble wraps to. Mirrors `captions.overlay.set`. */
+/** `buddy.overlay.set` (plan 260 S1.2d): the bubble the backend draws for
+ * one output canvas (plan 168 D16: the bubble only, its tail tip on the
+ * bitmap's bottom-centre, anchored above the pet's head). `text` must be the
+ * line that is up (`cohost.buddy.state`), or the backend refuses it as stale
+ * (`buddy-overlay-stale`). `rect` is the Buddy's placed rect for that
+ * canvas's orientation, the width the bubble wraps to. Mirrors Rust
+ * `BuddyOverlaySetRequest`, which still accepts the previous release's
+ * `pngBase64` raster for one release. */
 export interface SetBuddyOverlayParams {
   target: OverlayTarget
-  pngBase64: string
+  text?: string
+  style?: CohostBubbleStyle
+  canvasWidth?: number
+  canvasHeight?: number
+  /** The renderer's own raster, the path before plan 260 S1.2d, accepted for
+   *  one release. With it the backend ignores the other fields but `rect`. */
+  pngBase64?: string
   rect: OverlayRect
 }
 

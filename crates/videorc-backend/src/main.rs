@@ -12320,18 +12320,19 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 260 S1.2d: the backend draws the bubble from the line that is
+        // up; a `pngBase64` bubble (the previous release's path) is still
+        // installed.
         "buddy.overlay.set" => {
-            match serde_json::from_value::<buddy_overlay::SetBuddyOverlayParams>(command.params) {
-                Ok(params) => {
-                    match buddy_overlay::set_buddy_overlay(&state.buddy_overlay, params).await {
-                        Ok(info) => ServerResponse::ok(command.id, info),
-                        Err(error) => ServerResponse::error(
-                            command.id,
-                            "buddy-overlay-invalid",
-                            error.to_string(),
-                        ),
-                    }
-                }
+            match serde_json::from_value::<buddy_overlay::BuddyOverlaySetRequest>(command.params) {
+                Ok(request) => match buddy_overlay::set_buddy_overlay(state, request).await {
+                    Ok(info) => ServerResponse::ok(command.id, info),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        buddy_overlay::buddy_overlay_error_code(&error),
+                        format!("{error:#}"),
+                    ),
+                },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
