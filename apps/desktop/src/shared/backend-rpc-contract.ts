@@ -48,6 +48,7 @@ import type {
   ScheduledStreamMutation,
   ScheduledStreamCapabilities,
   ScheduledStreamCandidate,
+  ScheduledTimeResolution,
   CaptureRecoveryStatus,
   CohostCommandChooseParams,
   CohostCommandParams,
@@ -410,6 +411,7 @@ import {
   RuntimeSchemaError,
   runtimeSchema,
   stringSchema,
+  tupleSchema,
   undefinedSchema,
   unionSchema,
   type RuntimeSchema
@@ -436,8 +438,17 @@ export interface BackendRpcMethodMap {
   'session.sources.get': BackendRpcDefinition<{ sessionId: string }, SessionSources>
   'session.source.switch': BackendRpcDefinition<SourceSwitchParams, SessionSources>
   'scheduledStreams.resolveTime': BackendRpcDefinition<
-    { localStart: string; timeZone: string; offsetChoice?: string | null },
-    { startUtc: string }
+    {
+      localStart: string
+      timeZone: string
+      offsetChoice?: string | null
+      plannedEndLocal?: string | null
+    },
+    ScheduledTimeResolution
+  >
+  'scheduledStreams.zoneOffsets': BackendRpcDefinition<
+    { timeZones: string[]; atUtc?: string },
+    { offsets: Record<string, number> }
   >
   'scheduledStreams.candidates': BackendRpcDefinition<
     { eventId: string },
@@ -1181,6 +1192,8 @@ type RuntimeBackendRpcContract = {
 const boundedString = stringSchema({ minLength: 1, maxLength: 16_384 })
 const boundedPath = stringSchema({ minLength: 1, maxLength: 32_768 })
 const timestamp = stringSchema({ minLength: 1, maxLength: 128 })
+// Minutes east of UTC; real zones span -12:00 to +14:00.
+const utcOffsetMinutes = numberSchema({ integer: true, min: -1_080, max: 1_080 })
 const optionalText = optionalSchema(stringSchema({ maxLength: 16_384 }))
 const boundedBackendPayloadSchema = boundedJsonValueSchema()
 const boundedBackendParamValueSchema = boundedJsonValueSchema({
@@ -7275,11 +7288,34 @@ const runtimeContracts = {
       {
         localStart: boundedString,
         timeZone: boundedString,
-        offsetChoice: optionalSchema(nullableSchema(enumSchema(['earlier', 'later'])))
+        offsetChoice: optionalSchema(nullableSchema(enumSchema(['earlier', 'later']))),
+        plannedEndLocal: optionalSchema(nullableSchema(boundedString))
       },
       { allowUnknown: false }
     ),
-    result: objectSchema({ startUtc: timestamp }, { allowUnknown: false })
+    result: objectSchema(
+      {
+        startUtc: nullableSchema(timestamp),
+        startOffsetMinutes: nullableSchema(utcOffsetMinutes),
+        repeatedHourOffsets: nullableSchema(tupleSchema([utcOffsetMinutes, utcOffsetMinutes])),
+        plannedEndUtc: nullableSchema(timestamp),
+        plannedEndOffsetMinutes: nullableSchema(utcOffsetMinutes)
+      },
+      { allowUnknown: false }
+    )
+  },
+  'scheduledStreams.zoneOffsets': {
+    params: objectSchema(
+      {
+        timeZones: arraySchema(boundedString, { maxLength: 1_000 }),
+        atUtc: optionalSchema(timestamp)
+      },
+      { allowUnknown: false }
+    ),
+    result: objectSchema(
+      { offsets: recordSchema(utcOffsetMinutes, { maxKeys: 1_000 }) },
+      { allowUnknown: false }
+    )
   },
   'scheduledStreams.candidates': {
     params: objectSchema({ eventId: boundedString }, { allowUnknown: false }),

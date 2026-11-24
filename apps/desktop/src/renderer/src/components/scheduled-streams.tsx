@@ -55,6 +55,8 @@ import {
   scheduledProviderSections,
   scheduledProviderSite,
   scheduledThumbnailUrl,
+  scheduledStartRepair,
+  scheduledStartRepairMutation,
   scheduledWhenLabel,
   selectScheduledStreamForTarget,
   type ScheduledLifecycleChip,
@@ -172,6 +174,10 @@ export function ScheduledStreams(): ReactElement {
                 onEdit={(trigger) => {
                   formTrigger.current = trigger
                   void edit(event).catch(() => undefined)
+                }}
+                onFixTime={() => {
+                  const { action, fields } = scheduledStartRepairMutation(event)
+                  void perform(action, event, fields)
                 }}
                 onGoLive={() => {
                   setStarting(event)
@@ -502,6 +508,7 @@ function EventRow({
   onSchedule,
   onRecover,
   onEdit,
+  onFixTime,
   onDuplicate,
   onCancel
 }: {
@@ -513,6 +520,7 @@ function EventRow({
   onSchedule: () => void
   onRecover: () => void
   onEdit: (trigger: HTMLElement | null) => void
+  onFixTime: () => void
   onDuplicate: () => void
   onCancel: () => void
 }): ReactElement {
@@ -521,6 +529,7 @@ function EventRow({
   const noun = scheduledProviderNoun(event.provider)
   const privacy = scheduledPrivacyLabel(event)
   const editable = eventCanEdit(event)
+  const repair = scheduledStartRepair(event)
   const needsRecovery =
     event.createUncertain ||
     Boolean(event.preparation) ||
@@ -615,6 +624,25 @@ function EventRow({
               {event.thumbnailState === 'error' ? 'Event created; thumbnail upload failed. ' : ''}
               {event.error.message}
             </AlertDescription>
+          </Alert>
+        ) : null}
+        {repair ? (
+          <Alert data-testid="scheduled-start-repair" variant="warning">
+            <AlertTitle>{repair.title}</AlertTitle>
+            <AlertDescription>{repair.description}</AlertDescription>
+            <AlertAction>
+              <Button
+                disabled={pending}
+                size="xs"
+                variant="outline"
+                onClick={(click) => {
+                  if (repair.action === 'fix') onFixTime()
+                  else onEdit(click.currentTarget)
+                }}
+              >
+                {repair.action === 'fix' ? 'Fix time' : 'Edit…'}
+              </Button>
+            </AlertAction>
           </Alert>
         ) : null}
         {event.operationState === 'pending' ? (

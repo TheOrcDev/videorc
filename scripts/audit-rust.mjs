@@ -31,21 +31,16 @@ export const acceptedUnmaintainedAdvisories = [
     via: 'ashpd 0.13 -> zbus 5',
     reviewed: '2026-10-21'
   },
-  // chrono and chrono-tz are marked unmaintained for every version, with no
-  // patched release (chronotope/chrono#1768); the advisory suggests jiff or
-  // time. chrono is the backend's time type (100+ files) and also comes in
-  // through rmcp and schemars, so moving off it is its own migration, not an
-  // audit fix. Remove these once the backend (and rmcp, schemars) leave chrono.
+  // chrono is marked unmaintained for every version, with no patched release
+  // (chronotope/chrono#1768); the advisory suggests jiff or time. Zone rules
+  // already use jiff. chrono is the backend's time type (100+ files) and also
+  // comes in through rmcp and schemars, so moving off it is its own migration,
+  // not an audit fix. Remove this once the backend (and rmcp, schemars) leave
+  // chrono.
   {
     id: 'RUSTSEC-2026-0543',
     crate: 'chrono',
     via: 'videorc-backend, rmcp 3, schemars 1',
-    reviewed: '2026-11-18'
-  },
-  {
-    id: 'RUSTSEC-2026-0555',
-    crate: 'chrono-tz',
-    via: 'videorc-backend (scheduled streams, YouTube quota day)',
     reviewed: '2026-11-18'
   }
 ]

@@ -1,6 +1,6 @@
 import { patchPreparedStreamTarget, type CaptureConfig } from '@/lib/capture'
 import type { BackendClient } from '@/backendClient'
-import { resolveLocalTimeMs } from '@/lib/schedule-time'
+import { formatScheduledStart, offsetTimeZone } from '@/lib/schedule-time'
 import type {
   ScheduledStreamCapabilities,
   ScheduledStreamEvent,
@@ -108,32 +108,101 @@ export function scheduledPrivacyLabel(event: ScheduledStreamEvent): string | nul
 }
 
 /**
- * When the stream airs, in its own time zone ("Tue, Jan 1, 2035, 12:00 PM CET").
- * An X broadcast shows its planned end as a range ("12:00 – 1:30 PM CET"). The
- * planned end is a wall time in the start's zone, resolved on its own the way
- * the backend does, so a DST change between start and end shows the real end.
+ * When the stream airs, in its own time zone ("Tue, Jan 1, 2035, 12:00 PM GMT+1").
+ * An X broadcast shows its planned end as a range ("12:00 – 1:30 PM GMT+1").
+ * Both times come with the backend's UTC offsets, so a DST change between
+ * start and end shows the real end, and the renderer's older tz data never
+ * shifts either one.
  */
 export function scheduledWhenLabel(event: ScheduledStreamEvent, locale?: string): string {
-  const { timeZone, plannedEndLocal, localStart, offsetChoice } = event.requested
   const start = new Date(event.startUtc)
-  if (Number.isNaN(start.getTime())) return localStart.replace('T', ' ')
-  const format = new Intl.DateTimeFormat(locale, {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone,
-    timeZoneName: 'short'
-  })
-  const endMs =
-    event.provider === 'x' && plannedEndLocal
-      ? resolveLocalTimeMs(plannedEndLocal, timeZone, offsetChoice)
-      : null
-  return endMs !== null && endMs > start.getTime()
-    ? format.formatRange(start, new Date(endMs))
-    : format.format(start)
+  const times = event.times
+  if (Number.isNaN(start.getTime()) || !times) return event.requested.localStart.replace('T', ' ')
+  const format = (offsetMinutes: number) =>
+    new Intl.DateTimeFormat(locale, {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: offsetTimeZone(offsetMinutes),
+      timeZoneName: 'short'
+    })
+  const startFormat = format(times.startOffsetMinutes)
+  const end = event.provider === 'x' && times.plannedEndUtc ? new Date(times.plannedEndUtc) : null
+  if (!end || !(end.getTime() > start.getTime())) return startFormat.format(start)
+  const endOffset = times.plannedEndOffsetMinutes ?? times.startOffsetMinutes
+  return endOffset === times.startOffsetMinutes
+    ? startFormat.formatRange(start, end)
+    : `${startFormat.format(start)} – ${format(endOffset).format(end)}`
+}
+
+export interface ScheduledStartRepairView {
+  title: string
+  description: string
+  /** `fix` re-sends the saved wall time; `edit` opens the form to choose another. */
+  action: 'fix' | 'edit'
+}
+
+/**
+ * The Upcoming flag for an event whose saved start isn't what its typed time
+ * means any more: it was sent with older time zone rules (Vancouver,
+ * Edmonton, Inuvik, Winnipeg, Casablanca and Havana changed in 2026), so
+ * the platform shows the wrong hour. `null` when the start is right.
+ */
+export function scheduledStartRepair(
+  event: ScheduledStreamEvent,
+  locale?: string
+): ScheduledStartRepairView | null {
+  const repair = event.times?.startRepair
+  if (!repair || !eventCanBeRepaired(event)) return null
+  const published = Boolean(event.providerEventId)
+  const label = scheduledProviderLabel(event.provider)
+  const title = published ? `${label} shows the wrong start time` : 'The start time is out of date'
+  const typed = event.requested.localStart.replace('T', ' ')
+  if (repair.correctedStartUtc && repair.correctedStartOffsetMinutes != null) {
+    const corrected = formatScheduledStart(
+      repair.correctedStartUtc,
+      repair.correctedStartOffsetMinutes,
+      { locale }
+    )
+    return {
+      title,
+      description: published
+        ? `Time zone rules changed after it was scheduled. Fix time moves it to ${corrected}, the time you chose.`
+        : `Time zone rules changed after it was saved. Fix time keeps ${corrected}, the time you chose.`,
+      action: 'fix'
+    }
+  }
+  return {
+    title,
+    description: `Time zone rules changed after it was saved, and ${typed} no longer exists there. Edit it to choose another time.`,
+    action: 'edit'
+  }
+}
+
+function eventCanBeRepaired(event: ScheduledStreamEvent): boolean {
+  return (
+    !event.preparation &&
+    !event.createUncertain &&
+    event.operationState !== 'needs-reconciliation' &&
+    (event.lifecycle === 'draft' || event.lifecycle === 'scheduled')
+  )
+}
+
+/**
+ * Fix time: the saved metadata, sent again unchanged. The backend resolves
+ * its wall time with today's rules and updates the platform (or the draft).
+ */
+export function scheduledStartRepairMutation(event: ScheduledStreamEvent): {
+  action: 'update' | 'saveDraft'
+  fields: { accountId: string; metadata: ScheduledStreamEvent['requested'] }
+} {
+  return {
+    action: event.providerEventId ? 'update' : 'saveDraft',
+    fields: { accountId: event.accountId, metadata: event.requested }
+  }
 }
 
 export async function runScheduledOperation<T = unknown>(

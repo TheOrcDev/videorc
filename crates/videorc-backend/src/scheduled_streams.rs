@@ -1,6 +1,10 @@
 //! Backend-owned upcoming broadcasts. A scheduled time is metadata, never a timer.
+use std::collections::BTreeMap;
+
 use anyhow::{Result, bail};
-use chrono::{DateTime, LocalResult, NaiveDateTime, SecondsFormat, TimeZone, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
+use jiff::civil;
+use jiff::tz::AmbiguousOffset;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -77,33 +81,167 @@ impl EventMetadata {
 
 /// `%Y-%m-%dT%H:%M` wall time of a UTC instant in an IANA zone.
 pub fn local_wall_time(utc: DateTime<Utc>, zone: &str) -> Result<String> {
-    let zone: chrono_tz::Tz = zone
-        .parse()
-        .map_err(|_| anyhow::anyhow!("Choose a valid IANA time zone."))?;
-    Ok(utc
-        .with_timezone(&zone)
-        .format("%Y-%m-%dT%H:%M")
+    let zone = crate::tzdb::zone(zone)?;
+    Ok(zone
+        .to_datetime(crate::tzdb::timestamp(utc)?)
+        .strftime("%Y-%m-%dT%H:%M")
         .to_string())
 }
 
-pub fn resolve_time(local: &str, zone: &str, choice: Option<&str>) -> Result<DateTime<Utc>> {
-    let zone: chrono_tz::Tz = zone
-        .parse()
-        .map_err(|_| anyhow::anyhow!("Choose a valid IANA time zone."))?;
-    let local = NaiveDateTime::parse_from_str(local, "%Y-%m-%dT%H:%M")
-        .map_err(|_| anyhow::anyhow!("Enter a valid local date and time."))?;
-    let time = match zone.from_local_datetime(&local) {
-        LocalResult::Single(value) => value,
-        LocalResult::None => bail!(
-            "This local time does not exist because the clocks move forward. Choose another time."
+/// `earlier` or `later` when the instant's wall time happens twice in the
+/// zone (the clocks go back over it), else `None`.
+pub fn offset_choice_at(utc: DateTime<Utc>, zone: &str) -> Result<Option<String>> {
+    let zone = crate::tzdb::zone(zone)?;
+    let local = zone.to_datetime(crate::tzdb::timestamp(utc)?);
+    Ok(match zone.to_ambiguous_timestamp(local).offset() {
+        AmbiguousOffset::Fold { before, .. } => Some(
+            if crate::tzdb::utc(before.to_timestamp(local)?)? == utc {
+                "earlier"
+            } else {
+                "later"
+            }
+            .into(),
         ),
-        LocalResult::Ambiguous(early, late) => match choice {
-            Some("earlier") => early,
-            Some("later") => late,
-            _ => bail!("This local time occurs twice. Choose the earlier or later offset."),
+        _ => None,
+    })
+}
+
+const DOES_NOT_EXIST: &str =
+    "This local time does not exist because the clocks move forward. Choose another time.";
+const OCCURS_TWICE: &str = "This local time occurs twice. Choose the earlier or later offset.";
+
+fn parse_local(local: &str) -> Result<civil::DateTime> {
+    civil::DateTime::strptime("%Y-%m-%dT%H:%M", local)
+        .map_err(|_| anyhow::anyhow!("Enter a valid local date and time."))
+}
+
+pub fn resolve_time(local: &str, zone: &str, choice: Option<&str>) -> Result<DateTime<Utc>> {
+    let zone = crate::tzdb::zone(zone)?;
+    let local = parse_local(local)?;
+    let offset = match zone.to_ambiguous_timestamp(local).offset() {
+        AmbiguousOffset::Unambiguous { offset } => offset,
+        AmbiguousOffset::Gap { .. } => bail!(DOES_NOT_EXIST),
+        AmbiguousOffset::Fold { before, after } => match choice {
+            Some("earlier") => before,
+            Some("later") => after,
+            _ => bail!(OCCURS_TWICE),
         },
     };
-    Ok(time.with_timezone(&Utc))
+    crate::tzdb::utc(offset.to_timestamp(local)?)
+}
+
+/// What the Schedule form shows for a wall time, worked out with the bundled
+/// tz data so the renderer (whose ICU data can be older) only formats it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedLocalTime {
+    /// `None` only while a repeated hour waits for its earlier/later choice.
+    pub start_utc: Option<String>,
+    pub start_offset_minutes: Option<i32>,
+    /// The start's two offsets, earlier first, when its wall time happens twice.
+    pub repeated_hour_offsets: Option<[i32; 2]>,
+    pub planned_end_utc: Option<String>,
+    pub planned_end_offset_minutes: Option<i32>,
+}
+
+/// The start (and an X planned end) of a form, the way `validate_for` will
+/// resolve them. A time that does not exist is an error; a repeated hour
+/// without a choice returns its two offsets and no instant.
+pub fn resolve_local_time(
+    local_start: &str,
+    zone_name: &str,
+    choice: Option<&str>,
+    planned_end_local: Option<&str>,
+) -> Result<ResolvedLocalTime> {
+    let zone = crate::tzdb::zone(zone_name)?;
+    let local = parse_local(local_start)?;
+    let repeated_hour_offsets = match zone.to_ambiguous_timestamp(local).offset() {
+        AmbiguousOffset::Gap { .. } => bail!(DOES_NOT_EXIST),
+        AmbiguousOffset::Fold { before, after } => {
+            Some([before.seconds() / 60, after.seconds() / 60])
+        }
+        AmbiguousOffset::Unambiguous { .. } => None,
+    };
+    let start = match resolve_time(local_start, zone_name, choice) {
+        Ok(start) => Some(start),
+        Err(_) if repeated_hour_offsets.is_some() => None,
+        Err(error) => return Err(error),
+    };
+    // The end is advisory here: `validate_for` reports its own errors on save.
+    let end = planned_end_local
+        .filter(|end| !end.trim().is_empty())
+        .and_then(|end| resolve_time(end, zone_name, choice).ok());
+    let offset = |utc: Option<DateTime<Utc>>| {
+        utc.map(|utc| crate::tzdb::offset_minutes_at(utc, &zone))
+            .transpose()
+    };
+    Ok(ResolvedLocalTime {
+        start_utc: start.map(|utc| utc.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        start_offset_minutes: offset(start)?,
+        repeated_hour_offsets,
+        planned_end_utc: end.map(|utc| utc.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        planned_end_offset_minutes: offset(end)?,
+    })
+}
+
+/// UTC offset of each known zone at an instant, for the zone picker's
+/// "Vancouver (GMT-7)". Unknown names are left out.
+pub fn zone_offsets(zones: &[String], at: DateTime<Utc>) -> BTreeMap<String, i32> {
+    zones
+        .iter()
+        .filter_map(|name| {
+            let zone = crate::tzdb::zone(name).ok()?;
+            Some((
+                name.clone(),
+                crate::tzdb::offset_minutes_at(at, &zone).ok()?,
+            ))
+        })
+        .collect()
+}
+
+/// A saved schedule whose stored start is not the instant its own wall time
+/// means under the bundled tz data: it was sent with older data (tz 2025b
+/// before Vancouver, Edmonton, Inuvik, Winnipeg, Casablanca and Havana
+/// dropped clock changes) and the platform still shows the old instant.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MisresolvedStart {
+    pub event_id: String,
+    pub stored_start_utc: String,
+    /// `None` when the wall time no longer resolves (it now falls in a gap or
+    /// a repeated hour without a choice): the streamer has to pick a time.
+    pub resolved_start_utc: Option<String>,
+}
+
+/// Saved events still ahead of their broadcast whose `start_utc` differs from
+/// re-resolving `requested.local_start`. Ended, live and deleted events are
+/// left alone.
+pub fn misresolved_starts(events: &[ScheduledStreamEvent]) -> Vec<MisresolvedStart> {
+    events.iter().filter_map(misresolved_start).collect()
+}
+
+/// One event's entry for `misresolved_starts`.
+pub fn misresolved_start(event: &ScheduledStreamEvent) -> Option<MisresolvedStart> {
+    if matches!(
+        event.lifecycle.as_str(),
+        "live" | "completed" | "canceled" | "missing"
+    ) {
+        return None;
+    }
+    let stored = DateTime::parse_from_rfc3339(&event.start_utc)
+        .ok()
+        .map(|stored| stored.with_timezone(&Utc));
+    let resolved = resolve_time(
+        &event.requested.local_start,
+        &event.requested.time_zone,
+        event.requested.offset_choice.as_deref(),
+    )
+    .ok();
+    (stored.is_none() || stored != resolved).then(|| MisresolvedStart {
+        event_id: event.id.clone(),
+        stored_start_utc: event.start_utc.clone(),
+        resolved_start_utc: resolved.map(|utc| utc.to_rfc3339_opts(SecondsFormat::Secs, true)),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +283,31 @@ pub struct ScheduledStreamEvent {
     /// X only: the managed asset id that `thumbnail_media_id` was made from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail_uploaded_asset_id: Option<String>,
+    /// Filled by `public()` and never stored: the offsets the renderer formats
+    /// the times with, since its own tz data can be older than the backend's.
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub times: Option<ScheduledTimes>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledTimes {
+    pub start_offset_minutes: i32,
+    /// X only: the planned end the broadcast is sent with.
+    pub planned_end_utc: Option<String>,
+    pub planned_end_offset_minutes: Option<i32>,
+    /// Set when the saved start is not what the typed wall time means under
+    /// the bundled tz data: Upcoming flags the event and offers to fix it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_repair: Option<StartRepair>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StartRepair {
+    /// `None` when the wall time no longer resolves: only an edit can fix it.
+    pub corrected_start_utc: Option<String>,
+    pub corrected_start_offset_minutes: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -266,6 +429,7 @@ impl ScheduledStreamEvent {
             ingest: None,
             thumbnail_media_id: None,
             thumbnail_uploaded_asset_id: None,
+            times: None,
         })
     }
     /// Planned end instant: the requested one, else the default duration.
@@ -281,7 +445,39 @@ impl ScheduledStreamEvent {
         if let Some(preparation) = &mut self.preparation {
             preparation.prepared = None;
         }
+        self.times = self.times().ok();
         self
+    }
+    fn times(&self) -> Result<ScheduledTimes> {
+        let zone = crate::tzdb::zone(&self.requested.time_zone)?;
+        let start = DateTime::parse_from_rfc3339(&self.start_utc)?.with_timezone(&Utc);
+        let end = if self.provider == "x" {
+            self.requested.planned_end_utc()?
+        } else {
+            None
+        };
+        let start_repair = misresolved_start(self).map(|_| {
+            let corrected = resolve_time(
+                &self.requested.local_start,
+                &self.requested.time_zone,
+                self.requested.offset_choice.as_deref(),
+            )
+            .ok();
+            StartRepair {
+                corrected_start_utc: corrected
+                    .map(|utc| utc.to_rfc3339_opts(SecondsFormat::Secs, true)),
+                corrected_start_offset_minutes: corrected
+                    .and_then(|utc| crate::tzdb::offset_minutes_at(utc, &zone).ok()),
+            }
+        });
+        Ok(ScheduledTimes {
+            start_offset_minutes: crate::tzdb::offset_minutes_at(start, &zone)?,
+            planned_end_utc: end.map(|utc| utc.to_rfc3339_opts(SecondsFormat::Secs, true)),
+            planned_end_offset_minutes: end
+                .map(|utc| crate::tzdb::offset_minutes_at(utc, &zone))
+                .transpose()?,
+            start_repair,
+        })
     }
     pub fn editable(&self) -> Result<()> {
         if self.schema_version != 1 {
@@ -587,6 +783,228 @@ mod tests {
             "2027-01-01T06:30:00+00:00"
         );
         assert!(resolve_time("2027-02-30T12:00", "UTC", None).is_err());
+    }
+    fn utc(local: &str, zone: &str) -> String {
+        resolve_time(local, zone, None)
+            .unwrap()
+            .to_rfc3339_opts(SecondsFormat::Secs, true)
+    }
+    #[test]
+    fn zones_that_dropped_clock_changes_resolve_with_tz_2026e() {
+        // tz 2025b (chrono-tz, Electron 39's ICU) still falls back on
+        // 2026-11-01 and gives each of these an hour off.
+        for (zone, expected) in [
+            ("America/Vancouver", "2026-12-15T17:00:00Z"),
+            ("America/Edmonton", "2026-12-15T16:00:00Z"),
+            ("America/Inuvik", "2026-12-15T16:00:00Z"),
+            ("America/Winnipeg", "2026-12-15T15:00:00Z"),
+            ("Africa/Casablanca", "2026-12-15T10:00:00Z"),
+            ("America/Havana", "2026-12-15T14:00:00Z"),
+        ] {
+            assert_eq!(utc("2026-12-15T10:00", zone), expected, "{zone}");
+        }
+        // Neighbours that kept their clock changes are untouched.
+        assert_eq!(
+            utc("2026-12-15T10:00", "America/Los_Angeles"),
+            "2026-12-15T18:00:00Z"
+        );
+        assert_eq!(
+            utc("2026-12-15T10:00", "America/Regina"),
+            "2026-12-15T16:00:00Z"
+        );
+    }
+    #[test]
+    fn former_gap_and_repeated_hours_are_ordinary_times() {
+        // The old spring-forward gap exists now, and resolves at -07.
+        assert_eq!(
+            utc("2027-03-14T02:30", "America/Vancouver"),
+            "2027-03-14T09:30:00Z"
+        );
+        // The old fall-back hour happens once, so no earlier/later choice.
+        for (zone, expected) in [
+            ("America/Vancouver", "2027-11-07T08:30:00Z"),
+            ("America/Edmonton", "2027-11-07T07:30:00Z"),
+            ("America/Inuvik", "2027-11-07T07:30:00Z"),
+            ("America/Winnipeg", "2027-11-07T06:30:00Z"),
+        ] {
+            assert_eq!(utc("2027-11-07T01:30", zone), expected, "{zone}");
+            let resolved = resolve_local_time("2027-11-07T01:30", zone, None, None).unwrap();
+            assert_eq!(resolved.repeated_hour_offsets, None, "{zone}");
+            assert_eq!(resolved.start_utc.as_deref(), Some(expected), "{zone}");
+        }
+        // Cuba stopped falling back on 2026-11-01, so 00:30 happens once.
+        assert_eq!(
+            utc("2026-11-01T00:30", "America/Havana"),
+            "2026-11-01T04:30:00Z"
+        );
+    }
+    #[test]
+    fn resolved_local_time_carries_offsets_and_repeated_hour() {
+        let vancouver = resolve_local_time(
+            "2026-12-15T10:00",
+            "America/Vancouver",
+            None,
+            Some("2026-12-15T12:00"),
+        )
+        .unwrap();
+        assert_eq!(
+            vancouver,
+            ResolvedLocalTime {
+                start_utc: Some("2026-12-15T17:00:00Z".into()),
+                start_offset_minutes: Some(-420),
+                repeated_hour_offsets: None,
+                planned_end_utc: Some("2026-12-15T19:00:00Z".into()),
+                planned_end_offset_minutes: Some(-420),
+            }
+        );
+        let fold = resolve_local_time("2027-10-31T02:30", "Europe/Madrid", None, None).unwrap();
+        assert_eq!(fold.repeated_hour_offsets, Some([120, 60]));
+        assert_eq!(fold.start_utc, None);
+        let later =
+            resolve_local_time("2027-10-31T02:30", "Europe/Madrid", Some("later"), None).unwrap();
+        assert_eq!(later.start_utc.as_deref(), Some("2027-10-31T01:30:00Z"));
+        assert_eq!(later.start_offset_minutes, Some(60));
+        assert_eq!(later.repeated_hour_offsets, Some([120, 60]));
+        assert!(resolve_local_time("2027-03-28T02:30", "Europe/Madrid", None, None).is_err());
+        assert!(resolve_local_time("2027-01-01T12:00", "Not/AZone", None, None).is_err());
+        assert_eq!(
+            offset_choice_at(later_utc("2027-10-31T01:30:00Z"), "Europe/Madrid").unwrap(),
+            Some("later".into())
+        );
+        assert_eq!(
+            offset_choice_at(later_utc("2027-10-31T00:30:00Z"), "Europe/Madrid").unwrap(),
+            Some("earlier".into())
+        );
+        assert_eq!(
+            local_wall_time(later_utc("2026-12-15T17:00:00Z"), "America/Vancouver").unwrap(),
+            "2026-12-15T10:00"
+        );
+        let offsets = zone_offsets(
+            &[
+                "America/Vancouver".into(),
+                "Europe/Madrid".into(),
+                "Not/AZone".into(),
+            ],
+            later_utc("2026-12-15T17:00:00Z"),
+        );
+        assert_eq!(
+            offsets.into_iter().collect::<Vec<_>>(),
+            [
+                ("America/Vancouver".into(), -420),
+                ("Europe/Madrid".into(), 60)
+            ]
+        );
+    }
+    fn later_utc(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+    fn scheduled(
+        provider: &str,
+        local: &str,
+        zone: &str,
+        end: Option<&str>,
+    ) -> ScheduledStreamEvent {
+        ScheduledStreamEvent::draft(
+            Uuid::new_v4().to_string(),
+            provider,
+            "123".into(),
+            "Channel".into(),
+            EventMetadata {
+                title: "Show".into(),
+                description: "".into(),
+                privacy: "private".into(),
+                made_for_kids: false,
+                local_start: local.into(),
+                time_zone: zone.into(),
+                offset_choice: None,
+                thumbnail_asset_id: None,
+                planned_end_local: end.map(Into::into),
+                available_for_replay: None,
+            },
+        )
+        .unwrap()
+    }
+    #[test]
+    fn misresolved_starts_find_events_sent_with_old_tz_data() {
+        // Sent with tz 2025b: 10:00 in Vancouver went out as 18:00Z.
+        let mut stale = scheduled("youtube", "2026-12-15T10:00", "America/Vancouver", None);
+        stale.lifecycle = "scheduled".into();
+        stale.start_utc = "2026-12-15T18:00:00+00:00".into();
+        // Same instant, written in the other RFC 3339 form: not stale.
+        let mut current = scheduled("youtube", "2026-12-15T10:00", "America/Vancouver", None);
+        current.lifecycle = "scheduled".into();
+        current.start_utc = "2026-12-15T17:00:00+00:00".into();
+        let mut ended = stale.clone();
+        ended.id = Uuid::new_v4().to_string();
+        ended.lifecycle = "completed".into();
+        let mut unreadable = stale.clone();
+        unreadable.id = Uuid::new_v4().to_string();
+        unreadable.requested.local_start = "2027-03-28T02:30".into();
+        unreadable.requested.time_zone = "Europe/Madrid".into();
+        let draft = scheduled("youtube", "2035-01-01T12:00", "Europe/Madrid", None);
+        assert_eq!(
+            misresolved_starts(&[stale.clone(), current, ended, unreadable.clone(), draft]),
+            [
+                MisresolvedStart {
+                    event_id: stale.id,
+                    stored_start_utc: "2026-12-15T18:00:00+00:00".into(),
+                    resolved_start_utc: Some("2026-12-15T17:00:00Z".into()),
+                },
+                MisresolvedStart {
+                    event_id: unreadable.id,
+                    stored_start_utc: "2026-12-15T18:00:00+00:00".into(),
+                    resolved_start_utc: None,
+                },
+            ]
+        );
+    }
+    #[test]
+    fn public_events_carry_their_offsets() {
+        let x = scheduled(
+            "x",
+            "2026-12-15T10:00",
+            "America/Vancouver",
+            Some("2026-12-15T12:30"),
+        )
+        .public();
+        assert_eq!(
+            x.times,
+            Some(ScheduledTimes {
+                start_offset_minutes: -420,
+                planned_end_utc: Some("2026-12-15T19:30:00Z".into()),
+                planned_end_offset_minutes: Some(-420),
+                start_repair: None,
+            })
+        );
+        let youtube = scheduled("youtube", "2026-07-01T10:00", "Europe/Madrid", None).public();
+        assert_eq!(
+            youtube.times,
+            Some(ScheduledTimes {
+                start_offset_minutes: 120,
+                planned_end_utc: None,
+                planned_end_offset_minutes: None,
+                start_repair: None,
+            })
+        );
+        // Sent with tz 2025b: flagged, with the instant its wall time means now.
+        let mut stale = scheduled("youtube", "2026-12-15T10:00", "America/Vancouver", None);
+        stale.start_utc = "2026-12-15T18:00:00+00:00".into();
+        let times = stale.public().times.unwrap();
+        assert_eq!(times.start_offset_minutes, -420);
+        assert_eq!(
+            times.start_repair,
+            Some(StartRepair {
+                corrected_start_utc: Some("2026-12-15T17:00:00Z".into()),
+                corrected_start_offset_minutes: Some(-420),
+            })
+        );
+        // Derived, never stored: a saved payload's `times` is not read back.
+        let mut json = serde_json::to_value(&youtube).unwrap();
+        json["times"]["startOffsetMinutes"] = serde_json::json!(0);
+        let read: ScheduledStreamEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(read.times, None);
     }
     #[test]
     fn unicode_limits_are_characters() {

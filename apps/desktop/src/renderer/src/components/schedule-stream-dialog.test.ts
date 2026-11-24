@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ScheduledStreamEvent } from '@/lib/backend'
 import type { useScheduledStreams } from '@/hooks/use-scheduled-streams'
+import { wallTimeAt } from '@/lib/schedule-time'
 import { scheduleBlockedReason, ScheduleStreamDialog } from './schedule-stream-dialog'
 let root: Root
 let container: HTMLDivElement
@@ -29,9 +30,40 @@ const latest = {
   revision: 2,
   requested: { ...event.requested, title: 'External edit', thumbnailAssetId: 'new-thumbnail' }
 }
-const request = vi.fn(async (method: string) =>
-  method === 'resolveTime' ? { startUtc: '2035-01-01T12:00:00Z' } : method === 'get' ? latest : null
-)
+// Offsets as the backend's tz data has them; Vancouver no longer changes clocks.
+const zoneOffset = (zone: string): number =>
+  zone === 'Europe/Madrid' ? 60 : zone === 'America/Vancouver' ? -420 : 0
+const request = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+  if (method === 'resolveTime' && params?.localStart === '2026-10-25T02:30') {
+    // Madrid sets its clocks back over 02:30 that night.
+    const later = params.offsetChoice === 'later'
+    return {
+      startUtc: params.offsetChoice
+        ? later
+          ? '2026-10-25T01:30:00Z'
+          : '2026-10-25T00:30:00Z'
+        : null,
+      startOffsetMinutes: params.offsetChoice ? (later ? 60 : 120) : null,
+      repeatedHourOffsets: [120, 60],
+      plannedEndUtc: null,
+      plannedEndOffsetMinutes: null
+    }
+  }
+  if (method === 'resolveTime') {
+    return {
+      startUtc: '2035-01-01T12:00:00Z',
+      startOffsetMinutes: zoneOffset(String(params?.timeZone)),
+      repeatedHourOffsets: null,
+      plannedEndUtc: null,
+      plannedEndOffsetMinutes: null
+    }
+  }
+  if (method === 'zoneOffsets') {
+    const zones = params?.timeZones as string[]
+    return { offsets: Object.fromEntries(zones.map((zone) => [zone, zoneOffset(zone)])) }
+  }
+  return method === 'get' ? latest : null
+})
 const mutate = vi.fn(async (): Promise<void> => {
   throw new Error('Revision changed')
 })
@@ -48,14 +80,14 @@ afterEach(async () => {
   container.remove()
   vi.unstubAllGlobals()
 })
-async function render(available = true) {
+async function render(available = true, opened: ScheduledStreamEvent | null = event) {
   const state = {
     request,
     mutate,
     capabilities: { available, accounts: [{ accountId: 'channel', accountLabel: 'Channel' }] }
   } as unknown as ReturnType<typeof useScheduledStreams>
   await act(async () => {
-    root.render(createElement(ScheduleStreamDialog, { event, state, onClose: close }))
+    root.render(createElement(ScheduleStreamDialog, { event: opened, state, onClose: close }))
   })
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 180))
@@ -76,6 +108,21 @@ async function title(value: string) {
   })
 }
 describe('scheduled form ownership', () => {
+  it('starts a new event an hour from now in the backend wall clock of the zone', async () => {
+    vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockReturnValue({
+      timeZone: 'America/Vancouver'
+    } as Intl.ResolvedDateTimeFormatOptions)
+    const expected = (): string => wallTimeAt(Date.now() + 3_600_000, -420)
+    const before = expected()
+    await render(true, null)
+    const start = document.querySelector<HTMLInputElement>('#schedule-start')!.value
+    expect([before, expected()]).toContain(start)
+    expect(request).toHaveBeenCalledWith(
+      'zoneOffsets',
+      expect.objectContaining({ timeZones: ['America/Vancouver'] })
+    )
+    vi.mocked(Intl.DateTimeFormat.prototype.resolvedOptions).mockRestore()
+  })
   it('preserves dirty input after a focus refresh conflict until explicit reload', async () => {
     await render()
     await title('My unsaved edit')
@@ -239,8 +286,12 @@ describe('schedule form reasons (plan 174 S3.5b)', () => {
         })
       )
     })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 180))
+    })
     expect(document.querySelector('#schedule-offset')).not.toBeNull()
     expect(document.body.textContent).toContain('This time happens twice')
+    expect(document.body.textContent).toContain('This local time occurs twice')
   })
 
   it('explains an empty channel list and links to Setup', async () => {

@@ -189,12 +189,24 @@ pub async fn dispatch(state: &AppState, method: &str, params: Value) -> Result<V
             )?);
         }
         "resolveTime" => {
-            let utc = resolve_time(
+            return Ok(serde_json::to_value(resolve_local_time(
                 params["localStart"].as_str().unwrap_or(""),
                 params["timeZone"].as_str().unwrap_or(""),
                 params["offsetChoice"].as_str(),
-            )?;
-            return Ok(json!({"startUtc":utc.to_rfc3339()}));
+                params["plannedEndLocal"].as_str(),
+            )?)?);
+        }
+        "zoneOffsets" => {
+            let zones: Vec<String> = serde_json::from_value(params["timeZones"].clone())
+                .context("Time zones required")?;
+            if zones.len() > 1_000 {
+                bail!("Too many time zones.");
+            }
+            let at = match params["atUtc"].as_str() {
+                Some(at) => chrono::DateTime::parse_from_rfc3339(at)?.with_timezone(&Utc),
+                None => Utc::now(),
+            };
+            return Ok(json!({ "offsets": zone_offsets(&zones, at) }));
         }
         "candidates" => {
             let event = state
@@ -530,25 +542,8 @@ fn hydrate_requested_metadata(event: &mut ScheduledStreamEvent, current: &Value)
         .pointer("/snippet/scheduledStartTime")
         .and_then(Value::as_str)
     {
-        let utc = chrono::DateTime::parse_from_rfc3339(start)?;
-        let zone: chrono_tz::Tz = event.requested.time_zone.parse()?;
-        event.requested.local_start = utc
-            .with_timezone(&zone)
-            .format("%Y-%m-%dT%H:%M")
-            .to_string();
-        let local = utc.with_timezone(&zone).naive_local();
-        event.requested.offset_choice = match chrono::TimeZone::from_local_datetime(&zone, &local) {
-            chrono::LocalResult::Ambiguous(earlier, _) => Some(
-                if earlier.with_timezone(&Utc) == utc.with_timezone(&Utc) {
-                    "earlier"
-                } else {
-                    "later"
-                }
-                .into(),
-            ),
-            _ => None,
-        };
-        event.start_utc = utc.with_timezone(&Utc).to_rfc3339();
+        let utc = chrono::DateTime::parse_from_rfc3339(start)?.with_timezone(&Utc);
+        apply_remote_start(event, utc)?;
     }
     Ok(())
 }
@@ -1145,21 +1140,17 @@ fn x_candidates(
         .collect())
 }
 
+/// The platform's start, as the event's own wall time. An instant the
+/// platform still holds as saved keeps the saved wall time: it is what the
+/// streamer typed, and an event sent with older tz data must keep it until it
+/// is repaired (`misresolved_starts`), not take the platform's wrong hour.
 fn apply_remote_start(event: &mut ScheduledStreamEvent, utc: chrono::DateTime<Utc>) -> Result<()> {
-    let zone: chrono_tz::Tz = event.requested.time_zone.parse()?;
-    event.requested.local_start = local_wall_time(utc, &event.requested.time_zone)?;
-    let local = utc.with_timezone(&zone).naive_local();
-    event.requested.offset_choice = match chrono::TimeZone::from_local_datetime(&zone, &local) {
-        chrono::LocalResult::Ambiguous(earlier, _) => Some(
-            if earlier.with_timezone(&Utc) == utc {
-                "earlier"
-            } else {
-                "later"
-            }
-            .into(),
-        ),
-        _ => None,
-    };
+    let unchanged = chrono::DateTime::parse_from_rfc3339(&event.start_utc)
+        .is_ok_and(|saved| saved.with_timezone(&Utc) == utc);
+    if !unchanged {
+        event.requested.local_start = local_wall_time(utc, &event.requested.time_zone)?;
+        event.requested.offset_choice = offset_choice_at(utc, &event.requested.time_zone)?;
+    }
     event.start_utc = utc.to_rfc3339();
     Ok(())
 }
@@ -1180,7 +1171,15 @@ fn hydrate_x(event: &mut ScheduledStreamEvent, current: &Value) -> Result<()> {
                 .with_timezone(&Utc);
         apply_remote_start(event, utc)?;
     }
-    if let Some(end) = current["scheduled_end_ms"].as_str() {
+    // Like the start: an end X still holds as confirmed keeps the saved wall time.
+    if let Some(end) = current["scheduled_end_ms"].as_str()
+        && !(event.requested.planned_end_local.is_some()
+            && event
+                .confirmed
+                .as_ref()
+                .and_then(|confirmed| confirmed["scheduled_end_ms"].as_str())
+                == Some(end))
+    {
         let utc = chrono::DateTime::parse_from_rfc3339(&scheduled_x::rfc3339_from_epoch_ms(end)?)?
             .with_timezone(&Utc);
         event.requested.planned_end_local = Some(local_wall_time(utc, &event.requested.time_zone)?);
@@ -2035,7 +2034,7 @@ mod tests {
             crate::storage::Database::open_in_memory_for_tests(),
         )
     }
-    fn event() -> ScheduledStreamEvent {
+    pub(super) fn event() -> ScheduledStreamEvent {
         ScheduledStreamEvent::draft(
             uuid::Uuid::new_v4().to_string(),
             "youtube",
@@ -3169,6 +3168,53 @@ mod x_tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn hydrate_keeps_the_typed_wall_time_while_the_platform_instant_is_unchanged() {
+        // Sent with tz 2025b: 10:00 in Vancouver went out an hour late.
+        let mut youtube = super::tests::event();
+        youtube.requested.time_zone = "America/Vancouver".into();
+        youtube.requested.local_start = "2026-12-15T10:00".into();
+        youtube.start_utc = "2026-12-15T18:00:00+00:00".into();
+        let remote = json!({"snippet": {"scheduledStartTime": "2026-12-15T18:00:00Z"}});
+        hydrate_requested_metadata(&mut youtube, &remote).unwrap();
+        assert_eq!(youtube.requested.local_start, "2026-12-15T10:00");
+        assert_eq!(misresolved_starts(&[youtube.clone()]).len(), 1);
+        // Moved on YouTube: the new instant is read in the bundled tz data.
+        let moved = json!({"snippet": {"scheduledStartTime": "2026-12-15T20:00:00Z"}});
+        hydrate_requested_metadata(&mut youtube, &moved).unwrap();
+        assert_eq!(youtube.requested.local_start, "2026-12-15T13:00");
+        assert_eq!(youtube.requested.offset_choice, None);
+        assert!(misresolved_starts(&[youtube]).is_empty());
+
+        let mut x = x_event();
+        x.requested.time_zone = "America/Vancouver".into();
+        x.requested.local_start = "2026-12-15T10:00".into();
+        x.requested.planned_end_local = Some("2026-12-15T12:00".into());
+        x.start_utc = "2026-12-15T18:00:00+00:00".into();
+        let start_ms = "1797357600000"; // 2026-12-15T18:00:00Z
+        let end_ms = "1797364800000"; // 2026-12-15T20:00:00Z
+        x.confirmed = Some(json!({"scheduled_start_ms": start_ms, "scheduled_end_ms": end_ms}));
+        hydrate_x(
+            &mut x,
+            &json!({"scheduled_start_ms": start_ms, "scheduled_end_ms": end_ms}),
+        )
+        .unwrap();
+        assert_eq!(x.requested.local_start, "2026-12-15T10:00");
+        assert_eq!(
+            x.requested.planned_end_local.as_deref(),
+            Some("2026-12-15T12:00")
+        );
+        hydrate_x(
+            &mut x,
+            &json!({"scheduled_start_ms": start_ms, "scheduled_end_ms": "1797368400000"}),
+        )
+        .unwrap();
+        assert_eq!(
+            x.requested.planned_end_local.as_deref(),
+            Some("2026-12-15T14:00")
+        );
     }
 
     fn x_mutation(event: &ScheduledStreamEvent) -> Mutation {

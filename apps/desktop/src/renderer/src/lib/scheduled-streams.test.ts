@@ -5,6 +5,8 @@ import {
   scheduledLifecycleChip,
   scheduledPrivacyLabel,
   scheduledProviderSections,
+  scheduledStartRepair,
+  scheduledStartRepairMutation,
   scheduledWhenLabel,
   selectScheduledStreamForTarget,
   settleScheduledXTargets
@@ -319,92 +321,121 @@ describe('Upcoming, split by platform', () => {
     expect(scheduledPrivacyLabel(scheduledEvent({ provider: 'x' }))).toBeNull()
   })
 
-  it('says when, in the event time zone, with an X broadcast planned end', () => {
-    const youtube = scheduledWhenLabel(scheduledEvent(), 'en-GB')
+  it('says when, at the offset the backend gave, with an X broadcast planned end', () => {
+    const madrid = { startOffsetMinutes: 60, plannedEndUtc: null, plannedEndOffsetMinutes: null }
+    const youtube = scheduledWhenLabel(scheduledEvent({ times: madrid }), 'en-GB')
     expect(youtube).toContain('2035')
     expect(youtube).toContain('12:00')
-    const x = scheduledEvent({
-      provider: 'x',
-      requested: { ...scheduledEvent().requested, plannedEndLocal: '2035-01-01T13:30' }
-    })
-    expect(scheduledWhenLabel(x, 'en-GB')).toMatch(/12:00\s?–\s?13:30 CET$/)
-    expect(scheduledWhenLabel(x, 'en-US')).toMatch(/12:00\s?–\s?1:30\s?PM/)
-    const overnight = scheduledEvent({
-      provider: 'x',
-      requested: { ...scheduledEvent().requested, plannedEndLocal: '2035-01-02T01:00' }
-    })
-    expect(scheduledWhenLabel(overnight, 'en-GB')).toMatch(/12:00.*–.*2 Jan 2035, 01:00/)
-  })
-
-  // The end is a wall time resolved on its own, so a DST change between start and
-  // end must not shift it (it used to add the wall-clock difference to the start).
-  const madridRange = (startUtc: string, endUtc: string): string =>
-    new Intl.DateTimeFormat('en-GB', {
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      timeZone: 'Europe/Madrid',
-      timeZoneName: 'short'
-    }).formatRange(new Date(startUtc), new Date(endUtc))
-
-  it.each([
-    [
-      'spring forward',
-      '2027-03-28T00:30:00Z',
-      '2027-03-28T01:30',
-      '2027-03-28T03:30',
-      '2027-03-28T01:30:00Z'
-    ],
-    [
-      'fall back',
-      '2027-10-30T23:30:00Z',
-      '2027-10-31T01:30',
-      '2027-10-31T03:30',
-      '2027-10-31T02:30:00Z'
-    ],
-    [
-      'an ordinary day',
-      '2027-03-27T00:30:00Z',
-      '2027-03-27T01:30',
-      '2027-03-27T03:30',
-      '2027-03-27T02:30:00Z'
-    ]
-  ])(
-    'shows the saved planned end across %s',
-    (_name, startUtc, localStart, plannedEndLocal, endUtc) => {
-      const x = scheduledEvent({
-        provider: 'x',
-        startUtc,
-        requested: { ...scheduledEvent().requested, localStart, plannedEndLocal }
-      })
-      expect(scheduledWhenLabel(x, 'en-GB')).toBe(madridRange(startUtc, endUtc))
-    }
-  )
-
-  it('uses the chosen offset for a planned end in the repeated hour', () => {
-    const base = scheduledEvent().requested
-    const event = (offsetChoice: 'earlier' | 'later' | null): ScheduledStreamEvent =>
+    const x = (plannedEndUtc: string): ScheduledStreamEvent =>
       scheduledEvent({
         provider: 'x',
-        startUtc: '2027-10-30T23:30:00Z',
-        requested: {
-          ...base,
-          localStart: '2027-10-31T01:30',
-          plannedEndLocal: '2027-10-31T02:30',
-          offsetChoice
-        }
+        times: { ...madrid, plannedEndUtc, plannedEndOffsetMinutes: 60 }
       })
-    expect(scheduledWhenLabel(event('earlier'), 'en-GB')).toBe(
-      madridRange('2027-10-30T23:30:00Z', '2027-10-31T00:30:00Z')
+    expect(scheduledWhenLabel(x('2035-01-01T12:30:00Z'), 'en-GB')).toMatch(
+      /12:00\s?–\s?13:30 GMT\+1$/
     )
-    expect(scheduledWhenLabel(event('later'), 'en-GB')).toBe(
-      madridRange('2027-10-30T23:30:00Z', '2027-10-31T01:30:00Z')
+    expect(scheduledWhenLabel(x('2035-01-01T12:30:00Z'), 'en-US')).toMatch(/12:00\s?–\s?1:30\s?PM/)
+    expect(scheduledWhenLabel(x('2035-01-02T00:00:00Z'), 'en-GB')).toMatch(
+      /12:00.*–.*2 Jan 2035, 01:00/
     )
-    // No choice made: the end cannot be resolved, so only the start shows.
-    expect(scheduledWhenLabel(event(null), 'en-GB')).not.toContain('–')
+    // A YouTube event never shows an end, and an end before the start is dropped.
+    expect(
+      scheduledWhenLabel(
+        scheduledEvent({ times: { ...madrid, plannedEndUtc: '2035-01-01T12:30:00Z' } }),
+        'en-GB'
+      )
+    ).not.toContain('–')
+    expect(scheduledWhenLabel(x('2035-01-01T10:00:00Z'), 'en-GB')).not.toContain('–')
+  })
+
+  it('shows each end at its own offset across a clock change', () => {
+    // Madrid springs forward between a 01:30 start and a 03:30 end.
+    const label = scheduledWhenLabel(
+      scheduledEvent({
+        provider: 'x',
+        startUtc: '2027-03-28T00:30:00Z',
+        times: {
+          startOffsetMinutes: 60,
+          plannedEndUtc: '2027-03-28T01:30:00Z',
+          plannedEndOffsetMinutes: 120
+        }
+      }),
+      'en-GB'
+    )
+    expect(label).toMatch(/01:30 GMT\+1 – .*03:30 GMT\+2$/)
+  })
+
+  it('formats with the backend offset, not the renderer tz data', () => {
+    // tz 2025b (Electron 39) still has Vancouver at -08:00 in December.
+    const vancouver = scheduledEvent({
+      startUtc: '2026-12-15T17:00:00Z',
+      requested: {
+        ...scheduledEvent().requested,
+        localStart: '2026-12-15T10:00',
+        timeZone: 'America/Vancouver'
+      },
+      times: { startOffsetMinutes: -420, plannedEndUtc: null, plannedEndOffsetMinutes: null }
+    })
+    expect(scheduledWhenLabel(vancouver, 'en-US')).toMatch(/10:00\s?AM GMT-7$/)
+    // No offsets (an unknown zone): the saved wall time as typed.
+    expect(scheduledWhenLabel({ ...vancouver, times: undefined }, 'en-US')).toBe('2026-12-15 10:00')
+  })
+})
+
+describe('start times sent with older time zone rules', () => {
+  // Scheduled for 10:00 in Vancouver with tz 2025b, so YouTube has 18:00Z.
+  const stale = (overrides: Partial<ScheduledStreamEvent> = {}): ScheduledStreamEvent =>
+    scheduledEvent({
+      startUtc: '2026-12-15T18:00:00Z',
+      requested: {
+        ...scheduledEvent().requested,
+        localStart: '2026-12-15T10:00',
+        timeZone: 'America/Vancouver'
+      },
+      times: {
+        startOffsetMinutes: -480,
+        plannedEndUtc: null,
+        plannedEndOffsetMinutes: null,
+        startRepair: {
+          correctedStartUtc: '2026-12-15T17:00:00Z',
+          correctedStartOffsetMinutes: -420
+        }
+      },
+      ...overrides
+    })
+
+  it('flags a published event and fixes it by sending the saved metadata again', () => {
+    const view = scheduledStartRepair(stale(), 'en-US')
+    expect(view?.title).toBe('YouTube shows the wrong start time')
+    expect(view?.description).toMatch(/moves it to .*10:00\s?AM GMT-7, the time you chose\.$/)
+    expect(view?.action).toBe('fix')
+    expect(scheduledStartRepairMutation(stale())).toEqual({
+      action: 'update',
+      fields: { accountId: 'channel', metadata: stale().requested }
+    })
+  })
+
+  it('fixes a draft locally, and asks for an edit when the time no longer exists', () => {
+    const draft = stale({ providerEventId: null, lifecycle: 'draft' })
+    expect(scheduledStartRepair(draft, 'en-US')?.title).toBe('The start time is out of date')
+    expect(scheduledStartRepairMutation(draft).action).toBe('saveDraft')
+    const gone = stale({
+      times: {
+        startOffsetMinutes: -480,
+        plannedEndUtc: null,
+        plannedEndOffsetMinutes: null,
+        startRepair: { correctedStartUtc: null, correctedStartOffsetMinutes: null }
+      }
+    })
+    expect(scheduledStartRepair(gone)).toMatchObject({ action: 'edit' })
+    expect(scheduledStartRepair(gone)?.description).toContain('2026-12-15 10:00 no longer exists')
+  })
+
+  it('stays quiet when the start is right or the event is busy or over', () => {
+    expect(scheduledStartRepair(scheduledEvent())).toBeNull()
+    expect(scheduledStartRepair(stale({ lifecycle: 'live' }))).toBeNull()
+    expect(scheduledStartRepair(stale({ createUncertain: true }))).toBeNull()
+    expect(scheduledStartRepair(stale({ operationState: 'needs-reconciliation' }))).toBeNull()
   })
 })
 
