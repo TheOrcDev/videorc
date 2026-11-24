@@ -17,6 +17,7 @@ pub mod chat;
 pub mod frame;
 pub mod layout;
 pub mod panes;
+pub mod rows;
 pub mod sidekick;
 pub mod stats;
 pub mod status;
