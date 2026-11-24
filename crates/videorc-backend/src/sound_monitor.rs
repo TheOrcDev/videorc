@@ -78,6 +78,9 @@ pub(crate) struct VoiceReport {
     pub stopped: bool,
 }
 
+// Read only by `render`, which plays on macOS alone (S1.8d d3 made the
+// device callback generic).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug)]
 struct MixVoice {
     key: u64,
@@ -96,6 +99,7 @@ struct MixVoice {
     finished: bool,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl MixVoice {
     fn frames(&self) -> usize {
         self.pcm.len() / 2
@@ -200,6 +204,7 @@ impl MonitorMix {
 
     /// Writes every voice, summed, into `out` (interleaved stereo; a trailing
     /// odd sample is silence). Voices that end leave the mix with a report.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn render(&mut self, out: &mut [f32]) {
         out.fill(0.0);
         for voice in self.voices.iter_mut() {
