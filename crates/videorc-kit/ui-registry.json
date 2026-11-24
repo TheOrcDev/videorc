@@ -40,7 +40,8 @@
     "pin-window-button",
     "empty",
     "page-tabs",
-    "settings-row"
+    "settings-row",
+    "checkbox"
   ],
   "keepLocal": []
 }
