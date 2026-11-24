@@ -2107,6 +2107,50 @@ async fn an_idle_screen_pick_is_the_screen_of_the_scene_on_stream() {
     );
 }
 
+/// S1.6b part 5b: the Studio's Sources mirror is the Camera row (plan 231
+/// D8: no Screen row, no Hide screen) with Open Sources at its end (plan
+/// 235 D4), and the Sources page's Screen item names the scene on stream.
+#[tokio::test]
+async fn the_sources_views_read_the_camera_row_and_the_scene_on_stream() {
+    use videorc_app_core::studio::sources_page::{
+        PermissionInputs, SourcesPageInput, sources_page_view,
+    };
+    use videorc_app_core::studio::sources_section::{SourcesExtras, SourcesSectionView};
+    let (_backend, studio) = scenes_studio(capture_config_with_camera()).await;
+    let snapshot = studio.snapshot();
+    let telemetry = studio.telemetry_now();
+
+    let mirror =
+        SourcesSectionView::from_snapshot(&snapshot, &telemetry, &SourcesExtras::default());
+    assert_eq!(mirror.group_label, "Sources");
+    assert_eq!(mirror.camera.row.picker.label, "camera:1");
+    assert_eq!(mirror.camera.row.disabled_reason, None);
+    assert_eq!(mirror.camera.open_label, "Open Sources");
+    let background = mirror.camera.background.expect("a camera has a Background");
+    assert_eq!(background.value_label, "Off");
+    assert!(!background.is_effect);
+    assert_eq!(mirror.camera.system_effect, None);
+    assert_eq!(mirror.camera.background_stage, None);
+
+    let page = sources_page_view(&SourcesPageInput {
+        snapshot: &snapshot,
+        telemetry: &telemetry,
+        permissions: PermissionInputs {
+            platform: "darwin",
+            target_name: "Videorc",
+            ..PermissionInputs::default()
+        },
+        development: false,
+        refreshing: false,
+    });
+    let scene = page.screen.scene.expect("the scene on stream is named");
+    assert!(scene.shows_screen, "{scene:?}");
+    assert!(scene.line.starts_with("Shown by “"), "{}", scene.line);
+    assert_eq!(scene.open_label, "Open Scenes");
+    assert!(page.camera.low_light.is_none(), "no answer, no switch");
+    assert!(page.alerts.is_empty());
+}
+
 // S1.6b part 3c: the start races (#1643), apply-after-proof and the failure
 // reconciliation, the switch's progress (#1275), the manual-apply
 // listeners.
