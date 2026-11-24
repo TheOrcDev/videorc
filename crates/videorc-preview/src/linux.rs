@@ -331,17 +331,25 @@ impl Presenter {
                     }
                 } else if handles.x11_window != 0 {
                     match x11::Child::build(handles) {
-                        Ok(child) => {
-                            // Before the readiness, so `attach` has it.
-                            if let Some(socket) = child.cancel_handle() {
+                        Ok(child) => match child.cancel_handle() {
+                            // Before the readiness, so `attach` has it: an
+                            // X11 presenter is never ready without the handle
+                            // that bounds its drop.
+                            Ok(socket) => {
                                 let _ = socket_tx.send(socket);
+                                if wanted(Backing::X11ChildWindow) {
+                                    child.run(inbox, &thread_bell);
+                                } else {
+                                    child.close();
+                                }
                             }
-                            if wanted(Backing::X11ChildWindow) {
-                                child.run(inbox, &thread_bell);
-                            } else {
+                            Err(error) => {
                                 child.close();
+                                let _ = ready_tx.send(Err(format!(
+                                    "X11 child window: the connection's socket could not be duplicated for its shutdown: {error}"
+                                )));
                             }
-                        }
+                        },
                         Err(error) => {
                             let _ = ready_tx.send(Err(format!("X11 child window: {error}")));
                         }
@@ -1156,7 +1164,6 @@ mod x11 {
     use std::time::{Duration, Instant};
 
     use x11rb::connection::Connection;
-    use x11rb::cookie::VoidCookie;
     use x11rb::protocol::Event;
     use x11rb::protocol::render::{self, ConnectionExt as _};
     use x11rb::protocol::shape::{self, ConnectionExt as _};
@@ -1307,24 +1314,25 @@ mod x11 {
 
         /// A duplicate of the connection's socket for the presenter's drop
         /// (see `Presenter::drop`).
-        pub(super) fn cancel_handle(&self) -> Option<std::os::fd::OwnedFd> {
-            self.conn.stream().as_fd().try_clone_to_owned().ok()
+        pub(super) fn cancel_handle(&self) -> std::io::Result<std::os::fd::OwnedFd> {
+            self.conn.stream().as_fd().try_clone_to_owned()
         }
 
-        /// The server's verdict on one request, within `SETUP_WAIT`. x11rb's
-        /// `check` waits for it with no deadline, so it waits on a helper
-        /// thread; past the wait the socket is shut down, which ends that
-        /// wait with an error (the helper is joined before this returns) and
-        /// the connection with it, so the child stops at its next poll.
-        fn check_within(
+        /// One setup request, sent and checked within `SETUP_WAIT`. x11rb's
+        /// send can block on a full socket and its `check` waits with no
+        /// deadline, so both run on a helper thread; past the wait the socket
+        /// is shut down, which ends either with an error (the helper is
+        /// joined before this returns) and the connection with it, so the
+        /// child stops at its next poll.
+        fn request_within(
             conn: &RustConnection,
-            cookie: VoidCookie<'_, RustConnection>,
             what: &str,
+            request: impl FnOnce(&RustConnection) -> Result<(), String> + Send,
         ) -> Result<(), String> {
             std::thread::scope(|scope| {
                 let (verdict_tx, verdict) = std::sync::mpsc::channel();
                 scope.spawn(move || {
-                    let _ = verdict_tx.send(cookie.check());
+                    let _ = verdict_tx.send(request(conn));
                 });
                 match verdict.recv_timeout(SETUP_WAIT) {
                     Ok(Ok(())) => Ok(()),
@@ -1411,14 +1419,15 @@ mod x11 {
                 .conn
                 .generate_id()
                 .map_err(|error| format!("{error}"))?;
-            let attached = self
-                .conn
-                .shm_attach_fd(segment, frames_fd, true)
-                .map_err(|error| format!("shm_attach_fd: {error}"))?;
-            Self::check_within(
+            Self::request_within(
                 &self.conn,
-                attached,
                 "shm_attach_fd (MIT-SHM 1.2 fd passing)",
+                move |conn| {
+                    conn.shm_attach_fd(segment, frames_fd, true)
+                        .map_err(|error| format!("sending: {error}"))?
+                        .check()
+                        .map_err(|error| error.to_string())
+                },
             )?;
             let pixmap = self
                 .conn
