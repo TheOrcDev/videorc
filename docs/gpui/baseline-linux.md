@@ -24,7 +24,7 @@ Linux, shot with the same shooter, and what its processes cost.
 
 | What | Why |
 | --- | --- |
-| First run, all five steps, all four looks (20 shots) | After the shooter seeds the first-run record and reloads, the window stays on the black first-run placeholder and `[data-first-run-setup]` never mounts within 30 s. Twice, in every look; the lazy chunk's imports resolve. Cause not found: owed to the GPUI first run's Linux pass (Phase 4) or a dev-app fix |
+| First run, all five steps, all four looks (20 shots) | **Not applicable on Linux today.** First run is hidden on Linux by design: `firstRunSnapshotDecision` returns `hide` for `platform === 'linux'` (`apps/desktop/src/renderer/src/lib/first-run.ts:84`), so a fresh profile, and a seeded in-progress record after a reload, both open Studio. The shooter waited for `[data-first-run-setup]` and timed out. Linux first run is plan 257's S17 (Linux steps: screen portal, groups, Secret Service, destinations); shoot it once S17 lands |
 | The signed-in Sidekick part (`--parts=buddy`) | It needs the debug backend (the mock account); a debug backend target (25 to 33 GB) does not fit ogre's free disk next to the lanes' targets. The Sidekick pages are shot signed out |
 
 ## Shoot it again (on ogre)

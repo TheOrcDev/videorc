@@ -73,7 +73,7 @@
     "First run is shot with prefers-reduced-motion so the backdrop holds still, from a profile that holds only the first-run record.",
     "Plan 260 S0.10: the app is the dev build (electron-vite dev renderer) of main, whose app code is unchanged since 0.37.1; appCommit is that tree plus the shooter. The backend is the release profile for the idle, windows, live and first-run parts, and the debug profile for the signed-in buddy part (the mock account is debug-only). The Library player is the Markers dialog (row menu, Markers).",
     "Linux (plan 260 S0.10, lane L5): ogre, Omarchy, Hyprland 0.56.2; the owner's session was locked, so the app ran in a nested Hyprland on the lab output, with a private session bus (no portal, no notification daemon of the owner's) and every core pinned at 800 MHz.",
-    "Not shot on Linux: first run (all five steps, all looks). After the shooter seeds the first-run record and reloads, the window stays on the black first-run placeholder and [data-first-run-setup] never mounts within 30 s (twice, in every look); cause not found.",
+    "Not shot on Linux: first run. It is hidden on Linux by design (apps/desktop/src/renderer/src/lib/first-run.ts:84 returns hide for linux), so the shooter's wait for [data-first-run-setup] timed out; Linux first run is plan 257 S17.",
     "Not shot on Linux: the signed-in Sidekick part (buddy-pet-creator, buddy-onboarding and the signed-in states), which needs the debug backend; the Sidekick pages are shot signed out."
   ],
   "entries": [
@@ -5234,7 +5234,7 @@
   "notShotOnLinux": [
     {
       "screen": "first-run",
-      "reason": "the first-run setup never mounted after the reload (black placeholder), five steps x four looks"
+      "reason": "hidden on Linux by design until plan 257 S17 (first-run.ts:84); five steps x four looks"
     },
     {
       "part": "buddy",
