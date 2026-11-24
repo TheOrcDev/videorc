@@ -4185,3 +4185,57 @@ async fn a_failed_change_names_its_verb_drops_the_code_and_clears_pending() {
     let line = state.error.expect("the line");
     assert!(line.starts_with("Couldn't cancel the event. "), "{line}");
 }
+
+fn shown_titles(
+    notices: &mut tokio::sync::broadcast::Receiver<videorc_app_core::notices::NoticeCommand>,
+) -> Vec<String> {
+    let mut titles = Vec::new();
+    while let Ok(command) = notices.try_recv() {
+        if let videorc_app_core::notices::NoticeCommand::Show(notice) = command {
+            titles.push(notice.title.clone());
+        }
+    }
+    titles
+}
+
+#[tokio::test]
+async fn go_live_with_nothing_ready_offers_destinations_and_never_opens() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    let mut notices = studio.notices();
+
+    studio.open_go_live().await;
+
+    let state = studio.go_live_now();
+    assert!(!state.open && !state.pending);
+    assert!(livestream_methods(&backend).is_empty());
+    let titles = shown_titles(&mut notices);
+    assert!(
+        titles
+            .iter()
+            .any(|t| t == "Set up a destination to go live"),
+        "{titles:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_x_playback_check_is_told_once_per_broadcast_and_status() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let mut notices = studio.notices();
+    let verified = || BackendEvent::Untyped {
+        event: "streamTargets.x.playback".into(),
+        payload: json!({ "broadcastId": "b1", "status": "verified", "shareUrl": "https://x.com/i/broadcasts/b1" }),
+    };
+
+    studio.handle_event(verified()).await;
+    let titles = shown_titles(&mut notices);
+    assert_eq!(
+        titles,
+        vec!["Viewers can watch your X broadcast".to_string()]
+    );
+
+    studio.handle_event(verified()).await;
+    assert!(shown_titles(&mut notices).is_empty());
+}

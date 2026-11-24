@@ -81,6 +81,7 @@ pub mod clips;
 mod clips_actions;
 pub mod clips_ring;
 pub mod families;
+pub mod go_live;
 pub mod health;
 pub mod health_page;
 pub mod inspector;
@@ -207,7 +208,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 26] = [
+pub const STUDIO_EVENTS: [&str; 27] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -245,6 +246,8 @@ pub const STUDIO_EVENTS: [&str; 26] = [
     crate::livestream::chat_commands::REPLY_FAILED_EVENT,
     // S1.6c: Upcoming (`scheduled`).
     scheduled::CHANGED_EVENT,
+    // S1.6c: X's playback check (`go_live`).
+    go_live::X_PLAYBACK_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -880,6 +883,11 @@ pub struct Studio<B: StudioBackend> {
     chat_commands_tx: watch::Sender<chat_commands_store::ChatCommandsStore>,
     /// S1.6c: Upcoming, apart from the snapshot.
     scheduled_tx: watch::Sender<scheduled::ScheduledState>,
+    /// S1.6c: the Go Live dialog, apart from the snapshot.
+    go_live_tx: watch::Sender<go_live::GoLiveState>,
+    /// S1.6c: what the running livestream prepared on its platforms; the
+    /// stop ends and completes it.
+    go_live_streaming: Mutex<Option<Value>>,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -940,6 +948,7 @@ impl<B: StudioBackend> Studio<B> {
         let (chat_commands_tx, _) =
             watch::channel(chat_commands_store::ChatCommandsStore::default());
         let (scheduled_tx, _) = watch::channel(scheduled::ScheduledState::default());
+        let (go_live_tx, _) = watch::channel(go_live::GoLiveState::default());
         Self {
             backend,
             config,
@@ -965,6 +974,8 @@ impl<B: StudioBackend> Studio<B> {
             details_tx,
             chat_commands_tx,
             scheduled_tx,
+            go_live_tx,
+            go_live_streaming: Mutex::new(None),
         }
     }
 
@@ -1258,6 +1269,10 @@ impl<B: StudioBackend> Studio<B> {
                     || self.handle_details_event(&event, &payload).await
                     || self.handle_scheduled_event(&event).await
                 {
+                    return;
+                }
+                if event == go_live::X_PLAYBACK_EVENT {
+                    self.apply_x_playback(&payload).await;
                     return;
                 }
                 // The Health page's telemetry (`stream.targets` feeds both it
@@ -2275,6 +2290,7 @@ impl<B: StudioBackend> Studio<B> {
         };
         self.publish();
         // X's broadcasts end before the stream does (S1.6c).
+        self.end_x_broadcasts().await;
         let params = SessionStopParams {
             requested_at_ms: Some(requested_at_ms),
         };
@@ -2296,6 +2312,9 @@ impl<B: StudioBackend> Studio<B> {
         // live sync starts again.
         self.follow_live_audio().await;
         // YouTube's broadcasts complete once the stream stopped (S1.6c).
+        if ok {
+            self.complete_youtube_broadcasts().await;
+        }
         ok
     }
 

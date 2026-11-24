@@ -121,6 +121,27 @@ impl<B: StudioBackend> Studio<B> {
         )]);
     }
 
+    /// S3.5c: Go Live's draft, saved and validated without a toast
+    /// (`runGoLivePreflight`).
+    pub(super) async fn save_draft_for_go_live(&self) -> Result<(), RpcError> {
+        let Some(draft) = self.details_now().draft else {
+            return Ok(());
+        };
+        let value = serde_json::to_value(&draft).unwrap_or(Value::Null);
+        let saved = super::backend::read_json::<MetadataDraft>(
+            methods::METADATA_UPDATE,
+            self.backend
+                .livestream_request(methods::METADATA_UPDATE, value)
+                .await?,
+        )?;
+        let validation = self.validate_draft(&saved).await;
+        self.edit_details(|state| {
+            state.draft = Some(saved);
+            state.validation = validation;
+        });
+        Ok(())
+    }
+
     /// `patchStreamMetadataDraft`: the edit is local until Save; the last
     /// validation goes.
     pub fn patch_metadata_draft(&self, edit: impl FnOnce(&mut MetadataDraft)) {
