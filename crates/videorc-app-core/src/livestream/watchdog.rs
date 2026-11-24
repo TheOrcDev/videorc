@@ -55,6 +55,8 @@ pub struct WatchdogAlertFix {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WatchdogAlertsView {
+    /// The session these alerts belong to (plan 223 A6).
+    pub session_id: Option<String>,
     pub alerts: Vec<WatchdogAlert>,
     pub withdrawn: Vec<String>,
 }

@@ -131,6 +131,7 @@ impl<B: StudioBackend> Studio<B> {
 
     /// `commitCloudStatus`, then the ended show's platform cleanup.
     pub(super) async fn commit_cloud(&self, next: CloudStatus) {
+        self.feed_dashboard_cloud(&next);
         if let Some(owner) = self.commit_cloud_status(next) {
             self.settle_cloud_terminal(owner).await;
         }
