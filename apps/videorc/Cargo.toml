@@ -11,13 +11,21 @@ name = "Videorc"
 path = "src/main.rs"
 
 [dependencies]
-# The smoke command server and the UI driver (`src/smoke/`, plan 260 S2.5,
-# L6). S2.1 (L4) adds the shell's own dependencies beside these.
+anyhow = "1.0"
+# GPUI, pinned once in the root manifest (plan 260 D1). The platform's
+# features are the app's: `font-kit` on macOS, `wayland`/`x11` on Linux, and
+# `runtime_shaders`, which compiles the Metal shaders at run time so a build
+# needs no Metal Toolchain (development; CI's release build sets it aside
+# once the runner has the toolchain).
 gpui = { workspace = true }
+gpui_platform = { workspace = true, features = ["font-kit", "runtime_shaders", "wayland", "x11"] }
+# The core: the supervisor, the logs, the typed client, the stores.
 videorc-app-core = { workspace = true }
+# The core's own runtime (two workers), beside GPUI's executor.
+tokio = { version = "1.48", features = ["rt-multi-thread", "sync", "time", "macros"] }
+# The smoke command server and the UI driver (`src/smoke/`, plan 260 S2.5, L6).
 raw-window-handle = "0.6"
 serde_json = "1.0"
-tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The driver asks its own window's view for its accessibility children, as
@@ -27,4 +35,3 @@ objc2 = { version = "0.6.4" }
 [target.'cfg(target_os = "windows")'.dependencies]
 # The same question on Windows: `WM_GETOBJECT` to its own window.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
-
