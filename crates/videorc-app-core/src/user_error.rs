@@ -356,12 +356,29 @@ pub fn backend_error_toast(
     connected: bool,
     context: UserErrorContext,
 ) -> Option<NoticeCommand> {
+    backend_error_toast_with(error, connected, Some(context))
+}
+
+/// `reportError(error)` with no context: the same toast, titled "Videorc
+/// hit a problem".
+pub fn backend_error_toast_without_context(
+    error: &RpcError,
+    connected: bool,
+) -> Option<NoticeCommand> {
+    backend_error_toast_with(error, connected, None)
+}
+
+fn backend_error_toast_with(
+    error: &RpcError,
+    connected: bool,
+    context: Option<UserErrorContext>,
+) -> Option<NoticeCommand> {
     // `shouldToastBackendError`: a transient transport error while the
     // socket is down is the status bar's news, not a toast.
     if !connected && offline_raw(error) {
         return None;
     }
-    let copy = user_error_message(Failure::Rpc(error), Some(context));
+    let copy = user_error_message(Failure::Rpc(error), context);
     if copy.kind == UserErrorKind::Canceled {
         return None;
     }
@@ -501,5 +518,16 @@ mod tests {
             toast.action.as_ref().map(|button| button.action.clone()),
             Some(NoticeAction::OpenHealth)
         );
+    }
+
+    #[test]
+    fn the_backend_error_toast_without_a_context_says_videorc_hit_a_problem() {
+        let away = RpcError::not_connected("scene.load_from_capture_config");
+        assert!(backend_error_toast_without_context(&away, false).is_none());
+
+        let unknown = RpcError::new("scene.load_from_capture_config", "x", "boom");
+        let toast = shown(backend_error_toast_without_context(&unknown, true).unwrap());
+        assert_eq!(toast.kind, NoticeKind::Error);
+        assert_eq!(toast.title, NO_CONTEXT_TITLE);
     }
 }

@@ -22,6 +22,11 @@
 //!   switch awaiting its proof, then starts with the scene it left; a switch
 //!   asked for while a start is in flight waits for its answer, then runs as
 //!   a change to the session it started.
+//! - **The Clips ring's half (#1640, S1.6a part 6c).** A switch asked for
+//!   while the ring's own start is in flight waits for its answer the same
+//!   way; the ring never starts while a switch awaits its proof, and the
+//!   proof's end passes it again. A switch that crosses the orientation
+//!   while only the ring runs stops the ring first and runs idle.
 //! - **The progress (#1275).** A switch names what was clicked and the phase
 //!   it waits on (`crate::scenes::switch_progress`); the UI asks for the
 //!   status line at the instant it draws ([`super::scenes::ScenesView`]).
@@ -42,9 +47,9 @@
 //! - **Delete** ([`Studio::delete_scene`]) and **the Screen pick**
 //!   ([`Studio::set_scene_on_stream_shows`]).
 //!
-//! Not here yet: rooms, the Clips ring's half of the start races, the
-//! vertical leg's own sends (part 4), the camera's background on the layout
-//! (part 4), and the bell's routing of these toasts.
+//! Not here yet: rooms, the vertical leg's own sends (part 4), the camera's
+//! background on the layout (part 4), and the bell's routing of these
+//! toasts.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -418,6 +423,12 @@ impl SwitchCore {
         self.awaiting_proof.is_some()
     }
 
+    /// S1.6a part 6c: the Clips ring's start answered; a switch held for it
+    /// asks again (#1640).
+    pub(super) fn wake_waiters(&self) {
+        self.signals.tick();
+    }
+
     /// `workingAppRef`: the app the working setup was made for, if any
     /// (S1.6b part 5a: the reconcile resolves its window first).
     pub(super) fn working_app_ref(&self) -> Option<&Value> {
@@ -623,6 +634,9 @@ impl<B: StudioBackend> Drop for StartSceneHold<'_, B> {
 enum Gate {
     /// A start holds the scene: wait for it, then ask again.
     WaitStart,
+    /// S1.6a part 6c: the change crosses the orientation while only the
+    /// Clips ring runs: stop it (these commands), wait for Idle, ask again.
+    RingStepsAside(Vec<super::clips_ring::ClipsCommand>),
     /// Refused before minting: the orientation lock (`true`) or the
     /// reconnect, with the latest intent.
     Refused {
@@ -986,12 +1000,14 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     /// #1643: waits while a Record or Go Live start holds the scene it was
-    /// asked with (`sessionStartScenePromiseRef`).
+    /// asked with (`sessionStartScenePromiseRef`); #1640: or while the Clips
+    /// ring's own start is in flight (`replayStartPromiseRef`).
     async fn wait_for_start_scene(&self) {
         loop {
             let mut tick = {
                 let inner = self.lock();
-                if inner.scenes.switch.start_scene.is_none() {
+                if inner.scenes.switch.start_scene.is_none() && !inner.clips.ring.start_in_flight()
+                {
                     return;
                 }
                 inner.scenes.switch.signals.tick.subscribe()
@@ -1069,7 +1085,12 @@ impl<B: StudioBackend> Studio<B> {
         // #1643: a Record or Go Live start in flight carries the scene as it
         // was, and the backend commits it as the session starts. This change
         // runs once that start answers, as a change to the session it
-        // started, so the start's scene never lands over it.
+        // started, so the start's scene never lands over it. #1640: the Clips
+        // ring's own start the same.
+        // Plan 181: a change that crosses the orientation while only the
+        // ring runs stops the ring and runs idle; the ring is held until
+        // this transaction is done, however it ends.
+        let mut ring_hold: Option<super::clips_actions::ClipsOrientationHold<'_, B>> = None;
         let minted = loop {
             self.wait_for_start_scene().await;
             let gate = {
@@ -1080,8 +1101,14 @@ impl<B: StudioBackend> Studio<B> {
                 let crosses = Orientation::of_layout(&layout)
                     != Orientation::of_layout(&inner.capture.config["layout"]);
                 let latest = inner.scenes.switch.intent_id;
-                if inner.scenes.switch.start_scene.is_some() {
+                if inner.scenes.switch.start_scene.is_some() || inner.clips.ring.start_in_flight() {
                     Gate::WaitStart
+                } else if crosses
+                    && ring_hold.is_none()
+                    && super::session_is_replay_only(inner.session.status())
+                {
+                    let facts = inner.clips_facts(false, false);
+                    Gate::RingStepsAside(inner.clips.ring.hold_for_orientation(&facts))
                 } else if session_active && crosses {
                     Gate::Refused {
                         orientation_lock: true,
@@ -1102,6 +1129,13 @@ impl<B: StudioBackend> Studio<B> {
             };
             match gate {
                 Gate::WaitStart => continue,
+                Gate::RingStepsAside(commands) => {
+                    ring_hold = Some(super::clips_actions::ClipsOrientationHold(self));
+                    self.run_clips(commands).await;
+                    self.wait_for_recording_idle(super::clips_actions::RING_STEP_ASIDE_WAIT)
+                        .await;
+                    continue;
+                }
                 Gate::Refused {
                     orientation_lock,
                     latest,
@@ -1530,19 +1564,32 @@ impl<B: StudioBackend> Studio<B> {
     /// runs now), and the pending state goes once it is the latest.
     fn end_transaction(&self, intent: u64) {
         {
-            let mut inner = self.lock();
+            let mut guard = self.lock();
+            let inner = &mut *guard;
             let switch = &mut inner.scenes.switch;
-            if switch.awaiting_proof == Some(intent) {
+            let proven = switch.awaiting_proof == Some(intent);
+            if proven {
                 switch.awaiting_proof = None;
                 switch.signals.tick();
             }
-            if switch.intent_id != intent {
+            let latest = switch.intent_id == intent;
+            if latest {
+                switch.pending_layout = None;
+                switch.progress = None;
+                switch.pending_id = None;
+                switch.transaction_pending = false;
+            }
+            // S1.6a part 6c (#1640): the ring held its start for this
+            // transaction; it passes again, with the scene it left.
+            if proven {
+                let commands = inner.clips.ring.layout_transaction_ended();
+                if inner.queue_clips(commands) {
+                    self.settings_retry.notify_one();
+                }
+            }
+            if !latest {
                 return;
             }
-            switch.pending_layout = None;
-            switch.progress = None;
-            switch.pending_id = None;
-            switch.transaction_pending = false;
         }
         self.publish();
     }

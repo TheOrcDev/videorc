@@ -39,7 +39,9 @@
 //!   [`inspector`] (why a start waits and where it is fixed, the Session
 //!   facts and notices) and [`captions_readiness`] (a Go Live's captions);
 //!   [`recordings_folder`] (part 6b) where recordings go, whose capability
-//!   every start carries.
+//!   every start carries; [`clips`] and [`clips_ring`] (part 5) the Clips
+//!   ring's rules and controller, which `clips_actions` (part 6c) drives
+//!   from here (the snapshot's [`clips_ring::ClipsView`]).
 //! - [`scenes`] (S1.6b): plan 231's scene library as the Studio holds it,
 //!   read once the settings snapshot is in (the #1706 repair, the v1
 //!   migration, the working setup over the capture config, the scene on
@@ -75,6 +77,7 @@ pub mod camera_low_light;
 pub mod captions_readiness;
 pub mod capture_config;
 pub mod clips;
+mod clips_actions;
 pub mod clips_ring;
 pub mod families;
 pub mod health;
@@ -443,6 +446,9 @@ pub struct StudioSnapshot {
     /// S1.6a part 6b: the chosen recordings folder, and its facts once a
     /// page read them.
     pub recordings_folder: recordings_folder::RecordingsFolderState,
+    /// S1.6a part 6c: the Output page's Clips section (the switch, the
+    /// ring's state, why it waits).
+    pub clips: clips_ring::ClipsView,
 }
 
 /// What a start did.
@@ -555,6 +561,8 @@ struct Inner {
     live_audio_tokens: u64,
     /// S1.6a part 6b: the facts last read, for the folder at that path.
     recordings_folder_facts: Option<(PathBuf, recordings_folder::DirectoryFacts)>,
+    /// S1.6a part 6c: the Clips ring's controller, its timer and queue.
+    clips: clips_actions::ClipsCore,
 }
 
 /// S2.6c: the exclusion list's bookkeeping.
@@ -810,6 +818,7 @@ impl<B: StudioBackend> Studio<B> {
             live_audio_waiters: live_audio::MicrophoneWaiters::default(),
             live_audio_tokens: 0,
             recordings_folder_facts: None,
+            clips: clips_actions::ClipsCore::default(),
         };
         // Writes a previous run journaled wait in the cache until the
         // snapshot is in; then they are sent.
@@ -897,15 +906,23 @@ impl<B: StudioBackend> Studio<B> {
         }
     }
 
-    async fn drive_events(&self, mut events: broadcast::Receiver<BackendEvent>) {
+    async fn drive_events(self: &Arc<Self>, mut events: broadcast::Receiver<BackendEvent>) {
         loop {
-            let (due, live_due, low_light_due) = {
+            let (due, live_due, low_light_due, clips_due) = {
                 let inner = self.lock();
                 (
                     inner.settings_retry_due,
                     inner.live_due.map(|(at, ..)| at),
                     inner.low_light.due.as_ref().map(|read| read.at),
+                    inner.clips.due,
                 )
+            };
+            // S1.6a part 6c: the Clips ring's pass (`scheduleReplayReconcile`).
+            let clips_pass = async move {
+                match clips_due {
+                    Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                    None => std::future::pending().await,
+                }
             };
             let retry = async move {
                 match due {
@@ -940,6 +957,7 @@ impl<B: StudioBackend> Studio<B> {
                 () = retry => self.retry_settings().await,
                 () = live_read => self.live_sources_due().await,
                 () = low_light_read => self.camera_low_light_due().await,
+                () = clips_pass => self.spawn_clips_pass(),
                 () = self.settings_retry.notified() => {}
             }
         }
@@ -964,13 +982,20 @@ impl<B: StudioBackend> Studio<B> {
                 self.follow_live_audio().await;
             }
             BackendEvent::RecordingStatus(status) => {
-                let (effects, state_changed) = {
+                let (effects, state_changed, clips_woke) = {
                     let mut inner = self.lock();
-                    let before = std::mem::discriminant(&inner.session.status().state);
+                    let previous = inner.session.status().state.clone();
                     let effects = inner.session.apply_reported_status(*status, Instant::now());
-                    let after = std::mem::discriminant(&inner.session.status().state);
-                    (effects, before != after)
+                    let state_changed = std::mem::discriminant(&previous)
+                        != std::mem::discriminant(&inner.session.status().state);
+                    // S1.6a part 6c: a session ended or began; the switch
+                    // decides what the ring does next.
+                    let clips_woke = inner.clips_on_recording_status(&previous);
+                    (effects, state_changed, clips_woke)
                 };
+                if clips_woke {
+                    self.settings_retry.notify_one();
+                }
                 self.publish();
                 self.emit_all(effects);
                 // S1.6b part 5d: the live audio sync follows the session.
@@ -1105,9 +1130,21 @@ impl<B: StudioBackend> Studio<B> {
                 self.telemetry.send_if_modified(|telemetry| {
                     telemetry.apply(&event, payload.clone(), Instant::now())
                 });
+                // S1.6a part 6c: the camera's live edge and first frame, and
+                // Linux's portal share, for the Clips ring.
+                if event == health::PREVIEW_CAMERA_STATUS_EVENT
+                    || event == health::PREVIEW_SCREEN_STATUS_EVENT
+                {
+                    self.clips_preview_status(&event, &payload);
+                }
+                let replay = event == crate::client::names::REPLAY_STATE;
                 let commands = self.untyped_notices(&event, payload);
                 if !commands.is_empty() {
                     self.post(commands);
+                }
+                // The Output page's Clips section reads the ring's state.
+                if replay {
+                    self.publish();
                 }
             }
             BackendEvent::PreviewSurfaceStatus(status) => {
@@ -1153,7 +1190,19 @@ impl<B: StudioBackend> Studio<B> {
                 .map(|snapshot| self.lock().notices.on_stream_targets(&snapshot.targets))
                 .unwrap_or_default(),
             names::REPLAY_STATE => read::<ReplayStateEvent>(logger, event, payload)
-                .map(|state| self.lock().notices.on_replay_state(&state))
+                .map(|state| {
+                    let (commands, clips_woke) = {
+                        let mut inner = self.lock();
+                        // S1.6a part 6c: the ring's controller hears it too
+                        // (a ring that died disarms until the next move).
+                        let clips_woke = inner.clips_on_replay_state(&state);
+                        (inner.notices.on_replay_state(&state), clips_woke)
+                    };
+                    if clips_woke {
+                        self.settings_retry.notify_one();
+                    }
+                    commands
+                })
                 .unwrap_or_default(),
             names::REPLAY_SAVED => read::<ReplaySavedEvent>(logger, event, payload)
                 .map(|saved| self.lock().notices.on_replay_saved(&saved))
@@ -1353,6 +1402,8 @@ impl<B: StudioBackend> Studio<B> {
         self.read_telemetry(generation).await;
         // S1.6b part 5b: the caption service's status, for the Captions row.
         self.read_captions_status(generation).await;
+        // S1.6a part 6c: the Clips ring's state, and the launch's arming.
+        self.read_replay_status(generation).await;
         // The other areas' first reads (the agents line, takeovers and the
         // soundboard, chat, Sidekick, destinations, chat commands, scheduled
         // streams, the performance check, Hide screen, captions, the working
@@ -2372,7 +2423,11 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     fn publish(&self) {
+        // The lock order: `in_flight` and `stop_in_flight` before `Inner`.
         let start_in_flight = self.start_in_flight();
+        let stop_in_flight = self.stop_in_flight_now();
+        // S1.6a part 6c: the previews' status, read apart from the lock.
+        let previews = self.clips_previews();
         let snapshot = {
             let mut guard = self.lock();
             let inner = &mut *guard;
@@ -2415,10 +2470,21 @@ impl<B: StudioBackend> Studio<B> {
             if let Some(sample) = inner.latency.observe(&status, Instant::now()) {
                 self.config.logger.info(sample.log_line());
             }
-            let snapshot = Self::snapshot_of(inner);
-            (snapshot, std::mem::take(&mut inner.scenes.notices))
+            let mut snapshot = Self::snapshot_of(inner);
+            // S1.6a part 6c: the Clips ring's effects on what changed (the
+            // record block and the wait, the sources, the shape, the layout).
+            let clips_woke =
+                inner.clips_note(&mut snapshot, start_in_flight, stop_in_flight, &previews);
+            (
+                snapshot,
+                std::mem::take(&mut inner.scenes.notices),
+                clips_woke,
+            )
         };
-        let (snapshot, scene_notices) = snapshot;
+        let (snapshot, scene_notices, clips_woke) = snapshot;
+        if clips_woke {
+            self.settings_retry.notify_one();
+        }
         self.snapshot.send_replace(snapshot);
         self.post(scene_notices);
     }
@@ -2464,6 +2530,8 @@ impl<B: StudioBackend> Studio<B> {
             &inner.settings,
             inner.recordings_folder_facts.as_ref(),
         );
+        // S1.6a part 6c: as of the last publish (the publish refreshes it).
+        let clips = inner.clips_view();
         let session = &inner.session;
         StudioSnapshot {
             connection: inner.connection.clone(),
@@ -2501,6 +2569,7 @@ impl<B: StudioBackend> Studio<B> {
             system_audio,
             takeover_mute_ownership,
             recordings_folder,
+            clips,
         }
     }
 }
