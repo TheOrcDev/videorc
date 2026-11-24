@@ -28784,19 +28784,31 @@ mod tests {
         )
         .await;
         let run_id = status.run_id.unwrap();
-        timeout(Duration::from_secs(3), async {
-            loop {
-                if compositor::acquire_preview_frame(&state, &run_id, None)
-                    .await
-                    .is_some()
-                {
-                    break;
+        // A frame is leasable only while its evidence is the latest: the
+        // render thread publishes the frame, then records its evidence with
+        // `try_lock`, and skips the record when the compositor mutex is busy.
+        // So any single acquire can miss a frame; every acquire here polls,
+        // and sleeps between tries instead of spinning on the mutex the
+        // render thread needs (the spin made the misses likelier).
+        async fn eventually<T, F: std::future::Future<Output = Option<T>>>(
+            what: &str,
+            mut attempt: impl FnMut() -> F,
+        ) -> T {
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(value) = attempt().await {
+                        break value;
+                    }
+                    tokio::time::sleep(Duration::from_millis(2)).await;
                 }
-                tokio::task::yield_now().await;
-            }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{what} within 5 s"))
+        }
+        eventually("the first Metal frame", || {
+            compositor::acquire_preview_frame(&state, &run_id, None)
         })
-        .await
-        .expect("first Metal frame");
+        .await;
         let request = json!({"id":"acquire", "method":"preview.surface.frame.acquire",
             "params":{"leaseId":Uuid::new_v4().to_string(), "runId":run_id}});
         for role in [BackendRole::Renderer, BackendRole::Remote] {
@@ -28808,15 +28820,21 @@ mod tests {
             assert!(response.payload.is_none());
         }
         let mut held = None;
-        let response = handle_preview_frame_lease_control(
-            &state,
-            BackendRole::Admin,
-            &mut held,
-            &request.to_string(),
-        )
-        .await
-        .unwrap();
-        assert!(response.ok && held.is_some());
+        while held.is_none() {
+            let response = handle_preview_frame_lease_control(
+                &state,
+                BackendRole::Admin,
+                &mut held,
+                &request.to_string(),
+            )
+            .await
+            .unwrap();
+            assert!(response.ok, "an admin acquire is never refused");
+            if held.is_none() {
+                assert_eq!(response.payload, Some(serde_json::Value::Null));
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
         let mut release = json!({"id":"release", "method":"preview.surface.frame.release",
             "params":{"leaseId":Uuid::new_v4().to_string()}});
         let response = handle_preview_frame_lease_control(
@@ -28865,26 +28883,32 @@ mod tests {
             tokio_tungstenite::connect_async(format!("ws://{address}/ws?token={}", state.token))
                 .await
                 .unwrap();
-        socket
-            .send(tokio_tungstenite::tungstenite::Message::Text(
-                request.to_string().into(),
-            ))
-            .await
-            .unwrap();
-        let response = timeout(Duration::from_secs(3), async {
+        let response = timeout(Duration::from_secs(5), async {
             loop {
-                let message = socket.next().await.unwrap().unwrap();
-                if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
-                    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    if value["id"] == "acquire" {
-                        break value;
+                socket
+                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                        request.to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+                let value = loop {
+                    let message = socket.next().await.unwrap().unwrap();
+                    if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+                        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        if value["id"] == "acquire" {
+                            break value;
+                        }
                     }
+                };
+                assert_eq!(value["ok"], true);
+                if !value["payload"].is_null() {
+                    break value;
                 }
+                tokio::time::sleep(Duration::from_millis(2)).await;
             }
         })
         .await
-        .unwrap();
-        assert_eq!(response["ok"], true);
+        .expect("a leased frame over the socket within 5 s");
         assert!(
             response["payload"]["metalTargetIosurfaceId"]
                 .as_u64()
@@ -28902,11 +28926,10 @@ mod tests {
             .unwrap()
             .unwrap()
             .forget();
-        assert!(
+        eventually("a frame after the disconnect released the lease", || {
             compositor::acquire_preview_frame(&state, &run_id, None)
-                .await
-                .is_some()
-        );
+        })
+        .await;
         compositor::stop_compositor(&state).await;
         server.abort();
         let _ = server.await;
