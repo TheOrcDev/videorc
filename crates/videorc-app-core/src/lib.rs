@@ -14,6 +14,7 @@ mod http;
 pub mod interruption;
 pub mod ledger;
 pub mod log;
+pub mod notices;
 pub mod paths;
 pub mod process;
 pub mod restart;
