@@ -15,7 +15,7 @@ import { isRetryableSmokeCommandError, requestSmokeCommand } from './lib/smoke-c
 import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
-const fixtures = join(repoRoot, 'apps/desktop/src/main/obs-fixtures')
+const fixtures = join(repoRoot, 'protocol-fixtures/obs')
 
 export async function runObsImportSmoke({
   launchApp = launchDevApp,

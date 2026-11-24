@@ -18,13 +18,15 @@
 //! chat highlight card, the milestone card and the chat box (`highlight`,
 //! `milestone`, `chat`, with their avatars and emotes decoded by `images`
 //! and the platforms' own marks in `marks`), held to the renderer's PNGs
-//! like the caption; the switch of those overlays comes after. The Sidekick
-//! bubble lands in S1.2d.
+//! like the caption; the switch of those overlays comes after. S1.2d switched
+//! the Sidekick bubble: `buddy.overlay.set` with the bubble's text and style
+//! draws it here for the target's canvas (`buddy_bubble`).
 //!
 //! The goldens (`tests/fixtures/overlay-raster/`) are the renderer's own PNGs
 //! (`node scripts/overlay-raster-goldens.mjs`); `golden_tests` holds the
 //! drawing to them.
 
+mod buddy;
 mod canvas;
 mod caption;
 mod card;
@@ -42,6 +44,7 @@ mod golden_tests;
 use serde::Deserialize;
 use tiny_skia::Pixmap;
 
+pub(crate) use buddy::BuddyBubbleState;
 use canvas::Rgba;
 pub(crate) use caption::CaptionFrameState;
 use caption::{CaptionBarState, CaptionOverlayPosition, CaptionStyleId, CaptionTextSize};
@@ -63,6 +66,7 @@ pub(crate) enum OverlayState {
     CaptionFrame(CaptionFrameState),
     Highlight(HighlightCardState),
     Milestone(MilestoneCardState),
+    Buddy(BuddyBubbleState),
     Chat(ChatBoxState),
 }
 
@@ -126,7 +130,7 @@ impl OverlayState {
                 avatars: state.avatar_urls(),
                 emotes: card::emote_urls(&state.tokens()),
             },
-            Self::Caption(_) | Self::CaptionFrame(_) => WantedImages::default(),
+            Self::Caption(_) | Self::CaptionFrame(_) | Self::Buddy(_) => WantedImages::default(),
         }
     }
 }
@@ -152,6 +156,7 @@ fn render_premultiplied(state: &OverlayState, images: &OverlayImages) -> Option<
         OverlayState::CaptionFrame(state) => caption::render_frame(state),
         OverlayState::Highlight(state) => highlight::render(state, &images.avatars, &images.emotes),
         OverlayState::Milestone(state) => milestone::render(state, &images.avatars),
+        OverlayState::Buddy(state) => buddy::render(state),
         OverlayState::Chat(state) => chat::render(state, &images.avatars, &images.emotes),
     }
 }
@@ -213,6 +218,24 @@ pub(crate) fn caption_frame(
         position,
         text_size,
         style_id,
+    }
+}
+
+/// The Sidekick's bubble for one line on a target's canvas: what the
+/// renderer's push asked `renderBuddyBubblePng` for, wrapped to the
+/// Sidekick's placed rect on that canvas (plan 168 D16).
+pub(crate) fn buddy_bubble(
+    text: &str,
+    style: videorc_protocol::cohost::CohostBubbleStyle,
+    canvas: (u32, u32),
+    rect: OverlayRect,
+) -> BuddyBubbleState {
+    BuddyBubbleState {
+        text: text.to_string(),
+        style: style.into(),
+        canvas_width: canvas.0,
+        canvas_height: canvas.1,
+        rect,
     }
 }
 

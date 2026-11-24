@@ -58,6 +58,38 @@ describe('shortcutRecorderStep', () => {
     })
   })
 
+  it('refuses an AltGr chord off macOS and accepts it with Shift', () => {
+    expect(
+      shortcutRecorderStep(press('KeyQ', { control: true, alt: true }), 'win32', free)
+    ).toEqual({
+      type: 'reject',
+      message: 'Ctrl+Alt+Q is a system shortcut in every app. Pick another.'
+    })
+    expect(
+      shortcutRecorderStep(
+        press('Digit7', { control: true, alt: true, shift: true }),
+        'win32',
+        free
+      )
+    ).toEqual({ type: 'commit', accelerator: 'Ctrl+Alt+Shift+7' })
+    expect(
+      shortcutRecorderStep(press('KeyQ', { control: true, alt: true }), 'darwin', free)
+    ).toEqual({ type: 'commit', accelerator: 'Ctrl+Alt+Q' })
+  })
+
+  it('refuses close and redo off macOS, as on macOS', () => {
+    expect(shortcutRecorderStep(press('KeyW', { control: true }), 'win32', free)).toEqual({
+      type: 'reject',
+      message: 'Ctrl+W is a system shortcut in every app. Pick another.'
+    })
+    expect(
+      shortcutRecorderStep(press('KeyZ', { control: true, shift: true }), 'linux', free)
+    ).toEqual({
+      type: 'reject',
+      message: 'Ctrl+Shift+Z is a system shortcut in every app. Pick another.'
+    })
+  })
+
   it("passes the caller's duplicate refusal through", () => {
     expect(
       shortcutRecorderStep(
@@ -124,6 +156,19 @@ describe('shortcutRecorderName (plan 174 I-17)', () => {
     expect(
       shortcutRecorderName({ label: 'Mark a clip', value: '', armed: false, platform: 'win32' })
     ).toBe('Mark a clip: Unassigned')
+  })
+
+  it('saves a numpad key under its Electron name and reads it as the keycap', () => {
+    const step = shortcutRecorderStep(press('NumpadAdd', { control: true }), 'win32', free)
+    expect(step).toEqual({ type: 'commit', accelerator: 'Ctrl+numadd' })
+    expect(
+      shortcutRecorderName({
+        label: 'Mark a clip',
+        value: 'Ctrl+numadd',
+        armed: false,
+        platform: 'win32'
+      })
+    ).toBe('Mark a clip: Ctrl+Num +')
   })
 
   it("names Videorc's own key while no global key is set", () => {

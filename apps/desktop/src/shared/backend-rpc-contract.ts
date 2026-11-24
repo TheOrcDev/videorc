@@ -6226,11 +6226,19 @@ const overlayTargetsInfoSchema = objectSchema(
   { active: booleanSchema, primary: overlayTargetInfoSchema, auxiliary: overlayTargetInfoSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<OverlayTargetsInfo>
-// A 4 MB PNG cap on the Rust side: base64 of that is 5.6 M characters.
+// Plan 260 S1.2d: the backend draws the bubble from the line that is up
+// (`text`, at most the Sidekick's 200 characters plus the ellipsis), its style
+// and the target's canvas (the backend's 8K bound). The PNG (a 4 MB cap on the
+// Rust side: base64 of that is 5.6 M characters) is the previous release's
+// path.
 const setBuddyOverlayParamsSchema = objectSchema(
   {
     target: enumSchema(['primary', 'auxiliary']),
-    pngBase64: stringSchema({ minLength: 4, maxLength: 5_600_000 }),
+    text: optionalSchema(stringSchema({ minLength: 1, maxLength: 1000 })),
+    style: optionalSchema(enumSchema(['speech', 'thought', 'shout'])),
+    canvasWidth: optionalSchema(numberSchema({ integer: true, min: 1, max: 8192 })),
+    canvasHeight: optionalSchema(numberSchema({ integer: true, min: 1, max: 8192 })),
+    pngBase64: optionalSchema(stringSchema({ minLength: 4, maxLength: 5_600_000 })),
     rect: overlayRectSchema
   },
   { allowUnknown: false }

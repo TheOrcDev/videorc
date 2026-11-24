@@ -617,6 +617,10 @@ import type {
   TwitchCategory,
   KickAppliedMetadata,
   KickCategory,
+  XLiveCategory,
+  XLiveCategoriesResult,
+  XBroadcastUpdated,
+  XUpdateBroadcastParams,
   PreparedKickBroadcast,
   VideoPreset,
   VideoSettings,
@@ -901,11 +905,6 @@ async function loadChatOverlayDriver(client: BackendClient): Promise<ChatOverlay
   })
 }
 
-// The Buddy's bubble rasterizer: lazy, never in the eager shell.
-function loadBuddyOverlay() {
-  return import('@/lib/buddy-overlay')
-}
-
 // Plan 210 S10: the follower and the password-manager list it reads load on
 // macOS once the backend is up, never in the eager shell.
 function loadFollowFrontApp() {
@@ -963,6 +962,7 @@ function markOutputChosenByUser(): void {
 export const SESSION_DETAIL_BUFFER_LIMIT = 120
 const SESSION_DETAIL_CACHE_LIMIT = 8
 const EMPTY_KICK_CATEGORIES: KickCategory[] = []
+const EMPTY_X_LIVE_CATEGORIES: XLiveCategory[] = []
 
 export function capSessionDetailBuffer<T>(entries: T[]): T[] {
   return entries.slice(-SESSION_DETAIL_BUFFER_LIMIT)
@@ -1503,6 +1503,10 @@ export type StudioContextValue = {
   twitchCategorySearchPending: boolean
   kickCategories: KickCategory[]
   kickCategorySearchPending: boolean
+  /** X's live categories in X's order, read once a session for the X picker. */
+  xLiveCategories: XLiveCategory[]
+  /** Whether that read is running, done, or failed (the picker says so). */
+  xLiveCategoriesStatus: 'idle' | 'loading' | 'ready' | 'failed'
   xNativeCapability: XNativeLiveCapability | null
   /** Plan 094: the shared YouTube API quota breaker; `pausedUntil` while paused. */
   youtubeQuota: YouTubeQuotaStatus
@@ -1789,6 +1793,10 @@ export type StudioContextValue = {
   selectYouTubeChannel: (channelId: string, accountId?: string) => Promise<void>
   searchTwitchCategories: (query: string) => Promise<void>
   searchKickCategories: (query: string) => Promise<void>
+  /** Read X's live categories; `refresh` asks X again instead of the session's copy. */
+  loadXLiveCategories: (refresh?: boolean) => Promise<void>
+  /** Live on X: change the broadcast's title or category while it runs; X's answer. */
+  updateXBroadcast: (params: XUpdateBroadcastParams) => Promise<XBroadcastUpdated>
   refreshXNativeCapability: (accountId?: string) => Promise<void>
   authorizeXLive: () => Promise<void>
   saveStreamMetadataDraft: () => Promise<void>
@@ -1842,8 +1850,11 @@ export type StudioContextValue = {
   /**
    * Instant record (P5): keep the selected CoreAudio microphone open while
    * Studio is visible so `session.start` takes it warm. Never load-bearing.
+   * Plan 260 S1.3a: it is also the idle meter's only feed; `meterOnly`
+   * (Keep microphone ready off) opens it for the meter and Record opens the
+   * device fresh.
    */
-  armWarmMicrophone: () => Promise<WarmMicrophoneStatus | null>
+  armWarmMicrophone: (options?: { meterOnly?: boolean }) => Promise<WarmMicrophoneStatus | null>
   disarmWarmMicrophone: () => Promise<WarmMicrophoneStatus | null>
   warmMicrophone: WarmMicrophoneStatus | null
   /** A start in the saved output mode: the smoke harness's hook, nothing in the app. */
@@ -3225,6 +3236,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const [kickCategorySearchPending, setKickCategorySearchPending] = useState(false)
   const [xNativeCapability, setXNativeCapability] = useState<XNativeLiveCapability | null>(null)
   const [xNativeCapabilityLoading, setXNativeCapabilityLoading] = useState(false)
+  const [xLiveCategories, setXLiveCategories] = useState<XLiveCategory[]>(EMPTY_X_LIVE_CATEGORIES)
+  const [xLiveCategoriesStatus, setXLiveCategoriesStatus] =
+    useState<StudioContextValue['xLiveCategoriesStatus']>('idle')
   // Plan 094: one shared paused state for every YouTube Data API caller. The
   // backend owns it; the event clears it ({} = not paused) on its own.
   const [youtubeQuota, setYoutubeQuota] = useState<YouTubeQuotaStatus>({})
@@ -6149,14 +6163,16 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     cloudStatus?.show?.id,
     cloudStatus?.onAir?.thisDevice
   ])
-  // The Buddy on stream (plan 164 S-C2, plan 168 S-B1). The backend owns the
-  // state and the bubble and draws the pet itself from its atlas; this
-  // renderer rasterizes the bubble only, once per output canvas, and pushes
-  // each PNG into the `buddy_overlay` slot (the backend anchors it above the
-  // pet's head), or clears the slot when the bubble ends. A push happens on
-  // every change of bubble, style, placement or canvas, whether or not a
-  // session runs: the slot is app-global. Latest wins: a stale raster never
-  // lands after a newer state.
+  // The Buddy on stream (plan 164 S-C2, plan 168 S-B1, plan 260 S1.2d). The
+  // backend owns the state and the bubble and draws the pet from its atlas
+  // and the bubble from its line; this renderer names, once per output
+  // canvas, the line that is up, the persona's bubble style, the canvas and
+  // the Buddy's rect there (`buddy.overlay.set`, no pixels), and the backend
+  // draws it into the `buddy_overlay` slot (anchored above the pet's head),
+  // or clears the slot when the bubble ends. A push happens on every change
+  // of bubble, style, placement or canvas, whether or not a session runs: the
+  // slot is app-global. Latest wins: the backend draws only the line that is
+  // still up, and this effect stops at a newer state.
   const buddyPersona = cohostSettings?.persona ?? null
   const buddyTargetsKey = useMemo(
     () =>
@@ -6192,25 +6208,23 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       if (bubble === null) {
         await client.requestTyped('buddy.overlay.clear', {})
       } else {
-        const buddy = await loadBuddyOverlay()
         for (const target of targets) {
           if (epoch !== buddyPushEpochRef.current) return
-          const pngBase64 = await buddy.renderBuddyBubblePng({
-            bubble,
-            style,
-            canvas: { width: target.canvasWidth, height: target.canvasHeight },
-            rect: target.rect
-          })
-          if (!pngBase64 || epoch !== buddyPushEpochRef.current) return
           await client.requestTyped('buddy.overlay.set', {
             target: target.target,
-            pngBase64,
+            text: bubble,
+            style,
+            canvasWidth: target.canvasWidth,
+            canvasHeight: target.canvasHeight,
             rect: target.rect
           })
         }
       }
       if (epoch === buddyPushEpochRef.current) buddyPushedKeyRef.current = key
     })().catch((error: unknown) => {
+      // The line ended or was replaced while it was named: the newer state
+      // is already on its way here, so there is nothing to report.
+      if ((error as { code?: unknown } | null)?.code === 'buddy-overlay-stale') return
       console.warn(`Buddy overlay: ${error instanceof Error ? error.message : String(error)}`)
     })
   }, [client, wsStatus, buddyPersona, buddyOverlay, buddyTargetsKey])
@@ -7920,6 +7934,47 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }
     void refreshXNativeCapability(account.accountId)
   }, [platformAccounts, refreshXNativeCapability])
+
+  // X's live categories (sorted by viewership, changing rarely): read once
+  // X Live can go live, for the Stream details picker. A failed read is the
+  // picker's to say, never a notification: nobody pressed anything.
+  const loadXLiveCategories = useCallback(
+    async (refresh = false) => {
+      if (!client) return
+      const account = platformAccounts.find((item) => item.platform === 'x')
+      try {
+        setXLiveCategoriesStatus('loading')
+        const result = await client.request<XLiveCategoriesResult>(
+          'streamTargets.x.liveCategories',
+          { accountId: account?.accountId, ...(refresh ? { refresh: true } : {}) }
+        )
+        setXLiveCategories(result.categories)
+        setXLiveCategoriesStatus('ready')
+      } catch (error) {
+        console.warn('[x] live categories unavailable', error)
+        setXLiveCategoriesStatus('failed')
+      }
+    },
+    [client, platformAccounts]
+  )
+
+  const updateXBroadcast = useCallback(
+    async (params: XUpdateBroadcastParams): Promise<XBroadcastUpdated> => {
+      if (!client) throw new Error('Videorc is reconnecting. Try again in a moment.')
+      return client.request<XBroadcastUpdated>('streamTargets.x.updateBroadcast', params)
+    },
+    [client]
+  )
+
+  const xLiveReady = Boolean(xNativeCapability?.nativeAvailable)
+  useEffect(() => {
+    if (!xLiveReady) {
+      setXLiveCategories(EMPTY_X_LIVE_CATEGORIES)
+      setXLiveCategoriesStatus('idle')
+      return
+    }
+    void loadXLiveCategories()
+  }, [xLiveReady, loadXLiveCategories])
 
   const authorizeXLive = useCallback(async () => {
     if (!client || wsStatus !== 'connected') {
@@ -14538,7 +14593,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   ])
 
   const [warmMicrophone, setWarmMicrophone] = useState<WarmMicrophoneStatus | null>(null)
-  const armWarmMicrophone = useCallback(async () => {
+  const armWarmMicrophone = useCallback(async (options?: { meterOnly?: boolean }) => {
     const activeClient = clientRef.current
     if (!activeClient) return null
     const config = captureConfigRef.current
@@ -14546,7 +14601,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       const status = await activeClient.request<WarmMicrophoneStatus>('audio.mic.arm', {
         microphoneId: config.sources.microphoneId,
         microphoneGainDb: config.audio.microphoneGainDb,
-        microphoneMuted: config.audio.microphoneMuted
+        microphoneMuted: config.audio.microphoneMuted,
+        // Sent only when set, so the default request is unchanged on the wire.
+        ...(options?.meterOnly ? { meterOnly: true } : {})
       })
       if (clientRef.current === activeClient) setWarmMicrophone(status)
       return status
@@ -21693,6 +21750,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       twitchCategorySearchPending,
       kickCategories,
       kickCategorySearchPending,
+      xLiveCategories,
+      xLiveCategoriesStatus,
       xNativeCapability,
       xNativeCapabilityLoading,
       youtubeQuota,
@@ -21805,6 +21864,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       selectYouTubeChannel,
       searchTwitchCategories,
       searchKickCategories,
+      loadXLiveCategories,
+      updateXBroadcast,
       refreshXNativeCapability,
       authorizeXLive,
       saveStreamMetadataDraft,
@@ -21948,6 +22009,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       twitchCategorySearchPending,
       kickCategories,
       kickCategorySearchPending,
+      xLiveCategories,
+      xLiveCategoriesStatus,
       xNativeCapability,
       xNativeCapabilityLoading,
       youtubeQuota,
@@ -22060,6 +22123,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       selectYouTubeChannel,
       searchTwitchCategories,
       searchKickCategories,
+      loadXLiveCategories,
+      updateXBroadcast,
       refreshXNativeCapability,
       authorizeXLive,
       saveStreamMetadataDraft,

@@ -4,7 +4,10 @@ import {
   type MicVisualPipeline
 } from './mic-visual-pipeline'
 
-/** Browser adapter for the shared visual-only microphone analyser. */
+/**
+ * Browser adapter for the shared visual-only microphone analyser. Plan 220
+ * S1.3a: loaded only for a Windows or Linux microphone's idle meter.
+ */
 export function createBrowserMicVisualPipeline(): MicVisualPipeline {
   // The pipeline talks to analyser wrappers; Web Audio's connect() accepts
   // only a real AudioNode. Passing the wrapper threw a TypeError on every

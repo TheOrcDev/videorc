@@ -3,7 +3,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { useFrameSource } from './use-frame-source'
-import { useStudioMicMeterSource, useStudioMicVisualSource } from './use-studio-mic-sources'
+import { useStudioMicMeterSource } from './use-studio-mic-sources'
 import { MicVisualPipelineProvider } from './use-studio-mic-visual'
 import { createMicVisualPipeline, type MicVisualAudioContextLike } from '../lib/mic-visual-pipeline'
 
@@ -23,20 +23,9 @@ function MixerMeterSourceProbe({
   return null
 }
 
-/** The session sliver and the picker preview both read this source (plan 092). */
-function VisualSourceProbe({
-  onFrame,
-  onRender
-}: {
-  onFrame: (bandCount: number) => void
-  onRender: () => void
-}): null {
-  onRender()
-  const source = useStudioMicVisualSource()
-  useFrameSource(source, (frame) => onFrame(frame.bands.length))
-  return null
-}
-
+// Plan 260 S1.3a: the session sliver reads the backend's loudness now; the
+// analyser's only consumers are a Windows or Linux idle meter's level,
+// readout and clip light, which share one source.
 describe('Studio visual microphone consumers', () => {
   let root: Root | null = null
   let restoreDom: (() => void) | undefined
@@ -96,38 +85,18 @@ describe('Studio visual microphone consumers', () => {
     const renderCounts = [0, 0, 0]
     const paintCounts = [0, 0, 0]
     const meterPeaks: number[] = []
-    const bandCounts: number[] = []
-    const probes: ReactElement[] = [
+    const probes: ReactElement[] = ['meter', 'readout', 'clip'].map((key, index) =>
       createElement(MixerMeterSourceProbe, {
-        key: 'mixer',
+        key,
         onFrame: (peakDb) => {
-          paintCounts[0] += 1
+          paintCounts[index] += 1
           meterPeaks.push(peakDb)
         },
         onRender: () => {
-          renderCounts[0] += 1
-        }
-      }),
-      createElement(VisualSourceProbe, {
-        key: 'sliver',
-        onFrame: (bandCount) => {
-          paintCounts[1] += 1
-          bandCounts.push(bandCount)
-        },
-        onRender: () => {
-          renderCounts[1] += 1
-        }
-      }),
-      createElement(VisualSourceProbe, {
-        key: 'picker',
-        onFrame: () => {
-          paintCounts[2] += 1
-        },
-        onRender: () => {
-          renderCounts[2] += 1
+          renderCounts[index] += 1
         }
       })
-    ]
+    )
 
     await act(async () => {
       root = createRoot(testDom.container)
@@ -140,7 +109,7 @@ describe('Studio visual microphone consumers', () => {
             {
               pipeline,
               source: {
-                selectionKey: 'backend-mic-1',
+                selectionKey: 'microphone:dshow:53747564696f',
                 deviceName: 'Studio microphone',
                 enabled: true,
                 permissionStatus: 'granted'
@@ -173,8 +142,6 @@ describe('Studio visual microphone consumers', () => {
     // The meter reads what the recording gets: a 0.2 peak (-13.98 dBFS) plus
     // the 6 dB gain.
     expect(meterPeaks.at(-1)).toBeCloseTo(20 * Math.log10(0.2) + 6, 2)
-    // Bars and waveforms get the pipeline's 32 bands.
-    expect(bandCounts.at(-1)).toBe(32)
     expect(contexts).toHaveLength(1)
     expect(getUserMedia).toHaveBeenCalledTimes(1)
     expect(scheduledFrames.size).toBe(1)

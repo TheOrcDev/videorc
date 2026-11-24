@@ -155,6 +155,14 @@ pub struct XPublishResult {
     /// live broadcast, which X returned unchanged.
     #[serde(default)]
     pub already_live: bool,
+    /// The live category X answered with (`live_category_id`), absent when
+    /// the broadcast has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_category_id: Option<String>,
+    /// The saved category Go Live left out because X no longer lists it
+    /// (the session's list, or X's 400): for the session log only.
+    #[serde(skip)]
+    pub dropped_live_category: Option<String>,
     pub message: String,
 }
 
@@ -286,6 +294,8 @@ pub fn x_media_id_from_media_key(media_key: &str) -> Option<String> {
 
 #[derive(Debug, Clone, Deserialize)]
 struct XBroadcast {
+    #[serde(default)]
+    live_category_id: Option<String>,
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -835,20 +845,32 @@ pub async fn publish_x_broadcast(
         anyhow::bail!("X RTMPS source did not become active before Go Live.");
     }
 
-    let body = GoLiveRequest {
+    let title = x_title(&request.metadata);
+    // A saved category the session's list no longer has is left out quietly:
+    // X answers an unknown id with a 400, and a category never blocks Go Live.
+    let saved_category = x_live_category(&request.metadata);
+    let mut dropped_live_category = saved_category
+        .clone()
+        .filter(|id| !live_category_still_listed(&request.credentials.user_id, id));
+    let category = saved_category.filter(|_| dropped_live_category.is_none());
+    let mut body = GoLiveRequest {
         source_id: &request.source_id,
-        title: &x_title(&request.metadata),
+        title: &title,
         locale: &request.locale,
         chat_option: request.chat_option,
         should_not_tweet: x_should_not_tweet(&request.metadata),
+        live_category_id: category.as_deref(),
     };
     let conflict_attempts = request.conflict_attempts.max(1);
-    let mut outcome = None;
-    for attempt in 0..conflict_attempts {
+    let mut attempt = 0;
+    let (already_live, broadcast) = loop {
         match go_live(client, &request.credentials, &base_url, &body).await {
-            Ok(result) => {
-                outcome = Some(result);
-                break;
+            Ok(result) => break result,
+            // X dropped the category since the list was read: go live
+            // without it at once (a 400 created nothing).
+            Err(error) if body.live_category_id.is_some() && is_unknown_live_category(&error) => {
+                dropped_live_category = body.live_category_id.map(str::to_string);
+                body.live_category_id = None;
             }
             // 409: the source cannot take video yet (retry once video flows)
             // or another broadcast is live on it (`detail` names it). 5xx and
@@ -856,12 +878,12 @@ pub async fn publish_x_broadcast(
             // live answers 200 with that broadcast. The final error keeps X's
             // detail.
             Err(error) if attempt + 1 < conflict_attempts && go_live_error_is_retryable(&error) => {
+                attempt += 1;
                 sleep(Duration::from_millis(request.conflict_backoff_ms)).await;
             }
             Err(error) => return Err(error),
         }
-    }
-    let (already_live, broadcast) = outcome.context("X Go Live produced no broadcast.")?;
+    };
     let broadcast_id = broadcast
         .broadcast_id
         .clone()
@@ -887,6 +909,10 @@ pub async fn publish_x_broadcast(
         state: broadcast.state.unwrap_or_else(|| "RUNNING".to_string()),
         tweet_id: broadcast.tweet_id,
         already_live,
+        live_category_id: broadcast
+            .live_category_id
+            .filter(|id| !id.trim().is_empty()),
+        dropped_live_category,
         message: if already_live {
             "X broadcast was already live on this source; X returned it unchanged.".to_string()
         } else {
@@ -1042,8 +1068,9 @@ async fn get_source_stream_key(
         .context("X stream_key response did not include a stream key.")
 }
 
-/// The strict `POST /2/broadcasts` body: exactly these five fields, with
-/// `chat_option` a JSON integer and `should_not_tweet` a JSON boolean.
+/// The strict `POST /2/broadcasts` body: these five fields and, when a
+/// category is picked, `live_category_id`, with `chat_option` a JSON integer
+/// and `should_not_tweet` a JSON boolean.
 /// Unknown fields (the old `region`, `is_low_latency`) are a 400.
 #[derive(Debug, Clone, Serialize)]
 struct GoLiveRequest<'a> {
@@ -1052,6 +1079,9 @@ struct GoLiveRequest<'a> {
     locale: &'a str,
     chat_option: u8,
     should_not_tweet: bool,
+    /// Left out when nothing is picked: the body is strict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_category_id: Option<&'a str>,
 }
 
 /// `POST /2/broadcasts`: creates and publishes in one call. 201 is a new
@@ -1068,6 +1098,255 @@ async fn go_live(
     let (status, response): (reqwest::StatusCode, XData<XBroadcast>) =
         send_x_request_with_status(client, credentials, Method::POST, url, Some(body)).await?;
     Ok((status == reqwest::StatusCode::OK, response.data))
+}
+
+/// One live category as `GET /2/broadcasts/categories` lists it: store the
+/// permanent `id`, show the `name` (which can change), keep X's order.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct XLiveCategory {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct XLiveCategoriesParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    /// Read X's list again instead of the session's copy.
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct XLiveCategoriesResult {
+    pub categories: Vec<XLiveCategory>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct XLiveCategoriesResponse {
+    #[serde(default)]
+    data: Vec<XLiveCategory>,
+}
+
+/// The categories each X account read this session (keyed by its user id).
+/// X changes the list rarely and documents no paging, so one read a session
+/// is enough; `refresh` reads it again.
+fn live_category_cache()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<XLiveCategory>>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<XLiveCategory>>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// This session's list for an account, when it has read one.
+pub fn cached_live_categories(user_id: &str) -> Option<Vec<XLiveCategory>> {
+    live_category_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(user_id).cloned())
+}
+
+/// Whether `id` may go to X: true unless this session's list was read and
+/// no longer has it (with no list read, X's own 400 is the check).
+fn live_category_still_listed(user_id: &str, id: &str) -> bool {
+    cached_live_categories(user_id)
+        .is_none_or(|categories| categories.iter().any(|category| category.id == id))
+}
+
+/// The category's name from this session's list.
+pub fn cached_live_category_name(user_id: &str, id: &str) -> Option<String> {
+    cached_live_categories(user_id)?
+        .into_iter()
+        .find(|category| category.id == id)
+        .map(|category| category.name)
+}
+
+/// `GET /2/broadcasts/categories`, from this session's copy unless
+/// `refresh`. A failed read caches nothing.
+pub async fn live_categories(
+    client: &reqwest::Client,
+    credentials: &XLivestreamCredentials,
+    base_url: &str,
+    refresh: bool,
+) -> Result<Vec<XLiveCategory>> {
+    if !refresh && let Some(categories) = cached_live_categories(&credentials.user_id) {
+        return Ok(categories);
+    }
+    let url = endpoint(base_url, "/2/broadcasts/categories")?;
+    let response: XLiveCategoriesResponse =
+        send_x_request(client, credentials, Method::GET, url, None).await?;
+    let mut categories: Vec<XLiveCategory> = Vec::with_capacity(response.data.len());
+    for category in response.data {
+        let id = category.id.trim();
+        if id.is_empty() || categories.iter().any(|known| known.id == id) {
+            continue;
+        }
+        let name = category.name.trim();
+        categories.push(XLiveCategory {
+            id: id.to_string(),
+            name: if name.is_empty() { id } else { name }.to_string(),
+        });
+    }
+    if let Ok(mut cache) = live_category_cache().lock() {
+        cache.insert(credentials.user_id.clone(), categories.clone());
+    }
+    Ok(categories)
+}
+
+/// X's 400 for a `live_category_id` it doesn't list ("`live_category_id`
+/// is not a live category id"; the value is never echoed).
+fn is_unknown_live_category(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<XApiError>().is_some_and(|api_error| {
+        api_error.status == 400 && api_error.detail.contains("live_category_id")
+    })
+}
+
+/// The X row's saved category, when one is picked.
+pub fn x_live_category(metadata: &StreamMetadataDraft) -> Option<String> {
+    metadata
+        .target_overrides
+        .iter()
+        .find(|target| target.platform == StreamPlatform::X)
+        .and_then(|target| target.x_category_id.as_deref())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// The most characters X takes in `live_category_id`.
+const LIVE_CATEGORY_ID_MAX_CHARS: usize = 64;
+
+/// The strict `PUT /2/broadcasts/:id` body: only the fields being changed.
+/// `live_category_id: ""` clears the category.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct XBroadcastChanges {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_category_id: Option<String>,
+}
+
+/// `streamTargets.x.updateBroadcast`: the live broadcast's title or category
+/// changed from Videorc while it runs. `liveCategoryId: ""` clears it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct XUpdateBroadcastParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    pub broadcast_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_category_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// A broadcast as `PUT /2/broadcasts/:id` answers it: the result of the
+/// update (a GET right after can still return the old values).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct XBroadcastUpdated {
+    pub broadcast_id: String,
+    pub state: String,
+    pub share_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_category_id: Option<String>,
+    /// The category's name from this session's list, when it has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_category_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_option: Option<u8>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct XUpdatedBroadcastWire {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    broadcast_id: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    share_url: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    live_category_id: Option<String>,
+    #[serde(default)]
+    chat_option: Option<u8>,
+}
+
+/// A broadcast id as X's path takes it: 1 to 24 ASCII letters and digits.
+fn is_x_broadcast_id(id: &str) -> bool {
+    (1..=24).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+/// `PUT /2/broadcasts/:id`: changes the title or the live category, before,
+/// during or after the broadcast. The answer is the result.
+pub async fn update_broadcast(
+    client: &reqwest::Client,
+    credentials: &XLivestreamCredentials,
+    base_url: &str,
+    broadcast_id: &str,
+    changes: &XBroadcastChanges,
+) -> Result<XBroadcastUpdated> {
+    if !is_x_broadcast_id(broadcast_id) {
+        anyhow::bail!("That isn't an X broadcast id.");
+    }
+    let changes = XBroadcastChanges {
+        title: changes.title.as_deref().map(str::trim).map(str::to_string),
+        live_category_id: changes
+            .live_category_id
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_string),
+    };
+    if changes.title.is_none() && changes.live_category_id.is_none() {
+        anyhow::bail!("Nothing to change on the X broadcast.");
+    }
+    if changes.title.as_deref() == Some("") {
+        anyhow::bail!("The X title can't be empty.");
+    }
+    if changes
+        .live_category_id
+        .as_deref()
+        .is_some_and(|id| id.chars().count() > LIVE_CATEGORY_ID_MAX_CHARS)
+    {
+        anyhow::bail!("That isn't an X live category.");
+    }
+    let url = endpoint(base_url, &format!("/2/broadcasts/{broadcast_id}"))?;
+    let body = serde_json::to_value(&changes).context("Could not encode the X update.")?;
+    let response: XData<XUpdatedBroadcastWire> =
+        send_x_request(client, credentials, Method::PUT, url, Some(body)).await?;
+    let wire = response.data;
+    let id = wire
+        .broadcast_id
+        .or(wire.id)
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| broadcast_id.to_string());
+    let live_category_id = wire.live_category_id.filter(|id| !id.trim().is_empty());
+    Ok(XBroadcastUpdated {
+        live_category_name: live_category_id
+            .as_deref()
+            .and_then(|category| cached_live_category_name(&credentials.user_id, category)),
+        share_url: wire
+            .share_url
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| format!("https://x.com/i/broadcasts/{id}")),
+        state: wire.state.unwrap_or_else(|| "RUNNING".to_string()),
+        title: wire.title,
+        live_category_id,
+        chat_option: wire.chat_option,
+        broadcast_id: id,
+    })
 }
 
 /// One X viewer poll (plan 054): the concurrent count, or why there is none.
@@ -2589,6 +2868,12 @@ mod tests {
         broadcast_state: String,
         tweet_id: Option<String>,
         counter: usize,
+        /// `GET /2/broadcasts/categories`, in X's order: (id, name).
+        categories: Vec<(String, String)>,
+        /// The live category on the mock's one broadcast.
+        live_category_id: Option<String>,
+        /// The mock's broadcast title, as Go Live or the PUT set it.
+        title: Option<String>,
     }
 
     const MOCK_STREAM_KEY_PREFIX: &str = "1hJz9kQ2LmNpRsTuVwXyZ";
@@ -2723,6 +3008,7 @@ mod tests {
                     "locale",
                     "chat_option",
                     "should_not_tweet",
+                    "live_category_id",
                 ];
                 let unknown: Vec<String> = body
                     .as_object()
@@ -2749,6 +3035,16 @@ mod tests {
                 if !is_x_source_id(source_id) {
                     return problem(400, "The `source_id` value is not a source id.");
                 }
+                if let Some(category) = body.get("live_category_id") {
+                    let known = category
+                        .as_str()
+                        .is_some_and(|id| mock.categories.iter().any(|(known, _)| known == id));
+                    if !known {
+                        return problem(400, "`live_category_id` is not a live category id.");
+                    }
+                }
+                mock.live_category_id = body["live_category_id"].as_str().map(str::to_string);
+                mock.title = body["title"].as_str().map(str::to_string);
                 let tweet_id = mock.tweet_id.clone();
                 let mut data = json!({
                     "id": "1AbCdEfGhIjKl",
@@ -2767,12 +3063,66 @@ mod tests {
                 if mock.omit_media_key {
                     data.as_object_mut().unwrap().remove("media_key");
                 }
+                if let Some(category) = mock.live_category_id.clone() {
+                    data["live_category_id"] = json!(category);
+                }
                 let status = if mock.already_live {
                     StatusCode::OK
                 } else {
                     StatusCode::CREATED
                 };
                 (status, axum::Json(json!({"data": data}))).into_response()
+            }
+            ("GET", ["2", "broadcasts", "categories"]) => {
+                let data: Vec<serde_json::Value> = mock
+                    .categories
+                    .iter()
+                    .map(|(id, name)| json!({"id": id, "name": name}))
+                    .collect();
+                ok(json!({"data": data, "meta": {"result_count": mock.categories.len()}}))
+            }
+            ("PUT", ["2", "broadcasts", id]) => {
+                let Some(object) = body.as_object() else {
+                    return problem(400, "A JSON body is required.");
+                };
+                let allowed = ["title", "chat_option", "live_category_id"];
+                if object.is_empty() || object.keys().any(|key| !allowed.contains(&key.as_str())) {
+                    return problem(400, "One or more parameters to your request was invalid.");
+                }
+                if body
+                    .get("title")
+                    .is_some_and(|title| title.as_str().is_none_or(str::is_empty))
+                {
+                    return problem(400, "title must not be empty.");
+                }
+                if let Some(category) = body.get("live_category_id") {
+                    match category.as_str() {
+                        Some("") => mock.live_category_id = None,
+                        Some(id) if mock.categories.iter().any(|(known, _)| known == id) => {
+                            mock.live_category_id = Some(id.to_string());
+                        }
+                        _ => {
+                            return problem(400, "`live_category_id` is not a live category id.");
+                        }
+                    }
+                }
+                if let Some(title) = body["title"].as_str() {
+                    mock.title = Some(title.to_string());
+                }
+                let mut data = json!({
+                    "id": id,
+                    "broadcast_id": id,
+                    "state": mock.broadcast_state,
+                    "share_url": format!("https://x.com/i/broadcasts/{id}"),
+                    "chat_option": 2
+                });
+                if let Some(title) = mock.title.clone() {
+                    data["title"] = json!(title);
+                }
+                if let Some(category) = mock.live_category_id.clone() {
+                    data["live_category_id"] = json!(category);
+                }
+                ok(json!({"data": data}))
             }
             ("GET", ["2", "broadcasts", id]) => {
                 let mut data = json!({"id": id, "state": mock.broadcast_state});
@@ -2798,6 +3148,11 @@ mod tests {
     ) {
         let mock = std::sync::Arc::new(std::sync::Mutex::new(MockX {
             broadcast_state: "RUNNING".to_string(),
+            categories: vec![
+                ("gaming".to_string(), "Gaming".to_string()),
+                ("music".to_string(), "Music".to_string()),
+                ("sports".to_string(), "Sports".to_string()),
+            ],
             ..MockX::default()
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2825,6 +3180,280 @@ mod tests {
             conflict_attempts: 3,
             conflict_backoff_ms: 1,
         }
+    }
+
+    /// Credentials of their own: the category cache is per account and per
+    /// process, and tests run in parallel.
+    fn credentials_for(user_id: &str) -> XLivestreamCredentials {
+        XLivestreamCredentials {
+            user_id: user_id.to_string(),
+            ..credentials()
+        }
+    }
+
+    /// The source Go Live publishes on, receiving video.
+    fn with_active_source(mock: &std::sync::Mutex<MockX>) {
+        let mut mock = mock.lock().unwrap();
+        mock.source_active = true;
+        mock.sources.push((
+            "9123456789012345001".to_string(),
+            "Videorc Primary Encoder".to_string(),
+            true,
+            "key".to_string(),
+        ));
+    }
+
+    fn with_x_category(request: &mut XPublishRequest, id: &str) {
+        let x = request
+            .metadata
+            .target_overrides
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::X)
+            .unwrap();
+        x.x_category_id = Some(id.to_string());
+        x.x_category_name = Some(id.to_string());
+    }
+
+    #[tokio::test]
+    async fn the_categories_come_in_x_order_once_a_session() {
+        let (base, mock, server) = mock_x().await;
+        let credentials = credentials_for("cat-list");
+        let client = reqwest::Client::new();
+        let first = live_categories(&client, &credentials, &base, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .map(|category| (category.id.as_str(), category.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("gaming", "Gaming"),
+                ("music", "Music"),
+                ("sports", "Sports")
+            ]
+        );
+        // The session's copy: no second call.
+        let again = live_categories(&client, &credentials, &base, false)
+            .await
+            .unwrap();
+        assert_eq!(again, first);
+        assert_eq!(seen_paths(&mock), vec!["GET /2/broadcasts/categories"]);
+        // Refresh reads X again and sees a new list.
+        mock.lock()
+            .unwrap()
+            .categories
+            .push(("talk".to_string(), "Talk".to_string()));
+        let refreshed = live_categories(&client, &credentials, &base, true)
+            .await
+            .unwrap();
+        assert_eq!(refreshed.len(), 4);
+        assert_eq!(
+            cached_live_category_name("cat-list", "talk").as_deref(),
+            Some("Talk")
+        );
+        assert_eq!(seen_paths(&mock).len(), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn go_live_sends_the_picked_category() {
+        let (base, mock, server) = mock_x().await;
+        with_active_source(&mock);
+        let mut request = publish_request(&base, "9123456789012345001");
+        request.credentials = credentials_for("cat-picked");
+        with_x_category(&mut request, "gaming");
+        let published = publish_x_broadcast(request, &reqwest::Client::new())
+            .await
+            .unwrap();
+        assert_eq!(published.live_category_id.as_deref(), Some("gaming"));
+        assert_eq!(published.dropped_live_category, None);
+        let mock = mock.lock().unwrap();
+        let (_, _, body) = mock
+            .seen
+            .iter()
+            .find(|(method, path, _)| method == "POST" && path == "/2/broadcasts")
+            .unwrap();
+        assert_eq!(body["live_category_id"], json!("gaming"));
+        drop(mock);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_category_x_no_longer_lists_is_left_out_quietly() {
+        // X dropped it since the draft saved it: its 400 creates nothing, so
+        // Go Live goes again at once without it.
+        let (base, mock, server) = mock_x().await;
+        with_active_source(&mock);
+        let mut request = publish_request(&base, "9123456789012345001");
+        request.credentials = credentials_for("cat-gone-400");
+        request.conflict_attempts = 1;
+        with_x_category(&mut request, "retro");
+        let published = publish_x_broadcast(request, &reqwest::Client::new())
+            .await
+            .unwrap();
+        assert_eq!(published.live_category_id, None);
+        assert_eq!(published.dropped_live_category.as_deref(), Some("retro"));
+        let mock = mock.lock().unwrap();
+        let bodies: Vec<&serde_json::Value> = mock
+            .seen
+            .iter()
+            .filter(|(method, path, _)| method == "POST" && path == "/2/broadcasts")
+            .map(|(_, _, body)| body)
+            .collect();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0]["live_category_id"], json!("retro"));
+        assert!(bodies[1].get("live_category_id").is_none());
+        drop(mock);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_category_missing_from_the_sessions_list_is_never_sent() {
+        let (base, mock, server) = mock_x().await;
+        with_active_source(&mock);
+        let client = reqwest::Client::new();
+        let credentials = credentials_for("cat-gone-list");
+        live_categories(&client, &credentials, &base, false)
+            .await
+            .unwrap();
+        let mut request = publish_request(&base, "9123456789012345001");
+        request.credentials = credentials;
+        with_x_category(&mut request, "retro");
+        let published = publish_x_broadcast(request, &client).await.unwrap();
+        assert_eq!(published.dropped_live_category.as_deref(), Some("retro"));
+        let mock = mock.lock().unwrap();
+        let bodies: Vec<&serde_json::Value> = mock
+            .seen
+            .iter()
+            .filter(|(method, path, _)| method == "POST" && path == "/2/broadcasts")
+            .map(|(_, _, body)| body)
+            .collect();
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].get("live_category_id").is_none());
+        drop(mock);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_update_sends_only_what_changes_and_reads_x_answer() {
+        let (base, mock, server) = mock_x().await;
+        let client = reqwest::Client::new();
+        let credentials = credentials_for("cat-update");
+        live_categories(&client, &credentials, &base, false)
+            .await
+            .unwrap();
+        let updated = update_broadcast(
+            &client,
+            &credentials,
+            &base,
+            "1AbCdEfGhIjKl",
+            &XBroadcastChanges {
+                title: None,
+                live_category_id: Some("music".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.broadcast_id, "1AbCdEfGhIjKl");
+        assert_eq!(updated.live_category_id.as_deref(), Some("music"));
+        assert_eq!(updated.live_category_name.as_deref(), Some("Music"));
+        let renamed = update_broadcast(
+            &client,
+            &credentials,
+            &base,
+            "1AbCdEfGhIjKl",
+            &XBroadcastChanges {
+                title: Some("  Semifinal stream ".to_string()),
+                live_category_id: Some(String::new()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(renamed.title.as_deref(), Some("Semifinal stream"));
+        assert_eq!(renamed.live_category_id, None);
+        let mock = mock.lock().unwrap();
+        let puts: Vec<&serde_json::Value> = mock
+            .seen
+            .iter()
+            .filter(|(method, path, _)| method == "PUT" && path == "/2/broadcasts/1AbCdEfGhIjKl")
+            .map(|(_, _, body)| body)
+            .collect();
+        assert_eq!(puts[0], &json!({"live_category_id": "music"}));
+        assert_eq!(
+            puts[1],
+            &json!({"title": "Semifinal stream", "live_category_id": ""})
+        );
+        drop(mock);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_update_refuses_what_x_would_refuse_before_calling_it() {
+        let client = reqwest::Client::new();
+        let credentials = credentials_for("cat-refuse");
+        let base = "http://127.0.0.1:9"; // never reached
+        let nothing = update_broadcast(
+            &client,
+            &credentials,
+            base,
+            "1Ab",
+            &XBroadcastChanges::default(),
+        )
+        .await;
+        assert!(
+            nothing
+                .unwrap_err()
+                .to_string()
+                .contains("Nothing to change")
+        );
+        let empty_title = update_broadcast(
+            &client,
+            &credentials,
+            base,
+            "1Ab",
+            &XBroadcastChanges {
+                title: Some("   ".to_string()),
+                live_category_id: None,
+            },
+        )
+        .await;
+        assert!(
+            empty_title
+                .unwrap_err()
+                .to_string()
+                .contains("can't be empty")
+        );
+        let bad_id = update_broadcast(
+            &client,
+            &credentials,
+            base,
+            "../sources",
+            &XBroadcastChanges {
+                title: Some("Hi".to_string()),
+                live_category_id: None,
+            },
+        )
+        .await;
+        assert!(bad_id.unwrap_err().to_string().contains("broadcast id"));
+    }
+
+    #[test]
+    fn the_saved_category_is_read_from_the_x_row_only() {
+        let mut draft =
+            crate::streaming::default_stream_metadata_draft("2026-11-24T00:00:00Z".to_string());
+        assert_eq!(x_live_category(&draft), None);
+        for target in &mut draft.target_overrides {
+            target.x_category_id = Some(" gaming ".to_string());
+        }
+        assert_eq!(x_live_category(&draft).as_deref(), Some("gaming"));
+        let x = draft
+            .target_overrides
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::X)
+            .unwrap();
+        x.x_category_id = Some("  ".to_string());
+        assert_eq!(x_live_category(&draft), None);
     }
 
     fn seen_paths(mock: &std::sync::Mutex<MockX>) -> Vec<String> {

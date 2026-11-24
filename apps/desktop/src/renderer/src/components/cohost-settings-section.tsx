@@ -37,7 +37,7 @@ const TONE_OPTIONS: SegmentedControlOption<CohostTone>[] = [
 ]
 
 /** "Show on stream automatically" (plan 060 D8): one three-way choice over the
- * two engine flags. `autoHighlight` keeps meaning Buddy's picks and
+ * two engine flags. `autoHighlight` keeps meaning Sidekick's picks and
  * `voiceHighlight` means what the streamer talks about. */
 export type CohostShowOnStreamMode = 'off' | 'voice' | 'voice-and-picks'
 
@@ -72,12 +72,12 @@ export function cohostShowOnStreamMode(
 }
 
 /**
- * Saving Buddy's settings (plan 119; Settings → Buddy before). Persisted per
- * profile through `cohost.settings.get/set` (the engine reads the same row
- * when it builds a tick), NOT through local settings — so what the streamer
- * types here is what the model is given.
+ * Saving Sidekick's settings (plan 119; Settings → Sidekick / Buddy before).
+ * Persisted per profile through `cohost.settings.get/set` (the engine reads
+ * the same row when it builds a tick), NOT through local settings — so what
+ * the streamer types here is what the model is given.
  *
- * Buddy Live's switch owns `enabled` and the Premium gate's call to action,
+ * Sidekick Live's switch owns `enabled` and the Premium gate's call to action,
  * so neither repeats here: a locked account sees these controls disabled.
  */
 function useCohostSettingsSave(lockedByTab = false): {
@@ -112,14 +112,14 @@ function SaveError({ error }: { error: string | null }): ReactElement | null {
 }
 
 /**
- * "Buddy hears you while you're live" (plan 068), on the Buddy tab's Live tab
- * (plan 150): listening is part of what turning Buddy on means, so it sits
- * under Buddy Live's switch rather than with the reply settings.
+ * "Sidekick hears you while you're live" (plan 068), on the Sidekick tab's
+ * Live tab (plan 150): listening is part of what turning Sidekick on means,
+ * so it sits under Sidekick Live's switch rather than with the reply settings.
  */
 export function CohostListenField({
   locked: lockedByTab = false
 }: {
-  /** Buddy Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
+  /** Sidekick Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
   locked?: boolean
 } = {}): ReactElement | null {
   const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
@@ -163,7 +163,7 @@ export function CohostListenField({
 export function BuddyRepliesSection({
   locked: lockedByTab = false
 }: {
-  /** Buddy Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
+  /** Sidekick Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
   locked?: boolean
 } = {}): ReactElement | null {
   const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
@@ -308,13 +308,13 @@ function cooldownLabel(seconds: number): string {
 }
 
 /**
- * Moderation (plan 150, Chat tab): what Buddy flags for you and what it may
+ * Moderation (plan 150, Chat tab): what Sidekick flags for you and what it may
  * put on stream. It never posts in your chat on its own (plan 211 D6).
  */
 export function BuddyModerationSection({
   locked: lockedByTab = false
 }: {
-  /** Buddy Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
+  /** Sidekick Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
   locked?: boolean
 } = {}): ReactElement | null {
   const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
@@ -443,7 +443,7 @@ export function BuddyModerationSection({
         </Field>
         <Field>
           {/* Plan 174 F-18: "Show on stream" is the question's own action;
-              the Buddy overlay is "{name} on stream"; this is the automatic one. */}
+              the Sidekick overlay is "{name} on stream"; this is the automatic one. */}
           <FieldLabel>Put comments on stream automatically</FieldLabel>
           <FieldDescription>
             Puts a chat comment on your stream by itself. You can always show one yourself with H.

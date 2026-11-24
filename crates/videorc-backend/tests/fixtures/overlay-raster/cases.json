@@ -468,6 +468,214 @@
           "h": 0.3
         }
       }
+    },
+    {
+      "id": "buddy-speech-720p",
+      "request": {
+        "overlay": "buddy",
+        "text": "Nice shot! 🎯 Do it again",
+        "style": "speech",
+        "canvasWidth": 1280,
+        "canvasHeight": 720,
+        "rect": {
+          "x": 0.78,
+          "y": 0.6,
+          "w": 0.2,
+          "h": 0.36
+        }
+      }
+    },
+    {
+      "id": "buddy-shout-1080p",
+      "request": {
+        "overlay": "buddy",
+        "text": "let's go",
+        "style": "shout",
+        "canvasWidth": 1920,
+        "canvasHeight": 1080,
+        "rect": {
+          "x": 0.78,
+          "y": 0.6,
+          "w": 0.18,
+          "h": 0.36
+        }
+      }
+    },
+    {
+      "id": "buddy-thought-720p",
+      "request": {
+        "overlay": "buddy",
+        "text": "hmm, what if we try the left door instead of the stairs this time, and then circle back around to the courtyard",
+        "style": "thought",
+        "canvasWidth": 1280,
+        "canvasHeight": 720,
+        "rect": {
+          "x": 0.78,
+          "y": 0.6,
+          "w": 0.2,
+          "h": 0.36
+        }
+      }
+    },
+    {
+      "id": "buddy-speech-720p-smoke",
+      "request": {
+        "overlay": "buddy",
+        "text": "Welcome in, everyone. Grab a seat and stay a while!",
+        "style": "speech",
+        "canvasWidth": 1280,
+        "canvasHeight": 720,
+        "rect": {
+          "x": 0.7,
+          "y": 0.3,
+          "w": 0.2,
+          "h": 0.62
+        }
+      }
+    },
+    {
+      "id": "buddy-speech-1080p-smoke",
+      "request": {
+        "overlay": "buddy",
+        "text": "Welcome in, everyone. Grab a seat and stay a while!",
+        "style": "speech",
+        "canvasWidth": 1920,
+        "canvasHeight": 1080,
+        "rect": {
+          "x": 0.7,
+          "y": 0.3,
+          "w": 0.2,
+          "h": 0.62
+        }
+      }
+    },
+    {
+      "id": "buddy-thought-portrait-default",
+      "request": {
+        "overlay": "buddy",
+        "text": "Which door was it again, the red one or the blue one?",
+        "style": "thought",
+        "canvasWidth": 1080,
+        "canvasHeight": 1920,
+        "rect": {
+          "x": 0.608889,
+          "y": 0.6,
+          "w": 0.32,
+          "h": 0.18
+        }
+      }
+    },
+    {
+      "id": "buddy-shout-break-overflow",
+      "request": {
+        "overlay": "buddy",
+        "text": "noooooooooooooooooooooooooooo way that was the cleanest clutch of the whole night chat, clip it right now please",
+        "style": "shout",
+        "canvasWidth": 1280,
+        "canvasHeight": 720,
+        "rect": {
+          "x": 0.7975,
+          "y": 0.64,
+          "w": 0.18,
+          "h": 0.32
+        }
+      }
+    },
+    {
+      "id": "buddy-sample-demo-greeting",
+      "request": {
+        "overlay": "buddy",
+        "text": "Welcome to the horde, Mira!",
+        "style": "speech",
+        "canvasWidth": 3840,
+        "canvasHeight": 2160,
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 0.0859375,
+          "h": 0.1527777777777778
+        }
+      }
+    },
+    {
+      "id": "buddy-sample-demo-answer",
+      "request": {
+        "overlay": "buddy",
+        "text": "We go live every Tuesday at 8, coders_x.",
+        "style": "speech",
+        "canvasWidth": 3840,
+        "canvasHeight": 2160,
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 0.0859375,
+          "h": 0.1527777777777778
+        }
+      }
+    },
+    {
+      "id": "buddy-sample-demo-laugh",
+      "request": {
+        "overlay": "buddy",
+        "text": "Ha! Good one.",
+        "style": "speech",
+        "canvasWidth": 3840,
+        "canvasHeight": 2160,
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "w": 0.0859375,
+          "h": 0.1527777777777778
+        }
+      }
+    },
+    {
+      "id": "buddy-sample-test-shout-4k",
+      "request": {
+        "overlay": "buddy",
+        "text": "Welcome to the horde! Grab a seat.",
+        "style": "shout",
+        "canvasWidth": 3840,
+        "canvasHeight": 2160,
+        "rect": {
+          "x": 0.7975,
+          "y": 0.64,
+          "w": 0.18,
+          "h": 0.32
+        }
+      }
+    },
+    {
+      "id": "buddy-sample-settings-thought",
+      "request": {
+        "overlay": "buddy",
+        "text": "Welcome to the horde, Buddy says hi.",
+        "style": "thought",
+        "canvasWidth": 1920,
+        "canvasHeight": 1080,
+        "rect": {
+          "x": 0.7975,
+          "y": 0.64,
+          "w": 0.18,
+          "h": 0.32
+        }
+      }
+    },
+    {
+      "id": "buddy-sample-settings-speech-zoomed",
+      "request": {
+        "overlay": "buddy",
+        "text": "Welcome to the horde, Buddy says hi.",
+        "style": "speech",
+        "canvasWidth": 3840,
+        "canvasHeight": 2160,
+        "rect": {
+          "x": 0.7975,
+          "y": 0.64,
+          "w": 0.18,
+          "h": 0.32
+        }
+      }
     }
   ],
   "keptFromVideorcRust": [

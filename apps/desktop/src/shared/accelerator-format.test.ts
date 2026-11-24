@@ -50,6 +50,13 @@ describe('acceleratorLabel', () => {
     expect(acceleratorLabel('CmdOrCtrl+Enter', 'win32')).toBe('Ctrl+Enter')
   })
 
+  it('names numpad keys as their keycaps, never the Electron name', () => {
+    expect(acceleratorLabel('Cmd+num4', 'darwin')).toBe('⌘Num 4')
+    expect(acceleratorLabel('Ctrl+numadd', 'win32')).toBe('Ctrl+Num +')
+    expect(acceleratorLabel('Ctrl+Alt+numdec', 'linux')).toBe('Ctrl+Alt+Num .')
+    expect(acceleratorDisplayKeys('Ctrl+nummult', 'win32')).toEqual(['Ctrl', 'Num *'])
+  })
+
   it('prints a lone modifier hint per platform (drag hints)', () => {
     expect(acceleratorLabel('Alt', 'darwin')).toBe('⌥')
     expect(acceleratorLabel('Alt', 'win32')).toBe('Alt')
