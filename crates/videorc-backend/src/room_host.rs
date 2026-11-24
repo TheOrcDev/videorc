@@ -394,9 +394,16 @@ async fn hold(
                                     );
                                 }
                             }
-                            Some(RoomEvent::DataReceived { payload, topic, .. })
+                            // Only server-relayed acknowledgements, bounded as
+                            // the renderer's: a participant cannot send one.
+                            Some(RoomEvent::DataReceived { payload, topic, participant, .. })
                                 if topic.as_deref() == Some(crate::room_screen::PRIVACY_ACK_TOPIC) =>
                             {
+                                if participant.is_some()
+                                    || payload.len() > crate::room_screen::PRIVACY_ACK_MAX_BYTES
+                                {
+                                    continue;
+                                }
                                 let _ = screen_signals
                                     .send(crate::room_screen::ScreenSignal::Ack(payload.to_vec()));
                             }
