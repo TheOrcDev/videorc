@@ -876,3 +876,32 @@ fn the_typed_view_reads_every_section_and_names_what_does_not_fit() {
     assert!(view.issues[0].contains("layout"));
     assert_eq!(view.config.layout, default_layout_settings());
 }
+
+#[test]
+fn the_vertical_leg_is_armed_only_beside_a_16_9_studio_with_a_vertical_destination() {
+    let armed = json!({
+        "streamEnabled": true,
+        "layout": {"layoutPreset": "screen-camera"},
+        "streaming": {
+            "enabled": true,
+            "enabledTargetIds": ["tiktok"],
+            "targets": [
+                {"id": "youtube", "enabled": true, "outputOrientation": "horizontal"},
+                {"id": "tiktok", "enabled": true, "outputOrientation": "vertical"}
+            ]
+        }
+    });
+    assert!(simulcast_armed(&armed));
+    let mut portrait = armed.clone();
+    portrait["layout"]["layoutPreset"] = json!("vertical-camera-only");
+    assert!(!simulcast_armed(&portrait));
+    let mut not_chosen = armed.clone();
+    not_chosen["streaming"]["enabledTargetIds"] = json!(["youtube"]);
+    assert!(!simulcast_armed(&not_chosen));
+    let mut off = armed.clone();
+    off["streamEnabled"] = json!(false);
+    assert!(!simulcast_armed(&off));
+    let mut disabled = armed;
+    disabled["streaming"]["targets"][1]["enabled"] = json!(false);
+    assert!(!simulcast_armed(&disabled));
+}
