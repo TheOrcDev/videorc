@@ -747,7 +747,10 @@ export interface BackendRpcMethodMap {
   'cloud.room.routing.set': BackendRpcDefinition<ProgramAudioSettings, { held: boolean }>
   'cloud.room.aux.set': BackendRpcDefinition<CloudRoomAuxSetParams, { held: boolean }>
   /** Plan 260 S1.8d: the Program monitor takes the runner's return. */
-  'cloud.room.monitor.set': BackendRpcDefinition<{ enabled: boolean }, { held: boolean }>
+  'cloud.room.monitor.set': BackendRpcDefinition<
+    { enabled: boolean; listen?: boolean },
+    { held: boolean }
+  >
   /** Plan 260 S1.8c c5: this computer controls the show with its devices on. */
   'cloud.room.html.set': BackendRpcDefinition<{ enabled: boolean }, { held: boolean }>
   'cloud.room.avatar.motion': BackendRpcDefinition<
@@ -8479,7 +8482,10 @@ const runtimeContracts = {
     result: cloudRoomPresentationSetResultSchema
   },
   'cloud.room.monitor.set': {
-    params: cloudRoomHtmlSetParamsSchema,
+    params: objectSchema(
+      { enabled: booleanSchema, listen: optionalSchema(booleanSchema) },
+      { allowUnknown: false }
+    ) as RuntimeSchema<{ enabled: boolean; listen?: boolean }>,
     result: cloudRoomPresentationSetResultSchema
   },
   'cloud.room.avatar.motion': {

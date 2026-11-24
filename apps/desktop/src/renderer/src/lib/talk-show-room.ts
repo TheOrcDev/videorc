@@ -224,6 +224,9 @@ export type TalkShowMonitor = {
   enabled: boolean
   video: MediaStreamTrack | null
   audio: MediaStreamTrack | null
+  /** Plan 260 S1.8d d5: the backend's room plays the return itself (no
+   * track here); Listen goes through `setMonitorListening`. */
+  backendAudio?: boolean
 }
 
 export type TalkShowRoomSnapshot = {
