@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import {
+  COLOUR_LITERAL_ALLOWLIST,
   GPUI_ROOTS,
   GUARDS,
   handTypedShortcutOffenders,
@@ -36,6 +37,7 @@ test('lexRust keeps code, drops comments and reads literals with their lines', (
     '#[cfg(test)]',
     'mod tests {',
     '    const PLANTED: u32 = 0xff0000ff;',
+    '    assert_eq!(label(), "⇧⌘J");',
     '}'
   )
   const { code, strings } = lexRust(source)
@@ -78,6 +80,15 @@ test('raw colours: every colour is a token', () => {
     'mod tests { const A: u32 = 0x808080ff; }'
   )
   assert.deepEqual(rawColourOffenders(screen, lexRust(allowed)), [])
+  const chrome = 'crates/videorc-kit/src/chrome.rs'
+  assert.deepEqual(
+    rawColourOffenders(chrome, lexRust('pub const MASK_WHITE: Color = 0xffffffff;')),
+    []
+  )
+  for (const [file, reason] of COLOUR_LITERAL_ALLOWLIST) {
+    assert.match(file, /^crates\/videorc-kit\/src\/\w+\.rs$/)
+    assert.ok(reason.length > 20, file)
+  }
 })
 
 test('radii: panel, row, tag, chip and full; popup only on floating surfaces', () => {
@@ -148,6 +159,8 @@ test('shortcuts: printed by ShortcutKeys, never typed by hand', () => {
   assert.equal(handTypedShortcutOffenders(screen, lexRust(planted)).length, 4)
   const allowed = lines('// ⌘K opens the palette', 'ShortcutKeys::new(OpenPalette)')
   assert.deepEqual(handTypedShortcutOffenders(screen, lexRust(allowed)), [])
+  const tested = lines('#[cfg(test)]', 'mod tests {', '    assert_eq!(label(), "⌘K");', '}')
+  assert.deepEqual(handTypedShortcutOffenders(screen, lexRust(tested)), [])
   assert.deepEqual(
     handTypedShortcutOffenders('crates/videorc-kit/src/shortcut_keys.rs', lexRust(planted)),
     []

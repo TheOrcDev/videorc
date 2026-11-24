@@ -47,6 +47,7 @@ export function lexRust(source) {
   const literal = (open, close, textFrom, textTo) => {
     const raw = source.slice(textFrom, textTo)
     strings.push({
+      at: open,
       line,
       text: raw.replace(/\\u\{([0-9a-fA-F]{1,6})\}/g, (_, hex) =>
         String.fromCodePoint(Number.parseInt(hex, 16))
@@ -120,12 +121,22 @@ export function lexRust(source) {
       index += 1
     }
   }
-  return { code: blankTestModules(out.join('')), strings }
+  const { code, tests } = blankTestModules(out.join(''))
+  return {
+    code,
+    strings: strings
+      .filter(({ at }) => !tests.some(([from, to]) => at >= from && at < to))
+      .map(({ line, text }) => ({ line, text }))
+  }
 }
 
-/** Blanks each `#[cfg(test)] mod name { … }`: tests plant what the guards forbid. */
+/**
+ * Blanks each `#[cfg(test)] mod name { … }` (tests plant what the guards
+ * forbid) and returns their ranges, so their literals are dropped too.
+ */
 function blankTestModules(code) {
   const out = [...code]
+  const tests = []
   const pattern = /#\[cfg\(test\)\]\s*mod\s+\w+\s*\{/g
   for (const match of code.matchAll(pattern)) {
     let depth = 1
@@ -135,11 +146,12 @@ function blankTestModules(code) {
       if (code[cursor] === '}') depth -= 1
       cursor += 1
     }
+    tests.push([match.index, cursor])
     for (let index = match.index; index < cursor; index += 1) {
       if (out[index] !== '\n') out[index] = ' '
     }
   }
-  return out.join('')
+  return { code: out.join(''), tests }
 }
 
 const lineOf = (code, index) => code.slice(0, index).split('\n').length
@@ -171,8 +183,20 @@ const RAW_COLOUR_CALLS = [
 const HEX_STRING = /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
 const SVG_HEX = /\b(?:fill|stroke|stop-color|color)\s*=\s*["']?#[0-9a-fA-F]{3,8}\b/
 
+/**
+ * Files whose colour literals are not theme colours, each with its reason.
+ * tokens.rs is skipped as a whole (it is where the colours live).
+ */
+export const COLOUR_LITERAL_ALLOWLIST = new Map([
+  [
+    'crates/videorc-kit/src/chrome.rs',
+    "the chromatic ring's mask channels (MASK_WHITE, MASK_BLACK): a sprite's opacity is its mask, tinted to light or shade"
+  ]
+])
+
 /** Colours that are not tokens: a raw colour call, constant, or hex string. */
 export function rawColourOffenders(path, { code, strings }) {
+  if (COLOUR_LITERAL_ALLOWLIST.has(path)) return []
   const found = RAW_COLOUR_CALLS.flatMap((pattern) =>
     codeOffenders(path, code, pattern, (match) => match[0].trim())
   )
