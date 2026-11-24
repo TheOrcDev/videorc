@@ -305,9 +305,16 @@ impl TransportView {
         let starts_busy = session.start_pending || go_live_pending;
         // Record answers its own click and is lit from it: while its start
         // runs the button stays "Record", lit and busy (videorc-rust's S2.2b
-        // owner rule, kept ahead of the stop button). A Go Live start, its
-        // checks included, is Go Live's to answer: Record shows the stop
-        // button, which cancels the livestream (B-16).
+        // owner rule, kept ahead of the stop button). This is a deliberate
+        // deviation from Electron, not parity: Electron tests `recordActive`
+        // first and applies an optimistic `starting` status, so it shows an
+        // enabled "Stop recording" during the start (`session-panel.tsx`
+        // ~136-141, `canStop` includes `starting`). Here a Record start that
+        // hangs can't be cancelled from the button: it ends with the start's
+        // own answer, or at `session.start`'s 120 s deadline
+        // (`client::timeouts`). A Go Live start, its checks included, is Go
+        // Live's to answer: Record shows the stop button, which cancels the
+        // livestream (B-16).
         let record_starting = session.start_pending && !go_live_pending && !starting_livestream;
         let record_state = if record_starting {
             RecordButtonState::Starting
