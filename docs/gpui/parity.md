@@ -2218,6 +2218,14 @@ To fix before Phase 3 ticks these lines on macOS:
   Planned fix: a `Platform::show_about_panel` call
   (`NSApp orderFrontStandardAboutPanel:`, which reads the bundle's name,
   version and credits), with the `About` action's handler calling it.
+- **P1515 and P1496, the Dock's Quit, a logout and a restart while on
+  air: not held.** The app holds Quit (⌘Q, the menu), the main window's
+  close button and Close Window (S2.6a part 7, #1900), but these reach
+  `NSApplication terminate:`, and GPUI 0.3.14 implements only
+  `applicationWillTerminate:`, which can't cancel. Planned fix: a GPUI patch
+  for `applicationShouldTerminate:` that answers `NSTerminateLater` while the
+  End livestream question is up and replies with
+  `replyToApplicationShouldTerminate:`.
 
 ### OS integration: dock, lifecycle, deep links, single instance
 
