@@ -838,6 +838,37 @@ load average 3 to 5. Evidence: `~/cloud-test/reports/2026-11-23-plan-260/s0-9/`.
 - Bumps are cheap so far, and `NativeView` (the macOS preview's
   foundation) is a week old in `gpui-pre`: keep the exact pin (D1).
 
+#### S0.9 results on Linux (2026-11-24, lane L5)
+
+ogre (Omarchy, Hyprland 0.56.2, i7-8750H, 16 GB), the spikes workspace,
+`gpui-pre` 0.3.14, `CARGO_BUILD_JOBS=3` in a fresh target under the box's
+build lock. **The T2 firmware pinned every core at 800 MHz for the builds**
+(a fifth of the box's clock); start-up was measured in both clock states
+and is given per state. The owner's session was locked, so the apps ran in
+a nested Hyprland on the lab output. Evidence: `~/linux-beta/plan260-s0-9/`
+on ogre.
+
+| What | Number |
+| --- | --- |
+| Clean release build (`spike-desktop`), 800 MHz | 1,222 s, 1,916 MB of target |
+| Incremental release build (one file touched) | 17.2 s |
+| Clean debug build, same target | 410 s, 5,638 MB with release |
+| Incremental debug build | 9.5 s |
+| Release binary | 46.6 MB; **30.0 MB stripped**, 11.4 MB gzipped (macOS: 7.4 MB stripped: Linux carries wgpu's Vulkan path, Wayland and X11, cosmic-text and zbus) |
+| Today's Electron app (the Linux Alpha, 0.37.0, unpacked) | 699 MB: Electron and Chromium, `app.asar` 97 MB, FFmpeg 220 MB, the backend 88 MB |
+| Start-up, launch to the first frame with content (measured from outside: the nested compositor's client list, then `grim` frames), **4 GHz** | GPUI `spike-text` (10,000-row chat) **351 to 355 ms** (3 rounds); `spike-desktop` 370 to 371 ms (3). Electron, the Linux Alpha on a fresh isolated profile, **1,429 and 1,701 ms** (2 rounds) |
+| The same, **800 MHz** | GPUI `spike-text` 1.50 to 1.67 s (5), `spike-desktop` 1.63 to 1.69 s (4); Electron 6.72 to 6.87 s (3) |
+| `backend.ready` | Electron spawns the backend 539 to 548 ms after launch at 4 GHz and it is ready 94 to 107 ms later (634 to 654 ms after launch); at 800 MHz 2.51 to 2.62 s and 2.60 to 2.70 s. A GPUI app spawns it first thing in `main`, so about 0.5 s earlier at 4 GHz |
+| Bump | Not rehearsed on Linux: the macOS count covers the shared code, and the Linux-only spike code (the preview presenter, `os.rs`) uses only `raw-window-handle` and `Window` |
+
+- Start-up passes S0.9's line on Linux too: GPUI shows content about 4x
+  sooner than Electron at either clock (about 1.1 to 1.3 s sooner at 4 GHz).
+  A fresh Linux Alpha also opens the microphone and camera before its
+  first frame (its meters and device list were live in the first screenshot).
+- The GPUI binary is four times larger on Linux than on macOS; a Linux
+  package of the GPUI app plus the backend and FFmpeg is still well under
+  today's 699 MB.
+
 ### Phase 1: the core lands in the shipping repo (ships in Electron, starts now)
 
 Phase 1 needs no GPUI, and each move leaves Electron better if the rewrite
