@@ -267,7 +267,7 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 | P159 | "Livestream" row | Destinations summary; opens Destinations | `renderer/components/studio/session-panel.tsx:296` | [ ] | [ ] | [ ] |
 | P160 | "Output" row | Recording/encode summary; opens Recording settings panel | `renderer/components/studio/session-panel.tsx:302` | [ ] | [ ] | [ ] |
 | P161 | "Destinations" row (live) | "n of n on air" status dot; opens Destinations | `renderer/components/studio/session-panel.tsx:532` | [ ] | [ ] | [ ] |
-| P162 | Per-destination problem rows | One row per problem: the destination's name, then its word ("Ended", "Failed", "Reconnecting…", "Not receiving"); opens Destinations | `renderer/components/studio/session-panel.tsx:547` | [ ] | [ ] | [ ] |
+| P162 | Per-destination problem rows | One row per problem: the destination's name, then its word ("Ended", "Failed", "Reconnecting…", "Not receiving"); opens Destinations | `renderer/components/studio/session-panel.tsx:547` | [x] | [ ] | [ ] |
 | P163 | "Stream" health row (live) | Healthy or failing stage; opens Health | `renderer/components/studio/session-panel.tsx:597` | [ ] | [ ] | [ ] |
 | P164 | "Sidekick" (co-host) row (live) | Buddy presence/alerts; hint lines; opens Stream Manager | `renderer/components/studio/session-panel.tsx:639` | [ ] | [ ] | [ ] |
 | P165 | "Guests" row (room open) | "Room open · n backstage"; opens Guests page | `renderer/components/studio/guests-session-row.tsx:22` | [ ] | [ ] | [ ] |
