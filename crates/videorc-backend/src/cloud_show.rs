@@ -8368,6 +8368,16 @@ mod tests {
             let status: CloudStatus = serde_json::from_value(wire.clone()).unwrap();
             assert_eq!(serde_json::to_value(status).unwrap(), wire, "{pointer}");
         }
+        // Plan 260 S1.8b: the room's presentation event, as the renderer
+        // validates it (`cloud.room.presentation`).
+        let presentation = high_risk_fixture("/cloud/roomPresentationEvent");
+        let event: crate::cloud_talk::CloudRoomPresentationEvent =
+            serde_json::from_value(presentation.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&event).unwrap(), presentation);
+        assert_eq!(
+            event.graphics.unwrap().state,
+            crate::cloud_talk::RoomPresentationState::Waiting
+        );
         let patch: CloudSettingsPatch =
             serde_json::from_value(high_risk_fixture("/cloud/settingsPatch")).unwrap();
         assert_eq!(patch.enabled, Some(false));

@@ -25,6 +25,7 @@ import type {
   CloudGuestDecideParams,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
+  CloudRoomPresentationEvent,
   CloudRoomRequest,
   CloudRoomTokenAnswer,
   CloudStage,
@@ -361,6 +362,7 @@ interface HighRiskContractFixtures {
     roomClientReportParams: CloudRoomClientReportParams
     roomTokenAnswer: CloudRoomTokenAnswer
     roomRequestEvent: CloudRoomRequest
+    roomPresentationEvent: CloudRoomPresentationEvent
     // Plan 243 C1: another device on air, and a show waiting after a hand-off.
     statusOnAirElsewhere: CloudStatus
     statusWaiting: CloudStatus
@@ -713,7 +715,8 @@ describe('shared high-risk protocol fixture', () => {
       guestActParams,
       roomClientReportParams,
       roomTokenAnswer,
-      roomRequestEvent
+      roomRequestEvent,
+      roomPresentationEvent
     } = fixtures.cloud
     expect(jsonShape(validateBackendEventPayload('cloud.state', statusTalk))).toEqual(statusTalk)
     expect(jsonShape(validateBackendRpcResult('cloud.room.open', statusTalk))).toEqual(statusTalk)
@@ -751,6 +754,16 @@ describe('shared high-risk protocol fixture', () => {
     expect(jsonShape(validateBackendEventPayload('cloud.room.requests', roomRequestEvent))).toEqual(
       roomRequestEvent
     )
+    // Plan 260 S1.8b: the presentation topics' delivery, from the backend.
+    expect(
+      jsonShape(validateBackendEventPayload('cloud.room.presentation', roomPresentationEvent))
+    ).toEqual(roomPresentationEvent)
+    expect(() =>
+      validateBackendEventPayload('cloud.room.presentation', {
+        ...roomPresentationEvent,
+        graphics: { ...roomPresentationEvent.graphics, state: 'sent' }
+      })
+    ).toThrow()
     expect(() =>
       validateBackendEventPayload('cloud.state', {
         ...statusTalk,
