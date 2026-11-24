@@ -14097,6 +14097,13 @@ async fn handle_text_message_with_role(
             {
                 if room_host::holds_seat() {
                     room_remote::set_monitor(enabled);
+                    // S1.8d d5: the return is heard only with Listen on.
+                    let listen = command
+                        .params
+                        .get("listen")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    room_playout::set_listen(enabled && listen);
                     return ServerResponse::ok(command.id, serde_json::json!({ "held": true }));
                 }
             }

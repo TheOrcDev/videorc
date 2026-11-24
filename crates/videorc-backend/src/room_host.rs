@@ -667,6 +667,7 @@ async fn leave(state: &AppState, room: Option<Arc<Room>>) {
     crate::room_html::clear();
     crate::room_remote::clear();
     crate::room_guest_speech::clear();
+    crate::room_playout::clear();
     HOLDS_SEAT.store(false, Ordering::Release);
 }
 

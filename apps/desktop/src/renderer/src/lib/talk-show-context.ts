@@ -88,6 +88,9 @@ export interface TalkShowContextValue {
   /** Plan 249 S6 (D4): show the stream's public avatar layers to guest pages. */
   setAvatarGuests: (enabled: boolean) => Promise<void>
   setMonitor: (enabled: boolean) => Promise<void>
+  /** Plan 260 S1.8d d5: the Program monitor's Listen toggle, for a room the
+   * backend holds (it plays the return itself). */
+  setMonitorListening: (listening: boolean) => Promise<void>
   setMicrophoneMuted: (muted: boolean) => Promise<void>
   setCameraOff: (off: boolean) => Promise<void>
   /** Record in a talk show (D10). */
@@ -121,6 +124,7 @@ export const NO_TALK_SHOW: TalkShowContextValue = {
   startScreenShare: async () => {},
   stopScreenShare: async () => {},
   setMonitor: async () => {},
+  setMonitorListening: async () => {},
   setGraphicsEnabled: async () => {},
   setAvatarEnabled: async () => {},
   setAvatarGuests: async () => {},
