@@ -2,16 +2,14 @@
 //! takeover on-air switch, its one home (the Images page manages the
 //! images; this flips them). It works mid-session: a takeover only needs the
 //! backend, and it replaces the output whatever the scene.
-//!
-//! The header's "Open Images" cog and the buttons' image glyphs wait for the
-//! kit's Gear and Image icons.
 
 use std::sync::Arc;
 
-use gpui::{Context, EventEmitter, Window, div, prelude::*, px};
+use gpui::{Context, EventEmitter, Hsla, Window, div, prelude::*, px};
 use videorc_app_core::nav::PageId;
 use videorc_app_core::studio::{StudioBackend, connection_blocked_reason};
 use videorc_app_core::{BackendClient, StudioSnapshot};
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 use videorc_kit::{Button, ButtonSize, ButtonVariant, PanelSection};
@@ -23,6 +21,8 @@ use crate::app::bridge::Mirror;
 pub const TITLE: &str = "Takeover";
 pub const EMPTY: &str = "No takeovers yet.";
 pub const ADD_IN_IMAGES: &str = "Add in Images";
+/// `OpenPageCog label="Open Images"`.
+pub const OPEN_IMAGES: &str = "Open Images";
 pub const IDLE_HINT: &str =
     "Click a takeover to cover the output. Works while you’re recording or live.";
 
@@ -191,9 +191,22 @@ impl Render for TakeoverSection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::resolve(None, window, cx);
         let muted = hsla(theme.muted_foreground);
+        // Ghost / Outline ink (`button.rs`): `foreground`. Default metal ink:
+        // `chrome_fill_ink`.
+        let ghost_ink = hsla(theme.foreground);
+        let outline_ink = hsla(theme.foreground);
+        let default_ink = hsla(theme.chrome_fill_ink);
         let link = self.link.read(cx).value().clone();
         let view = TakeoverView::of(&self.screens, self.active.as_ref(), link.disconnected);
-        let section = PanelSection::new("studio-takeover").title(TITLE);
+        let section = PanelSection::new("studio-takeover").title(TITLE).action(
+            Button::new("takeover-open-images")
+                .variant(ButtonVariant::Ghost)
+                .size(ButtonSize::IconXs)
+                .accessibility_label(OPEN_IMAGES)
+                .tooltip(OPEN_IMAGES)
+                .child(icon(IconName::GearSix, 16., ghost_ink))
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage(PageId::Assets)))),
+        );
         if view.buttons.is_empty() {
             return section.child(
                 div()
@@ -202,6 +215,8 @@ impl Render for TakeoverSection {
                     .gap(px(6.))
                     .type_scale(text::META)
                     .text_color(muted)
+                    // Electron: ImageIcon `size-3.5` (14 px) before the empty words.
+                    .child(icon(IconName::ImageSquare, 14., muted))
                     .child(div().min_w_0().child(EMPTY))
                     .child(
                         Button::new("takeover-add-in-images")
@@ -216,6 +231,7 @@ impl Render for TakeoverSection {
         let mut row = div().flex().flex_wrap().gap(px(6.));
         for (index, button) in view.buttons.into_iter().enumerate() {
             let TakeoverButton { id, name, active } = button;
+            let ink: Hsla = if active { default_ink } else { outline_ink };
             row = row.child(
                 Button::new(("takeover", index))
                     .variant(if active {
@@ -223,7 +239,11 @@ impl Render for TakeoverSection {
                     } else {
                         ButtonVariant::Outline
                     })
-                    .label(name)
+                    .accessibility_label(name.clone())
+                    // Leading ImageIcon, then the name (kit draws `.label`
+                    // before children, so both ride as children).
+                    .child(icon(IconName::ImageSquare, 16., ink))
+                    .child(name)
                     .disabled(disconnected.is_some())
                     .when_some(disconnected.clone(), |button, reason| {
                         button.tooltip(reason)
