@@ -13868,17 +13868,42 @@ async fn handle_text_message_with_role(
         "cloud.guest.act" => {
             match serde_json::from_value::<cloud_talk::GuestActParams>(command.params) {
                 Ok(params) => match cloud_context(state) {
-                    Some(context) => match context
-                        .act_on_guest(account::stored_session_token(), params)
-                        .await
-                    {
-                        Ok(status) => ServerResponse::ok(command.id, status),
-                        Err(error) => ServerResponse::error(
-                            command.id,
-                            "cloud-guest-action-failed",
-                            format!("{error:#}"),
-                        ),
-                    },
+                    Some(context) => {
+                        // Plan 260 S1.8 (#1895): a removed or banned guest's
+                        // grant goes before the web takes them out, and stays
+                        // gone until the host lets them in again.
+                        let removes = matches!(
+                            params.action,
+                            cloud_talk::GuestAction::Remove | cloud_talk::GuestAction::Ban
+                        );
+                        let guest_id = params.guest_id.clone();
+                        #[cfg(target_os = "macos")]
+                        {
+                            if removes {
+                                room_routing::deny(&guest_id);
+                            }
+                        }
+                        match context
+                            .act_on_guest(account::stored_session_token(), params)
+                            .await
+                        {
+                            Ok(status) => ServerResponse::ok(command.id, status),
+                            Err(error) => {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    if removes {
+                                        room_routing::undeny(&guest_id);
+                                    }
+                                }
+                                let _ = (removes, &guest_id);
+                                ServerResponse::error(
+                                    command.id,
+                                    "cloud-guest-action-failed",
+                                    format!("{error:#}"),
+                                )
+                            }
+                        }
+                    }
                     None => cloud_unavailable(command.id),
                 },
                 Err(error) => {
