@@ -612,6 +612,21 @@ mod tests {
         ));
     }
 
+    /// A child that stays alive for about 30 s. Windows' `timeout` exits at
+    /// once without console input, so it waits on `ping` there.
+    fn stand_in_child() -> std::process::Child {
+        let mut command = if cfg!(windows) {
+            let mut ping = std::process::Command::new("ping");
+            ping.args(["-n", "31", "127.0.0.1"]);
+            ping
+        } else {
+            let mut sleep = std::process::Command::new("sleep");
+            sleep.arg("30");
+            sleep
+        };
+        command.stdout(std::process::Stdio::null()).spawn().unwrap()
+    }
+
     #[test]
     fn this_process_probes_live_and_records_round_trip() {
         let dir = tempfile::tempdir().unwrap();
@@ -622,11 +637,7 @@ mod tests {
         assert!(ledger.records().unwrap().is_empty());
 
         // A child we own: `sleep` is alive long enough to probe.
-        let mut child = std::process::Command::new(if cfg!(windows) { "timeout" } else { "sleep" })
-            .arg("30")
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = stand_in_child();
         let pid = child.id();
         match probe_process(pid) {
             ProbeResult::Live(identity) => {
@@ -668,11 +679,7 @@ mod tests {
     fn identity_mismatch_is_pruned_without_a_signal() {
         let dir = tempfile::tempdir().unwrap();
         let ledger = OwnedProcessLedger::new(dir.path().join("rust-x.json"));
-        let mut child = std::process::Command::new(if cfg!(windows) { "timeout" } else { "sleep" })
-            .arg("30")
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = stand_in_child();
         let pid = child.id();
         ledger
             .write(&[OwnedProcessRecord {
@@ -698,11 +705,7 @@ mod tests {
 
     #[test]
     fn a_signal_to_a_reused_pid_is_refused() {
-        let mut child = std::process::Command::new(if cfg!(windows) { "timeout" } else { "sleep" })
-            .arg("30")
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = stand_in_child();
         let pid = child.id();
         let someone_else = ProcessIdentity {
             birth_token: "someone else".to_string(),

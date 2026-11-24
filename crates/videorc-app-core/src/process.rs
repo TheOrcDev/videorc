@@ -1319,12 +1319,18 @@ mod tests {
 
     #[test]
     fn bootstrap_parse_mirrors_electron_main() {
+        // Roots must be absolute on the platform the test runs on.
+        let (x, y, z) = if cfg!(windows) {
+            (r"C:\x", r"C:\y", r"C:\z")
+        } else {
+            ("/x", "/y", "/z")
+        };
         let value = json!({
             "host": "127.0.0.1", "port": 50000,
             "token": "11111111-2222-3333-4444-555555555555",
             "adminToken": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             "pid": 4242, "parentPid": 4241,
-            "managedAssetRoots": {"screens": "/x", "banners": "/y"}
+            "managedAssetRoots": {"screens": x, "banners": y}
         });
         let bootstrap = BackendBootstrap::parse(&value).unwrap();
         assert_eq!(bootstrap.port, 50000);
@@ -1339,13 +1345,13 @@ mod tests {
         assert_eq!(
             bootstrap.managed_asset_roots,
             Some(ManagedAssetRoots {
-                screens: PathBuf::from("/x"),
-                banners: PathBuf::from("/y"),
+                screens: PathBuf::from(x),
+                banners: PathBuf::from(y),
                 sounds: None,
             })
         );
         let mut relative = value.clone();
-        relative["managedAssetRoots"] = json!({"screens": "x", "banners": "/y", "sounds": "/z"});
+        relative["managedAssetRoots"] = json!({"screens": "x", "banners": y, "sounds": z});
         assert_eq!(
             BackendBootstrap::parse(&relative)
                 .unwrap()
