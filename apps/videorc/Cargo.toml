@@ -23,3 +23,16 @@ gpui_platform = { workspace = true, features = ["font-kit", "runtime_shaders", "
 videorc-app-core = { workspace = true }
 # The core's own runtime (two workers), beside GPUI's executor.
 tokio = { version = "1.48", features = ["rt-multi-thread", "sync", "time", "macros"] }
+# The preview element (plan 260 S2.3a, L1): the presenter, the lease feed,
+# the contracts and the slots' words; and the wire types its scene speaks.
+videorc-preview = { workspace = true }
+videorc-protocol = { workspace = true }
+
+# macOS: the preview's layer in a GPUI `NativeView` (S0.1's route). The same
+# bindings and features S0.1's spike compiled with.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3.2"
+objc2-app-kit = { version = "0.3.2", features = ["NSView", "NSResponder", "NSWindow", "NSGraphics", "objc2-quartz-core"] }
+objc2-quartz-core = { version = "0.3.2", features = ["CALayer", "CAMetalLayer", "CATransaction", "objc2-metal"] }
+raw-window-handle = "0.6"

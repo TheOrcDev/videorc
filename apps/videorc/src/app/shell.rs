@@ -9,6 +9,8 @@ use videorc_app_core::nav::{self, PageId, ZONES};
 use videorc_app_core::{BackendState, ConnectionState, Tone};
 
 use super::bridge::Mirror;
+use crate::preview::Preview;
+use videorc_preview::lifecycle::WindowMode;
 
 /// The status bar's line: the supervisor's words, and whether the typed
 /// client has the backend's `backend.ready`.
@@ -60,20 +62,27 @@ pub struct Shell {
     page: PageId,
     backend: Entity<Mirror<StatusLine>>,
     connection: Entity<Mirror<String>>,
+    /// The preview (plan 260 S2.3a, L1): its slot is the Studio page's.
+    preview: Entity<Preview>,
 }
 
 impl Shell {
     pub fn new(
         backend: Entity<Mirror<StatusLine>>,
         connection: Entity<Mirror<String>>,
+        preview: Entity<Preview>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&backend, |_, _, cx| cx.notify()).detach();
         cx.observe(&connection, |_, _, cx| cx.notify()).detach();
+        // The preview notifies only when its slot's words or its window
+        // change, never per video frame.
+        cx.observe(&preview, |_, _, cx| cx.notify()).detach();
         Self {
             page: PageId::Studio,
             backend,
             connection,
+            preview,
         }
     }
 
@@ -85,8 +94,57 @@ impl Shell {
         if self.page != page {
             self.page = page;
             window.set_window_title(&nav::window_title(page));
+            // A docked slot that is not on screen presents nothing.
+            self.preview.update(cx, |preview, _| {
+                preview.set_docked_shown(page == PageId::Studio)
+            });
             cx.notify();
         }
+    }
+
+    /// The Studio page (S2.3a's part of it): the preview's slot, and the
+    /// button that moves the Preview into its own window and back
+    /// (`preview-stage.tsx`'s "Pop out" and "Show here").
+    fn studio_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (floating, can_float) = {
+            let preview = self.preview.read(cx);
+            (preview.mode() == WindowMode::Floating, preview.can_float())
+        };
+        let mut header = div().flex().justify_between().items_center().child(
+            div()
+                .text_size(px(20.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(PageId::Studio.label()),
+        );
+        if can_float {
+            header = header.child(
+                div()
+                    .id("preview-pop-out")
+                    .px(px(10.))
+                    .py(px(4.))
+                    .rounded(px(6.))
+                    .bg(rgb(SELECTED))
+                    .text_size(px(12.))
+                    .cursor_pointer()
+                    .child(if floating { "Show here" } else { "Pop out" })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.preview
+                            .update(cx, |preview, cx| preview.toggle_floating(cx));
+                    })),
+            );
+        }
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .pb(px(16.))
+            .child(header)
+            .child(
+                div()
+                    .flex_1()
+                    .child(Preview::docked_slot(&self.preview, cx)),
+            )
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -167,7 +225,15 @@ impl Render for Shell {
                     .flex()
                     .flex_row()
                     .child(self.sidebar(cx))
-                    .child(
+                    .child(if page == PageId::Studio {
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .px(px(24.))
+                            .child(self.studio_page(cx))
+                    } else {
                         div()
                             .flex_1()
                             .flex()
@@ -186,8 +252,8 @@ impl Render for Shell {
                                     .text_size(px(13.))
                                     .text_color(rgb(MUTED))
                                     .child("This page comes in plan 260's Phase 3."),
-                            ),
-                    ),
+                            )
+                    }),
             )
             .child(
                 div()

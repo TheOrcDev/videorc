@@ -20,6 +20,7 @@
 //! will.
 
 mod app;
+mod preview;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -197,6 +198,13 @@ fn main() -> Result<()> {
 
     let backend_state = supervisor.state();
     let connection_state = client.state();
+    // The preview (plan 260 S2.3a, L1): started in the main window, stopped
+    // before the backend at quit.
+    let preview_runtime = runtime.handle().clone();
+    let preview_logger = logger.clone();
+    let preview_slot: Rc<RefCell<Option<gpui::Entity<preview::Preview>>>> =
+        Rc::new(RefCell::new(None));
+    let quit_preview = preview_slot.clone();
     // Taken by the quit: the shutdown handshake runs once.
     let supervisor = Rc::new(RefCell::new(Some(supervisor)));
     let quit_supervisor = supervisor.clone();
@@ -212,7 +220,12 @@ fn main() -> Result<()> {
         // GPUI gives quit observers a short deadline, so the wait happens
         // here, on the main thread, as Electron's `before-quit` holds the
         // quit until the backend confirms.
-        cx.on_app_quit(move |_| {
+        cx.on_app_quit(move |cx| {
+            // The preview releases its lease and destroys its surface while
+            // the backend still answers.
+            if let Some(preview) = quit_preview.borrow_mut().take() {
+                preview.update(cx, |preview, cx| preview.stop(cx));
+            }
             stop_backend(&quit_supervisor, &runtime_handle);
             async {}
         })
@@ -232,7 +245,19 @@ fn main() -> Result<()> {
                 app_id: Some(APP_ID.into()),
                 ..Default::default()
             },
-            |_, cx| cx.new(|cx| Shell::new(status.clone(), connection.clone(), cx)),
+            |window, cx| {
+                let preview = preview::Preview::new(
+                    preview::PreviewSetup {
+                        runtime: preview_runtime.clone(),
+                        backend: backend_state.clone(),
+                        logger: preview_logger.clone(),
+                    },
+                    window,
+                    cx,
+                );
+                *preview_slot.borrow_mut() = Some(preview.clone());
+                cx.new(|cx| Shell::new(status.clone(), connection.clone(), preview, cx))
+            },
         );
         let main_window = match opened {
             Ok(handle) => handle,
