@@ -24,14 +24,14 @@ storage did, so each family's "could not save" path still runs.
 The list with each key's family is `UI_SETTINGS_MOVED_KEYS` in
 `apps/desktop/src/renderer/src/lib/ui-settings-key-families.ts`.
 
-| Area                   | Keys                                                                                                                                                                                                                                    |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Area                   | Keys                                                                                                                                                                                                                                                                                |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Studio                 | `videorc.settings`, `videorc.captureConfig`, `videorc.scenes.v2`, `videorc.scene-presets.v1` (read once to migrate), `videorc.working-scene.v1`, `videorc.scene-window-apps.v1`, `videorc.backgroundAssets`, `videorc.outputChosenByUser`, `videorc.screenTakeoverMuteOwnership.v1` |
-| First run and app      | `videorc.firstRun`, `videorc.onboardingComplete`, `videorc.whatsNewLastSeenVersion`, `videorc.theme`                                                                                                                                    |
-| Consents and Clean cut | `videorc.aiConsent`, `videorc.buddyAutoChatConsent`, `videorc.cleanCutAuto`, `videorc.cleanCutAttempted`, `videorc.cleanCutAnnounced`                                                                                                   |
-| Scenes and privacy     | `videorc.followSettings.v1`, `videorc.privacySettings.v1`                                                                                                                                                                               |
-| Buddy                  | `videorc.buddyPetReviewMarks`, `videorc.buddyInvitationDismissed`, `videorc.buddyWornPack:<persona>`, `videorc.cohostSensitivity`, `videorc.cohostNudgeDismissed`, `videorc.orcleListenPromptDismissed`                                 |
-| Stream Manager         | `videorc.streamManager.statsBar`                                                                                                                                                                                                        |
+| First run and app      | `videorc.firstRun`, `videorc.onboardingComplete`, `videorc.whatsNewLastSeenVersion`, `videorc.theme`                                                                                                                                                                                |
+| Consents and Clean cut | `videorc.aiConsent`, `videorc.buddyAutoChatConsent`, `videorc.cleanCutAuto`, `videorc.cleanCutAttempted`, `videorc.cleanCutAnnounced`                                                                                                                                               |
+| Scenes and privacy     | `videorc.followSettings.v1`, `videorc.privacySettings.v1`                                                                                                                                                                                                                           |
+| Buddy                  | `videorc.buddyPetReviewMarks`, `videorc.buddyInvitationDismissed`, `videorc.buddyWornPack:<persona>`, `videorc.cohostSensitivity`, `videorc.cohostNudgeDismissed`, `videorc.orcleListenPromptDismissed`                                                                             |
+| Stream Manager         | `videorc.streamManager.statsBar`                                                                                                                                                                                                                                                    |
 
 Cross-window updates that used to ride the `storage` event (the co-host
 sensitivity, the Clean cut switch) now subscribe to the store.
@@ -86,15 +86,31 @@ copies are unused.
   (`protocol-fixtures/ui-settings-previous-release-profile.json`) and checks
   every moved family answers as it did from web storage.
 - `scripts/lib/renderer-profile-seed.test.mjs` fails when a script touches a
-  product key through web storage.
+  product key through web storage, or when a seed helper writes before the
+  window's store hydrated.
+- `scripts/lib/smoke-command-callers.test.mjs` fails when a script writes
+  through the seam without the shared wait (S1.4b.2).
 
 ## Smokes and the live lab
 
 Page code reaches the store through `window.__videorcUiSettings`
-(`getItem`, `setItem`, `removeItem`, `keys`, `clear`, `flush`), installed in
-every build because the live lab drives the packaged app. `seedUiSettingsJs`
-and `reloadKeepingSeedJs` in `scripts/lib/renderer-profile-seed.mjs` wrap it.
-A write lands in the window's journal synchronously, so a reload right after
-it still finds the value. Setting `videorc.theme` in web storage and
-dispatching a `storage` event still switches the theme live; a seed that
-reloads writes the store too.
+(`getItem`, `setItem`, `removeItem`, `keys`, `clear`, `flush`, `status`,
+`ready`), installed in every build because the live lab drives the packaged
+app. The seam exists from the moment a window starts hydrating, before its
+first render; until the snapshot is in, every key reads null and a write
+throws ("no snapshot yet (hydrating)"). `ready()` resolves once the window
+rendered with its snapshot and rejects, naming why, when it rendered without
+it (that window reloads once the snapshot arrives).
+
+Smokes seed right after launch or a reload, so every seed waits first (S1.4b.2):
+`uiSettingsReadyJs` / `UI_SETTINGS_READY_JS` in
+`scripts/lib/renderer-profile-seed.mjs` waits for the seam and `ready()`,
+bounded (45 s by default), and names what it last saw on timeout.
+`seedUiSettingsJs`, `readUiSettingJs` and `reloadKeepingSeedJs` use it; a
+hand-written seed starts with `const settings = await ${UI_SETTINGS_READY_JS};`.
+`scripts/lib/smoke-command-callers.test.mjs` fails when a script touches the
+seam other than through these (a plain `window.__videorcUiSettings?.getItem(`
+poll is allowed). A write lands in the window's journal synchronously, so a
+reload right after it still finds the value. Setting `videorc.theme` in web
+storage and dispatching a `storage` event still switches the theme live; a
+seed that reloads writes the store too.

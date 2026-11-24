@@ -53,7 +53,7 @@ import {
 import { BackendEventRecorder } from './lib/record-latency-events.mjs'
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
-import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
+import { reloadKeepingSeedJs, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120_000)
@@ -212,11 +212,12 @@ try {
   // Record-only, the synthetic source, Cloud AI consent: one reload.
   await command('eval-js', {
     code: `
+      const settings = await ${UI_SETTINGS_READY_JS};
       const key = 'videorc.captureConfig';
       let current = {};
-      try { current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}') ?? {}; } catch {}
-      window.__videorcUiSettings.setItem(key, JSON.stringify({ ...current, video: params.video, recordEnabled: true, streamEnabled: false }));
-      window.__videorcUiSettings.setItem('videorc.aiConsent', '1');
+      try { current = JSON.parse(settings.getItem(key) ?? '{}') ?? {}; } catch {}
+      settings.setItem(key, JSON.stringify({ ...current, video: params.video, recordEnabled: true, streamEnabled: false }));
+      settings.setItem('videorc.aiConsent', '1');
       ${reloadKeepingSeedJs({ forgetWorkingScene: false })}
       return true;
     `,
@@ -238,7 +239,7 @@ try {
   await waitUntil('the Screen only scene to own the test pattern', async () => {
     const edited = await command('eval-js', {
       code: `
-        const library = JSON.parse(window.__videorcUiSettings.getItem('videorc.scenes.v2') ?? 'null');
+        const library = JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2') ?? 'null');
         const scene = library?.scenes?.find((entry) => entry.layouts?.horizontal?.layoutPreset === 'screen-only');
         if (!scene || !window.__videorcSmokeScenePresets) return null;
         scene.shows = { kind: 'test-pattern' };

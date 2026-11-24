@@ -227,6 +227,10 @@ export function uiSettingsStore(): UiSettingsStore {
  * key, a fresh profile's store). Installed in every build, because the live
  * lab drives the packaged app; it reaches nothing the window's own code
  * cannot.
+ *
+ * The seam exists from the moment the window starts hydrating, before its
+ * first render, and a write before the snapshot throws. A seed awaits
+ * `ready()` first (`uiSettingsReadyJs` in `scripts/lib/renderer-profile-seed.mjs`).
  */
 export interface UiSettingsSmokeSeam {
   getItem(key: string): string | null
@@ -236,10 +240,17 @@ export interface UiSettingsSmokeSeam {
   clear(): void
   flush(): Promise<void>
   status(): ReturnType<UiSettingsStore['status']>
+  /**
+   * Resolves once this window rendered with its snapshot (at once when it
+   * already did). Rejects, naming why, when the window rendered without it
+   * (the engine missed the hydrate deadline or refused): such a window reloads
+   * once the snapshot arrives, so a seed belongs in the reloaded window.
+   */
+  ready(): Promise<void>
 }
 
-function installUiSettingsSmokeSeam(): void {
-  if (typeof window === 'undefined') return
+/** The seam over this window's store; exported for tests. */
+export function createUiSettingsSmokeSeam(): UiSettingsSmokeSeam {
   const storage = uiSettingsStorage()
   // A seed written before the snapshot would be refused quietly; say so.
   const writable = (): void => {
@@ -250,7 +261,7 @@ function installUiSettingsSmokeSeam(): void {
       )
     }
   }
-  const seam: UiSettingsSmokeSeam = {
+  return {
     getItem: (key) => storage.getItem(key),
     setItem: (key, value) => {
       writable()
@@ -266,9 +277,23 @@ function installUiSettingsSmokeSeam(): void {
       for (const key of uiSettingsStore().keys()) storage.removeItem(key)
     },
     flush: () => uiSettingsStore().flush(),
-    status: () => uiSettingsStore().status()
+    status: () => uiSettingsStore().status(),
+    ready: async () => {
+      // The window's own bounded hydrate (the same promise its entry awaits).
+      const rendered = await uiSettingsStore().hydrate()
+      if (rendered.state === 'hydrated') return
+      const why = rendered.state === 'unavailable' ? rendered.reason : rendered.state
+      throw new Error(
+        `This window rendered without its UI settings snapshot (${why}); it reloads once the snapshot arrives, so seed the reloaded window.`
+      )
+    }
   }
-  ;(window as Window & { __videorcUiSettings?: UiSettingsSmokeSeam }).__videorcUiSettings = seam
+}
+
+function installUiSettingsSmokeSeam(): void {
+  if (typeof window === 'undefined') return
+  ;(window as Window & { __videorcUiSettings?: UiSettingsSmokeSeam }).__videorcUiSettings =
+    createUiSettingsSmokeSeam()
 }
 
 /**

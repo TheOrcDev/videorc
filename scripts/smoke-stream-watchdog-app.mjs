@@ -32,6 +32,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { seedUiSettingsJs } from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
   connectBackend,
@@ -185,8 +186,11 @@ try {
         checks: { 'still-there': { enabled: true } },
         micMutedAfterSeconds: 30
       })
-      if (patched.micMutedAfterSeconds === 60 && !patched.checks['still-there'].enabled &&
-          restored.micMutedAfterSeconds === 30) {
+      if (
+        patched.micMutedAfterSeconds === 60 &&
+        !patched.checks['still-there'].enabled &&
+        restored.micMutedAfterSeconds === 30
+      ) {
         pass('settings', 'watchdog.settings.set round-trips')
       } else {
         fail('settings', `patch did not round-trip: ${JSON.stringify(patched)}`)
@@ -233,15 +237,24 @@ try {
       } else if (!/Nothing else is playing\./.test(opened.detail)) {
         // The fold lands once the silence clock passes its own threshold.
         const folded = await waitFor(
-          () => openAlerts().find((alert) => alert.check === 'mic-muted' && /Nothing else is playing\./.test(alert.detail)),
+          () =>
+            openAlerts().find(
+              (alert) =>
+                alert.check === 'mic-muted' && /Nothing else is playing\./.test(alert.detail)
+            ),
           PROGRAM_SILENT_AFTER_MS + 2500
         )
-        if (folded) pass('mic-muted', `opened ${sinceMute} ms after the mute; the silence folded into it`)
+        if (folded)
+          pass('mic-muted', `opened ${sinceMute} ms after the mute; the silence folded into it`)
         else fail('mic-muted', `the detail never folded the silence in: ${opened.detail}`)
       } else {
         pass('mic-muted', `opened ${sinceMute} ms after the mute, silence folded in`)
       }
-      if (!healthEvents.some((event) => event.code === 'watchdog-mic-muted' && event.level === 'error')) {
+      if (
+        !healthEvents.some(
+          (event) => event.code === 'watchdog-mic-muted' && event.level === 'error'
+        )
+      ) {
         fail('mic-muted health event', `no watchdog-mic-muted error event (${healthCodes()})`)
       } else {
         pass('mic-muted health event', 'watchdog-mic-muted persisted as error')
@@ -259,12 +272,14 @@ try {
         )
         const acknowledged = openAlerts().find((alert) => alert.id === alertId)?.state
         if (repeated) fail('acknowledge', 'the alert repeated after Got it')
-        else if (acknowledged !== 'acknowledged') fail('acknowledge', `state ${acknowledged}, expected acknowledged`)
+        else if (acknowledged !== 'acknowledged')
+          fail('acknowledge', `state ${acknowledged}, expected acknowledged`)
         else pass('acknowledge', 'no repeat after Got it; the card stays')
       }
       await setMuted(ws, sessionId, false)
       const cleared = await waitFor(
-        () => !openAlerts().some((alert) => alert.check === 'mic-muted') &&
+        () =>
+          !openAlerts().some((alert) => alert.check === 'mic-muted') &&
           healthEvents.some((event) => event.code === 'watchdog-mic-muted-cleared'),
         4000
       )
@@ -289,9 +304,15 @@ try {
         )
         const micBehind = openAlerts().some((alert) => alert.check === 'mic-muted')
         if (micBehind) fail('takeover guard', 'mic-muted opened behind a takeover')
-        else if (!notice) fail('takeover guard', `program-silent never opened behind the takeover (${alertNames()})`)
-        else if (notice.severity !== 'notice') fail('takeover guard', `program-silent severity ${notice.severity}, expected notice`)
-        else if (!/Be right back has been silent/.test(notice.detail)) fail('takeover guard', `unexpected detail: ${notice.detail}`)
+        else if (!notice)
+          fail(
+            'takeover guard',
+            `program-silent never opened behind the takeover (${alertNames()})`
+          )
+        else if (notice.severity !== 'notice')
+          fail('takeover guard', `program-silent severity ${notice.severity}, expected notice`)
+        else if (!/Be right back has been silent/.test(notice.detail))
+          fail('takeover guard', `unexpected detail: ${notice.detail}`)
         else pass('takeover guard', 'no mic-muted behind the takeover; the silence is a notice')
         await setMuted(ws, sessionId, false)
         await request(ws, timeoutMs, 'screens.clear', {})
@@ -314,7 +335,8 @@ try {
           PICTURE_BLACK_AFTER_MS + 6000
         )
         if (!black) fail('picture-black', `never opened on a black takeover (${alertNames()})`)
-        else if (black.fixes?.[0]?.kind !== 'end-takeover') fail('picture-black', `fix ${black.fixes?.[0]?.kind}, expected end-takeover`)
+        else if (black.fixes?.[0]?.kind !== 'end-takeover')
+          fail('picture-black', `fix ${black.fixes?.[0]?.kind}, expected end-takeover`)
         else pass('picture-black', `opened with End takeover; detail "${black.detail}"`)
         await request(ws, timeoutMs, 'screens.clear', {})
         const cleared = await waitFor(
@@ -349,7 +371,8 @@ try {
           () => healthEvents.find((event) => event.code === 'watchdog-picture-stopped-cleared'),
           15000
         )
-        if (cleared) pass('picture-stopped', `opened on the stall ("${stalled.message}"), then cleared`)
+        if (cleared)
+          pass('picture-stopped', `opened on the stall ("${stalled.message}"), then cleared`)
         else fail('picture-stopped', 'opened but never cleared after the pause')
       }
       await assertSessionRunning(ws, 'after the stall')
@@ -361,12 +384,18 @@ try {
       await stopListener(listeners.get(victim.id), 'SIGKILL')
       listeners.delete(victim.id)
       const down = await waitFor(
-        () => openAlerts().find((alert) => alert.check === 'destination-down' && alert.targetId === victim.id),
+        () =>
+          openAlerts().find(
+            (alert) => alert.check === 'destination-down' && alert.targetId === victim.id
+          ),
         DESTINATION_DOWN_AFTER_MS + 12000
       )
-      const otherDown = openAlerts().some((alert) => alert.check === 'destination-down' && alert.targetId === other.id)
+      const otherDown = openAlerts().some(
+        (alert) => alert.check === 'destination-down' && alert.targetId === other.id
+      )
       if (!down) fail('destination-down', `no alert for ${victim.label} (${alertNames()})`)
-      else if (down.severity !== 'warning') fail('destination-down', `severity ${down.severity}, expected warning`)
+      else if (down.severity !== 'warning')
+        fail('destination-down', `severity ${down.severity}, expected warning`)
       else if (otherDown) fail('destination-down', `${other.label} was flagged too`)
       else pass('destination-down', `${victim.label} only: "${down.title}"`)
       listeners.set(victim.id, spawnListener(victim))
@@ -374,20 +403,27 @@ try {
         () => !openAlerts().some((alert) => alert.check === 'destination-down'),
         25000
       )
-      if (back) pass('destination-down cleared', `${victim.label} reconnected and the alert cleared`)
+      if (back)
+        pass('destination-down cleared', `${victim.label} reconnected and the alert cleared`)
       else fail('destination-down cleared', `still open after the sink came back: ${alertNames()}`)
       await sleep(3000)
       await stopListener(listeners.get(victim.id), 'SIGKILL')
       await stopListener(listeners.get(other.id), 'SIGKILL')
       listeners.clear()
       const fold = await waitFor(
-        () => openAlerts().find((alert) => alert.check === 'destination-down' && alert.targetId === 'all'),
+        () =>
+          openAlerts().find(
+            (alert) => alert.check === 'destination-down' && alert.targetId === 'all'
+          ),
         DESTINATION_DOWN_AFTER_MS + 15000
       )
-      const perLeg = openAlerts().filter((alert) => alert.check === 'destination-down' && alert.targetId !== 'all')
+      const perLeg = openAlerts().filter(
+        (alert) => alert.check === 'destination-down' && alert.targetId !== 'all'
+      )
       if (!fold) fail('all-down fold', `no critical fold (${alertNames()})`)
       else if (fold.severity !== 'critical') fail('all-down fold', `severity ${fold.severity}`)
-      else if (perLeg.length > 0) fail('all-down fold', 'per-destination cards stayed beside the fold')
+      else if (perLeg.length > 0)
+        fail('all-down fold', 'per-destination cards stayed beside the fold')
       else pass('all-down fold', `"${fold.title}"`)
       for (const target of targets) listeners.set(target.id, spawnListener(target))
       await waitFor(() => !openAlerts().some((alert) => alert.check === 'destination-down'), 30000)
@@ -398,7 +434,9 @@ try {
       const fakeSessionId = sessionId
       await request(ws, timeoutMs, 'liveChat.start', {
         sessionId: fakeSessionId,
-        destinations: [{ platform: 'twitch', targetId: 'smoke-twitch', read: 'ready', write: 'ready' }],
+        destinations: [
+          { platform: 'twitch', targetId: 'smoke-twitch', read: 'ready', write: 'ready' }
+        ],
         fakes: [
           {
             platform: 'twitch',
@@ -420,7 +458,9 @@ try {
       await request(ws, timeoutMs, 'liveChat.stop', { sessionId: fakeSessionId }).catch(() => {})
       await request(ws, timeoutMs, 'liveChat.start', {
         sessionId: fakeSessionId,
-        destinations: [{ platform: 'twitch', targetId: 'smoke-twitch', read: 'ready', write: 'ready' }],
+        destinations: [
+          { platform: 'twitch', targetId: 'smoke-twitch', read: 'ready', write: 'ready' }
+        ],
         fakes: [
           {
             platform: 'twitch',
@@ -447,7 +487,9 @@ try {
       await request(ws, timeoutMs, 'liveChat.stop', { sessionId: fakeSessionId }).catch(() => {})
       await request(ws, timeoutMs, 'liveChat.start', {
         sessionId: fakeSessionId,
-        destinations: [{ platform: 'twitch', targetId: 'smoke-twitch', read: 'ready', write: 'ready' }],
+        destinations: [
+          { platform: 'twitch', targetId: 'smoke-twitch', read: 'ready', write: 'ready' }
+        ],
         fakes: [
           {
             platform: 'twitch',
@@ -460,12 +502,15 @@ try {
         ]
       })
       const chat = await waitFor(
-        () => openAlerts().find((alert) => alert.check === 'chat-says' && alert.targetId === 'audio'),
+        () =>
+          openAlerts().find((alert) => alert.check === 'chat-says' && alert.targetId === 'audio'),
         12000
       )
       if (!chat) fail('chat-says', `two chatters did not open it (${alertNames()})`)
-      else if (!chat.detail.includes('no sound??') || !chat.detail.includes('sin audio')) fail('chat-says', `quotes missing: ${chat.detail}`)
-      else if (!/^2 people/.test(chat.detail)) fail('chat-says', `people count wrong: ${chat.detail}`)
+      else if (!chat.detail.includes('no sound??') || !chat.detail.includes('sin audio'))
+        fail('chat-says', `quotes missing: ${chat.detail}`)
+      else if (!/^2 people/.test(chat.detail))
+        fail('chat-says', `people count wrong: ${chat.detail}`)
       else pass('chat-says', `"${chat.title}" / ${chat.detail}`)
       await request(ws, timeoutMs, 'liveChat.stop', { sessionId: fakeSessionId }).catch(() => {})
     }
@@ -504,7 +549,8 @@ try {
     const stopMs = Date.now() - stopStartedAt
     if (stopMs <= stopBudgetMs) pass('stop', `${stopMs} ms`)
     else fail('stop', `Stop took ${stopMs} ms (budget ${stopBudgetMs} ms)`)
-    if (stopped.state === 'failed') fail('stop', `the session was marked failed: ${stopped.message ?? ''}`)
+    if (stopped.state === 'failed')
+      fail('stop', `the session was marked failed: ${stopped.message ?? ''}`)
     const emptied = await waitFor(
       () => alertViews.at(-1)?.alerts.length === 0 || alertViews.length === 0,
       5000
@@ -523,7 +569,10 @@ try {
   report.pass = failures.length === 0
   report.failures = failures
   report.skips = skips
-  writeFileSync(join(outputDirectory, 'stream-watchdog-evidence.json'), JSON.stringify(report, null, 2))
+  writeFileSync(
+    join(outputDirectory, 'stream-watchdog-evidence.json'),
+    JSON.stringify(report, null, 2)
+  )
 }
 
 if (failures.length > 0) {
@@ -536,10 +585,19 @@ function openAlerts() {
   return alertViews.at(-1)?.alerts ?? []
 }
 function alertNames() {
-  return openAlerts().map((alert) => `${alert.check}${alert.targetId ? `:${alert.targetId}` : ''}`).join(', ') || 'none'
+  return (
+    openAlerts()
+      .map((alert) => `${alert.check}${alert.targetId ? `:${alert.targetId}` : ''}`)
+      .join(', ') || 'none'
+  )
 }
 function healthCodes() {
-  return healthEvents.map((event) => event.code).filter((code) => code.startsWith('watchdog')).join(', ') || 'none'
+  return (
+    healthEvents
+      .map((event) => event.code)
+      .filter((code) => code.startsWith('watchdog'))
+      .join(', ') || 'none'
+  )
 }
 
 async function setMuted(ws, sessionId, muted) {
@@ -588,7 +646,19 @@ async function importTakeover(ws, smoke, path) {
 function makePng(path, color) {
   execFileSync(
     ffmpegPath,
-    ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', `color=c=${color}:s=320x180`, '-frames:v', '1', path],
+    [
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      `color=c=${color}:s=320x180`,
+      '-frames:v',
+      '1',
+      path
+    ],
     { stdio: 'ignore' }
   )
   if (!existsSync(path)) throw new Error(`ffmpeg did not write ${path}`)
@@ -661,7 +731,21 @@ function recordingVideo() {
 function spawnListener(target) {
   const proc = spawn(
     ffmpegPath,
-    ['-y', '-hide_banner', '-loglevel', 'error', '-listen', '1', '-i', target.listenUrl, '-c', 'copy', '-f', 'flv', target.recvPath],
+    [
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-listen',
+      '1',
+      '-i',
+      target.listenUrl,
+      '-c',
+      'copy',
+      '-f',
+      'flv',
+      target.recvPath
+    ],
     { stdio: ['ignore', 'ignore', 'pipe'] }
   )
   proc.stderr.setEncoding('utf8')
@@ -692,14 +776,16 @@ async function captureStudioShots(smoke, stage, raise) {
   mkdirSync(shotsDir, { recursive: true })
   const devtools = await waitFor(
     () =>
-      appLines.map((line) => /DevTools listening on (ws:\/\/\S+)/.exec(line)?.[1]).findLast(Boolean),
+      appLines
+        .map((line) => /DevTools listening on (ws:\/\/\S+)/.exec(line)?.[1])
+        .findLast(Boolean),
     10000
   )
   if (!devtools) throw new Error('no DevTools url in the app log (VIDEORC_REMOTE_DEBUG_PORT)')
   const { host } = new URL(devtools.replace('ws://', 'http://'))
   await cdpEvaluate(
     host,
-    `window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'creator-ux-v1'); location.reload(); 'ok'`
+    `${seedUiSettingsJs({ 'videorc.onboardingComplete': 'creator-ux-v1' })}.then(() => { location.reload(); return 'ok' })`
   )
   await waitFor(
     async () =>
@@ -723,7 +809,10 @@ async function captureStudioShots(smoke, stage, raise) {
     cdpEvaluate(host, `document.documentElement.classList.contains('dark') ? 'dark' : 'light'`)
   const setTheme = async (wanted) => {
     if ((await theme()) === wanted) return
-    await cdpEvaluate(host, `document.querySelector('[aria-label="Toggle color theme"]').click(); 'ok'`)
+    await cdpEvaluate(
+      host,
+      `document.querySelector('[aria-label="Toggle color theme"]').click(); 'ok'`
+    )
     await waitFor(async () => ((await theme()) === wanted ? true : null), 5000)
     await sleep(250)
   }
@@ -767,7 +856,10 @@ async function cdpCall(host, method, params) {
 }
 
 async function cdpEvaluate(host, expression) {
-  const result = await cdpCall(host, 'Runtime.evaluate', { expression, returnByValue: true })
+  const result = await cdpCall(host, 'Runtime.evaluate', {
+    expression,
+    returnByValue: true,
+    awaitPromise: true
+  })
   return result?.result?.value
 }
-

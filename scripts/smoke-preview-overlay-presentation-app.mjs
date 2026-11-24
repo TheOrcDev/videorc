@@ -31,7 +31,7 @@ import { stripVTControlCharacters } from 'node:util'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { writeBuddyPetFixturePack } from './lib/buddy-pet-fixture.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
-import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
+import { reloadKeepingSeedJs, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const isWindows = process.platform === 'win32'
@@ -297,9 +297,10 @@ try {
   await command('eval-js', {
     video,
     code: `
+      const settings = await ${UI_SETTINGS_READY_JS};
       const key = 'videorc.captureConfig';
-      const current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}');
-      window.__videorcUiSettings.setItem(key, JSON.stringify({ ...current,
+      const current = JSON.parse(settings.getItem(key) ?? '{}');
+      settings.setItem(key, JSON.stringify({ ...current,
         video: params.video, layout: { ...current.layout, layoutPreset: 'screen-only' },
         recordEnabled: true, streamEnabled: false,
         replayBuffer: { enabled: false, explicit: true }

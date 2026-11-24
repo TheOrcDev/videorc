@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { request as httpRequest } from 'node:http'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { seedUiSettingsJs } from './lib/renderer-profile-seed.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_PROBE_TIMEOUT_MS ?? 180000)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -142,9 +143,21 @@ try {
   const cdp = await CdpClient.connect(mainTarget.webSocketDebuggerUrl)
   await cdp.send('Runtime.enable')
 
-  await cdp.send('Runtime.evaluate', {
-    expression: `window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'creator-ux-v1'); window.__videorcUiSettings.setItem('videorc.theme', 'dark'); localStorage.setItem('videorc.theme', 'dark'); location.reload()`
+  // The seed waits for the window's UI settings store (plan 220 S1.4b.2), then the reload.
+  const seeded = await cdp.send('Runtime.evaluate', {
+    expression: seedUiSettingsJs(
+      { 'videorc.onboardingComplete': 'creator-ux-v1', 'videorc.theme': 'dark' },
+      { readyTimeoutMs: 8000 }
+    ),
+    awaitPromise: true,
+    returnByValue: true
   })
+  if (seeded.exceptionDetails) {
+    throw new Error(
+      `UI settings seed: ${seeded.exceptionDetails.exception?.description ?? seeded.exceptionDetails.text}`
+    )
+  }
+  await cdp.send('Runtime.evaluate', { expression: 'location.reload()' })
   await sleep(6000)
   cdp.events.length = 0
 

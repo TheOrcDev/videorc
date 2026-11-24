@@ -64,7 +64,7 @@ import {
   analyzeStartupResolution,
   writeStartupReports
 } from './lib/startup-resolution-analyzer.mjs'
-import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
+import { RELOAD_KEEPING_SEED_JS, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 import {
@@ -208,9 +208,10 @@ async function seedRendererVideoProfile(smoke) {
     'eval-js',
     {
       code: `
+        const settings = await ${UI_SETTINGS_READY_JS};
         const key = 'videorc.captureConfig';
         let current = {};
-        try { current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}') ?? {}; } catch {}
+        try { current = JSON.parse(settings.getItem(key) ?? '{}') ?? {}; } catch {}
         // Screen-only scene: the dev app has no camera permission grant and the
         // renderer auto-selects the first listed camera, which would make the
         // start preflight refuse ("camera preview source produced no frames")
@@ -220,7 +221,7 @@ async function seedRendererVideoProfile(smoke) {
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
         const seeded = { ...current, video: params.video, layout, recordEnabled: true, streamEnabled: false };
         if (params.systemAudio) seeded.audio = { ...(current.audio ?? {}), systemAudioEnabled: true };
-        window.__videorcUiSettings.setItem(key, JSON.stringify(seeded));
+        settings.setItem(key, JSON.stringify(seeded));
         ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,
