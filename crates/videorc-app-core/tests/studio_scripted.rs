@@ -2151,6 +2151,56 @@ async fn the_sources_views_read_the_camera_row_and_the_scene_on_stream() {
     assert!(page.alerts.is_empty());
 }
 
+/// S1.6b part 5c: the Microphone row's mute goes through
+/// `requestRemoteMicrophoneMute` (idle: at once), says "Muted", and says
+/// "Muted for takeover" with when it ends while a takeover holds the voice
+/// (#1601). The section has no title, only its name and its focus.
+#[tokio::test]
+async fn the_microphone_row_says_muted_and_muted_for_takeover() {
+    use std::time::Instant;
+    use videorc_app_core::studio::audio_levels::MicLevels;
+    use videorc_app_core::studio::audio_section::{AudioInputs, AudioSectionView};
+    let backend = Scripted::new();
+    backend.with(|script| {
+        script.settings.insert(
+            keys::SCREEN_TAKEOVER_MUTE_OWNERSHIP.to_string(),
+            Value::String(r#"{"priorMicrophoneMuted":false}"#.to_string()),
+        );
+    });
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let section = |inputs: AudioInputs| {
+        AudioSectionView::from_snapshot(
+            &studio.snapshot(),
+            &MicLevels::default(),
+            Instant::now(),
+            inputs,
+        )
+    };
+    let idle = section(AudioInputs::default());
+    assert_eq!(idle.label, "Audio");
+    assert_eq!(idle.focus, "studio-audio");
+    assert!(!idle.microphone.muted);
+    assert_eq!(idle.microphone.mute_chip, None);
+
+    assert!(studio.request_microphone_mute(true).await, "idle: at once");
+    let muted = section(AudioInputs::default());
+    assert!(muted.microphone.muted);
+    assert_eq!(muted.microphone.mute_chip, Some("Muted"));
+    assert_eq!(muted.microphone.takeover_hint, None);
+
+    // The takeover muted a live microphone: the row says so until it ends.
+    let held = section(AudioInputs {
+        takeover_active: true,
+        room_open: false,
+    });
+    assert_eq!(held.microphone.mute_chip, Some("Muted for takeover"));
+    assert_eq!(
+        held.microphone.takeover_hint,
+        Some("Your microphone comes back on when the takeover ends.")
+    );
+}
+
 // S1.6b part 3c: the start races (#1643), apply-after-proof and the failure
 // reconciliation, the switch's progress (#1275), the manual-apply
 // listeners.
