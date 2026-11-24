@@ -42,11 +42,46 @@ use super::source_selection::{
     source_selection_change_events,
 };
 use super::{Connection, Inner, SettingWrite, Studio, StudioBackend, capture_config, keys};
-use crate::client::RpcError;
 use crate::notices::{NoticeAction, NoticeCommand, NoticeLifetime, ToastRequest};
 use crate::scenes::model::{SceneMicrophone, visual_sources, without_scene_app};
 use crate::scenes::v2::shows_from_sources;
 use crate::user_error::{self, Failure, UserErrorContext};
+
+/// A live source read's `finally`, on drop. Electron's read promise always
+/// settles; a Rust future can be dropped at an `.await` (a closed window, a
+/// timeout), which would leave `reading` set and every later refresh
+/// waiting. The read that still owns the flag clears it here, a refresh
+/// asked for meanwhile goes to the driver's timer, and the waiters wake.
+struct LiveRead<'a, B: StudioBackend> {
+    studio: &'a Studio<B>,
+    generation: u64,
+}
+
+impl<B: StudioBackend> Drop for LiveRead<'_, B> {
+    fn drop(&mut self) {
+        let kick = {
+            let mut guard = self.studio.lock();
+            let inner = &mut *guard;
+            let live = &mut inner.live_sources;
+            let mut kick = false;
+            if live.reading && live.read_owner == self.generation {
+                live.reading = false;
+                if live.read_dirty {
+                    live.read_dirty = false;
+                    if inner.live_due.is_none() {
+                        inner.live_due = Some((Instant::now(), live.epoch, false));
+                    }
+                    kick = true;
+                }
+            }
+            kick
+        };
+        if kick {
+            self.studio.settings_retry.notify_one();
+        }
+        self.studio.live_read_done.notify_waiters();
+    }
+}
 
 /// The refusal toast's id (`source-switch-blocked`).
 const BLOCKED_TOAST_ID: &str = "source-switch-blocked";
@@ -246,6 +281,10 @@ impl<B: StudioBackend> Studio<B> {
                 uuid::Uuid::new_v4().to_string(),
                 protected,
             );
+            // `select` clears the proof timer before its first await.
+            if request.is_ok() {
+                inner.live_due = None;
+            }
             (request, inner.live_sources.epoch)
         };
         let request = match request {
@@ -401,25 +440,56 @@ impl<B: StudioBackend> Studio<B> {
 
     /// `refresh`: the session's whole source authority, read again; a lost
     /// request found here is sent again with its own identity.
+    /// A caller that awaits it waits for a read already in flight, as
+    /// Electron's `refresh()` returns that read's promise.
     pub async fn refresh_live_sources(&self) {
+        self.read_live_sources(true).await;
+    }
+
+    /// The driver's `void refresh()` (an event, the proof timer, a resync):
+    /// a read already in flight only marks itself dirty, so the driver's
+    /// loop never waits on another caller's read.
+    pub(super) async fn kick_live_sources_read(&self) {
+        self.read_live_sources(false).await;
+    }
+
+    async fn read_live_sources(&self, wait: bool) {
         loop {
-            let (session_id, epoch, generation) = {
+            let started = {
                 let mut inner = self.lock();
                 let live = &mut inner.live_sources;
                 if live.reading {
+                    // Electron returns the read in flight: wait for it.
                     live.read_dirty = true;
+                    Err(live.read_owner)
+                } else if !live.readable() {
+                    return;
+                } else {
+                    live.reading = true;
+                    live.read_generation += 1;
+                    live.read_owner = live.read_generation;
+                    Ok((
+                        live.session_id().unwrap_or_default().to_string(),
+                        live.epoch,
+                        live.read_generation,
+                    ))
+                }
+            };
+            let (session_id, epoch, generation) = match started {
+                Ok(read) => read,
+                Err(owner) => {
+                    if wait {
+                        self.wait_for_live_read(owner).await;
+                    }
                     return;
                 }
-                if !live.readable() {
-                    return;
-                }
-                live.reading = true;
-                live.read_generation += 1;
-                (
-                    live.session_id().unwrap_or_default().to_string(),
-                    live.epoch,
-                    live.read_generation,
-                )
+            };
+            // A dropped refresh never leaves `reading` set: its guard clears
+            // it, wakes the waiters and hands a pending re-read to the
+            // driver.
+            let read = LiveRead {
+                studio: self,
+                generation,
             };
             let answer = self
                 .backend
@@ -465,17 +535,41 @@ impl<B: StudioBackend> Studio<B> {
             {
                 let mut inner = self.lock();
                 let live = &mut inner.live_sources;
-                if live.read_generation == generation || live.reading {
+                // `finally`: only the read that is still this one clears it
+                // and runs the refresh asked for meanwhile; a read a send or
+                // a select abandoned leaves the flags to the newer one.
+                if live.reading && live.read_owner == generation {
                     live.reading = false;
-                }
-                if live.read_dirty {
-                    live.read_dirty = false;
-                    again = true;
+                    if live.read_dirty {
+                        live.read_dirty = false;
+                        again = true;
+                    }
                 }
             }
+            // The guard finds the flag settled and only wakes the waiters.
+            drop(read);
             if !again {
                 return;
             }
+        }
+    }
+
+    /// A refresh that found a read running: wait until that read is over
+    /// (Electron's `return this.read`). A read that is abandoned or dropped
+    /// wakes the waiters as well.
+    async fn wait_for_live_read(&self, owner: u64) {
+        loop {
+            let notified = self.live_read_done.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let running = {
+                let inner = self.lock();
+                inner.live_sources.reading && inner.live_sources.read_owner == owner
+            };
+            if !running {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -541,6 +635,9 @@ impl<B: StudioBackend> Studio<B> {
                 ));
             }
             self.settings_retry.notify_one();
+        } else {
+            // `accept` clears the proof timer before it sets the next one.
+            self.lock().live_due = None;
         }
         let selected = {
             let mut guard = self.lock();
@@ -585,7 +682,7 @@ impl<B: StudioBackend> Studio<B> {
             true
         };
         if due {
-            self.refresh_live_sources().await;
+            self.kick_live_sources_read().await;
         }
     }
 
@@ -605,8 +702,9 @@ impl<B: StudioBackend> Studio<B> {
             let inner = &mut *guard;
             let sources = working_sources(inner);
             let session = &inner.session;
-            let active =
-                session.is_active() && !matches!(session.phase(), super::SessionPhase::Stopping);
+            // `isActiveRecordingState`: Stopping counts, so an offer stays
+            // until the session has ended.
+            let active = session.is_active();
             let returns = if inner.bootstrapped
                 && !session.start_pending()
                 && !session.stop_pending()
@@ -740,11 +838,23 @@ impl<B: StudioBackend> Studio<B> {
                 if let Some(window) = before.get("windowId").filter(|id| id.is_string()) {
                     params["preferWindowId"] = window.clone();
                 }
-                let answer = self
+                // A request that failed (offline, an older backend, a
+                // timeout) changes nothing, as Electron's rejection reaches
+                // only its `.catch`; only `{ ok: false }` holds Screen None.
+                match self
                     .backend
                     .scene_request(RESOLVE_APP_WINDOW_METHOD, params)
-                    .await;
-                resolved_app_sources(&before, &devices, &options, answer)
+                    .await
+                {
+                    Ok(answer) => resolved_app_sources(&before, &devices, &options, answer),
+                    Err(error) => {
+                        self.config.logger.warn(format!(
+                            "[scenes] working window resolution failed ({}): {}",
+                            error.code, error.message
+                        ));
+                        return;
+                    }
+                }
             }
         };
         let next = without_scene_app(&next);
@@ -841,11 +951,9 @@ fn resolved_app_sources(
     before: &Value,
     devices: &[videorc_protocol::Device],
     options: &ReconcileOptions,
-    answer: Result<Value, RpcError>,
+    answer: Value,
 ) -> Value {
-    let resolved = answer
-        .ok()
-        .filter(|value| value.get("ok") == Some(&Value::Bool(true)));
+    let resolved = Some(answer).filter(|value| value.get("ok") == Some(&Value::Bool(true)));
     let mut next = before.clone();
     if let Value::Object(map) = &mut next {
         for key in ["screenId", "screenName", "screenUuid"] {
@@ -920,7 +1028,7 @@ mod tests {
             &before,
             &[],
             &ReconcileOptions::default(),
-            Ok(json!({"ok": true, "windowId": "window:9", "title": "Keynote"})),
+            json!({"ok": true, "windowId": "window:9", "title": "Keynote"}),
         );
         assert_eq!(ready["windowId"], "window:9");
         assert_eq!(ready["windowName"], "Keynote");
@@ -930,7 +1038,7 @@ mod tests {
             &before,
             &[],
             &ReconcileOptions::default(),
-            Ok(json!({"ok": false, "reason": "minimized"})),
+            json!({"ok": false, "reason": "minimized"}),
         );
         assert_eq!(refused["captureOff"], true);
         assert!(refused.get("windowId").is_none());
