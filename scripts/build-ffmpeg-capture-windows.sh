@@ -11,10 +11,16 @@ WORK="${REPO_ROOT}/vendor/ffmpeg/_build/windows-capture"
 DEST="${REPO_ROOT}/vendor/ffmpeg/windows-x64"
 PATCH="${REPO_ROOT}/scripts/patches/dshow-capture-clock.patch"
 [[ -f "${DEST}/bin/ffmpeg.exe" ]] || { echo 'Fetch the pinned output FFmpeg first (pnpm ffmpeg:fetch:windows).' >&2; exit 1; }
+# Probe first: a verified worker is reused. A missing MANIFEST.json is the
+# normal cold path after ffmpeg:fetch:windows (output FFmpeg only) — rebuild
+# below, then the final verify and package:preflight:windows both refuse to
+# ship without capture/ffmpeg-capture.exe. The probe prints one clear line on
+# miss instead of a Node ENOENT stack (PR #1812 installer log confusion).
 if [[ "${FFMPEG_CAPTURE_REBUILD:-0}" != 1 ]] && "${NODE_EXE}" "${REPO_ROOT}/scripts/ffmpeg-capture-windows.mjs" "${DEST}"; then
   echo 'Using verified Windows capture worker.'
   exit 0
 fi
+echo 'Building the Windows capture worker from the pinned source.'
 mkdir -p "$(dirname "${ARCHIVE}")"
 # Retries plus the www.ffmpeg.org fallback. SHA-256 is still the authority;
 # a cached or mirrored tarball that does not match SOURCE_SHA is deleted.
