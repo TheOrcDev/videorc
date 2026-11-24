@@ -431,6 +431,19 @@ impl<B: StudioBackend> Studio<B> {
         self.activate_platforms(streaming, Some(session_id)).await;
     }
 
+    /// The scripted tests' way onto the air without a whole Go Live: the
+    /// session's owner installed with `streaming`, then the activation, as
+    /// after a Go Live's start.
+    #[doc(hidden)]
+    pub async fn activate_prepared_for_tests(&self, streaming: Value, session_id: &str) {
+        self.platform.install(Owner {
+            session_id: session_id.to_string(),
+            streaming: streaming.clone(),
+        });
+        self.activate_platforms(streaming, Some(session_id.to_string()))
+            .await;
+    }
+
     /// The prepared statuses into the saved config too.
     pub(super) async fn save_target_patch(&self, target_id: &str, patch: Map<String, Value>) {
         let id = target_id.to_string();
@@ -749,6 +762,12 @@ impl<B: StudioBackend> Studio<B> {
                                 json!({ "accountId": account, "streamId": stream }),
                             )
                             .await?;
+                        // A stop that finished during the read wrote the
+                        // destination's last status; a late reply never
+                        // overwrites it.
+                        if !self.session_owns_transport() || self.platform.run() != run {
+                            return Ok(None);
+                        }
                         active = status.get("active").and_then(Value::as_bool) == Some(true);
                         last = text(&status, "message");
                         self.save_target_patch(
