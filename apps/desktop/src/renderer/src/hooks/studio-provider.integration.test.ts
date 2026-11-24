@@ -64,6 +64,7 @@ import type {
   BackendConnection,
   Banner,
   BuddyOverlaySnapshot,
+  CaptionsStatus,
   CaptionsUpdate,
   CaptureRecoveryStatus,
   CloudStatus,
@@ -446,6 +447,7 @@ class StudioBackend {
   sourceCapabilities: SessionSources['capabilities'] | null = null
   chatTotals: SessionChatTotals | null = null
   recordingStatusOverride: RecordingStatus | undefined
+  captionsStatus: CaptionsStatus = { state: 'idle' }
   accountSnapshot: VideorcAccountSnapshot = { status: 'signed-out' }
   accountTransportFailuresRemaining = 0
   accountSignInSuperseded = false
@@ -862,7 +864,7 @@ class StudioBackend {
         }
         return this.captureRecoveryStatus
       case 'captions.status.get':
-        return { state: 'idle' }
+        return this.captionsStatus
       case 'liveChat.status':
         return this.liveChatSnapshot
       case 'liveChat.send':
@@ -4321,6 +4323,94 @@ describe('real StudioProvider lifecycle', () => {
       pngBase64: 'cG5n',
       verticalPngBase64: 'cG5n'
     })
+  })
+
+  // Plan 260 S1.2b: the backend draws the caption bar from the line's text at
+  // the leg's canvas; the renderer sends the text, the style, the canvas and
+  // the rect, never its pixels.
+  it('asks the backend to draw the caption line, never sending its pixels', async () => {
+    const backend = new StudioBackend()
+    backend.recordingState = 'streaming'
+    backend.recordingSessionId = 'caption-session'
+    backend.captionsStatus = {
+      state: 'listening',
+      desiredEnabled: true,
+      sessionClientId: 'captions-1'
+    }
+    backend.overlayLayout = {
+      ...DEFAULT_OVERLAY_LAYOUT,
+      captions: { ...DEFAULT_OVERLAY_LAYOUT.captions, showOnStream: true }
+    }
+    // The start edge may run before bootstrap commits the status; the running
+    // captions answer it with the same status.
+    backend.deferResponse('captions.start', backend.captionsStatus)()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        recordEnabled: false,
+        streamEnabled: true,
+        captions: {
+          ...defaultCaptureConfig.captions,
+          enabled: true,
+          burnTarget: 'stream',
+          styleId: 'high-contrast',
+          textSize: 'l',
+          position: 'bottom'
+        }
+      })
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.overlayLayout.captions.showOnStream === true &&
+        latest()?.core.captionsStatus.state === 'listening'
+    )
+    const captionSets = (): BackendCommand[] =>
+      backend.commands.filter((command) => command.method === 'captions.overlay.set')
+    const line: CaptionsUpdate = {
+      sessionClientId: 'captions-1',
+      seq: 1,
+      kind: 'final',
+      text: 'Hello chat',
+      chunkSeconds: 3
+    }
+    await act(async () => {
+      for (const socket of backend.sockets)
+        socket.onmessage?.({ data: JSON.stringify({ event: 'captions.update', payload: line }) })
+      await Promise.resolve()
+    })
+    await waitForObservation(() => captionSets().length === 1)
+    const params = captionSets()[0]!.params as Record<string, unknown>
+    // A stream-only session: the bar goes on the primary leg, at its canvas,
+    // wrapped to the captions rect for its orientation.
+    expect(params).toMatchObject({
+      text: 'Hello chat',
+      textSize: 'l',
+      styleId: 'high-contrast',
+      position: 'bottom',
+      rect: DEFAULT_OVERLAY_LAYOUT.captions.horizontal,
+      target: 'primary',
+      styleRevision: defaultCaptureConfig.captions.styleRevision
+    })
+    expect(params.canvasWidth).toBeGreaterThan(params.canvasHeight as number)
+    expect(params).not.toHaveProperty('pngBase64')
   })
 
   it('returns success to Main after reconciling an outcome-unknown detached highlight request', async () => {
