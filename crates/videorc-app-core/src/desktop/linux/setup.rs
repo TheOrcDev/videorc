@@ -150,7 +150,7 @@ pub const KEYRING_SIGN_IN_REFUSAL: &str = "Signing in needs a keyring (Secret Se
 fn keyring_backend_label(backend: &str) -> &'static str {
     if backend.starts_with("kwallet") {
         "KWallet"
-    } else if backend == "gnome_libsecret" {
+    } else if backend == "gnome_libsecret" || backend == "secret_service" {
         "Secret Service"
     } else {
         "Available"
