@@ -22,6 +22,8 @@ OPTIONS:
     --workspace PATH     Workspace root (default: derived from the executable, or VIDEORC_WORKSPACE_ROOT)
     --quiet              Do not echo the backend's log lines to stderr (the log file still gets them)
     --quit-after SECS    Quit on its own after SECS (scripts and the build pass)
+    --relaunched         Set by Reopen Videorc: wait for the old instance to let go of the
+                         data directory instead of handing it the links
     -h, --help           This text
 
 A videorc:// link is handed to the running instance for the same data directory.
@@ -34,6 +36,8 @@ pub struct Args {
     pub workspace: Option<PathBuf>,
     pub quiet: bool,
     pub quit_after: Option<f64>,
+    /// Reopen Videorc started this process (`app::permissions`).
+    pub relaunched: bool,
     /// `videorc://` links on the command line.
     pub links: Vec<String>,
 }
@@ -46,6 +50,7 @@ pub fn parse() -> Result<Args> {
         workspace: None,
         quiet: false,
         quit_after: None,
+        relaunched: false,
         links: Vec::new(),
     };
     let mut iter = std::env::args().skip(1);
@@ -61,6 +66,7 @@ pub fn parse() -> Result<Args> {
             "--workspace" => args.workspace = Some(PathBuf::from(value("--workspace")?)),
             "--quiet" => args.quiet = true,
             "--quit-after" => args.quit_after = Some(value("--quit-after")?.parse()?),
+            "--relaunched" => args.relaunched = true,
             "-h" | "--help" => {
                 print!("{USAGE}");
                 std::process::exit(0);

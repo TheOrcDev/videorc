@@ -39,6 +39,12 @@ raw-window-handle = "0.6"
 objc2 = { version = "0.6.4" }
 objc2-foundation = "0.3.2"
 objc2-app-kit = { version = "0.3.2", features = ["NSView", "NSWindow", "NSResponder", "NSPanel", "NSGraphics"] }
+# The camera, microphone and screen grants (S2.6a part 3), read and asked
+# for as the Rust app does: AVFoundation's authorization status and prompt
+# (a block2 completion handler), CoreGraphics' screen capture access.
+block2 = "0.6.1"
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGWindow"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # The smoke driver's same question on Windows: `WM_GETOBJECT` to its own window.

@@ -17,6 +17,9 @@
 //! window activation.
 
 use gpui::Window;
+use videorc_app_core::desktop::permissions::{
+    MediaAccessPermission, MediaAccessStatus, MediaPane, PermissionFuture,
+};
 
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -50,6 +53,41 @@ pub trait Platform: Send + Sync {
     /// The app bundle's identifier, or `None` for a bare binary (macOS
     /// needs a bundle for notifications and TCC's per-app grants).
     fn bundle_id(&self) -> Option<String>;
+
+    /// The grant now, in Electron's `getMediaAccessStatus` words: the exact
+    /// TCC value on macOS; `not-applicable` where the OS keeps no per-app
+    /// grant (the screen off macOS, everything on Linux).
+    ///
+    /// The default is a platform whose grants this app can't read yet:
+    /// Windows keeps per-app camera and microphone toggles, answered
+    /// `unknown` (the rows fall back to the backend's evidence); nothing else
+    /// keeps a grant. Never a pretend `granted`.
+    fn media_access(&self, permission: MediaAccessPermission) -> OsResult<MediaAccessStatus> {
+        Ok(match (cfg!(windows), permission) {
+            (true, MediaAccessPermission::Camera | MediaAccessPermission::Microphone) => {
+                MediaAccessStatus::Unknown
+            }
+            _ => MediaAccessStatus::NotApplicable,
+        })
+    }
+
+    /// The OS's own camera or microphone prompt; true when granted. The
+    /// core asks only a never-asked computer (`not-determined`).
+    ///
+    /// The default is Electron's Windows path: no prompt, the status read
+    /// again.
+    fn ask_media_access(&self, pane: MediaPane) -> PermissionFuture<'static, OsResult<bool>> {
+        let status = self.media_access(pane.permission());
+        Box::pin(async move { Ok(status? == MediaAccessStatus::Granted) })
+    }
+
+    /// Lists the app under Screen & System Audio Recording and shows the
+    /// OS's prompt (macOS answers it in System Settings).
+    ///
+    /// The default asks nothing: the core asks for the screen on macOS only.
+    fn request_screen_access(&self) -> OsResult<()> {
+        Ok(())
+    }
 }
 
 /// A platform whose module has not landed: every call says so.
