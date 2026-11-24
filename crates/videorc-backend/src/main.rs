@@ -102,6 +102,8 @@ mod room_frame_bridge;
 // Plan 249 S13b: the processed camera role's native producer.
 #[cfg(target_os = "macos")]
 mod room_assets;
+#[cfg(target_os = "macos")]
+mod room_avatar;
 mod room_camera_source;
 #[cfg(target_os = "macos")]
 #[allow(
@@ -13657,6 +13659,13 @@ async fn handle_text_message_with_role(
                         .and_then(serde_json::Value::as_bool)
                     {
                         room_graphics::set_enabled(enabled);
+                    }
+                    if let Some(enabled) = command
+                        .params
+                        .get("avatar")
+                        .and_then(serde_json::Value::as_bool)
+                    {
+                        room_avatar::set_enabled(enabled);
                     }
                     return ServerResponse::ok(command.id, serde_json::json!({ "held": true }));
                 }

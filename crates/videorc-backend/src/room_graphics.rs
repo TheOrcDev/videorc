@@ -394,6 +394,7 @@ impl GraphicsState {
             reason,
             revision: self.revision,
             observed,
+            guests: None,
         };
         if self.last_status.as_ref() == Some(&status) {
             return (None, accepted);
@@ -578,6 +579,7 @@ async fn send_due(
             CloudRoomPresentationEvent {
                 show_id: show_id.to_string(),
                 graphics: Some(status),
+                avatar: None,
             },
         );
     }

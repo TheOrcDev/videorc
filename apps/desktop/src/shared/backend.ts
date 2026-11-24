@@ -6018,6 +6018,8 @@ export interface RoomPresentationStatus {
   reason: string | null
   revision: number
   observed: Record<string, RoomPresentationObservation>
+  /** The avatar's guest pages (plan 249 S6): avatar only. */
+  guests?: { enabled: boolean; capable: number; applied: number }
 }
 
 /**
@@ -6030,6 +6032,7 @@ export interface RoomPresentationStatus {
  * switches, for the topics the backend sends while it holds the host seat. */
 export interface CloudRoomPresentationSetParams {
   graphics?: boolean
+  avatar?: boolean
 }
 
 /** `cloud.room.avatar.set` (plan 260 S1.8b): the avatar content the Studio
@@ -6074,6 +6077,7 @@ export interface CloudRoomSceneCommitParams {
 export interface CloudRoomPresentationEvent {
   showId: string
   graphics?: RoomPresentationStatus
+  avatar?: RoomPresentationStatus
 }
 
 /**
