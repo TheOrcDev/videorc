@@ -723,7 +723,11 @@ pub fn setup_view(input: &SetupInput<'_>, memory: &PageMemory) -> SetupView {
     };
     let scheduled = list
         .iter()
-        .filter(|t| t.scheduled_event_id.is_some())
+        .filter(|t| {
+            t.scheduled_event_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty())
+        })
         .map(|t| {
             (
                 t.id.clone(),

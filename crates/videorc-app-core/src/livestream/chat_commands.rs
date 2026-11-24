@@ -360,6 +360,93 @@ fn already_exists_sentence(raw: &str) -> Option<String> {
     None
 }
 
+// --- The Add command / Edit dialog (`chat-command-dialog.tsx`) ---
+
+pub const ADD_COMMAND_TITLE: &str = "Add command";
+pub const NAME_LABEL: &str = "Name";
+pub const NAME_PLACEHOLDER: &str = "go";
+pub const DESCRIPTION_LABEL: &str = "Description";
+pub const DESCRIPTION_PLACEHOLDER: &str = "why I'm learning Go";
+pub const DESCRIPTION_HINT: &str = "!commands shows it after the name.";
+pub const REPLY_LABEL: &str = "Reply";
+pub const REPLY_PLACEHOLDER: &str = "I'm learning Go because…";
+pub const X_TWO_POSTS_NOTE: &str = "X gets this in 2 posts.";
+pub const PREVIEW_LABEL: &str = "Preview";
+/// The preview's mention, before the reply.
+pub const PREVIEW_MENTION: &str = "@viewer";
+/// The preview's placeholder while the reply is empty.
+pub const PREVIEW_EMPTY: &str = "Your reply";
+pub const CANCEL: &str = "Cancel";
+pub const SAVE: &str = "Save";
+pub const SAVING: &str = "Saving…";
+
+/// The dialog's title: "Edit !go", or "Add command".
+pub fn dialog_title(command: Option<&ChatCommand>) -> String {
+    command.map_or_else(
+        || ADD_COMMAND_TITLE.to_string(),
+        |command| format!("Edit !{}", command.name),
+    )
+}
+
+/// The name field after a keystroke or paste: the `!` is already there, so
+/// one typed or pasted in front is dropped (`replace(/^!/, '')`).
+pub fn name_input(raw: &str) -> String {
+    raw.strip_prefix('!').unwrap_or(raw).to_string()
+}
+
+fn grouped(count: u64) -> String {
+    let digits = count.to_string();
+    let mut out = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// `chatCommandRoomLabel`: "12 characters left", "1 character over".
+pub fn room_label(reply: &str) -> String {
+    let room = reply_room(reply);
+    let count = room.unsigned_abs();
+    let noun = if count == 1 {
+        "character"
+    } else {
+        "characters"
+    };
+    let side = if room >= 0 { "left" } else { "over" };
+    format!("{} {noun} {side}", grouped(count))
+}
+
+/// Over the limit, the counter carries the alert icon.
+pub fn reply_over(reply: &str) -> bool {
+    reply_room(reply) < 0
+}
+
+/// The preview's reply: the trimmed text, or `None` for the placeholder.
+pub fn preview(reply: &str) -> Option<String> {
+    let trimmed = reply.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// What Save sends: the command's id when editing, the name normalized, the
+/// description and reply trimmed, and its enabled state (a new one is on).
+pub fn save_params(
+    command: Option<&ChatCommand>,
+    name: &str,
+    description: &str,
+    reply: &str,
+) -> ChatCommandSaveParams {
+    ChatCommandSaveParams {
+        id: command.map(|command| command.id.clone()),
+        name: normalize_name(name),
+        description: description.trim().to_string(),
+        reply: reply.trim().to_string(),
+        enabled: command.is_none_or(|command| command.enabled),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,5 +570,35 @@ mod tests {
         assert_eq!(projected.commands.len(), 1);
         assert_eq!(projected.commands[0].name, "faq");
         assert!(projected.list_enabled);
+    }
+
+    #[test]
+    fn the_dialog_counts_drops_one_bang_previews_and_saves_as_electron_does() {
+        assert_eq!(name_input("!go"), "go");
+        assert_eq!(name_input("!!go"), "!go");
+        assert_eq!(room_label(""), "170 characters left");
+        assert_eq!(room_label(&"a".repeat(169)), "1 character left");
+        assert_eq!(room_label(&"a".repeat(171)), "1 character over");
+        assert_eq!(room_label(&"a".repeat(1300)), "1,130 characters over");
+        assert!(reply_over(&"a".repeat(171)));
+        assert_eq!(preview("  "), None);
+        assert_eq!(preview(" hi ").as_deref(), Some("hi"));
+        assert_eq!(dialog_title(None), "Add command");
+        let saved = command("go", false);
+        assert_eq!(dialog_title(Some(&saved)), "Edit !go");
+        let params = save_params(Some(&saved), " !GO ", " why ", " because ");
+        assert_eq!(params.id.as_deref(), Some(saved.id.as_str()));
+        assert_eq!(
+            (
+                params.name.as_str(),
+                params.description.as_str(),
+                params.reply.as_str()
+            ),
+            ("go", "why", "because")
+        );
+        assert!(!params.enabled);
+        let fresh = save_params(None, "go", "d", "r");
+        assert_eq!(fresh.id, None);
+        assert!(fresh.enabled);
     }
 }

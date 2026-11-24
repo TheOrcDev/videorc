@@ -212,7 +212,7 @@ pub fn setup_hint(setup: Setup) -> Option<&'static str> {
 
 /// The streaming presets the page offers (`streamQualityOptions`) and the
 /// ones a destination may carry: (preset, width, height, fps, kbps).
-const PRESETS: [(&str, u32, u32, u32, u32); 13] = [
+const PRESETS: [(&str, u32, u32, u32, u32); 14] = [
     ("tutorial-540p30", 960, 540, 30, 2500),
     ("tutorial-720p30", 1280, 720, 30, 4000),
     ("tutorial-1080p30", 1920, 1080, 30, 6000),
@@ -227,6 +227,8 @@ const PRESETS: [(&str, u32, u32, u32, u32); 13] = [
     ("stream-1080p60", 1920, 1080, 60, 9000),
     // The Vertical scene's portrait canvas (`VIDEO_PRESETS`).
     ("vertical-1080x1920", 1080, 1920, 30, 9000),
+    // `custom` reads as the backend's custom stream profile.
+    ("custom", 1920, 1080, 30, 6000),
 ];
 
 /// A preset's (width, height, fps, kbps), for the output plan.
@@ -989,6 +991,7 @@ mod tests {
             Some("1080 × 1920 · 30 fps".to_string()),
             "the Vertical scene's preset names its size, not its bitrate"
         );
+        assert_eq!(preset_spec("custom"), Some((1920, 1080, 30, 6000)));
         patch_target(&mut config, "kick", &TargetPatch::quality("default"), "now");
         assert_eq!(format_bitrate(4500), "4.5 Mbps");
         set_stream_quality(&mut config, "stream-safe-1080p60");
