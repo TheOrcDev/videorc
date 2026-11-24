@@ -984,6 +984,18 @@ The HTML layers' manifest names the sheet video track (its `trackSid`,
 generation, size and frame rate), so it moves with that track in S1.8c,
 not S1.8b.
 
+S1.8c's parts, each its own PR (the backend already makes most of this
+media for the renderer's bridges; S1.8c points it at the room instead):
+c1 the microphone (`room_microphone.rs`'s processed tap, 48 kHz mono, into
+a native audio source); c2 the camera (the compositor's camera role, VP8,
+simulcast 180p/360p under 720p); c3 the screen behind the privacy still,
+with its privacy topics and acknowledgements; c4 the aux track (soundboard
+and System audio, stereo, RED, 128 kbps, `AUX_TRACK_NAME`) and the audio
+routing topic; c5 the HTML layers' sheet track and its manifest; c6 the
+latency reports from RTC stats. With c2 and c3 the scene adapter's
+readiness checks and the cards for the avatar's motion read the backend's
+room.
+
 ### Phase 2: the shell, on all three platforms
 
 | # | Slice | Lane | Done when |
