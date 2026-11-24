@@ -66,6 +66,8 @@ pub mod camera_background_view;
 pub mod camera_frame_rate;
 pub mod camera_low_light;
 pub mod capture_config;
+pub mod clips;
+pub mod clips_ring;
 pub mod families;
 pub mod health;
 pub mod health_page;
