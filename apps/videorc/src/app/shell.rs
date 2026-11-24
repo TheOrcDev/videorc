@@ -19,6 +19,7 @@ use videorc_kit::{
 
 use super::bridge::Mirror;
 use crate::preview::Preview;
+use crate::screens::output::OutputPanel;
 use crate::screens::sources::SourcesPanel;
 use crate::screens::studio::{StudioPage, transport::OpenPage};
 
@@ -71,6 +72,8 @@ pub struct Shell {
     preview: Entity<Preview>,
     /// Phase 3: Sources ⌘2.
     sources: Entity<SourcesPanel>,
+    /// Phase 3: Output ⌘5.
+    output: Entity<OutputPanel>,
     settings: Entity<SettingsScreen>,
     health: Entity<crate::screens::health::HealthScreen>,
 }
@@ -82,6 +85,7 @@ impl Shell {
         studio: Entity<StudioPage>,
         preview: Entity<Preview>,
         sources: Entity<SourcesPanel>,
+        output: Entity<OutputPanel>,
         settings: Entity<SettingsScreen>,
         health: Entity<crate::screens::health::HealthScreen>,
         window: &Window,
@@ -93,6 +97,7 @@ impl Shell {
         // change, never per video frame.
         cx.observe(&preview, |_, _, cx| cx.notify()).detach();
         cx.observe(&sources, |_, _, cx| cx.notify()).detach();
+        cx.observe(&output, |_, _, cx| cx.notify()).detach();
         // Both routes use the same lifecycle, title and focus updates.
         cx.subscribe_in(&studio, window, |this, _, open: &OpenPage, window, cx| {
             this.open_page(open.0, window, cx);
@@ -109,6 +114,7 @@ impl Shell {
             studio,
             preview,
             sources,
+            output,
             settings,
             health,
         }
@@ -142,6 +148,9 @@ impl Shell {
             self.page = page;
             self.health.update(cx, |health, cx| {
                 health.set_active(page == PageId::Diagnostics, cx)
+            });
+            self.output.update(cx, |output, cx| {
+                output.set_active(page == PageId::Recording, cx)
             });
             if page == PageId::Settings {
                 self.settings
@@ -225,6 +234,7 @@ impl Render for Shell {
         let connection = self.connection.read(cx).value().clone();
         let page = self.page;
         let sources = self.sources.clone();
+        let output = self.output.clone();
         div()
             .size_full()
             .font_family(FONT)
@@ -258,6 +268,18 @@ impl Render for Shell {
                             .gap(px(8.))
                             .child(div().type_scale(text::SECTION).child(page.label()))
                             .child(sources)
+                    } else if page == PageId::Recording {
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .px(px(24.))
+                            .gap(px(8.))
+                            .child(div().type_scale(text::SECTION).child(page.label()))
+                            .child(output)
                     } else {
                         div()
                             .flex_1()
