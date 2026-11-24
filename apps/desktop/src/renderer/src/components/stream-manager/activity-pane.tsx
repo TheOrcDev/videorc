@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import { useMemo, useState, type ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -282,6 +283,7 @@ function ActivityRow({
   onThank?: (item: ActivityItem) => void
   onShowFollowNames?: () => void
 }): ReactElement {
+  useLocalTime()
   const Icon = item.gift ? GiftIcon : KIND_ICONS[item.kind]
   const person = activityRowShowsPerson(item)
   const actions = activityRowActions(item, highlight, {

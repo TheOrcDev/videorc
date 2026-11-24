@@ -57,7 +57,7 @@ import { launchDevApp, repoRoot, stopProcess } from './lib/app-launcher.mjs'
 import { launchAvSyncStimulus, stopAvSyncStimulus } from './lib/av-sync-stimulus.mjs'
 import { resolveExistingSiblingFfprobe } from './lib/ffmpeg-sibling-paths.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
-import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
+import { reloadKeepingSeedJs, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import {
   focusScreenMotionStimulus,
   launchScreenMotionStimulus,
@@ -4029,11 +4029,12 @@ async function seedRendererSystemAudio() {
   }
   await smokeCommand(smoke, 'eval-js', {
     code: `
+      const settings = await ${UI_SETTINGS_READY_JS};
       const key = 'videorc.captureConfig';
       let current = {};
-      try { current = JSON.parse(localStorage.getItem(key) ?? '{}') ?? {}; } catch {}
+      try { current = JSON.parse(settings.getItem(key) ?? '{}') ?? {}; } catch {}
       const audio = { ...(current.audio ?? {}), systemAudioEnabled: true, systemAudioGainDb: -6 };
-      localStorage.setItem(key, JSON.stringify({ ...current, audio }));
+      settings.setItem(key, JSON.stringify({ ...current, audio }));
       ${reloadKeepingSeedJs({ forgetWorkingScene: false })}
       return true;
     `

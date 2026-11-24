@@ -10,7 +10,7 @@ import {
   RNNOISE_FIXTURE_ENV,
   RNNOISE_FIXTURE_SOURCE_ENV
 } from './lib/rnnoise-speech-fixture.mjs'
-import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
+import { reloadKeepingSeedJs, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -167,14 +167,15 @@ async function command(smoke, name, params) {
 async function seedRenderer(smoke, mode, selectedMicrophoneId) {
   await command(smoke, 'eval-js', {
     code: `
-    const current = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}')
-    localStorage.setItem('videorc.captureConfig', JSON.stringify({ ...current,
+    const settings = await ${UI_SETTINGS_READY_JS}
+    const current = JSON.parse(settings.getItem('videorc.captureConfig') ?? '{}')
+    settings.setItem('videorc.captureConfig', JSON.stringify({ ...current,
       recordEnabled: true, streamEnabled: false,
       captions: { ...current.captions, enabled: false },
       audio: { ...current.audio, microphoneGainDb: 0, microphoneMuted: false, microphoneNoiseSuppression: ${JSON.stringify(mode)}, systemAudioEnabled: false },
       sources: { testPattern: true, microphoneId: ${JSON.stringify(selectedMicrophoneId)} }
     }))
-    localStorage.setItem('videorc.onboardingComplete', 'permissions-v1')
+    settings.setItem('videorc.onboardingComplete', 'permissions-v1')
     ${reloadKeepingSeedJs({ delayMs: 100 })}
     return true
   `

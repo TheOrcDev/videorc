@@ -2,90 +2,23 @@
 // as "Madrid (GMT+2)" instead of "Europe/Madrid", the start as "Sat, Oct 12,
 // 9:00 PM GMT+2", and the repeated-hour choice only when the clocks go back
 // over the chosen time.
+//
+// The zone rules live in the backend's bundled tz data: Electron's ICU lags
+// the law (Electron 39 still has Vancouver, Edmonton, Winnipeg, Casablanca
+// and Havana changing clocks). The backend sends each time with its UTC
+// offset, and this file only formats a time at that fixed offset.
 
-// One formatter per zone, kept: the zone picker labels every zone on each
-// render, and building ~430 formatters per keystroke made search crawl.
-const zoneFormatters = new Map<string, Intl.DateTimeFormat>()
-
-function zoneFormatter(timeZone: string): Intl.DateTimeFormat {
-  let formatter = zoneFormatters.get(timeZone)
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone,
-      hourCycle: 'h23',
-      year: 'numeric',
-      month: 'numeric',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: 'numeric',
-      second: 'numeric'
-    })
-    zoneFormatters.set(timeZone, formatter)
-  }
-  return formatter
+/** `Intl`'s `timeZone` for a fixed UTC offset in minutes: -420 is "-07:00". */
+export function offsetTimeZone(minutes: number): string {
+  const sign = minutes < 0 ? '-' : '+'
+  const hours = String(Math.floor(Math.abs(minutes) / 60)).padStart(2, '0')
+  const rest = String(Math.abs(minutes) % 60).padStart(2, '0')
+  return `${sign}${hours}:${rest}`
 }
 
-/** The zone's UTC offset at an instant, in minutes (Madrid in summer: 120). */
-export function zoneOffsetMinutes(utcMs: number, timeZone: string): number {
-  const parts = zoneFormatter(timeZone).formatToParts(new Date(utcMs))
-  const part = (type: string): number =>
-    Number(parts.find((candidate) => candidate.type === type)?.value ?? 0)
-  const wall = Date.UTC(
-    part('year'),
-    part('month') - 1,
-    part('day'),
-    part('hour'),
-    part('minute'),
-    part('second')
-  )
-  return Math.round((wall - Math.floor(utcMs / 1000) * 1000) / 60_000)
-}
-
-/**
- * Every UTC offset at which `localStart` (a `datetime-local` value) happens
- * in the zone: one normally, two when the clocks go back over it (it happens
- * twice), none when they jump over it. Earlier first.
- */
-export function localTimeOffsets(localStart: string, timeZone: string): number[] {
-  const wall = Date.parse(`${localStart}Z`)
-  if (Number.isNaN(wall)) return []
-  try {
-    const candidates = new Set([
-      zoneOffsetMinutes(wall - 86_400_000, timeZone),
-      zoneOffsetMinutes(wall, timeZone),
-      zoneOffsetMinutes(wall + 86_400_000, timeZone)
-    ])
-    return [...candidates]
-      .filter((offset) => zoneOffsetMinutes(wall - offset * 60_000, timeZone) === offset)
-      .sort((a, b) => b - a)
-  } catch {
-    return []
-  }
-}
-
-/**
- * The UTC instant (ms) a `datetime-local` value is in the zone, the way the
- * backend resolves it: `null` when the time does not exist (the clocks jump
- * over it) or happens twice and no earlier/later `choice` was made.
- */
-export function resolveLocalTimeMs(
-  localTime: string,
-  timeZone: string,
-  choice?: 'earlier' | 'later' | null
-): number | null {
-  const wall = Date.parse(`${localTime}Z`)
-  const offsets = localTimeOffsets(localTime, timeZone)
-  if (Number.isNaN(wall) || offsets.length === 0) return null
-  // The larger offset is the earlier instant.
-  const offset =
-    offsets.length === 1
-      ? offsets[0]
-      : choice === 'later'
-        ? offsets[1]
-        : choice === 'earlier'
-          ? offsets[0]
-          : null
-  return offset === null ? null : wall - offset * 60_000
+/** The `datetime-local` value ("2026-12-15T10:00") of an instant at a fixed UTC offset. */
+export function wallTimeAt(utcMs: number, offsetMinutes: number): string {
+  return new Date(utcMs + offsetMinutes * 60_000).toISOString().slice(0, 16)
 }
 
 /** "GMT+2", "GMT-5:30", "GMT". */
@@ -97,28 +30,27 @@ export function formatGmtOffset(minutes: number): string {
   return `GMT${sign}${hours}${rest ? `:${String(rest).padStart(2, '0')}` : ''}`
 }
 
-/** "Madrid (GMT+2)", "New York (GMT-4)", "UTC": a zone as people name it, at a time. */
-export function timeZoneLabel(timeZone: string, atMs: number = Date.now()): string {
+/**
+ * "Madrid (GMT+2)", "New York (GMT-4)", "UTC": a zone as people name it, with
+ * the backend's offset for it. Just the city while the offset is unknown.
+ */
+export function timeZoneLabel(timeZone: string, offsetMinutes?: number | null): string {
   if (timeZone === 'UTC') return 'UTC'
   const city = timeZone.split('/').pop()?.replace(/_/g, ' ') ?? timeZone
-  try {
-    return `${city} (${formatGmtOffset(zoneOffsetMinutes(atMs, timeZone))})`
-  } catch {
-    return city
-  }
+  return typeof offsetMinutes === 'number' ? `${city} (${formatGmtOffset(offsetMinutes)})` : city
 }
 
-/** "Sat, Oct 12, 9:00 PM GMT+2": the start in its zone, the year only when it isn't this one. */
+/** "Sat, Oct 12, 9:00 PM GMT+2": the start at its offset, the year only when it isn't this one. */
 export function formatScheduledStart(
   startUtc: string,
-  timeZone: string,
+  offsetMinutes: number,
   { locale, nowMs = Date.now() }: { locale?: string; nowMs?: number } = {}
 ): string {
   const start = new Date(startUtc)
   if (Number.isNaN(start.getTime())) return ''
-  const sameYear =
-    new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric' }).format(start) ===
-    new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric' }).format(new Date(nowMs))
+  const timeZone = offsetTimeZone(offsetMinutes)
+  const year = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric' })
+  const sameYear = year.format(start) === year.format(new Date(nowMs))
   return new Intl.DateTimeFormat(locale, {
     weekday: 'short',
     month: 'short',

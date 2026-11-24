@@ -26,6 +26,7 @@ pub mod room_program_camera;
 pub mod source_registry;
 pub mod source_status;
 pub mod streaming;
+pub mod ui_settings;
 
 use std::collections::BTreeMap;
 
@@ -6407,8 +6408,8 @@ pub struct SoundboardState {
     pub sounds: Vec<Sound>,
     /// The soundboard's level on Sources, whole dB, -24..+12.
     pub volume_db: i32,
-    /// "Hear sounds yourself": the main window's monitor plays while
-    /// recording or live.
+    /// "Hear sounds yourself": the monitor (the backend's on macOS, the main
+    /// window's on Windows and Linux) plays while recording or live.
     pub monitor: bool,
     pub starters_seeded: bool,
 }

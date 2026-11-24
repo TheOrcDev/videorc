@@ -1,12 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import type { Sound, SoundboardState } from './backend'
-import { startSoundboardHost, type SoundboardHostDeps } from './soundboard-host'
+import {
+  rendererPlaysMonitor,
+  startSoundboardHost,
+  type SoundboardHostDeps
+} from './soundboard-host'
 import { createSoundboardStore, type SoundboardClient } from './soundboard-store'
 
 // Plan 189: the main window's soundboard host. It pushes the Stream Manager a
 // read-only board (never a file), loads the monitor only on the first voice,
-// seeds the starters once per connection, and answers a relayed press.
+// seeds the starters once per connection, and answers a relayed press. Plan
+// 260 S1.3b: on macOS the backend plays the monitor and no Web Audio loads.
 
 const sound = (id: string): Sound => ({
   id,
@@ -42,6 +47,7 @@ function host(overrides: Partial<SoundboardHostDeps> = {}) {
       }),
       pushSoundResult: vi.fn(async () => true)
     },
+    rendererMonitor: true,
     loadMonitor: vi.fn(async () => ({ createSoundMonitor: () => monitor })),
     seedStarters: vi.fn(async () => undefined),
     runAction: vi.fn(async () => ({ ok: true })),
@@ -91,6 +97,36 @@ describe('the soundboard host (plan 189)', () => {
     expect(monitor.update).toHaveBeenLastCalledWith(expect.objectContaining({ voices: [] }))
     stop()
     expect(monitor.dispose).toHaveBeenCalled()
+  })
+
+  it('never loads the renderer monitor where the backend plays it (macOS)', async () => {
+    expect(rendererPlaysMonitor('darwin')).toBe(false)
+    expect(rendererPlaysMonitor('win32')).toBe(true)
+    expect(rendererPlaysMonitor('linux')).toBe(true)
+    const { store, deps, monitor, stop } = host({ rendererMonitor: false })
+    store.acceptBoard(board())
+    store.acceptPlayback({
+      voices: [
+        {
+          voiceId: 'v-1',
+          soundId: 'a',
+          startedAtMs: 1,
+          durationMs: 1000,
+          loop: false,
+          onAir: false
+        }
+      ]
+    })
+    await flush()
+    expect(deps.loadMonitor).not.toHaveBeenCalled()
+    expect(monitor.update).not.toHaveBeenCalled()
+    // The Stream Manager still gets the board with its voices.
+    expect(deps.api?.pushCommentsSounds).toHaveBeenLastCalledWith({
+      sounds: [{ id: 'a', name: 'A', mode: 'toggle' }],
+      voices: [{ soundId: 'a', startedAtMs: 1, durationMs: 1000, loop: false }]
+    })
+    stop()
+    expect(monitor.dispose).not.toHaveBeenCalled()
   })
 
   it('seeds the starters once per connection while the board says it has not', () => {

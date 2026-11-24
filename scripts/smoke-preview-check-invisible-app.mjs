@@ -61,7 +61,7 @@ import {
   windowsScreenStartSkip
 } from './lib/hide-screen-windows-gates.mjs'
 import { acquireHostSmokeLock, waitForHostMemory } from './lib/host-lock.mjs'
-import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
+import { reloadKeepingSeedJs, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { scenePresetStateReadCode } from './lib/scene-presets-smoke-state.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
@@ -871,9 +871,10 @@ async function runAll() {
   // A camera-free profile: the dev app has no camera grant.
   await evaluate(
     `
+      const settings = await ${UI_SETTINGS_READY_JS};
       const key = 'videorc.captureConfig';
-      const current = JSON.parse(localStorage.getItem(key) ?? '{}');
-      localStorage.setItem(key, JSON.stringify({ ...current,
+      const current = JSON.parse(settings.getItem(key) ?? '{}');
+      settings.setItem(key, JSON.stringify({ ...current,
         video: params.video, layout: { ...current.layout, ...params.layout },
         sources: { ...(current.sources ?? {}), cameraId: undefined, cameraName: undefined, cameraOff: true, testPattern: false },
         recordEnabled: true, streamEnabled: false,

@@ -6,6 +6,7 @@ import { AppErrorBoundary } from '@/components/app-error-boundary'
 import { WindowFrame } from '@/components/window-frame'
 import { WindowProviders } from '@/components/window-providers'
 import type { CaptionWindowSnapshot } from '@/lib/backend'
+import { hydrateUiSettingsBeforeFirstRender } from '@/lib/ui-settings-window'
 import '@/styles.css'
 
 // Long-lived second window: drop React's dev perf-track measures, which buffer
@@ -72,12 +73,18 @@ function CaptionsWindowApp(): ReactElement {
   )
 }
 
-ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
-  <React.StrictMode>
-    <AppErrorBoundary>
-      <WindowProviders window="captions">
-        <CaptionsWindowApp />
-      </WindowProviders>
-    </AppErrorBoundary>
-  </React.StrictMode>
-)
+function render(): void {
+  ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
+    <React.StrictMode>
+      <AppErrorBoundary>
+        <WindowProviders window="captions">
+          <CaptionsWindowApp />
+        </WindowProviders>
+      </AppErrorBoundary>
+    </React.StrictMode>
+  )
+}
+
+// Plan 220 S1.4a: the UI settings store (over main's relay) is in before the
+// first render; past its deadline the window renders anyway.
+void hydrateUiSettingsBeforeFirstRender().then(render, render)

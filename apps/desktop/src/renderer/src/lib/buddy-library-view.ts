@@ -28,6 +28,7 @@ import {
   type BuddyOfficialSlug
 } from '../../../shared/buddy-library'
 import { DEFAULT_AVATAR_NAME } from '../../../shared/avatar-name'
+import { uiSettingsStorage } from './ui-settings-storage'
 
 // "My Buddies" and the four-step onboarding (plan 170 D14 to D16): pure
 // derivations the section, the sheet and their tests share. Every string a
@@ -285,16 +286,8 @@ export function buddyInvitationVisible({
   )
 }
 
-function localStorageOrNull(): Storage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage
-  } catch {
-    return null
-  }
-}
-
 export function readBuddyInvitationDismissed(
-  storage: Pick<Storage, 'getItem'> | null = localStorageOrNull()
+  storage: Pick<Storage, 'getItem'> | null = uiSettingsStorage()
 ): boolean {
   try {
     const raw = storage?.getItem(BUDDY_INVITATION_STORAGE_KEY)
@@ -306,7 +299,7 @@ export function readBuddyInvitationDismissed(
 
 /** Best effort: blocked storage keeps it closed for this window's life only. */
 export function writeBuddyInvitationDismissed(
-  storage: Pick<Storage, 'setItem'> | null = localStorageOrNull()
+  storage: Pick<Storage, 'setItem'> | null = uiSettingsStorage()
 ): void {
   try {
     storage?.setItem(BUDDY_INVITATION_STORAGE_KEY, '1')

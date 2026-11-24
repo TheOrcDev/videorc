@@ -7,6 +7,7 @@ import { BackgroundAssetsProvider } from '@/hooks/use-background-assets'
 import type { ObsDiscovery, ObsSetup } from '@/lib/backend'
 import { type CaptureConfig, defaultCaptureConfig, STORAGE_KEYS } from '@/lib/capture'
 import { OBS_PROFILE_UNREADABLE, ObsImportDialog } from './obs-import-dialog'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 // Plan 174 (C-7, C-29): the OBS import says what will happen and then does
 // exactly that; a failed discovery or read says so and offers Try again.
@@ -81,7 +82,6 @@ beforeEach(() => {
     setCaptureConfig: vi.fn(),
     setSettings: vi.fn()
   }
-  localStorage.clear()
   vi.clearAllMocks()
 })
 
@@ -158,7 +158,7 @@ describe('Import from OBS', () => {
 
     await act(async () => importButton.click())
     expect(mocked.core.setCaptureConfig).toHaveBeenCalledTimes(1)
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEYS.backgroundAssets)!)
+    const stored = JSON.parse(uiSettingsStorage().getItem(STORAGE_KEYS.backgroundAssets)!)
     expect(stored.slots.find((slot: { id: string }) => slot.id === 'bg-10').assetId).toBe(
       'obs-backdrop'
     )

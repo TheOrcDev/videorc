@@ -3,6 +3,7 @@ import type { WorkspaceTab } from '@/components/workspace-nav'
 import type { RecordingStatus } from '../../../shared/backend'
 import { sessionIsReplayOnly } from '../../../shared/capture-state'
 import { ONBOARDING_DISMISSED_VALUE, STORAGE_KEYS } from './capture'
+import { uiSettingsStorage } from './ui-settings-storage'
 
 export const FIRST_RUN_STEPS = ['permissions', 'goal', 'look', 'sound', 'destinations'] as const
 export type FirstRunStep = (typeof FIRST_RUN_STEPS)[number]
@@ -151,7 +152,7 @@ const FIRST_RUN_MODE: FirstRunSetupMode = { kind: 'first-run' }
 
 export function writeFirstRunRecord(
   status: FirstRunRecord['status'],
-  store: FirstRunStorage = localStorage,
+  store: FirstRunStorage = uiSettingsStorage(),
   updatedAt = new Date().toISOString(),
   progress: FirstRunProgress = INITIAL_PROGRESS
 ): FirstRunRecord {
@@ -168,7 +169,7 @@ export function writeFirstRunRecord(
 
 export function completeFirstRun(
   status: FirstRunCompletion,
-  store: FirstRunStorage = localStorage,
+  store: FirstRunStorage = uiSettingsStorage(),
   progress: FirstRunProgress = parseFirstRunRecord(store.getItem(STORAGE_KEYS.firstRun)) ??
     INITIAL_PROGRESS
 ): void {
@@ -194,7 +195,9 @@ export interface FirstRunStartup {
  * first launch. Finalize as soon as runtime info arrives, before enabling
  * useWhatsNew. Deferring writes until then lets suppressed smokes write nothing.
  */
-export function createFirstRunStartup(store: FirstRunStorage = localStorage): FirstRunStartup {
+export function createFirstRunStartup(
+  store: FirstRunStorage = uiSettingsStorage()
+): FirstRunStartup {
   const record = parseFirstRunRecord(store.getItem(STORAGE_KEYS.firstRun))
   const snapshot = firstRunSnapshot({
     record,

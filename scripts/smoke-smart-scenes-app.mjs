@@ -29,7 +29,7 @@ import { fileURLToPath } from 'node:url'
 
 import { buildFixtureApps, FIXTURE_SOURCE_PATH } from './fixtures/build-fixture-apps.mjs'
 import { launchDevApp } from './lib/app-launcher.mjs'
-import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
+import { reloadKeepingSeedJs, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { decodeSceneFrames } from './lib/scene-artifact-frames.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import {
@@ -283,11 +283,12 @@ try {
         lastVerticalPreset: 'vertical-camera-top' };
       const old = ${JSON.stringify({ version: 1, scenes })};
       const working = ${JSON.stringify(working)};
+      const settings = await ${UI_SETTINGS_READY_JS};
       const seed = () => {
-        localStorage.setItem('videorc.captureConfig', JSON.stringify(config));
-        localStorage.setItem('videorc.scene-presets.v1', JSON.stringify(old));
-        localStorage.setItem('videorc.working-scene.v1', JSON.stringify(working));
-        localStorage.removeItem('videorc.scenes.v2');
+        settings.setItem('videorc.captureConfig', JSON.stringify(config));
+        settings.setItem('videorc.scene-presets.v1', JSON.stringify(old));
+        settings.setItem('videorc.working-scene.v1', JSON.stringify(working));
+        settings.removeItem('videorc.scenes.v2');
       };
       seed(); window.addEventListener('pagehide', seed);
       ${reloadKeepingSeedJs({ forgetWorkingScene: false, forgetScenes: true, delayMs: 100 })}
@@ -299,7 +300,7 @@ try {
       'plan 210 migration settled'
     )
     const library = await renderer.evaluate(
-      `return JSON.parse(localStorage.getItem('videorc.scenes.v2'))`
+      `return JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2'))`
     )
     assert.deepEqual(
       library.scenes.map((scene) => scene.name),
@@ -320,7 +321,7 @@ try {
     assert.equal(library.scenes[0].layouts.vertical.layoutPreset, 'vertical-screen-only')
     assert.deepEqual(
       await renderer.evaluate(
-        `return JSON.parse(localStorage.getItem('videorc.scene-presets.v1'))`
+        `return JSON.parse(window.__videorcUiSettings?.getItem('videorc.scene-presets.v1'))`
       ),
       JSON.parse(JSON.stringify({ version: 1, scenes })),
       'migration must never rewrite v1'
@@ -570,7 +571,7 @@ try {
       }
     await requestSmokeCommand(smoke, 'select-camera-device', { settleMs: 500 }, { timeoutMs })
     const base = await renderer.evaluate(
-      `return JSON.parse(localStorage.getItem('videorc.scenes.v2')).scenes.find((scene) => scene.id === ${JSON.stringify(targets.alpha.sceneId)})`
+      `return JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2')).scenes.find((scene) => scene.id === ${JSON.stringify(targets.alpha.sceneId)})`
     )
     const cameraScene = {
       ...base,
@@ -766,7 +767,7 @@ try {
     await renderer.goTo(targets.alpha)
     // Different layouts on both orientations make a stale leg observable.
     const library = await renderer.evaluate(
-      `return JSON.parse(localStorage.getItem('videorc.scenes.v2'))`
+      `return JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2'))`
     )
     for (const target of Object.values(targets)) {
       const scene = library.scenes.find((scene) => scene.id === target.sceneId)
@@ -838,7 +839,7 @@ try {
           current = next
         }
         const stored = await renderer.evaluate(
-          `return JSON.parse(localStorage.getItem('videorc.scenes.v2'))`
+          `return JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2'))`
         )
         const noScreen = stored.scenes.find((scene) => scene.id === 'acceptance-camera-only')
         if (noScreen) {
@@ -1487,7 +1488,7 @@ try {
       .waitFor(() => true, 'privacy settings stored')
       .then(() =>
         renderer.evaluate(`
-        const raw = localStorage.getItem('videorc.privacySettings.v1');
+        const raw = window.__videorcUiSettings?.getItem('videorc.privacySettings.v1');
         return raw ? JSON.parse(raw) : null;
       `)
       )

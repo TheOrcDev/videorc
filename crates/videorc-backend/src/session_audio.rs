@@ -6842,6 +6842,10 @@ fn run_bus_owned(
             // report their frames through `caption_observer` instead.
             #[cfg(not(test))]
             crate::captions::offer_caption_frame(&frame);
+            // Plan 260 S1.8c c4a: the backend's room microphone while this
+            // session owns the device (off unless the room asks).
+            #[cfg(not(test))]
+            crate::room_microphone::session_tap::offer(&frame);
             #[cfg(test)]
             {
                 let observer = shared

@@ -57,7 +57,7 @@ import {
 } from './lib/remote-control-client.mjs'
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
-import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
+import { RELOAD_KEEPING_SEED_JS, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
@@ -126,9 +126,10 @@ async function seedRendererProfile(smoke) {
     'eval-js',
     {
       code: `
+        const settings = await ${UI_SETTINGS_READY_JS};
         const key = 'videorc.captureConfig';
         let current = {};
-        try { current = JSON.parse(localStorage.getItem(key) ?? '{}') ?? {}; } catch {}
+        try { current = JSON.parse(settings.getItem(key) ?? '{}') ?? {}; } catch {}
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
         const seeded = {
           ...current,
@@ -138,7 +139,7 @@ async function seedRendererProfile(smoke) {
           streamEnabled: false,
           replayBuffer: { enabled: true, explicit: false }
         };
-        localStorage.setItem(key, JSON.stringify(seeded));
+        settings.setItem(key, JSON.stringify(seeded));
         ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,

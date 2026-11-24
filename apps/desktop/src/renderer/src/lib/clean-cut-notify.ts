@@ -2,6 +2,7 @@ import type { CleanCutJob } from './backend'
 import { openCleanCut } from './clean-cut-events'
 import { cleanCutReadyTitle } from './clean-cut-view'
 import { withWorkNotifications } from './notify'
+import { uiSettingsStorage } from './ui-settings-storage'
 
 // Plan 119 S15: "Your clean cut is ready (42:10 → 31:05)", once per job and
 // cut-list revision, with Review. The render finishes out of view, which is
@@ -50,11 +51,7 @@ interface AnnouncementStorage {
 }
 
 function browserStorage(): AnnouncementStorage | null {
-  try {
-    return globalThis.localStorage ?? null
-  } catch {
-    return null
-  }
+  return uiSettingsStorage()
 }
 
 /** Says the cut is ready unless this revision was announced. True when said. */

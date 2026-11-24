@@ -1,7 +1,7 @@
 //! The one HTTP/1.1 response parser the loopback calls share (the shutdown
-//! preparation in [`crate::process`] and the interruption lease in
-//! [`crate::interruption`]). Small enough that the app does not need an HTTP
-//! client crate.
+//! preparation in [`crate::process`], the interruption lease in
+//! [`crate::interruption`] and the Library's posters, [`get_bytes`]). Small
+//! enough that the app does not need an HTTP client crate.
 //!
 //! The response is split and de-chunked as bytes and only then decoded as
 //! UTF-8, so a chunk boundary inside a multi-byte character cannot panic.
@@ -17,6 +17,16 @@ pub(crate) struct HttpResponse {
 
 /// Parses a whole `Connection: close` response.
 pub(crate) fn parse_response(raw: &[u8]) -> Result<HttpResponse> {
+    let (status, body) = parse_response_bytes(raw)?;
+    Ok(HttpResponse {
+        status,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    })
+}
+
+/// Parses a whole `Connection: close` response, its body as bytes (a
+/// picture).
+pub(crate) fn parse_response_bytes(raw: &[u8]) -> Result<(u16, Vec<u8>)> {
     let split = find(raw, b"\r\n\r\n").ok_or_else(|| anyhow!("malformed HTTP response"))?;
     let head = String::from_utf8_lossy(&raw[..split]);
     let body = &raw[split + 4..];
@@ -34,10 +44,46 @@ pub(crate) fn parse_response(raw: &[u8]) -> Result<HttpResponse> {
     } else {
         body.to_vec()
     };
-    Ok(HttpResponse {
-        status,
-        body: String::from_utf8_lossy(&body).into_owned(),
-    })
+    Ok((status, body))
+}
+
+/// `GET {path}` on the backend's loopback server: a 200's body, refused past
+/// `max_bytes` or `deadline`. Anything but a 200 is an error.
+pub(crate) async fn get_bytes(
+    port: u16,
+    path: &str,
+    accept: &str,
+    max_bytes: usize,
+    deadline: std::time::Duration,
+) -> Result<Vec<u8>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let read = async {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: {accept}\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await?;
+        let mut response = Vec::new();
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                break;
+            }
+            response.extend_from_slice(&chunk[..read]);
+            if response.len() > max_bytes + 16 * 1024 {
+                return Err(anyhow!("the answer is over {max_bytes} bytes"));
+            }
+        }
+        let (status, body) = parse_response_bytes(&response)?;
+        if status != 200 {
+            return Err(anyhow!("HTTP {status}"));
+        }
+        Ok(body)
+    };
+    tokio::time::timeout(deadline, read)
+        .await
+        .map_err(|_| anyhow!("no answer in {deadline:?}"))?
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -91,5 +137,54 @@ mod tests {
         assert_eq!(response.body, "{\"a\":1}");
         assert!(parse_response(b"HTTP/1.1 200 OK\r\n").is_err());
         assert!(parse_response(b"garbage\r\n\r\n").is_err());
+    }
+
+    /// The poster read: a binary body comes back byte for byte; anything but
+    /// a 200, or a body past the limit, is an error.
+    #[tokio::test]
+    async fn get_bytes_reads_a_picture_and_refuses_the_rest() {
+        async fn serve(answer: Vec<u8>) -> u16 {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).await;
+                stream.write_all(&answer).await.unwrap();
+            });
+            port
+        }
+        let deadline = std::time::Duration::from_secs(2);
+        let picture: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x00, 0xff, 0xc3];
+        let mut ok = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            picture.len()
+        )
+        .into_bytes();
+        ok.extend_from_slice(&picture);
+        let port = serve(ok).await;
+        assert_eq!(
+            get_bytes(port, "/p", "image/*", 1024, deadline)
+                .await
+                .unwrap(),
+            picture
+        );
+        let port = serve(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()).await;
+        assert!(
+            get_bytes(port, "/p", "image/*", 1024, deadline)
+                .await
+                .is_err()
+        );
+        let mut big = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
+        big.extend(std::iter::repeat_n(0u8, 40 * 1024));
+        let port = serve(big).await;
+        assert!(
+            get_bytes(port, "/p", "image/*", 1024, deadline)
+                .await
+                .is_err()
+        );
     }
 }

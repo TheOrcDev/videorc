@@ -27,12 +27,33 @@ tokio = { version = "1.48", features = ["rt-multi-thread", "sync", "time", "macr
 # the contracts and the slots' words; and the wire types its scene speaks.
 videorc-preview = { workspace = true }
 videorc-protocol = { workspace = true }
-
-# macOS: the preview's layer in a GPUI `NativeView` (S0.1's route). The same
-# bindings and features S0.1's spike compiled with.
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-foundation = "0.3.2"
-objc2-app-kit = { version = "0.3.2", features = ["NSView", "NSResponder", "NSWindow", "NSGraphics", "objc2-quartz-core"] }
-objc2-quartz-core = { version = "0.3.2", features = ["CALayer", "CAMetalLayer", "CATransaction", "objc2-metal"] }
+# Global shortcuts (S2.6a part 2): Carbon on macOS, RegisterHotKey on
+# Windows, X11 on Linux, behind the core's gate.
+global-hotkey = "0.7"
+# The smoke command server (`src/smoke/`, plan 260 S2.5, L6).
+serde_json = "1.0"
+# The smoke UI driver and the OS interface (`src/platform/`, S2.6a): raw-window-handle
+# reaches the native window under a GPUI window on every platform; the
+# preview's layer reaches its NSView through it too (S2.3a).
 raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The smoke driver asks its own window's view for its accessibility children,
+# as VoiceOver does first, so GPUI builds the tree in a smoke run (L6).
+# AppKit and IOKit, as spike S0.7 proved them under GPUI 0.3.14 (S2.6a).
+# The preview's layer in a GPUI `NativeView` (S0.1's route, S2.3a): the
+# QuartzCore bindings and AppKit's quartz-core feature.
+objc2 = { version = "0.6.4" }
+objc2-foundation = "0.3.2"
+objc2-app-kit = { version = "0.3.2", features = ["NSView", "NSWindow", "NSResponder", "NSPanel", "NSGraphics", "objc2-quartz-core"] }
+objc2-quartz-core = { version = "0.3.2", features = ["CALayer", "CAMetalLayer", "CATransaction", "objc2-metal"] }
+# The camera, microphone and screen grants (S2.6a part 3), read and asked
+# for as the Rust app does: AVFoundation's authorization status and prompt
+# (a block2 completion handler), CoreGraphics' screen capture access.
+block2 = "0.6.1"
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGWindow"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# The smoke driver's same question on Windows: `WM_GETOBJECT` to its own window.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

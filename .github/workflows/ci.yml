@@ -33,9 +33,11 @@ jobs:
     # workspace dev opt-level 2 (one ~24k-line main.rs, full debuginfo, on a
     # 3-core runner). The test/sentinel builds below compile the backend crate
     # itself at opt-level 0 with line tables only (dependencies keep opt 2),
-    # which is a correctness gate, not a perf gate. 70 min is a hard ceiling:
-    # the steps before the test compile take ~13 min, the compile up to 45.
-    timeout-minutes: 70
+    # which is a correctness gate, not a perf gate. Busy runners still hit the
+    # Compile tests *step* at 45 (PRs #1756, #1771, #1839) with no test
+    # failures — only a cold or contended compile. 75 min is the job ceiling;
+    # the compile step below is raised in step with that.
+    timeout-minutes: 75
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -67,6 +69,12 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
+          # Stable across stacked PR branches and the sentinel job below.
+          # Without shared-key, rust-cache folds `github.job` into the key; the
+          # sentinel already restored `shared-key: rust`, so this job never
+          # saved under the key the sentinel looked for, and stacked branches
+          # that never finished a save kept compiling deps cold.
+          shared-key: rust
           # The job never finished, so the cache was never saved and every run
           # rebuilt every dependency cold. Save the deps even on failure.
           cache-on-failure: true
@@ -112,12 +120,23 @@ jobs:
         # cannot see it (#1070).
         run: cargo clippy --release -p videorc-backend -- -D warnings
 
+      - name: Plan 260 crates (clippy + test)
+        # Plan 260 S1.0: every crate plan 260 adds (the workspace minus the
+        # backend, the addon and the WER helper, which have their own steps).
+        # A lane that fills one of them is linted and tested here with no
+        # workflow edit.
+        run: |
+          cargo clippy --workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper --all-targets -- -D warnings
+          cargo test --workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper
+
       - name: Compile tests
         # Split from the run so a slow compile and a hung test are told apart.
         # It takes 23-30 min on most runs; on a slow runner (Clippy at 9 min
         # instead of 6) it ran past 35 twice on 2026-11-16 with a full cache
-        # hit, while the same crate's Linux compile held at 9 min.
-        timeout-minutes: 45
+        # hit, while the same crate's Linux compile held at 9 min. Busy
+        # stacked-branch runners later hit the old 45-minute step timeout
+        # (#1756, #1771, #1839) with no failing tests — raise with the job.
+        timeout-minutes: 55
         run: cargo test -p videorc-backend --no-run
 
       - name: Test

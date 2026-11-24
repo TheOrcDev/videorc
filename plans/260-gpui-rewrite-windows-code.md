@@ -134,8 +134,9 @@ read as a model.
 
 ### WC-0.5 All routes with the real backend (`spike-preview-windows`). Waits on maintainers.
 
-- **Goal:** the four routes with the backend's real 4K60 synthetic scene,
-  one binary with `--route a|b|c|d`, `--floating`, and the testing plan's
+- **Goal:** the four routes with the backend's real D3D11 display-capture
+  session at 1440p60 and 4K30 (the largest it takes; see "Which preview"
+  below), one binary with `--route a|b|c|d`, `--floating`, and the testing plan's
   summary fields.
 - **Route (c) can start now:** the backend already presents its own
   preview window. The spike starts the backend, asks for the preview the
@@ -154,7 +155,7 @@ read as a model.
     WC-0.2's visual: the presenter stays in the backend, zero copies, the
     same shape as macOS;
   - for (b), a small ring of shared NT-handle textures with a keyed mutex;
-  - for (d), the shared-memory ring (S1.7);
+  - for (d), the shared-memory ring (S1.7): not yet, see below;
   - and a preview lease message in the protocol that says which one the
     app gets.
 - **Done when:** the testing plan's S0.2c checks are posted for all four
@@ -164,14 +165,24 @@ read as a model.
 
 The backend half of routes (a) and (b) is on `main`
 (`crates/videorc-backend/src/windows_d3d11_preview_handover.rs` is the
-contract; `preview_handover.rs` is the message). Route (d) follows when the
-shared-memory ring lands (S1.7).
+contract; `preview_handover.rs` is the message). Route (d) is **not published yet**,
+on Windows or anywhere: the ring's crate (`videorc-preview-ring`) is on
+`main` and `videorc-preview` reads it, but the backend has no writer (it does
+not depend on the crate). Route (d) waits for S1.7's backend writer; until
+then the spike measures (d) with its own synthetic producer (WC-0.4).
 
 - **Which preview.** The hand-over serves the backend's D3D11 media session:
   the one that runs while a Windows recording or stream captures a display
   (the session today's presenter shows). Start one first, with the display
-  as the screen source; a test-pattern source takes another path. With no
-  session, the open answers `preview-handover-unavailable`.
+  as the screen source. Anything the D3D11 path does not take runs on the
+  synthetic compositor, which has no hand-over, so the open answers
+  `preview-handover-unavailable` for it as for no session at all: a test
+  pattern, a window (not a display) as the source, a vertical simulcast,
+  a session with neither recording nor streaming on, and an output above
+  H.264 level 5.1, which means **4K60 is refused; 4K30 and 1440p60 are the
+  largest it takes** (`select_windows_d3d11_session` in
+  `windows_d3d11_session.rs` names each reason, and the session's
+  diagnostics carry it).
 - **The message,** on the backend's WebSocket with the main-process (admin)
   credential, one per connection:
 

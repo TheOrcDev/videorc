@@ -1,6 +1,6 @@
 ---
 name: videorc-design
-description: Videorc's UI design language — a desktop app on opaque solid windows with Liquid Chrome controls, built exclusively from shadcn/ui components and Videorc's shared primitives: flush panes, toolbars, grouped lists, glass chips, polished chrome controls, and a Raycast-style ⌘K palette. Use whenever building, styling, reviewing, or planning ANY Videorc UI (new components, screens, dialogs, lists, toolbars, badges, confirmations, empty or locked states), when the user mentions "our design", "the design skill", "glass", "chrome", "Liquid Chrome", "native look", or asks how something should look.
+description: Videorc's UI design language — a desktop app on opaque solid windows with Liquid Chrome controls, built exclusively from shadcn/ui components and Videorc's shared primitives: flush panes, toolbars, grouped lists, glass chips, polished chrome controls, and a Raycast-style ⌘K palette. Use whenever building, styling, reviewing, or planning ANY Videorc UI (new components, screens, dialogs, lists, toolbars, badges, confirmations, empty or locked states), when the user mentions "our design", "the design skill", "glass", "chrome", "Liquid Chrome", "native look", or asks how something should look, in the Electron app or the GPUI one.
 ---
 
 # Videorc Design Language (v2: the window family)
@@ -95,6 +95,73 @@ registry item on Base UI, with its docs and examples there.
   one-thumb Slider's a number; selectors read `data-open`, `data-checked`,
   `data-pressed`, `data-active` and `data-panel-open`, never `data-state`.
 
+## The GPUI flavour (plan 260)
+
+Videorc is moving from Electron to GPUI (plan 260). Until Electron is
+deleted both apps ship, and **every rule and owner call in this skill binds
+both flavours**: the GPUI app looks the same, with the same tokens, the same
+primitives and the same words. Only the tools differ.
+
+- **Where it comes from.** The GPUI kit is the second flavour of videorc-ui:
+  `gpui/kit/src/<item>.rs`, one module per registry item with the React
+  twin's name (`list-row.tsx` is `list_row.rs`, `ShortcutKeys` is
+  `shortcut_keys.rs`), and `gpui/gallery`, which shows every item in dark,
+  light and both Increase Contrast appearances. The app syncs the kit into
+  `crates/videorc-kit/src/` and never edits it there (`ui:sync --flavour
+  gpui`, plan 260 S2.2b). Screens live in `apps/videorc/src`.
+- **One change, both flavours.** A component's look changes in its React and
+  GPUI files in the same videorc-ui PR; the twin check holds the names,
+  variants and sizes together. Behaviour comes from `gpui-base` (Base UI's
+  twin) and, where it has none, gpui-component's input, editor, virtual list
+  and table. The look is always Videorc's.
+- **Tokens.** `tokens.rs` is generated from `styles/videorc.css` by
+  videorc-ui's `pnpm theme:build`; `theme:check` fails when it is stale and
+  nobody edits it. A field is the custom property's name in snake case
+  (`--glass-solid` is `theme.glass_solid`), a colour is `0xRRGGBBAA` and is
+  painted through `hsla(token)`. `Appearance::of(window.appearance(),
+  increase_contrast).theme()` picks the column. A new token goes into the
+  stylesheet first, as today.
+- **The scale in Rust.** Radii are `radius::PANEL`, `ROW`, `TAG` and `CHIP`,
+  or `rounded_full()`; `radius::LG` is the popup tier, for floating surfaces
+  only. GPUI's Tailwind helpers (`rounded_md()`, `text_xs()`) are not the
+  scale. Heights are `size::TOOLBAR`, `STATUS_BAR`, `ROW`, `ROW_COMPACT`,
+  `CONTROL` and `GUTTER`. Text is `text::LABEL`, `SECTION` and `META` through
+  `.type_scale(…)`, in `FONT` (the system UI font on every platform), and
+  never below 11 px.
+- **Windows.** Every window is opaque on `glass_solid`, and the kit owns its
+  frame: `window::options` hides the title bar and puts the traffic lights
+  at (14, 13) on the 40 px toolbar band. GPUI's default title bar is
+  AppKit's grey strip, a different colour from the window. GPUI has no
+  backdrop blur and Videorc wants none.
+- **Liquid Chrome on S0.4's route** (the owner judged it equal to Electron
+  on macOS, 2026-11-24): a multi-stop fill or bead is rasterised once per
+  size and scale into an image with its corner radii; the light and shade
+  lines are GPUI quads and box shadows from the tokens. Never stack two-stop
+  gradients for chrome.
+- **Disabled.** Pre-blend a disabled control's colours over the ground it
+  sits on (`faded_over(token, ground, 0.5)`). GPUI fades each layer on its
+  own, so `.opacity(0.5)` drops the label into its fill.
+- **Motion.** Anything that turns runs on GPUI's animation clock
+  (`with_timed_transformation`), capped at 60 fps (`with_max_fps(60.)`,
+  owner call 2026-11-24), and stops under Reduce Motion. Never a
+  `request_animation_frame` loop: it redraws the whole window every frame.
+  The one short burst allowed is an overlay's 100 ms fade in and out
+  (`motion::presence`), which asks for frames only while it moves
+  (coordinator call 2026-11-24).
+- **Lit Record's glow holds steady at 85% in GPUI; it does not breathe**
+  (owner call 2026-11-24). A breath would redraw the window every frame for
+  the whole session (S0.4 measured 24% of a core). The Electron flavour's
+  breathing glow (D5) stays as it is.
+- **Shortcuts** come from the keymap through `ShortcutKeys`, so the chip
+  cannot drift from the binding. **Toasts** tint their icon only.
+- **Guards.** `scripts/lib/gpui-design-guards.test.mjs` (`pnpm
+  test:scripts`) reads `apps/videorc/src` and `crates/videorc-kit/src` and
+  fails on a raw colour (a hex literal, `rgb(0x…)`, `hsla(` with numbers, a
+  named GPUI colour), a radius off the tiers, text below 11 px, a key glyph
+  or "Cmd+" typed by hand, and a toast tinted anywhere but its icon. Comments
+  and `#[cfg(test)]` modules don't count. An exception goes in the guard's
+  set with its reason, as in the React guards.
+
 ## Owner calls
 
 Binding. Follow them as written; a change that would undo one is a question
@@ -121,7 +188,8 @@ for the owner, not a design choice.
     exception, the owner's call on 2026-11-01 (plan 005 in videorc-ui): lit
     Record's glow breathes while a session runs, like a camera's tally
     light, on opacity alone, and reduced motion holds it steady. The metal
-    itself never moves.
+    itself never moves. In the GPUI flavour the glow holds steady (owner
+    call 2026-11-24).
   - **Stream Manager's highlights and members are chrome** (2026-10-28,
     plan 0011). The owner asked for the highlights and every member's entry
     to look much stronger, in the Welcome screen's Liquid Chrome.

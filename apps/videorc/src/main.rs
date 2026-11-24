@@ -20,19 +20,28 @@
 //! will.
 
 mod app;
+mod platform;
 mod preview;
+// Plan 260 S2.5 (L6): the smoke command server and the UI driver. The shell
+// starts it (`smoke::start`) in a later S2 part; until then nothing calls it.
+#[allow(dead_code)]
+mod smoke;
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use gpui::{
-    App, AppContext, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions,
-    point, px, size,
+    App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
 };
-use videorc_app_core::desktop::single_instance::{self, Acquired, HANDOFF_WAIT};
+use videorc_app_core::client::events::names;
+use videorc_app_core::desktop::deep_link::{DeepLinks, LinkSource};
+use videorc_app_core::desktop::global_shortcuts::GlobalShortcutsConfig;
+use videorc_app_core::desktop::single_instance::{
+    self, Acquired, HANDOFF_WAIT, RELAUNCH_LOCK_WAIT,
+};
 use videorc_app_core::nav::{self, PageId};
 use videorc_app_core::supervisor::STOP_GRACE;
 use videorc_app_core::{
@@ -42,9 +51,9 @@ use videorc_app_core::{
 
 use app::args;
 use app::bridge;
+use app::permissions::Permissions;
 use app::shell::{Shell, StatusLine, connection_text};
-
-actions!(videorc, [Quit]);
+use app::{capture, hotkeys, links, menus, sleep};
 
 /// Electron's app id (`electron-builder.yml`), kept on every platform: the
 /// macOS bundle id, Videorc Camera's host, Linux's desktop entry and the
@@ -62,8 +71,14 @@ fn main() -> Result<()> {
 
     // One instance per data directory, before any window: a second launch
     // hands its links to the first (which brings its window up) and exits,
-    // as Electron's `second-instance`.
-    let mut instance = match single_instance::acquire(&paths.user_data_dir) {
+    // as Electron's `second-instance`. A launch Reopen Videorc started waits
+    // for the old instance to let go instead.
+    let acquired = if args.relaunched {
+        single_instance::acquire_after_relaunch(&paths.user_data_dir, RELAUNCH_LOCK_WAIT)
+    } else {
+        single_instance::acquire(&paths.user_data_dir)
+    };
+    let mut instance = match acquired {
         Ok(Acquired::Primary(primary)) => Some(primary),
         Ok(Acquired::Secondary(second)) => match second.hand_off(&args.links, HANDOFF_WAIT) {
             Ok(pid) => {
@@ -159,15 +174,17 @@ fn main() -> Result<()> {
     });
 
     // The typed client on the backend's socket. Its event filter grows as
-    // the screens land; S2.1 needs only `backend.ready`.
-    let (client, _events) = BackendClient::start(
+    // the screens land: `backend.ready` always arrives, and the sleep guard
+    // reads `recording.status`.
+    let (client, events) = BackendClient::start(
         supervisor.state(),
         ClientConfig {
-            filter: EventFilter::include(Vec::<String>::new()),
+            filter: EventFilter::include([names::RECORDING_STATUS]),
             logger: logger.clone(),
             ..ClientConfig::default()
         },
     );
+    let client = Arc::new(client);
 
     // What the window says, on stderr too, for scripts and the build pass.
     let mut backend_lines = supervisor.state();
@@ -196,6 +213,20 @@ fn main() -> Result<()> {
         }
     });
 
+    // S2.6a: the display stays awake while a session runs, a permission
+    // grant restarts the backend once capture is idle, and links reach the
+    // core from the command line, the Apple Event and a second launch.
+    let capture_state = capture::follow(runtime.handle(), events);
+    let sleep_guard = sleep::follow(runtime.handle(), capture_state.clone(), logger.clone());
+    let permissions = Permissions::install(
+        runtime.handle(),
+        supervisor.restarter(),
+        capture_state,
+        logger.clone(),
+    );
+    let deep_links: links::Links = Arc::new(DeepLinks::new(client.clone(), logger.clone()));
+    links::receive(&deep_links, &args.links, LinkSource::CommandLine);
+
     let backend_state = supervisor.state();
     let connection_state = client.state();
     // The preview (plan 260 S2.3a, L1): started in the main window, stopped
@@ -210,11 +241,32 @@ fn main() -> Result<()> {
     let quit_supervisor = supervisor.clone();
     let runtime_handle = runtime.handle().clone();
     let quit_after = args.quit_after;
+    let quit_guard = sleep_guard.clone();
+    let quit_permissions = permissions.clone();
+    let focus_permissions = permissions.clone();
+    // The single-instance lock goes before a relaunch starts the new app.
+    let instance = Rc::new(RefCell::new(instance));
+    let quit_instance = instance.clone();
+    let hotkey_logger = logger.clone();
+    let handoff_links = deep_links.clone();
 
     let application = gpui_platform::application();
+    // Registered before `run`, so a link that starts the app is not lost.
+    let apple_links = deep_links.clone();
+    application.on_open_urls(move |urls| {
+        links::receive(&apple_links, &urls, LinkSource::AppleEvent);
+    });
     application.run(move |cx: &mut App| {
-        cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        // The menu bar from the core's template, and the keys it names.
+        menus::install(cx);
+
+        // Global shortcuts: the registry behind the core's gate. The app runs
+        // no shortcut action until the Studio lands, so every key is named in
+        // the log and left unregistered (never taken from every app for
+        // nothing); the settings store's keys replace the defaults then.
+        let global_keys = hotkeys::Hotkeys::install(cx, Rc::new(hotkeys::NoActions), hotkey_logger);
+        global_keys.apply(&GlobalShortcutsConfig::default(), hotkeys::node_platform());
+        let quit_keys = global_keys.clone();
 
         // The backend stops with the shutdown handshake before the app goes.
         // GPUI gives quit observers a short deadline, so the wait happens
@@ -226,7 +278,11 @@ fn main() -> Result<()> {
             if let Some(preview) = quit_preview.borrow_mut().take() {
                 preview.update(cx, |preview, cx| preview.stop(cx));
             }
+            quit_keys.release_all();
+            sleep::release(&quit_guard);
             stop_backend(&quit_supervisor, &runtime_handle);
+            quit_instance.borrow_mut().take();
+            quit_permissions.relaunch_if_requested();
             async {}
         })
         .detach();
@@ -269,6 +325,17 @@ fn main() -> Result<()> {
         };
         cx.activate(true);
 
+        // The main window coming to the front re-checks a grant System
+        // Settings may have made meanwhile.
+        let _ = main_window.update(cx, |_, window, cx| {
+            cx.observe_window_activation(window, move |_, window, _| {
+                if window.is_window_active() {
+                    focus_permissions.recheck();
+                }
+            })
+            .detach();
+        });
+
         // Closing the last window quits, as Electron does on Windows and
         // Linux. (On macOS Electron keeps the app in the Dock; the menu bar
         // and the Dock's reopen land with S2.6a.)
@@ -286,11 +353,12 @@ fn main() -> Result<()> {
                     .timer(Duration::from_millis(200))
                     .await;
                 let mut handed = false;
-                while let Ok(links) = handoff_rx.try_recv() {
+                while let Ok(handed_links) = handoff_rx.try_recv() {
                     eprintln!(
                         "[videorc-app] a second launch handed over {} link(s)",
-                        links.len()
+                        handed_links.len()
                     );
+                    links::receive(&handoff_links, &handed_links, LinkSource::SecondInstance);
                     handed = true;
                 }
                 if handed {
@@ -316,8 +384,10 @@ fn main() -> Result<()> {
 
     // Where the platform's run loop returns (not on macOS, which exits from
     // `terminate:`), stop the backend if the quit hook didn't.
+    sleep::release(&sleep_guard);
     stop_backend(&supervisor, runtime.handle());
-    drop(instance);
+    instance.borrow_mut().take();
+    permissions.relaunch_if_requested();
     Ok(())
 }
 

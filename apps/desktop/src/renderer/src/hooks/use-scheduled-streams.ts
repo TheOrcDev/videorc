@@ -127,7 +127,12 @@ export function useScheduledStreams() {
     []
   )
   const mutate = useCallback(
-    async (action: string, params: Record<string, unknown>) => {
+    async (
+      action: string,
+      params: Record<string, unknown>,
+      /** `inline`: the caller shows the error itself, so the page banner stays clear. */
+      options: { inline?: boolean } = {}
+    ) => {
       if (!client.current) throw new Error('Videorc is reconnecting.')
       const eventId = String(params.eventId)
       pending.current.set(eventId, (pending.current.get(eventId) ?? 0) + 1)
@@ -136,10 +141,14 @@ export function useScheduledStreams() {
       try {
         return await runScheduledOperation(client.current, action, params)
       } catch (error) {
-        setError(
-          userErrorMessage(error, { action: ACTION_VERBS[action] ?? 'update', object: 'the event' })
-            .text
-        )
+        if (!options.inline) {
+          setError(
+            userErrorMessage(error, {
+              action: ACTION_VERBS[action] ?? 'update',
+              object: 'the event'
+            }).text
+          )
+        }
         throw error
       } finally {
         await reload().catch(() => undefined)

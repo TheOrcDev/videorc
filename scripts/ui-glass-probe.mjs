@@ -119,6 +119,7 @@ import {
   regionMean,
   relativeLuminance
 } from './lib/image-stats.mjs'
+import { seedUiSettingsJs } from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 
 // Calibrated on macOS 26.5.1 / Electron 39.8.10; the raw populations live in
@@ -262,7 +263,7 @@ function fetchJson(url) {
   })
 }
 
-async function cdpEvaluate(webSocketUrl, expression) {
+async function cdpEvaluate(webSocketUrl, expression, { awaitPromise = false } = {}) {
   const socket = new WebSocket(webSocketUrl)
   await new Promise((resolve, reject) => {
     socket.addEventListener('open', resolve)
@@ -275,14 +276,16 @@ async function cdpEvaluate(webSocketUrl, expression) {
         const message = JSON.parse(event.data)
         if (message.id !== 1) return
         clearTimeout(timer)
+        const thrown = awaitPromise ? message.result?.exceptionDetails : null
         if (message.error) reject(new Error(message.error.message))
+        else if (thrown) reject(new Error(thrown.exception?.description ?? thrown.text))
         else resolve(message.result?.result?.value)
       })
       socket.send(
         JSON.stringify({
           id: 1,
           method: 'Runtime.evaluate',
-          params: { expression, returnByValue: true }
+          params: { expression, returnByValue: true, awaitPromise }
         })
       )
     })
@@ -320,10 +323,16 @@ async function pageDarkClass(devtoolsHost, role) {
 async function applyTheme(devtoolsHost, theme) {
   const main = await pageTarget(devtoolsHost, 'main')
   if (!main) throw new Error('Main window CDP target not found.')
+  // The seed waits for the window's UI settings store (plan 220 S1.4b.2), then the reload.
   await cdpEvaluate(
     main.webSocketDebuggerUrl,
-    `localStorage.setItem('videorc.onboardingComplete', 'creator-ux-v1'); localStorage.setItem('videorc.theme', ${JSON.stringify(theme)}); location.reload(); true`
+    seedUiSettingsJs(
+      { 'videorc.onboardingComplete': 'creator-ux-v1', 'videorc.theme': theme },
+      { readyTimeoutMs: 8000 }
+    ),
+    { awaitPromise: true }
   )
+  await cdpEvaluate(main.webSocketDebuggerUrl, 'location.reload(); true')
   await sleep(7000)
 }
 

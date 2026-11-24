@@ -50,6 +50,23 @@ describe('renderer image URL cache', () => {
     expect(cacheChatAvatar).toHaveBeenCalledTimes(258)
   })
 
+  it('forgets a null answer on request, and nothing else', async () => {
+    const { resolveAvatar, cacheChatAvatar } = await setup()
+    const { forgetFailedChatImage } = await import('./chat-image-cache')
+    cacheChatAvatar.mockResolvedValueOnce(null)
+    expect(await resolveAvatar('away', 'avatar')).toBeNull()
+    expect(await resolveAvatar('ok', 'avatar')).toBe('local:ok')
+    forgetFailedChatImage('ok', 'avatar')
+    expect(await resolveAvatar('ok', 'avatar')).toBe('local:ok')
+    expect(cacheChatAvatar).toHaveBeenCalledTimes(2)
+    forgetFailedChatImage('away', 'gif')
+    expect(await resolveAvatar('away', 'avatar')).toBeNull()
+    expect(cacheChatAvatar).toHaveBeenCalledTimes(2)
+    forgetFailedChatImage('away', 'avatar')
+    expect(await resolveAvatar('away', 'avatar')).toBe('local:away')
+    expect(cacheChatAvatar).toHaveBeenCalledTimes(3)
+  })
+
   it('bounds negative results and retries them after eviction', async () => {
     const { resolveAvatar, cacheChatAvatar, cacheChatGif } = await setup()
     cacheChatAvatar.mockRejectedValue(new Error('refused'))

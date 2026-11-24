@@ -7,25 +7,37 @@
 //! `videorc-rust`, so the crates that move from there (L1's
 //! `videorc-preview`) compile unchanged.
 
+pub mod account;
 pub mod buddy;
 pub mod chat;
 pub mod client;
+pub mod command_score;
 pub mod crash_log;
 pub mod desktop;
+pub mod editor;
 mod encoding;
+pub mod first_run;
+pub mod format;
 pub mod guests;
 mod http;
 pub mod interruption;
 pub mod ledger;
+pub mod library;
+pub mod livestream;
 pub mod log;
 pub mod nav;
 pub mod notices;
 pub mod paths;
 pub mod process;
 pub mod restart;
+pub mod scenes;
+pub mod settings_page;
+pub mod shortcuts;
+pub mod smoke;
 pub mod stream_manager;
 pub mod studio;
 pub mod supervisor;
+pub mod user_error;
 
 pub use client::{BackendClient, BackendEvent, ClientConfig, ConnectionState, EventFilter};
 pub use log::{Level, LogFileLimits, Logger, RotatingLogFile};
@@ -33,6 +45,10 @@ pub use paths::AppPaths;
 pub use process::{
     BackendBootstrap, BackendLaunch, BackendOwnership, BackendProcess, BackendStopReport,
     Credential, Isolation, process_is_alive,
+};
+pub use studio::{
+    SessionEffect, SessionPhase, SessionStartIntent, StartOutcome, StopOrigin, Studio,
+    StudioBackend, StudioConfig, StudioSnapshot,
 };
 pub use supervisor::{BackendState, StopOutcome, Supervisor, SupervisorConfig, Tone};
 pub use videorc_protocol as protocol;

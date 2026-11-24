@@ -11,9 +11,7 @@ const ignored = [
   '--ignore',
   'RUSTSEC-2026-0372',
   '--ignore',
-  'RUSTSEC-2026-0543',
-  '--ignore',
-  'RUSTSEC-2026-0555'
+  'RUSTSEC-2026-0543'
 ]
 
 test('Rust audit clones a fresh database through system Git before auditing offline', () => {
@@ -45,8 +43,7 @@ test('Rust audit ignores only the named unmaintained notices, each with its sour
       'RUSTSEC-2026-0370',
       'RUSTSEC-2026-0371',
       'RUSTSEC-2026-0372',
-      'RUSTSEC-2026-0543',
-      'RUSTSEC-2026-0555'
+      'RUSTSEC-2026-0543'
     ]
   )
 })

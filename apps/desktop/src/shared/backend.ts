@@ -4899,6 +4899,19 @@ export interface SessionCommentsPage {
   nextCursor?: string
 }
 
+/** One session's History view from the backend (`sessions.comments.history`,
+ * plan 220 S1.6a): the newest saved messages (at most 2,000 and 8 MB), the
+ * latest send operation, and the saved stats. `audience` and `chatTotals` are
+ * null when the session has none. */
+export interface SessionCommentsHistory {
+  sessionId: string
+  messages: LiveChatMessage[]
+  latestSendOperation?: CommentsSendOperation
+  viewers: ViewerSample[]
+  audience: AudienceSnapshot | null
+  chatTotals: SessionChatTotals | null
+}
+
 export type StreamScreenStatus = 'ready' | 'missing'
 
 export interface StreamScreen {
@@ -5486,7 +5499,15 @@ export function normalizeCommentHighlightAnchor(value: unknown): CommentHighligh
 export interface SetCommentHighlightParams {
   sessionId: string
   messageId: string
-  pngBase64: string
+  /** The renderer's card, the path before plan 260 S1.2, accepted for one
+   *  release. Without it the backend draws the card from the message it
+   *  holds, for `canvasWidth` x `canvasHeight` and the vertical leg. */
+  pngBase64?: string
+  /** The stream canvas the card is drawn for (plan 260 S1.2). */
+  canvasWidth?: number
+  canvasHeight?: number
+  /** Plan 225 B6: the milestone card for this arrival row instead. */
+  milestone?: CommentHighlightMilestone
   anchor: CommentHighlightAnchor
   /** The placed highlight rect for the horizontal canvas (plan 164); omitted
    *  keeps the `anchor` corner. */
@@ -5496,6 +5517,16 @@ export interface SetCommentHighlightParams {
   verticalPngBase64?: string
   /** The placed highlight rect for the vertical leg (plan 164). */
   verticalRect?: OverlayRect
+}
+
+/** The milestone card the backend draws for an arrival row (plan 225 B6,
+ * plan 260 S1.2). Mirrors Rust `CommentHighlightMilestone`. */
+export interface CommentHighlightMilestone {
+  name: string
+  label: string
+  avatarUrl?: string
+  platform: StreamPlatform
+  personaName?: string
 }
 
 /** `comments.highlight.canvases`: extra canvases the running session burns
@@ -5511,7 +5542,14 @@ export interface CommentHighlightCanvases {
 
 /** `chat.overlay.set`: mirrors Rust `SetChatOverlayParams`. */
 export interface SetChatOverlayParams {
-  pngBase64: string
+  /** The renderer's box, the path before plan 260 S1.2, accepted for one
+   *  release. Without it the backend draws the box from `messageIds`. */
+  pngBase64?: string
+  /** The messages the box shows, oldest first (plan 260 S1.2). */
+  messageIds?: string[]
+  /** The landscape canvas the box is drawn for. */
+  canvasWidth?: number
+  canvasHeight?: number
   /** The placed chat rect for the horizontal canvas; omitted keeps the
    *  default corner. */
   rect?: OverlayRect
@@ -6056,6 +6094,213 @@ export interface CloudRoomRequest {
   name: string
   askedAt: string
   device: CloudGuestDevice
+}
+
+/** Plan 260 S1.8b: one topic's delivery to the room's program pages. */
+export type RoomPresentationState = 'off' | 'preview' | 'waiting' | 'applied' | 'failed'
+
+/** Plan 260 S1.8b: one program page that applied the view it was sent. */
+export interface RoomPresentationObservation {
+  revision: number
+  output: 'stream' | 'recording'
+  orientation: 'h' | 'v'
+}
+
+/** Plan 260 S1.8b: a presentation topic's status (the renderer's
+ * `RoomGraphicsStatus` without its preview). */
+export interface RoomPresentationStatus {
+  enabled: boolean
+  state: RoomPresentationState
+  reason: string | null
+  revision: number
+  observed: Record<string, RoomPresentationObservation>
+  /** The avatar's guest pages (plan 249 S6): avatar only. */
+  guests?: { enabled: boolean; capable: number; applied: number }
+  /** What the program pages drew for the scene's background (plan 249
+   * S14): scene only, while the scene names one. */
+  background?: {
+    wanted: { h: string; v: string }
+    drawn: Record<string, import('./cloud-scene').BackgroundDrawn>
+    unsupported: number
+  }
+}
+
+/**
+ * `cloud.room.presentation` (plan 260 S1.8b): what the room's program pages
+ * draw of the presentation topics the backend sends once it holds the host
+ * seat. Each topic is present once it is the backend's (graphics first).
+ * Mirrors Rust `CloudRoomPresentationEvent`.
+ */
+/** `cloud.room.presentation.set` (plan 260 S1.8b): the room's presentation
+ * switches, for the topics the backend sends while it holds the host seat. */
+export interface CloudRoomPresentationSetParams {
+  graphics?: boolean
+  avatar?: boolean
+}
+
+/** `cloud.room.avatar.set` (plan 260 S1.8b): the avatar content the Studio
+ * built, for the backend to deliver while it holds the host seat; `null`
+ * takes the avatar off. Mirrors Rust `CloudRoomAvatarSetParams`. */
+export interface CloudRoomAvatarSetParams {
+  content: {
+    h: import('./cloud-avatar').AvatarLayer[]
+    v: import('./cloud-avatar').AvatarLayer[]
+    stream: boolean
+    recording: boolean
+    animated?: {
+      h: import('./cloud-avatar').AvatarLayer[]
+      v: import('./cloud-avatar').AvatarLayer[]
+    }
+  } | null
+  /** The host's opt-in to show the stream's public layers to guest pages. */
+  guests?: boolean
+}
+
+/** The host's microphone in the room microphone bridge's own settings shape
+ * (Rust `room_microphone::Settings`): an exact device id, gain within
+ * ±24 dB, offset within 1 s. */
+export interface CloudRoomMicrophoneSettings {
+  deviceId: string
+  gainDb: number
+  muted: boolean
+  noise: MicrophoneNoiseSuppression
+  offsetMs: number
+}
+
+/** The camera the Studio has on for the backend's room (the Sources camera,
+ * which the native preview camera runs). Its key, look and background are
+ * the backend's own scene layout, so only the device travels. */
+export interface CloudRoomCameraSettings {
+  deviceId: string
+}
+
+/** The host's media for the backend's room while it holds the host seat
+ * (plan 260 S1.8c), one method per kind: `cloud.room.microphone.set` sends
+ * `microphone`, `cloud.room.camera.set` sends `camera`, `cloud.room.screen.set`
+ * sends `screen`; `null` takes it off.
+ * Mirrors Rust `CloudRoomMediaSetParams`. */
+export interface CloudRoomMediaSetParams {
+  microphone?: CloudRoomMicrophoneSettings | null
+  camera?: CloudRoomCameraSettings | null
+  screen?: CloudRoomScreenSettings | null
+}
+
+/** The screen the backend's room shares: the scene's own, by its native
+ * source id (`screen:screencapturekit:<id>`, `window:screencapturekit:<id>`). */
+export interface CloudRoomScreenSettings {
+  sourceId: string
+}
+
+/** `cloud.room.avatar.motion` (plan 260 S1.8b): one message of the
+ * renderer's avatar motion model, for the backend to send to the pages that
+ * animate. The model moves to app-core with the content builders. */
+export interface CloudRoomAvatarMotionParams {
+  message: import('./cloud-avatar-motion').MotionMessage
+}
+
+/** Who the motion went to (the model keyframes a page it has not served). */
+export interface CloudRoomAvatarMotionResult {
+  held: boolean
+  targets: string[]
+}
+
+/** A scene background picture, named by its SHA-256 (plan 249 S14). */
+export interface CloudSceneAsset {
+  hash: string
+  mime: string
+  width: number
+  height: number
+  base64: string
+}
+
+/** `cloud.room.scene.commit` (plan 260 S1.8b): what the program draws per
+ * orientation lane and the background pictures it names; `null` returns the
+ * room to its own layouts. Mirrors Rust `CloudRoomSceneCommitParams`. */
+export interface CloudRoomSceneCommitParams {
+  content: {
+    h: import('./cloud-scene').CloudScene | null
+    v: import('./cloud-scene').CloudScene | null
+    transition: { kind: 'cut' | 'motion'; durationMs: number }
+  } | null
+  assets: CloudSceneAsset[]
+}
+
+export interface CloudRoomPresentationEvent {
+  showId: string
+  graphics?: RoomPresentationStatus
+  avatar?: RoomPresentationStatus
+  /** The committed scene; the Studio's commit waits on it (5 s). */
+  scene?: RoomPresentationStatus
+  /** Plan 260 S1.8c: the host's own media in the backend's room. */
+  media?: RoomMediaStatus
+}
+
+/** What the backend's room publishes of the host's own media. Mirrors Rust
+ * `RoomMediaStatus`. */
+export interface RoomMediaStatus {
+  camera: boolean
+  microphone: boolean
+  screen?: RoomScreenStatus
+  /** Plan 260 S1.8c c4d: the auxiliary track (room sounds, system audio). */
+  aux?: RoomMediaAuxStatus
+  /** Plan 260 S1.8d: the room's other people; their pictures at
+   * `/room/remote/latest.bmp?identity=&source=camera|screen`. */
+  people?: RoomRemotePerson[]
+  /** Plan 260 S1.8d: the runner's return while the Program monitor takes it
+   * (`source=monitor`). */
+  monitor?: { video: boolean; audio: boolean }
+}
+
+/** One person in the backend's room as the host receives them. Mirrors Rust
+ * `RoomRemotePerson`. */
+export interface RoomRemotePerson {
+  identity: string
+  name: string
+  camera: boolean
+  screen: boolean
+  audio: boolean
+  micMuted: boolean
+  cameraOff: boolean
+  speaking: boolean
+  quality: 'excellent' | 'good' | 'poor' | 'lost'
+}
+
+/** The backend room's auxiliary track, as the renderer room's
+ * `RoomAuxStatus`, and its system capture's state. Mirrors Rust
+ * `RoomAuxStatus`. */
+export interface RoomMediaAuxStatus {
+  enabled: boolean
+  state: 'off' | 'blocked' | 'queued' | 'published'
+  reason: string | null
+  trackSid: string | null
+  observed: Record<string, number>
+  systemState: 'off' | 'opening' | 'capturing' | 'blocked'
+  systemReason: string | null
+  /** A lost connection turned system audio off; it needs a fresh enable. */
+  systemDisarmed?: boolean
+}
+
+/** `cloud.room.aux.set` (plan 260 S1.8c c4d): room sounds on or off, and the
+ * room's system audio. Mirrors Rust `CloudRoomAuxSetParams`. */
+export interface CloudRoomAuxSetParams {
+  sounds: boolean
+  system: { enabled: boolean; gainDb: number; muted: boolean }
+}
+
+/** The shared screen and its Hide screen state on the wire (plan 249 S2), as
+ * the renderer room's `screenPrivacy`: the publication, when the source was
+ * blocked, which receivers acknowledged the frost. Mirrors Rust
+ * `RoomScreenStatus`. */
+export interface RoomScreenStatus {
+  sourceId: string
+  epoch: string
+  generation: number
+  hidden: boolean
+  published: boolean
+  sourceBlockedAt: number | null
+  status: 'visible' | 'hiding' | 'observed' | 'unconfirmed' | 'paused'
+  observations: Record<string, number>
+  reason?: string
 }
 
 /**
@@ -7114,6 +7359,13 @@ export interface VideorcApi {
   closeNotesWindow: () => Promise<NotesWindowState>
   getNotesWindowState: () => Promise<NotesWindowState>
   setNotesWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<NotesWindowState>
+  /** The UI settings store (plan 220 S1.4a) for the windows without a backend
+   * socket: main relays `ui.settings.get`/`ui.settings.set` over its admin
+   * lane and every landed batch as `onUiSettingsChanged`. The main window
+   * reads and writes the store over its own socket instead. */
+  getUiSettings: (params?: UiSettingsGetParams) => Promise<UiSettingsSnapshot>
+  setUiSettings: (params: UiSettingsSetParams) => Promise<UiSettingsChange>
+  onUiSettingsChanged: (callback: (change: UiSettingsChange) => void) => () => void
   getNotesDocument: () => Promise<NotesDocument>
   saveNotesDocument: (patch: Partial<NotesDocument>) => Promise<NotesDocument>
   onNotesFlushRequest: (callback: () => void) => () => void
@@ -8127,6 +8379,74 @@ export interface MigrateHighlightAnchorParams {
 }
 // --- end overlay layout (plan 164) ------------------------------------------
 
+// --- UI settings store (plan 220 S1.4a) ------------------------------------
+// The key-value product state every window used to keep in `localStorage`,
+// now one backend row per key (`app_settings`, namespace `ui:`), read through
+// `ui.settings.get`, written in batches through `ui.settings.set` and
+// announced to every window as `ui.settings.changed`. Keys are the renderer's
+// `localStorage` names (`videorc.settings`, ...). Mirrors Rust
+// `videorc_protocol::ui_settings`; the limits mirror `ui_settings.rs`.
+
+/** Any JSON. A top-level value is never `null`: that is a delete. */
+export type UiSettingsJson =
+  | string
+  | number
+  | boolean
+  | null
+  | UiSettingsJson[]
+  | { [key: string]: UiSettingsJson }
+export type UiSettingsValue = Exclude<UiSettingsJson, null>
+
+/** A key is 1 to 256 characters, no control characters, no surrounding whitespace. */
+export const UI_SETTINGS_KEY_MAX_CHARS = 256
+/** Largest value, serialized (8 MiB: a previous release's whole scene library fits). */
+export const UI_SETTINGS_VALUE_MAX_BYTES = 8 * 1024 * 1024
+/** Most keys one batch (puts plus deletes) or one read may name. */
+export const UI_SETTINGS_BATCH_MAX_KEYS = 256
+/** Largest batch, every value serialized (12 MiB). */
+export const UI_SETTINGS_BATCH_MAX_BYTES = 12 * 1024 * 1024
+/** Longest writer id. */
+export const UI_SETTINGS_WRITER_MAX_CHARS = 128
+
+/** No `keys` (or an empty list) reads the whole store. */
+export interface UiSettingsGetParams {
+  keys?: string[]
+}
+
+export interface UiSettingsSnapshot {
+  entries: Record<string, UiSettingsValue>
+  /** Bumped by every batch that lands something. */
+  revision: number
+  /** Whether the one-time `localStorage` migration has run on this profile. */
+  localStorageMigrated: boolean
+}
+
+/** One batch of puts and deletes, applied in one transaction. */
+export interface UiSettingsSetParams {
+  put?: Record<string, UiSettingsValue>
+  delete?: string[]
+  /** Puts land only on keys the store does not hold yet (the migration). */
+  ifAbsent?: boolean
+  /** Marks the one-time `localStorage` migration done. */
+  localStorageMigrated?: boolean
+  /**
+   * A journal replay's write times (Unix ms) by key: a key the store changed
+   * after that time is left out. Every key named here is put or deleted.
+   */
+  unlessUpdatedAfter?: Record<string, number>
+  /** The writing window's id, echoed on the event so it can skip its own change. */
+  writer?: string
+}
+
+/** `ui.settings.set`'s answer and the `ui.settings.changed` event: what landed. */
+export interface UiSettingsChange {
+  revision: number
+  put: Record<string, UiSettingsValue>
+  delete: string[]
+  writer?: string
+}
+// --- end UI settings store (plan 220 S1.4a) --------------------------------
+
 // --- Banners (plan 186) -----------------------------------------------------
 // The streamer's own images placed anywhere on the picture. Backend-owned
 // (SQLite `banners`, images in the managed `Banners` dir beside `Screens`).
@@ -8513,6 +8833,41 @@ export interface SetBuddyOverlayParams {
    *  one release. With it the backend ignores the other fields but `rect`. */
   pngBase64?: string
   rect: OverlayRect
+}
+
+/** `buddy.bubble.render` (plan 260 S1.2e): a sample bubble for the Sidekick
+ * page (the stream demo, the test dialog, the settings sample), drawn by the
+ * live bubble's painter for the canvas the sample stands in for and the
+ * Sidekick's rect there. Nothing reaches the stream. Mirrors Rust
+ * `BuddyBubbleRenderParams`. */
+export interface BuddyBubbleRenderParams {
+  text: string
+  style: CohostBubbleStyle
+  canvasWidth: number
+  canvasHeight: number
+  rect: OverlayRect
+}
+
+/** `captions.preview.render` (plan 260 S1.2e): the Captions page's preview,
+ * drawn by the backend with the captioned copy's cue-frame painter: the line
+ * at its place on a transparent canvas of the preview's size. Mirrors Rust
+ * `CaptionPreviewRenderParams`. */
+export interface CaptionPreviewRenderParams {
+  text: string
+  canvasWidth: number
+  canvasHeight: number
+  position: 'top' | 'bottom'
+  textSize: 's' | 'm' | 'l'
+  /** Omitted: glass. */
+  styleId?: CaptionStyleId
+}
+
+/** A drawing the backend made for a page (plan 260 S1.2e): the PNG as base64
+ * (no `data:` prefix) and its size. Mirrors Rust `OverlayPng`. */
+export interface OverlayPng {
+  pngBase64: string
+  width: number
+  height: number
 }
 
 export interface OverlayTargetInfo {
@@ -10239,6 +10594,52 @@ export interface ScheduledEventMetadata {
   /** X only: keep the replay available after the broadcast ends. */
   availableForReplay?: boolean | null
 }
+export interface ScheduledStreamTimes {
+  /** Minutes east of UTC at `startUtc`: Vancouver in December is -420. */
+  startOffsetMinutes: number
+  /** X only: the planned end the broadcast is sent with. */
+  plannedEndUtc: string | null
+  plannedEndOffsetMinutes: number | null
+  /**
+   * Present when the platform's start (or X's end) is not what the typed wall
+   * time means under the backend's tz data (sent with older rules, or a Fix
+   * time the platform refused): Upcoming offers Fix time.
+   */
+  repair?: {
+    /** `end`: X only, the start is right but the planned end is not. */
+    part: 'start' | 'end'
+    /** What the platform shows now. */
+    platformUtc: string
+    /** `null` when the wall time no longer exists: only an edit can fix it. */
+    correctedUtc: string | null
+    correctedOffsetMinutes: number | null
+  }
+}
+/** `scheduledStreams.resolveTime`: a form's times in the backend's tz data. */
+/** One stretch of a zone's UTC offset, from `fromMs` until the next span. */
+export interface LocalOffsetSpan {
+  fromMs: number
+  offsetMinutes: number
+}
+
+/** `time.localOffsets`: a zone's offsets from the backend's bundled tz data. */
+export interface LocalOffsets {
+  timeZone: string
+  /** The window the spans cover; outside it, ask for that window. */
+  fromMs: number
+  untilMs: number
+  spans: LocalOffsetSpan[]
+}
+
+export interface ScheduledTimeResolution {
+  /** `null` only while a repeated hour waits for its earlier/later choice. */
+  startUtc: string | null
+  startOffsetMinutes: number | null
+  /** The start's two offsets, earlier first, when its wall time happens twice. */
+  repeatedHourOffsets: [number, number] | null
+  plannedEndUtc: string | null
+  plannedEndOffsetMinutes: number | null
+}
 export interface ScheduledStreamEvent {
   id: string
   schemaVersion: number
@@ -10248,6 +10649,11 @@ export interface ScheduledStreamEvent {
   accountLabel: string
   requested: ScheduledEventMetadata
   startUtc: string
+  /**
+   * The UTC offsets to show the times at, from the backend's bundled tz data
+   * (the renderer's ICU data can be older). Absent when the zone is unknown.
+   */
+  times?: ScheduledStreamTimes
   providerEventId: string | null
   watchUrl: string | null
   lifecycle:

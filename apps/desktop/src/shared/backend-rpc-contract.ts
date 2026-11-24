@@ -48,6 +48,8 @@ import type {
   ScheduledStreamMutation,
   ScheduledStreamCapabilities,
   ScheduledStreamCandidate,
+  LocalOffsets,
+  ScheduledTimeResolution,
   CaptureRecoveryStatus,
   CohostCommandChooseParams,
   CohostCommandParams,
@@ -139,6 +141,9 @@ import type {
   BannerReorderParams,
   BannerUpdateParams,
   BuddyOverlaySnapshot,
+  BuddyBubbleRenderParams,
+  CaptionPreviewRenderParams,
+  OverlayPng,
   OverlayTargetsInfo,
   SetBuddyOverlayParams,
   ClearBuddyOverlayParams,
@@ -159,6 +164,15 @@ import type {
   CloudRecordingsList,
   CloudRecordingStatus,
   CloudRoomOverlayEvent,
+  CloudRoomPresentationEvent,
+  RoomPresentationStatus,
+  CloudRoomPresentationSetParams,
+  CloudRoomAvatarSetParams,
+  CloudRoomAvatarMotionParams,
+  CloudRoomAvatarMotionResult,
+  CloudRoomMediaSetParams,
+  CloudRoomAuxSetParams,
+  CloudRoomSceneCommitParams,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
   CloudRoomRequest,
@@ -220,6 +234,7 @@ import type {
   ServerResponse,
   SessionAiArtifactsPage,
   SessionCommentsListParams,
+  SessionCommentsHistory,
   SessionCommentsPage,
   SessionChatTotals,
   SessionDeletionOperation,
@@ -270,6 +285,11 @@ import type {
   StreamOutputTopologyProbeResult,
   StreamPlatform,
   StreamTargetsSnapshot,
+  UiSettingsChange,
+  UiSettingsGetParams,
+  UiSettingsSetParams,
+  UiSettingsSnapshot,
+  UiSettingsValue,
   VideorcAccountSnapshot,
   VideoSettings,
   LinuxDesktopCheck
@@ -296,6 +316,7 @@ import {
 } from './session-markers'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { sessionChatIdentifierSchema, sessionChatTotalsSchema } from './session-chat-totals'
+import { chatImageRoute } from './chat-avatar-bytes'
 import { STREAM_PLATFORMS } from './stream-platforms'
 import {
   BANNER_MAX_COUNT,
@@ -317,7 +338,12 @@ import {
   SOUND_VOLUME_DB_MAX,
   SOUND_VOLUME_DB_MIN,
   SOUNDBOARD_VOLUME_DB_MAX,
-  SOUNDBOARD_VOLUME_DB_MIN
+  SOUNDBOARD_VOLUME_DB_MIN,
+  UI_SETTINGS_BATCH_MAX_BYTES,
+  UI_SETTINGS_BATCH_MAX_KEYS,
+  UI_SETTINGS_KEY_MAX_CHARS,
+  UI_SETTINGS_VALUE_MAX_BYTES,
+  UI_SETTINGS_WRITER_MAX_CHARS
 } from './backend'
 import { isBannerFileName } from './banner-assets'
 import { parseCohostPetAnimatorEvent, type CohostPetAnimatorEvent } from './buddy-animator-public'
@@ -336,6 +362,7 @@ import {
   type ChatCommandsState
 } from './chat-commands'
 import type { CohostActAnswer, CohostActParams } from './buddy-act'
+import type { ProgramAudioSettings } from './program-audio-routing'
 import { LIVE_BACKGROUND_IDS, type LiveBackgroundId } from './live-background-ids'
 import { isSoundFileName, isSoundStarterSlug } from './sound-assets'
 import { TWITCH_GIF_MODES } from './chat-gif'
@@ -410,6 +437,7 @@ import {
   RuntimeSchemaError,
   runtimeSchema,
   stringSchema,
+  tupleSchema,
   undefinedSchema,
   unionSchema,
   type RuntimeSchema
@@ -436,8 +464,21 @@ export interface BackendRpcMethodMap {
   'session.sources.get': BackendRpcDefinition<{ sessionId: string }, SessionSources>
   'session.source.switch': BackendRpcDefinition<SourceSwitchParams, SessionSources>
   'scheduledStreams.resolveTime': BackendRpcDefinition<
-    { localStart: string; timeZone: string; offsetChoice?: string | null },
-    { startUtc: string }
+    {
+      localStart: string
+      timeZone: string
+      offsetChoice?: string | null
+      plannedEndLocal?: string | null
+    },
+    ScheduledTimeResolution
+  >
+  'scheduledStreams.zoneOffsets': BackendRpcDefinition<
+    { timeZones: string[]; atUtc?: string },
+    { offsets: Record<string, number> }
+  >
+  'time.localOffsets': BackendRpcDefinition<
+    { timeZone: string; fromUtc?: string; untilUtc?: string },
+    LocalOffsets
   >
   'scheduledStreams.candidates': BackendRpcDefinition<
     { eventId: string },
@@ -594,6 +635,11 @@ export interface BackendRpcMethodMap {
   'sessions.aiArtifacts.list': BackendRpcDefinition<SessionDetailListParams, SessionAiArtifactsPage>
   'sessions.storage': BackendRpcDefinition<undefined, SessionStorageTotals>
   'sessions.comments.list': BackendRpcDefinition<SessionCommentsListParams, SessionCommentsPage>
+  // Plan 220 S1.6a: one session's History view from the backend.
+  'sessions.comments.history': BackendRpcDefinition<{ sessionId: string }, SessionCommentsHistory>
+  // Plan 220 S1.6a: an allowlisted chat image into the backend's cache; its
+  // loopback route URL, or null when refused.
+  'chatImages.cache': BackendRpcDefinition<{ url: string; kind?: 'avatar' | 'gif' }, string | null>
   'sessions.comments.totals': BackendRpcDefinition<{ sessionId: string }, SessionChatTotals | null>
   'sessions.viewers.list': BackendRpcDefinition<SessionViewersListParams, SessionViewersPage>
   'sessions.audience.get': BackendRpcDefinition<{ sessionId: string }, AudienceSnapshot | null>
@@ -691,6 +737,36 @@ export interface BackendRpcMethodMap {
   'cloud.presentation.restore': BackendRpcDefinition<{ showId: string }, CloudPresentationRestore>
   /** The renderer's own room connection, for the status copy. */
   'cloud.room.client.report': BackendRpcDefinition<CloudRoomClientReportParams, CloudStatus>
+  'cloud.room.avatar.set': BackendRpcDefinition<CloudRoomAvatarSetParams, { held: boolean }>
+  'cloud.room.microphone.set': BackendRpcDefinition<CloudRoomMediaSetParams, { held: boolean }>
+  'cloud.room.camera.set': BackendRpcDefinition<CloudRoomMediaSetParams, { held: boolean }>
+  'cloud.room.screen.set': BackendRpcDefinition<CloudRoomMediaSetParams, { held: boolean }>
+  /** Plan 260 S1.8: whether the backend holds the room's host seat (its dev
+   * switch); asked before the renderer starts a room client. */
+  'cloud.room.owner': BackendRpcDefinition<undefined, { backend: boolean }>
+  'cloud.room.routing.set': BackendRpcDefinition<ProgramAudioSettings, { held: boolean }>
+  'cloud.room.aux.set': BackendRpcDefinition<CloudRoomAuxSetParams, { held: boolean }>
+  /** Plan 260 S1.8d: the Program monitor takes the runner's return. */
+  'cloud.room.monitor.set': BackendRpcDefinition<
+    { enabled: boolean; listen?: boolean },
+    { held: boolean }
+  >
+  /** Plan 260 S1.8c c5: this computer controls the show with its devices on. */
+  'cloud.room.html.set': BackendRpcDefinition<{ enabled: boolean }, { held: boolean }>
+  'cloud.room.avatar.motion': BackendRpcDefinition<
+    CloudRoomAvatarMotionParams,
+    CloudRoomAvatarMotionResult
+  >
+  /** The commit's generation (the scene entry's `revision`) and, for an
+   * unchanged commit, the entry already reported for it. */
+  'cloud.room.scene.commit': BackendRpcDefinition<
+    CloudRoomSceneCommitParams,
+    { held: boolean; generation?: number; status?: RoomPresentationStatus | null }
+  >
+  'cloud.room.presentation.set': BackendRpcDefinition<
+    CloudRoomPresentationSetParams,
+    { held: boolean }
+  >
   'cloud.guest.decide': BackendRpcDefinition<CloudGuestDecideParams, CloudStatus>
   'cloud.guest.act': BackendRpcDefinition<CloudGuestActParams, CloudStatus>
   /** The whole stage in one frame (D8). */
@@ -810,6 +886,10 @@ export interface BackendRpcMethodMap {
   // --- Overlay layout (plan 164) ---
   'overlays.layout.get': BackendRpcDefinition<undefined, OverlayLayout>
   'overlays.layout.set': BackendRpcDefinition<OverlayLayout, OverlayLayout>
+  // --- UI settings store (plan 220 S1.4a) ---
+  'ui.settings.get': BackendRpcDefinition<UiSettingsGetParams | undefined, UiSettingsSnapshot>
+  'ui.settings.set': BackendRpcDefinition<UiSettingsSetParams, UiSettingsChange>
+  // --- end UI settings store ---
   'overlays.layout.migrate_highlight_anchor': BackendRpcDefinition<
     MigrateHighlightAnchorParams,
     OverlayLayout
@@ -908,6 +988,10 @@ export interface BackendRpcMethodMap {
   'cohost.buddy.status': BackendRpcDefinition<undefined, BuddyOverlaySnapshot>
   'buddy.overlay.set': BackendRpcDefinition<SetBuddyOverlayParams, OverlayTargetsInfo>
   // --- end Buddy overlay (plan 164) ---
+  // --- Drawings for the pages (plan 260 S1.2e) ---
+  'captions.preview.render': BackendRpcDefinition<CaptionPreviewRenderParams, OverlayPng>
+  'buddy.bubble.render': BackendRpcDefinition<BuddyBubbleRenderParams, OverlayPng>
+  // --- end Drawings for the pages (plan 260 S1.2e) ---
   // --- Buddy pets (plan 168, Phase A) ---
   'cohost.pet.list': BackendRpcDefinition<undefined, BuddyPetSummary[]>
   'cohost.pet.import': BackendRpcDefinition<CohostPetImportParams, BuddyPetSummary>
@@ -1096,6 +1180,7 @@ export interface BackendEventMap {
   'cloud.room.requests': CloudRoomRequest
   /** Plan 234 T3: an overlay for the host's renderer to send to the room. */
   'cloud.room.overlay': CloudRoomOverlayEvent
+  'cloud.room.presentation': CloudRoomPresentationEvent
   'cloud.clip.job': CloudClipJob
   'cloud.recordings.download': CloudRecordingDownloadEvent
   /** Plan 249 S22: one file of a separate-files import job. */
@@ -1108,6 +1193,8 @@ export interface BackendEventMap {
   // --- Overlay layout (plan 164) ---
   'overlays.layout': OverlayLayout
   // --- end overlay layout (plan 164) ---
+  // --- UI settings store (plan 220 S1.4a): one batch, to every window ---
+  'ui.settings.changed': UiSettingsChange
   // --- Banners (plan 186): the full list, to every window ---
   'banners.changed': Banner[]
   // --- HTML overlays (plan 232): what main renders, and where each stands ---
@@ -1181,6 +1268,8 @@ type RuntimeBackendRpcContract = {
 const boundedString = stringSchema({ minLength: 1, maxLength: 16_384 })
 const boundedPath = stringSchema({ minLength: 1, maxLength: 32_768 })
 const timestamp = stringSchema({ minLength: 1, maxLength: 128 })
+// Minutes east of UTC; real zones span -12:00 to +14:00.
+const utcOffsetMinutes = numberSchema({ integer: true, min: -1_080, max: 1_080 })
 const optionalText = optionalSchema(stringSchema({ maxLength: 16_384 }))
 const boundedBackendPayloadSchema = boundedJsonValueSchema()
 const boundedBackendParamValueSchema = boundedJsonValueSchema({
@@ -1978,6 +2067,14 @@ const discordTestResultSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<DiscordTestResult>
 // --- end Discord go-live announcement (plan 187) ---
+
+/** The backend's loopback route for one cached chat image (plan 220 S1.6a). */
+const chatImageRouteUrlSchema = runtimeSchema<string>('a backend chat image URL', (value, path) => {
+  if (chatImageRoute(value) === null) {
+    throw new RuntimeSchemaError(path, 'a backend chat image URL')
+  }
+  return value as string
+})
 
 const audienceSnapshotSchema = objectSchema(
   {
@@ -4299,12 +4396,138 @@ const migrateHighlightAnchorParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<MigrateHighlightAnchorParams>
 // --- end overlay layout (plan 164) ---
+
+// --- UI settings store (plan 220 S1.4a) ---
+// The limits mirror `ui_settings.rs`: the backend refuses the same batches,
+// with the reason; this side refuses them before they are sent, and refuses
+// a forged snapshot or event before it reaches a window's cache.
+const uiSettingsKeySchema = runtimeSchema<string>('a UI setting key', (value, path) => {
+  const key = stringSchema({ minLength: 1, maxLength: UI_SETTINGS_KEY_MAX_CHARS }).parse(
+    value,
+    path
+  )
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(key)) {
+    throw new RuntimeSchemaError(path, 'a UI setting key without control characters')
+  }
+  if (key.trim() !== key) {
+    throw new RuntimeSchemaError(path, 'a UI setting key without surrounding whitespace')
+  }
+  return key
+})
+const uiSettingsBoundedJsonSchema = boundedJsonValueSchema({
+  maxStringLength: UI_SETTINGS_VALUE_MAX_BYTES,
+  maxTotalStringLength: UI_SETTINGS_BATCH_MAX_BYTES
+})
+const uiSettingsValueSchema = runtimeSchema<UiSettingsValue>(
+  'a UI setting value (JSON, never null)',
+  (value, path) => {
+    if (value === null) {
+      throw new RuntimeSchemaError(path, 'a UI setting value (JSON, never null)')
+    }
+    return uiSettingsBoundedJsonSchema.parse(value, path) as UiSettingsValue
+  }
+)
+/** A record of settings whose keys are checked too (`recordSchema` checks values only). */
+function uiSettingsEntriesSchema(maxKeys: number): RuntimeSchema<Record<string, UiSettingsValue>> {
+  const values = recordSchema(uiSettingsValueSchema, { maxKeys })
+  return runtimeSchema<Record<string, UiSettingsValue>>('UI settings entries', (value, path) => {
+    const entries = values.parse(value, path)
+    for (const key of Object.keys(entries)) uiSettingsKeySchema.parse(key, `${path}.${key}`)
+    return entries
+  })
+}
+const uiSettingsKeyListSchema = arraySchema(uiSettingsKeySchema, {
+  maxLength: UI_SETTINGS_BATCH_MAX_KEYS
+})
+const uiSettingsRevisionSchema = numberSchema({ integer: true, min: 0 })
+const uiSettingsWriterSchema = optionalSchema(
+  stringSchema({ minLength: 1, maxLength: UI_SETTINGS_WRITER_MAX_CHARS })
+)
+export const uiSettingsGetParamsSchema = objectSchema(
+  { keys: optionalSchema(uiSettingsKeyListSchema) },
+  { allowUnknown: false }
+) as RuntimeSchema<UiSettingsGetParams>
+/** The whole store: more keys than one batch (every `videorc.sources.more.<id>`). */
+export const uiSettingsSnapshotSchema = objectSchema(
+  {
+    entries: uiSettingsEntriesSchema(10_000),
+    revision: uiSettingsRevisionSchema,
+    localStorageMigrated: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<UiSettingsSnapshot>
+export const uiSettingsSetParamsSchema = runtimeSchema<UiSettingsSetParams>(
+  'a UI settings batch',
+  (value, path) => {
+    const batch = objectSchema(
+      {
+        put: optionalSchema(uiSettingsEntriesSchema(UI_SETTINGS_BATCH_MAX_KEYS)),
+        delete: optionalSchema(uiSettingsKeyListSchema),
+        ifAbsent: optionalSchema(booleanSchema),
+        localStorageMigrated: optionalSchema(booleanSchema),
+        unlessUpdatedAfter: optionalSchema(
+          recordSchema(numberSchema({ integer: true, min: 0 }), {
+            maxKeys: UI_SETTINGS_BATCH_MAX_KEYS
+          })
+        ),
+        writer: uiSettingsWriterSchema
+      },
+      { allowUnknown: false }
+    ).parse(value, path) as UiSettingsSetParams
+    const put = batch.put ?? {}
+    const deletes = batch.delete ?? []
+    for (const key of Object.keys(batch.unlessUpdatedAfter ?? {})) {
+      if (!(key in put) && !deletes.includes(key)) {
+        throw new RuntimeSchemaError(
+          `${path}.unlessUpdatedAfter`,
+          `a write time only for a key the batch puts or deletes (${key})`
+        )
+      }
+    }
+    if (Object.keys(put).length + deletes.length > UI_SETTINGS_BATCH_MAX_KEYS) {
+      throw new RuntimeSchemaError(
+        path,
+        `a UI settings batch naming at most ${UI_SETTINGS_BATCH_MAX_KEYS} keys`
+      )
+    }
+    const seen = new Set<string>()
+    for (const key of deletes) {
+      if (key in put) {
+        throw new RuntimeSchemaError(`${path}.delete`, `a key not also put (${key})`)
+      }
+      if (seen.has(key)) {
+        throw new RuntimeSchemaError(`${path}.delete`, `each key once (${key})`)
+      }
+      seen.add(key)
+    }
+    return batch
+  }
+)
+export const uiSettingsChangeSchema = objectSchema(
+  {
+    revision: uiSettingsRevisionSchema,
+    put: uiSettingsEntriesSchema(UI_SETTINGS_BATCH_MAX_KEYS),
+    delete: uiSettingsKeyListSchema,
+    writer: uiSettingsWriterSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<UiSettingsChange>
+// --- end UI settings store (plan 220 S1.4a) ---
 // --- Chat on stream (plan 215 G) ---
 // A 4 MB PNG cap on the Rust side: base64 of that is 5.6 M characters. The
 // rects are the overlay layout's, optional like the highlight's.
 const setChatOverlayParamsSchema = objectSchema(
   {
-    pngBase64: stringSchema({ minLength: 4, maxLength: 5_600_000 }),
+    // Plan 260 S1.2: the backend draws the box from the messages named (at
+    // most five shown) for the canvas given; the PNG is the previous
+    // release's path.
+    pngBase64: optionalSchema(stringSchema({ minLength: 4, maxLength: 5_600_000 })),
+    messageIds: optionalSchema(
+      arraySchema(stringSchema({ minLength: 1, maxLength: 512 }), { maxLength: 50 })
+    ),
+    canvasWidth: optionalSchema(numberSchema({ integer: true, min: 1, max: 8192 })),
+    canvasHeight: optionalSchema(numberSchema({ integer: true, min: 1, max: 8192 })),
     rect: optionalSchema(overlayRectSchema),
     verticalPngBase64: optionalSchema(stringSchema({ minLength: 4, maxLength: 5_600_000 })),
     verticalRect: optionalSchema(overlayRectSchema)
@@ -6244,6 +6467,41 @@ const setBuddyOverlayParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<SetBuddyOverlayParams>
 // --- end Buddy overlay (plan 164) ---
+// --- Drawings for the pages (plan 260 S1.2e) ---
+// The backend's 4K bound for a page's sample (the Buddy page's zoomed sample
+// and stream demo draw on a 4K canvas). A PNG of that is far under the wire's
+// 16 M characters.
+const pageSampleSideSchema = numberSchema({ integer: true, min: 1, max: 4096 })
+const overlayPngSchema = objectSchema(
+  {
+    pngBase64: stringSchema({ minLength: 4, maxLength: 12_000_000 }),
+    width: pageSampleSideSchema,
+    height: pageSampleSideSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<OverlayPng>
+const captionPreviewRenderParamsSchema = objectSchema(
+  {
+    text: stringSchema({ maxLength: 2000 }),
+    canvasWidth: numberSchema({ integer: true, min: 2, max: 4096 }),
+    canvasHeight: numberSchema({ integer: true, min: 2, max: 4096 }),
+    position: enumSchema(['top', 'bottom']),
+    textSize: enumSchema(['s', 'm', 'l']),
+    styleId: optionalSchema(enumSchema(['classic', 'glass', 'lower-third', 'high-contrast']))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CaptionPreviewRenderParams>
+const buddyBubbleRenderParamsSchema = objectSchema(
+  {
+    text: stringSchema({ minLength: 1, maxLength: 1000 }),
+    style: enumSchema(['speech', 'thought', 'shout']),
+    canvasWidth: pageSampleSideSchema,
+    canvasHeight: pageSampleSideSchema,
+    rect: overlayRectSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<BuddyBubbleRenderParams>
+// --- end Drawings for the pages (plan 260 S1.2e) ---
 // --- Buddy pets (plan 168, Phase B) ---
 const clearBuddyOverlayParamsSchema = objectSchema(
   { target: optionalSchema(enumSchema(['primary', 'auxiliary'])) },
@@ -6978,6 +7236,263 @@ const cloudOpenFlagSchema = objectSchema({ open: booleanSchema }, { allowUnknown
 // in the event (`imageId` names them on the backend's HTTP server).
 const cloudOverlaySlotSchema = enumSchema(['card', 'takeover', 'hold'])
 const cloudOverlayOrientationSchema = enumSchema(['h', 'v'])
+// Plan 260 S1.8b: the presentation topics' delivery, from the backend's room
+// host. At most a few program pages observe one view.
+const roomPresentationStatusSchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    state: enumSchema(['off', 'preview', 'waiting', 'applied', 'failed']),
+    reason: nullableSchema(stringSchema({ maxLength: 512 })),
+    revision: numberSchema({ integer: true, min: 0 }),
+    observed: recordSchema(
+      objectSchema(
+        {
+          revision: numberSchema({ integer: true, min: 0 }),
+          output: enumSchema(['stream', 'recording']),
+          orientation: enumSchema(['h', 'v'])
+        },
+        { allowUnknown: false }
+      ),
+      { maxKeys: 32 }
+    ),
+    guests: optionalSchema(
+      objectSchema(
+        {
+          enabled: booleanSchema,
+          capable: numberSchema({ integer: true, min: 0 }),
+          applied: numberSchema({ integer: true, min: 0 })
+        },
+        { allowUnknown: false }
+      )
+    ),
+    background: optionalSchema(
+      objectSchema(
+        {
+          wanted: objectSchema(
+            { h: stringSchema({ maxLength: 16 }), v: stringSchema({ maxLength: 16 }) },
+            { allowUnknown: false }
+          ),
+          drawn: recordSchema(boundedJsonValueSchema({ maxDepth: 3, maxNodes: 16 }), {
+            maxKeys: 32
+          }),
+          unsupported: numberSchema({ integer: true, min: 0 })
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+)
+const cloudRoomPresentationSetParamsSchema = objectSchema(
+  { graphics: optionalSchema(booleanSchema), avatar: optionalSchema(booleanSchema) },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomPresentationSetParams>
+const cloudRoomPresentationSetResultSchema = objectSchema(
+  { held: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<{ held: boolean }>
+// Plan 260 S1.8b: the avatar and scene content the Studio builds, for the
+// backend's room to deliver. The content is bounded JSON here; the program
+// pages parse every snapshot they are sent. A scene's pictures are a few,
+// of at most 4 MB each.
+const roomContentSchema = boundedJsonValueSchema({
+  maxDepth: 12,
+  maxNodes: 20_000,
+  maxStringLength: 6_000_000,
+  maxTotalStringLength: 24_000_000
+})
+const cloudRoomAvatarSetParamsSchema = objectSchema(
+  {
+    content: roomContentSchema,
+    guests: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomAvatarSetParams>
+// Plan 260 S1.8c: the room microphone bridge's settings (its own bounds).
+const cloudRoomMicrophoneSetParamsSchema = objectSchema(
+  {
+    microphone: nullableSchema(
+      objectSchema(
+        {
+          deviceId: stringSchema({ minLength: 1, maxLength: 512 }),
+          gainDb: numberSchema({ min: -24, max: 24 }),
+          muted: booleanSchema,
+          noise: enumSchema(['off', 'rnnoise']),
+          offsetMs: numberSchema({ integer: true, min: 0, max: 1000 })
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomMediaSetParams>
+// Plan 260 S1.8c c5: whether the backend's room may publish the HTML sheet.
+const cloudRoomHtmlSetParamsSchema = objectSchema(
+  { enabled: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<{ enabled: boolean }>
+// Plan 260 S1.8c c4d: room sounds and the room's system audio.
+const cloudRoomAuxSetParamsSchema = objectSchema(
+  {
+    sounds: booleanSchema,
+    system: objectSchema(
+      {
+        enabled: booleanSchema,
+        gainDb: numberSchema({ min: -24, max: 12 }),
+        muted: booleanSchema
+      },
+      { allowUnknown: false }
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomAuxSetParams>
+// Plan 260 S1.8c c4c: what the program page plays of the host's speech and
+// auxiliary audio (`ProgramAudioSettings`), for the backend's room to route.
+const programGain = numberSchema({ min: 0, max: 1 })
+const cloudRoomRoutingSetParamsSchema = objectSchema(
+  {
+    speechGain: programGain,
+    auxiliaryGain: programGain,
+    speechMuted: booleanSchema,
+    auxiliaryMuted: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ProgramAudioSettings>
+// Plan 260 S1.8c: the screen the room shares, by its native source id.
+const cloudRoomScreenSetParamsSchema = objectSchema(
+  {
+    screen: nullableSchema(
+      objectSchema(
+        {
+          // The backend refuses an id that names no screen or window.
+          sourceId: stringSchema({ minLength: 1, maxLength: 512 })
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomMediaSetParams>
+// Plan 260 S1.8c: the camera the Studio has on (its effects are the scene
+// layout's, already the backend's).
+const cloudRoomCameraSetParamsSchema = objectSchema(
+  {
+    camera: nullableSchema(
+      objectSchema(
+        { deviceId: stringSchema({ minLength: 1, maxLength: 512 }) },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomMediaSetParams>
+// One motion message, at most 16 KiB on the wire (AVATAR_MOTION_MAX_BYTES).
+const cloudRoomAvatarMotionParamsSchema = objectSchema(
+  {
+    message: boundedJsonValueSchema({
+      maxDepth: 8,
+      maxNodes: 2_000,
+      maxStringLength: 4_096,
+      maxTotalStringLength: 16_384
+    })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomAvatarMotionParams>
+const cloudRoomAvatarMotionResultSchema = objectSchema(
+  {
+    held: booleanSchema,
+    targets: arraySchema(stringSchema({ maxLength: 160 }), { maxLength: 32 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomAvatarMotionResult>
+const cloudSceneAssetSchema = objectSchema(
+  {
+    hash: stringSchema({ minLength: 64, maxLength: 64 }),
+    mime: enumSchema(['image/png', 'image/jpeg', 'image/webp']),
+    width: numberSchema({ integer: true, min: 1, max: 8192 }),
+    height: numberSchema({ integer: true, min: 1, max: 8192 }),
+    base64: stringSchema({ minLength: 4, maxLength: 5_600_000 })
+  },
+  { allowUnknown: false }
+)
+const cloudRoomSceneCommitParamsSchema = objectSchema(
+  {
+    content: roomContentSchema,
+    assets: arraySchema(cloudSceneAssetSchema, { maxLength: 4 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomSceneCommitParams>
+const cloudRoomPresentationEventSchema = objectSchema(
+  {
+    showId: boundedString,
+    graphics: optionalSchema(roomPresentationStatusSchema),
+    avatar: optionalSchema(roomPresentationStatusSchema),
+    scene: optionalSchema(roomPresentationStatusSchema),
+    media: optionalSchema(
+      objectSchema(
+        {
+          camera: booleanSchema,
+          microphone: booleanSchema,
+          screen: optionalSchema(
+            objectSchema(
+              {
+                sourceId: stringSchema({ minLength: 1, maxLength: 512 }),
+                epoch: stringSchema({ minLength: 1, maxLength: 64 }),
+                generation: nonNegativeInteger,
+                hidden: booleanSchema,
+                published: booleanSchema,
+                sourceBlockedAt: nullableSchema(nonNegativeInteger),
+                status: enumSchema(['visible', 'hiding', 'observed', 'unconfirmed', 'paused']),
+                observations: recordSchema(nonNegativeInteger, { maxKeys: 256 }),
+                reason: optionalSchema(stringSchema({ maxLength: 512 }))
+              },
+              { allowUnknown: false }
+            )
+          ),
+          people: optionalSchema(
+            arraySchema(
+              objectSchema(
+                {
+                  identity: stringSchema({ minLength: 1, maxLength: 256 }),
+                  name: stringSchema({ maxLength: 256 }),
+                  camera: booleanSchema,
+                  screen: booleanSchema,
+                  audio: booleanSchema,
+                  micMuted: booleanSchema,
+                  cameraOff: booleanSchema,
+                  speaking: booleanSchema,
+                  quality: enumSchema(['excellent', 'good', 'poor', 'lost'])
+                },
+                { allowUnknown: false }
+              ),
+              { maxLength: 64 }
+            )
+          ),
+          monitor: optionalSchema(
+            objectSchema({ video: booleanSchema, audio: booleanSchema }, { allowUnknown: false })
+          ),
+          aux: optionalSchema(
+            objectSchema(
+              {
+                enabled: booleanSchema,
+                state: enumSchema(['off', 'blocked', 'queued', 'published']),
+                reason: nullableSchema(stringSchema({ maxLength: 512 })),
+                trackSid: nullableSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+                observed: recordSchema(nonNegativeInteger, { maxKeys: 256 }),
+                systemState: enumSchema(['off', 'opening', 'capturing', 'blocked']),
+                systemReason: nullableSchema(stringSchema({ maxLength: 512 })),
+                systemDisarmed: optionalSchema(booleanSchema)
+              },
+              { allowUnknown: false }
+            )
+          )
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomPresentationEvent>
 const cloudRoomOverlayEventSchema = unionSchema([
   objectSchema(
     {
@@ -7283,11 +7798,59 @@ const runtimeContracts = {
       {
         localStart: boundedString,
         timeZone: boundedString,
-        offsetChoice: optionalSchema(nullableSchema(enumSchema(['earlier', 'later'])))
+        offsetChoice: optionalSchema(nullableSchema(enumSchema(['earlier', 'later']))),
+        plannedEndLocal: optionalSchema(nullableSchema(boundedString))
       },
       { allowUnknown: false }
     ),
-    result: objectSchema({ startUtc: timestamp }, { allowUnknown: false })
+    result: objectSchema(
+      {
+        startUtc: nullableSchema(timestamp),
+        startOffsetMinutes: nullableSchema(utcOffsetMinutes),
+        repeatedHourOffsets: nullableSchema(tupleSchema([utcOffsetMinutes, utcOffsetMinutes])),
+        plannedEndUtc: nullableSchema(timestamp),
+        plannedEndOffsetMinutes: nullableSchema(utcOffsetMinutes)
+      },
+      { allowUnknown: false }
+    )
+  },
+  'scheduledStreams.zoneOffsets': {
+    params: objectSchema(
+      {
+        timeZones: arraySchema(boundedString, { maxLength: 1_000 }),
+        atUtc: optionalSchema(timestamp)
+      },
+      { allowUnknown: false }
+    ),
+    result: objectSchema(
+      { offsets: recordSchema(utcOffsetMinutes, { maxKeys: 1_000 }) },
+      { allowUnknown: false }
+    )
+  },
+  'time.localOffsets': {
+    params: objectSchema(
+      {
+        timeZone: boundedString,
+        fromUtc: optionalSchema(timestamp),
+        untilUtc: optionalSchema(timestamp)
+      },
+      { allowUnknown: false }
+    ),
+    result: objectSchema(
+      {
+        timeZone: boundedString,
+        fromMs: numberSchema({ integer: true }),
+        untilMs: numberSchema({ integer: true }),
+        spans: arraySchema(
+          objectSchema(
+            { fromMs: numberSchema({ integer: true }), offsetMinutes: utcOffsetMinutes },
+            { allowUnknown: false }
+          ),
+          { maxLength: 256 }
+        )
+      },
+      { allowUnknown: false }
+    )
   },
   'scheduledStreams.candidates': {
     params: objectSchema({ eventId: boundedString }, { allowUnknown: false }),
@@ -7638,6 +8201,30 @@ const runtimeContracts = {
     params: objectSchema({ sessionId: sessionChatIdentifierSchema }, { allowUnknown: false }),
     result: nullableSchema(sessionChatTotalsSchema)
   },
+  'sessions.comments.history': {
+    params: objectSchema({ sessionId: sessionChatIdentifierSchema }, { allowUnknown: false }),
+    result: objectSchema(
+      {
+        sessionId: sessionChatIdentifierSchema,
+        messages: arraySchema(boundedBackendPayloadSchema, { maxLength: 2000 }),
+        latestSendOperation: optionalSchema(boundedBackendPayloadSchema),
+        viewers: arraySchema(viewerSampleSchema, { maxLength: 1440 }),
+        audience: nullableSchema(audienceSnapshotSchema),
+        chatTotals: nullableSchema(sessionChatTotalsSchema)
+      },
+      { allowUnknown: false }
+    )
+  },
+  'chatImages.cache': {
+    params: objectSchema(
+      {
+        url: stringSchema({ minLength: 1, maxLength: 2048 }),
+        kind: optionalSchema(enumSchema(['avatar', 'gif'] as const))
+      },
+      { allowUnknown: false }
+    ),
+    result: nullableSchema(chatImageRouteUrlSchema)
+  },
   'sessions.comments.list': {
     params: objectSchema(
       {
@@ -7860,6 +8447,70 @@ const runtimeContracts = {
     ),
     result: presentationValueSchema as RuntimeSchema<CloudPresentationRestore>
   },
+  'cloud.room.avatar.set': {
+    params: cloudRoomAvatarSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.microphone.set': {
+    params: cloudRoomMicrophoneSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.camera.set': {
+    params: cloudRoomCameraSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.screen.set': {
+    params: cloudRoomScreenSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.owner': {
+    params: undefinedSchema,
+    result: objectSchema({ backend: booleanSchema }, { allowUnknown: false }) as RuntimeSchema<{
+      backend: boolean
+    }>
+  },
+  'cloud.room.routing.set': {
+    params: cloudRoomRoutingSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.aux.set': {
+    params: cloudRoomAuxSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.html.set': {
+    params: cloudRoomHtmlSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.monitor.set': {
+    params: objectSchema(
+      { enabled: booleanSchema, listen: optionalSchema(booleanSchema) },
+      { allowUnknown: false }
+    ) as RuntimeSchema<{ enabled: boolean; listen?: boolean }>,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.avatar.motion': {
+    params: cloudRoomAvatarMotionParamsSchema,
+    result: cloudRoomAvatarMotionResultSchema
+  },
+  'cloud.room.scene.commit': {
+    params: cloudRoomSceneCommitParamsSchema,
+    result: objectSchema(
+      {
+        held: booleanSchema,
+        generation: optionalSchema(nonNegativeInteger),
+        status: optionalSchema(nullableSchema(roomPresentationStatusSchema))
+      },
+      { allowUnknown: false }
+    ) as RuntimeSchema<{
+      held: boolean
+      generation?: number
+      status?: RoomPresentationStatus | null
+    }>
+  },
+  'cloud.room.presentation.set': {
+    params: cloudRoomPresentationSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
   'cloud.room.client.report': {
     params: cloudRoomClientReportParamsSchema,
     result: cloudStatusSchema
@@ -8017,6 +8668,13 @@ const runtimeContracts = {
   // --- Overlay layout (plan 164) ---
   'overlays.layout.get': { params: undefinedSchema, result: overlayLayoutSchema },
   'overlays.layout.set': { params: overlayLayoutSchema, result: overlayLayoutSchema },
+  // --- UI settings store (plan 220 S1.4a) ---
+  'ui.settings.get': {
+    params: optionalSchema(uiSettingsGetParamsSchema),
+    result: uiSettingsSnapshotSchema
+  },
+  'ui.settings.set': { params: uiSettingsSetParamsSchema, result: uiSettingsChangeSchema },
+  // --- end UI settings store ---
   'overlays.layout.migrate_highlight_anchor': {
     params: migrateHighlightAnchorParamsSchema,
     result: overlayLayoutSchema
@@ -8128,6 +8786,13 @@ const runtimeContracts = {
   'cohost.buddy.status': { params: undefinedSchema, result: buddyOverlaySnapshotSchema },
   'buddy.overlay.set': { params: setBuddyOverlayParamsSchema, result: overlayTargetsInfoSchema },
   // --- end Buddy overlay (plan 164) ---
+  // --- Drawings for the pages (plan 260 S1.2e) ---
+  'captions.preview.render': {
+    params: captionPreviewRenderParamsSchema,
+    result: overlayPngSchema
+  },
+  'buddy.bubble.render': { params: buddyBubbleRenderParamsSchema, result: overlayPngSchema },
+  // --- end Drawings for the pages (plan 260 S1.2e) ---
   // --- Buddy pets (plan 168, Phase A) ---
   'cohost.pet.list': {
     params: undefinedSchema,
@@ -8488,6 +9153,7 @@ const runtimeEventSchemas = {
   'cloud.state': cloudStatusSchema,
   'cloud.room.requests': cloudRoomRequestSchema,
   'cloud.room.overlay': cloudRoomOverlayEventSchema,
+  'cloud.room.presentation': cloudRoomPresentationEventSchema,
   'cloud.clip.job': cloudClipJobSchema,
   'cloud.recordings.download': cloudRecordingDownloadEventSchema,
   'cloud.iso.import': cloudIsoImportEventSchema,
@@ -8497,6 +9163,9 @@ const runtimeEventSchemas = {
   // --- Overlay layout (plan 164) ---
   'overlays.layout': overlayLayoutSchema,
   // --- end overlay layout (plan 164) ---
+  // --- UI settings store (plan 220 S1.4a) ---
+  'ui.settings.changed': uiSettingsChangeSchema,
+  // --- end UI settings store ---
   'banners.changed': bannerListSchema,
   'htmlOverlays.targets': htmlOverlayTargetsSchema,
   'htmlOverlays.status': htmlOverlayStatusesSchema,

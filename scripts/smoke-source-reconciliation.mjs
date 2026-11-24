@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { rm } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 
@@ -13,13 +13,34 @@ const tempDir = join(tmpdir(), `videorc-source-reconciliation-${Date.now()}`)
 try {
   const tempModule = await compileCaptureModule(tempDir)
 
-  const storage = new Map()
-  globalThis.localStorage = {
-    getItem: (key) => storage.get(key) ?? null,
-    setItem: (key, value) => storage.set(key, String(value)),
-    removeItem: (key) => storage.delete(key),
-    clear: () => storage.clear()
-  }
+  // Plan 220 S1.4b: capture.ts reads its stored config from the window's UI
+  // settings store. Here that store runs over an engine in memory.
+  const { createUiSettingsStore } = require(join(dirname(tempModule), 'ui-settings-store.js'))
+  const { setWindowUiSettingsStoreForTests, uiSettingsStorage } = require(
+    join(dirname(tempModule), 'ui-settings-storage.js')
+  )
+  const engine = new Map()
+  let revision = 0
+  const store = createUiSettingsStore({
+    storage: null,
+    transport: {
+      get: async () => ({
+        entries: Object.fromEntries(engine),
+        revision,
+        localStorageMigrated: true
+      }),
+      set: async ({ put = {}, delete: deletes = [] }) => {
+        for (const [key, value] of Object.entries(put)) engine.set(key, value)
+        for (const key of deletes) engine.delete(key)
+        revision += 1
+        return { revision, put, delete: deletes }
+      },
+      onChange: () => () => {}
+    }
+  })
+  assert.equal((await store.hydrate()).state, 'hydrated')
+  setWindowUiSettingsStoreForTests(store)
+  const storedSettings = uiSettingsStorage()
 
   const {
     defaultCaptureConfig,
@@ -52,7 +73,7 @@ try {
     wantedCameraName: undefined
   }
 
-  localStorage.setItem(
+  storedSettings.setItem(
     STORAGE_KEYS.captureConfig,
     JSON.stringify(
       persistableCaptureConfig({
@@ -108,7 +129,7 @@ try {
     ]
   )
 
-  localStorage.setItem(
+  storedSettings.setItem(
     STORAGE_KEYS.captureConfig,
     JSON.stringify({
       ...defaultCaptureConfig,
@@ -120,7 +141,7 @@ try {
   )
   assert.equal(loadCaptureConfig().audio.microphoneSyncOffsetMs, 0)
 
-  localStorage.setItem(
+  storedSettings.setItem(
     STORAGE_KEYS.captureConfig,
     JSON.stringify({
       ...defaultCaptureConfig,

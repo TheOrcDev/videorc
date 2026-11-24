@@ -10,7 +10,7 @@ import {
 } from 'react'
 
 import { BackendClient } from '@/backendClient'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useOwnBackendClient } from '@/hooks/use-own-backend-client'
 import { inlineUserError } from '@/lib/user-error'
 import type {
   AiCapabilities,
@@ -389,30 +389,6 @@ function failedLines(draft: CohostAvatarDraft): Partial<Record<CohostAvatarState
 /** The client the Buddy tab shares (plan 170): undefined outside a provider. */
 const BuddyLookClientContext = createContext<BackendClient | null | undefined>(undefined)
 
-/** A backend client of its own while `enabled` and connected; null otherwise. */
-function useOwnBuddyLookClient(enabled: boolean): BackendClient | null {
-  const { connection, wsStatus } = useStudioCore()
-  const online = enabled && wsStatus === 'connected' ? connection : null
-  const [client, setClient] = useState<BackendClient | null>(null)
-  useEffect(() => {
-    if (!online) return
-    let disposed = false
-    const next = new BackendClient(online)
-    next.connect().then(
-      () => {
-        if (!disposed) setClient(next)
-      },
-      () => undefined
-    )
-    return () => {
-      disposed = true
-      next.close()
-      setClient(null)
-    }
-  }, [online])
-  return client
-}
-
 /**
  * One client for every Buddy surface under it (the Buddy tab: My Buddies,
  * the look panel and the onboarding sheet), so they share one connection
@@ -420,7 +396,7 @@ function useOwnBuddyLookClient(enabled: boolean): BackendClient | null {
  * sheet shows as working and then as a draft in the look panel too.
  */
 export function BuddyLookClientProvider({ children }: { children: ReactNode }): ReactElement {
-  const client = useOwnBuddyLookClient(true)
+  const client = useOwnBackendClient(true)
   return createElement(BuddyLookClientContext.Provider, { value: client }, children)
 }
 
@@ -431,7 +407,7 @@ export function BuddyLookClientProvider({ children }: { children: ReactNode }): 
  */
 export function useBuddyLookClient(): BackendClient | null {
   const provided = useContext(BuddyLookClientContext)
-  const own = useOwnBuddyLookClient(provided === undefined)
+  const own = useOwnBackendClient(provided === undefined)
   return provided === undefined ? own : provided
 }
 

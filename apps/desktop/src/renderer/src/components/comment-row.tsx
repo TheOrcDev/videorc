@@ -1,3 +1,4 @@
+import { formatLocal, useLocalTime } from '@/lib/local-time'
 import {
   Fragment,
   useEffect,
@@ -54,7 +55,7 @@ import type {
   LiveChatMessage,
   LiveChatMessageFragment
 } from '@/lib/backend'
-import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
+import { monogramInitials, reportChatImageFailure, useCachedAvatar } from '@/lib/chat-avatar'
 import { clickSelectsText } from '@/lib/chat-list-keys'
 import { REMOVE_FROM_CHAT_LABEL, type RemovalStatusView } from '@/lib/chat-removal-view'
 import { groupEmoteOverlays } from '@/lib/chat-emotes'
@@ -112,9 +113,7 @@ export function commentHighlightPresentationForMessage({
 }
 
 export function formatCommentTime(iso: string): string {
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return ''
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return formatLocal(Date.parse(iso), { hour: '2-digit', minute: '2-digit' })
 }
 
 /**
@@ -495,7 +494,7 @@ function ChatGif({
 
 /** One frame of an animated image: drawn to a canvas as soon as it loads,
  * so the file's later frames never play (Still, or reduced motion). */
-function StillFrame({ alt, src }: { alt: string; src: string }): ReactElement {
+export function StillFrame({ alt, src }: { alt: string; src: string }): ReactElement {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   useEffect(() => {
     const canvas = canvasRef.current
@@ -509,10 +508,16 @@ function StillFrame({ alt, src }: { alt: string; src: string }): ReactElement {
       canvas.height = image.naturalHeight
       canvas.getContext('2d')?.drawImage(image, 0, 0)
     }
+    // A detached image is outside the document, so the window's capture
+    // listener never sees its error: report a dead route here.
+    image.onerror = () => {
+      if (!cancelled) reportChatImageFailure(src)
+    }
     image.src = src
     return () => {
       cancelled = true
       image.onload = null
+      image.onerror = null
     }
   }, [src])
   return (
@@ -758,6 +763,7 @@ function CommentContent({
   timestamps: CommentTimestamps
   nameIds?: CommentNameIds
 }): ReactElement {
+  useLocalTime()
   const avatarUrl = useCachedAvatar(message.authorAvatarUrl)
   const time = formatCommentTime(message.receivedAt)
   const noticeWords = noticeViewerWords(message)
@@ -767,7 +773,17 @@ function CommentContent({
       {/* Sized with the 20 px platform marks (plan 165): 32 px in the compact
           rail, 40 px (both lines) in the Stream Manager. */}
       <Avatar aria-hidden className="mt-0.5" size={density === 'comfortable' ? 'lg' : 'default'}>
-        {avatarUrl ? <AvatarImage alt="" src={avatarUrl} /> : null}
+        {avatarUrl ? (
+          // The avatar loads off-document, so its failure is reported here
+          // (a backend restart retires every route URL, plan 220 S1.6a).
+          <AvatarImage
+            alt=""
+            onLoadingStatusChange={(status) => {
+              if (status === 'error') reportChatImageFailure(avatarUrl)
+            }}
+            src={avatarUrl}
+          />
+        ) : null}
         <AvatarFallback>{monogramInitials(message.authorName)}</AvatarFallback>
       </Avatar>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">

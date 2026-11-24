@@ -371,16 +371,29 @@ test('the working scene puts Screen only on stream with no camera', () => {
 })
 
 /**
- * A fake Studio over a Map-backed localStorage. On reload it starts the way
+ * A fake Studio over a Map-backed UI settings store. On reload it starts the way
  * use-studio.tsx does: the working scene's sources and layout override the
  * saved config, and its scene goes to the backend. `settleAfterPolls` delays
- * that, like the real re-persist a few seconds after the reload.
+ * that, like the real re-persist a few seconds after the reload. Like the
+ * app's seam, its store reads null and refuses writes until `ready()` saw the
+ * snapshot, and every reload starts hydrating again, so a seed that does not
+ * wait fails here.
  */
 function fakeStudio({ storage = {}, settleAfterPolls = 2, ignoresWorkingScene = false } = {}) {
   const store = new Map(Object.entries(storage).map(([k, v]) => [k, JSON.stringify(v)]))
-  const localStorage = {
-    getItem: (key) => (store.has(key) ? store.get(key) : null),
-    setItem: (key, value) => store.set(key, String(value))
+  let hydrated = false
+  const seam = {
+    getItem: (key) => (hydrated && store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => {
+      if (!hydrated) throw new Error('no snapshot yet (hydrating)')
+      store.set(key, String(value))
+    },
+    flush: async () => {},
+    status: () => ({ hydration: { state: hydrated ? 'hydrated' : 'hydrating' } }),
+    ready: async () => {
+      await new Promise((resolve) => setImmediate(resolve))
+      hydrated = true
+    }
   }
   const calls = []
   let backendScene = { sources: [{ kind: 'camera', deviceId: 'cam:1', name: 'FaceTime' }] }
@@ -429,9 +442,13 @@ function fakeStudio({ storage = {}, settleAfterPolls = 2, ignoresWorkingScene = 
       throw new Error(method)
     },
     evaluate: async (expression) =>
-      new Function('localStorage', `return ${expression}`)(localStorage),
+      new Function('window', 'localStorage', `return ${expression}`)(
+        { __videorcUiSettings: seam },
+        { setItem() {}, clear() {} }
+      ),
     reloadAndWait: async () => {
       calls.push({ method: 'reload' })
+      hydrated = false
       pending = settleAfterPolls
     }
   }

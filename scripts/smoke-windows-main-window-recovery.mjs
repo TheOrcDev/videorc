@@ -113,12 +113,27 @@ function openSession(wsUrl) {
     const socket = new WebSocket(wsUrl)
     const pending = new Map()
     let nextId = 1
+    let closed = false
+    const closedWaiters = []
+    const markClosed = () => {
+      if (closed) return
+      closed = true
+      for (const waiter of closedWaiters) waiter()
+      closedWaiters.length = 0
+    }
     socket.addEventListener('message', (event) => {
       const message = JSON.parse(event.data)
       pending.get(message.id)?.(message)
       pending.delete(message.id)
     })
-    socket.addEventListener('error', () => fail(new Error('CDP socket error')))
+    socket.addEventListener('error', () => {
+      if (socket.readyState === WebSocket.CONNECTING) {
+        fail(new Error('CDP socket error'))
+        return
+      }
+      markClosed()
+    })
+    socket.addEventListener('close', markClosed)
     socket.addEventListener('open', () =>
       done({
         send(method, params = {}) {
@@ -127,6 +142,16 @@ function openSession(wsUrl) {
           return new Promise((resolveMessage, rejectMessage) => {
             pending.set(id, resolveMessage)
             setTimeout(() => rejectMessage(new Error(`CDP ${method} timed out`)), 10_000)
+          })
+        },
+        waitClosed(timeoutMs) {
+          if (closed) return Promise.resolve(true)
+          return new Promise((resolveClosed) => {
+            const timer = setTimeout(() => resolveClosed(false), timeoutMs)
+            closedWaiters.push(() => {
+              clearTimeout(timer)
+              resolveClosed(true)
+            })
           })
         },
         close: () => socket.close()
@@ -155,15 +180,50 @@ async function readPage(port) {
   }
 }
 
-async function crashRenderer(port) {
-  const target = await mainTarget(port)
-  if (!target) return false
-  const session = await openSession(target.webSocketDebuggerUrl)
-  // Page.crash never answers: the process it would answer from is gone.
-  session.send('Page.crash').catch(() => undefined)
-  await delay(POLL_MS)
-  session.close()
-  return true
+/**
+ * Crash the main renderer through CDP and prove the app saw it.
+ *
+ * Do not require the CDP page target to stay gone: a successful recovery
+ * remounts within seconds, so "/json has no page" is a race. PR 1855's
+ * installer failure (run 45402234509) crashed three times that way, burned
+ * ReloadBudget (max 2 automatic reloads), and then asked the user — so the
+ * remount gate failed even though the first crash recovered.
+ *
+ * Success is backend.log containing "Renderer process gone". Retry only when
+ * that line never appears (the fire-and-forget miss from run 45366114023).
+ */
+async function crashRenderer(port, readLog) {
+  const CRASH_ATTEMPTS = 3
+  const CRASH_WAIT_MS = 8_000
+  const sawCrash = () => /Renderer process gone \(/.test(readLog() ?? '')
+  for (let attempt = 1; attempt <= CRASH_ATTEMPTS; attempt += 1) {
+    if (sawCrash()) return true
+    let session
+    try {
+      const target = await mainTarget(port)
+      if (!target) {
+        const logged = await waitFor(async () => (sawCrash() ? true : null), CRASH_WAIT_MS)
+        if (logged) return true
+        continue
+      }
+      session = await openSession(target.webSocketDebuggerUrl)
+      await session.send('Page.enable').catch(() => undefined)
+      // Page.crash never answers when it works: the process that would reply is gone.
+      session.send('Page.crash').catch(() => undefined)
+      await session.waitClosed(CRASH_WAIT_MS)
+    } catch (error) {
+      console.warn(`crashRenderer attempt ${attempt}/${CRASH_ATTEMPTS}: ${error?.message ?? error}`)
+    } finally {
+      try {
+        session?.close()
+      } catch {
+        // Already dead with the renderer.
+      }
+    }
+    const logged = await waitFor(async () => (sawCrash() ? true : null), CRASH_WAIT_MS)
+    if (logged) return true
+  }
+  return sawCrash()
 }
 
 async function launch(name, env, userData) {
@@ -238,7 +298,9 @@ const CLEAR_GLASS = { VIDEORC_GLASS: 'clear' }
       evaluateDefaultLaunch({ mounted: isMounted, glass })
     )
 
-    const crashed = await crashRenderer(app.port)
+    const crashed = await crashRenderer(app.port, () => app.log())
+    // Always give remount a chance when the log already proves a crash, even
+    // if the CDP helper timed out — otherwise a late log line is discarded.
     const recovered = await waitFor(
       async () =>
         /Reloading the main window/.test(app.log()) && (await readPage(app.port))?.mounted,
@@ -246,10 +308,15 @@ const CLEAR_GLASS = { VIDEORC_GLASS: 'clear' }
     )
     screenshot(join(app.dir, 'screen-2-after-renderer-crash.png'))
     const remounted = Boolean(recovered)
+    const log = app.log()
     record(
       'crash-recovery',
-      { crashed, remounted },
-      evaluateCrashRecovery({ crashed, remounted, log: app.log() })
+      { crashed: crashed || /Renderer process gone \(/.test(log), remounted },
+      evaluateCrashRecovery({
+        crashed: crashed || /Renderer process gone \(/.test(log),
+        remounted,
+        log
+      })
     )
   } finally {
     await app.stop()

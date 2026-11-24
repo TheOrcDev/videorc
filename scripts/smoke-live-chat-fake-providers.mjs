@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { createServer } from 'node:http'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
 import {
@@ -41,7 +42,26 @@ const BUDDY_ACTIVITY_KINDS = [
   'redemption'
 ]
 
+// Plan 220 S1.6a: the backend fetches chat images through this local fake
+// CDN (the dev-only VIDEORC_CHAT_IMAGE_FAKE_ORIGIN), never the internet.
+const SMOKE_AVATAR_URL = 'https://yt3.ggpht.com/videorc-smoke/live-chat-avatar.png'
+const SMOKE_EMOTE = {
+  text: 'smokeHYPE',
+  imageUrl: 'https://static-cdn.jtvnw.net/emoticons/v2/videorc-smoke/default/dark/1.0'
+}
+// A 1x1 PNG and a 1x1 GIF, both decodable.
+const SMOKE_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64'
+)
+const SMOKE_GIF = Buffer.from(
+  'R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==',
+  'base64'
+)
+
 let launched
+let smoke
+const fakeImages = await startFakeImageHost()
 
 try {
   const connection = await launchAndReadConnection()
@@ -648,6 +668,8 @@ try {
     ) {
       throw new Error('Finished History accounting changed after local clear and stop.')
     }
+    // Plan 220 S1.6a: the History view comes from the backend in one call.
+    await assertCommentsHistory(ws, eventsSessionId, rolledTotals)
 
     // Plan 211: Buddy talks only in its bubble. In Bubble, with Buddy on
     // stream and no lines of the user's own (plan 192), the fake follow's
@@ -658,18 +680,282 @@ try {
     // sent at all.
     await assertBuddyGreetings(ws)
 
+    // Plan 220 S1.6a: the backend fetches, caches and serves chat images, and
+    // the Stream Manager's rows draw them from its route.
+    await assertChatImages(ws, connection)
+
     console.log(
       `Unified-comments fake-provider smoke OK - ${diagnostics.messagesReceived} messages, ` +
         `${diagnostics.duplicatesSkipped} duplicate(s) skipped, sent/failed/read-only/timeout ` +
         `fan-out preserved, websocket snapshot recovered, X receive-only as "${x.message}", ` +
         `${expectedKinds.length} activity kinds with details, audience baseline and delta, ` +
-        `Kick follow row and delta-only audience.`
+        `Kick follow row and delta-only audience, the History view from the backend, ` +
+        `chat images fetched from the allowlist only and drawn in the Stream Manager from ` +
+        `the backend route.`
     )
   } finally {
     ws.close()
   }
 } finally {
   await stopApp()
+  await fakeImages.close()
+}
+
+/** The History view (plan 220 S1.6a): the newest 2,000 saved messages, the
+ * same rows `sessions.comments.list` pages, and the session's totals. */
+async function assertCommentsHistory(ws, sessionId, totals) {
+  const history = await request(ws, timeoutMs, 'sessions.comments.history', { sessionId })
+  if (history.sessionId !== sessionId || history.messages.length !== 2000) {
+    throw new Error(
+      `sessions.comments.history did not answer the newest 2,000 rows: ${JSON.stringify({
+        sessionId: history.sessionId,
+        messages: history.messages.length
+      })}`
+    )
+  }
+  const newest = await request(ws, timeoutMs, 'sessions.comments.list', { sessionId, limit: 200 })
+  const tail = history.messages.slice(-200).map((message) => message.id)
+  if (JSON.stringify(tail) !== JSON.stringify(newest.messages.map((message) => message.id))) {
+    throw new Error('sessions.comments.history disagrees with the newest saved page.')
+  }
+  if (JSON.stringify(history.chatTotals) !== JSON.stringify(totals)) {
+    throw new Error(`History totals disagree: ${JSON.stringify(history.chatTotals)}`)
+  }
+  const again = await request(ws, timeoutMs, 'sessions.comments.history', { sessionId })
+  if (JSON.stringify(again.messages) !== JSON.stringify(history.messages)) {
+    throw new Error('A cached History view changed between two reads.')
+  }
+}
+
+/** Plan 220 S1.6a: `chatImages.cache` fetches only allowlisted https images
+ * (here from the fake CDN), the route serves them only with this run's key,
+ * and the Stream Manager's rows draw the avatar, emote and GIF from it. */
+async function assertChatImages(ws, connection) {
+  const routePrefix = `http://127.0.0.1:${connection.port}/chat-images/`
+  const cache = (url, kind = 'avatar') => request(ws, timeoutMs, 'chatImages.cache', { url, kind })
+  const isRoute = (value) =>
+    typeof value === 'string' &&
+    value.startsWith(routePrefix) &&
+    /\/chat-images\/[a-f0-9]{32}\.(png|gif|img)\?key=[a-f0-9]{32}$/.test(value)
+
+  const avatar = await cache(SMOKE_AVATAR_URL)
+  const emote = await cache(SMOKE_EMOTE.imageUrl)
+  const gif = await cache(SMOKE_TWITCH_GIF.imageUrl, 'gif')
+  for (const [name, value] of Object.entries({ avatar, emote, gif })) {
+    if (!isRoute(value)) {
+      throw new Error(`chatImages.cache did not answer a route URL for the ${name}: ${value}`)
+    }
+  }
+  for (const [value, type, bytes] of [
+    [avatar, 'image/png', SMOKE_PNG],
+    [emote, 'image/png', SMOKE_PNG],
+    [gif, 'image/gif', SMOKE_GIF]
+  ]) {
+    const response = await fetch(value)
+    const body = Buffer.from(await response.arrayBuffer())
+    if (
+      response.status !== 200 ||
+      response.headers.get('content-type') !== type ||
+      response.headers.get('x-content-type-options') !== 'nosniff' ||
+      !body.equals(bytes)
+    ) {
+      throw new Error(`The route did not serve ${type} as cached: ${response.status}`)
+    }
+  }
+  const [path, key] = avatar.split('?key=')
+  for (const [url, status] of [
+    [path, 401],
+    [`${path}?key=${'0'.repeat(32)}`, 401],
+    [`${routePrefix}${'f'.repeat(32)}.png?key=${key}`, 404],
+    [`${routePrefix}videorc.sqlite3?key=${key}`, 404]
+  ]) {
+    const response = await fetch(url)
+    if (response.status !== status) {
+      throw new Error(`The route answered ${response.status}, not ${status}, for a refused read.`)
+    }
+  }
+  // Cached: asking again never reaches the CDN.
+  const again = await cache(SMOKE_AVATAR_URL)
+  const avatarHits = fakeImages.hits('/yt3.ggpht.com/videorc-smoke/live-chat-avatar.png')
+  if (again !== avatar || avatarHits !== 1) {
+    throw new Error(`The cached avatar was fetched again (${avatarHits} requests).`)
+  }
+
+  // Every refusal answers null and never fetches the refused target.
+  const before = fakeImages.total()
+  for (const [url, kind] of [
+    ['http://yt3.ggpht.com/videorc-smoke/live-chat-avatar.png', 'avatar'],
+    ['file:///etc/passwd', 'avatar'],
+    ['https://127.0.0.1/a.png', 'avatar'],
+    ['https://169.254.169.254/latest/meta-data', 'avatar'],
+    ['https://evil.example.com/a.png', 'avatar'],
+    ['https://user:secret@yt3.ggpht.com/a.png', 'avatar'],
+    ['https://yt3.ggpht.com:8443/a.png', 'avatar'],
+    [SMOKE_TWITCH_GIF.imageUrl, 'avatar'],
+    [SMOKE_AVATAR_URL, 'gif']
+  ]) {
+    if ((await cache(url, kind)) !== null) {
+      throw new Error(`chatImages.cache accepted a refused ${kind} URL: ${url}`)
+    }
+  }
+  if (fakeImages.total() !== before) {
+    throw new Error('A refused chat image URL reached the network.')
+  }
+  for (const path of ['redirect-off', 'redirect-loopback', 'page', 'huge']) {
+    if ((await cache(`https://yt3.ggpht.com/videorc-smoke/${path}`)) !== null) {
+      throw new Error(`chatImages.cache cached a refused response (${path}).`)
+    }
+  }
+  if (fakeImages.total() !== before + 4) {
+    throw new Error(`A refused redirect was followed: ${fakeImages.total() - before} requests.`)
+  }
+
+  // The Stream Manager's rows draw them from the backend route.
+  const opened = await smokeCommand('comments-window-open')
+  if (opened.open !== true) throw new Error('The Stream Manager did not open.')
+  const sessionId = `smoke-chat-images-${Date.now()}`
+  const row = (id, fragments, text, extra = {}) => ({
+    id: `${sessionId}:twitch:${id}`,
+    providerMessageId: id,
+    platform: 'twitch',
+    targetId: 'smoke-twitch-images',
+    sessionId,
+    authorName: 'Image Viewer',
+    authorAvatarUrl: SMOKE_AVATAR_URL,
+    authorBadges: [],
+    authorRoles: [],
+    publishedAt: '2026-11-09T10:00:01Z',
+    receivedAt: '2026-11-09T10:00:01Z',
+    messageText: text,
+    fragments,
+    eventType: 'message',
+    isDeleted: false,
+    ...extra
+  })
+  const emoteRow = row(
+    'emote',
+    [
+      { type: 'text', text: 'hype ' },
+      { type: 'emote', text: SMOKE_EMOTE.text, imageUrl: SMOKE_EMOTE.imageUrl }
+    ],
+    `hype ${SMOKE_EMOTE.text}`
+  )
+  const gifRow = row(
+    'gif',
+    [{ type: 'gif', text: SMOKE_TWITCH_GIF.title, imageUrl: SMOKE_TWITCH_GIF.imageUrl }],
+    SMOKE_TWITCH_GIF.title
+  )
+  await smokeCommand('comments-window-push-snapshot', {
+    mode: { kind: 'live' },
+    snapshot: {
+      sessionId,
+      providers: [
+        {
+          id: 'smoke-twitch-images',
+          targetId: 'smoke-twitch-images',
+          platform: 'twitch',
+          read: 'ready',
+          write: 'ready',
+          state: 'connected',
+          message: 'twitch comments connected.',
+          lastConnectedAt: '2026-11-09T10:00:00Z'
+        }
+      ],
+      messages: [emoteRow, gifRow],
+      unreadCount: 2,
+      updatedAt: '2026-11-09T10:00:02Z'
+    }
+  })
+  const fromRoute = (image) => image.loaded && image.src.startsWith(routePrefix)
+  let last
+  await waitForAsync(
+    async () => {
+      last = await smokeCommand('comments-window-reader-state')
+      const rows = Object.fromEntries((last.rowImages ?? []).map((entry) => [entry.id, entry]))
+      const emoteImages = rows[emoteRow.id]?.images ?? []
+      const gifEntry = rows[gifRow.id]
+      const gifDrawn =
+        gifEntry?.gifMode === 'still'
+          ? gifEntry.gifStills.some((still) => still.width === 1 && still.height === 1)
+          : (gifEntry?.images ?? []).some(
+              (image) => image.slot === 'comment-gif-image' && fromRoute(image)
+            )
+      return (
+        emoteImages.some((image) => image.slot === 'avatar-image' && fromRoute(image)) &&
+        emoteImages.some((image) => image.slot === 'comment-emote' && fromRoute(image)) &&
+        (gifEntry?.images ?? []).some(
+          (image) => image.slot === 'avatar-image' && fromRoute(image)
+        ) &&
+        gifDrawn
+      )
+    },
+    timeoutMs,
+    'the Stream Manager rows drawing the avatar, emote and GIF from the backend route'
+  ).catch((error) => {
+    throw new Error(`${error.message} Last rows: ${JSON.stringify(last?.rowImages)}`)
+  })
+  const remote = (last.rowImages ?? []).flatMap((entry) =>
+    entry.images.filter((image) => /^https?:\/\/(?!127\.0\.0\.1:)/.test(image.src))
+  )
+  if (remote.length > 0) {
+    throw new Error(`A Stream Manager row hot-linked a remote image: ${JSON.stringify(remote)}`)
+  }
+}
+
+/** A local fake CDN: `https://<host>/<path>` arrives as `/<host>/<path>`. */
+async function startFakeImageHost() {
+  const hits = new Map()
+  let total = 0
+  const server = createServer((request, response) => {
+    const path = new URL(request.url ?? '/', 'http://127.0.0.1').pathname
+    hits.set(path, (hits.get(path) ?? 0) + 1)
+    total += 1
+    const send = (status, type, body, headers = {}) => {
+      response.writeHead(status, { 'Content-Type': type, ...headers })
+      response.end(body)
+    }
+    switch (path) {
+      case '/yt3.ggpht.com/videorc-smoke/live-chat-avatar.png':
+      case '/static-cdn.jtvnw.net/emoticons/v2/videorc-smoke/default/dark/1.0':
+        return send(200, 'image/png', SMOKE_PNG)
+      case '/media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif':
+        return send(200, 'image/gif', SMOKE_GIF)
+      case '/yt3.ggpht.com/videorc-smoke/redirect-off':
+        return send(302, 'text/plain', '', { Location: 'https://evil.example.com/a.png' })
+      case '/yt3.ggpht.com/videorc-smoke/redirect-loopback':
+        return send(302, 'text/plain', '', { Location: 'https://127.0.0.1/a.png' })
+      case '/yt3.ggpht.com/videorc-smoke/page':
+        return send(200, 'text/html', '<!doctype html><p>not an image</p>')
+      case '/yt3.ggpht.com/videorc-smoke/huge':
+        return send(200, 'image/png', Buffer.concat([SMOKE_PNG, Buffer.alloc(3 * 1024 * 1024)]))
+      default:
+        return send(404, 'text/plain', 'not found')
+    }
+  })
+  await new Promise((resolveListen) => server.listen(0, '127.0.0.1', resolveListen))
+  const { port } = server.address()
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    hits: (path) => hits.get(path) ?? 0,
+    total: () => total,
+    close: () => new Promise((resolveClose) => server.close(() => resolveClose()))
+  }
+}
+
+async function smokeCommand(command, params = {}) {
+  const response = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${smoke.capability}`
+    },
+    body: JSON.stringify({ command, params })
+  })
+  const payload = await response.json()
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload?.error ?? `${command} smoke command failed`)
+  }
+  return payload.result
 }
 
 async function assertBuddyGreetings(ws) {
@@ -1032,6 +1318,16 @@ async function listPersistedMessages(ws, sessionId, expectedCount, deadlineMs) {
   )
 }
 
+async function waitForAsync(predicate, deadlineMs, label) {
+  const startedAt = Date.now()
+  while (!(await predicate())) {
+    if (Date.now() - startedAt > deadlineMs) {
+      throw new Error(`Timed out waiting for ${label}.`)
+    }
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 250))
+  }
+}
+
 function waitFor(predicate, deadlineMs, label) {
   return new Promise((resolveWait, rejectWait) => {
     const startedAt = Date.now()
@@ -1054,11 +1350,18 @@ async function launchAndReadConnection() {
   // The shared launcher spawns `pnpm` the way each platform needs (Windows
   // has only `pnpm.cmd`), and holds the host lock and memory gate.
   launched = await launchDevApp({
-    env: { VIDEORC_SMOKE_PRINT_BACKEND_READY: '1' },
+    env: {
+      VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
+      // Plan 220 S1.6a: chat images come from the local fake CDN, and the
+      // command server opens the Stream Manager to look at its rows.
+      VIDEORC_CHAT_IMAGE_FAKE_ORIGIN: fakeImages.origin,
+      VIDEORC_SMOKE_COMMAND_SERVER: '1'
+    },
     timeoutMs,
-    requiredMarkers: ['backend-ready'],
+    requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     onLine: printAppLine
   })
+  smoke = launched.connections['preview-motion-ready']
   return launched.connections['backend-ready']
 }
 

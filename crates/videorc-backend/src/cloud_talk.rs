@@ -200,6 +200,59 @@ pub enum GuestAction {
     DisallowScreenShare,
 }
 
+/// Whether a failed guest action was an explicit refusal by the web (a 4xx
+/// answer): the action certainly did not happen. A transport failure, a
+/// timeout, a server error or anything not known to be the web's answer may
+/// have happened remotely (plan 260 S1.8, #1895: a removal's deny stays).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn guest_action_refused(error: &anyhow::Error) -> bool {
+    use crate::cloud_show::CloudApiError;
+    match error.downcast_ref::<CloudApiError>() {
+        Some(
+            CloudApiError::Transport(_)
+            | CloudApiError::NodeUnreachable
+            | CloudApiError::RoomsUnavailable
+            | CloudApiError::Full
+            | CloudApiError::Disabled,
+        ) => false,
+        Some(CloudApiError::Other { status, .. }) => (400..500).contains(status),
+        Some(_) => true,
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod guest_action_refusal_tests {
+    use super::guest_action_refused;
+    use crate::cloud_show::CloudApiError;
+
+    fn other(status: u16) -> anyhow::Error {
+        anyhow::Error::new(CloudApiError::Other {
+            status,
+            code: "x".to_string(),
+            message: "x".to_string(),
+        })
+    }
+
+    #[test]
+    fn only_an_explicit_web_refusal_counts() {
+        assert!(guest_action_refused(&other(404)));
+        assert!(guest_action_refused(&anyhow::Error::new(
+            CloudApiError::Unauthorized
+        )));
+        assert!(!guest_action_refused(&other(502)));
+        assert!(!guest_action_refused(&anyhow::Error::new(
+            CloudApiError::Transport("timed out".to_string())
+        )));
+        assert!(!guest_action_refused(&anyhow::Error::new(
+            CloudApiError::RoomsUnavailable
+        )));
+        assert!(!guest_action_refused(&anyhow::anyhow!(
+            "the deadline passed"
+        )));
+    }
+}
+
 /// `POST /api/cloud/shows/:id/guests/:guestId`'s body.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -966,6 +1019,393 @@ impl CloudOverlayRect {
 
 /// `cloud.room.overlay`: what the host's renderer sends to the room.
 pub const CLOUD_ROOM_OVERLAY_EVENT: &str = "cloud.room.overlay";
+
+/// Plan 260 S1.8b: what the room's program pages draw of the presentation
+/// topics, once the backend holds the host seat and sends them (`room_host`):
+/// the Studio's chips and reasons read it, as they read the renderer's own
+/// publishers before. One event for every topic; each topic is present once
+/// it is the backend's (graphics first).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const CLOUD_ROOM_PRESENTATION_EVENT: &str = "cloud.room.presentation";
+
+/// `cloud.room.avatar.set` (plan 260 S1.8b): the avatar content the Studio
+/// built (the static layers per orientation, which outputs show it, and the
+/// atlas variant for animating pages), for the backend to deliver while it
+/// holds the host seat. `content: null` takes the avatar off. The builder
+/// moves to `videorc-app-core` in Phase 2/3.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudRoomAvatarSetParams {
+    pub content: Option<serde_json::Value>,
+    /// The host's opt-in to show the stream's public layers to guest pages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guests: Option<bool>,
+}
+
+/// The host's media for the backend's room (plan 260 S1.8c), one method per
+/// kind: `cloud.room.microphone.set` sends `microphone` (the room microphone
+/// bridge's own settings shape), `cloud.room.camera.set` sends `camera`,
+/// `cloud.room.screen.set` sends `screen`; `null` takes it off.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CloudRoomMediaSetParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) microphone: Option<crate::room_microphone::Settings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) camera: Option<RoomCameraSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) screen: Option<RoomScreenSettings>,
+}
+
+/// The screen or window the room shares (plan 249 S14: the scene's own),
+/// by its native source id (`screen:screencapturekit:<id>`,
+/// `window:screencapturekit:<id>`). The backend shares it while the
+/// preview screen runs that source, behind Hide screen.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RoomScreenSettings {
+    pub(crate) source_id: String,
+}
+
+impl RoomScreenSettings {
+    pub(crate) fn valid(&self) -> bool {
+        (self.source_id.starts_with("screen:") || self.source_id.starts_with("window:"))
+            && self.source_id.len() <= 512
+            && !self.source_id.contains(['\0', '\r', '\n'])
+    }
+}
+
+/// `cloud.room.routing.set` (plan 260 S1.8c c4c): what the program page
+/// plays of the host's speech and auxiliary audio (`ProgramAudioSettings`,
+/// plan 249 S8), sent to routing-capable program pages on
+/// `videorc.audio-routing.v1`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ProgramAudioSettings {
+    pub(crate) speech_gain: f64,
+    pub(crate) auxiliary_gain: f64,
+    pub(crate) speech_muted: bool,
+    pub(crate) auxiliary_muted: bool,
+}
+
+impl Default for ProgramAudioSettings {
+    fn default() -> Self {
+        Self {
+            speech_gain: 1.0,
+            auxiliary_gain: 1.0,
+            speech_muted: false,
+            auxiliary_muted: false,
+        }
+    }
+}
+
+impl ProgramAudioSettings {
+    pub(crate) fn valid(&self) -> bool {
+        [self.speech_gain, self.auxiliary_gain]
+            .iter()
+            .all(|gain| gain.is_finite() && (0.0..=1.0).contains(gain))
+    }
+}
+
+/// The host's own media in the backend's room (plan 260 S1.8c), on
+/// `cloud.room.presentation`'s `media` entry: what is published, and the
+/// screen's privacy as the renderer's room reported it (`screenPrivacy`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomMediaStatus {
+    pub camera: bool,
+    pub microphone: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<RoomScreenStatus>,
+    /// The auxiliary track (room sounds and system audio), S1.8c c4d.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aux: Option<RoomAuxStatus>,
+    /// The room's other people, as the stage shows them (S1.8d d1): their
+    /// pictures at `/room/remote/latest.bmp`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people: Vec<RoomRemotePerson>,
+    /// The runner's return, while the Program monitor takes it (S1.8d d1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor: Option<RoomRemoteMonitor>,
+}
+
+/// One person in the room as the host receives them (the renderer room's
+/// `TalkShowPerson`, without the tracks).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomRemotePerson {
+    pub identity: String,
+    pub name: String,
+    /// A camera picture is coming in.
+    pub camera: bool,
+    /// A shared screen is coming in.
+    pub screen: bool,
+    /// Their microphone is coming in.
+    pub audio: bool,
+    pub mic_muted: bool,
+    pub camera_off: bool,
+    pub speaking: bool,
+    /// `excellent`, `good`, `poor` or `lost`.
+    pub quality: String,
+}
+
+/// The runner's return as the host receives it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomRemoteMonitor {
+    pub video: bool,
+    pub audio: bool,
+}
+
+/// The auxiliary track as the renderer room's `RoomAuxStatus` and its
+/// system capture's state (`roomAudioRouting.status`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomAuxStatus {
+    /// Room sounds are on for this room.
+    pub enabled: bool,
+    pub state: RoomAuxState,
+    pub reason: Option<String>,
+    pub track_sid: Option<String>,
+    /// Consumers that reported hearing the track, with when.
+    pub observed: std::collections::BTreeMap<String, i64>,
+    pub system_state: RoomSystemAudioState,
+    pub system_reason: Option<String>,
+    /// A lost connection turned system audio off; the Studio turns its own
+    /// switch off too, and only a fresh enable opens it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub system_disarmed: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum RoomAuxState {
+    Off,
+    Blocked,
+    Queued,
+    Published,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum RoomSystemAudioState {
+    Off,
+    Opening,
+    Capturing,
+    Blocked,
+}
+
+/// `cloud.room.aux.set` (plan 260 S1.8c c4d): room sounds on or off, and the
+/// room's system audio (the renderer's `roomAudioRouting.system`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CloudRoomAuxSetParams {
+    pub(crate) sounds: bool,
+    pub(crate) system: RoomSystemAudioSettings,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RoomSystemAudioSettings {
+    pub(crate) enabled: bool,
+    pub(crate) gain_db: f64,
+    pub(crate) muted: bool,
+}
+
+impl CloudRoomAuxSetParams {
+    pub(crate) fn valid(&self) -> bool {
+        self.system.gain_db.is_finite() && (-24.0..=12.0).contains(&self.system.gain_db)
+    }
+}
+
+/// The shared screen and its Hide screen state on the wire (plan 249 S2):
+/// the publication (`vrc-privacy:<epoch>:<generation>:<hidden>`), when the
+/// source was blocked, and which receivers acknowledged the frost.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomScreenStatus {
+    pub source_id: String,
+    pub epoch: String,
+    pub generation: u64,
+    pub hidden: bool,
+    pub published: bool,
+    /// Milliseconds since the epoch; `null` while visible.
+    pub source_blocked_at: Option<i64>,
+    pub status: RoomScreenPrivacyState,
+    pub observations: std::collections::BTreeMap<String, i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum RoomScreenPrivacyState {
+    Visible,
+    Hiding,
+    Observed,
+    Unconfirmed,
+    Paused,
+}
+
+/// The camera the Studio has on for the room (the Sources camera, which the
+/// native preview camera runs). Its key, look and background are the
+/// backend's own scene layout, so only the device travels.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RoomCameraSettings {
+    pub(crate) device_id: String,
+}
+
+impl RoomCameraSettings {
+    pub(crate) fn valid(&self) -> bool {
+        !self.device_id.is_empty()
+            && self.device_id.len() <= 512
+            && !self.device_id.contains(['\0', '\r', '\n'])
+    }
+}
+
+/// One scene background picture, immutable and named by its hash.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSceneAsset {
+    pub hash: String,
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    pub base64: String,
+}
+
+/// `cloud.room.scene.commit` (plan 260 S1.8b): what the room's program draws
+/// per orientation lane, and the background pictures it names. `content:
+/// null` returns the room to its own layouts. The builder moves to
+/// `videorc-app-core` in Phase 2/3.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudRoomSceneCommitParams {
+    pub content: Option<serde_json::Value>,
+    #[serde(default)]
+    pub assets: Vec<CloudSceneAsset>,
+}
+
+/// `cloud.room.presentation`'s payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct CloudRoomPresentationEvent {
+    pub show_id: String,
+    /// The room's static graphics (captions, cards, banners, timers, the
+    /// chat box), as the renderer's `RoomGraphicsStatus` without its preview
+    /// (the Studio draws the preview from `cloud.graphics.snapshot` itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphics: Option<RoomPresentationStatus>,
+    /// The worn avatar and its bubble (plan 249 S4, S6), with the guest
+    /// pages' count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<RoomPresentationStatus>,
+    /// The committed scene (plan 249 S12, S14): the Studio's commit waits on
+    /// it (5 s), as it waited on the renderer's publisher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene: Option<RoomPresentationStatus>,
+    /// The host's own media (S1.8c): camera, microphone, screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<RoomMediaStatus>,
+}
+
+/// Plan 249 S14: what the program pages drew for the scene's background.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomBackgroundStatus {
+    /// `backgroundKey` of what the scene asks for, per lane.
+    pub wanted: RoomBackgroundWanted,
+    /// Each capable lane's last drawn background, as its page reported it.
+    pub drawn: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Program pages that cannot draw scene backgrounds (older pages).
+    pub unsupported: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomBackgroundWanted {
+    pub h: String,
+    pub v: String,
+}
+
+/// Plan 249 S6 (D4): the host's opt-in to show the stream's public avatar
+/// layers to guest pages, how many can draw them, how many applied them.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomPresentationGuests {
+    pub enabled: bool,
+    pub capable: u32,
+    pub applied: u32,
+}
+
+/// One topic's delivery, as the program pages report it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomPresentationStatus {
+    pub enabled: bool,
+    pub state: RoomPresentationState,
+    /// Why it is not applied, in the Studio's words; null when it is.
+    pub reason: Option<String>,
+    pub revision: u64,
+    /// Each program page that applied the view it was sent, by identity.
+    pub observed: std::collections::BTreeMap<String, RoomPresentationObservation>,
+    /// The avatar's guest pages (avatar only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guests: Option<RoomPresentationGuests>,
+    /// The scene's background (scene only, while the scene names one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<RoomBackgroundStatus>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum RoomPresentationState {
+    Off,
+    Preview,
+    Waiting,
+    Applied,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct RoomPresentationObservation {
+    pub revision: u64,
+    pub output: PresentationOutput,
+    pub orientation: PresentationOrientation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum PresentationOutput {
+    Stream,
+    Recording,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum PresentationOrientation {
+    #[serde(rename = "h")]
+    H,
+    #[serde(rename = "v")]
+    V,
+}
 /// `GET /cloud/overlays/{imageId}?token=`: an overlay's bytes.
 pub const OVERLAY_IMAGE_ROUTE: &str = "/cloud/overlays/{id}";
 /// The program page takes an overlay of at most 2 MiB (wire section 6.3).

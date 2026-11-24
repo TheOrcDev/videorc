@@ -22,7 +22,21 @@ use crate::state::AppState;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetChatOverlayParams {
+    /// The renderer's box, the path before plan 260 S1.2: accepted for one
+    /// release. Empty or missing: the backend draws the box from
+    /// `messageIds` at `canvasWidth` x `canvasHeight`.
+    #[serde(default)]
     pub png_base64: String,
+    /// The messages the box shows, oldest first (the renderer still picks
+    /// them). Required without `pngBase64`.
+    #[serde(default)]
+    pub message_ids: Option<Vec<String>>,
+    /// The landscape canvas the box is drawn for, as the renderer sized its
+    /// PNG. Required without `pngBase64`.
+    #[serde(default)]
+    pub canvas_width: Option<u32>,
+    #[serde(default)]
+    pub canvas_height: Option<u32>,
     /// The chat rect for the horizontal canvas (the overlay layout's
     /// `chat.horizontal`). Missing => the top-left corner snap.
     #[serde(default)]
@@ -51,7 +65,7 @@ pub struct ChatOverlayInfo {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ChatOverlayError {
-    #[error("pngBase64 is required.")]
+    #[error("pngBase64, or messageIds and canvasWidth and canvasHeight, are required.")]
     InvalidParams,
     #[error("The chat box image is invalid: {0}")]
     InvalidImage(String),
@@ -87,7 +101,12 @@ pub async fn set_chat_overlay(
     state: &AppState,
     params: SetChatOverlayParams,
 ) -> Result<ChatOverlayInfo, ChatOverlayError> {
-    if params.png_base64.trim().is_empty() {
+    let drawing = params.png_base64.trim().is_empty();
+    if drawing
+        && (params.message_ids.as_ref().is_none_or(Vec::is_empty)
+            || params.canvas_width.is_none()
+            || params.canvas_height.is_none())
+    {
         return Err(ChatOverlayError::InvalidParams);
     }
     let generation = {
@@ -98,10 +117,16 @@ pub async fn set_chat_overlay(
         *generation = generation.wrapping_add(1);
         *generation
     };
-    let png_base64 = params.png_base64;
-    let vertical_png_base64 = params
-        .vertical_png_base64
-        .filter(|value| !value.trim().is_empty());
+    let (png_base64, vertical_png_base64) = if drawing {
+        draw_chat_box_pngs(state, &params).await?
+    } else {
+        (
+            params.png_base64,
+            params
+                .vertical_png_base64
+                .filter(|value| !value.trim().is_empty()),
+        )
+    };
     let prepared = tokio::task::spawn_blocking(move || {
         let horizontal = crate::captions::prepare_caption_overlay(&png_base64)?;
         let vertical = vertical_png_base64
@@ -131,6 +156,86 @@ pub async fn set_chat_overlay(
         params.rect,
         params.vertical_rect,
     ))
+}
+
+/// The longest canvas side the box is drawn for (an 8K leg).
+const CHAT_BOX_CANVAS_MAX_SIDE: u32 = 8192;
+
+/// Plan 260 S1.2: the box the renderer drew (`renderChatOverlayCards`), drawn
+/// here from the messages it names, for the landscape canvas and the
+/// vertical leg's when the session has one, as base64 PNGs for the install
+/// below. Avatars and emotes come from the chat image cache only (the
+/// renderer caches them first): a file not cached draws the initials or the
+/// emote's name.
+async fn draw_chat_box_pngs(
+    state: &AppState,
+    params: &SetChatOverlayParams,
+) -> Result<(String, Option<String>), ChatOverlayError> {
+    let (Some(width), Some(height)) = (params.canvas_width, params.canvas_height) else {
+        return Err(ChatOverlayError::InvalidParams);
+    };
+    let side = 1..=CHAT_BOX_CANVAS_MAX_SIDE;
+    if !side.contains(&width) || !side.contains(&height) {
+        return Err(ChatOverlayError::InvalidParams);
+    }
+    let ids = params.message_ids.as_deref().unwrap_or_default();
+    let mut messages = state.live_chat.lock().await.chat_box_messages(ids);
+    let keep_from = messages
+        .len()
+        .saturating_sub(crate::overlay_raster::CHAT_BOX_MAX_MESSAGES);
+    messages.drain(..keep_from);
+    if messages.is_empty() {
+        return Err(ChatOverlayError::InvalidParams);
+    }
+    let vertical = chat_overlay_canvases(state)
+        .await
+        .vertical
+        .map(|canvas| (canvas.width, canvas.height));
+    let rect = chat_overlay_placement(params.rect).rect_for_canvas(width, height);
+    let vertical = vertical.map(|(vertical_width, vertical_height)| {
+        (
+            (vertical_width, vertical_height),
+            chat_overlay_placement(params.vertical_rect)
+                .rect_for_canvas(vertical_width, vertical_height),
+        )
+    });
+    let cache = state.chat_images.clone();
+    tokio::task::spawn_blocking(move || {
+        use crate::overlay_raster::{
+            self, DecodedImages, OverlayImages, OverlayState, WantedImages,
+        };
+        use base64::Engine as _;
+
+        let stream_box =
+            OverlayState::Chat(overlay_raster::chat_box(&messages, (width, height), rect));
+        let wanted = stream_box.wanted_images();
+        let images = OverlayImages {
+            avatars: DecodedImages::load(wanted.avatars.iter().map(String::as_str), |url| {
+                cache.read_cached_avatar(url)
+            }),
+            emotes: DecodedImages::load(wanted.emotes.iter().map(String::as_str), |url| {
+                cache.read_cached_avatar(&WantedImages::emote_file_url(url))
+            }),
+        };
+        let draw = |state: &OverlayState| -> anyhow::Result<String> {
+            let image = overlay_raster::render_with_images(state, &images)
+                .ok_or_else(|| anyhow::anyhow!("the chat box has no room on its canvas"))?;
+            Ok(base64::engine::general_purpose::STANDARD
+                .encode(overlay_raster::encode_png(&image)?))
+        };
+        let horizontal = draw(&stream_box)?;
+        let vertical = vertical
+            .map(|(canvas, rect)| {
+                draw(&OverlayState::Chat(overlay_raster::chat_box(
+                    &messages, canvas, rect,
+                )))
+            })
+            .transpose()?;
+        anyhow::Ok((horizontal, vertical))
+    })
+    .await
+    .map_err(|error| ChatOverlayError::InvalidImage(format!("the drawing task stopped: {error}")))?
+    .map_err(|error| ChatOverlayError::InvalidImage(format!("{error:#}")))
 }
 
 fn install_prepared_chat_overlay(
@@ -313,6 +418,52 @@ mod tests {
         );
     }
 
+    /// Plan 260 S1.2: without the renderer's PNG the box is drawn from the
+    /// messages named, so a request without them, without its canvas, with a
+    /// canvas out of range or naming no message the chat holds is refused and
+    /// installs nothing.
+    #[tokio::test]
+    async fn a_drawn_box_without_its_messages_or_canvas_is_refused() {
+        let state = test_state();
+        let request = |ids: Option<Vec<String>>, canvas: Option<(u32, u32)>| SetChatOverlayParams {
+            png_base64: String::new(),
+            message_ids: ids,
+            canvas_width: canvas.map(|canvas| canvas.0),
+            canvas_height: canvas.map(|canvas| canvas.1),
+            rect: None,
+            vertical_png_base64: None,
+            vertical_rect: None,
+        };
+        let ids = || Some(vec!["session-1:twitch:1".to_string()]);
+        for params in [
+            request(None, Some((1920, 1080))),
+            request(Some(Vec::new()), Some((1920, 1080))),
+            request(ids(), None),
+            request(ids(), Some((0, 1080))),
+            request(ids(), Some((9000, 1080))),
+            // No chat session holds the message.
+            request(ids(), Some((1920, 1080))),
+        ] {
+            assert_eq!(
+                set_chat_overlay(&state, params).await,
+                Err(ChatOverlayError::InvalidParams)
+            );
+        }
+        let parsed: SetChatOverlayParams = serde_json::from_value(serde_json::json!({
+            "messageIds": ["a", "b"],
+            "canvasWidth": 1280,
+            "canvasHeight": 720,
+            "rect": { "x": 0.6, "y": 0.1, "w": 0.3, "h": 0.5 }
+        }))
+        .unwrap();
+        assert!(parsed.png_base64.is_empty());
+        assert_eq!(parsed.message_ids.as_deref().map(<[String]>::len), Some(2));
+        assert_eq!(
+            (parsed.canvas_width, parsed.canvas_height),
+            (Some(1280), Some(720))
+        );
+    }
+
     #[tokio::test]
     async fn set_installs_both_slots_and_a_replacement_without_a_vertical_clears_it() {
         let state = test_state();
@@ -320,6 +471,9 @@ mod tests {
             &state,
             SetChatOverlayParams {
                 png_base64: TEST_PNG.to_string(),
+                message_ids: None,
+                canvas_width: None,
+                canvas_height: None,
                 rect: Some(OverlayRect::new(0.6, 0.1, 0.3, 0.5)),
                 vertical_png_base64: Some(TEST_PNG.to_string()),
                 vertical_rect: Some(OverlayRect::new(0.1, 0.1, 0.8, 0.3)),
@@ -345,6 +499,9 @@ mod tests {
             &state,
             SetChatOverlayParams {
                 png_base64: TEST_PNG.to_string(),
+                message_ids: None,
+                canvas_width: None,
+                canvas_height: None,
                 rect: None,
                 vertical_png_base64: None,
                 vertical_rect: None,
@@ -374,6 +531,9 @@ mod tests {
                 &state,
                 SetChatOverlayParams {
                     png_base64: "  ".to_string(),
+                    message_ids: None,
+                    canvas_width: None,
+                    canvas_height: None,
                     rect: None,
                     vertical_png_base64: None,
                     vertical_rect: None,
@@ -387,6 +547,9 @@ mod tests {
             &state,
             SetChatOverlayParams {
                 png_base64: TEST_PNG.to_string(),
+                message_ids: None,
+                canvas_width: None,
+                canvas_height: None,
                 rect: None,
                 vertical_png_base64: None,
                 vertical_rect: None,
@@ -399,6 +562,9 @@ mod tests {
             &state,
             SetChatOverlayParams {
                 png_base64: "not-an-image".to_string(),
+                message_ids: None,
+                canvas_width: None,
+                canvas_height: None,
                 rect: None,
                 vertical_png_base64: None,
                 vertical_rect: None,

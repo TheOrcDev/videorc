@@ -6,6 +6,7 @@ import type {
 } from '@/lib/backend'
 import { compactTime, dayLabel } from '@/lib/format'
 import { formatRelativeTime } from '@/lib/format-time'
+import { localDayKey } from '@/lib/local-time'
 
 // Plan 209 S7: the words of Settings → Remote → Agents, the Studio's Session
 // line (D12) and ⌘K. Pure, and free of the tool catalog, so the Session line
@@ -130,9 +131,9 @@ export function agentRefusalMessage(error: unknown): string | null {
 
 /** An Activity row's time: the clock today ("14:02:11"), the day and time before. */
 export function activityTimeLabel(at: string, nowMs: number): string {
-  const when = new Date(at)
-  if (Number.isNaN(when.getTime())) return ''
-  return when.toDateString() === new Date(nowMs).toDateString() ? compactTime(at) : dayLabel(at)
+  const when = Date.parse(at)
+  if (Number.isNaN(when)) return ''
+  return localDayKey(when) === localDayKey(nowMs) ? compactTime(at) : dayLabel(at)
 }
 
 /** The Connect row's line: the apps it works with, or how many are connected now. */

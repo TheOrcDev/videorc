@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import { useId, useMemo, useState, type KeyboardEvent, type ReactElement } from 'react'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
@@ -401,6 +402,7 @@ function WebhookRow({
   onSendTest: () => void
   onRemove: () => void
 }): ReactElement {
+  useLocalTime()
   const deleted = webhook.lastError?.code === 'webhook-deleted'
   const failure = webhook.lastError ? discordErrorLine(webhook.lastError.code) : null
   const testFailure = test.kind === 'failed' ? test.error : null

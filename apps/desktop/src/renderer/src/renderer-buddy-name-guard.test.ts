@@ -72,6 +72,19 @@ const ORCLE_ALLOWED: readonly Allowed[] = [
     text: "'videorc.orcleListenPromptDismissed'",
     reason: SAVED_PROMPT_KEY
   },
+  // Plan 220 S1.4b: where each saved key lives now, by its saved name.
+  {
+    file: 'src/lib/ui-settings-key-families.ts',
+    text: "'videorc.orcleListenPromptDismissed'",
+    reason: SAVED_PROMPT_KEY
+  },
+  {
+    file: 'src/lib/ui-settings-key-families.ts',
+    text: "'videorc.orcleTab'",
+    reason: SAVED_TAB_KEY
+  },
+  // Plan 220 S1.4a: the store's tests carry the saved tab key as a real value.
+  { file: 'src/lib/ui-settings-store.test.ts', text: "'videorc.orcleTab'", reason: SAVED_TAB_KEY },
   ...ORCLE_VOICE_FILES.map((file) => ({ file, text: "'orcle-voice'", reason: MODERATION_SOURCE })),
   { file: 'src/lib/settings-tabs.ts', text: 'saved `orcle` here', reason: OLD_SETTINGS_TAB },
   { file: 'src/lib/settings-tabs.test.ts', text: "'orcle'", reason: OLD_SETTINGS_TAB },

@@ -2,7 +2,8 @@
 //
 // Launches an isolated instance (fresh profile — proves the dark default),
 // captures the requested tabs in dark, flips the theme to light via CDP
-// (localStorage + reload, the same mechanism the toggle persists through),
+// (the UI settings store plus the theme's pre-paint copy, then a reload: the
+// same places the toggle persists to, plan 220 S1.4b),
 // and captures again. PNGs land in VIDEORC_SMOKE_OUTPUT_DIR (/tmp).
 //
 // Usage: node scripts/ui-theme-screens.mjs [tab ...]   (default: studio streaming)
@@ -16,6 +17,7 @@ import { request as httpRequest } from 'node:http'
 import { promisify } from 'node:util'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { seedUiSettingsJs } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const execFileAsync = promisify(execFile)
@@ -33,7 +35,11 @@ function smokeCommand(smoke, command, params = {}) {
         port: smoke.port,
         path: '/command',
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Authorization: `Bearer ${smoke.capability}` }
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          Authorization: `Bearer ${smoke.capability}`
+        }
       },
       (res) => {
         res.setEncoding('utf8')
@@ -117,6 +123,18 @@ async function cdpCall(host, method, params) {
 async function cdpEvaluate(host, expression) {
   const result = await cdpCall(host, 'Runtime.evaluate', { expression, returnByValue: true })
   return result?.result?.value
+}
+
+// Plan 220 S1.4b.2: a seed waits for the window's UI settings store, then reloads.
+async function cdpSeedAndReload(host, entries) {
+  const result = await cdpCall(host, 'Runtime.evaluate', {
+    expression: seedUiSettingsJs(entries),
+    returnByValue: true,
+    awaitPromise: true
+  })
+  const thrown = result?.exceptionDetails
+  if (thrown) throw new Error(`UI settings seed: ${thrown.exception?.description ?? thrown.text}`)
+  await cdpEvaluate(host, `location.reload(); 'ok'`)
 }
 
 // Compositor-direct screenshot: immune to window occlusion, transparency, and
@@ -358,13 +376,10 @@ try {
   }
 
   // Dismiss onboarding for clean captures (fresh profiles always show it).
-  // The Dialog unmounts on Escape/Skip; mutating localStorage alone is
-  // not enough, but a reload after setting the flag never shows it again.
+  // The Dialog unmounts on Escape/Skip; writing the flag alone is not
+  // enough, but a reload after setting it never shows it again.
   if (process.env.VIDEORC_SHOTS_NO_RELOAD !== '1') {
-    await cdpEvaluate(
-      host,
-      `localStorage.setItem('videorc.onboardingComplete', 'creator-ux-v1'); location.reload(); 'ok'`
-    )
+    await cdpSeedAndReload(host, { 'videorc.onboardingComplete': 'creator-ux-v1' })
     await sleep(5000)
     if (process.env.VIDEORC_SHOTS_DEBUG === '1') {
       await paintDiag('post-reload')
@@ -394,7 +409,7 @@ try {
   await captureCommentsRail(smoke, host, 'dark')
 
   console.log('flipping to light...')
-  await cdpEvaluate(host, `localStorage.setItem('videorc.theme', 'light'); location.reload(); 'ok'`)
+  await cdpSeedAndReload(host, { 'videorc.theme': 'light' })
   await sleep(6000)
   const lightThemeClass = await cdpEvaluate(host, 'document.documentElement.className')
   console.log(`light root class: "${lightThemeClass}"`)

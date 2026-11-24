@@ -8,6 +8,7 @@
 mod account;
 mod agent_call;
 mod agent_chat;
+mod agent_config;
 mod agent_library;
 mod agent_look;
 mod agent_mcp;
@@ -21,6 +22,7 @@ mod audio;
 mod audio_capture_adapter;
 mod autorelease_pool;
 mod backend_authority;
+mod background_effects;
 mod banner_prepare;
 mod banner_timers;
 mod banners;
@@ -45,6 +47,7 @@ mod capture_interruption;
 mod capture_log;
 mod capture_recovery;
 mod chat_commands;
+mod chat_images;
 mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
@@ -71,6 +74,7 @@ mod cohost_library;
 mod cohost_throttle;
 mod color;
 mod comment_highlight;
+mod comments_history;
 mod community;
 mod community_service;
 mod community_store;
@@ -91,6 +95,7 @@ mod ffmpeg_work;
 mod fifo;
 mod frame_store;
 mod html_overlay;
+mod join_chime;
 mod output_session;
 mod preview_debug_sample;
 mod provider_output;
@@ -101,7 +106,46 @@ mod room_clock;
 mod room_frame_bridge;
 // Plan 249 S13b: the processed camera role's native producer.
 mod room_camera_source;
+// Plan 260 S1.8: the talk show's room from the backend (macOS first).
+#[cfg(target_os = "macos")]
+mod room_assets;
+#[cfg(target_os = "macos")]
+mod room_aux;
+#[cfg(target_os = "macos")]
+mod room_avatar;
+#[cfg(target_os = "macos")]
+#[allow(
+    dead_code,
+    reason = "plan 260 S1.8b: the presentation publishers (graphics, avatar, scene, HTML layers) read the receipts in its next parts"
+)]
+mod room_capability;
+#[cfg(target_os = "macos")]
+mod room_content;
+#[cfg(target_os = "macos")]
+mod room_graphics;
+#[cfg(target_os = "macos")]
+mod room_guest_speech;
+#[cfg(target_os = "macos")]
+mod room_host;
+#[cfg(target_os = "macos")]
+mod room_html;
+#[cfg(target_os = "macos")]
+mod room_latency;
+#[cfg(target_os = "macos")]
+mod room_media;
+#[cfg(target_os = "macos")]
+mod room_overlays;
+#[cfg(target_os = "macos")]
+mod room_playout;
 mod room_program_camera;
+#[cfg(target_os = "macos")]
+mod room_remote;
+#[cfg(target_os = "macos")]
+mod room_routing;
+#[cfg(target_os = "macos")]
+mod room_scene;
+#[cfg(target_os = "macos")]
+mod room_screen;
 mod room_system_audio;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;
@@ -192,6 +236,7 @@ mod session_token;
 mod seventv;
 mod sound_loudness;
 mod sound_mix;
+mod sound_monitor;
 mod sound_player;
 mod sound_store;
 mod source_audio_tap;
@@ -216,9 +261,12 @@ mod system_audio_session;
 mod test_alloc;
 #[cfg(test)]
 mod test_temp_dir;
+mod thumbnails;
 mod transcript;
 mod twitch;
 mod twitch_chat;
+mod tzdb;
+mod ui_settings;
 mod usage_stats;
 #[cfg(target_os = "macos")]
 mod video_toolbox_encoder;
@@ -708,10 +756,20 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     tokio::spawn(banner_timers::run_banner_timers(state.clone()));
     // Plan 232: which HTML overlays main renders, and where each stands.
     tokio::spawn(html_overlay::run_html_overlay_targets(state.clone()));
+    // Plan 260 S1.8a: the backend holds the talk show's host seat (dev
+    // switch, macOS).
+    #[cfg(target_os = "macos")]
+    room_host::start(state.clone());
     // Plan 214 D4: Videorc Camera comes back on when it was on.
     virtual_camera_service::start_from_settings(&state).await;
+    // Plan 260 S1.5b: the stored scheduled thumbnails are previewable again
+    // before the first client connects (main's old rehydrate pass).
+    register_stored_scheduled_thumbnails(&state).await;
     let app = Router::new()
         .route("/health", get(health_handler))
+        // Plan 260 S1.5a: cached chat avatars, emotes and GIFs, behind this
+        // run's key; the route serves the cache and never fetches.
+        .route("/chat-images/{file}", get(chat_images::serve_handler))
         .route("/preview/live.mjpeg", get(live_preview_handler))
         .route("/preview/live.jpg", get(live_preview_frame_handler))
         .route("/preview/camera/live.png", get(live_camera_frame_handler))
@@ -723,6 +781,8 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
             "/preview/buddy/latest.bmp",
             get(preview_buddy_layer::latest_bmp_handler),
         )
+        // Plan 260 S1.8d: a person's picture in the backend's room.
+        .route("/room/remote/latest.bmp", get(room_remote_bmp_handler))
         // Plan 232 S11: an HTML banner's live picture for the proof surface.
         .route(
             html_overlay::HTML_OVERLAY_PREVIEW_ROUTE,
@@ -1725,6 +1785,79 @@ async fn live_screen_frame_handler(
         )
             .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// `?token=&identity=&source=&afterGeneration=&afterSequence=`: one person's
+/// camera or screen, or the monitor, and the frame the caller already has.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RoomRemoteFrameQuery {
+    token: String,
+    identity: String,
+    source: String,
+    #[serde(default)]
+    after_generation: Option<String>,
+    #[serde(default)]
+    after_sequence: Option<u64>,
+}
+
+/// `GET /room/remote/latest.bmp` (plan 260 S1.8d): the latest picture of a
+/// person in the backend's room, in the HTML overlay route's dialect
+/// (`200` BMP with its cursor, `204` unchanged, `204` empty).
+async fn room_remote_bmp_handler(
+    State(state): State<AppState>,
+    Query(query): Query<RoomRemoteFrameQuery>,
+) -> Response {
+    if http_backend_role(&state, &query.token).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let Some(frame) = room_remote::latest(&query.identity, &query.source) else {
+            return html_overlay::html_overlay_preview_response(
+                html_overlay::HtmlOverlayPreviewPoll::Empty,
+            );
+        };
+        if query.after_generation.as_deref() == Some(frame.generation.as_str())
+            && query.after_sequence == Some(frame.sequence)
+        {
+            return html_overlay::html_overlay_preview_response(
+                html_overlay::HtmlOverlayPreviewPoll::Unchanged {
+                    generation: frame.generation,
+                    sequence: frame.sequence,
+                },
+            );
+        }
+        let encoded = tokio::task::spawn_blocking(move || {
+            preview_buddy_layer::encode_bgra_bmp_with_alpha(frame.width, frame.height, &frame.bgra)
+                .map(|bmp| (frame, bmp))
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some((frame, bmp)) = encoded else {
+            return html_overlay::html_overlay_preview_response(
+                html_overlay::HtmlOverlayPreviewPoll::Empty,
+            );
+        };
+        html_overlay::html_overlay_preview_response(html_overlay::HtmlOverlayPreviewPoll::Frame {
+            generation: frame.generation,
+            sequence: frame.sequence,
+            width: frame.width,
+            height: frame.height,
+            bmp: axum::body::Bytes::from(bmp),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (
+            &query.identity,
+            &query.source,
+            &query.after_generation,
+            query.after_sequence,
+        );
+        html_overlay::html_overlay_preview_response(html_overlay::HtmlOverlayPreviewPoll::Empty)
     }
 }
 
@@ -6401,7 +6534,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "screens.importImage"
         | "banners.importImage"
         | "banners.importHtml"
-        | "sounds.import" => Some(Mutation {
+        | "sounds.import"
+        // Plan 260 S1.5b: a picked image decoded, fitted and stored.
+        | "scheduledThumbnail.import"
+        | "backgrounds.import" => Some(Mutation {
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
         }),
 
@@ -6412,6 +6548,12 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
 
         // Plan 168 S-F4: a save decodes the built atlas once and moves the pack.
         "cohost.pet.save" => Some(Mutation {
+            max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
+        // Plan 260 S1.5c: another app's config file, or `claude mcp remove`
+        // then `add` (8 s + 20 s).
+        "agents.config.add" => Some(Mutation {
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
         }),
 
@@ -6492,6 +6634,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "encoder.preference.set"
         | "diagnostics.metricsJournal.set"
         | "usageStats.set"
+        // Plan 220 S1.4a: one UI settings batch, one transaction, one event.
+        | "ui.settings.set"
         | "discord.announce.update"
         | "discord.webhook.remove"
         | "streamReport.email.set"
@@ -6503,6 +6647,21 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "watchdog.idle.report"
         | "cloud.show.check"
         | "cloud.room.client.report"
+        // Plan 260 S1.8b: the room's presentation switches and content (in
+        // memory).
+        | "cloud.room.presentation.set"
+        | "cloud.room.avatar.set"
+        | "cloud.room.avatar.motion"
+        | "cloud.room.scene.commit"
+        // Plan 260 S1.8c: the host's own media in the backend's room.
+        | "cloud.room.microphone.set"
+        | "cloud.room.camera.set"
+        | "cloud.room.screen.set"
+        | "cloud.room.owner"
+        | "cloud.room.routing.set"
+        | "cloud.room.aux.set"
+        | "cloud.room.html.set"
+        | "cloud.room.monitor.set"
         | "cloud.recordings.download"
         | "cloud.archive.stop"
         | "cloud.archive.cancel"
@@ -6532,7 +6691,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "scheduledStreams.get"
         | "scheduledStreams.operation"
         | "scheduledStreams.resolveTime"
+        | "scheduledStreams.zoneOffsets"
         | "scheduledStreams.candidates"
+        | "time.localOffsets"
         | "account.get"
         | "entitlements.get"
         | "cloud.clips.status"
@@ -6549,6 +6710,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.status"
         | "cohost.settings.get"
         | "cohost.buddy.status"
+        // Plan 260 S1.2e: pure drawings for the Captions and Sidekick pages.
+        | "captions.preview.render"
+        | "buddy.bubble.render"
         | "cohost.pet.list"
         | "cohost.pet.creation.status"
         | "cohost.avatar.draft.get"
@@ -6608,6 +6772,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "obs.discover"
         | "obs.read"
         | "obs.readStreamKey"
+        // Plan 260 S1.5a: one session's History view, read from SQLite and
+        // the transcript cache.
+        | "sessions.comments.history"
         | "sessions.viewers.list"
         | "sessions.audience.get"
         | "stream.audience.snapshot"
@@ -6622,8 +6789,13 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.emotes.get"
         | "usageStats.get"
         | "streamReport.email.get"
+        | "ui.settings.get"
         | "discord.announce.get"
         | "discord.links.preview"
+        // Plan 260 S1.5a: an allowlisted chat image into the cache. It writes
+        // only the cache folder, never app state, and a GIF may take 15 s, so
+        // it runs beside other commands like `discord.links.preview`.
+        | "chatImages.cache"
         | "streamTargets.metadata.get"
         | "streamTargets.metadata.validate"
         | "streamTargets.manualKey.inspect"
@@ -6724,9 +6896,12 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
     match command.method.as_str() {
         // Plan 186: one image import process-wide, takeovers and banners
         // alike; plan 189: a sound decode shares the lane.
-        "screens.importImage" | "banners.importImage" | "banners.importHtml" | "sounds.import" => {
-            Some(WebSocketIsolatedCommandLaneKind::AssetImport)
-        }
+        "screens.importImage"
+        | "banners.importImage"
+        | "banners.importHtml"
+        | "sounds.import"
+        | "scheduledThumbnail.import"
+        | "backgrounds.import" => Some(WebSocketIsolatedCommandLaneKind::AssetImport),
         "account.refresh"
         | "account.windows_pilot_update_token"
         | "entitlements.refresh"
@@ -6736,6 +6911,8 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         | "platformAccounts.youtube.selectChannel"
         | "discord.webhook.save"
         | "discord.webhook.sendTest"
+        // Plan 260 S1.5c: "Add to …" may wait on the `claude` CLI.
+        | "agents.config.add"
         | COMMAND_LANE_SMOKE_BLOCK_METHOD => {
             Some(WebSocketIsolatedCommandLaneKind::AccountMaintenance)
         }
@@ -10623,6 +10800,61 @@ fn resolve_import_resources(
     )
 }
 
+/// Plan 260 S1.5b: decode, fit and store off the async workers, then make
+/// the stored copy previewable (`videorc-asset://scheduled-thumbnail/<id>`).
+async fn import_scheduled_thumbnail(
+    state: &AppState,
+    params: thumbnails::ImportImageParams,
+) -> Result<thumbnails::ScheduledThumbnail> {
+    let root = thumbnails::configured_dir(thumbnails::SCHEDULED_THUMBNAIL_ROOT_ENV)?;
+    let (thumbnail, path) = tokio::task::spawn_blocking(move || {
+        thumbnails::import_scheduled_thumbnail(std::path::Path::new(&params.path), &root)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("Thumbnail import worker failed: {error}"))??;
+    state
+        .resource_authority
+        .register_managed_thumbnail(&thumbnail.id, &path.to_string_lossy())?;
+    Ok(thumbnail)
+}
+
+/// Plan 260 S1.5b: copy into the managed folder and write the Assets tile,
+/// then register the copy as a scene background.
+async fn import_background(
+    state: &AppState,
+    params: thumbnails::ImportImageParams,
+) -> Result<thumbnails::BackgroundImport> {
+    let directory = thumbnails::configured_dir(thumbnails::BACKGROUND_IMPORT_DIR_ENV)?;
+    let asset_directory = directory.clone();
+    let imported = tokio::task::spawn_blocking(move || {
+        thumbnails::import_background(std::path::Path::new(&params.path), &asset_directory)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("Background import worker failed: {error}"))??;
+    let asset_path = directory.join(&imported.asset_file_name);
+    state
+        .resource_authority
+        .register_managed_background(&imported.id, &asset_path.to_string_lossy())?;
+    Ok(imported)
+}
+
+async fn register_stored_scheduled_thumbnails(state: &AppState) {
+    let Ok(root) = thumbnails::configured_dir(thumbnails::SCHEDULED_THUMBNAIL_ROOT_ENV) else {
+        return;
+    };
+    let authority = state.resource_authority.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        for (asset_id, path) in thumbnails::stored_scheduled_thumbnails(&root) {
+            if let Err(error) =
+                authority.register_managed_thumbnail(&asset_id, &path.to_string_lossy())
+            {
+                tracing::warn!(%asset_id, "stored scheduled thumbnail not registered: {error:#}");
+            }
+        }
+    })
+    .await;
+}
+
 fn resolve_screen_import_resource(
     state: &AppState,
     params: &mut serde_json::Value,
@@ -11865,6 +12097,41 @@ async fn handle_text_message_with_role(
             command.id,
             comment_highlight::comment_highlight_canvases(state).await,
         ),
+        // Plan 220 S1.4a: the UI settings store every window reads its
+        // product state from (what localStorage held). A refused batch names
+        // its reason; a storage failure is its own code.
+        "ui.settings.get" => {
+            match serde_json::from_value::<ui_settings::UiSettingsGetParams>(command.params) {
+                Ok(params) => match ui_settings::get(&state.database, params) {
+                    Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+                    Err(ui_settings::UiSettingsError::Invalid(error)) => {
+                        ServerResponse::error(command.id, "invalid-params", error.to_string())
+                    }
+                    Err(ui_settings::UiSettingsError::Storage(error)) => {
+                        ServerResponse::error(command.id, "ui-settings-storage", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "ui.settings.set" => {
+            match serde_json::from_value::<ui_settings::UiSettingsSetParams>(command.params) {
+                Ok(params) => match ui_settings::set(state, params) {
+                    Ok(change) => ServerResponse::ok(command.id, change),
+                    Err(ui_settings::UiSettingsError::Invalid(error)) => {
+                        ServerResponse::error(command.id, "invalid-params", error.to_string())
+                    }
+                    Err(ui_settings::UiSettingsError::Storage(error)) => {
+                        ServerResponse::error(command.id, "ui-settings-storage", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "overlays.layout.get" => ServerResponse::ok(
             command.id,
             overlay_layout::load_overlay_layout(&state.database),
@@ -12412,6 +12679,23 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 260 S1.2e: the Sidekick page's samples, drawn by the live
+        // bubble's painter; no state is read or changed.
+        "buddy.bubble.render" => {
+            match serde_json::from_value::<buddy_overlay::BuddyBubbleRenderParams>(command.params) {
+                Ok(params) => match buddy_overlay::render_buddy_bubble(params).await {
+                    Ok(png) => ServerResponse::ok(command.id, png),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "buddy-bubble-invalid",
+                        format!("{error:#}"),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         // Plan 260 S1.2d: the backend draws the bubble from the line that is
         // up; a `pngBase64` bubble (the previous release's path) is still
         // installed.
@@ -12770,6 +13054,25 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 260 S1.2e: the Captions page's preview, drawn by the captioned
+        // copy's cue-frame painter.
+        "captions.preview.render" => {
+            match serde_json::from_value::<captions::CaptionPreviewRenderParams>(command.params) {
+                Ok(params) => match captions::render_caption_preview(params).await {
+                    Ok(png) => ServerResponse::ok(command.id, png),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "captions-preview-invalid",
+                        format!("{error:#}"),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // The renderer's cue frames, the path before plan 260 S1.2e: taken for
+        // one release (the backend draws them itself now).
         "captions.cues.submit" => {
             let request_id = command
                 .params
@@ -13614,6 +13917,13 @@ async fn handle_text_message_with_role(
             }
         }
         "cloud.room.token.refresh" => match cloud_context(state) {
+            // Plan 260 S1.8a: with the backend holding the host seat the
+            // renderer must stay out of the room (one `host:<showId>`).
+            _ if backend_holds_room_seat() => ServerResponse::error(
+                command.id,
+                "cloud-room-held-by-backend",
+                "The backend holds the talk show's host seat.",
+            ),
             Some(context) => match context.room_token(account::stored_session_token()).await {
                 Ok(answer) => ServerResponse::ok(command.id, answer),
                 Err(error) => ServerResponse::error(
@@ -13674,8 +13984,277 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 260 S1.8b: the avatar and scene content the Studio built, for
+        // the backend's room to deliver while it holds the host seat.
+        "cloud.room.avatar.set" => {
+            match serde_json::from_value::<cloud_talk::CloudRoomAvatarSetParams>(command.params) {
+                #[cfg(target_os = "macos")]
+                Ok(params) if room_host::holds_seat() => {
+                    room_content::set_avatar(params);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 260 S1.8c: the host's microphone for the backend's room, in
+        // the room microphone bridge's settings shape (`null` takes it off).
+        "cloud.room.microphone.set" => {
+            match serde_json::from_value::<cloud_talk::CloudRoomMediaSetParams>(command.params) {
+                Ok(params)
+                    if !params
+                        .microphone
+                        .as_ref()
+                        .is_none_or(|settings| settings.valid()) =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "invalid-params",
+                        "The microphone settings are out of range.",
+                    )
+                }
+                #[cfg(target_os = "macos")]
+                Ok(params) if room_host::holds_seat() => {
+                    room_media::set_microphone(params.microphone);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 260 S1.8c: the host's camera for the backend's room (on with
+        // its device, `null` off); its effects are the scene layout's.
+        "cloud.room.camera.set" => {
+            match serde_json::from_value::<cloud_talk::CloudRoomMediaSetParams>(command.params) {
+                Ok(params)
+                    if !params
+                        .camera
+                        .as_ref()
+                        .is_none_or(|settings| settings.valid()) =>
+                {
+                    ServerResponse::error(command.id, "invalid-params", "The camera id is invalid.")
+                }
+                #[cfg(target_os = "macos")]
+                Ok(params) if room_host::holds_seat() => {
+                    room_media::set_camera(params.camera);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 260 S1.8: who holds the room's host seat, asked before the
+        // renderer starts a room client of its own.
+        "cloud.room.owner" => {
+            #[cfg(target_os = "macos")]
+            let backend = room_host::holds_seat();
+            #[cfg(not(target_os = "macos"))]
+            let backend = false;
+            ServerResponse::ok(command.id, serde_json::json!({ "backend": backend }))
+        }
+        // Plan 260 S1.8c: the screen the room shares (the scene's own, by its
+        // native id), behind Hide screen; `null` stops sharing.
+        "cloud.room.screen.set" => {
+            match serde_json::from_value::<cloud_talk::CloudRoomMediaSetParams>(command.params) {
+                Ok(params)
+                    if !params
+                        .screen
+                        .as_ref()
+                        .is_none_or(|settings| settings.valid()) =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "invalid-params",
+                        "The screen source id is invalid.",
+                    )
+                }
+                #[cfg(target_os = "macos")]
+                Ok(params) if room_host::holds_seat() => {
+                    room_screen::set_screen(params.screen);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 260 S1.8d: the Program monitor takes the runner's return in
+        // the backend's room.
+        "cloud.room.monitor.set" => {
+            let Some(enabled) = command
+                .params
+                .get("enabled")
+                .and_then(serde_json::Value::as_bool)
+            else {
+                return ServerResponse::error(command.id, "invalid-params", "Send enabled.");
+            };
+            #[cfg(target_os = "macos")]
+            {
+                if room_host::holds_seat() {
+                    room_remote::set_monitor(enabled);
+                    // S1.8d d5: the return is heard only with Listen on.
+                    let listen = command
+                        .params
+                        .get("listen")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    room_playout::set_listen(enabled && listen);
+                    return ServerResponse::ok(command.id, serde_json::json!({ "held": true }));
+                }
+            }
+            let _ = enabled;
+            ServerResponse::ok(command.id, serde_json::json!({ "held": false }))
+        }
+        // Plan 260 S1.8c c5: whether the backend's room may publish the HTML
+        // layers' sheet (this computer controls the show, devices on).
+        "cloud.room.html.set" => {
+            let Some(enabled) = command
+                .params
+                .get("enabled")
+                .and_then(serde_json::Value::as_bool)
+            else {
+                return ServerResponse::error(command.id, "invalid-params", "Send enabled.");
+            };
+            #[cfg(target_os = "macos")]
+            {
+                if room_host::holds_seat() {
+                    room_html::set_enabled(enabled);
+                    return ServerResponse::ok(command.id, serde_json::json!({ "held": true }));
+                }
+            }
+            let _ = enabled;
+            ServerResponse::ok(command.id, serde_json::json!({ "held": false }))
+        }
+        // Plan 260 S1.8c: room sounds and the room's system audio, on the
+        // backend room's auxiliary track.
+        "cloud.room.aux.set" => {
+            match serde_json::from_value::<cloud_talk::CloudRoomAuxSetParams>(command.params) {
+                Ok(params) if !params.valid() => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "The system audio gain is out of range.",
+                ),
+                #[cfg(target_os = "macos")]
+                Ok(params) if room_host::holds_seat() => {
+                    room_aux::set_aux(params);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 260 S1.8c: what the program page plays of the host's speech
+        // and auxiliary audio, for the backend's room to route.
+        "cloud.room.routing.set" => {
+            match serde_json::from_value::<cloud_talk::ProgramAudioSettings>(command.params) {
+                Ok(settings) if !settings.valid() => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "The program gains are out of range.",
+                ),
+                #[cfg(target_os = "macos")]
+                Ok(settings) if room_host::holds_seat() => {
+                    room_routing::set_routing(settings);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 260 S1.8b: one message of the renderer's avatar motion model,
+        // sent to the pages that animate; answers who they are.
+        "cloud.room.avatar.motion" => {
+            let Some(message) = command.params.get("message").cloned() else {
+                return ServerResponse::error(command.id, "invalid-params", "Send the message.");
+            };
+            #[cfg(target_os = "macos")]
+            {
+                if room_host::holds_seat() {
+                    return match room_avatar::send_motion(&message).await {
+                        Ok(targets) => ServerResponse::ok(
+                            command.id,
+                            serde_json::json!({ "held": true, "targets": targets }),
+                        ),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cloud-room-motion-failed",
+                            format!("{error:#}"),
+                        ),
+                    };
+                }
+            }
+            let _ = message;
+            ServerResponse::ok(
+                command.id,
+                serde_json::json!({ "held": false, "targets": [] }),
+            )
+        }
+        "cloud.room.scene.commit" => {
+            match serde_json::from_value::<cloud_talk::CloudRoomSceneCommitParams>(command.params) {
+                #[cfg(target_os = "macos")]
+                Ok(params) if room_host::holds_seat() => {
+                    // The commit's generation (the scene entry's revision),
+                    // and its standing result when nothing changed.
+                    let (generation, status) = room_content::commit_scene(params);
+                    ServerResponse::ok(
+                        command.id,
+                        serde_json::json!({
+                            "held": true,
+                            "generation": generation,
+                            "status": status,
+                        }),
+                    )
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 260 S1.8b: the room's presentation switches (Graphics first),
+        // for the topics the backend sends while it holds the host seat.
+        "cloud.room.presentation.set" => {
+            #[cfg(target_os = "macos")]
+            {
+                if room_host::holds_seat() {
+                    if let Some(enabled) = command
+                        .params
+                        .get("graphics")
+                        .and_then(serde_json::Value::as_bool)
+                    {
+                        room_graphics::set_enabled(enabled);
+                    }
+                    if let Some(enabled) = command
+                        .params
+                        .get("avatar")
+                        .and_then(serde_json::Value::as_bool)
+                    {
+                        room_avatar::set_enabled(enabled);
+                    }
+                    return ServerResponse::ok(command.id, serde_json::json!({ "held": true }));
+                }
+            }
+            ServerResponse::ok(command.id, serde_json::json!({ "held": false }))
+        }
         "cloud.room.client.report" => {
             match serde_json::from_value::<cloud_talk::RoomClientReportParams>(command.params) {
+                // Plan 260 S1.8a: the backend reports its own room
+                // connection; the renderer's, refused a token, would only
+                // contradict it.
+                Ok(_) if backend_holds_room_seat() => {
+                    ServerResponse::ok(command.id, cloud_show_status(state))
+                }
                 Ok(params) => match cloud_context(state) {
                     Some(context) => ServerResponse::ok(command.id, context.report_client(params)),
                     None => cloud_unavailable(command.id),
@@ -13709,17 +14288,54 @@ async fn handle_text_message_with_role(
         "cloud.guest.act" => {
             match serde_json::from_value::<cloud_talk::GuestActParams>(command.params) {
                 Ok(params) => match cloud_context(state) {
-                    Some(context) => match context
-                        .act_on_guest(account::stored_session_token(), params)
-                        .await
-                    {
-                        Ok(status) => ServerResponse::ok(command.id, status),
-                        Err(error) => ServerResponse::error(
-                            command.id,
-                            "cloud-guest-action-failed",
-                            format!("{error:#}"),
-                        ),
-                    },
+                    Some(context) => {
+                        // Plan 260 S1.8 (#1895): a removed or banned guest's
+                        // grant goes before the web takes them out, and stays
+                        // gone until the host lets them in again.
+                        let removes = matches!(
+                            params.action,
+                            cloud_talk::GuestAction::Remove | cloud_talk::GuestAction::Ban
+                        );
+                        let guest_id = params.guest_id.clone();
+                        // The deny's permissions update goes out first.
+                        #[cfg(target_os = "macos")]
+                        {
+                            if removes {
+                                let applied = room_routing::deny(&guest_id);
+                                if tokio::time::timeout(Duration::from_secs(3), applied)
+                                    .await
+                                    .is_err()
+                                {
+                                    tracing::warn!(
+                                        "The removed guest's subscriptions were not confirmed revoked in 3 s; removing anyway (the deny stays)."
+                                    );
+                                }
+                            }
+                        }
+                        match context
+                            .act_on_guest(account::stored_session_token(), params)
+                            .await
+                        {
+                            Ok(status) => ServerResponse::ok(command.id, status),
+                            Err(error) => {
+                                // Only an explicit refusal lifts the deny:
+                                // after a timeout or a server error the
+                                // removal may have happened.
+                                #[cfg(target_os = "macos")]
+                                {
+                                    if removes && cloud_talk::guest_action_refused(&error) {
+                                        room_routing::undeny(&guest_id);
+                                    }
+                                }
+                                let _ = (removes, &guest_id);
+                                ServerResponse::error(
+                                    command.id,
+                                    "cloud-guest-action-failed",
+                                    format!("{error:#}"),
+                                )
+                            }
+                        }
+                    }
                     None => cloud_unavailable(command.id),
                 },
                 Err(error) => {
@@ -15317,6 +15933,7 @@ async fn handle_text_message_with_role(
                     Ok(completion) => {
                         if completion.deleted {
                             posters::remove_session_poster(&completion.session_id).await;
+                            state.comments_history.remove(&completion.session_id);
                         }
                         ServerResponse::ok(command.id, completion)
                     }
@@ -15588,6 +16205,20 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "agents.config.add" => {
+            match serde_json::from_value::<agent_config::AgentConfigAddParams>(command.params) {
+                Ok(params) => ServerResponse::ok(
+                    command.id,
+                    agent_config::add_agent_to_app_for_rpc(params).await,
+                ),
+                // Never echo the params: they hold the agent token.
+                Err(_) => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "Expected { app, bridgePath, token }.".to_string(),
+                ),
+            }
+        }
         "discord.webhook.save" => {
             match serde_json::from_value::<discord_announce::SaveWebhookParams>(command.params) {
                 Ok(params) => discord_rpc(
@@ -15617,6 +16248,32 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<discord_announce::TestParams>(command.params) {
                 Ok(params) => {
                     discord_rpc(command.id, discord_announce::send_test(state, params).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sessions.comments.history" => {
+            match serde_json::from_value::<comments_history::CommentsHistoryParams>(command.params)
+            {
+                Ok(params) => match comments_history::load(state, &params.session_id).await {
+                    Ok(history) => ServerResponse::ok(command.id, history),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "session-comments-history-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "chatImages.cache" => {
+            match serde_json::from_value::<chat_images::ChatImageCacheParams>(command.params) {
+                Ok(params) => {
+                    ServerResponse::ok(command.id, chat_images::cache_for_rpc(state, params).await)
                 }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
@@ -16223,6 +16880,7 @@ async fn handle_text_message_with_role(
         | "scheduledStreams.get"
         | "scheduledStreams.operation"
         | "scheduledStreams.resolveTime"
+        | "scheduledStreams.zoneOffsets"
         | "scheduledStreams.candidates" => {
             match scheduled_streams_service::dispatch(state, &command.method, command.params).await
             {
@@ -16232,6 +16890,10 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "time.localOffsets" => match tzdb::local_offsets(&command.params, chrono::Utc::now()) {
+            Ok(value) => ServerResponse::ok(command.id, value),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
         "streamTargets.youtube.prepare" => {
             match serde_json::from_value::<YouTubePrepareParams>(command.params) {
                 Ok(params) => match prepare_youtube_stream_target(state, params).await {
@@ -17085,6 +17747,52 @@ async fn handle_text_message_with_role(
                         ),
                     }
                 }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "scheduledThumbnail.import" => {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_screen_import_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value::<thumbnails::ImportImageParams>(params_value) {
+                Ok(params) => match import_scheduled_thumbnail(state, params).await {
+                    Ok(thumbnail) => ServerResponse::ok(command.id, thumbnail),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "thumbnail-import-failed",
+                        format!("{error:#}"),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "backgrounds.import" => {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_screen_import_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value::<thumbnails::ImportImageParams>(params_value) {
+                Ok(params) => match import_background(state, params).await {
+                    Ok(imported) => ServerResponse::ok(command.id, imported),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "background-import-failed",
+                        format!("{error:#}"),
+                    ),
+                },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
@@ -18771,7 +19479,13 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
                         // Plan 249 S13b: with the processed camera on, the native
                         // camera stays the one owner and the room publishes its
                         // processed frames; nothing is lent to the browser.
-                        if room_camera_source::enabled(state.smoke_rpc_enabled) {
+                        // Plan 260 S1.8c: the same while the backend's room is
+                        // on (its dev switch): the backend publishes the camera.
+                        #[cfg(target_os = "macos")]
+                        let backend_room = room_host::enabled();
+                        #[cfg(not(target_os = "macos"))]
+                        let backend_room = false;
+                        if backend_room || room_camera_source::enabled(state.smoke_rpc_enabled) {
                             room_camera_source::set_kept_for_room(true);
                             *state
                                 .cloud_live_hold
@@ -18813,7 +19527,10 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
             })
         }),
         // Plan 224: "Ada wants to join", one event per new request.
+        // Plan 260 S1.3c: the backend rings the chime itself where it has an
+        // output (macOS); the renderer rings it elsewhere.
         request: std::sync::Arc::new(move |request| {
+            join_chime::ring(&request_state);
             request_state.emit_event(cloud_talk::CLOUD_ROOM_REQUESTS_EVENT, request);
         }),
         // Plan 234 T3: an overlay for the host's renderer to send to the
@@ -18919,6 +19636,20 @@ fn cloud_talk_error_code(error: &anyhow::Error, default: &'static str) -> &'stat
         return code;
     }
     default
+}
+
+/// Plan 260 S1.8a: does the backend's own room hold the talk show's host
+/// seat? A match guard inside an RPC arm, never on the arm itself: the
+/// websocket inventory reads only plain top-level arms.
+#[cfg(target_os = "macos")]
+fn backend_holds_room_seat() -> bool {
+    room_host::holds_seat()
+}
+
+/// The backend's room is macOS only (plan 260 S1.8).
+#[cfg(not(target_os = "macos"))]
+fn backend_holds_room_seat() -> bool {
+    false
 }
 
 fn cloud_show_status(state: &AppState) -> cloud_show::CloudStatus {
@@ -22723,8 +23454,11 @@ mod tests {
             "banners.importImage",
             "banners.importHtml",
             "sounds.import",
+            "scheduledThumbnail.import",
+            "backgrounds.import",
             "sessions.delete",
             "sessions.delete.complete",
+            "agents.config.add",
         ] {
             assert_eq!(
                 websocket_method_execution_policy(method),
@@ -23380,6 +24114,7 @@ mod tests {
             "entitlements.refresh",
             "platformAccounts.refresh",
             "platformAccounts.validate",
+            "agents.config.add",
             COMMAND_LANE_SMOKE_BLOCK_METHOD,
         ] {
             let command = json!({ "id": method, "method": method, "params": {} }).to_string();

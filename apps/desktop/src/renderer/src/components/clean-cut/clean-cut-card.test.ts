@@ -16,6 +16,7 @@ import { DEFAULT_BASIC_ENTITLEMENTS } from '@/lib/entitlements'
 import { CLOUD_AI_CLEAN_CUT_USE, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
 
 import { CleanCutCard, type CleanCutFocus } from './clean-cut-card'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
@@ -209,7 +210,6 @@ beforeEach(() => {
   for (const spy of [onReview, onOpenLibrarySession, setAiConsent, revealSession, signIn]) {
     spy.mockClear()
   }
-  localStorage.clear()
   Object.assign(window, { videorc: { revealSession } })
   container = document.createElement('div')
   document.body.append(container)
@@ -242,13 +242,13 @@ describe('Clean cut card (plan 119 S14)', () => {
   it('turns "every recording" on and off, remembering it in this window', async () => {
     await render()
     await act(async () => autoSwitch().click())
-    expect(localStorage.getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('1')
+    expect(uiSettingsStorage().getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('1')
     expect(autoSwitch().hasAttribute('data-checked')).toBe(true)
     expect(document.querySelector('[data-slot="clean-cut-auto-status"]')?.textContent).toContain(
       'On, cuts every recording when you stop'
     )
     await act(async () => autoSwitch().click())
-    expect(localStorage.getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('0')
+    expect(uiSettingsStorage().getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('0')
   })
 
   it('asks for Cloud AI consent first, naming the audio upload, and changes nothing on Not now', async () => {
@@ -264,16 +264,16 @@ describe('Clean cut card (plan 119 S14)', () => {
     for (const use of CLOUD_AI_USES) expect(dialog?.textContent).toContain(use)
     await act(async () => button('Not now').click())
     expect(setAiConsent).not.toHaveBeenCalled()
-    expect(localStorage.getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBeNull()
+    expect(uiSettingsStorage().getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBeNull()
 
     await act(async () => autoSwitch().click())
     await act(async () => button('Allow and turn on').click())
     expect(setAiConsent).toHaveBeenCalledWith(true)
-    expect(localStorage.getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('1')
+    expect(uiSettingsStorage().getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('1')
   })
 
   it('offers "Allow cloud AI…" when every recording is on but cloud AI was revoked (plan 174 E-6)', async () => {
-    localStorage.setItem(CLEAN_CUT_AUTO_STORAGE_KEY, '1')
+    uiSettingsStorage().setItem(CLEAN_CUT_AUTO_STORAGE_KEY, '1')
     await render({ consented: false })
     const status = document.querySelector('[data-slot="clean-cut-auto-status"]')
     expect(status?.getAttribute('data-status')).toBe('attention')
@@ -287,7 +287,7 @@ describe('Clean cut card (plan 119 S14)', () => {
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Turn on Clean cut?')
     await act(async () => button('Allow and turn on').click())
     expect(setAiConsent).toHaveBeenCalledWith(true)
-    expect(localStorage.getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('1')
+    expect(uiSettingsStorage().getItem(CLEAN_CUT_AUTO_STORAGE_KEY)).toBe('1')
   })
 
   it('asks a signed-out streamer to sign in and offers nothing to start', async () => {

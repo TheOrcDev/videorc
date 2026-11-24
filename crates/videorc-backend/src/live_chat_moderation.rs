@@ -2168,12 +2168,25 @@ mod tests {
         assert!(!pending.requires_explicit_confirm);
         assert_eq!(pending.confirm_by, None);
         assert!(pending.execute_at.is_some());
-        tokio::time::sleep(COUNTDOWN + Duration::from_millis(250)).await;
-        let stored = state
-            .database
-            .get_chat_moderation_operation(&pending.operation_id)
-            .unwrap()
-            .unwrap();
+        tokio::time::sleep(COUNTDOWN).await;
+        // The countdown fires on time, but the platform call that follows
+        // can take longer than any fixed margin on a busy CI runner (it was
+        // still Executing 250 ms later on macOS): wait for the outcome.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let stored = loop {
+            let stored = state
+                .database
+                .get_chat_moderation_operation(&pending.operation_id)
+                .unwrap()
+                .unwrap();
+            let settled = stored.phase != ModerationPhase::PendingConfirm
+                && stored.phase != ModerationPhase::Executing
+                && buffered_message(&state, &target.id).await.is_deleted;
+            if settled || tokio::time::Instant::now() >= deadline {
+                break stored;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
         assert_eq!(stored.phase, ModerationPhase::Removed);
         assert_eq!(script.hits.load(Ordering::SeqCst), 1);
         assert!(buffered_message(&state, &target.id).await.is_deleted);

@@ -81,6 +81,8 @@ import {
   type RemovalAnswer
 } from '@/lib/chat-removal-view'
 import { holdUndoableAction, type UndoableAction } from '@/lib/undoable-action'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
+import { hydrateUiSettingsBeforeFirstRender } from '@/lib/ui-settings-window'
 import { mergeModerationOperations } from '../../shared/chat-moderation'
 import { reconcileBrokerCommentsSnapshot } from '../../shared/comments-snapshot-delta'
 import { CommentsDeltaBatcher, scheduleCommentsDeltaFlush } from '@/lib/comments-delta-batcher'
@@ -94,6 +96,7 @@ import type {
   ChatCommandsSummary
 } from '../../shared/chat-commands'
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
+import { startLocalTimeSync } from '@/lib/local-time'
 import '@/styles.css'
 
 /** What a failed Buddy action was, for its toast (plan 174 S2.4). */
@@ -400,7 +403,7 @@ function CommentsWindowApp(): ReactElement {
   const [cohost, setCohost] = useState<CohostWindowState>(offCohostWindowState)
   const [cohostActionPending, setCohostActionPending] = useState(false)
   const [cohostNudgeDismissed, setCohostNudgeDismissed] = useState(() =>
-    cohostNudgeDismissedFromStorage(localStorage.getItem(COHOST_NUDGE_STORAGE_KEY))
+    cohostNudgeDismissedFromStorage(uiSettingsStorage().getItem(COHOST_NUDGE_STORAGE_KEY))
   )
   useEffect(() => {
     const applyView = (next: CommentsViewSnapshot): void => {
@@ -987,7 +990,7 @@ function CommentsWindowApp(): ReactElement {
           onCohostListenOn={turnListeningOn}
           onCohostNudgeDismiss={() => {
             setCohostNudgeDismissed(true)
-            localStorage.setItem(COHOST_NUDGE_STORAGE_KEY, '1')
+            uiSettingsStorage().setItem(COHOST_NUDGE_STORAGE_KEY, '1')
           }}
           onCohostDismissFlag={(flag) => void sendCohostAction('dismiss-flag')(flag.messageId)}
           onCohostDismissQuestion={(question) =>
@@ -1222,15 +1225,23 @@ function CommentsWindowApp(): ReactElement {
   )
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <AppErrorBoundary>
-      {/* A separate React root: its own tooltips, and toasts above its 32 px
-          status bar. With no theme provider sonner follows
-          prefers-color-scheme, like the page. */}
-      <WindowProviders window="stream-manager">
-        <CommentsWindowApp />
-      </WindowProviders>
-    </AppErrorBoundary>
-  </React.StrictMode>
-)
+void startLocalTimeSync()
+
+function render(): void {
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <AppErrorBoundary>
+        {/* A separate React root: its own tooltips, and toasts above its 32 px
+            status bar. With no theme provider sonner follows
+            prefers-color-scheme, like the page. */}
+        <WindowProviders window="stream-manager">
+          <CommentsWindowApp />
+        </WindowProviders>
+      </AppErrorBoundary>
+    </React.StrictMode>
+  )
+}
+
+// Plan 220 S1.4a: the UI settings store (over main's relay) is in before the
+// first render; past its deadline the window renders anyway.
+void hydrateUiSettingsBeforeFirstRender().then(render, render)

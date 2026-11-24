@@ -2844,6 +2844,171 @@
       "askedAt": "2026-11-08T12:05:00.000Z",
       "device": "computer"
     },
+    "roomAvatarSetParams": {
+      "content": {
+        "h": [
+          {
+            "kind": "avatar",
+            "rect": {
+              "x": 0.8,
+              "y": 0.6,
+              "w": 0.18,
+              "h": 0.32
+            },
+            "asset": {
+              "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "png": "iVBORw0KGgo=",
+              "width": 256,
+              "height": 256
+            },
+            "expiresAt": null
+          }
+        ],
+        "v": [],
+        "stream": true,
+        "recording": false
+      },
+      "guests": false
+    },
+    "roomMicrophoneSetParams": {
+      "microphone": {
+        "deviceId": "microphone:coreaudio:7",
+        "gainDb": 4.5,
+        "muted": false,
+        "noise": "rnnoise",
+        "offsetMs": 40
+      }
+    },
+    "roomCameraSetParams": {
+      "camera": {
+        "deviceId": "camera:avfoundation:0"
+      }
+    },
+    "roomScreenSetParams": {
+      "screen": {
+        "sourceId": "window:screencapturekit:4242"
+      }
+    },
+    "roomPresentationMediaEvent": {
+      "showId": "show_talk_1",
+      "media": {
+        "camera": true,
+        "microphone": true,
+        "screen": {
+          "sourceId": "window:screencapturekit:4242",
+          "epoch": "4f1c2b0a9d8e7f6a5b4c3d2e1f0a9b8c",
+          "generation": 3,
+          "hidden": true,
+          "published": true,
+          "sourceBlockedAt": 1764000000000,
+          "status": "observed",
+          "observations": {
+            "guest:ada": 1764000000420
+          }
+        }
+      }
+    },
+    "roomRoutingSetParams": {
+      "speechGain": 0.5,
+      "auxiliaryGain": 1,
+      "speechMuted": false,
+      "auxiliaryMuted": true
+    },
+    "roomAuxSetParams": {
+      "sounds": true,
+      "system": {
+        "enabled": true,
+        "gainDb": -6,
+        "muted": false
+      }
+    },
+    "roomPresentationAuxEvent": {
+      "showId": "show_talk_1",
+      "media": {
+        "camera": true,
+        "microphone": true,
+        "aux": {
+          "enabled": true,
+          "state": "published",
+          "reason": null,
+          "trackSid": "TR_aux_1",
+          "observed": {
+            "EG_program_h": 1764000000420
+          },
+          "systemState": "capturing",
+          "systemReason": "System source attached. Final audibility and clock sync are unqualified."
+        }
+      }
+    },
+    "roomPresentationPeopleEvent": {
+      "showId": "show_talk_1",
+      "media": {
+        "camera": true,
+        "microphone": true,
+        "people": [
+          {
+            "identity": "g_ada",
+            "name": "Ada",
+            "camera": true,
+            "screen": false,
+            "audio": true,
+            "micMuted": false,
+            "cameraOff": false,
+            "speaking": true,
+            "quality": "good"
+          }
+        ],
+        "monitor": {
+          "video": true,
+          "audio": true
+        }
+      }
+    },
+    "roomAvatarMotionParams": {
+      "message": {
+        "v": 1,
+        "show": "show_7f3a",
+        "publisherSid": "PA_host",
+        "epoch": "e1",
+        "seq": 3,
+        "kind": "tick"
+      }
+    },
+    "roomSceneCommitParams": {
+      "content": {
+        "h": null,
+        "v": null,
+        "transition": {
+          "kind": "cut",
+          "durationMs": 0
+        }
+      },
+      "assets": [
+        {
+          "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "mime": "image/webp",
+          "width": 1920,
+          "height": 1080,
+          "base64": "UklGRg=="
+        }
+      ]
+    },
+    "roomPresentationEvent": {
+      "showId": "show_7f3a",
+      "graphics": {
+        "enabled": true,
+        "state": "waiting",
+        "reason": "Graphics sent; waiting for each output to apply it.",
+        "revision": 12,
+        "observed": {
+          "EG_program_wide": {
+            "revision": 12,
+            "output": "stream",
+            "orientation": "h"
+          }
+        }
+      }
+    },
     "settingsPatch": { "enabled": false, "holdMaxSeconds": 900, "holdImageScreenId": null },
     "testRunParams": {
       "outputs": [

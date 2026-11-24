@@ -20,8 +20,6 @@ import { runVirtualCameraAction } from './virtual-camera-action'
 import { WatchdogNotifyLedger, watchdogNotifyDecision } from './watchdog-notify'
 import { notificationActRaisesMainWindow } from '../shared/notifications-relay'
 import { runLinuxLoadModule } from './virtual-camera-linux-setup'
-import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
-import { writeBackgroundThumbnail } from './background-thumbnail'
 import {
   BUDDY_ASSETS_FOLDER,
   importBuddyPetFolder,
@@ -53,6 +51,10 @@ import type {
   GlobalShortcutsResult,
   SessionMediaGrantResult,
   ShortcutRecorderArmResult,
+  UiSettingsChange,
+  UiSettingsGetParams,
+  UiSettingsSetParams,
+  UiSettingsSnapshot,
   VirtualCameraActionResult,
   VirtualCameraStatus
 } from '../shared/backend'
@@ -93,7 +95,6 @@ import {
   NativePreviewFrameLeaseError
 } from './native-preview-frame-lease'
 import {
-  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -255,6 +256,7 @@ import {
   parseMainRecordingStatusEvent,
   parseMainScene,
   parseMainSceneChangedEvent,
+  parseMainUiSettingsChangedEvent,
   parseMainVirtualCameraChangedEvent
 } from './backend-event-message'
 import {
@@ -372,7 +374,6 @@ import {
   resolveAgentBridge,
   type AgentBridgeLocation
 } from './agent-bridge'
-import { AGENT_ADD_BRIDGE_MISSING, addAgentToApp } from './agent-config-install'
 import {
   requestMediaAccessWithRestart,
   requestScreenAccessWithWatch,
@@ -514,28 +515,15 @@ import {
 } from './preview-surface-sample'
 import { backendIsolationEnv } from './backend-isolation'
 import {
-  AVATAR_FETCH_TIMEOUT_MS,
-  AVATAR_MAX_BYTES,
-  type AvatarCacheRejection,
-  type AvatarUrlDecision,
-  avatarCacheFileName,
-  avatarCacheRejectionKey,
-  avatarCacheRejectionMessage,
-  avatarPruneDelayMs,
-  avatarPrunePlan,
-  avatarUrlDecision,
-  chatGifUrlDecision,
-  httpStatusClass,
-  redactAvatarFetchError,
-  withAvatarFetchDeadline
-} from './avatar-cache'
-import { chatAvatarBytesWithinCap, managedAvatarFileName } from '../shared/chat-avatar-bytes'
+  CHAT_AVATAR_MAX_BYTES,
+  chatAvatarBytesWithinCap,
+  chatImageRoute,
+  chatImageRouteUrl
+} from '../shared/chat-avatar-bytes'
 import {
   CHAT_GIF_FETCH_TIMEOUT_MS,
-  CHAT_GIF_MAX_BYTES,
   DEFAULT_TWITCH_GIF_MODE,
   isTwitchGifMode,
-  sniffChatImage,
   type TwitchGifMode
 } from '../shared/chat-gif'
 import { installContextMenu } from './context-menu'
@@ -718,7 +706,8 @@ import {
 } from './comments-command-broker'
 import {
   COMMENTS_COMMAND_RELAY_TIMEOUT_MS,
-  COMMENTS_HIGHLIGHT_RELAY_TIMEOUT_MS
+  COMMENTS_HIGHLIGHT_RELAY_TIMEOUT_MS,
+  COMMENTS_HIGHLIGHT_TIMING_CONTRACT
 } from '../shared/comments-command-timing'
 import {
   COMMENTS_MODERATION_RELAY_TIMEOUT_MS,
@@ -775,7 +764,6 @@ import {
   BUNDLED_BACKGROUND_MANIFEST,
   backgroundAssetNameFromPath,
   isSupportedBackgroundFile,
-  managedBackgroundFileName,
   type BackgroundImportResult
 } from '../shared/background-import'
 import {
@@ -825,7 +813,6 @@ import type {
   CompositorStatus,
   LayoutSettings,
   LiveChatSnapshot,
-  LiveChatMessage,
   ModerationOperation,
   NativePreviewHostCommand,
   NotesDocument,
@@ -855,7 +842,7 @@ import type {
   StreamScreen,
   SystemPermissionPane,
   RuntimeInfo,
-  SessionCommentsPage,
+  SessionCommentsHistory,
   SessionViewersPage,
   AudienceSnapshot,
   CommentsHistoryStats,
@@ -865,7 +852,8 @@ import type {
   RecordingStatus,
   OverlayLayout,
   EffectiveSceneBackground,
-  Scene
+  Scene,
+  ScheduledThumbnail
 } from '../shared/backend'
 import { previewProgramShape } from '../shared/preview-program'
 import {
@@ -1832,6 +1820,24 @@ async function reconcileCameraExtensionWithBackend(): Promise<void> {
     void controller.activate()
   }
 }
+
+/**
+ * Plan 220 S1.4a: one landed UI settings batch, to every window. The main
+ * window hears it over its own socket too and skips the relay; the Stream
+ * Manager, Captions and Notes windows have no socket and learn it here. A
+ * bad payload is dropped with a warning, never the main socket.
+ */
+function relayUiSettingsChange(parse: () => UiSettingsChange): void {
+  let change: UiSettingsChange
+  try {
+    change = parse()
+  } catch (error) {
+    logBackend('warn', `Main dropped a UI settings change: ${errorMessageText(error)}`)
+    return
+  }
+  sendToWindows('ui-settings:changed', change)
+}
+
 /** `virtualCamera.changed`: the switch turning on at runtime activates the extension. */
 function acceptVirtualCameraStatus(parse: () => VirtualCameraStatus): void {
   let status: VirtualCameraStatus
@@ -4383,28 +4389,27 @@ async function attachCommentsHistoryStats(sessionId: string): Promise<void> {
   }
 }
 
-async function loadCommentsHistoryView(mode: Extract<CommentsViewMode, { kind: 'history' }>) {
-  const maxMessages = MAX_COMMENTS_SNAPSHOT_MESSAGES
-  let messages: LiveChatMessage[] = []
-  let cursor: string | undefined
-  do {
-    const page = await requestBackendAdmin<SessionCommentsPage>('sessions.comments.list', {
-      sessionId: mode.sessionId,
-      cursor,
-      limit: Math.min(200, maxMessages - messages.length)
-    })
-    messages = [...page.messages, ...messages].slice(-maxMessages)
-    cursor = page.nextCursor
-  } while (cursor && messages.length < maxMessages)
+/** Up to 2,000 messages read from SQLite on a cold history; a wait like the
+ * old paged load's. */
+const COMMENTS_HISTORY_REQUEST_TIMEOUT_MS = 30_000
 
-  // The saved stats for the History summary (plan 055, S9); a session
-  // recorded before the Stream Manager simply has none.
-  const [latestSendOperation, history] = await Promise.all([
-    requestBackendAdmin<CommentsSendOperation | null>('liveChat.sendOperations.latest', {
-      sessionId: mode.sessionId
-    }).catch(() => null),
-    loadCommentsHistoryStats(mode.sessionId)
-  ])
+/** One session's History view (plan 260 S1.5a): the backend reads the
+ * transcript (cached there), the latest send operation and the saved stats in
+ * one call; main keeps only the relay copy the Stream Manager is shown. */
+async function loadCommentsHistoryView(mode: Extract<CommentsViewMode, { kind: 'history' }>) {
+  const history = await requestBackendAdmin<SessionCommentsHistory>(
+    'sessions.comments.history',
+    { sessionId: mode.sessionId },
+    COMMENTS_HISTORY_REQUEST_TIMEOUT_MS
+  )
+  if (history.sessionId !== mode.sessionId) {
+    throw new Error('Loaded comments history did not match the requested session.')
+  }
+  const messages = history.messages.slice(-MAX_COMMENTS_SNAPSHOT_MESSAGES)
+  const chatTotals =
+    history.chatTotals?.sessionId === mode.sessionId
+      ? sessionChatTotalsSchema.parse(history.chatTotals)
+      : null
   return {
     mode,
     snapshot: {
@@ -4414,8 +4419,8 @@ async function loadCommentsHistoryView(mode: Extract<CommentsViewMode, { kind: '
       unreadCount: messages.length,
       updatedAt: new Date().toISOString()
     },
-    latestSendOperation: latestSendOperation ?? undefined,
-    history
+    latestSendOperation: history.latestSendOperation ?? undefined,
+    history: { viewers: history.viewers, audience: history.audience, chatTotals }
   } satisfies HistoryCommentsView
 }
 
@@ -11359,25 +11364,30 @@ function resolveDevBackendBinary(root = workspaceRoot()): string {
   )
 }
 
-/** Plan 209 S22: "Add to …" for the app Connect just named (the IPC
- * contract has already checked the app and the token's shape). */
+const AGENT_ADD_BRIDGE_MISSING =
+  "This copy of Videorc is missing its agent bridge, so agents can't connect. Reinstall Videorc, then try again."
+/** `claude mcp remove` then `add` take up to 28 s in the backend. */
+const AGENT_ADD_TIMEOUT_MS = 35_000
+
+/** Plan 209 S22, plan 260 S1.5c: "Add to …" for the app Connect just named
+ * (the IPC contract has already checked the app and the token's shape).
+ * Main finds its own bridge; the backend writes the app's config. */
 async function addAgentToInstalledApp(app: AgentAddApp, token: string): Promise<AgentAddResult> {
   const bridge = await resolveAgentBridge(agentBridgeLocation(), true)
   if (!bridge.exists) return { added: false, message: AGENT_ADD_BRIDGE_MISSING }
-  return addAgentToApp(
-    app,
-    { bridgePath: bridge.path, token },
-    {
-      platform: process.platform,
-      homeDir: homedir(),
-      appData: process.env.APPDATA,
-      localAppData: process.env.LOCALAPPDATA,
-      xdgConfigHome: process.env.XDG_CONFIG_HOME,
-      codexHome: process.env.CODEX_HOME,
-      pathVariable: process.env.PATH ?? process.env.Path
-    },
-    { log: (message) => logBackend('warn', `[agents] ${message}`) }
-  )
+  try {
+    return await requestBackendAdmin<AgentAddResult>(
+      'agents.config.add',
+      { app, bridgePath: bridge.path, token },
+      AGENT_ADD_TIMEOUT_MS
+    )
+  } catch (error) {
+    logBackend(
+      'warn',
+      `[agents] agents.config.add failed: ${error instanceof Error ? error.message : String(error)}`
+    )
+    return { added: false, message: "Couldn't add Videorc. Copy the line instead." }
+  }
 }
 
 /** Plan 209 S7: where this install's `videorc-mcp` bridge lives (D6, D20). */
@@ -11742,6 +11752,7 @@ function startBackendWithRegistryLock(): void {
         : '',
       VIDEORC_MANAGED_BACKGROUND_ROOTS: managedBackgroundRoots().join(delimiter),
       VIDEORC_MANAGED_THUMBNAIL_ROOT: join(app.getPath('userData'), 'scheduled-thumbnails'),
+      VIDEORC_MANAGED_BACKGROUND_IMPORT_DIR: join(app.getPath('userData'), 'background-assets'),
       // Metrics journal and per-session FFmpeg logs land beside backend.log
       // (plan 166 S1/S3); the backend writes them only while the journal is on.
       VIDEORC_LOGS_DIR: join(app.getPath('userData'), 'logs'),
@@ -11981,7 +11992,9 @@ function connectBackendEventSocket(connection: BackendConnection): void {
         'recording.status',
         'banners.changed',
         'overlays.layout',
-        'scene.changed'
+        'scene.changed',
+        // Plan 220 S1.4a: relayed to the windows without a socket.
+        'ui.settings.changed'
       ]
       if (process.platform === 'win32') {
         includedEvents.push('preview.surface.status')
@@ -12177,6 +12190,10 @@ function connectBackendEventSocket(connection: BackendConnection): void {
         acceptVirtualCameraStatus(() => parseMainVirtualCameraChangedEvent(parsed.payload))
         return
       }
+      if (parsed.event === 'ui.settings.changed') {
+        relayUiSettingsChange(() => parseMainUiSettingsChangedEvent(parsed.payload))
+        return
+      }
       if (parsed.event === 'preview.surface.status') {
         const status = parseMainPreviewSurfaceStatusEvent(parsed.payload)
         noteNativePreviewBackendSurfaceState(status.state)
@@ -12245,11 +12262,15 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'room.frame.test.inspect',
   'room.camera.processed.inspect',
   'room.microphone.inspect',
-  'resource.capability.register_thumbnail',
   // Plan 260 S1.5d: OBS import reads OBS's own files in the backend.
   'obs.discover',
   'obs.read',
   'obs.readStreamKey',
+  // Plan 260 S1.5b: the picked image's decode, fit and copy run in the backend.
+  'scheduledThumbnail.import',
+  'backgrounds.import',
+  // Plan 260 S1.5c: "Add to …" writes another app's config.
+  'agents.config.add',
   // Plan 232: how an HTML overlay's page stands; only main hosts them.
   'htmlOverlays.host.report',
   ...SMOKE_BACKEND_RPC_METHOD_NAMES,
@@ -12278,15 +12299,20 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'cohost.library.sync',
   'cohost.library.use',
   'preview.surface.take_native_host_commands',
-  'sessions.comments.list',
+  // Plan 260 S1.5a: the History view and the chat image cache live in the
+  // backend; main forwards for the socket-less Stream Manager window.
+  'sessions.comments.history',
+  'chatImages.cache',
   'sessions.comments.totals',
   'sessions.viewers.list',
   'sessions.audience.get',
   'sessions.delete.resolve',
   'sessions.delete.complete',
-  'liveChat.sendOperations.latest',
   // Show who followed from the Stream Manager (plan 071, S2).
-  'platformAccounts.oauth.startProvider'
+  'platformAccounts.oauth.startProvider',
+  // Plan 220 S1.4a: the UI settings store, relayed to the socket-less windows.
+  'ui.settings.get',
+  'ui.settings.set'
 ])
 
 async function requestBackendAdmin<T>(
@@ -12634,7 +12660,6 @@ function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText
         const adminConnection = backendAdminConnection
         backendAuthorityReady = Promise.all([
           rehydrateManagedBackgroundAssets(),
-          rehydrateScheduledThumbnails(),
           migrateCommentsHighlightAnchorPref()
         ])
           .then(() => undefined)
@@ -13007,13 +13032,7 @@ async function runSmokePreviewMotionCommand(
       { kind: 'input-file', path: params.path },
       process.env.VIDEORC_SMOKE_STATE_DIR
     )
-    return importScheduledThumbnail(
-      authorization.path,
-      join(app.getPath('userData'), 'scheduled-thumbnails'),
-      (bytes) => nativeImage.createFromBuffer(bytes).getSize(),
-      (assetId, path) =>
-        requestBackendAdmin('resource.capability.register_thumbnail', { assetId, path })
-    )
+    return importScheduledThumbnailInBackend(authorization.path)
   }
 
   if (command === 'import-smoke-background') {
@@ -14689,6 +14708,21 @@ async function runSmokePreviewMotionCommand(
             row.getAttribute('data-message-id'),
             row.getAttribute('data-row-tint')
           ])),
+          // Plan 260 S1.5a: every image a row draws (avatar, emote, GIF):
+          // where it came from and whether it decoded.
+          rowImages: rows.map((row) => ({
+            id: row.getAttribute('data-message-id'),
+            images: Array.from(row.querySelectorAll('img')).map((image) => ({
+              slot: image.getAttribute('data-slot'),
+              src: image.currentSrc || image.src,
+              loaded: image.complete && image.naturalWidth > 0
+            })),
+            gifMode: row.querySelector('[data-slot="comment-gif"]')?.getAttribute('data-gif-mode') ?? null,
+            gifStills: Array.from(row.querySelectorAll('canvas[data-slot="comment-gif-still"]')).map((canvas) => ({
+              width: canvas.width,
+              height: canvas.height
+            }))
+          })),
           highlightReasons: Object.fromEntries(rows.map((row) => [
             row.getAttribute('data-message-id'),
             row.querySelector('[data-testid="highlight-failed-reason"]')?.textContent ?? null
@@ -17533,196 +17567,65 @@ function resolveManagedBuddyFile(relativePath: string): string | null {
   }
 }
 
-// --- Chat avatar cache (Comments window upgrade S1) ----------------------------
-// Renderers never hot-link platform CDNs: main fetches each avatar once from
-// an allowlisted host (avatar-cache.ts policy), stores it here, and serves it
-// back through the same scoped protocol under the `avatar` host.
-function avatarCacheDirectory(): string {
-  return join(app.getPath('userData'), 'avatar-cache')
-}
+// --- Chat images (plan 260 S1.5a) ---------------------------------------------
+// The backend fetches chat avatars, emotes and Twitch GIFs from its allowlist,
+// caches them and serves them on its own loopback route (`chat_images.rs`).
+// Main only forwards for the socket-less Stream Manager window, and reads a
+// cached file's bytes back for the highlight card. A refusal or an engine
+// that is away answers null, as the old cache did; the backend logs refusals.
 
-const avatarFetchesInFlight = new Map<string, Promise<string | null>>()
+/** The backend's own deadline for the fetch, plus the hop to it. */
+const CHAT_IMAGE_REQUEST_MARGIN_MS = 1_000
 
-// Rejections used to be silent, so a monogram-only sidebar or Comments window
-// left nothing in a support bundle. Log each distinct (host, reason) once per
-// process — host/scheme/size/status class only, never the URL (CDN paths can
-// carry per-user tokens).
-const avatarRejectionsLogged = new Set<string>()
-
-/** The two things the cache holds: avatars and emotes on the avatar policy,
- * and Twitch GIF Keyboard assets (plan 155) on their own gate, size cap and
- * deadline. One directory, one file-name scheme, one prune. */
-interface ChatImagePolicy {
-  subject: 'Chat avatar' | 'Chat GIF'
-  decide: (rawUrl: unknown) => AvatarUrlDecision
-  maxBytes: number
-  timeoutMs: number
-  /** Whether the body must look like an image. The GIF hosts are wide
-   * enough (`giphy.com`) to also serve HTML; avatar CDNs are image-only. */
-  sniff: boolean
-}
-
-const CHAT_AVATAR_POLICY: ChatImagePolicy = {
-  subject: 'Chat avatar',
-  decide: avatarUrlDecision,
-  maxBytes: AVATAR_MAX_BYTES,
-  timeoutMs: AVATAR_FETCH_TIMEOUT_MS,
-  sniff: false
-}
-
-const CHAT_GIF_POLICY: ChatImagePolicy = {
-  subject: 'Chat GIF',
-  decide: chatGifUrlDecision,
-  maxBytes: CHAT_GIF_MAX_BYTES,
-  timeoutMs: CHAT_GIF_FETCH_TIMEOUT_MS,
-  sniff: true
-}
-
-function rejectChatImage(policy: ChatImagePolicy, rejection: AvatarCacheRejection): null {
-  const key = `${policy.subject}:${avatarCacheRejectionKey(rejection)}`
-  if (!avatarRejectionsLogged.has(key)) {
-    avatarRejectionsLogged.add(key)
-    logBackend('warn', avatarCacheRejectionMessage(rejection, policy.subject))
+async function cacheChatImage(kind: 'avatar' | 'gif', rawUrl: unknown): Promise<string | null> {
+  if (typeof rawUrl !== 'string' || !rawUrl || rawUrl.length > 2_048) return null
+  const deadlineMs =
+    (kind === 'gif'
+      ? CHAT_GIF_FETCH_TIMEOUT_MS
+      : COMMENTS_HIGHLIGHT_TIMING_CONTRACT.avatarFetchMs) + CHAT_IMAGE_REQUEST_MARGIN_MS
+  try {
+    const localUrl = await requestBackendAdmin<string | null>(
+      'chatImages.cache',
+      { url: rawUrl, kind },
+      deadlineMs
+    )
+    return chatImageRoute(localUrl) ? (localUrl as string) : null
+  } catch {
+    return null
   }
-  return null
 }
 
 function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
-  return cacheChatImage(CHAT_AVATAR_POLICY, rawUrl)
+  return cacheChatImage('avatar', rawUrl)
 }
 
 function cacheChatGif(rawUrl: unknown): Promise<string | null> {
-  return cacheChatImage(CHAT_GIF_POLICY, rawUrl)
+  return cacheChatImage('gif', rawUrl)
 }
 
-async function cacheChatImage(policy: ChatImagePolicy, rawUrl: unknown): Promise<string | null> {
-  const decision = policy.decide(rawUrl)
-  if (!decision.allowed) {
-    return rejectChatImage(policy, decision.rejection)
-  }
-  const { host } = decision
-  const imageUrl = rawUrl as string
-  const fileName = avatarCacheFileName(imageUrl)
-  const localUrl = `${MANAGED_ASSET_SCHEME}://avatar/${fileName}`
-  const filePath = join(avatarCacheDirectory(), fileName)
-  if (existsSync(filePath)) {
-    return localUrl
-  }
-  const inFlight = avatarFetchesInFlight.get(fileName)
-  if (inFlight) {
-    return inFlight
-  }
-  const fetchPromise = (async () => {
-    try {
-      const result = await withAvatarFetchDeadline(async (signal) => {
-        const response = await net.fetch(imageUrl, { signal })
-        if (!response.ok) {
-          return { ok: false as const, status: response.status }
-        }
-        return {
-          ok: true as const,
-          bytes: Buffer.from(await response.arrayBuffer())
-        }
-      }, policy.timeoutMs)
-      if (!result.ok) {
-        return rejectChatImage(policy, {
-          kind: 'http-status',
-          host,
-          statusClass: httpStatusClass(result.status)
-        })
-      }
-      const { bytes } = result
-      if (bytes.length === 0) {
-        return rejectChatImage(policy, { kind: 'empty-body', host })
-      }
-      if (bytes.length > policy.maxBytes) {
-        return rejectChatImage(policy, {
-          kind: 'too-large',
-          host,
-          bytes: bytes.length,
-          cap: policy.maxBytes
-        })
-      }
-      if (policy.sniff && sniffChatImage(bytes) === null) {
-        return rejectChatImage(policy, { kind: 'not-an-image', host })
-      }
-      mkdirSync(avatarCacheDirectory(), { recursive: true })
-      writeFileSync(filePath, bytes)
-      scheduleAvatarCachePrune()
-      return localUrl
-    } catch (error) {
-      return rejectChatImage(policy, {
-        kind: 'fetch-error',
-        host,
-        message: redactAvatarFetchError(error)
-      })
-    } finally {
-      avatarFetchesInFlight.delete(fileName)
-    }
-  })()
-  avatarFetchesInFlight.set(fileName, fetchPromise)
-  return fetchPromise
-}
-
-let avatarCacheLastPruneAt: number | null = null
-let avatarCachePruneTimer: ReturnType<typeof setTimeout> | null = null
-
-// At most one prune per AVATAR_PRUNE_MIN_INTERVAL_MS, with one trailing pass
-// so the last burst of new files is still bounded (plan 089).
-function scheduleAvatarCachePrune(): void {
-  if (avatarCachePruneTimer) return
-  const delayMs = avatarPruneDelayMs(avatarCacheLastPruneAt, Date.now())
-  if (delayMs === 0) {
-    pruneAvatarCache()
-    return
-  }
-  avatarCachePruneTimer = setTimeout(() => {
-    avatarCachePruneTimer = null
-    pruneAvatarCache()
-  }, delayMs)
-  avatarCachePruneTimer.unref?.()
-}
-
-// Oldest-by-mtime files past the file count or the byte budget are pruned
-// (`avatarPrunePlan`); best-effort.
-function pruneAvatarCache(): void {
-  avatarCacheLastPruneAt = Date.now()
-  try {
-    const directory = avatarCacheDirectory()
-    const entries = readdirSync(directory).map((name) => {
-      const filePath = join(directory, name)
-      const stat = statSync(filePath)
-      return { filePath, mtimeMs: stat.mtimeMs, bytes: stat.size }
-    })
-    for (const stale of avatarPrunePlan(entries)) {
-      rmSync(stale, { force: true })
-    }
-  } catch {
-    // Cache pruning is a convenience; never let it break chat.
-  }
-}
-
-function resolveManagedAvatarFile(fileName: string): string | null {
-  if (!fileName || fileName.includes('/') || fileName.includes('\\') || fileName.includes('..')) {
-    return null
-  }
-  return resolveRegularFileInsideRoot(avatarCacheDirectory(), fileName)
-}
+/** How long reading one cached file back from the loopback route may take. */
+const CHAT_IMAGE_READ_TIMEOUT_MS = 2_000
 
 // The highlight card decodes cached avatars and emotes from BYTES (plan 095,
-// S3): the renderer cannot fetch the CORS-less videorc-asset: scheme, and a
-// videorc-asset: <img> would taint its OffscreenCanvas. Only a managed cache
-// file name is accepted (shared/chat-avatar-bytes.ts), resolved inside the
-// cache directory with the protocol's own symlink/realpath checks, and bounded
-// by the same 2 MB cap as the fetch. Null, never a throw, for anything else.
-function readChatAvatar(localUrl: unknown): Uint8Array | null {
-  const fileName = managedAvatarFileName(localUrl)
-  if (!fileName) return null
-  const resolved = resolveManagedAvatarFile(fileName)
-  if (!resolved) return null
+// S3): a cross-origin <img> would taint its OffscreenCanvas. Only a URL of
+// the running backend's chat image route is accepted, rebuilt from its parts
+// (main never fetches a URL a renderer composed), and the bytes are bounded
+// by the 2 MB avatar cap. Null, never a throw, for anything else; a URL from
+// a backend that has since restarted is null too.
+async function readChatAvatar(localUrl: unknown): Promise<Uint8Array | null> {
+  const route = chatImageRoute(localUrl)
+  const connection = backendConnection
+  if (!route || !connection || route.port !== connection.port) return null
   try {
-    if (!chatAvatarBytesWithinCap(statSync(resolved).size)) return null
-    return new Uint8Array(readFileSync(resolved))
+    const response = await fetch(chatImageRouteUrl(route), {
+      redirect: 'error',
+      signal: AbortSignal.timeout(CHAT_IMAGE_READ_TIMEOUT_MS)
+    })
+    if (!response.ok) return null
+    const declared = Number(response.headers.get('content-length') ?? Number.NaN)
+    if (Number.isFinite(declared) && declared > CHAT_AVATAR_MAX_BYTES) return null
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    return chatAvatarBytesWithinCap(bytes.byteLength) ? bytes : null
   } catch {
     return null
   }
@@ -17827,17 +17730,15 @@ function registerManagedAssetProtocol(): void {
           ? resolveScheduledThumbnail(fileName)
           : url.host === 'background'
             ? resolveManagedBackgroundFile(fileName)
-            : url.host === 'avatar'
-              ? resolveManagedAvatarFile(fileName)
-              : url.host === 'screen'
-                ? resolveManagedScreenFile(fileName)
-                : url.host === BANNER_ASSET_HOST
-                  ? resolveManagedBannerFile(fileName)
-                  : url.host === SOUND_ASSET_HOST
-                    ? resolveManagedSoundFile(fileName)
-                    : url.host === 'buddy'
-                      ? resolveManagedBuddyFile(fileName)
-                      : null
+            : url.host === 'screen'
+              ? resolveManagedScreenFile(fileName)
+              : url.host === BANNER_ASSET_HOST
+                ? resolveManagedBannerFile(fileName)
+                : url.host === SOUND_ASSET_HOST
+                  ? resolveManagedSoundFile(fileName)
+                  : url.host === 'buddy'
+                    ? resolveManagedBuddyFile(fileName)
+                    : null
       if (!resolved) {
         return new Response('Not found', { status: 404 })
       }
@@ -17890,17 +17791,17 @@ function resolveScheduledThumbnail(fileName: string): string | null {
   )
 }
 
-async function rehydrateScheduledThumbnails(): Promise<void> {
-  const root = join(app.getPath('userData'), 'scheduled-thumbnails')
-  if (!existsSync(root)) return
-  for (const file of readdirSync(root)) {
-    const path = resolveScheduledThumbnail(file)
-    if (path)
-      await requestBackendAdmin('resource.capability.register_thumbnail', {
-        assetId: file.split('.')[0],
-        path
-      }).catch(() => undefined)
-  }
+/** A picked image's decode, fit and store can outlast the default 15 s. */
+const IMAGE_IMPORT_TIMEOUT_MS = 60_000
+
+// Plan 260 S1.5b: the backend checks, fits under 2 MB, stores and registers
+// the thumbnail, and registers the stored ones again at its own startup.
+function importScheduledThumbnailInBackend(path: string): Promise<ScheduledThumbnail> {
+  return requestBackendAdmin<ScheduledThumbnail>(
+    'scheduledThumbnail.import',
+    { path },
+    IMAGE_IMPORT_TIMEOUT_MS
+  )
 }
 
 async function pickScheduledThumbnail() {
@@ -17913,35 +17814,7 @@ async function pickScheduledThumbnail() {
     ? await dialog.showOpenDialog(mainWindow, options)
     : await dialog.showOpenDialog(options)
   if (result.canceled || !result.filePaths[0]) return null
-  return importScheduledThumbnail(
-    result.filePaths[0],
-    join(app.getPath('userData'), 'scheduled-thumbnails'),
-    (bytes) => nativeImage.createFromBuffer(bytes).getSize(),
-    (assetId, path) =>
-      requestBackendAdmin('resource.capability.register_thumbnail', { assetId, path }),
-    fitScheduledThumbnail
-  )
-}
-
-/**
- * Plan 083: an image over 2 MB becomes a JPEG with a 1280 px long edge
- * (1280 × 720 for 16:9). Capping the long edge, not fitting 1280 × 720, keeps
- * a portrait image above YouTube's 640 px minimum width.
- */
-function fitScheduledThumbnail(bytes: Buffer, quality: number): Buffer {
-  const image = nativeImage.createFromBuffer(bytes)
-  if (image.isEmpty()) throw new Error('Corrupt or unsupported thumbnail image.')
-  const { width, height } = image.getSize()
-  const scale = Math.min(1, 1280 / Math.max(width, height))
-  const fitted =
-    scale < 1
-      ? image.resize({
-          width: Math.max(1, Math.round(width * scale)),
-          height: Math.max(1, Math.round(height * scale)),
-          quality: 'best'
-        })
-      : image
-  return fitted.toJPEG(quality)
+  return importScheduledThumbnailInBackend(result.filePaths[0])
 }
 
 async function importBackgroundImage(): Promise<BackgroundImportResult | null> {
@@ -17975,37 +17848,19 @@ async function importBackgroundImageFromPath(
     return null
   }
 
-  // Copy into app-support storage and reference the managed copy, never the
-  // user's original path (Assets Tab plan locked decision).
-  const id = randomUUID()
-  const directory = join(app.getPath('userData'), 'background-assets')
-  mkdirSync(directory, { recursive: true })
-  const assetPath = join(directory, managedBackgroundFileName(id, sourcePath))
-  copyFileSync(sourcePath, assetPath)
-  // A ~480 px copy for the Assets tile (plan 174 C-40); the full file
-  // otherwise, when this image can't be decoded here.
-  let thumbnailFileName: string | null = null
-  try {
-    thumbnailFileName = writeBackgroundThumbnail({
-      id,
-      sourcePath,
-      directory,
-      image: nativeImage.createFromPath(assetPath),
-      write: (path, bytes) => writeFileSync(path, bytes)
-    })
-  } catch (error) {
-    console.warn('[assets] background thumbnail failed', error)
-  }
-
-  await requestBackendAdmin('resource.capability.register_background', {
-    assetId: id,
-    path: assetPath
-  })
+  // Plan 260 S1.5b: the backend copies it into app-support storage (the
+  // asset references the managed copy, never the user's original path),
+  // writes the ~480 px Assets tile (plan 174 C-40) and registers the copy.
+  const imported = await requestBackendAdmin<{
+    id: string
+    assetFileName: string
+    thumbnailFileName: string | null
+  }>('backgrounds.import', { path: sourcePath }, IMAGE_IMPORT_TIMEOUT_MS)
   return {
-    id,
+    id: imported.id,
     name: backgroundAssetNameFromPath(sourcePath),
-    assetPath: managedBackgroundAssetUrl(basename(assetPath)),
-    thumbnailPath: managedBackgroundAssetUrl(thumbnailFileName ?? basename(assetPath)),
+    assetPath: managedBackgroundAssetUrl(imported.assetFileName),
+    thumbnailPath: managedBackgroundAssetUrl(imported.thumbnailFileName ?? imported.assetFileName),
     fileName: basename(sourcePath)
   }
 }
@@ -19206,6 +19061,15 @@ app.whenReady().then(async () => {
   secureIpcHandle('notes-window:get-state', () => notesWindowState())
   secureIpcHandle('notes-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setNotesWindowAlwaysOnTop(Boolean(alwaysOnTop))
+  )
+  // Plan 220 S1.4a: the UI settings store for the windows without a backend
+  // socket. The preload checked the shapes; main only relays over its admin
+  // lane and lets the backend's refusal come back as the reply's error.
+  secureIpcHandle('ui-settings:get', (_event, params?: UiSettingsGetParams) =>
+    requestBackendAdmin<UiSettingsSnapshot>('ui.settings.get', { ...(params ?? {}) })
+  )
+  secureIpcHandle('ui-settings:set', (_event, params: UiSettingsSetParams) =>
+    requestBackendAdmin<UiSettingsChange>('ui.settings.set', { ...params })
   )
   // A failed read or write rejects the call (QA F9): the window shows it
   // instead of Saved, and never takes a failed read for empty notes.

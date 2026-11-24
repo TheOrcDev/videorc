@@ -66,14 +66,17 @@ export function displayKeyGlyph(glyph: string, platform: string | undefined): st
 // host OS reliably enough, so it stands in ONLY when no explicit platform was
 // passed.
 function detectedPlatform(): string | undefined {
-  const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent
+  // A test's stubbed navigator may have no user agent at all.
+  const userAgent: string | undefined =
+    typeof navigator === 'undefined' ? undefined : navigator.userAgent
+  if (!userAgent) return undefined
   if (userAgent.includes('Windows')) {
     return 'win32'
   }
   if (userAgent.includes('Macintosh')) {
     return 'darwin'
   }
-  return userAgent ? 'linux' : undefined
+  return 'linux'
 }
 
 /**

@@ -8368,6 +8368,103 @@ mod tests {
             let status: CloudStatus = serde_json::from_value(wire.clone()).unwrap();
             assert_eq!(serde_json::to_value(status).unwrap(), wire, "{pointer}");
         }
+        // Plan 260 S1.8b: the room's presentation event, as the renderer
+        // validates it (`cloud.room.presentation`).
+        let presentation = high_risk_fixture("/cloud/roomPresentationEvent");
+        let event: crate::cloud_talk::CloudRoomPresentationEvent =
+            serde_json::from_value(presentation.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&event).unwrap(), presentation);
+        assert_eq!(
+            event.graphics.unwrap().state,
+            crate::cloud_talk::RoomPresentationState::Waiting
+        );
+        // The avatar and scene content the Studio hands the backend's room.
+        let avatar = high_risk_fixture("/cloud/roomAvatarSetParams");
+        let params: crate::cloud_talk::CloudRoomAvatarSetParams =
+            serde_json::from_value(avatar.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&params).unwrap(), avatar);
+        let scene = high_risk_fixture("/cloud/roomSceneCommitParams");
+        let params: crate::cloud_talk::CloudRoomSceneCommitParams =
+            serde_json::from_value(scene.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&params).unwrap(), scene);
+        assert_eq!(params.assets[0].mime, "image/webp");
+        // `cloud.room.microphone.set`: the room microphone bridge's settings.
+        let microphone = high_risk_fixture("/cloud/roomMicrophoneSetParams");
+        let params: crate::cloud_talk::CloudRoomMediaSetParams =
+            serde_json::from_value(microphone.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&params).unwrap(), microphone);
+        assert!(
+            params
+                .microphone
+                .as_ref()
+                .is_some_and(|settings| settings.valid())
+        );
+        // `cloud.room.camera.set`: the same type, the camera's kind.
+        let camera = high_risk_fixture("/cloud/roomCameraSetParams");
+        let params: crate::cloud_talk::CloudRoomMediaSetParams =
+            serde_json::from_value(camera.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&params).unwrap(), camera);
+        assert!(params.microphone.is_none());
+        assert!(
+            params
+                .camera
+                .as_ref()
+                .is_some_and(|settings| settings.valid())
+        );
+        // The room's other people and the monitor (S1.8d).
+        let people = high_risk_fixture("/cloud/roomPresentationPeopleEvent");
+        let parsed: crate::cloud_talk::CloudRoomPresentationEvent =
+            serde_json::from_value(people.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), people);
+        let media = parsed.media.unwrap();
+        assert_eq!(media.people[0].identity, "g_ada");
+        assert!(media.monitor.is_some_and(|monitor| monitor.video));
+        // `cloud.room.aux.set` and the aux track's status.
+        let aux: crate::cloud_talk::CloudRoomAuxSetParams =
+            serde_json::from_value(high_risk_fixture("/cloud/roomAuxSetParams")).unwrap();
+        assert!(aux.valid() && aux.sounds && aux.system.enabled);
+        let event = high_risk_fixture("/cloud/roomPresentationAuxEvent");
+        let parsed: crate::cloud_talk::CloudRoomPresentationEvent =
+            serde_json::from_value(event.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), event);
+        assert_eq!(
+            parsed.media.unwrap().aux.unwrap().state,
+            crate::cloud_talk::RoomAuxState::Published
+        );
+        // `cloud.room.routing.set`: the program's speech and auxiliary audio.
+        let routing = high_risk_fixture("/cloud/roomRoutingSetParams");
+        let settings: crate::cloud_talk::ProgramAudioSettings =
+            serde_json::from_value(routing.clone()).unwrap();
+        assert!(settings.valid());
+        assert!((settings.speech_gain - 0.5).abs() < 1e-9);
+        assert!(settings.auxiliary_muted);
+        // `cloud.room.screen.set`: the scene's screen by its native id.
+        let screen = high_risk_fixture("/cloud/roomScreenSetParams");
+        let params: crate::cloud_talk::CloudRoomMediaSetParams =
+            serde_json::from_value(screen.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&params).unwrap(), screen);
+        assert!(
+            params
+                .screen
+                .as_ref()
+                .is_some_and(|settings| settings.valid())
+        );
+        // The host's media on `cloud.room.presentation`, the screen's privacy
+        // as the renderer's room reported it.
+        let media = high_risk_fixture("/cloud/roomPresentationMediaEvent");
+        let event: crate::cloud_talk::CloudRoomPresentationEvent =
+            serde_json::from_value(media.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&event).unwrap(), media);
+        let screen = event.media.unwrap().screen.unwrap();
+        assert_eq!(
+            screen.status,
+            crate::cloud_talk::RoomScreenPrivacyState::Observed
+        );
+        assert_eq!(screen.observations.len(), 1);
+        // `cloud.room.avatar.motion` carries one motion message as it is.
+        let motion = high_risk_fixture("/cloud/roomAvatarMotionParams");
+        assert!(motion["message"].is_object());
+        assert!(serde_json::to_vec(&motion["message"]).unwrap().len() <= 16 * 1024);
         let patch: CloudSettingsPatch =
             serde_json::from_value(high_risk_fixture("/cloud/settingsPatch")).unwrap();
         assert_eq!(patch.enabled, Some(false));

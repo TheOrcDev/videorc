@@ -4,6 +4,7 @@
 // node vitest runner; the backend owns the alerts and their copy, this only
 // orders and quotes them.
 
+import { formatLocal } from '@/lib/local-time'
 import type { WatchdogAlert } from '@/lib/backend'
 
 export { topWatchdogAlert, visibleWatchdogAlerts, watchdogChipLabel } from './watchdog-rank'
@@ -225,8 +226,5 @@ export function watchdogHistorySpan(row: WatchdogHistoryRow): string {
 }
 
 function timeOfDay(iso: string): string {
-  const date = new Date(iso)
-  return Number.isNaN(date.getTime())
-    ? ''
-    : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return formatLocal(Date.parse(iso), { hour: '2-digit', minute: '2-digit' })
 }

@@ -13,9 +13,9 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::captions::{OverlayFallbackPlacement, OverlayPlacement};
-use crate::live_chat::HighlightMessageEligibility;
 #[cfg(test)]
-use crate::live_chat::{LiveChatEventType, LiveChatMessage};
+use crate::live_chat::LiveChatEventType;
+use crate::live_chat::{HighlightMessageEligibility, LiveChatMessage};
 use crate::overlay_layout::{OverlayItem, OverlayRect, OverlaySnap};
 use crate::protocol::CompositorState;
 use crate::state::AppState;
@@ -99,7 +99,21 @@ impl From<CommentHighlightAnchor> for OverlayFallbackPlacement {
 pub struct SetCommentHighlightParams {
     pub session_id: String,
     pub message_id: String,
+    /// The renderer's card, the path before plan 260 S1.2: accepted for one
+    /// release. Empty or missing: the backend draws the card itself from the
+    /// message it holds, at `canvasWidth` x `canvasHeight`.
+    #[serde(default)]
     pub png_base64: String,
+    /// The stream canvas the card is drawn for (the renderer sized its card
+    /// for the same canvas). Required without `pngBase64`.
+    #[serde(default)]
+    pub canvas_width: Option<u32>,
+    #[serde(default)]
+    pub canvas_height: Option<u32>,
+    /// Plan 225 B6: draw the milestone card for this arrival row instead of
+    /// the message's card. Only with the backend's drawing.
+    #[serde(default)]
+    pub milestone: Option<CommentHighlightMilestone>,
     /// Corner anchor. Missing => `BottomLeft`. The struct intentionally does not
     /// `deny_unknown_fields`: older clients still send the retired
     /// `"position": "top"`, which is accepted and ignored.
@@ -124,6 +138,27 @@ pub struct SetCommentHighlightParams {
     #[serde(skip)]
     commit_blocker: Option<CommentHighlightCommitBlocker>,
 }
+
+/// Plan 225 B6's milestone card for an arrival row (`CohostUtteranceMilestone`
+/// and the persona's name): the avatar, the name, the milestone and "with
+/// <persona>", never the message.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommentHighlightMilestone {
+    pub name: String,
+    /// "10th stream", "5 in a row", "One year".
+    pub label: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    pub platform: crate::streaming::StreamPlatform,
+    #[serde(default)]
+    pub persona_name: Option<String>,
+}
+
+/// The longest canvas side a card is drawn for (an 8K leg).
+const HIGHLIGHT_CANVAS_MAX_SIDE: u32 = 8192;
+/// The milestone card's text fields are short labels.
+const MILESTONE_TEXT_MAX_CHARS: usize = 200;
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
@@ -209,7 +244,7 @@ impl CommentHighlightCommitBlocker {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CommentHighlightError {
-    #[error("sessionId, messageId, and pngBase64 are required.")]
+    #[error("sessionId and messageId, and pngBase64 or the canvas, are required.")]
     InvalidParams,
     #[error("Comment highlighting requires an active livestream.")]
     NotStreaming,
@@ -294,6 +329,157 @@ fn validate_eligibility(
     Ok(())
 }
 
+fn message_eligibility_error(refused: HighlightMessageEligibility) -> CommentHighlightError {
+    match refused {
+        HighlightMessageEligibility::WrongSession => CommentHighlightError::WrongSession,
+        HighlightMessageEligibility::Ineligible => CommentHighlightError::IneligibleMessage,
+        HighlightMessageEligibility::Eligible | HighlightMessageEligibility::Missing => {
+            CommentHighlightError::MessageNotFound
+        }
+    }
+}
+
+/// Plan 260 S1.2: the backend draws the card the renderer drew (the
+/// message's highlight card, or plan 225 B6's milestone card) for the stream
+/// canvas and, when the session has one, the vertical leg's, and puts the
+/// PNGs where the renderer's went. It refuses first what the install would
+/// refuse, in the same order, so nothing is drawn for a card that cannot
+/// go on; the install checks again under its locks. Avatars and emotes come
+/// from the chat image cache only (the renderer caches them first), never
+/// the network: a file not cached draws the monogram or the emote's name.
+async fn draw_highlight_cards(
+    state: &AppState,
+    params: &mut SetCommentHighlightParams,
+) -> Result<(), CommentHighlightError> {
+    if params.session_id.trim().is_empty() || params.message_id.trim().is_empty() {
+        return Err(CommentHighlightError::InvalidParams);
+    }
+    let side = 1..=HIGHLIGHT_CANVAS_MAX_SIDE;
+    let (Some(width), Some(height)) = (params.canvas_width, params.canvas_height) else {
+        return Err(CommentHighlightError::InvalidParams);
+    };
+    if !side.contains(&width) || !side.contains(&height) {
+        return Err(CommentHighlightError::InvalidParams);
+    }
+    if let Some(milestone) = params.milestone.as_ref() {
+        let long = |text: &str| text.chars().count() > MILESTONE_TEXT_MAX_CHARS;
+        if milestone.label.trim().is_empty()
+            || long(&milestone.name)
+            || long(&milestone.label)
+            || milestone.persona_name.as_deref().is_some_and(long)
+        {
+            return Err(CommentHighlightError::InvalidParams);
+        }
+    }
+    if let Some(show_id) = crate::cloud_talk_show_room_show_id(state) {
+        if params.session_id != show_id {
+            return Err(CommentHighlightError::WrongSession);
+        }
+    } else {
+        let eligibility = {
+            let recording = state.recording.lock().await;
+            let compositor_live =
+                state.compositor.lock().await.status.state == CompositorState::Live;
+            HighlightEligibility {
+                recording_session_id: recording.as_ref().map(|active| active.session_id.clone()),
+                recording_mode: recording.as_ref().map(|active| active.mode.clone()),
+                recording_stopping: recording
+                    .as_ref()
+                    .is_some_and(|active| active.stop_requested),
+                viewer_overlay_available: recording
+                    .as_ref()
+                    .is_some_and(|active| active.comment_highlight_available),
+                compositor_live,
+                message: state
+                    .live_chat
+                    .lock()
+                    .await
+                    .highlight_message_eligibility(&params.session_id, &params.message_id),
+            }
+        };
+        validate_eligibility(params, &eligibility)?;
+    }
+    let message = state
+        .live_chat
+        .lock()
+        .await
+        .highlight_message(&params.session_id, &params.message_id)
+        .map_err(message_eligibility_error)?;
+    let vertical = comment_highlight_canvases(state)
+        .await
+        .vertical
+        .map(|canvas| (canvas.width, canvas.height));
+    let cache = state.chat_images.clone();
+    let milestone = params.milestone.clone();
+    let (rect, vertical_rect) = (params.rect, params.vertical_rect);
+    let (horizontal, vertical) = tokio::task::spawn_blocking(move || {
+        draw_card_pngs(
+            &cache,
+            &message,
+            milestone.as_ref(),
+            ((width, height), rect),
+            vertical.map(|canvas| (canvas, vertical_rect)),
+        )
+    })
+    .await
+    .map_err(|error| {
+        CommentHighlightError::InvalidImage(format!("the card drawing task stopped: {error}"))
+    })?
+    .map_err(|error| CommentHighlightError::InvalidImage(format!("{error:#}")))?;
+    params.png_base64 = horizontal;
+    params.vertical_png_base64 = vertical;
+    Ok(())
+}
+
+type CardCanvas = ((u32, u32), Option<OverlayRect>);
+
+/// Blocking: one card per canvas as base64 PNGs (what the renderer sent),
+/// the images decoded once for both.
+fn draw_card_pngs(
+    cache: &crate::chat_images::ChatImages,
+    message: &LiveChatMessage,
+    milestone: Option<&CommentHighlightMilestone>,
+    stream: CardCanvas,
+    vertical: Option<CardCanvas>,
+) -> anyhow::Result<(String, Option<String>)> {
+    use crate::overlay_raster::{
+        self, DecodedImages, MilestoneCardState, OverlayImages, OverlayState, WantedImages,
+    };
+    use base64::Engine as _;
+
+    let card = |(canvas, rect): CardCanvas| match milestone {
+        Some(milestone) => OverlayState::Milestone(MilestoneCardState {
+            name: milestone.name.clone(),
+            label: milestone.label.clone(),
+            persona_name: milestone.persona_name.clone(),
+            avatar_url: milestone.avatar_url.clone(),
+            platform: milestone.platform,
+            canvas_width: canvas.0,
+            canvas_height: canvas.1,
+            rect,
+        }),
+        None => OverlayState::Highlight(overlay_raster::highlight_card(message, canvas, rect)),
+    };
+    let stream_card = card(stream);
+    let wanted = stream_card.wanted_images();
+    let images = OverlayImages {
+        avatars: DecodedImages::load(wanted.avatars.iter().map(String::as_str), |url| {
+            cache.read_cached_avatar(url)
+        }),
+        emotes: DecodedImages::load(wanted.emotes.iter().map(String::as_str), |url| {
+            cache.read_cached_avatar(&WantedImages::emote_file_url(url))
+        }),
+    };
+    let draw = |state: &OverlayState| -> anyhow::Result<String> {
+        let image = overlay_raster::render_with_images(state, &images)
+            .ok_or_else(|| anyhow::anyhow!("the card has no room on its canvas"))?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(overlay_raster::encode_png(&image)?))
+    };
+    let horizontal = draw(&stream_card)?;
+    let vertical = vertical.map(|canvas| draw(&card(canvas))).transpose()?;
+    Ok((horizontal, vertical))
+}
+
 fn next_generation(generation: u64) -> u64 {
     generation.wrapping_add(1).max(1)
 }
@@ -374,6 +560,11 @@ async fn set_comment_highlight_with_ttl(
     mut params: SetCommentHighlightParams,
     ttl: Duration,
 ) -> Result<CommentHighlightState, CommentHighlightError> {
+    // Plan 260 S1.2: without the renderer's PNG the backend draws the card
+    // (and the vertical leg's) itself; the rest of the path is unchanged.
+    if params.png_base64.trim().is_empty() {
+        draw_highlight_cards(state, &mut params).await?;
+    }
     if params.session_id.trim().is_empty()
         || params.message_id.trim().is_empty()
         || params.png_base64.trim().is_empty()
@@ -908,6 +1099,9 @@ pub(crate) mod tests {
             session_id: "session-1".to_string(),
             message_id: "session-1:x:x-target:message-1".to_string(),
             png_base64: TEST_PNG.to_string(),
+            canvas_width: None,
+            canvas_height: None,
+            milestone: None,
             anchor: CommentHighlightAnchor::default(),
             rect: None,
             vertical_png_base64: None,

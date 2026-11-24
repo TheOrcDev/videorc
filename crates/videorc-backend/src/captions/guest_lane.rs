@@ -67,6 +67,43 @@ pub struct GuestStatus {
     reason: &'static str,
 }
 
+/// Plan 260 S1.8d d4: the backend's room mixes the guests itself (no
+/// renderer round trip) and feeds the same lane through these.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl GuestSync {
+    pub(crate) fn new(show_id: &str, source_id: &str, generation: u64, guests: u32) -> Self {
+        Self {
+            show_id: show_id.to_string(),
+            source_id: source_id.to_string(),
+            generation,
+            guests,
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl GuestPcm {
+    pub(crate) fn new(source_id: &str, sequence: u64, sample_rate: u32, samples: Vec<f32>) -> Self {
+        Self {
+            source_id: source_id.to_string(),
+            sequence,
+            sample_rate,
+            samples,
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl GuestStatus {
+    pub(crate) fn upload_allowed(&self) -> bool {
+        self.upload_allowed
+    }
+
+    pub(crate) fn captioning(&self) -> bool {
+        self.captioning
+    }
+}
+
 /// The lane's place in the caption coordinator.
 #[derive(Debug, Default)]
 pub(super) struct GuestLane {

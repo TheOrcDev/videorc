@@ -11,7 +11,8 @@ import {
   peImports,
   verifySystemImports,
   verifyNormalizedCapture,
-  verifyWindowsCaptureManifest
+  verifyWindowsCaptureManifest,
+  windowsCaptureProbeFailureMessage
 } from '../ffmpeg-capture-windows.mjs'
 
 function pe(dll = 'KERNEL32.dll') {
@@ -150,6 +151,26 @@ test('capture manifests bind source recipe patch executable license and actual s
   } finally {
     rmSync(bundle, { recursive: true, force: true })
   }
+})
+
+test('capture probe names a missing MANIFEST as the cold rebuild path, not a silent packaging skip', () => {
+  const bundle = 'D:\\a\\videorc\\videorc\\vendor\\ffmpeg\\windows-x64'
+  const missing = windowsCaptureProbeFailureMessage(bundle, {
+    code: 'ENOENT',
+    path: `${bundle}\\capture\\MANIFEST.json`,
+    message: `ENOENT: no such file or directory, open '${bundle}\\capture\\MANIFEST.json'`
+  })
+  assert.match(missing, /not built yet/)
+  assert.match(missing, /Building from the pinned Windows capture source/)
+  assert.match(missing, /refuse to continue without a verified worker/)
+  assert.doesNotMatch(missing, /ENOENT: no such file/)
+
+  const mismatch = windowsCaptureProbeFailureMessage(
+    bundle,
+    new Error('Capture worker hash does not match its manifest.')
+  )
+  assert.match(mismatch, /Capture worker check failed/)
+  assert.match(mismatch, /hash does not match/)
 })
 
 test('build wrapper carries current Node into MSYS2 without installing machine tooling', () => {

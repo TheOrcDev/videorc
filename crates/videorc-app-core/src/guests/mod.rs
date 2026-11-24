@@ -4,8 +4,13 @@
 //! `lib/talk-show-layout.ts`). The room's transport (LiveKit) is S1.8's, in
 //! the backend; nothing here talks to a room.
 
+pub mod iso;
 pub mod layout;
+pub mod presentation;
+pub mod program;
+pub mod program_camera;
 pub mod session;
 pub mod stage_screens;
+pub mod tile;
 pub mod view;
 pub mod wire;

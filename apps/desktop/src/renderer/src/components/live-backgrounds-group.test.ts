@@ -19,6 +19,7 @@ import {
 } from '@/lib/background-library'
 import { STORAGE_KEYS } from '@/lib/capture'
 import { AssetsTab } from '@/components/tabs/assets-tab'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 // Plan 190 S8: Assets → Backgrounds → Live. Built-in tiles above the
 // pictures (ten since plan 194, in two rows of five where five fit); a click
@@ -57,7 +58,6 @@ beforeEach(() => {
     liveBackgroundStatus: null,
     scene: null
   }
-  localStorage.clear()
 })
 
 afterEach(async () => {
@@ -68,14 +68,16 @@ afterEach(async () => {
 })
 
 async function renderAssets(registry?: BackgroundAssetRegistry): Promise<void> {
-  if (registry) localStorage.setItem(STORAGE_KEYS.backgroundAssets, JSON.stringify(registry))
+  if (registry) uiSettingsStorage().setItem(STORAGE_KEYS.backgroundAssets, JSON.stringify(registry))
   await act(async () =>
     root.render(createElement(BackgroundAssetsProvider, null, createElement(AssetsTab)))
   )
 }
 
 const storedRegistry = (): BackgroundAssetRegistry =>
-  reconcileRegistry(JSON.parse(localStorage.getItem(STORAGE_KEYS.backgroundAssets) ?? 'null'))
+  reconcileRegistry(
+    JSON.parse(uiSettingsStorage().getItem(STORAGE_KEYS.backgroundAssets) ?? 'null')
+  )
 
 const liveTile = (id: string): HTMLElement =>
   document.querySelector(`[data-videorc-live-background-tile="${id}"]`) as HTMLElement

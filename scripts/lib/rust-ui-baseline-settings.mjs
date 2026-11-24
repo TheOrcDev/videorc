@@ -1,9 +1,9 @@
 /**
  * The baseline's settings seam for the Electron app of this repository (plan
- * 260 S0.10). Plan 220's shooter wrote through the Rust UI settings store
- * (`window.__videorcUiSettings`); Electron keeps its UI settings in each
- * window's localStorage, so these give the shooter the same three helpers
- * over localStorage.
+ * 260 S0.10). Since plan 260 S1.4 Electron keeps its UI settings in the
+ * backend store too, so these hand the shooter the shared waits from
+ * renderer-profile-seed.mjs: every read and write waits until the window's
+ * store holds its snapshot.
  *
  * Seeding the saved scenes writes the v1 library (`videorc.scene-presets.v1`)
  * and forgets the v2 one (`videorc.scenes.v2`), so the renderer's own
@@ -12,26 +12,16 @@
  * change, and a write between the seed and the reload would undo it (the
  * reason `reloadKeepingSeedJs` exists).
  */
+import {
+  PRE_PAINT_COPY_KEYS,
+  readUiSettingJs,
+  UI_SETTINGS_READY_JS
+} from './renderer-profile-seed.mjs'
+
+export { readUiSettingJs, UI_SETTINGS_READY_JS }
 
 export const LEGACY_SCENES_KEY = 'videorc.scene-presets.v1'
 export const SCENES_V2_KEY = 'videorc.scenes.v2'
-
-const STORE_JS = `{
-  getItem: (key) => localStorage.getItem(key),
-  setItem: (key, value) => localStorage.setItem(key, value),
-  removeItem: (key) => localStorage.removeItem(key),
-  clear: () => localStorage.clear(),
-  flush: async () => true
-}`
-
-/** `const settings = await ${UI_SETTINGS_READY_JS};` in an async page script. */
-export const UI_SETTINGS_READY_JS = `(async () => (${STORE_JS}))()`
-
-/** Page JavaScript resolving to the stored string for `key`, or null. */
-export function readUiSettingJs(key) {
-  if (typeof key !== 'string' || !key) throw new Error(`Not a UI settings key: ${key}`)
-  return `(async () => localStorage.getItem(${JSON.stringify(key)}))()`
-}
 
 /** Page JavaScript resolving to true once `entries` (key to string) are stored. */
 export function seedUiSettingsJs(entries, { replace = false } = {}) {
@@ -40,12 +30,17 @@ export function seedUiSettingsJs(entries, { replace = false } = {}) {
   }
   const forgetV2 = LEGACY_SCENES_KEY in entries && !(SCENES_V2_KEY in entries)
   return `(async () => {
+  const settings = await ${UI_SETTINGS_READY_JS};
   const entries = ${JSON.stringify(entries)};
   const write = () => {
-    for (const [key, value] of Object.entries(entries)) localStorage.setItem(key, value);${forgetV2 ? `\n    localStorage.removeItem(${JSON.stringify(SCENES_V2_KEY)});` : ''}
-  };${replace ? '\n  localStorage.clear();' : ''}
+    for (const [key, value] of Object.entries(entries)) {
+      settings.setItem(key, value);
+      if (${JSON.stringify(PRE_PAINT_COPY_KEYS)}.includes(key)) localStorage.setItem(key, value);
+    }${forgetV2 ? `\n    settings.removeItem(${JSON.stringify(SCENES_V2_KEY)});` : ''}
+  };${replace ? '\n  localStorage.clear();\n  settings.clear();' : ''}
   write();
   window.addEventListener('pagehide', write);
+  await settings.flush();
   return true;
 })()`
 }

@@ -1,4 +1,4 @@
-/** Which of main's two cache kinds resolves a URL: avatars and emotes share
+/** Which of the backend's two cache rules resolves a URL: avatars and emotes share
  * one allowlist and cap; Twitch GIFs (plan 155) have their own. */
 export type CachedImageKind = 'avatar' | 'gif'
 
@@ -6,6 +6,9 @@ export type CachedImageKind = 'avatar' | 'gif'
 // pending and settled promises (including nulls) during long, busy streams.
 const AVATAR_URL_CACHE_MAX = 256
 const avatarUrlCache = new Map<string, Promise<string | null>>()
+// Answers that settled null: a refusal, or an engine that was away (main
+// answers null for both). `forgetFailedChatImage` drops only these.
+const settledNull = new WeakSet<Promise<string | null>>()
 
 export function resolveAvatar(remoteUrl: string, kind: CachedImageKind): Promise<string | null> {
   const key = `${kind}:${remoteUrl}`
@@ -27,6 +30,9 @@ export function resolveAvatar(remoteUrl: string, kind: CachedImageKind): Promise
       return null
     }
   })()
+  void resolved.then((local) => {
+    if (local === null) settledNull.add(resolved)
+  })
   avatarUrlCache.set(key, resolved)
   if (avatarUrlCache.size > AVATAR_URL_CACHE_MAX) {
     const oldest = avatarUrlCache.keys().next().value
@@ -35,4 +41,18 @@ export function resolveAvatar(remoteUrl: string, kind: CachedImageKind): Promise
   // Eviction drops only our reference. Existing callers still receive the
   // result; settling never reinserts an evicted promise or revokes main's URL.
   return resolved
+}
+
+/** Forget every resolved URL: the backend restarted or pruned a file, so
+ * its route URLs are stale (`reportChatImageFailure`). */
+export function clearResolvedChatImages(): void {
+  avatarUrlCache.clear()
+}
+
+/** Forget one URL's null answer so the next resolve asks the backend again
+ * (`useCachedAvatar`'s bounded retry). A pending or resolved URL stays. */
+export function forgetFailedChatImage(remoteUrl: string, kind: CachedImageKind): void {
+  const key = `${kind}:${remoteUrl}`
+  const cached = avatarUrlCache.get(key)
+  if (cached && settledNull.has(cached)) avatarUrlCache.delete(key)
 }

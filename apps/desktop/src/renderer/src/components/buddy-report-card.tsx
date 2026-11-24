@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import {
   AlertIcon,
   type AppIcon,
@@ -78,6 +79,7 @@ export function BuddyReportCard({
   sessionId: string | null
   onSessionChange: (sessionId: string | null) => void
 }): ReactElement {
+  useLocalTime()
   const { sessions, cohostSettings, cohostGate } = useStudioCore()
   const [markersOpen, setMarkersOpen] = useState(false)
   const newestId = useMemo(() => newestStreamedSessionId(sessions), [sessions])

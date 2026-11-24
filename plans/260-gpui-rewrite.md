@@ -797,7 +797,7 @@ platform. S0.8 and S0.9 inform the plan and do not gate it.
 | S0.1 | macOS preview with the real backend: `videorc-preview`'s presenter in a `NativeView`, the IOSurface ring at 4K60, docked and floating, editor handles over the video | This Mac: a quiet machine and an unoccluded window; one build slot for the backend | L1 | Diagnose · `fable-5.1` · 9 | Plan 220's week-1 lines pass for 10 min at 4K60: zero CPU copies, present p95 ≤ 20 ms, still frame ≤ 3 % CPU, live ≤ 10 %, ≤ 2 ms GPU per frame, floating window out of capture; and the editor overlay adds ≤ 1 % CPU while idle |
 | S0.2a | GPUI on Windows: the frame spike, then routes (a), (b) and (d) in one process with synthetic frames | Both contributors' PCs | W (WC-0.1 to WC-0.4) | Contributors; reviewed as Diagnose · `fable-5.1` · 9 | The testing plan's S0.2a checks on both PCs; the patch sizes of (a) and (b) |
 | S0.2b | The backend hands its preview over on Windows: a DirectComposition surface handle for (a), shared NT-handle textures with a keyed mutex for (b), the shared-memory ring for (d), and the lease message that names them | This Mac (`pnpm check:windows`); run on a contributor's PC | L2 | Implementation · `fable-5.1` · 9 | Windows CI green; a contributor's spike receives frames by each route |
-| S0.2c | Routes (a) to (d) measured with the real backend at 4K60 | Both contributors' PCs | W (WC-0.5) | Contributors | Numbers per route on both PCs against S0.1's lines, reviewed by the owner; the owner takes D12 |
+| S0.2c | Routes (a) to (d) measured with the real backend's display-capture session at 1440p60 and 4K30 (the hand-over refuses 4K60 and a test pattern; (d) uses the spike's producer until the backend writes the ring) | Both contributors' PCs | W (WC-0.5) | Contributors | Numbers per route on both PCs against S0.1's lines, reviewed by the owner; the owner takes D12 |
 | S0.3 | Linux preview: the Wayland subsurface and the X11 child under GPUI's wgpu window | ogre (Hyprland, and one X11 session) | L5 | Diagnose · `fable-5.1` · 8 | It presents below GPUI content at the camera's rate on both sessions, within S0.1's CPU lines; GNOME and KDE wait for the second box (a Phase 4 gate, not this one) |
 | S0.4 | Liquid Chrome in GPUI: Button (every variant), Switch, Slider, the Record button, a pane with sidebar and toolbar, in dark, light and Increase Contrast | This Mac, in `~/gpui-scratch` (its warm target needs no slot); the same spike on Windows and ogre | L3 (+ W WC-0.6, L5) | UI/Product Design · `opus-5.5` · 9 | Side-by-side shots against Electron; the owner judges macOS equal by eye (D3); the Windows (DirectWrite) and Linux shots show nothing the owner rejects |
 | S0.5 | Text: IME (Japanese, Chinese) on each platform, colour emoji, font fallback, selectable text, tabular numbers, a 10,000-row chat with inline animated WebP emotes | This Mac; W (WC-0.7); ogre (fcitx5 on Wayland, XIM on X11) | L4 (+ W, L5) | Implementation · `fable-5.1` · 8 | Scrolls at 60 fps with ≤ 100 MB extra and first paint ≤ 100 ms; IME commits correctly on each platform; the gaps are listed against D13 |
@@ -937,6 +937,128 @@ Routes: S1.2, S1.3, S1.6a, S1.6d and S1.8 touch recording, audio or rooms:
 Implementation · `fable-5.1` · 9. The rest: Implementation · `gpt-6.1-sol`
 · 8.
 
+#### S1.8 cut (L2, 2026-11-24)
+
+Today the renderer holds the only host connection (`lib/talk-show-room.ts`
+and its publishers, about 6,500 lines), and the backend publishes nothing.
+Guest media never enters the backend compositor: the runner (node shows) or
+the program page (managed shows) composes and records in the cloud. Guest
+media reaches the desktop only for the Show stage, the guest captions mix
+and the Program monitor. S1.8 moves this in five slices, each shippable with
+the renderer still working until its part switches:
+
+| # | Slice | Done when |
+| --- | --- | --- |
+| S1.8a | The backend joins the room as `host:<showId>` with no media: `room_token` stays in the backend, and the reconnect, backoff and duplicate-host rules and the client state move with it (no more `cloud.room.client.report`). Behind a switch; the renderer still publishes | Against a local `livekit-server` with a browser guest: join, a dropped network and rejoin, a take-over from another device; `cloud.state`'s client state matches what the renderer showed |
+| S1.8b | Data and byte streams: the stage, screen privacy and its acks, latency (from RTC stats), overlays (the `cloud.room.overlay` hop goes away), and the scene, graphics, avatar, avatar motion, HTML manifest and capability topics; `cloud.presentation.accepted` handled in-process | The protocol fixtures and a program-page run where the graphics, scene and avatar apply; the renderer publishers deleted |
+| S1.8c | Host media from the backend: camera (keyed by the compositor, replacing `talk-show-camera-effects`), microphone (the native processed PCM), screen through the privacy still, aux and system audio, the HTML sheet track; host speech tapped natively | The room spike's checks from Electron with the backend publishing; a guest sees and hears the host; codecs and simulcast as today (VP8, 180p/360p/720p; screen one layer at 4 Mbps; aux stereo RED 128 kbps) |
+| S1.8d | Subscriptions back as preview feeds: guests' and the runner's return video, guest audio played natively, the guest captions mix in-process, the Program monitor and Videorc Camera from native frames (the `/room-program-camera/frames` upload goes away) | The stage shows the guests, the monitor switch changes the subscriptions, captions still arrive |
+| S1.8e | The renderer side removed: `talk-show-room.ts` and its dependents, the alpha fixtures, main's room IPC bridges; `use-talk-show-room` a view of status and events | `livekit-client` gone from `package.json` and the bundle; the talk-show smokes pass |
+
+The SDK is a macOS dependency first (`[target.'cfg(target_os = "macos")']`):
+S0.8 measured +22.9 MB raw (+6.7 MB xz) on arm64, and the Windows
+cross-build fails in `webrtc-sys`'s C++ bridge, with the native Windows and
+Linux builds still owed (a contributor's PC; L5 on ogre). Windows and Linux
+keep the renderer's room, as D9's fallback allows, until those builds pass;
+then the dependency widens and their renderer path goes in S1.8e. Traps
+from S0.8: `-ObjC` on macOS, `TrackPublished` only after the join, and the
+release strip on this Mac.
+
+Content and delivery (decided 2026-11-24): S1.8b moves the delivery only.
+The graphics content is the backend's already (`cloud.graphics.snapshot`);
+the avatar and scene content stay built where they are today (the avatar
+raster and its atlas, `renderCloudAvatar`; the scene adapter and its
+background pictures) and reach the backend through `cloud.room.avatar.set`
+and `cloud.room.scene.commit`. The backend owns the per-page delivery,
+leases, acknowledgements, references and the status on
+`cloud.room.presentation`; the avatar motion comes straight from its own
+`cohost.pet.animator`. The content builders move to `videorc-app-core` in
+Phase 2/3: the GPUI app builds the same content in Rust and sends it the
+same way.
+The avatar's motion model (`MotionProducer`, `shared/cloud-avatar-motion.ts`)
+stays in the renderer too and hands each message to the backend through
+`cloud.room.avatar.motion`; the backend picks the pages that animate and
+sends it on the motion topic. The model moves to `videorc-app-core` with the
+builders, with parity fixtures generated from its TypeScript tests then.
+The HTML layers' manifest names the sheet video track (its `trackSid`,
+generation, size and frame rate), so it moves with that track in S1.8c,
+not S1.8b.
+
+S1.8c's parts, each its own PR (the backend already makes most of this
+media for the renderer's bridges; S1.8c points it at the room instead):
+c1 the microphone (`room_microphone.rs`'s processed tap, 48 kHz mono, into
+a native audio source; settings through `cloud.room.microphone.set`, in the
+bridge's own shape); c2 the camera (the compositor's camera role, VP8,
+simulcast 180p/360p under 720p; its device and effects through
+`cloud.room.camera.set`, the same parameter type); c3 the screen behind the
+privacy still, with its privacy topics and acknowledgements; c4 the aux
+track (soundboard and System audio, stereo, RED, 128 kbps, `AUX_TRACK_NAME`),
+the audio routing topic, and the room's microphone taken from the session's
+own microphone while this Mac records or streams (the c1 tap refuses to
+open while native capture owns the device, and a host recording while in a
+room is the normal talk-show case); c5 the HTML layers' sheet track and its manifest; c6 the
+latency reports from RTC stats. With c2 and c3 the scene adapter's
+readiness checks and the cards for the avatar's motion read the backend's
+room. c4b, after c4: the stage's hand-picked screen or window shares into
+the room through a second capture (c3 shares only the scene's own screen,
+the one the preview runs; today's room shares any picked source).
+S1.8d's parts (cut 2026-11-24; the renderer reads remote tracks in one
+place, `#publish()`, plus audio playback, the captions mix and the latency
+sampler): d1 the backend subscribes as the renderer did (every guest
+publication, the runner only with the Program monitor), decodes each remote
+video track (`NativeVideoStream`) into a latest-frame store served at
+`/room/remote/latest.bmp` (the `/preview/camera/latest.bmp` pattern) and
+reports the people (camera, screen, mic muted, camera off, speaking,
+quality) on `cloud.room.presentation`'s media entry; d2 the Studio's stage,
+guest cards and Program monitor draw those frames when the backend holds the
+room; d3 guest audio played natively with echo cancellation (S1.3b's
+CoreAudio output generalised to a pushed mix, LiveKit's libwebrtc APM, the
+guest mix as the far end, every room microphone frame through it), stacked
+on S1.3b; d4 the guest captions mix in-process (on-stage, unmuted guest
+microphones from `NativeAudioStream`, into the `cloud.speech.guests.*`
+path without the round trip); d5 the Program monitor's return audio
+through d3's output behind its Listen toggle. The Videorc Camera's room
+program (`/room-program-camera/frames`, a DOM raster of the managed-show
+Program preview, off in production) keeps its renderer producer, now
+drawing d2's frames, until Phase 2's GPUI program view composes it
+natively.
+c6 (latency) moved after S1.8d (decided 2026-11-24): the host's samples of
+the guests' tracks as it receives them need S1.8d's subscriptions, so the
+join is ported once, complete, with no partial reports.
+
+**Blockers for turning the backend's room on by default** (until both
+land, the switch `VIDEORC_BACKEND_ROOM` stays a dev switch):
+
+- c4's session microphone: without it the room has no microphone while
+  this Mac records.
+- c4b's hand-picked screen or window: without it the stage's picker shares
+  only the scene's own screen, a parity gap with today's room.
+- Echo cancellation (S1.8d, decided 2026-11-24, option B): the backend
+  plays the guests itself (S1.3b's CoreAudio monitor output on macOS; L5's
+  PipeWire and L6's WASAPI outputs later) and runs LiveKit's own libwebrtc
+  `AudioProcessingModule` (`livekit::webrtc::native::apm`, no new
+  dependency): the guest mix as the far end, every room microphone frame
+  (own tap or session tap) through it before it is published. Without it a
+  host on speakers echoes the guests back; today's room has the browser's.
+Accepted until Phase 2 (decided 2026-11-24, #1895): subscription grants
+are identity-scoped (LiveKit's Rust SDK has no session field), with review
+option D (no grant without a receipt current for the participant's present
+session; every connect revokes in the same update) and a persistent deny
+for any identity the host removes or blocks, kept until the host admits it
+again. The remaining sub-second window between a replacement's connect and
+D's revoke is accepted. Per-join guest identities (guest id plus a nonce,
+minted by the web) are a candidate cross-repo plan, not scheduled: about 35
+web files and the desktop treat the LiveKit identity as the guest id.
+
+- Every live guest page sends media-v2 receipts. The backend's room grants
+  a participant nothing until its receipt is current for the session it is
+  in (review option D, #1895), so a page that never sends one gets no host
+  media. Checked 2026-11-24 on web main `f084d2ae`: the guest page
+  (`components/guest/use-guest-connection.ts`) sends a v2 capability on
+  connect and with every 10 s heartbeat. Before the switch, confirm again on
+  the web's main and that no older guest page can still be served (a
+  deploy's cached chunk).
+
 ### Phase 2: the shell, on all three platforms
 
 | # | Slice | Lane | Done when |
@@ -1022,12 +1144,8 @@ and Guests take `fable-5.1`.
   are merged.
   - **Linux shipping blockers** (each holds the Linux gate until it merges;
     remove a row once it does):
-    - **#1914:** the X11 presenter's teardown, bounded from outside. x11rb's
-      flush and reply waits have no deadline, so a stalled X server could
-      hold the presenter thread and the UI thread's join on it. The drop
-      shuts the connection's socket down after a 500 ms grace, and the
-      setup's `shm_attach_fd` check gets 2 s (Codex r4682762154, deferred
-      from #1782).
+    - None open. #1914 (the X11 presenter's teardown, bounded from outside)
+      merged as e0e3a9cc1.
 - **macOS** (L4): the remaining OS rows found by the screens.
 
 Routes: the first run on each machine and the preview: `fable-5.1` · 9;

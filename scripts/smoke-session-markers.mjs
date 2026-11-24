@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
 import { startFakeCaptionService } from './lib/fake-caption-service.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import { seedUiSettingsJs, UI_SETTINGS_READY_TIMEOUT_MS } from './lib/renderer-profile-seed.mjs'
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { connectBackend, loadSessionListItem, request } from './smoke-recording-session.mjs'
@@ -95,7 +96,14 @@ try {
     }
   }
   console.log('session markers: detached composer and active recording')
-  await command('eval-js', { code: "localStorage.setItem('videorc.aiConsent','1'); return true" })
+  // The seed waits for the window's UI settings store (it may still be
+  // hydrating), so it gets longer than a plain command.
+  await requestSmokeCommand(
+    smoke,
+    'eval-js',
+    { code: `return ${seedUiSettingsJs({ 'videorc.aiConsent': '1' })}` },
+    { timeoutMs: UI_SETTINGS_READY_TIMEOUT_MS + 15_000 }
+  )
   await ask('cohost.settings.set', { enabled: true, listen: true })
   // Consent is React state read at mount; reload the isolated profile so the
   // real capture effect owns the same grant as this test's voice configuration.

@@ -9,6 +9,7 @@ import {
   separateSourceRecordingsForSession,
   separateSourceRecordingsIneligibility,
   separateSourceRecordingsIneligibilityCopy,
+  STORAGE_KEYS,
   type CaptureConfig
 } from './capture'
 import {
@@ -17,6 +18,7 @@ import {
   takeSiblings
 } from './separate-source-recordings-view'
 import { buildStartSessionParams } from './session-params'
+import { uiSettingsStorage } from './ui-settings-storage'
 
 const scene: Scene = { id: 'scene-1', name: 'Studio', sources: [], outputs: [] }
 const settings = { outputDirectory: '', keepOriginalRecording: false }
@@ -128,11 +130,7 @@ describe('separate source recordings (plan 157)', () => {
   })
 
   it('loads a stored config without the key as Off', () => {
-    vi.stubGlobal('localStorage', {
-      getItem: () => JSON.stringify({ recordEnabled: true }),
-      setItem: vi.fn(),
-      removeItem: vi.fn()
-    })
+    uiSettingsStorage().setItem(STORAGE_KEYS.captureConfig, JSON.stringify({ recordEnabled: true }))
     expect(loadCaptureConfig().separateSourceRecordings).toEqual({
       enabled: false,
       keepCombined: true

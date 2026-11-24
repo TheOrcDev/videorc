@@ -169,7 +169,7 @@ try {
   // leaves a display id behind, which a saved scene correctly restores.
   assert.equal(
     await evaluate(`
-    const library = JSON.parse(localStorage.getItem('videorc.scenes.v2'));
+    const library = JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2'));
     const scene = library.scenes.find((entry) => entry.id === library.onStreamId);
     scene.shows = {kind: 'test-pattern'};
     return await window.__videorcSmokeScenePresets.edit(scene);

@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import { request as httpRequest } from 'node:http'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { seedUiSettingsJs } from './lib/renderer-profile-seed.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_PROBE_TIMEOUT_MS ?? 180000)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -31,7 +32,11 @@ function smokeCommand(smoke, command, params = {}) {
         port: smoke.port,
         path: '/command',
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Authorization: `Bearer ${smoke.capability}` }
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          Authorization: `Bearer ${smoke.capability}`
+        }
       },
       (res) => {
         res.setEncoding('utf8')
@@ -165,9 +170,20 @@ try {
   // thing under test. The window relaunches the app shell when storage is set
   // before the app reads it — so set keys, then do the ONE reload that is the
   // experiment itself, capturing before and after.
-  await cdp.send('Runtime.evaluate', {
-    expression: `localStorage.setItem('videorc.onboardingComplete', 'creator-ux-v1'); localStorage.setItem('videorc.theme', 'dark')`
+  // The seed waits for the window's UI settings store (plan 220 S1.4b.2).
+  const seeded = await cdp.send('Runtime.evaluate', {
+    expression: seedUiSettingsJs(
+      { 'videorc.onboardingComplete': 'creator-ux-v1', 'videorc.theme': 'dark' },
+      { readyTimeoutMs: 8000 }
+    ),
+    awaitPromise: true,
+    returnByValue: true
   })
+  if (seeded.exceptionDetails) {
+    throw new Error(
+      `UI settings seed: ${seeded.exceptionDetails.exception?.description ?? seeded.exceptionDetails.text}`
+    )
+  }
 
   const { windowId } = await smokeCommand(smoke, 'main-window-id')
   if (!windowId) throw new Error('no CGWindowID for the main window')

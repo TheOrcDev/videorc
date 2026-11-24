@@ -93,7 +93,7 @@ export type BackgroundAssetRegistry = {
   // Always points at a 'ready' slot or is null — enforced by applySlot and
   // reconcileRegistry so a dangling/empty active can never persist.
   activeSlotId: string | null
-  // Used to seed bundled presets into older localStorage registries exactly once.
+  // Used to seed bundled presets into older stored registries exactly once.
   bundledPresetVersion: number
   // Plan 190: the live backgrounds. At most one of `activeSlotId` and
   // `live.activeId` is set: a scene has one background.
@@ -349,7 +349,7 @@ function withStoredBuiltinEdits(builtin: BackgroundAsset, raw: unknown): Backgro
   }
 }
 
-// Rebuild a trustworthy registry from whatever localStorage held. The canonical
+// Rebuild a trustworthy registry from whatever the store held. The canonical
 // ten slots always come from code (ids + labels), so a stale or partial store
 // can never drop a slot or resurrect a renamed one; only the mutable overlay
 // (imported assets, per-slot link, active selection, a built-in's name and

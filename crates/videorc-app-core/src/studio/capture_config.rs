@@ -166,7 +166,7 @@ pub const SYSTEM_AUDIO_GAIN_DB_MAX: f64 = 12.0;
 
 const DEFAULT_VIDEO_PRESET: &str = "tutorial-1080p30";
 const DEFAULT_LAST_HORIZONTAL_PRESET: &str = "screen-camera";
-const DEFAULT_LAST_VERTICAL_PRESET: &str = "vertical-camera-top";
+pub const DEFAULT_LAST_VERTICAL_PRESET: &str = "vertical-camera-top";
 
 fn video_preset_spec(name: &str) -> Option<(&'static str, u32, u32, u32, u32)> {
     VIDEO_PRESETS
@@ -205,6 +205,27 @@ pub fn is_layout_preset(value: Option<&Value>) -> bool {
 /// `layoutPresetOrientation(preset) === 'vertical'`.
 pub fn layout_preset_is_vertical(preset: &str) -> bool {
     VERTICAL_LAYOUT_PRESETS.contains(&preset)
+}
+
+/// `simulcastArmed` (plan 231 D4): the stream is on, at least one enabled
+/// destination is vertical-bound, and the Studio is in 16:9 (the vertical
+/// leg shows the scene on stream's 9:16 layout). In a 9:16 studio the one
+/// canvas is portrait: no second leg exists to arm.
+pub fn simulcast_armed(config: &Value) -> bool {
+    let streaming = &config["streaming"];
+    let enabled_ids = streaming["enabledTargetIds"].as_array();
+    config["streamEnabled"] == Value::Bool(true)
+        && streaming["enabled"] == Value::Bool(true)
+        && !config["layout"]["layoutPreset"]
+            .as_str()
+            .is_some_and(layout_preset_is_vertical)
+        && streaming["targets"].as_array().is_some_and(|targets| {
+            targets.iter().any(|target| {
+                target["enabled"] == Value::Bool(true)
+                    && target["outputOrientation"] == "vertical"
+                    && enabled_ids.is_some_and(|ids| ids.contains(&target["id"]))
+            })
+        })
 }
 
 /// `isPlatformOAuthAvailable`: Facebook, TikTok, Instagram and Custom RTMP
@@ -1741,6 +1762,12 @@ impl CaptureConfigView {
         };
         Self { config, issues }
     }
+}
+
+/// A built-in layout's wire id as the protocol's `LayoutPreset`, or none
+/// for an id this build doesn't know.
+pub fn parse_preset(id: &str) -> Option<videorc_protocol::LayoutPreset> {
+    serde_json::from_value(Value::String(id.to_string())).ok()
 }
 
 #[cfg(test)]

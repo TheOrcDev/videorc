@@ -111,8 +111,10 @@ describe('Electron IPC contract', () => {
     // 202: plan 250 S8 adds the Stream Manager's bell: the notification list
     // (get, push), the pop-up offered to the Stream Manager, and the relay of
     // what is pressed there (comments-window:notification-act).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(202)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(202)
+    // 204: plan 260 S1.4 (plan 220 S1.4a) adds ui-settings:get and ui-settings:set
+    // (the UI settings store for the windows without a backend socket).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(204)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(204)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -304,13 +306,19 @@ describe('Electron IPC contract', () => {
       expect(() => validateElectronInvokeArgs('chat-gifs:cache', [refused])).toThrow()
     }
     expect(() => validateElectronInvokeArgs('chat-gifs:cache', [])).toThrow()
-    // The result is null or a managed cache URL, never a remote one.
+    // The result is null or the backend's chat image route, never a remote URL.
     expect(validateElectronInvokeResult('chat-gifs:cache', null)).toBeNull()
-    const local = `videorc-asset://avatar/${'0'.repeat(32)}.gif`
+    const local = `http://127.0.0.1:4321/chat-images/${'0'.repeat(32)}.gif?key=${'a'.repeat(32)}`
     expect(validateElectronInvokeResult('chat-gifs:cache', local)).toBe(local)
     expect(() => validateElectronInvokeResult('chat-gifs:cache', url)).toThrow()
     expect(() =>
       validateElectronInvokeResult('chat-gifs:cache', 'videorc-asset://avatar/../x.gif')
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult(
+        'chat-gifs:cache',
+        `http://127.0.0.1:4321/chat-images/../x.gif?key=${'a'.repeat(32)}`
+      )
     ).toThrow()
   })
 
@@ -1074,7 +1082,7 @@ describe('Electron IPC contract', () => {
 
 describe('cached chat image bytes IPC (plan 095)', () => {
   it('returns null or bounded bytes, never another structured-clone value', () => {
-    const localUrl = 'videorc-asset://avatar/0123456789abcdef0123456789abcdef.png'
+    const localUrl = `http://127.0.0.1:4321/chat-images/0123456789abcdef0123456789abcdef.png?key=${'a'.repeat(32)}`
     expect(validateElectronInvokeArgs('avatars:read', [localUrl])).toEqual([localUrl])
     expect(() => validateElectronInvokeArgs('avatars:read', [''])).toThrow()
     expect(validateElectronInvokeResult('avatars:read', null)).toBeNull()

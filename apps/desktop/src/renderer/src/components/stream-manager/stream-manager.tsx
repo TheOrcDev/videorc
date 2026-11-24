@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import type { TimelineMarker } from '../../../../shared/cloud-markers'
 import {
   chatDeliveryActivityMatches,
@@ -115,7 +116,7 @@ import { isSortedChronologically, sortMessagesChronological } from '@/lib/live-c
 import { activityItems, thankYouDraft, type ActivityItem } from '@/lib/stream-activity'
 import { formatHistoryDate, statItems } from '@/lib/stream-manager-stats'
 import {
-  browserStorage,
+  statsLayoutStorage,
   loadStatsLayout,
   saveStatsLayout,
   type StatsLayout
@@ -555,6 +556,7 @@ export function StreamManager({
   onCohostUpgrade,
   communityCall
 }: StreamManagerProps): ReactElement {
+  const localTime = useLocalTime()
   // The buffer almost always arrives sorted: one scan instead of a copy and a
   // full sort per chat message (plan 191). Either way the rows are the same.
   const messages = useMemo<readonly LiveChatMessage[]>(
@@ -858,10 +860,13 @@ export function StreamManager({
             }
           : {})
       }),
+    // The stats format local times: recompute when the tz offsets arrive.
+    // oxlint-disable-next-line react/exhaustive-deps
     [
       dashboard,
       history,
       inHistory,
+      localTime,
       messages,
       nowMs,
       snapshot.providers,
@@ -872,10 +877,10 @@ export function StreamManager({
   )
 
   // The streamer's own order and picks for the stats bar (plan 057, D2).
-  const [statsLayout, setStatsLayout] = useState(() => loadStatsLayout(browserStorage()))
+  const [statsLayout, setStatsLayout] = useState(() => loadStatsLayout(statsLayoutStorage()))
   const changeStatsLayout = useCallback((next: StatsLayout): void => {
     setStatsLayout(next)
-    saveStatsLayout(browserStorage(), next)
+    saveStatsLayout(statsLayoutStorage(), next)
   }, [])
 
   const showBuddy = useCallback((): void => {

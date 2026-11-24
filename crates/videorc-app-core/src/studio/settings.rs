@@ -519,12 +519,6 @@ impl StudioSettings {
         finite_number(self.field("cameraBackgroundMigration"))
             .is_some_and(|version| version >= CAMERA_BACKGROUND_MIGRATION_VERSION)
     }
-
-    /// Plan 250 D4: `quietWhileLiveOn`, "Quiet while recording or live". On
-    /// by default: only a stored `false` turns it off.
-    pub fn quiet_while_live(&self) -> bool {
-        self.field("quietWhileLive") != Some(&Value::Bool(false))
-    }
 }
 
 /// `CAMERA_BACKGROUND_MIGRATION_VERSION`: the D4 migration's version, stored
@@ -547,8 +541,11 @@ pub fn retry_delay(step: usize) -> Duration {
 }
 
 /// The store's limits (`ui_settings.rs`, `UI_SETTINGS_*` in `shared/backend.ts`).
+/// A value is at most 8 MiB serialized, so a previous release's whole scene
+/// library fits (#1833 raised it from 1 MiB). The limits stay in the backend,
+/// not `videorc-protocol`, so they are mirrored here.
 pub const KEY_MAX_CHARS: usize = 256;
-pub const VALUE_MAX_BYTES: usize = 1024 * 1024;
+pub const VALUE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 /// `migrationRefusal`: why the store would refuse this key or value, or
 /// `None`. A write past the limits fails at once, as full web storage did,
@@ -730,7 +727,10 @@ mod tests {
     }
 
     #[test]
-    fn camera_backgrounds_and_quiet_while_live_read_as_electron_reads_them() {
+    fn camera_backgrounds_read_as_electron_reads_them() {
+        // `quietWhileLive` ("Quiet while recording or live") is retired: an
+        // older settings file that still has it loads as before, and nothing
+        // reads it.
         let settings = StudioSettings::load(Some(&json!(
             r#"{"cameraBackgrounds":{"cam":{"mode":"blur","blurPct":30}},"cameraBackgroundMigration":1,"quietWhileLive":false}"#
         )));
@@ -741,10 +741,8 @@ mod tests {
         assert_eq!(settings.camera_background(Some("other")), None);
         assert_eq!(settings.camera_background(None), None);
         assert!(settings.camera_background_migrated());
-        assert!(!settings.quiet_while_live());
         let defaults = StudioSettings::default();
         assert!(!defaults.camera_background_migrated());
-        assert!(defaults.quiet_while_live(), "absent is on");
     }
 
     #[test]
@@ -899,6 +897,12 @@ mod tests {
         );
         assert!(write_refusal("videorc.\u{0007}", None).is_some());
         assert!(write_refusal(" videorc.x", None).is_some());
+        let library = Value::String("x".repeat(2 * 1024 * 1024));
+        assert_eq!(
+            write_refusal(keys::THEME, Some(&library)),
+            None,
+            "a value past the old 1 MiB limit is kept"
+        );
         let huge = Value::String("x".repeat(VALUE_MAX_BYTES));
         assert!(
             write_refusal(keys::THEME, Some(&huge))

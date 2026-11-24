@@ -14,7 +14,7 @@ import {
 } from './lib/captions-live-artifact.mjs'
 import { startFakeCaptionService } from './lib/fake-caption-service.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
-import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
+import { reloadKeepingSeedJs, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 // Plan 077 gate: live captions on BOTH legs of a dual-orientation stream.
@@ -392,8 +392,9 @@ async function seedRendererDualProfile(smoke) {
   // record + stream, a horizontal canvas, and an armed vertical destination.
   await smokeCommand(smoke, 'eval-js', {
     code: `
+      const settings = await ${UI_SETTINGS_READY_JS}
       let current = {}
-      try { current = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}') } catch {}
+      try { current = JSON.parse(settings.getItem('videorc.captureConfig') ?? '{}') } catch {}
       const next = {
         ...current,
         recordEnabled: true,
@@ -402,8 +403,8 @@ async function seedRendererDualProfile(smoke) {
         streaming: { ...current.streaming, ...${JSON.stringify(streamingSettings())} },
         captions: ${JSON.stringify(captionsProfile)}
       }
-      localStorage.setItem('videorc.captureConfig', JSON.stringify(next))
-      localStorage.setItem('videorc.onboardingComplete', 'permissions-v1')
+      settings.setItem('videorc.captureConfig', JSON.stringify(next))
+      settings.setItem('videorc.onboardingComplete', 'permissions-v1')
       ${reloadKeepingSeedJs({ forgetWorkingScene: false, delayMs: 150 })}
       return true
     `
@@ -415,7 +416,7 @@ async function seedRendererDualProfile(smoke) {
     try {
       latest = await smokeCommand(smoke, 'eval-js', {
         code: `
-          const stored = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}')
+          const stored = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}')
           return {
             ready: document.readyState === 'complete',
             burnTarget: stored.captions?.burnTarget,

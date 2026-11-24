@@ -276,8 +276,11 @@ hand-over") and reports its numbers there.
 ### S0.2c: the Windows preview routes, measured
 
 Spike `spike-preview-windows` (from code slices WC-0.2 to WC-0.5). It runs
-the real Videorc backend with a synthetic 4K60 test scene and shows its
-preview in a GPUI window by one of four routes:
+the real Videorc backend recording your display (a real D3D11 capture
+session, not a test pattern: the backend hands over only that session's
+preview, and a test pattern or a 4K60 output answers
+`preview-handover-unavailable`) and shows its preview in a GPUI window by
+one of four routes:
 
 | `--route` | What it is |
 | --- | --- |
@@ -286,11 +289,16 @@ preview in a GPUI window by one of four routes:
 | `c` | The backend's own preview window placed over the GPUI window |
 | `d` | CPU frames from shared memory, drawn by GPUI as an image |
 
-For each route, three runs of 10 minutes each:
+For each route, three runs of 10 minutes each at 1440p60, then one at 4K30
+(the largest sizes the hand-over serves; 4K60 is refused):
 
 ```powershell
-cargo run --release -p spike-preview-windows -- --route a --resolution 4k --fps 60 --seconds 600
+cargo run --release -p spike-preview-windows -- --route a --resolution 1440p --fps 60 --seconds 600
+cargo run --release -p spike-preview-windows -- --route a --resolution 4k --fps 30 --seconds 600
 ```
+
+Route (d) has no backend writer yet: until it does, its runs use the spike's
+own synthetic producer, and the summary says so.
 
 While it runs, in the PowerShell where you pasted `Measure-VideorcCpu`
 (change the route and run number in the file name each time):
@@ -320,7 +328,7 @@ S0.1):
 | Field in `summary.json` | Pass line |
 | --- | --- |
 | `cpu_copies_per_frame` | 0 for routes a, b and c (d copies by design: report it) |
-| `present_interval_p95_ms` | ≤ 20 |
+| `present_interval_p95_ms` | ≤ 20 at 60 fps; at 4K30, report it against the 33.3 ms frame interval |
 | `ui_cpu_percent_still` (app process, scene not changing) | ≤ 3 |
 | `ui_cpu_percent_live` (app process, video moving) | ≤ 10 |
 | `gpu_ms_per_frame_p95` | ≤ 2 |

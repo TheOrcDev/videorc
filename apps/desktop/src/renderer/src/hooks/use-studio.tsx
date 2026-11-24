@@ -213,7 +213,6 @@ import {
   revealInFileManagerLabel,
   trashName
 } from '@/lib/platform'
-import { quietWhileLiveOn } from '@/lib/quiet-while-live'
 import {
   nextPortalShareGrant,
   replayStartWaitsForGrant,
@@ -221,6 +220,7 @@ import {
   replayStartWaitsForScreen
 } from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, toast } from '@/lib/toast'
+import { uiSettingsStorage, windowUiSettingsHydrated } from '@/lib/ui-settings-storage'
 import { CLOUD_TOAST_ID } from '@/lib/cloud-toast-id'
 import { NO_TALK_SHOW, type TalkShowContextValue } from '@/lib/talk-show-context'
 import type { TalkShowRoomControllerDeps } from '@/hooks/use-talk-show-room'
@@ -326,6 +326,7 @@ import {
   verticalOrientationVideoPatch,
   videoProfileCompatibility,
   videoPresets,
+  withoutRetiredSettings,
   HORIZONTAL_LAYOUT_PRESETS,
   VERTICAL_LAYOUT_PRESETS,
   type CaptureConfig,
@@ -496,7 +497,6 @@ import type {
   CloudTestOutput,
   BuddyOverlaySnapshot,
   CommentHighlightAnchor,
-  CommentHighlightCanvases,
   CommentHighlightCommand,
   CohostUtteranceMilestone,
   CommentHighlightState,
@@ -588,7 +588,6 @@ import type {
   SceneEditorDraftAck,
   SceneEditorDraftParams,
   SceneTransformPatch,
-  SessionCommentsPage,
   SessionDeletionOperation,
   SessionDetails,
   SessionHealthEventsPage,
@@ -652,6 +651,8 @@ import {
   offCohostState
 } from '@/lib/backend'
 import type { WatchdogAlert, WatchdogAlertFix, WatchdogAlertsView } from '@/lib/backend'
+import type { RoomMediaStatus } from '@/lib/backend'
+import type { SceneContent } from '@/lib/room-scene-publisher'
 import { backendAudioLevels } from '@/lib/backend-audio-levels'
 import { soundboard } from '@/lib/soundboard-store'
 import {
@@ -662,13 +663,11 @@ import {
   captionOverlayKey,
   captionOverlayTargetPlan,
   captionSessionFloor,
-  CaptionCueRenderGuard,
   captionsBarRunning,
   captionsStatusIsActive,
   decideCaptionsRuntimeIntent,
   decideOverlayPush,
   LatestWinsScheduler,
-  shouldCancelCaptionCueRender,
   type CaptionSessionFloor
 } from '@/lib/captions-ui'
 import {
@@ -892,16 +891,29 @@ const loadCloudNotices = () => import('@/lib/cloud-notices')
 // Plan 224 C-G4: the room controller mounts lazily under the provider.
 const TalkShowRoomHost = lazy(() => import('@/components/studio/talk-show-room-host'))
 
+// The files the backend draws a highlight card or the chat box from (plan
+// 260 S1.2), cached before the request: the backend reads its chat image
+// cache and never fetches. Bounded by the highlight's avatar slice; a file
+// that is not cached in time draws the monogram or the emote's name.
+async function warmChatImages(urls: readonly string[]): Promise<void> {
+  const cache = window.videorc?.cacheChatAvatar
+  if (!cache || urls.length === 0) return
+  await Promise.race([
+    Promise.allSettled(urls.map((url) => cache(url))),
+    new Promise((resolve) => setTimeout(resolve, COMMENTS_HIGHLIGHT_TIMING_CONTRACT.avatarFetchMs))
+  ])
+}
+
 async function loadChatOverlayDriver(client: BackendClient): Promise<ChatOverlayDriver> {
-  const [{ createChatOverlayDriver }, { renderChatOverlayCards }] = await Promise.all([
+  const [{ createChatOverlayDriver }, { chatOverlayImageUrls }] = await Promise.all([
     import('@/lib/chat-overlay'),
-    loadCaptionOverlay()
+    import('@/lib/comment-highlight-layout')
   ])
   return createChatOverlayDriver({
     set: (params) => client.requestTyped('chat.overlay.set', params),
     clear: () => client.requestTyped('chat.overlay.clear'),
     canvases: () => client.requestTyped('chat.overlay.canvases'),
-    paint: renderChatOverlayCards
+    warm: (messages) => warmChatImages(chatOverlayImageUrls(messages))
   })
 }
 
@@ -946,7 +958,10 @@ const SESSION_LIST_PAGE_LIMIT = 50
 
 function outputChosenByUser(): boolean {
   try {
-    return localStorage.getItem(STORAGE_KEYS.outputChosenByUser) !== null
+    // Before the UI settings store has its snapshot nothing is known, and an
+    // unknown answer must never let a check apply an output: say chosen.
+    if (!windowUiSettingsHydrated()) return true
+    return uiSettingsStorage().getItem(STORAGE_KEYS.outputChosenByUser) !== null
   } catch {
     return true
   }
@@ -954,7 +969,7 @@ function outputChosenByUser(): boolean {
 
 function markOutputChosenByUser(): void {
   try {
-    localStorage.setItem(STORAGE_KEYS.outputChosenByUser, '1')
+    uiSettingsStorage().setItem(STORAGE_KEYS.outputChosenByUser, '1')
   } catch {
     // Storage unavailable: the check then only ever suggests.
   }
@@ -2893,6 +2908,24 @@ function StudioCloudProvider({
  * Studio first renders. The migration is a chunk of its own, loaded only on
  * that launch; every other launch reads the stored library and renders at once.
  */
+
+/** Plan 260 S1.8c: the backend room's screen privacy in the room client's
+ * `screenPrivacy` shape, for the Studio's Hide screen status. */
+function backendScreenPrivacy(
+  media: RoomMediaStatus | null
+): TalkShowRoomSnapshot['screenPrivacy'] | undefined {
+  const screen = media?.screen
+  if (!screen) return undefined
+  return {
+    epoch: screen.epoch,
+    generation: screen.generation,
+    hidden: screen.hidden,
+    sourceBlockedAt: screen.sourceBlockedAt,
+    status: screen.status,
+    observations: screen.observations
+  }
+}
+
 export function StudioProvider({ children }: { children: ReactNode }): ReactElement | null {
   const [ready, setReady] = useState(scenesStored)
   useEffect(() => {
@@ -3429,7 +3462,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.visual.sources.app
   )
   const [settings, setSettings] = useState<SettingsState>(() =>
-    loadJson(STORAGE_KEYS.settings, defaultSettings)
+    withoutRetiredSettings(loadJson(STORAGE_KEYS.settings, defaultSettings))
   )
   const [storedCaptureConfig, setCaptureConfig] = useState<CaptureConfig>(() => {
     const config = loadCaptureConfig()
@@ -3983,13 +4016,18 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
                 captureConfig.video,
                 captureConfig.streamEnabled ? captureConfig.streaming : undefined
               )
-        const avatarSource = options?.milestone?.avatarUrl ?? message.authorAvatarUrl
-        const [avatarUrl, canvases] = await Promise.all([
-          avatarSource ? window.videorc?.cacheChatAvatar?.(avatarSource).catch(() => null) : null,
-          client.request<CommentHighlightCanvases>('comments.highlight.canvases').catch(() => null)
-        ])
-        if (commentHighlightIntentRef.current !== intent) return null
-        const { renderCommentHighlightCards, renderMilestoneCards } = await loadCaptionOverlay()
+        // Plan 260 S1.2: the backend draws the card (or the milestone card)
+        // from the message it holds; the renderer caches the files it reads
+        // first and names the canvas it sized the card for.
+        const milestone = options?.milestone
+        const { commentHighlightImageUrls } = await import('@/lib/comment-highlight-layout')
+        await warmChatImages(
+          milestone
+            ? milestone.avatarUrl
+              ? [milestone.avatarUrl]
+              : []
+            : commentHighlightImageUrls(message)
+        )
         if (commentHighlightIntentRef.current !== intent) return null
         // The streamer's placement (plan 164): the card wraps to the rect's
         // width on each canvas and the backend blits it inside that rect.
@@ -3997,22 +4035,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         const rect =
           highlightLayout[overlayOrientationForCanvas(streamVideo.width, streamVideo.height)]
         const verticalRect = highlightLayout.vertical
-        const cards = options?.milestone
-          ? await renderMilestoneCards(
-              options.milestone,
-              avatarUrl ?? null,
-              cohostSettingsRef.current?.persona.name ?? null,
-              { ...streamVideo, rect },
-              canvases?.vertical ? { ...canvases.vertical, rect: verticalRect } : undefined
-            )
-          : await renderCommentHighlightCards(
-              message,
-              avatarUrl ?? null,
-              { ...streamVideo, rect },
-              canvases?.vertical ? { ...canvases.vertical, rect: verticalRect } : undefined
-            )
-        if (!cards) throw new Error("Couldn't render this message for the stream.")
-        if (commentHighlightIntentRef.current !== intent) return null
+        const personaName = cohostSettingsRef.current?.persona.name ?? null
         let state: CommentHighlightState
         try {
           state = await client.request<CommentHighlightState>('comments.highlight.set', {
@@ -4020,8 +4043,20 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             messageId: message.id,
             anchor: commentHighlightAnchorRef.current,
             rect,
-            ...(cards.verticalPngBase64 ? { verticalRect } : {}),
-            ...cards
+            verticalRect,
+            canvasWidth: streamVideo.width,
+            canvasHeight: streamVideo.height,
+            ...(milestone
+              ? {
+                  milestone: {
+                    name: milestone.name,
+                    label: milestone.label,
+                    platform: milestone.platform,
+                    ...(milestone.avatarUrl ? { avatarUrl: milestone.avatarUrl } : {}),
+                    ...(personaName ? { personaName } : {})
+                  }
+                }
+              : {})
           } satisfies SetCommentHighlightParams)
         } catch (error) {
           const failurePolicy = await loadCommandFailurePolicy()
@@ -4332,17 +4367,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         return
       }
       try {
-        let messages: LiveChatMessage[] = []
-        let cursor: string | undefined
-        do {
-          const page: SessionCommentsPage = await client.requestTyped('sessions.comments.list', {
-            sessionId,
-            cursor,
-            limit: Math.min(200, MAX_LIVE_CHAT_VIEW_MESSAGES - messages.length)
-          })
-          messages = [...page.messages, ...messages].slice(-MAX_LIVE_CHAT_VIEW_MESSAGES)
-          cursor = page.nextCursor
-        } while (cursor && messages.length < MAX_LIVE_CHAT_VIEW_MESSAGES)
+        // Plan 220 S1.6a: the backend reads (and caches) the transcript and
+        // its saved stats in one call.
+        const history = await client.requestTyped('sessions.comments.history', { sessionId })
+        const messages = history.messages.slice(-MAX_LIVE_CHAT_VIEW_MESSAGES)
         const snapshot = applyLiveChatSnapshot({
           sessionId,
           providers: [],
@@ -4350,13 +4378,15 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           unreadCount: messages.length,
           updatedAt: new Date().toISOString()
         })
-        const operations = await client
-          .request<CommentsSendOperation[]>('liveChat.sendOperations.list', { sessionId })
-          .catch(() => [])
         await publishLiveCommentsSnapshot({
           mode: { kind: 'history', sessionId, title, startedAt },
           snapshot,
-          latestSendOperation: operations.at(-1)
+          latestSendOperation: history.latestSendOperation,
+          history: {
+            viewers: history.viewers,
+            audience: history.audience,
+            chatTotals: history.chatTotals
+          }
         })
         await window.videorc?.setCommentsViewMode?.({
           kind: 'history',
@@ -4694,11 +4724,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // consent that silently reset to off on every launch left cloud AI doing
   // nothing with no visible reason (2026-07-11 report).
   const [aiConsent, setAiConsentState] = useState(
-    () => localStorage.getItem(AI_CONSENT_STORAGE_KEY) === '1'
+    () => uiSettingsStorage().getItem(AI_CONSENT_STORAGE_KEY) === '1'
   )
   const setAiConsent = useCallback((consent: boolean) => {
     setAiConsentState(consent)
-    localStorage.setItem(AI_CONSENT_STORAGE_KEY, consent ? '1' : '0')
+    uiSettingsStorage().setItem(AI_CONSENT_STORAGE_KEY, consent ? '1' : '0')
   }, [])
   const [startRequestPending, setStartRequestPending] = useState(false)
   const [stopRequestPending, setStopRequestPending] = useState(false)
@@ -4759,11 +4789,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         // live all the same (as for the watchdog, plan 249 S26).
         live: () =>
           sessionOwnsTransport(recordingRef.current) ||
-          cloudRoomActivityFromCloudStatus(cloudStatusRef.current) !== null,
-        quiet: () => quietWhileLiveOn(settingsRef.current)
+          cloudRoomActivityFromCloudStatus(cloudStatusRef.current) !== null
       })
       // S8: the Stream Manager's bell reads a copy of the list through main.
-      startMainNotificationRelay(() => quietWhileLiveOn(settingsRef.current))
+      startMainNotificationRelay()
     })
   }, [])
   // Stable handle for callbacks that only need to READ the config (labels,
@@ -4914,7 +4943,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }
     if (muteChanges) {
       try {
-        localStorage.setItem(
+        uiSettingsStorage().setItem(
           STORAGE_KEYS.captureConfig,
           JSON.stringify(persistableCaptureConfig(captureConfigRef.current))
         )
@@ -5322,7 +5351,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   useEffect(() => {
     rememberedAppsRef.current = rememberedSceneApps(rememberedAppsRef.current, sceneLibrary.scenes)
     try {
-      localStorage.setItem(SCENE_WINDOW_APPS_KEY, JSON.stringify(rememberedAppsRef.current))
+      uiSettingsStorage().setItem(SCENE_WINDOW_APPS_KEY, JSON.stringify(rememberedAppsRef.current))
     } catch {
       /* Device memory is best effort. */
     }
@@ -5479,7 +5508,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         queueMicrotask(() => autosaveSavedScene(persisted, savedSceneId, visual))
       }
       try {
-        localStorage.setItem(
+        uiSettingsStorage().setItem(
           WORKING_SCENE_KEY,
           JSON.stringify({
             version: 1,
@@ -5849,6 +5878,21 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   /** Plan 249 S12: asks for the room scene to be sent again after a confirmed edit. */
   const requestRoomSceneResendRef = useRef<() => void>(() => {})
   const [roomMedia, setRoomMedia] = useState<TalkShowRoomSnapshot | undefined>()
+  // Plan 260 S1.8c: the host's media in the backend's room (its dev switch),
+  // a token for that room (one per hold, as the room client is), and the
+  // scene last committed there.
+  const [backendRoomMedia, setBackendRoomMedia] = useState<RoomMediaStatus | null>(null)
+  const backendRoomMediaRef = useRef(backendRoomMedia)
+  backendRoomMediaRef.current = backendRoomMedia
+  const backendRoomRef = useRef<object | null>(null)
+  const backendSceneContentRef = useRef<SceneContent | null>(null)
+  const onBackendRoomMedia = useCallback((media: RoomMediaStatus | null) => {
+    if (!media) {
+      backendRoomRef.current = null
+      backendSceneContentRef.current = null
+    } else backendRoomRef.current ??= {}
+    setBackendRoomMedia(media)
+  }, [])
   const onRoomMediaSnapshot = useCallback((snapshot: TalkShowRoomSnapshot) => {
     setRoomMedia((previous) =>
       previous?.state === snapshot.state &&
@@ -8006,13 +8050,13 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   useEffect(() => {
     if (migratedShortcuts && settings.globalShortcuts === migratedShortcuts)
       shortcutMigrationHeldRef.current = true
-    localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(settings))
+    uiSettingsStorage().setItem(STORAGE_KEYS.settings, JSON.stringify(settings))
     if (shortcutMigrationHeldRef.current && settleSceneShortcuts())
       shortcutMigrationHeldRef.current = false
   }, [settings, migratedShortcuts, settleSceneShortcuts])
 
   useEffect(() => {
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify(persistableCaptureConfig(captureConfig))
     )
@@ -8446,87 +8490,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     let liveChatRecovery: Promise<void> | null = null
     let liveChatRecoveryRetryTimer: number | null = null
     let commentHighlightRevision = 0
-    type CaptionCueRenderRequest = {
-      requestId: string
-      canvasWidth: number
-      canvasHeight: number
-      position: 'top' | 'bottom'
-      textSize: 's' | 'm' | 'l'
-      styleId?: import('@/lib/backend').CaptionStyleId
-      styleRevision?: number
-      blankSeq: number
-      cues: { seq: number; text: string }[]
-    }
-    const captionCueRenderGuard = new CaptionCueRenderGuard()
-    let captionCueRenderGeneration = captionCueRenderGuard.begin()
-    const captionCueRenderQueue: CaptionCueRenderRequest[] = []
-    let captionCueRenderWorkerActive = false
-    let captionCueRenderAbort: AbortController | null = null
-    const cancelCaptionCueRender = (): void => {
-      captionCueRenderGuard.cancel()
-      captionCueRenderGeneration = captionCueRenderGuard.begin()
-      captionCueRenderQueue.splice(0)
-      captionCueRenderAbort?.abort()
-      captionCueRenderAbort = null
-    }
-    const drainCaptionCueRenderQueue = async (): Promise<void> => {
-      if (captionCueRenderWorkerActive) return
-      captionCueRenderWorkerActive = true
-      try {
-        const { renderCaptionCueFramePng } = await loadCaptionOverlay()
-        while (captionCueRenderQueue.length > 0) {
-          const request = captionCueRenderQueue.shift()
-          if (!request) continue
-          const cueRenderGeneration = captionCueRenderGeneration
-          const cueRenderAbort = new AbortController()
-          captionCueRenderAbort = cueRenderAbort
-          const jobs = [{ seq: request.blankSeq, text: '' }, ...request.cues]
-          for (const cue of jobs) {
-            if (
-              !generationIsCurrent() ||
-              cueRenderAbort.signal.aborted ||
-              !captionCueRenderGuard.isCurrent(cueRenderGeneration)
-            ) {
-              break
-            }
-            const pngBase64 = await renderCaptionCueFramePng({
-              text: cue.text,
-              canvasWidth: request.canvasWidth,
-              canvasHeight: request.canvasHeight,
-              position: request.position,
-              textSize: request.textSize,
-              styleId: request.styleId ?? 'glass'
-            })
-            if (
-              !pngBase64 ||
-              !generationIsCurrent() ||
-              cueRenderAbort.signal.aborted ||
-              !captionCueRenderGuard.isCurrent(cueRenderGeneration)
-            ) {
-              continue
-            }
-            try {
-              await nextClient.request(
-                'captions.cues.submit',
-                {
-                  requestId: request.requestId,
-                  seq: cue.seq,
-                  pngBase64
-                },
-                { signal: cueRenderAbort.signal }
-              )
-            } catch {
-              // Skip this cue; the backend watchdog handles incompleteness.
-            }
-          }
-          if (captionCueRenderAbort === cueRenderAbort) {
-            captionCueRenderAbort = null
-          }
-        }
-      } finally {
-        captionCueRenderWorkerActive = false
-      }
-    }
     type LiveChatRecoveryResult =
       | { kind: 'disposed' | 'superseded' }
       | {
@@ -9485,10 +9448,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       nextClient.on('captions.status', (payload) =>
         commitCaptionsStatus(payload as CaptionsStatus)
       ),
-      nextClient.on('captions.cleared', (payload) => {
-        if (shouldCancelCaptionCueRender((payload as { reason?: string }).reason)) {
-          cancelCaptionCueRender()
-        }
+      nextClient.on('captions.cleared', () => {
         captionSessionFloorRef.current = null
         setCaptionLines([])
       }),
@@ -9499,13 +9459,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             : current
         )
       ),
-      // Burned-copy cue frames (R2): the backend asks for one full-frame PNG
-      // per cue at finalize; render + submit sequentially, best-effort (the
-      // backend watchdog degrades to SRT-only if we never finish).
-      nextClient.on('captions.cues.render-request', (payload) => {
-        captionCueRenderQueue.push(payload as CaptionCueRenderRequest)
-        void drainCaptionCueRenderQueue()
-      }),
       nextClient.on('streamTargets.metadata.changed', (payload) => {
         bootstrapGuard.mark('streamMetadata')
         const draft = payload as StreamMetadataDraft
@@ -10083,7 +10036,6 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       sessionDetailRequests.clear()
       sessionDetailSingleFlight.clear()
       sessionDetailLiveEntries.clear()
-      cancelCaptionCueRender()
       bootstrapAbort.abort()
       liveChatMessageBatcher.dispose()
       dashboard?.dispose()
@@ -11994,6 +11946,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       current?: () => boolean
     ): Promise<RoomSceneResult> => {
       const { applySceneToRoom } = await import('@/lib/cloud-scene-adapter')
+      const { capturerIdForNative } = await import('@/lib/room-screen-source')
       return applySceneToRoom(
         { ...target, video: captureConfigRef.current.video },
         {
@@ -12004,6 +11957,41 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           room: () => {
             const controls = roomControlsRef.current
             const status = cloudStatusRef.current
+            const backend = backendRoomMediaRef.current
+            // Plan 260 S1.8c: the backend's room, from its media status.
+            if (!controls && backend && status?.room && status.show) {
+              const showId = status.show.id
+              return {
+                identity: status.room.client === 'connected' ? `host:${showId}` : null,
+                cameraPublished: backend.camera,
+                cameraOff: captureConfigRef.current.sources.cameraOff === true,
+                screenPublished: backend.screen?.published === true,
+                screenSourceId: backend.screen
+                  ? capturerIdForNative(backend.screen.sourceId)
+                  : null,
+                stage: status.room.stage,
+                commitScene: async (content, assets) => {
+                  const backendClient = clientRef.current
+                  if (!backendClient)
+                    return { state: 'failed', reason: 'Videorc is offline.', observed: {} }
+                  const { commitSceneToBackend } = await import('@/lib/room-scene-backend')
+                  const answered = await commitSceneToBackend(
+                    backendClient,
+                    showId,
+                    content,
+                    assets ?? []
+                  ).catch(() => null)
+                  if (!answered)
+                    return {
+                      state: 'failed',
+                      reason: 'The room did not take the scene.',
+                      observed: {}
+                    }
+                  backendSceneContentRef.current = content
+                  return answered
+                }
+              }
+            }
             if (!controls || !status?.room || !status.show) return null
             const snapshot = controls.snapshot
             return {
@@ -12016,13 +12004,40 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
               screenPublished: Boolean(snapshot.local.screen),
               screenSourceId: controls.screenSourceId,
               stage: status.room.stage,
-              commitScene: (content, assets) => controls.commitScene(content, assets)
+              commitScene: async (content, assets) => {
+                // Plan 260 S1.8b: the backend's room takes the commit when it
+                // holds the host seat; the room client commits otherwise.
+                const backendClient = clientRef.current
+                const showId = status.show?.id
+                if (backendClient && showId) {
+                  const { commitSceneToBackend } = await import('@/lib/room-scene-backend')
+                  const answered = await commitSceneToBackend(
+                    backendClient,
+                    showId,
+                    content,
+                    assets ?? []
+                  ).catch(() => null)
+                  if (answered) return answered
+                }
+                return controls.commitScene(content, assets)
+              }
             }
           },
           // Plan 249 S14: the scene's own screen or window, through main's
           // one-shot source grant and the room's privacy-gated capture.
           shareScreen: async (want) => {
             const controls = roomControlsRef.current
+            // Plan 260 S1.8c: the backend's room shares by native id.
+            if (!controls && backendRoomMediaRef.current) {
+              if (!clientRef.current) throw offlineError()
+              if (!want.nativeId) throw new Error("the room can't share this source here.")
+              roomScreenWantedRef.current = want.capturerId
+              const answer = await clientRef.current.requestTyped('cloud.room.screen.set', {
+                screen: { sourceId: want.nativeId }
+              })
+              if (!answer.held) throw new Error('the room is not open.')
+              return
+            }
             if (!controls) throw new Error('The room is not open.')
             roomScreenWantedRef.current = want.capturerId
             const granted = await window.videorc?.setTalkShowMediaGrant?.({
@@ -12079,7 +12094,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     (): boolean =>
       roomHoldsTheCamera(cloudStatusRef.current?.room) &&
       roomScenesOn() &&
-      Boolean(roomControlsRef.current?.sceneContent),
+      Boolean(roomControlsRef.current?.sceneContent ?? backendSceneContentRef.current),
     [roomScenesOn]
   )
   // Plan 249 S12: confirmed edits (drag, nudge, reset, Show/Hide, a look
@@ -12089,7 +12104,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   roomSceneEditDepsRef.current = { live: roomSceneLive, send: sendSceneToRoom }
   roomSceneEditSyncRef.current ??= createRoomSceneEditSync({
     live: () => roomSceneEditDepsRef.current.live(),
-    room: () => roomControlsRef.current,
+    room: () => roomControlsRef.current ?? backendRoomRef.current,
     target: () => ({
       layout: captureConfigRef.current.layout,
       sources: captureConfigRef.current.sources,
@@ -12726,7 +12741,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             sceneLibrary.scenes
           )
           try {
-            localStorage.setItem(SCENE_WINDOW_APPS_KEY, JSON.stringify(rememberedAppsRef.current))
+            uiSettingsStorage().setItem(
+              SCENE_WINDOW_APPS_KEY,
+              JSON.stringify(rememberedAppsRef.current)
+            )
           } catch {
             /* Best effort. */
           }
@@ -18591,6 +18609,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       stopOutput: (output) => stopOutputRef.current?.(output) ?? Promise.resolve(false),
       controlsRef: roomControlsRef,
       onMediaSnapshot: onRoomMediaSnapshot,
+      onBackendMedia: onBackendRoomMedia,
       microphoneMuted: captureConfig.audio.microphoneMuted,
       microphoneAudio: captureConfig.audio,
       cameraOff: captureConfig.sources.cameraOff === true,
@@ -18613,6 +18632,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       deviceList.devices,
       smokeTalkShowRoomOpen,
       onRoomMediaSnapshot,
+      onBackendRoomMedia,
       captureConfig.audio,
       captureConfig.sources.cameraOff,
       talkShowCameraId,
@@ -21714,7 +21734,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const value = useMemo<StudioCoreContextValue>(
     () => ({
       ...privacy,
-      roomScreenPrivacy: roomMedia?.screenPrivacy,
+      roomScreenPrivacy: roomMedia?.screenPrivacy ?? backendScreenPrivacy(backendRoomMedia),
       connection,
       wsStatus,
       health,
@@ -21974,6 +21994,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     [
       privacy,
       roomMedia,
+      backendRoomMedia,
       connection,
       wsStatus,
       health,

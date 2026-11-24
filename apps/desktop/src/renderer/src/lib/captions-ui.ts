@@ -11,31 +11,30 @@ import { overlayOrientationForCanvas } from './overlay-layout'
 /** Lines kept for the captions strip / detached window. */
 export const MAX_CAPTION_LINES = 50
 
-/**
- * Generation guard for renderer-owned caption cue raster work. Privacy
- * boundaries and client teardown invalidate older async renders before they
- * can retain or submit more transcript pixels.
- */
-export class CaptionCueRenderGuard {
-  private generation = 0
+/** What the Captions page's preview shows before a caption has arrived. */
+export const CAPTION_PREVIEW_SAMPLE = 'Your words become clear, live captions.'
 
-  begin(): number {
-    this.generation += 1
-    return this.generation
+/** The longest side the backend draws a page sample at
+ * (`overlay_raster::PAGE_SAMPLE_MAX_SIDE`, and `captions.preview.render`'s
+ * contract). */
+export const CAPTION_PREVIEW_MAX_SIDE = 4096
+
+/** The canvas the Captions page's preview is drawn on (plan 260 S1.2e: by the
+ * backend's cue-frame painter): 960 px wide at the video's aspect ratio, at
+ * least 360 px tall. A narrow portrait video (360x1920 would be 960x5120)
+ * shrinks to fit 4096 px tall at the same aspect ratio. */
+export function captionPreviewCanvas(video: { width: number; height: number }): {
+  width: number
+  height: number
+} {
+  const width = 960
+  const aspect = video.width / Math.max(1, video.height)
+  const height = Math.max(360, Math.round(width / aspect))
+  if (height <= CAPTION_PREVIEW_MAX_SIDE) return { width, height }
+  return {
+    width: Math.max(2, Math.round(CAPTION_PREVIEW_MAX_SIDE * aspect)),
+    height: CAPTION_PREVIEW_MAX_SIDE
   }
-
-  cancel(): void {
-    this.generation += 1
-  }
-
-  isCurrent(generation: number): boolean {
-    return generation === this.generation
-  }
-}
-
-/** Final-copy work survives ordinary capture boundaries; sign-out purges it. */
-export function shouldCancelCaptionCueRender(reason: string | undefined): boolean {
-  return reason === 'signed-out'
 }
 
 /**

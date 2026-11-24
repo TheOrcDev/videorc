@@ -1,4 +1,5 @@
 import { DEFAULT_STAT_ORDER, type StatId, type StatItemModel } from '@/lib/stream-manager-stats'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 // Where each stat sits in the Stream Manager's stats bar (plan 057, D2). The
 // first MAIN_SLOTS positions of `order` are the main slots: never clipped,
@@ -38,7 +39,7 @@ export function arrangeStats(
   return { main, more }
 }
 
-/** One per machine, beside the window's other renderer-local preferences. */
+/** One per profile, in the UI settings store beside the other renderer preferences. */
 export const STATS_LAYOUT_STORAGE_KEY = 'videorc.streamManager.statsBar'
 
 const KNOWN_STATS: ReadonlySet<string> = new Set(DEFAULT_STAT_ORDER)
@@ -115,11 +116,7 @@ export function saveStatsLayout(
   }
 }
 
-/** The window's `localStorage`, or undefined where touching it throws. */
-export function browserStorage(): Storage | undefined {
-  try {
-    return typeof localStorage === 'undefined' ? undefined : localStorage
-  } catch {
-    return undefined
-  }
+/** Where the layout is kept: the UI settings store (plan 220 S1.4b). */
+export function statsLayoutStorage(): Pick<Storage, 'getItem' | 'setItem'> {
+  return uiSettingsStorage()
 }

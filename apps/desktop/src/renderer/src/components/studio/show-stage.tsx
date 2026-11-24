@@ -993,7 +993,7 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
   const { activeScreen } = useStudioCore()
   const [listening, setListening] = useState(false)
   const audioRef = useRef<HTMLAudioElement>(null)
-  const { video, audio } = talkShow.room.monitor
+  const { video, audio, backendAudio } = talkShow.room.monitor
   const live = Boolean(cloudStatus?.room?.live || cloudStatus?.recording?.active)
   const view = programMonitorView(cloudStatus)
   // The takeover covers the managed program and silences every voice (the
@@ -1026,6 +1026,12 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
       cameraAvailable: virtualCamera.status?.available !== false
     }) ??
     'Videorc Camera · Not sending this room'
+
+  // Plan 260 S1.8d d5: with the backend in the room, it plays the return.
+  const setMonitorListening = talkShow.setMonitorListening
+  useEffect(() => {
+    if (backendAudio) void setMonitorListening(listening)
+  }, [backendAudio, listening, setMonitorListening])
 
   useEffect(() => {
     const element = audioRef.current
@@ -1107,7 +1113,7 @@ function ProgramMonitor({ talkShow }: { talkShow: TalkShowContextValue }): React
             <Button
               aria-label={listening ? 'Mute the program' : 'Listen to the program'}
               aria-pressed={listening}
-              disabled={!audio}
+              disabled={!audio && !backendAudio}
               size="icon-xs"
               type="button"
               variant="ghost"

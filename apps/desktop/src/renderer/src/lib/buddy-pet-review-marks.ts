@@ -1,4 +1,5 @@
 import type { BuddyPetReviewMarks } from './buddy-pet-creator-view'
+import { uiSettingsStorage } from './ui-settings-storage'
 
 // The Alive creator's "Looks right" marks, kept on this device (plan 174
 // S3.15a, the review-marks owner item): a creation survives closing the
@@ -8,14 +9,6 @@ import type { BuddyPetReviewMarks } from './buddy-pet-creator-view'
 export const BUDDY_PET_REVIEW_MARKS_STORAGE_KEY = 'videorc.buddyPetReviewMarks'
 
 type MarksByBuild = Record<string, BuddyPetReviewMarks>
-
-function localStorageOrNull(): Storage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage
-  } catch {
-    return null
-  }
-}
 
 /** Only marks shaped as stored (row → version number) come back; anything odd is dropped. */
 function sanitize(parsed: unknown): MarksByBuild {
@@ -35,7 +28,7 @@ function sanitize(parsed: unknown): MarksByBuild {
 }
 
 export function readBuddyPetReviewMarks(
-  storage: Pick<Storage, 'getItem'> | null = localStorageOrNull()
+  storage: Pick<Storage, 'getItem'> | null = uiSettingsStorage()
 ): MarksByBuild {
   try {
     const raw = storage?.getItem(BUDDY_PET_REVIEW_MARKS_STORAGE_KEY)
@@ -64,7 +57,7 @@ function write(
 export function writeBuddyPetReviewMarks(
   buildId: string,
   marks: BuddyPetReviewMarks,
-  storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null = localStorageOrNull()
+  storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null = uiSettingsStorage()
 ): MarksByBuild {
   // One creation at a time: the marks of an earlier build go with it.
   const next: MarksByBuild = { [buildId]: marks }
@@ -74,7 +67,7 @@ export function writeBuddyPetReviewMarks(
 
 export function forgetBuddyPetReviewMarks(
   buildId: string,
-  storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null = localStorageOrNull()
+  storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null = uiSettingsStorage()
 ): MarksByBuild {
   const next = { ...readBuddyPetReviewMarks(storage) }
   delete next[buildId]

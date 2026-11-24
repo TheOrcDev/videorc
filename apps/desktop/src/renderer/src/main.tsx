@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 
 import { App } from './App'
 import { AppErrorBoundary } from './components/app-error-boundary'
+import { startLocalTimeSync } from './lib/local-time'
 import './styles.css'
 
 // React's dev build logs every component render onto the performance timeline
@@ -27,10 +28,21 @@ if (import.meta.env.DEV && localStorage.getItem('videorc.reactPerfTrack') !== '1
   }
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <AppErrorBoundary>
-      <App />
-    </AppErrorBoundary>
-  </React.StrictMode>
-)
+void startLocalTimeSync()
+
+function render(): void {
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <AppErrorBoundary>
+        <App />
+      </AppErrorBoundary>
+    </React.StrictMode>
+  )
+}
+
+// Plan 220 S1.4a: the UI settings store is in before the first render, so
+// every read is synchronous; past its deadline the window renders anyway.
+// The store and its transport load as their own chunk, off the eager bundle.
+void import('./lib/ui-settings-window')
+  .then(({ hydrateUiSettingsBeforeFirstRender }) => hydrateUiSettingsBeforeFirstRender())
+  .then(render, render)

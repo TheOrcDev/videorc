@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import { StreamQualityControl } from './stream-quality-control'
 import { streamQualityOverride } from '@/lib/output-quality'
 import {
@@ -257,6 +258,7 @@ export function DestinationCard({
   onAuthorizeXLive: () => Promise<void>
   onSelectYouTubeChannel: (channelId: string, accountId?: string) => Promise<void>
 }): ReactElement {
+  useLocalTime()
   const fullUrl = target.urlMode === 'full-url'
   const nativeDestination = target.platform !== 'custom'
   const platformName = metadataPlatformLabel(target.platform)

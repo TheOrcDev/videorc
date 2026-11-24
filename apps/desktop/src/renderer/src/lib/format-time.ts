@@ -6,6 +6,7 @@
 // The relative form rolls over to days and then to a date, so an old row
 // never reads "2207h 25m".
 
+import { formatLocal, localDayKey } from '@/lib/local-time'
 export { formatTimecode, type TimecodeOptions } from '../../../shared/timecode'
 
 const MINUTE_MS = 60_000
@@ -33,11 +34,10 @@ export function formatRelativeTime(iso: string, nowMs: number): string {
 
 /** "Oct 2", or "Oct 2, 2025" outside the current year. */
 export function formatShortDate(atMs: number, nowMs: number): string {
-  const at = new Date(atMs)
-  const sameYear = at.getFullYear() === new Date(nowMs).getFullYear()
-  return new Intl.DateTimeFormat(undefined, {
+  const sameYear = localDayKey(atMs).slice(0, 4) === localDayKey(nowMs).slice(0, 4)
+  return formatLocal(atMs, {
     month: 'short',
     day: 'numeric',
     ...(sameYear ? {} : { year: 'numeric' })
-  }).format(at)
+  })
 }

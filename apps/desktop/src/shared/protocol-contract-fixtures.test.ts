@@ -25,6 +25,12 @@ import type {
   CloudGuestDecideParams,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
+  CloudRoomAvatarMotionParams,
+  CloudRoomAvatarSetParams,
+  CloudRoomMediaSetParams,
+  CloudRoomAuxSetParams,
+  CloudRoomPresentationEvent,
+  CloudRoomSceneCommitParams,
   CloudRoomRequest,
   CloudRoomTokenAnswer,
   CloudStage,
@@ -99,6 +105,7 @@ import type {
   BuddyPetSheetGeneratedEvent
 } from './buddy-pet-creator'
 import { normalizeSessionCommentsListParams } from './backend'
+import type { ProgramAudioSettings } from './program-audio-routing'
 import type {
   CohostAvatarAccepted,
   CohostAvatarCreateParams,
@@ -361,6 +368,18 @@ interface HighRiskContractFixtures {
     roomClientReportParams: CloudRoomClientReportParams
     roomTokenAnswer: CloudRoomTokenAnswer
     roomRequestEvent: CloudRoomRequest
+    roomPresentationEvent: CloudRoomPresentationEvent
+    roomAvatarSetParams: CloudRoomAvatarSetParams
+    roomAvatarMotionParams: CloudRoomAvatarMotionParams
+    roomMicrophoneSetParams: CloudRoomMediaSetParams
+    roomCameraSetParams: CloudRoomMediaSetParams
+    roomScreenSetParams: CloudRoomMediaSetParams
+    roomRoutingSetParams: ProgramAudioSettings
+    roomAuxSetParams: CloudRoomAuxSetParams
+    roomPresentationAuxEvent: CloudRoomPresentationEvent
+    roomPresentationPeopleEvent: CloudRoomPresentationEvent
+    roomPresentationMediaEvent: CloudRoomPresentationEvent
+    roomSceneCommitParams: CloudRoomSceneCommitParams
     // Plan 243 C1: another device on air, and a show waiting after a hand-off.
     statusOnAirElsewhere: CloudStatus
     statusWaiting: CloudStatus
@@ -713,7 +732,19 @@ describe('shared high-risk protocol fixture', () => {
       guestActParams,
       roomClientReportParams,
       roomTokenAnswer,
-      roomRequestEvent
+      roomRequestEvent,
+      roomPresentationEvent,
+      roomAvatarSetParams,
+      roomAvatarMotionParams,
+      roomSceneCommitParams,
+      roomMicrophoneSetParams,
+      roomCameraSetParams,
+      roomScreenSetParams,
+      roomRoutingSetParams,
+      roomAuxSetParams,
+      roomPresentationAuxEvent,
+      roomPresentationPeopleEvent,
+      roomPresentationMediaEvent
     } = fixtures.cloud
     expect(jsonShape(validateBackendEventPayload('cloud.state', statusTalk))).toEqual(statusTalk)
     expect(jsonShape(validateBackendRpcResult('cloud.room.open', statusTalk))).toEqual(statusTalk)
@@ -751,6 +782,120 @@ describe('shared high-risk protocol fixture', () => {
     expect(jsonShape(validateBackendEventPayload('cloud.room.requests', roomRequestEvent))).toEqual(
       roomRequestEvent
     )
+    // Plan 260 S1.8b: the presentation topics' delivery, from the backend.
+    expect(
+      jsonShape(validateBackendEventPayload('cloud.room.presentation', roomPresentationEvent))
+    ).toEqual(roomPresentationEvent)
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.avatar.set', roomAvatarSetParams))
+    ).toEqual(roomAvatarSetParams)
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.avatar.motion', roomAvatarMotionParams))
+    ).toEqual(roomAvatarMotionParams)
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.scene.commit', roomSceneCommitParams))
+    ).toEqual(roomSceneCommitParams)
+    // Plan 260 S1.8c: the host's microphone, in the bridge's own bounds.
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.microphone.set', roomMicrophoneSetParams))
+    ).toEqual(roomMicrophoneSetParams)
+    expect(validateBackendRpcParams('cloud.room.microphone.set', { microphone: null })).toEqual({
+      microphone: null
+    })
+    for (const microphone of [
+      { ...roomMicrophoneSetParams.microphone, gainDb: 30 },
+      { ...roomMicrophoneSetParams.microphone, offsetMs: 1001 },
+      { ...roomMicrophoneSetParams.microphone, deviceId: '' },
+      { ...roomMicrophoneSetParams.microphone, noise: 'loud' }
+    ]) {
+      expect(() => validateBackendRpcParams('cloud.room.microphone.set', { microphone })).toThrow()
+    }
+    // The camera: on with its device, off with null; each method takes its own kind.
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.camera.set', roomCameraSetParams))
+    ).toEqual(roomCameraSetParams)
+    expect(validateBackendRpcParams('cloud.room.camera.set', { camera: null })).toEqual({
+      camera: null
+    })
+    expect(() =>
+      validateBackendRpcParams('cloud.room.camera.set', { camera: { deviceId: '' } })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('cloud.room.camera.set', roomMicrophoneSetParams)
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('cloud.room.microphone.set', roomCameraSetParams)
+    ).toThrow()
+    // The room's other people and the monitor, from the backend's room.
+    expect(
+      jsonShape(validateBackendEventPayload('cloud.room.presentation', roomPresentationPeopleEvent))
+    ).toEqual(roomPresentationPeopleEvent)
+    expect(validateBackendRpcParams('cloud.room.monitor.set', { enabled: false })).toEqual({
+      enabled: false
+    })
+    // Whether the backend's room may publish the HTML layers' sheet.
+    expect(validateBackendRpcParams('cloud.room.html.set', { enabled: true })).toEqual({
+      enabled: true
+    })
+    expect(() => validateBackendRpcParams('cloud.room.html.set', { enabled: 'yes' })).toThrow()
+    // Room sounds and system audio on the backend room's aux track.
+    expect(jsonShape(validateBackendRpcParams('cloud.room.aux.set', roomAuxSetParams))).toEqual(
+      roomAuxSetParams
+    )
+    expect(() =>
+      validateBackendRpcParams('cloud.room.aux.set', {
+        ...roomAuxSetParams,
+        system: { ...roomAuxSetParams.system, gainDb: 13 }
+      })
+    ).toThrow()
+    expect(
+      jsonShape(validateBackendEventPayload('cloud.room.presentation', roomPresentationAuxEvent))
+    ).toEqual(roomPresentationAuxEvent)
+    // The program audio routing the backend's room sends its program pages.
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.routing.set', roomRoutingSetParams))
+    ).toEqual(roomRoutingSetParams)
+    for (const bad of [
+      { ...roomRoutingSetParams, speechGain: 1.5 },
+      { ...roomRoutingSetParams, auxiliaryGain: -0.1 },
+      { ...roomRoutingSetParams, extra: true }
+    ])
+      expect(() => validateBackendRpcParams('cloud.room.routing.set', bad)).toThrow()
+    // The screen the room shares, by its native id; its privacy on the wire.
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.screen.set', roomScreenSetParams))
+    ).toEqual(roomScreenSetParams)
+    expect(validateBackendRpcParams('cloud.room.screen.set', { screen: null })).toEqual({
+      screen: null
+    })
+    expect(() =>
+      validateBackendRpcParams('cloud.room.screen.set', { screen: { sourceId: '' } })
+    ).toThrow()
+    expect(() => validateBackendRpcParams('cloud.room.screen.set', roomCameraSetParams)).toThrow()
+    expect(
+      jsonShape(validateBackendEventPayload('cloud.room.presentation', roomPresentationMediaEvent))
+    ).toEqual(roomPresentationMediaEvent)
+    expect(() =>
+      validateBackendEventPayload('cloud.room.presentation', {
+        ...roomPresentationMediaEvent,
+        media: {
+          ...roomPresentationMediaEvent.media,
+          screen: { ...roomPresentationMediaEvent.media?.screen, status: 'frosted' }
+        }
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('cloud.room.scene.commit', {
+        ...roomSceneCommitParams,
+        assets: [{ ...roomSceneCommitParams.assets[0], mime: 'image/gif' }]
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('cloud.room.presentation', {
+        ...roomPresentationEvent,
+        graphics: { ...roomPresentationEvent.graphics, state: 'sent' }
+      })
+    ).toThrow()
     expect(() =>
       validateBackendEventPayload('cloud.state', {
         ...statusTalk,
@@ -1504,6 +1649,62 @@ describe('shared high-risk protocol fixture', () => {
     expect(() => validateBackendRpcParams('buddy.overlay.clear', { target: 'vertical' })).toThrow()
     expect(() => validateBackendRpcParams('buddy.overlay.clear', { rect: null })).toThrow()
     expect(validateBackendRpcResult('buddy.overlay.clear', info)).toStrictEqual(info)
+  })
+
+  it("carries text, not pixels, to the pages' drawings (plan 260 S1.2e)", () => {
+    // The Captions page's preview: the cue-frame painter on the preview's canvas.
+    const preview = {
+      text: 'Your words become clear, live captions.',
+      canvasWidth: 960,
+      canvasHeight: 540,
+      position: 'bottom',
+      textSize: 'm',
+      styleId: 'classic'
+    }
+    expect(validateBackendRpcParams('captions.preview.render', preview)).toStrictEqual(preview)
+    const glass = {
+      text: preview.text,
+      canvasWidth: 720,
+      canvasHeight: 1280,
+      position: 'top',
+      textSize: 'l'
+    }
+    expect(validateBackendRpcParams('captions.preview.render', glass)).toStrictEqual(glass)
+    for (const wrong of [
+      { ...preview, canvasWidth: 1 },
+      { ...preview, canvasHeight: 5000 },
+      { ...preview, position: 'middle' },
+      { ...preview, textSize: 'xl' },
+      { ...preview, styleId: 'neon' },
+      { ...preview, text: 'x'.repeat(2001) },
+      { ...preview, pngBase64: 'iVBORw0KGgo=' }
+    ]) {
+      expect(() => validateBackendRpcParams('captions.preview.render', wrong)).toThrow()
+    }
+    // The Sidekick page's samples: the live bubble's painter, any line.
+    const sample = {
+      text: 'Welcome to the horde! Grab a seat.',
+      style: 'shout',
+      canvasWidth: 3840,
+      canvasHeight: 2160,
+      rect: { x: 0.7975, y: 0.64, w: 0.18, h: 0.32 }
+    }
+    expect(validateBackendRpcParams('buddy.bubble.render', sample)).toStrictEqual(sample)
+    for (const wrong of [
+      { ...sample, text: '' },
+      { ...sample, style: 'whisper' },
+      { ...sample, canvasWidth: 0 },
+      { ...sample, canvasHeight: 8192 },
+      { ...sample, rect: undefined },
+      { ...sample, target: 'primary' }
+    ]) {
+      expect(() => validateBackendRpcParams('buddy.bubble.render', wrong)).toThrow()
+    }
+    const png = { pngBase64: 'iVBORw0KGgo=', width: 367, height: 103 }
+    expect(validateBackendRpcResult('buddy.bubble.render', png)).toStrictEqual(png)
+    expect(validateBackendRpcResult('captions.preview.render', png)).toStrictEqual(png)
+    expect(() => validateBackendRpcResult('buddy.bubble.render', { ...png, width: 0 })).toThrow()
+    expect(() => validateBackendRpcResult('captions.preview.render', { pngBase64: 'x' })).toThrow()
   })
 
   it('keeps Sidekick voice commands, their answers and settings identical across languages (plan 140 S3)', () => {

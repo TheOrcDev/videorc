@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import {
   CameraIcon,
   ChatIcon,
@@ -924,6 +925,7 @@ function LibraryRow({
   onRename: () => void
   onDelete: () => void
 }): ReactElement {
+  useLocalTime()
   const { recording } = useStudioRecordingState()
   const { sessionDetails, loadSessionDetails } = useStudioCore()
   // A Record press the backend refused leaves a failed row whose file never

@@ -11,7 +11,7 @@ vi.mock('@/lib/join-request-chime', async (importActual) => ({
   playJoinChime: play
 }))
 
-const { useJoinRequestChime } = await import('./use-join-request-chime')
+const { rendererPlaysJoinChime, useJoinRequestChime } = await import('./use-join-request-chime')
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -30,15 +30,27 @@ function fakeClient() {
   return { client: client as unknown as BackendClient, handlers, off }
 }
 
-function Probe({ client, roomOpen }: { client: BackendClient | null; roomOpen: boolean }): null {
-  useJoinRequestChime(client, roomOpen)
+function Probe({
+  client,
+  roomOpen,
+  rendererPlays
+}: {
+  client: BackendClient | null
+  roomOpen: boolean
+  rendererPlays: boolean
+}): null {
+  useJoinRequestChime(client, roomOpen, rendererPlays)
   return null
 }
 
 let root: Root | null = null
-const render = async (client: BackendClient | null, roomOpen: boolean): Promise<void> => {
+const render = async (
+  client: BackendClient | null,
+  roomOpen: boolean,
+  rendererPlays = true
+): Promise<void> => {
   root ??= createRoot(document.createElement('div'))
-  await act(async () => root?.render(createElement(Probe, { client, roomOpen })))
+  await act(async () => root?.render(createElement(Probe, { client, roomOpen, rendererPlays })))
 }
 
 afterEach(async () => {
@@ -48,6 +60,18 @@ afterEach(async () => {
 })
 
 describe('useJoinRequestChime', () => {
+  // Plan 260 S1.3: on macOS the backend rings it; the window stays quiet.
+  it('leaves the chime to the backend where the backend plays it', async () => {
+    const { client, handlers } = fakeClient()
+    await render(client, true, false)
+
+    handlers.get('cloud.room.requests')?.()
+    expect(play).not.toHaveBeenCalled()
+    expect(rendererPlaysJoinChime('darwin')).toBe(false)
+    expect(rendererPlaysJoinChime('win32')).toBe(true)
+    expect(rendererPlaysJoinChime('linux')).toBe(true)
+  })
+
   it('chimes when someone asks to join an open room', async () => {
     const { client, handlers } = fakeClient()
     await render(client, true)

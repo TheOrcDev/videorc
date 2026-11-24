@@ -3,43 +3,21 @@ import { describe, expect, it } from 'vitest'
 import type { CaptionsUpdate } from '@/lib/backend'
 import {
   appendCaptionLine,
+  CAPTION_PREVIEW_MAX_SIDE,
+  captionPreviewCanvas,
   captionDwellMs,
   captionLineAboveFloor,
   captionOverlayKey,
   captionOverlayTargetPlan,
   captionSessionFloor,
-  CaptionCueRenderGuard,
   captionStripLines,
   captionsBarRunning,
   captionsStatusIsActive,
   decideCaptionsRuntimeIntent,
   decideOverlayPush,
   LatestWinsScheduler,
-  latestFinalCaptionText,
-  shouldCancelCaptionCueRender
+  latestFinalCaptionText
 } from './captions-ui'
-
-describe('CaptionCueRenderGuard', () => {
-  it('invalidates queued cue renders on supersession and authoritative clear', () => {
-    const guard = new CaptionCueRenderGuard()
-    const first = guard.begin()
-    expect(guard.isCurrent(first)).toBe(true)
-
-    const replacement = guard.begin()
-    expect(guard.isCurrent(first)).toBe(false)
-    expect(guard.isCurrent(replacement)).toBe(true)
-
-    guard.cancel()
-    expect(guard.isCurrent(replacement)).toBe(false)
-  })
-
-  it('purges on sign-out without cancelling normal final-copy boundaries', () => {
-    expect(shouldCancelCaptionCueRender('signed-out')).toBe(true)
-    expect(shouldCancelCaptionCueRender('capture-ended')).toBe(false)
-    expect(shouldCancelCaptionCueRender('blocked')).toBe(false)
-    expect(shouldCancelCaptionCueRender(undefined)).toBe(false)
-  })
-})
 
 const update = (seq: number, overrides: Partial<CaptionsUpdate> = {}): CaptionsUpdate => ({
   sessionClientId: 'captions-session-a',
@@ -47,6 +25,33 @@ const update = (seq: number, overrides: Partial<CaptionsUpdate> = {}): CaptionsU
   text: `line ${seq}`,
   chunkSeconds: 3,
   ...overrides
+})
+
+describe('captionPreviewCanvas', () => {
+  it('draws 960 wide at the video aspect, at least 360 tall', () => {
+    expect(captionPreviewCanvas({ width: 1920, height: 1080 })).toEqual({ width: 960, height: 540 })
+    expect(captionPreviewCanvas({ width: 1080, height: 1920 })).toEqual({
+      width: 960,
+      height: 1707
+    })
+    expect(captionPreviewCanvas({ width: 3840, height: 640 })).toEqual({ width: 960, height: 360 })
+  })
+
+  // capture.ts allows a custom portrait 360..2160 wide and 640..3840 tall, so
+  // 360x1920 is valid: 960 wide would be 5120 tall, past the backend's 4096.
+  it('fits a narrow portrait video inside the backend limit at the same aspect', () => {
+    expect(CAPTION_PREVIEW_MAX_SIDE).toBe(4096)
+    expect(captionPreviewCanvas({ width: 360, height: 1920 })).toEqual({ width: 768, height: 4096 })
+    expect(captionPreviewCanvas({ width: 360, height: 3840 })).toEqual({ width: 384, height: 4096 })
+    for (const width of [360, 400, 720, 1080, 2160]) {
+      for (const height of [640, 1280, 1920, 2560, 3840]) {
+        const canvas = captionPreviewCanvas({ width, height })
+        expect(canvas.width).toBeLessThanOrEqual(CAPTION_PREVIEW_MAX_SIDE)
+        expect(canvas.height).toBeLessThanOrEqual(CAPTION_PREVIEW_MAX_SIDE)
+        expect(Number.isInteger(canvas.width) && Number.isInteger(canvas.height)).toBe(true)
+      }
+    }
+  })
 })
 
 describe('appendCaptionLine', () => {

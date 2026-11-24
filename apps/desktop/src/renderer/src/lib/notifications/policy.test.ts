@@ -53,11 +53,13 @@ function entry(patch: Partial<NotificationEntry>): NotificationEntry {
 describe('popUpDecision (plan 250, "What pops up")', () => {
   // The plan's table: tone by idle, recording or live with quiet on, quiet off.
   // Idle is the bell only (the owner, 2026-11-22: "we said we are going to
-  // put everything inside of our notifications").
+  // put everything inside of our notifications"), and live only an urgent
+  // problem pops up, quiet or not: a toast answers a press or says an urgent
+  // problem.
   const table: [NotificationTone, number | null, number | null, number | null][] = [
     ['urgent', null, URGENT_POP_UP_MS, URGENT_POP_UP_MS],
-    ['warning', null, null, POP_UP_MS],
-    ['done', null, null, POP_UP_MS],
+    ['warning', null, null, null],
+    ['done', null, null, null],
     ['news', null, null, null]
   ]
   it.each(table)('%s: idle, live and quiet, quiet off', (tone, idle, quietLive, loudLive) => {
@@ -166,16 +168,16 @@ describe('popUpDecision (plan 250, "What pops up")', () => {
     const repeat = (now: number): number | null =>
       popUpDecision(
         question({
-          tone: 'warning',
+          tone: 'urgent',
           change: 'repeated',
           live: true,
           quiet: false,
           now,
-          lastPop: { at: 0, tone: 'warning' }
+          lastPop: { at: 0, tone: 'urgent' }
         })
       )
     expect(repeat(REALERT_AFTER_MS - 1)).toBeNull()
-    expect(repeat(REALERT_AFTER_MS)).toBe(POP_UP_MS)
+    expect(repeat(REALERT_AFTER_MS)).toBe(URGENT_POP_UP_MS)
   })
 })
 
@@ -404,6 +406,9 @@ describe('popUpDecision at launch (the owner, 2026-11-22: no toasts when you ope
     expect(popUpDecision(question({ tone: 'warning', launching: false }))).toBeNull()
     expect(
       popUpDecision(question({ tone: 'warning', launching: false, live: true, quiet: false }))
-    ).toBe(POP_UP_MS)
+    ).toBeNull()
+    expect(
+      popUpDecision(question({ tone: 'urgent', launching: false, live: true, quiet: false }))
+    ).toBe(URGENT_POP_UP_MS)
   })
 })

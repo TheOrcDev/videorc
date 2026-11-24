@@ -1,69 +1,78 @@
 import { useEffect, useState, type ReactElement } from 'react'
 
 import { Skeleton } from '@/components/ui/skeleton'
-import type { CohostBubbleStyle, CohostPersona } from '@/lib/backend'
+import { useBuddyLookClient } from '@/hooks/use-buddy-look'
+import type { CohostBubbleStyle, CohostPersona, OverlayPng } from '@/lib/backend'
+import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
 import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
-import { BUDDY_BUBBLE_LABELS } from '@/lib/buddy-persona-view'
-import { loadBuddyStateImage, renderBuddyOverlayPng } from '@/lib/buddy-overlay'
+import {
+  BUDDY_BUBBLE_LABELS,
+  BUDDY_BUBBLE_SAMPLE_CANVAS,
+  BUDDY_BUBBLE_SAMPLE_ZOOM,
+  buddyBubbleSampleLine
+} from '@/lib/buddy-persona-view'
+import { buddyOverlayMetrics } from '@/lib/buddy-overlay'
 import { cn } from '@/lib/utils'
 
-/** The sample canvas: the bubble as it goes on a 1080p stream at the Buddy's
- * default placement. */
-const SAMPLE_CANVAS = { width: 1920, height: 1080 }
 const SAMPLE_RECT = DEFAULT_OVERLAY_LAYOUT.buddy.horizontal
-/**
- * The zoomed sample is drawn on a canvas twice that size (36 px type, a
- * 691 px Buddy), never a small bitmap scaled up: shown at about a 1080p
- * stream's own scale, it stays crisp on a Retina screen.
- */
-const ZOOMED_CANVAS_SCALE = 2
 
 export type BuddyBubbleSampleSize = 'inline' | 'zoomed'
 
 /**
- * A sample of the bubble (plan 164 S-A4), drawn by the overlay rasterizer
- * itself (S-C2) with the persona's talking image, so what the screen shows
- * is what the stream gets. The bubble is always the light variant: the
+ * A sample of the bubble (plan 164 S-A4) over the persona's talking image,
+ * laid out as the stream lays them out: the bubble is drawn by the live
+ * bubble's own painter in the backend (plan 260 S1.2e), and the picture
+ * stands under it in a square the Buddy's width, bottom-aligned, as plan
+ * 164's composite drew it. The bubble is always the light variant: the
  * stream is not themed (D17). `inline` is the small sample beside the style
  * toggle; `zoomed` fills the zoom dialog's box, big enough to read the
- * bubble. A host without a 2D canvas (tests) shows the placeholder.
+ * bubble. Until the backend answers (or without one, in tests) it shows the
+ * placeholder.
  */
 export function BuddyBubbleSample({
   persona,
   style,
   size = 'inline'
 }: {
-  persona: Pick<CohostPersona, 'id' | 'name' | 'images'>
+  persona: Pick<CohostPersona, 'id' | 'name' | 'images' | 'source'>
   style: CohostBubbleStyle
   size?: BuddyBubbleSampleSize
 }): ReactElement {
-  const [src, setSrc] = useState<string | null>(null)
+  const client = useBuddyLookClient()
+  const [bubble, setBubble] = useState<OverlayPng | null>(null)
   const { name } = persona
-  const imagesKey = JSON.stringify(persona.images)
-  const scale = size === 'zoomed' ? ZOOMED_CANVAS_SCALE : 1
+  const scale = size === 'zoomed' ? BUDDY_BUBBLE_SAMPLE_ZOOM : 1
+  const canvasWidth = BUDDY_BUBBLE_SAMPLE_CANVAS.width * scale
+  const canvasHeight = BUDDY_BUBBLE_SAMPLE_CANVAS.height * scale
   useEffect(() => {
+    if (!client) return
     let cancelled = false
-    void (async () => {
-      const image = await loadBuddyStateImage(
-        { images: JSON.parse(imagesKey) as CohostPersona['images'] },
-        'talk',
-        { warn: () => undefined }
-      )
-      const png = await renderBuddyOverlayPng({
-        image,
-        bubble: `Welcome to the horde, ${name} says hi.`,
+    client
+      .requestTyped('buddy.bubble.render', {
+        text: buddyBubbleSampleLine(name),
         style,
-        canvas: { width: SAMPLE_CANVAS.width * scale, height: SAMPLE_CANVAS.height * scale },
+        canvasWidth,
+        canvasHeight,
         rect: SAMPLE_RECT
       })
-      if (!cancelled) setSrc(png ? `data:image/png;base64,${png}` : null)
-    })().catch(() => {
-      if (!cancelled) setSrc(null)
-    })
+      .then(
+        (png) => {
+          if (!cancelled) setBubble(png)
+        },
+        () => {
+          if (!cancelled) setBubble(null)
+        }
+      )
     return () => {
       cancelled = true
     }
-  }, [imagesKey, name, style, scale])
+  }, [canvasHeight, canvasWidth, client, name, style])
+  const metrics = buddyOverlayMetrics(
+    canvasWidth,
+    canvasHeight,
+    Math.floor(SAMPLE_RECT.w * canvasWidth),
+    style
+  )
   const zoomed = size === 'zoomed'
   return (
     <div
@@ -77,8 +86,36 @@ export function BuddyBubbleSample({
       data-style={style}
       role="img"
     >
-      {src ? (
-        <img alt="" className="max-h-full max-w-full object-contain" draggable={false} src={src} />
+      {bubble ? (
+        // One picture, scaled as a whole and standing on the box's floor like
+        // the composite PNG it replaces: the bubble's bitmap on top, its tail
+        // tip on the square's top edge. `size-auto`: its own size, held in
+        // the box, never the zoom Button's icon size.
+        <svg
+          aria-hidden
+          className="size-auto max-h-full max-w-full"
+          data-testid="buddy-bubble-sample-picture"
+          height={bubble.height + metrics.avatarPx + metrics.padPx}
+          preserveAspectRatio="xMidYMax meet"
+          viewBox={`0 0 ${bubble.width} ${bubble.height + metrics.avatarPx + metrics.padPx}`}
+          width={bubble.width}
+        >
+          <image
+            height={bubble.height}
+            href={`data:image/png;base64,${bubble.pngBase64}`}
+            width={bubble.width}
+            x={0}
+            y={0}
+          />
+          <image
+            height={metrics.avatarPx}
+            href={buddyStateImageUrl(persona, 'talk')}
+            preserveAspectRatio="xMidYMax meet"
+            width={metrics.avatarPx}
+            x={metrics.padPx}
+            y={bubble.height}
+          />
+        </svg>
       ) : (
         <Skeleton className={zoomed ? 'h-full w-3/5 rounded-row' : 'h-40 w-28'} />
       )}

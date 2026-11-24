@@ -223,7 +223,7 @@ try {
       {
         code: `
       const hook = () => window.__videorcSmokeScenePresets;
-      const library = JSON.parse(localStorage.getItem('videorc.scenes.v2'));
+      const library = JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2'));
       const scene = library.scenes.find((entry) => entry.id === library.onStreamId);
       scene.shows = {kind: 'test-pattern'};
       scene.layouts.horizontal.layoutPreset = 'screen-only';

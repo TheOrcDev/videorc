@@ -491,7 +491,8 @@ describe('renderer security policy', () => {
 
   it('lets only the Comments window join main in caching chat avatars', () => {
     // The detached Comments window draws the same chat rows as Studio; the
-    // host allowlist and the on-disk cache stay main-owned (avatar-cache.ts).
+    // host allowlist and the on-disk cache are the backend's (chat_images.rs),
+    // and main forwards for the windows without a socket.
     expect(roleCanInvokeChannel('main', 'avatars:cache')).toBe(true)
     expect(roleCanInvokeChannel('comments', 'avatars:cache')).toBe(true)
     expect(roleCanInvokeChannel('notes', 'avatars:cache')).toBe(false)

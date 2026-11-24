@@ -966,6 +966,32 @@ impl SessionState {
         vec![SessionEffect::StartFailed(failure)]
     }
 
+    /// A start whose future was dropped before `session.start` answered (a
+    /// Rust-only end: Electron's start promise always reaches its answer or
+    /// its catch). The optimistic `starting` goes back to Idle with no
+    /// failure, since nothing refused it; a session the request did start
+    /// arrives with its own `recording.status`. False when no start was
+    /// pending (the answer or the failure already ended it).
+    pub fn abandon_start(&mut self) -> bool {
+        if !self.start_pending {
+            return false;
+        }
+        if matches!(self.status.state, RecordingState::Starting) && self.status.session_id.is_none()
+        {
+            let mut idle = initial_status();
+            idle.message = Some(READY_TO_START_MESSAGE.to_string());
+            self.apply_status(idle);
+        }
+        // A session pushed while the start ran is this start's: it keeps its
+        // intent.
+        if !self.is_active() {
+            self.active_intent = None;
+        }
+        self.start_pending = false;
+        self.start_lifecycle = None;
+        true
+    }
+
     /// S3.5c: a Go Live refused before its start (the preflight, platform
     /// setup): the same persistent failure, and Retry opens Go Live again.
     pub fn fail_go_live(
@@ -1178,6 +1204,38 @@ mod tests {
         assert!(SessionActivity::RecordAndStream.saves_recording());
         assert!(!SessionActivity::LiveStream.saves_recording());
         assert!(!SessionActivity::Recording.is_live());
+    }
+
+    #[test]
+    fn a_dropped_start_goes_back_to_idle_without_a_failure() {
+        let now = Instant::now();
+        let mut session = SessionState::new();
+        assert!(session.begin_start(SessionStartIntent::RECORD));
+        assert!(session.abandon_start());
+        assert!(!session.start_pending());
+        assert_eq!(session.phase(), SessionPhase::Idle);
+        assert_eq!(session.active_intent(), None);
+        assert!(session.start_failure().is_none(), "nothing refused it");
+        assert!(!session.abandon_start(), "only once");
+        // The next press starts again.
+        assert!(session.begin_start(SessionStartIntent::RECORD));
+
+        // A session pushed while the start ran stays, with its intent.
+        session.apply_reported_status(status(RecordingState::Recording, Some("s1")), now);
+        assert!(session.abandon_start());
+        assert_eq!(session.phase(), SessionPhase::Recording);
+        assert_eq!(session.active_intent(), Some(SessionStartIntent::RECORD));
+        // An answered start leaves nothing to abandon.
+        assert!(!session.abandon_start());
+    }
+
+    #[test]
+    fn a_dropped_stop_lets_the_next_stop_run() {
+        let mut session = SessionState::new();
+        assert!(session.begin_stop());
+        assert!(!session.begin_stop(), "one at a time");
+        session.end_stop();
+        assert!(session.begin_stop());
     }
 
     #[test]

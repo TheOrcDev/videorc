@@ -71,6 +71,9 @@ pub const ENGINE_NOT_CONNECTED: &str = "Videorc's engine isn't connected.";
 /// `ENGINE_CONNECTION_CLOSED`.
 pub const ENGINE_CONNECTION_CLOSED: &str = "Videorc's engine connection closed.";
 
+/// Why the socket closed when this app closed it ([`BackendSocket::close`]).
+pub const CLIENT_CLOSED: &str = "the client closed the connection";
+
 /// A failed request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RpcError {
@@ -178,6 +181,9 @@ pub struct BackendSocket {
     /// handshake and the first subscriber.
     initial_events: Mutex<Option<broadcast::Receiver<ServerEvent>>>,
     closed: watch::Receiver<Option<String>>,
+    /// The reader records why the connection ended; [`Self::close`] records
+    /// its own close too, since it aborts the reader, which may not have.
+    closed_tx: Arc<watch::Sender<Option<String>>>,
     reader: JoinHandle<()>,
     writer: Mutex<Option<JoinHandle<()>>>,
     timeouts: RequestTimeouts,
@@ -236,6 +242,7 @@ impl BackendSocket {
         let (events, mut ready_rx) = broadcast::channel::<ServerEvent>(EVENT_CHANNEL_CAPACITY);
         let initial_rx = events.subscribe();
         let (closed_tx, closed) = watch::channel(None::<String>);
+        let closed_tx = Arc::new(closed_tx);
         let (outgoing, mut outgoing_rx) = mpsc::channel::<Message>(OUTGOING_CHANNEL_CAPACITY);
 
         let writer = tokio::spawn(async move {
@@ -250,6 +257,7 @@ impl BackendSocket {
         let reader = {
             let pending = pending.clone();
             let events = events.clone();
+            let closed_tx = closed_tx.clone();
             tokio::spawn(async move {
                 let reason = loop {
                     match source.next().await {
@@ -278,23 +286,8 @@ impl BackendSocket {
                         None => break "the connection ended".to_string(),
                     }
                 };
-                let waiters: Vec<_> = pending
-                    .lock()
-                    .map(|mut pending| pending.drain().collect())
-                    .unwrap_or_default();
-                for (_, waiter) in waiters {
-                    let error = if waiter.sent {
-                        outcome_unknown(&waiter.method, "lost its connection")
-                    } else {
-                        RpcError::new(
-                            &waiter.method,
-                            codes::CONNECTION_CLOSED,
-                            ENGINE_CONNECTION_CLOSED,
-                        )
-                    };
-                    let _ = waiter.tx.send(Err(error));
-                }
-                let _ = closed_tx.send(Some(reason));
+                fail_pending(&pending);
+                record_closed(&closed_tx, reason);
             })
         };
 
@@ -305,6 +298,7 @@ impl BackendSocket {
             events,
             initial_events: Mutex::new(Some(initial_rx)),
             closed,
+            closed_tx,
             reader,
             writer: Mutex::new(Some(writer)),
             timeouts,
@@ -544,6 +538,10 @@ impl BackendSocket {
             let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
         }
         self.reader.abort();
+        // The aborted reader may not have recorded the close, or failed the
+        // requests still waiting: the close is this app's, so it says so.
+        fail_pending(&self.pending);
+        record_closed(&self.closed_tx, CLIENT_CLOSED.to_string());
     }
 
     fn forget(&self, id: &str) {
@@ -560,6 +558,39 @@ impl Drop for BackendSocket {
             writer.abort();
         }
     }
+}
+
+/// Fails every request still waiting: a sent one's outcome is unknown, an
+/// unsent one never reached the engine.
+fn fail_pending(pending: &PendingMap) {
+    let waiters: Vec<_> = pending
+        .lock()
+        .map(|mut pending| pending.drain().collect())
+        .unwrap_or_default();
+    for (_, waiter) in waiters {
+        let error = if waiter.sent {
+            outcome_unknown(&waiter.method, "lost its connection")
+        } else {
+            RpcError::new(
+                &waiter.method,
+                codes::CONNECTION_CLOSED,
+                ENGINE_CONNECTION_CLOSED,
+            )
+        };
+        let _ = waiter.tx.send(Err(error));
+    }
+}
+
+/// Records why the socket closed, once: the first reason stays (the
+/// engine's, when the reader saw it before a [`BackendSocket::close`]).
+fn record_closed(closed: &watch::Sender<Option<String>>, reason: String) {
+    closed.send_if_modified(|current| {
+        if current.is_some() {
+            return false;
+        }
+        *current = Some(reason);
+        true
+    });
 }
 
 fn outcome_unknown(method: &str, detail: &str) -> RpcError {

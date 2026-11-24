@@ -9,6 +9,7 @@ import { applySlot, createImportedAsset } from '@/lib/background-library'
 import { STORAGE_KEYS } from '@/lib/capture'
 import { AssetsTab } from '@/components/tabs/assets-tab'
 import { BackgroundReplaceDialog, radioStep } from './background-replace-dialog'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 // Plan 174 (C-2, D14): on a fresh profile all ten background slots are in
 // use, so Import asks which background the picked image replaces.
@@ -43,7 +44,6 @@ beforeEach(() => {
     applyWorkingBackgroundStyle: vi.fn(),
     scene: null
   }
-  localStorage.clear()
   vi.clearAllMocks()
 })
 
@@ -153,7 +153,7 @@ describe('Assets Import on a fresh profile', () => {
     await act(async () => button('Replace Podcast')!.click())
 
     expect(document.body.textContent).not.toContain('Replace which background?')
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEYS.backgroundAssets)!)
+    const stored = JSON.parse(uiSettingsStorage().getItem(STORAGE_KEYS.backgroundAssets)!)
     const podcast = stored.slots.find((slot: { id: string }) => slot.id === 'bg-06')
     expect(podcast.assetId).toBe('imported-2')
     expect(stored.assets['imported-2'].name).toBe('Neon sign')
@@ -168,7 +168,7 @@ describe('Assets Import on a fresh profile', () => {
     )
     await act(async () => button('Import image…')!.click())
     expect(radios()).toHaveLength(0)
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEYS.backgroundAssets)!)
+    const stored = JSON.parse(uiSettingsStorage().getItem(STORAGE_KEYS.backgroundAssets)!)
     expect(
       stored.slots.every((slot: { assetId: string }) => slot.assetId.startsWith('builtin-'))
     ).toBe(true)

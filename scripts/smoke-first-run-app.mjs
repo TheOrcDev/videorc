@@ -19,6 +19,7 @@ import {
   firstRunPerformanceCheckSettled,
   firstRunSourceStartLines
 } from './lib/first-run-smoke-gate.mjs'
+import { seedUiSettingsJs, UI_SETTINGS_READY_TIMEOUT_MS } from './lib/renderer-profile-seed.mjs'
 
 if (process.platform !== 'darwin')
   throw new Error('First-run app smoke requires macOS; Windows acceptance is owner-owed.')
@@ -117,25 +118,25 @@ async function connect(url) {
   return {
     listeners,
     close: () => ws.close(),
-    call: (method, params = {}) =>
+    call: (method, params = {}, { timeoutMs = 10000 } = {}) =>
       new Promise((resolveCall, reject) => {
         const id = ++nextId
         const timer = setTimeout(() => {
           pending.delete(id)
           reject(new Error(`CDP ${method} timed out`))
-        }, 10000)
+        }, timeoutMs)
         pending.set(id, { resolve: resolveCall, reject, timer })
         ws.send(JSON.stringify({ id, method, params }))
       })
   }
 }
 
-async function evaluate(expression) {
-  const result = await cdp.call('Runtime.evaluate', {
-    expression,
-    returnByValue: true,
-    awaitPromise: true
-  })
+async function evaluate(expression, { timeoutMs } = {}) {
+  const result = await cdp.call(
+    'Runtime.evaluate',
+    { expression, returnByValue: true, awaitPromise: true },
+    { timeoutMs }
+  )
   if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails))
   return result.result?.value
 }
@@ -196,9 +197,9 @@ const stateExpression = `(() => {
   // Null for a moment while a reload swaps the document.
   const root = document.documentElement?.classList;
   const e = window.__firstRunSmoke;
-  const recordRaw = localStorage.getItem('videorc.firstRun');
-  const configRaw = localStorage.getItem('videorc.captureConfig');
-  const registryRaw = localStorage.getItem('videorc.backgroundAssets');
+  const recordRaw = window.__videorcUiSettings?.getItem('videorc.firstRun') ?? null;
+  const configRaw = window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? null;
+  const registryRaw = window.__videorcUiSettings?.getItem('videorc.backgroundAssets') ?? null;
   const look = document.querySelector('[data-first-run-look-layout]');
   return {
     setup: setup?.dataset.firstRunSetup ?? null, mode: setup?.dataset.firstRunMode ?? null,
@@ -293,10 +294,14 @@ async function reloadWith(keys) {
   if (previous.setup === 'open' && previous.mode === 'first-run')
     await waitForPerformanceCheck('reload')
   const previousDocument = previous.documentId
-  if (keys)
-    await evaluate(
-      `localStorage.clear(); for (const [key, value] of Object.entries(${JSON.stringify(keys)})) localStorage.setItem(key, value)`
-    )
+  // A fresh profile holding only `keys` (plan 220 S1.4b: the product keys
+  // live in the UI settings store; the theme also keeps its pre-paint copy).
+  // The seed waits for the window's store (CDP attaches while it may still be hydrating).
+  if (keys) {
+    await evaluate(seedUiSettingsJs(keys, { replace: true }), {
+      timeoutMs: UI_SETTINGS_READY_TIMEOUT_MS + 5000
+    })
+  }
   await cdp.call('Page.reload', { ignoreCache: true })
   // Do not accidentally accept the previous document's state.
   await waitFor(

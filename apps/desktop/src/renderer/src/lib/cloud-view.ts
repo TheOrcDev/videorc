@@ -1,3 +1,4 @@
+import { formatLocal } from '@/lib/local-time'
 import type {
   AiCapabilitiesCloud,
   CloudStatus,
@@ -181,13 +182,11 @@ export const CLOUD_TEST_DESCRIPTION = 'Sends 10 seconds of test video. Nothing g
 export const CLOUD_TEST_SESSION_REASON = "Locked while you're recording or live."
 export const CLOUD_TEST_SHOW_LIVE_REASON = 'A show is live through Videorc Cloud. End it first.'
 
-const RESET_TIME = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' })
-
 /** "2:05 PM", the local time a limit frees up. */
 function formatResetTime(resetAt: string | undefined): string | null {
   if (!resetAt) return null
-  const date = new Date(resetAt)
-  return Number.isNaN(date.getTime()) ? null : RESET_TIME.format(date)
+  const at = Date.parse(resetAt)
+  return Number.isNaN(at) ? null : formatLocal(at, { hour: 'numeric', minute: '2-digit' }, 'en-US')
 }
 
 /** "2.3 s": a short duration, the time the cloud took to go live. */

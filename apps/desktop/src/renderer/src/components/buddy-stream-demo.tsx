@@ -4,10 +4,10 @@ import { useEffect, useState, type ReactElement } from 'react'
 import streamBackdropUrl from '@/assets/backgrounds/livestream.webp'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { useBuddyLookClient, type BuddyLookClient } from '@/hooks/use-buddy-look'
 import { useReducedMotion } from '@/hooks/use-reduced-motion'
 import type { CohostAvatarState } from '@/lib/backend'
 import { BUDDY_ONBOARDING_STEP1 } from '@/lib/buddy-onboarding-copy'
-import { renderBuddyBubblePng } from '@/lib/buddy-overlay'
 import {
   BUDDY_DEMO_CANVAS,
   BUDDY_DEMO_RECT,
@@ -18,24 +18,32 @@ import {
 } from '@/lib/buddy-stream-demo'
 import { cn } from '@/lib/utils'
 
-/** The bubbles as PNG data URLs, drawn once per page (they never change). */
+/** The bubbles as PNG data URLs, drawn by the backend's bubble painter
+ * (plan 260 S1.2e) once per page: they never change. A set with a bubble
+ * missing is not kept, so the next showing asks again. */
 let bubbleCache: Promise<(string | null)[]> | null = null
 
-function drawBubbles(): Promise<(string | null)[]> {
-  bubbleCache ??= Promise.all(
+function drawBubbles(client: Pick<BuddyLookClient, 'requestTyped'>): Promise<(string | null)[]> {
+  const drawing = (bubbleCache ??= Promise.all(
     BUDDY_ONBOARDING_STEP1.demoBubbles.map((text) =>
-      renderBuddyBubblePng({
-        bubble: text,
-        style: 'speech',
-        canvas: BUDDY_DEMO_CANVAS,
-        rect: BUDDY_DEMO_RECT
-      }).then(
-        (png) => (png ? `data:image/png;base64,${png}` : null),
-        () => null
-      )
+      client
+        .requestTyped('buddy.bubble.render', {
+          text,
+          style: 'speech',
+          canvasWidth: BUDDY_DEMO_CANVAS.width,
+          canvasHeight: BUDDY_DEMO_CANVAS.height,
+          rect: BUDDY_DEMO_RECT
+        })
+        .then(
+          (png) => `data:image/png;base64,${png.pngBase64}`,
+          () => null
+        )
     )
-  )
-  return bubbleCache
+  ))
+  void drawing.then((drawn) => {
+    if (drawn.includes(null) && bubbleCache === drawing) bubbleCache = null
+  })
+  return drawing
 }
 
 /** What a reader hears for the demo: the heading and the three lines it says (plan 174 G-20). */
@@ -61,6 +69,7 @@ export function BuddyStreamDemo({
   className?: string
 }): ReactElement {
   const reducedMotion = useReducedMotion()
+  const client = useBuddyLookClient()
   const [paused, setPaused] = useState(false)
   const [frameIndex, setFrameIndex] = useState(0)
   const [bubbles, setBubbles] = useState<(string | null)[]>([])
@@ -68,14 +77,15 @@ export function BuddyStreamDemo({
   const frame = BUDDY_DEMO_TIMELINE[index]!
 
   useEffect(() => {
+    if (!client) return
     let cancelled = false
-    void drawBubbles().then((drawn) => {
+    void drawBubbles(client).then((drawn) => {
       if (!cancelled) setBubbles(drawn)
     })
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [client])
 
   useEffect(() => {
     if (reducedMotion || paused) return

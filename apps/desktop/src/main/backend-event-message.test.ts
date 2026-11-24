@@ -14,6 +14,7 @@ import {
   parseMainRecordingStatusEvent,
   parseMainScene,
   parseMainSceneChangedEvent,
+  parseMainUiSettingsChangedEvent,
   parseMainVirtualCameraChangedEvent,
   parseMainVirtualCameraStatus
 } from './backend-event-message'
@@ -128,6 +129,29 @@ describe('the Videorc Camera status on the main socket (plan 214 B3)', () => {
       JSON.stringify({ event: 'virtualCamera.changed', payload: { on: 'yes' } })
     )
     expect(parsed).toEqual({ event: 'virtualCamera.changed', payload: { on: 'yes' } })
+  })
+
+  it('relays a UI settings batch to the socket-less windows and drops a bad one (plan 220 S1.4a)', () => {
+    expect(MAIN_ISOLATED_BACKEND_EVENTS.has('ui.settings.changed')).toBe(true)
+    const change = {
+      revision: 3,
+      put: { 'videorc.theme': 'dark' },
+      delete: ['videorc.orcleTab'],
+      writer: 'window-main'
+    }
+    expect(parseMainUiSettingsChangedEvent(change)).toEqual(change)
+    // A forged field, a null value and a bad revision are refused, and the
+    // envelope still parses: the socket stays.
+    for (const bad of [
+      { ...change, extra: 1 },
+      { ...change, put: { 'videorc.theme': null } },
+      { ...change, revision: -1 }
+    ]) {
+      expect(() => parseMainUiSettingsChangedEvent(bad)).toThrow('ui.settings.changed')
+      expect(
+        parseMainBackendWireMessage(JSON.stringify({ event: 'ui.settings.changed', payload: bad }))
+      ).toEqual({ event: 'ui.settings.changed', payload: bad })
+    }
   })
 })
 

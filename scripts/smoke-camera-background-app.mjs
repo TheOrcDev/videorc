@@ -116,7 +116,7 @@ for (const tool of [ffmpegPath, ffprobePath]) {
 
 /** The renderer's stored background for the camera (settings.cameraBackgrounds), or null. */
 const READ_STORED_BACKGROUND = `
-  const settings = JSON.parse(localStorage.getItem('videorc.settings') ?? '{}');
+  const settings = JSON.parse(window.__videorcUiSettings?.getItem('videorc.settings') ?? '{}');
   return settings.cameraBackgrounds?.[params.cameraId] ?? null;
 `
 
@@ -180,7 +180,7 @@ const PICK_BACKGROUND = `
   let stored = null;
   const deadline = performance.now() + 5000;
   while (performance.now() < deadline) {
-    const settings = JSON.parse(localStorage.getItem('videorc.settings') ?? '{}');
+    const settings = JSON.parse(window.__videorcUiSettings?.getItem('videorc.settings') ?? '{}');
     stored = settings.cameraBackgrounds?.[params.cameraId] ?? null;
     if ((stored?.mode ?? 'off') === params.mode) break;
     await sleep(50);

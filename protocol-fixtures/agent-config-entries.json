@@ -1,0 +1,311 @@
+{
+  "description": "Plan 260 S1.6f (from videorc-rust's plan 220 S1.6b): the videorc entry for each agent app, as the Connect dialog shows it and Electron main writes it (apps/desktop/src/shared/agent-config-entry.ts) and as videorc-app-core's settings_page::agents spells it. Both sides' tests read this file.",
+  "cases": [
+    {
+      "bridgePath": "/Applications/Videorc.app/Contents/Resources/videorc-mcp",
+      "token": "vrc_agent_ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12",
+      "temporaryCopy": false,
+      "jsonRootKey": {
+        "claude-desktop": "mcpServers",
+        "cursor": "mcpServers",
+        "vs-code": "servers"
+      },
+      "json": {
+        "claude-desktop": {
+          "command": "/Applications/Videorc.app/Contents/Resources/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
+          }
+        },
+        "cursor": {
+          "command": "/Applications/Videorc.app/Contents/Resources/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
+          }
+        },
+        "vs-code": {
+          "type": "stdio",
+          "command": "/Applications/Videorc.app/Contents/Resources/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
+          }
+        }
+      },
+      "codexTomlLines": [
+        "[mcp_servers.videorc]",
+        "command = \"/Applications/Videorc.app/Contents/Resources/videorc-mcp\"",
+        "args = []",
+        "env = { VIDEORC_AGENT_TOKEN = \"vrc_agent_ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12\" }"
+      ],
+      "claudeCodeAddArgs": [
+        "mcp",
+        "add",
+        "--scope",
+        "user",
+        "videorc",
+        "--env",
+        "VIDEORC_AGENT_TOKEN=vrc_agent_ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12",
+        "--",
+        "/Applications/Videorc.app/Contents/Resources/videorc-mcp"
+      ]
+    },
+    {
+      "bridgePath": "C:\\Users\\Ana Lee\\AppData\\Local\\Programs\\Videorc\\resources\\videorc-mcp.exe",
+      "token": "vrc_agent_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "temporaryCopy": false,
+      "jsonRootKey": {
+        "claude-desktop": "mcpServers",
+        "cursor": "mcpServers",
+        "vs-code": "servers"
+      },
+      "json": {
+        "claude-desktop": {
+          "command": "C:\\Users\\Ana Lee\\AppData\\Local\\Programs\\Videorc\\resources\\videorc-mcp.exe",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        },
+        "cursor": {
+          "command": "C:\\Users\\Ana Lee\\AppData\\Local\\Programs\\Videorc\\resources\\videorc-mcp.exe",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        },
+        "vs-code": {
+          "type": "stdio",
+          "command": "C:\\Users\\Ana Lee\\AppData\\Local\\Programs\\Videorc\\resources\\videorc-mcp.exe",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        }
+      },
+      "codexTomlLines": [
+        "[mcp_servers.videorc]",
+        "command = \"C:\\\\Users\\\\Ana Lee\\\\AppData\\\\Local\\\\Programs\\\\Videorc\\\\resources\\\\videorc-mcp.exe\"",
+        "args = []",
+        "env = { VIDEORC_AGENT_TOKEN = \"vrc_agent_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\" }"
+      ],
+      "claudeCodeAddArgs": [
+        "mcp",
+        "add",
+        "--scope",
+        "user",
+        "videorc",
+        "--env",
+        "VIDEORC_AGENT_TOKEN=vrc_agent_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "--",
+        "C:\\Users\\Ana Lee\\AppData\\Local\\Programs\\Videorc\\resources\\videorc-mcp.exe"
+      ]
+    },
+    {
+      "bridgePath": "/Users/ana/odd \"name\"\\dir\ttab/videorc-mcp",
+      "token": "vrc_agent_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "temporaryCopy": false,
+      "jsonRootKey": {
+        "claude-desktop": "mcpServers",
+        "cursor": "mcpServers",
+        "vs-code": "servers"
+      },
+      "json": {
+        "claude-desktop": {
+          "command": "/Users/ana/odd \"name\"\\dir\ttab/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          }
+        },
+        "cursor": {
+          "command": "/Users/ana/odd \"name\"\\dir\ttab/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          }
+        },
+        "vs-code": {
+          "type": "stdio",
+          "command": "/Users/ana/odd \"name\"\\dir\ttab/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          }
+        }
+      },
+      "codexTomlLines": [
+        "[mcp_servers.videorc]",
+        "command = \"/Users/ana/odd \\\"name\\\"\\\\dir\\ttab/videorc-mcp\"",
+        "args = []",
+        "env = { VIDEORC_AGENT_TOKEN = \"vrc_agent_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\" }"
+      ],
+      "claudeCodeAddArgs": [
+        "mcp",
+        "add",
+        "--scope",
+        "user",
+        "videorc",
+        "--env",
+        "VIDEORC_AGENT_TOKEN=vrc_agent_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "--",
+        "/Users/ana/odd \"name\"\\dir\ttab/videorc-mcp"
+      ]
+    },
+    {
+      "bridgePath": "/Volumes/Videorc/Videorc.app/Contents/Resources/videorc-mcp",
+      "token": "vrc_agent_1111111111111111111111111111111111111111111111111111111111111111",
+      "temporaryCopy": true,
+      "jsonRootKey": {
+        "claude-desktop": "mcpServers",
+        "cursor": "mcpServers",
+        "vs-code": "servers"
+      },
+      "json": {
+        "claude-desktop": {
+          "command": "/Volumes/Videorc/Videorc.app/Contents/Resources/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        },
+        "cursor": {
+          "command": "/Volumes/Videorc/Videorc.app/Contents/Resources/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        },
+        "vs-code": {
+          "type": "stdio",
+          "command": "/Volumes/Videorc/Videorc.app/Contents/Resources/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        }
+      },
+      "codexTomlLines": [
+        "[mcp_servers.videorc]",
+        "command = \"/Volumes/Videorc/Videorc.app/Contents/Resources/videorc-mcp\"",
+        "args = []",
+        "env = { VIDEORC_AGENT_TOKEN = \"vrc_agent_1111111111111111111111111111111111111111111111111111111111111111\" }"
+      ],
+      "claudeCodeAddArgs": [
+        "mcp",
+        "add",
+        "--scope",
+        "user",
+        "videorc",
+        "--env",
+        "VIDEORC_AGENT_TOKEN=vrc_agent_1111111111111111111111111111111111111111111111111111111111111111",
+        "--",
+        "/Volumes/Videorc/Videorc.app/Contents/Resources/videorc-mcp"
+      ]
+    },
+    {
+      "bridgePath": "/private/var/folders/x/AppTranslocation/ABC/d/Videorc.app/Contents/Resources/videorc-mcp",
+      "token": "vrc_agent_2222222222222222222222222222222222222222222222222222222222222222",
+      "temporaryCopy": true,
+      "jsonRootKey": {
+        "claude-desktop": "mcpServers",
+        "cursor": "mcpServers",
+        "vs-code": "servers"
+      },
+      "json": {
+        "claude-desktop": {
+          "command": "/private/var/folders/x/AppTranslocation/ABC/d/Videorc.app/Contents/Resources/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_2222222222222222222222222222222222222222222222222222222222222222"
+          }
+        },
+        "cursor": {
+          "command": "/private/var/folders/x/AppTranslocation/ABC/d/Videorc.app/Contents/Resources/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_2222222222222222222222222222222222222222222222222222222222222222"
+          }
+        },
+        "vs-code": {
+          "type": "stdio",
+          "command": "/private/var/folders/x/AppTranslocation/ABC/d/Videorc.app/Contents/Resources/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_2222222222222222222222222222222222222222222222222222222222222222"
+          }
+        }
+      },
+      "codexTomlLines": [
+        "[mcp_servers.videorc]",
+        "command = \"/private/var/folders/x/AppTranslocation/ABC/d/Videorc.app/Contents/Resources/videorc-mcp\"",
+        "args = []",
+        "env = { VIDEORC_AGENT_TOKEN = \"vrc_agent_2222222222222222222222222222222222222222222222222222222222222222\" }"
+      ],
+      "claudeCodeAddArgs": [
+        "mcp",
+        "add",
+        "--scope",
+        "user",
+        "videorc",
+        "--env",
+        "VIDEORC_AGENT_TOKEN=vrc_agent_2222222222222222222222222222222222222222222222222222222222222222",
+        "--",
+        "/private/var/folders/x/AppTranslocation/ABC/d/Videorc.app/Contents/Resources/videorc-mcp"
+      ]
+    },
+    {
+      "bridgePath": "/Volumes/SSD/Applications/Videorc.app/Contents/Resources/videorc-mcp",
+      "token": "vrc_agent_3333333333333333333333333333333333333333333333333333333333333333",
+      "temporaryCopy": false,
+      "jsonRootKey": {
+        "claude-desktop": "mcpServers",
+        "cursor": "mcpServers",
+        "vs-code": "servers"
+      },
+      "json": {
+        "claude-desktop": {
+          "command": "/Volumes/SSD/Applications/Videorc.app/Contents/Resources/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        },
+        "cursor": {
+          "command": "/Volumes/SSD/Applications/Videorc.app/Contents/Resources/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        },
+        "vs-code": {
+          "type": "stdio",
+          "command": "/Volumes/SSD/Applications/Videorc.app/Contents/Resources/videorc-mcp",
+          "args": [],
+          "env": {
+            "VIDEORC_AGENT_TOKEN": "vrc_agent_3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        }
+      },
+      "codexTomlLines": [
+        "[mcp_servers.videorc]",
+        "command = \"/Volumes/SSD/Applications/Videorc.app/Contents/Resources/videorc-mcp\"",
+        "args = []",
+        "env = { VIDEORC_AGENT_TOKEN = \"vrc_agent_3333333333333333333333333333333333333333333333333333333333333333\" }"
+      ],
+      "claudeCodeAddArgs": [
+        "mcp",
+        "add",
+        "--scope",
+        "user",
+        "videorc",
+        "--env",
+        "VIDEORC_AGENT_TOKEN=vrc_agent_3333333333333333333333333333333333333333333333333333333333333333",
+        "--",
+        "/Volumes/SSD/Applications/Videorc.app/Contents/Resources/videorc-mcp"
+      ]
+    }
+  ]
+}

@@ -898,6 +898,68 @@ pub fn buddy_overlay_error_code(error: &anyhow::Error) -> &'static str {
 /// The longest canvas side a bubble is drawn for (an 8K leg).
 const BUDDY_CANVAS_MAX_SIDE: u32 = 8192;
 
+/// `buddy.bubble.render` (plan 260 S1.2e): the Buddy page's samples (the
+/// stream demo, the test dialog, the settings sample) drawn by the live
+/// bubble's painter: a sample line, a style, the canvas the sample stands in
+/// for and the Buddy's rect there. It reads and changes no state: the line
+/// need not be up, and nothing reaches the stream.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuddyBubbleRenderParams {
+    pub text: String,
+    pub style: CohostBubbleStyle,
+    pub canvas_width: u32,
+    pub canvas_height: u32,
+    pub rect: OverlayRect,
+}
+
+/// The longest sample line (Buddy's own lines are 200 characters at most).
+const BUDDY_SAMPLE_TEXT_MAX_CHARS: usize = 1000;
+
+pub async fn render_buddy_bubble(
+    params: BuddyBubbleRenderParams,
+) -> anyhow::Result<crate::overlay_raster::OverlayPng> {
+    use crate::overlay_raster::{self, OverlayState, PAGE_SAMPLE_MAX_SIDE};
+
+    let side_ok = |side: u32| (1..=PAGE_SAMPLE_MAX_SIDE).contains(&side);
+    if !side_ok(params.canvas_width) || !side_ok(params.canvas_height) {
+        anyhow::bail!(
+            "The bubble's canvas must be 1 to {PAGE_SAMPLE_MAX_SIDE} pixels on each side."
+        );
+    }
+    let rect = params.rect;
+    if ![rect.x, rect.y, rect.w, rect.h]
+        .iter()
+        .all(|value| value.is_finite())
+        || rect.w <= 0.0
+        || rect.w > 1.0
+    {
+        anyhow::bail!("The Buddy's rect must be a finite rect at most the canvas wide.");
+    }
+    if params.text.trim().is_empty() {
+        anyhow::bail!("The bubble needs a line.");
+    }
+    if params.text.chars().count() > BUDDY_SAMPLE_TEXT_MAX_CHARS {
+        anyhow::bail!("The bubble's line is longer than {BUDDY_SAMPLE_TEXT_MAX_CHARS} characters.");
+    }
+    let bubble = overlay_raster::buddy_bubble(
+        &params.text,
+        params.style,
+        (params.canvas_width, params.canvas_height),
+        rect,
+    );
+    overlay_raster::render_png(OverlayState::Buddy(bubble))
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "The bubble has no room on a {}x{} canvas in a rect {:.3} wide.",
+                params.canvas_width,
+                params.canvas_height,
+                rect.w
+            )
+        })
+}
+
 /// `buddy.overlay.clear { target? }`: the bubble ended; both targets without
 /// one.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1509,6 +1571,57 @@ mod tests {
     /// A request without a line or a canvas, a canvas out of range or a rect
     /// with no room for a word is invalid; the previous release's PNG is
     /// still installed as it was.
+    /// Plan 260 S1.2e: the Buddy page's samples come from the live bubble's
+    /// painter, at the canvas each sample stands in for, whatever line is up
+    /// (none here); a sample with no line, no room or a canvas past 4K is
+    /// refused, and the request carries no target or pixels.
+    #[tokio::test]
+    async fn a_page_sample_is_the_live_bubble_painter_with_no_line_up() {
+        use base64::Engine as _;
+        let sample = |text: &str, canvas: (u32, u32), w: f64| BuddyBubbleRenderParams {
+            text: text.to_string(),
+            style: CohostBubbleStyle::Shout,
+            canvas_width: canvas.0,
+            canvas_height: canvas.1,
+            rect: OverlayRect::new(0.7975, 0.64, w, 0.32),
+        };
+        let png = render_buddy_bubble(sample(
+            "Welcome to the horde! Grab a seat.",
+            (3840, 2160),
+            0.18,
+        ))
+        .await
+        .expect("the sample is drawn");
+        // The 4K canvas's Buddy is 691 px wide, plus 22 px of shadow room each side.
+        assert_eq!(png.width, 691 + 2 * 22);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&png.png_base64)
+            .expect("base64");
+        let decoded = tiny_skia::Pixmap::decode_png(&bytes).expect("a PNG");
+        assert_eq!((decoded.width(), decoded.height()), (png.width, png.height));
+        assert!(decoded.pixels().iter().any(|pixel| pixel.alpha() == 255));
+
+        for wrong in [
+            sample("   ", (1920, 1080), 0.18),
+            sample("Hello", (0, 1080), 0.18),
+            sample("Hello", (8192, 4320), 0.18),
+            sample("Hello", (1920, 1080), 0.0),
+            sample("Hello", (1920, 1080), 0.01),
+            sample(&"x".repeat(1001), (1920, 1080), 0.18),
+        ] {
+            assert!(render_buddy_bubble(wrong).await.is_err());
+        }
+        let extra = serde_json::json!({
+            "text": "Hello",
+            "style": "speech",
+            "canvasWidth": 1920,
+            "canvasHeight": 1080,
+            "rect": { "x": 0.8, "y": 0.6, "w": 0.18, "h": 0.32 },
+            "target": "primary"
+        });
+        assert!(serde_json::from_value::<BuddyBubbleRenderParams>(extra).is_err());
+    }
+
     #[tokio::test]
     async fn bubble_requests_without_a_line_or_a_canvas_are_invalid() {
         let (app, _rx) = test_app();

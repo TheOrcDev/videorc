@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import { MicrophoneIcon, NoteIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
@@ -41,6 +42,7 @@ export function CohostQuestionRow({
   onSelect: (key: string) => void
   onReply: (question: CohostQuestion) => void
 }): ReactElement {
+  useLocalTime()
   const key = cohostQuestionRowKey(question.id)
   const askers = cohostAskersLabel(question.askers)
   const age = cohostAgeLabel(question.updatedAt, nowMs)
