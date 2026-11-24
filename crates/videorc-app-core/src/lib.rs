@@ -33,6 +33,7 @@ pub mod restart;
 pub mod scenes;
 pub mod settings_page;
 pub mod shortcuts;
+pub mod smoke;
 pub mod stream_manager;
 pub mod studio;
 pub mod supervisor;
