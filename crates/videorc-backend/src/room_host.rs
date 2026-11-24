@@ -240,25 +240,25 @@ async fn hold(
                 publish_stage(&room, message).await;
                 let reason = loop {
                     tokio::select! {
-                            _ = &mut stop => return leave(&state, Some(room)).await,
-                            changed = stage.changed() => {
-                                if changed.is_ok() {
-                                    let message = stage.borrow_and_update().clone();
-                                    publish_stage(&room, message).await;
-                                }
+                        _ = &mut stop => return leave(&state, Some(room)).await,
+                        changed = stage.changed() => {
+                            if changed.is_ok() {
+                                let message = stage.borrow_and_update().clone();
+                                publish_stage(&room, message).await;
                             }
-                            event = events.recv() => match event {
-                                Some(RoomEvent::Reconnecting) => {
-                                    report(&state, CloudRoomClientState::Reconnecting, None);
-                                }
-                                Some(RoomEvent::Reconnected) => {
-                                    report(&state, CloudRoomClientState::Connected, None);
-                                }
-                                Some(RoomEvent::Disconnected { reason }) => break reason,
-                                None => break DisconnectReason::UnknownReason,
-                                Some(_) => {}
-                            },
                         }
+                        event = events.recv() => match event {
+                            Some(RoomEvent::Reconnecting) => {
+                                report(&state, CloudRoomClientState::Reconnecting, None);
+                            }
+                            Some(RoomEvent::Reconnected) => {
+                                report(&state, CloudRoomClientState::Connected, None);
+                            }
+                            Some(RoomEvent::Disconnected { reason }) => break reason,
+                            None => break DisconnectReason::UnknownReason,
+                            Some(_) => {}
+                        },
+                    }
                 };
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
