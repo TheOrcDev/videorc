@@ -621,75 +621,75 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P401 | "Sources" title + description | "Changes apply live." / Linux: change while idle *(Linux copy differs)* | `renderer/lib/platform-copy.ts:104` | [ ] | [ ] | [ ] |
-| P402 | "Refresh"/"Refreshing…" | Re-reads screens, windows, cameras, microphones | `renderer/components/tabs/sources-tab.tsx:35` | [ ] | [ ] | [ ] |
+| P401 | "Sources" title + description | "Changes apply live." / Linux: change while idle *(Linux copy differs)* | `renderer/lib/platform-copy.ts:104` | [x] | [ ] | [ ] |
+| P402 | "Refresh"/"Refreshing…" | Re-reads screens, windows, cameras, microphones | `renderer/components/tabs/sources-tab.tsx:35` | [x] | [ ] | [ ] |
 | P403 | Refresh re-asks portal share | Re-opens share dialog after it ended unanswered *(Linux only (apps/desktop/src/renderer/src/lib/screen-share-recovery.ts:38))* | `renderer/components/tabs/sources-tab.tsx:44` | n/a | n/a | [ ] |
-| P404 | Layout | Video beside Audio at lg; stacked narrower | `renderer/components/tabs/sources-tab.tsx:71` | [ ] | [ ] | [ ] |
+| P404 | Layout | Video beside Audio at lg; stacked narrower | `renderer/components/tabs/sources-tab.tsx:71` | [x] | [ ] | [ ] |
 
 ### Permission alerts (source-permission-alerts.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P405 | Screen Recording alert | "Screen Recording permission is required for Videorc." *(macOS (not Windows: system-access.ts:285; none on Linux: system-access.ts:254))* | `renderer/lib/source-permissions.ts:110` | [ ] | n/a | n/a |
-| P406 | "Reopen Videorc to record your screen." | Grant needs relaunch *(macOS)* | `renderer/lib/source-permissions.ts:114` | [ ] | n/a | n/a |
-| P407 | Camera / Microphone alerts | Permission required; OS-specific fix path *(macOS + Windows wording (source-permissions.ts:55))* | `renderer/lib/source-permissions.ts:63` | [ ] | [ ] | [ ] |
-| P408 | Fix button (actionLabel) | Allow access / opens OS privacy settings *(per OS)* | `renderer/components/sources/source-permission-alerts.tsx:64` | [ ] | [ ] | [ ] |
+| P405 | Screen Recording alert | "Screen Recording permission is required for Videorc." *(macOS (not Windows: system-access.ts:285; none on Linux: system-access.ts:254))* | `renderer/lib/source-permissions.ts:110` | [x] | n/a | n/a |
+| P406 | "Reopen Videorc to record your screen." | Grant needs relaunch *(macOS)* | `renderer/lib/source-permissions.ts:114` | [x] | n/a | n/a |
+| P407 | Camera / Microphone alerts | Permission required; OS-specific fix path *(macOS + Windows wording (source-permissions.ts:55))* | `renderer/lib/source-permissions.ts:63` | [x] | [ ] | [ ] |
+| P408 | Fix button (actionLabel) | Allow access / opens OS privacy settings *(per OS)* | `renderer/components/sources/source-permission-alerts.tsx:64` | [x] | [ ] | [ ] |
 | P409 | Reveal helper button | "Show helper in …" reveal target *(per OS)* | `renderer/components/sources/source-permission-alerts.tsx:72` | [ ] | [ ] | [ ] |
-| P410 | "Videorc couldn't check every device." + "Open Health" | Device warnings; opens Health | `renderer/components/sources/source-permission-alerts.tsx:82` | [ ] | [ ] | [ ] |
+| P410 | "Videorc couldn't check every device." + "Open Health" | Device warnings; opens Health | `renderer/components/sources/source-permission-alerts.tsx:82` | [x] | [ ] | [ ] |
 
 ### Video column (video-sources.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P411 | "Video" section description | "What people see." (+ fresh-frames note live) | `renderer/components/sources/video-sources.tsx:108` | [ ] | [ ] | [ ] |
-| P412 | "Screen" row status chip | Live/needs permission/not shared etc. *(all; "Not shared" Linux (apps/desktop/src/renderer/src/lib/screen-share-recovery.ts:30))* | `renderer/components/sources/video-sources.tsx:117` | [ ] | [ ] | [ ] |
-| P413 | "Screen / window" picker | Searchable, grouped; "None" when allowed *(all; locked when no grant (video-sources.tsx:272))* | `renderer/components/sources/video-sources.tsx:124` | [ ] | [ ] | [ ] |
-| P414 | Screen facts line | Resolution/fps facts | `renderer/components/sources/video-sources.tsx:141` | [ ] | [ ] | [ ] |
-| P415 | Scene line + "Open Scenes" | Which scene's screen; scrolls Studio Scenes | `renderer/components/sources/video-sources.tsx:144` | [ ] | [ ] | [ ] |
+| P411 | "Video" section description | "What people see." (+ fresh-frames note live) | `renderer/components/sources/video-sources.tsx:108` | [x] | [ ] | [ ] |
+| P412 | "Screen" row status chip | Live/needs permission/not shared etc. *(all; "Not shared" Linux (apps/desktop/src/renderer/src/lib/screen-share-recovery.ts:30))* | `renderer/components/sources/video-sources.tsx:117` | [x] | [ ] | [ ] |
+| P413 | "Screen / window" picker | Searchable, grouped; "None" when allowed *(all; locked when no grant (video-sources.tsx:272))* | `renderer/components/sources/video-sources.tsx:124` | [x] | [ ] | [ ] |
+| P414 | Screen facts line | Resolution/fps facts | `renderer/components/sources/video-sources.tsx:141` | [x] | [ ] | [ ] |
+| P415 | Scene line + "Open Scenes" | Which scene's screen; scrolls Studio Scenes | `renderer/components/sources/video-sources.tsx:144` | [x] | [ ] | [ ] |
 | P416 | "Synthetic diagnostic source" switch | Frame-number test screen *(dev builds only (:429))* | `renderer/components/sources/video-sources.tsx:162` | dev | dev | dev |
-| P417 | "Camera" row status chip | Camera state incl. low fps, stand-in | `renderer/components/sources/video-sources.tsx:183` | [ ] | [ ] | [ ] |
-| P418 | "Camera" picker ("Off") | Switches camera live | `renderer/components/sources/video-sources.tsx:190` | [ ] | [ ] | [ ] |
-| P419 | Camera format shortfall alert | Camera can't meet requested rate | `renderer/components/sources/video-sources.tsx:207` | [ ] | [ ] | [ ] |
-| P420 | Camera facts line | Camera format facts | `renderer/components/sources/video-sources.tsx:211` | [ ] | [ ] | [ ] |
+| P417 | "Camera" row status chip | Camera state incl. low fps, stand-in | `renderer/components/sources/video-sources.tsx:183` | [x] | [ ] | [ ] |
+| P418 | "Camera" picker ("Off") | Switches camera live | `renderer/components/sources/video-sources.tsx:190` | [x] | [ ] | [ ] |
+| P419 | Camera format shortfall alert | Camera can't meet requested rate | `renderer/components/sources/video-sources.tsx:207` | [x] | [ ] | [ ] |
+| P420 | Camera facts line | Camera format facts | `renderer/components/sources/video-sources.tsx:211` | [x] | [ ] | [ ] |
 | P421 | "Low-light compensation" switch | Brightens picture; may halve fps *(Windows only (crates/videorc-backend/src/camera_low_light.rs:564))* | `renderer/components/sources/video-sources.tsx:214` | n/a | [ ] | n/a |
-| P422 | Picker search / finding text | "Search …", "Finding screens and windows…" etc. | `renderer/lib/source-select-state.ts:52` | [ ] | [ ] | [ ] |
+| P422 | Picker search / finding text | "Search …", "Finding screens and windows…" etc. | `renderer/lib/source-select-state.ts:52` | [x] | [ ] | [ ] |
 
 ### Source item shell (source-item.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P423 | Header click / More chevron | Expands "More … settings"; remembered per device | `renderer/components/sources/source-item.tsx:136` | [ ] | [ ] | [ ] |
-| P424 | Status chip / tag | Source status; tag (e.g. "Sync +40 ms") | `renderer/components/sources/source-item.tsx:42` | [ ] | [ ] | [ ] |
-| P425 | Value readout reset | "Reset to 0 dB" when off default | `renderer/components/sources/source-item.tsx:213` | [ ] | [ ] | [ ] |
+| P423 | Header click / More chevron | Expands "More … settings"; remembered per device | `renderer/components/sources/source-item.tsx:136` | [x] | [ ] | [ ] |
+| P424 | Status chip / tag | Source status; tag (e.g. "Sync +40 ms") | `renderer/components/sources/source-item.tsx:42` | [x] | [ ] | [ ] |
+| P425 | Value readout reset | "Reset to 0 dB" when off default | `renderer/components/sources/source-item.tsx:213` | [x] | [ ] | [ ] |
 
 ### Audio mixer column (sources-audio-mixer.tsx, gain-faders.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P426 | "Audio" section description | After gain; or room-mic processing text | `renderer/components/sources/sources-audio-mixer.tsx:235` | [ ] | [ ] | [ ] |
+| P426 | "Audio" section description | After gain; or room-mic processing text | `renderer/components/sources/sources-audio-mixer.tsx:235` | [x] | [ ] | [ ] |
 | P427 | "Room microphone" alert | Processing detail for room mic | `renderer/components/sources/sources-audio-mixer.tsx:242` | [ ] | [ ] | [ ] |
 | P428 | Retro LCD meters | Meters drawn as LCD when Retro LCD on | `renderer/components/sources/sources-audio-mixer.tsx:233` | [ ] | [ ] | [ ] |
 | P429 | ⌘/Ctrl+↑/↓ | Moves focus between channel strips | `renderer/components/sources/sources-audio-mixer.tsx:148` | [ ] | [ ] | [ ] |
-| P430 | "Microphone" status chip | Muted/silent/takeover/switching state | `renderer/components/sources/sources-audio-mixer.tsx:312` | [ ] | [ ] | [ ] |
-| P431 | "Mute microphone" toggle | Mutes mic; shortcut tooltip | `renderer/components/sources/sources-audio-mixer.tsx:445` | [ ] | [ ] | [ ] |
-| P432 | Microphone picker ("Off") | Switches microphone live | `renderer/components/sources/sources-audio-mixer.tsx:289` | [ ] | [ ] | [ ] |
-| P433 | "No microphone selected." | Empty mic fact | `renderer/components/sources/sources-audio-mixer.tsx:515` | [ ] | [ ] | [ ] |
-| P434 | "Microphone level" meter | Live mic level | `renderer/components/sources/sources-audio-mixer.tsx:518` | [ ] | [ ] | [ ] |
-| P435 | Mic "Gain" fader | −24…+24 dB, reset 0 | `renderer/components/audio/gain-faders.tsx:42` | [ ] | [ ] | [ ] |
-| P436 | Level unavailable lines | Why mic level missing | `renderer/components/sources/sources-audio-mixer.tsx:521` | [ ] | [ ] | [ ] |
-| P437 | "Noise reduction" switch | RNNoise on/off; needs a mic | `renderer/components/sources/sources-audio-mixer.tsx:533` | [ ] | [ ] | [ ] |
-| P438 | More: "Microphone sync" slider (reset, input) | Offset voice ± ms vs video | `renderer/components/sources/sources-audio-mixer.tsx:469` | [ ] | [ ] | [ ] |
-| P439 | More: "Keep microphone ready" switch | Warm mic while Studio visible *(macOS only (CoreAudio ids, :269))* | `renderer/components/sources/sources-audio-mixer.tsx:493` | [ ] | n/a | n/a |
+| P430 | "Microphone" status chip | Muted/silent/takeover/switching state | `renderer/components/sources/sources-audio-mixer.tsx:312` | [x] | [ ] | [ ] |
+| P431 | "Mute microphone" toggle | Mutes mic; shortcut tooltip | `renderer/components/sources/sources-audio-mixer.tsx:445` | [x] | [ ] | [ ] |
+| P432 | Microphone picker ("Off") | Switches microphone live | `renderer/components/sources/sources-audio-mixer.tsx:289` | [x] | [ ] | [ ] |
+| P433 | "No microphone selected." | Empty mic fact | `renderer/components/sources/sources-audio-mixer.tsx:515` | [x] | [ ] | [ ] |
+| P434 | "Microphone level" meter | Live mic level | `renderer/components/sources/sources-audio-mixer.tsx:518` | [x] | [ ] | [ ] |
+| P435 | Mic "Gain" fader | −24…+24 dB, reset 0 | `renderer/components/audio/gain-faders.tsx:42` | [x] | [ ] | [ ] |
+| P436 | Level unavailable lines | Why mic level missing | `renderer/components/sources/sources-audio-mixer.tsx:521` | [x] | [ ] | [ ] |
+| P437 | "Noise reduction" switch | RNNoise on/off; needs a mic | `renderer/components/sources/sources-audio-mixer.tsx:533` | [x] | [ ] | [ ] |
+| P438 | More: "Microphone sync" slider (reset, input) | Offset voice ± ms vs video | `renderer/components/sources/sources-audio-mixer.tsx:469` | [x] | [ ] | [ ] |
+| P439 | More: "Keep microphone ready" switch | Warm mic while Studio visible *(macOS only (CoreAudio ids, :269))* | `renderer/components/sources/sources-audio-mixer.tsx:493` | [x] | n/a | n/a |
 | P440 | More: "Calibrate" (Stimulus, "Import JSON…", "Apply") | A/V sync measurement import *(dev builds only (:256))* | `renderer/components/sources/sources-audio-mixer.tsx:624` | dev | dev | dev |
-| P441 | "System audio" row | "Everything your Mac/PC plays, except Videorc." *(macOS; hidden Linux/older Windows (apps/desktop/src/renderer/src/lib/system-audio.ts:34))* | `renderer/components/sources/sources-audio-mixer.tsx:813` | [ ] | [ ] | [ ] |
-| P442 | "System audio" switch | Toggles capture; shortcut tooltip *(as above)* | `renderer/components/sources/sources-audio-mixer.tsx:763` | [ ] | [ ] | [ ] |
-| P443 | System audio meter / idle line | Level while bus runs *(as above)* | `renderer/components/sources/sources-audio-mixer.tsx:816` | [ ] | [ ] | [ ] |
-| P444 | System audio "Gain" fader | Gain with reset *(as above)* | `renderer/components/audio/gain-faders.tsx:82` | [ ] | [ ] | [ ] |
-| P445 | Issue alert + "Open Permissions" | Unavailable: opens Settings → Permissions *(macOS only)* | `renderer/components/sources/sources-audio-mixer.tsx:748` | [ ] | n/a | n/a |
-| P446 | Issue alert + "Resume" | Echo pause resume *(as above)* | `renderer/components/sources/sources-audio-mixer.tsx:752` | [ ] | [ ] | [ ] |
-| P447 | More: "Pause if your stream echoes back" | Echo guard switch *(as above)* | `renderer/components/sources/sources-audio-mixer.tsx:783` | [ ] | [ ] | [ ] |
-| P448 | More: tips list | Tab capture, headphones; volume note *(volume bullet macOS only (:801))* | `renderer/components/sources/sources-audio-mixer.tsx:795` | [ ] | [ ] | [ ] |
-| P449 | "Sounds" row meter / "Level shows while recording or live." | Soundboard mix level | `renderer/components/sources/sources-audio-mixer.tsx:919` | [ ] | [ ] | [ ] |
+| P441 | "System audio" row | "Everything your Mac/PC plays, except Videorc." *(macOS; hidden Linux/older Windows (apps/desktop/src/renderer/src/lib/system-audio.ts:34))* | `renderer/components/sources/sources-audio-mixer.tsx:813` | [x] | [ ] | [ ] |
+| P442 | "System audio" switch | Toggles capture; shortcut tooltip *(as above)* | `renderer/components/sources/sources-audio-mixer.tsx:763` | [x] | [ ] | [ ] |
+| P443 | System audio meter / idle line | Level while bus runs *(as above)* | `renderer/components/sources/sources-audio-mixer.tsx:816` | [x] | [ ] | [ ] |
+| P444 | System audio "Gain" fader | Gain with reset *(as above)* | `renderer/components/audio/gain-faders.tsx:82` | [x] | [ ] | [ ] |
+| P445 | Issue alert + "Open Permissions" | Unavailable: opens Settings → Permissions *(macOS only)* | `renderer/components/sources/sources-audio-mixer.tsx:748` | [x] | n/a | n/a |
+| P446 | Issue alert + "Resume" | Echo pause resume *(as above)* | `renderer/components/sources/sources-audio-mixer.tsx:752` | [x] | [ ] | [ ] |
+| P447 | More: "Pause if your stream echoes back" | Echo guard switch *(as above)* | `renderer/components/sources/sources-audio-mixer.tsx:783` | [x] | [ ] | [ ] |
+| P448 | More: tips list | Tab capture, headphones; volume note *(volume bullet macOS only (:801))* | `renderer/components/sources/sources-audio-mixer.tsx:795` | [x] | [ ] | [ ] |
+| P449 | "Sounds" row meter / "Level shows while recording or live." | Soundboard mix level | `renderer/components/sources/sources-audio-mixer.tsx:919` | [x] | [ ] | [ ] |
 | P450 | "Level" fader ("Sounds level") | Trims all sounds; saves on release | `renderer/components/sources/sources-audio-mixer.tsx:928` | [ ] | [ ] | [ ] |
 | P451 | "Hear sounds yourself" switch | Local monitor of sounds | `renderer/components/sources/sources-audio-mixer.tsx:959` | [ ] | [ ] | [ ] |
 
