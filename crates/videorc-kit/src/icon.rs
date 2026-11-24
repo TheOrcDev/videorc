@@ -45,6 +45,10 @@ pub enum IconName {
     WarningCircle,
     /// `ExternalLinkIcon` (Phosphor's ArrowSquareOut): the preview's Pop out.
     ArrowSquareOut,
+    /// `SettingsIcon` (Phosphor's GearSix).
+    GearSix,
+    /// `ImageIcon` and `AssetsIcon` (Phosphor's ImageSquare).
+    ImageSquare,
 }
 
 impl IconName {
@@ -69,6 +73,8 @@ impl IconName {
             IconName::FrameCorners => include_bytes!("../icons/frame-corners.svg"),
             IconName::WarningCircle => include_bytes!("../icons/warning-circle.svg"),
             IconName::ArrowSquareOut => include_bytes!("../icons/arrow-square-out.svg"),
+            IconName::GearSix => include_bytes!("../icons/gear-six.svg"),
+            IconName::ImageSquare => include_bytes!("../icons/image-square.svg"),
         }
     }
 }
