@@ -13,8 +13,8 @@
 //!   Stream Manager when you go live, 7TV emotes and Twitch GIFs from the
 //!   backend's `liveChat.emotes` row), Setup (Run setup again…), Import
 //!   (OBS, [`obs_import`]), Privacy (the backend's `usageStats`) and
-//!   Elsewhere (the pages the other settings live on), and Notifications'
-//!   quiet switch (plan 250 D4).
+//!   Elsewhere (the pages the other settings live on). Notifications has no
+//!   section: idle news waits behind the bell, quiet or not (#1909).
 //! - **Permissions** ([`permissions_view`]): the system access rows S2.6b
 //!   computes, each with its chip, purpose, detail and one action; Change a
 //!   permission; Linux's empty state.
@@ -137,17 +137,6 @@ pub mod copy {
         "Couldn't read the chat settings. Reopen Settings to try again.";
     pub const CHAT_SAVE_FAILED: &str = "Couldn't save the chat settings. Try again.";
 
-    pub const NOTIFICATIONS: &str = "Notifications";
-    pub const NOTIFICATIONS_DESCRIPTION: &str =
-        "What Videorc notices on its own waits behind the bell in the status bar.";
-    /// `QUIET_WHILE_LIVE_LABEL`.
-    pub const QUIET_WHILE_LIVE: &str = "Quiet while recording or live";
-    /// `QUIET_WHILE_LIVE_DESCRIPTION`.
-    pub const QUIET_WHILE_LIVE_DESCRIPTION: &str =
-        "Only urgent problems pop up. Everything else waits in Notifications.";
-    /// The `data-section-focus` id the list's "Settings" link lands on.
-    pub const NOTIFICATIONS_SECTION_FOCUS: &str = "settings-notifications";
-
     pub const SETUP: &str = "Setup";
     pub const SETUP_DESCRIPTION: &str = "The steps from the first time Videorc opened.";
     pub const FIRST_RUN_SETUP: &str = "First-run setup";
@@ -262,11 +251,6 @@ pub struct UsageStats {
     pub env_disabled: bool,
 }
 
-/// `quietWhileLiveOn`: on by default, an absent key is on.
-pub fn quiet_while_live_on(stored: Option<bool>) -> bool {
-    stored != Some(false)
-}
-
 /// `plural(count, 'emote')`.
 fn plural_emotes(count: u64) -> String {
     crate::format::plural(i64::try_from(count).unwrap_or(i64::MAX), "emote", None)
@@ -318,9 +302,6 @@ pub struct GeneralInput<'a> {
     pub retro_lcd: bool,
     pub studio_chat: bool,
     pub open_stream_manager_on_live: bool,
-    /// `quietWhileLiveOn(settings)`: the stored `quietWhileLive`, on unless
-    /// it is `false` ([`quiet_while_live_on`]).
-    pub quiet_while_live: bool,
     /// `runtimeInfo.commentsWindowEnabled !== false`.
     pub stream_manager_enabled: bool,
     pub chat: &'a Loaded<ChatEmotes>,
@@ -355,7 +336,6 @@ pub struct GeneralView {
     pub studio_chat: bool,
     pub stream_manager_row: bool,
     pub open_stream_manager_on_live: bool,
-    pub quiet_while_live: bool,
     pub chat_error: Option<&'static str>,
     /// The chat rows wait for the backend's row.
     pub chat_loaded: bool,
@@ -400,7 +380,6 @@ pub fn general_view(input: &GeneralInput<'_>) -> GeneralView {
         studio_chat: input.studio_chat,
         stream_manager_row: input.stream_manager_enabled,
         open_stream_manager_on_live: input.open_stream_manager_on_live,
-        quiet_while_live: input.quiet_while_live,
         chat_error: input.chat.error,
         chat_loaded: chat.is_some(),
         seven_tv: chat.is_some_and(|chat| chat.seven_tv),
@@ -558,7 +537,6 @@ mod tests {
             retro_lcd: false,
             studio_chat: true,
             open_stream_manager_on_live: false,
-            quiet_while_live: quiet_while_live_on(None),
             stream_manager_enabled: true,
             chat,
             usage,
@@ -583,20 +561,6 @@ mod tests {
         assert!(!SettingsTab::Shortcuts.ported());
         let ids: Vec<&str> = TABS.iter().map(|tab| tab.id()).collect();
         assert_eq!(ids, crate::nav::sub_tabs::SETTINGS_TABS);
-    }
-
-    /// Plan 250 D4: the quiet switch is on unless it was turned off.
-    #[test]
-    fn notifications_quiet_switch_is_on_by_default() {
-        assert!(quiet_while_live_on(None));
-        assert!(quiet_while_live_on(Some(true)));
-        assert!(!quiet_while_live_on(Some(false)));
-        let chat = Loaded::default();
-        let usage = Loaded::default();
-        let mut off = input(&chat, &usage);
-        assert!(general_view(&off).quiet_while_live);
-        off.quiet_while_live = quiet_while_live_on(Some(false));
-        assert!(!general_view(&off).quiet_while_live);
     }
 
     #[test]
