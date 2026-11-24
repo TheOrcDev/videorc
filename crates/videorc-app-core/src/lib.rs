@@ -8,6 +8,8 @@
 //! `videorc-preview`) compile unchanged.
 
 pub mod crash_log;
+pub mod desktop;
+pub mod interruption;
 pub mod ledger;
 pub mod log;
 pub mod paths;

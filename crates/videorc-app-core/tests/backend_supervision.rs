@@ -210,3 +210,84 @@ async fn a_killed_backend_is_restarted_and_the_crash_recorded() {
     assert!(!process_is_alive(second.pid));
     let _ = std::fs::remove_dir_all(profile.path());
 }
+
+/// S2.6b: a permission grant's restart, under the backend's own
+/// interruption lease (the real `/interruption/lease` routes), replaces the
+/// generation without counting a crash, and a recording would refuse it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs the debug backend: cargo build -p videorc-backend, then cargo test -p videorc-app-core --test backend_supervision -- --ignored"]
+async fn a_permission_restart_takes_the_lease_and_replaces_the_backend() {
+    use std::sync::Arc;
+    use videorc_app_core::desktop::capture_state::MainCaptureState;
+    use videorc_app_core::desktop::permission_restart::{PermissionRestarts, SupervisorRestarter};
+    use videorc_app_core::interruption::LoopbackHttp;
+
+    let _serial = ONE_BACKEND_AT_A_TIME.lock().await;
+    let profile = tempfile::Builder::new()
+        .prefix("videorc-app-core-")
+        .tempdir()
+        .unwrap();
+    let config = config(profile.path());
+    let paths = config.paths.clone();
+
+    let supervisor = Supervisor::start(config);
+    let first = supervisor.wait_ready(READY_TIMEOUT).await.unwrap();
+    let logs = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let logged = logs.clone();
+    let restarts = PermissionRestarts::new(
+        Arc::new(SupervisorRestarter {
+            restart: supervisor.restarter(),
+            transport: Arc::new(LoopbackHttp),
+        }),
+        Arc::new(move |_, message| logged.lock().unwrap().push(message)),
+    );
+
+    // While capture is busy the restart waits.
+    restarts.capture_changed(MainCaptureState::Recording);
+    let deferred = restarts
+        .request("Restarting capture backend after camera permission became available.".into())
+        .await
+        .unwrap();
+    assert!(!deferred.restarted);
+    assert_eq!(
+        deferred.stale_backend.as_ref().unwrap().pid,
+        Some(first.pid)
+    );
+    assert!(process_is_alive(first.pid));
+
+    // Idle: the waiting restart runs once, under the lease.
+    let reason = restarts
+        .capture_changed(MainCaptureState::Idle)
+        .expect("the deferred restart flushes at idle");
+    let mut state = supervisor.state();
+    let done = restarts.run(reason).await.expect("the restart ran");
+    assert!(done.restarted, "logs: {:?}", logs.lock().unwrap());
+    assert_eq!(done.stale_backend.unwrap().pid, Some(first.pid));
+    let second = tokio::time::timeout(READY_TIMEOUT, async {
+        loop {
+            if let BackendState::Ready { bootstrap, .. } = &*state.borrow_and_update()
+                && bootstrap.pid != first.pid
+            {
+                break bootstrap.clone();
+            }
+            state.changed().await.expect("the supervisor is alive");
+        }
+    })
+    .await
+    .expect("a new generation becomes ready");
+    assert!(!process_is_alive(first.pid), "the old backend is gone");
+    assert!(process_is_alive(second.pid));
+    assert_eq!(restarts.capture_changed(MainCaptureState::Idle), None);
+    assert!(
+        read_crash_log(&paths.backend_crash_log_file()).is_empty(),
+        "a permission restart is not a crash"
+    );
+
+    let outcome = supervisor.stop().await;
+    assert!(
+        outcome.stray_pids.is_empty(),
+        "strays: {:?}",
+        outcome.stray_pids
+    );
+    let _ = std::fs::remove_dir_all(profile.path());
+}
