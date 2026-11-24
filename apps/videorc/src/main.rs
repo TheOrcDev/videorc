@@ -38,9 +38,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use gpui::{
-    App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
-};
+use gpui::{App, AppContext, Bounds, WindowOptions, px, size};
 use videorc_app_core::desktop::deep_link::{DeepLinks, LinkSource};
 use videorc_app_core::desktop::global_shortcuts::GlobalShortcutsConfig;
 use videorc_app_core::desktop::single_instance::{
@@ -196,7 +194,8 @@ fn main() -> Result<()> {
             filter: EventFilter::include(
                 STUDIO_EVENTS
                     .into_iter()
-                    .chain([camera::VIRTUAL_CAMERA_CHANGED, app::exit::CLOUD_STATE]),
+                    .chain([camera::VIRTUAL_CAMERA_CHANGED, app::exit::CLOUD_STATE])
+                    .chain(screens::settings::EVENTS),
             ),
             logger: logger.clone(),
             ..ClientConfig::default()
@@ -301,6 +300,7 @@ fn main() -> Result<()> {
     let quit_guard = sleep_guard.clone();
     let quit_permissions = permissions.clone();
     let focus_permissions = permissions.clone();
+    let settings_permissions = permissions.clone();
     // The single-instance lock goes before a relaunch starts the new app.
     let instance = Rc::new(RefCell::new(instance));
     let quit_instance = instance.clone();
@@ -318,6 +318,7 @@ fn main() -> Result<()> {
     });
     let permissions_after_run = permissions.clone();
     application.run(move |cx: &mut App| {
+        videorc_kit::init(cx);
         // The menu bar from the core's template, and the keys it names.
         ExitGuard::install(cx, &exit_runtime, exit_events);
         menus::install(cx);
@@ -361,19 +362,22 @@ fn main() -> Result<()> {
         let sources = cx.new(|cx| {
             SourcesPanel::new(studio.clone(), permissions.clone(), core_handle.clone(), cx)
         });
+        let settings = cx.new(|cx| {
+            screens::settings::SettingsScreen::new(
+                studio.clone(),
+                core_handle.clone(),
+                settings_permissions.clone(),
+                paths.user_data_dir.clone(),
+                cx,
+            )
+        });
         let window_bounds = main_frame
             .restored(cx)
             .unwrap_or_else(|| Bounds::centered(None, size(px(1280.), px(800.)), cx));
         let opened = cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(window_bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(nav::window_title(PageId::Studio).into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(14.), px(13.))),
-                }),
                 app_id: Some(APP_ID.into()),
-                ..Default::default()
+                ..videorc_kit::window::options(nav::window_title(PageId::Studio), window_bounds)
             },
             |window, cx| {
                 let preview = preview::Preview::new(
@@ -393,6 +397,7 @@ fn main() -> Result<()> {
                         session.clone(),
                         preview,
                         sources.clone(),
+                        settings.clone(),
                         cx,
                     )
                 })
@@ -410,6 +415,29 @@ fn main() -> Result<()> {
         // The Stream Manager's menu command and keys, and the window when it
         // was open at the last quit.
         screens::stream_manager::window::install(cx, stream_manager_frame, APP_ID);
+        cx.on_action(move |_: &menus::ShowSettings, cx| {
+            let _ = main_window.update(cx, |shell, window, cx| {
+                shell.open_settings(None, window, cx)
+            });
+        });
+        cx.on_action(move |_: &menus::ShowShortcuts, cx| {
+            let _ = main_window.update(cx, |shell, window, cx| {
+                shell.open_settings(
+                    Some(videorc_app_core::settings_page::SettingsTab::Shortcuts),
+                    window,
+                    cx,
+                )
+            });
+        });
+        cx.on_action(move |_: &menus::About, cx| {
+            let _ = main_window.update(cx, |shell, window, cx| {
+                shell.open_settings(
+                    Some(videorc_app_core::settings_page::SettingsTab::About),
+                    window,
+                    cx,
+                )
+            });
+        });
 
         // The main window coming to the front re-checks a grant System
         // Settings may have made meanwhile; a move or resize saves its frame
@@ -420,10 +448,11 @@ fn main() -> Result<()> {
             let shell_weak = cx.weak_entity();
             sources.update(cx, |panel, _| panel.bind_shell(shell_weak));
             ExitGuard::watch_main_window(window, cx);
-            cx.observe_window_activation(window, move |_, window, _| {
+            cx.observe_window_activation(window, move |_, window, cx| {
                 if window.is_window_active() {
                     focus_permissions.recheck();
                     focus_studio.set_clips_media_access(Some(focus_permissions.snapshot()));
+                    settings.update(cx, |settings, cx| settings.refresh(cx));
                 }
             })
             .detach();
