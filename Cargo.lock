@@ -7940,6 +7940,7 @@ dependencies = [
  "dispatch2",
  "futures-util",
  "global-hotkey",
+ "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",
  "objc2 0.6.4",
