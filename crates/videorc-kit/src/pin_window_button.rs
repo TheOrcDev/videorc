@@ -161,11 +161,6 @@ impl RenderOnce for PinWindowButton {
     }
 }
 
-/// Re-export so a caller can name the constant without the module path.
-pub fn pin_window_label() -> &'static str {
-    PIN_WINDOW_LABEL
-}
-
 #[cfg(test)]
 mod tests {
     use super::PIN_WINDOW_LABEL;
