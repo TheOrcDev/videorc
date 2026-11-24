@@ -25,7 +25,9 @@ import type {
   CloudGuestDecideParams,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
+  CloudRoomAvatarSetParams,
   CloudRoomPresentationEvent,
+  CloudRoomSceneCommitParams,
   CloudRoomRequest,
   CloudRoomTokenAnswer,
   CloudStage,
@@ -363,6 +365,8 @@ interface HighRiskContractFixtures {
     roomTokenAnswer: CloudRoomTokenAnswer
     roomRequestEvent: CloudRoomRequest
     roomPresentationEvent: CloudRoomPresentationEvent
+    roomAvatarSetParams: CloudRoomAvatarSetParams
+    roomSceneCommitParams: CloudRoomSceneCommitParams
     // Plan 243 C1: another device on air, and a show waiting after a hand-off.
     statusOnAirElsewhere: CloudStatus
     statusWaiting: CloudStatus
@@ -716,7 +720,9 @@ describe('shared high-risk protocol fixture', () => {
       roomClientReportParams,
       roomTokenAnswer,
       roomRequestEvent,
-      roomPresentationEvent
+      roomPresentationEvent,
+      roomAvatarSetParams,
+      roomSceneCommitParams
     } = fixtures.cloud
     expect(jsonShape(validateBackendEventPayload('cloud.state', statusTalk))).toEqual(statusTalk)
     expect(jsonShape(validateBackendRpcResult('cloud.room.open', statusTalk))).toEqual(statusTalk)
@@ -758,6 +764,18 @@ describe('shared high-risk protocol fixture', () => {
     expect(
       jsonShape(validateBackendEventPayload('cloud.room.presentation', roomPresentationEvent))
     ).toEqual(roomPresentationEvent)
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.avatar.set', roomAvatarSetParams))
+    ).toEqual(roomAvatarSetParams)
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.scene.commit', roomSceneCommitParams))
+    ).toEqual(roomSceneCommitParams)
+    expect(() =>
+      validateBackendRpcParams('cloud.room.scene.commit', {
+        ...roomSceneCommitParams,
+        assets: [{ ...roomSceneCommitParams.assets[0], mime: 'image/gif' }]
+      })
+    ).toThrow()
     expect(() =>
       validateBackendEventPayload('cloud.room.presentation', {
         ...roomPresentationEvent,

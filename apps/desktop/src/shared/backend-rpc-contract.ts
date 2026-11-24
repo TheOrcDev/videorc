@@ -166,6 +166,8 @@ import type {
   CloudRoomOverlayEvent,
   CloudRoomPresentationEvent,
   CloudRoomPresentationSetParams,
+  CloudRoomAvatarSetParams,
+  CloudRoomSceneCommitParams,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
   CloudRoomRequest,
@@ -729,6 +731,8 @@ export interface BackendRpcMethodMap {
   'cloud.presentation.restore': BackendRpcDefinition<{ showId: string }, CloudPresentationRestore>
   /** The renderer's own room connection, for the status copy. */
   'cloud.room.client.report': BackendRpcDefinition<CloudRoomClientReportParams, CloudStatus>
+  'cloud.room.avatar.set': BackendRpcDefinition<CloudRoomAvatarSetParams, { held: boolean }>
+  'cloud.room.scene.commit': BackendRpcDefinition<CloudRoomSceneCommitParams, { held: boolean }>
   'cloud.room.presentation.set': BackendRpcDefinition<
     CloudRoomPresentationSetParams,
     { held: boolean }
@@ -7232,6 +7236,40 @@ const cloudRoomPresentationSetResultSchema = objectSchema(
   { held: booleanSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<{ held: boolean }>
+// Plan 260 S1.8b: the avatar and scene content the Studio builds, for the
+// backend's room to deliver. The content is bounded JSON here; the program
+// pages parse every snapshot they are sent. A scene's pictures are a few,
+// of at most 4 MB each.
+const roomContentSchema = boundedJsonValueSchema({
+  maxDepth: 12,
+  maxNodes: 20_000,
+  maxStringLength: 6_000_000,
+  maxTotalStringLength: 24_000_000
+})
+const cloudRoomAvatarSetParamsSchema = objectSchema(
+  {
+    content: roomContentSchema,
+    guests: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomAvatarSetParams>
+const cloudSceneAssetSchema = objectSchema(
+  {
+    hash: stringSchema({ minLength: 64, maxLength: 64 }),
+    mime: enumSchema(['image/png', 'image/jpeg', 'image/webp']),
+    width: numberSchema({ integer: true, min: 1, max: 8192 }),
+    height: numberSchema({ integer: true, min: 1, max: 8192 }),
+    base64: stringSchema({ minLength: 4, maxLength: 5_600_000 })
+  },
+  { allowUnknown: false }
+)
+const cloudRoomSceneCommitParamsSchema = objectSchema(
+  {
+    content: roomContentSchema,
+    assets: arraySchema(cloudSceneAssetSchema, { maxLength: 4 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomSceneCommitParams>
 const cloudRoomPresentationEventSchema = objectSchema(
   {
     showId: boundedString,
@@ -8192,6 +8230,14 @@ const runtimeContracts = {
       { allowUnknown: false }
     ),
     result: presentationValueSchema as RuntimeSchema<CloudPresentationRestore>
+  },
+  'cloud.room.avatar.set': {
+    params: cloudRoomAvatarSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.scene.commit': {
+    params: cloudRoomSceneCommitParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
   },
   'cloud.room.presentation.set': {
     params: cloudRoomPresentationSetParamsSchema,

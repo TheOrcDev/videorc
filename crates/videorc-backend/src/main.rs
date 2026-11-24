@@ -115,6 +115,12 @@ mod room_camera_source;
 )]
 mod room_capability;
 #[cfg(target_os = "macos")]
+#[allow(
+    dead_code,
+    reason = "plan 260 S1.8b: the avatar and scene publishers read the content in the next parts"
+)]
+mod room_content;
+#[cfg(target_os = "macos")]
 mod room_graphics;
 #[cfg(target_os = "macos")]
 mod room_host;
@@ -6547,8 +6553,11 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "watchdog.idle.report"
         | "cloud.show.check"
         | "cloud.room.client.report"
-        // Plan 260 S1.8b: the room's presentation switches (in memory).
+        // Plan 260 S1.8b: the room's presentation switches and content (in
+        // memory).
         | "cloud.room.presentation.set"
+        | "cloud.room.avatar.set"
+        | "cloud.room.scene.commit"
         | "cloud.recordings.download"
         | "cloud.archive.stop"
         | "cloud.archive.cancel"
@@ -13866,6 +13875,34 @@ async fn handle_text_message_with_role(
                     Ok(kept) => ServerResponse::ok(command.id, serde_json::json!({ "kept": kept })),
                     Err(problem) => ServerResponse::error(command.id, "invalid-params", problem),
                 },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 260 S1.8b: the avatar and scene content the Studio built, for
+        // the backend's room to deliver while it holds the host seat.
+        "cloud.room.avatar.set" => {
+            match serde_json::from_value::<cloud_talk::CloudRoomAvatarSetParams>(command.params) {
+                #[cfg(target_os = "macos")]
+                Ok(params) if room_host::holds_seat() => {
+                    room_content::set_avatar(params);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cloud.room.scene.commit" => {
+            match serde_json::from_value::<cloud_talk::CloudRoomSceneCommitParams>(command.params) {
+                #[cfg(target_os = "macos")]
+                Ok(params) if room_host::holds_seat() => {
+                    room_content::commit_scene(params);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
