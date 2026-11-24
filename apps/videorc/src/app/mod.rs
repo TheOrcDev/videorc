@@ -4,7 +4,8 @@
 //! window frame, Hide from stream and the quit while on air. The
 //! preview's GPUI side (`src/preview/`, L1) and the smoke UI driver
 //! (`src/smoke/`, L6) join as their slices land. The Studio page's session
-//! controls (S2.4, lane L7) drive the core's Studio.
+//! controls (S2.4, lane L7) drive the core's Studio. Phase 3 screens live
+//! under [`crate::screens`].
 
 pub mod args;
 pub mod bridge;

@@ -63,6 +63,7 @@ use app::permissions::Permissions;
 use app::session::{SessionControls, SessionPanel};
 use app::shell::{Shell, StatusLine, connection_text};
 use app::{camera, capture, hotkeys, links, menus, sleep};
+use screens::sources::SourcesPanel;
 use screens::stream_manager::frame::StreamManagerFrame;
 
 /// Electron's app id (`electron-builder.yml`), kept on every platform: the
@@ -222,6 +223,11 @@ fn main() -> Result<()> {
             ..StudioConfig::default()
         },
     ));
+    // #1874: authorize a user-chosen recordings folder on the ready backend;
+    // Clips media grants are set once Permissions is installed below.
+    studio.set_output_authorizer(videorc_app_core::resources::output_directory_authorizer(
+        supervisor.state(),
+    ));
     runtime.spawn(studio.clone().drive(events));
 
     // What the window says, on stderr too, for scripts and the build pass.
@@ -262,6 +268,7 @@ fn main() -> Result<()> {
         capture_state,
         logger.clone(),
     );
+    studio.set_clips_media_access(Some(permissions.snapshot()));
     // Videorc Camera's extension: activated when the backend's switch is on.
     let _camera = camera::Camera::install(
         runtime.handle(),
@@ -309,6 +316,7 @@ fn main() -> Result<()> {
     application.on_open_urls(move |urls| {
         links::receive(&apple_links, &urls, LinkSource::AppleEvent);
     });
+    let permissions_after_run = permissions.clone();
     application.run(move |cx: &mut App| {
         // The menu bar from the core's template, and the keys it names.
         ExitGuard::install(cx, &exit_runtime, exit_events);
@@ -350,6 +358,9 @@ fn main() -> Result<()> {
         let controls = bridge::mirror(cx, studio_state.clone(), SessionControls::of);
         let session = cx
             .new(|cx| SessionPanel::new(studio.clone(), core_handle.clone(), controls.clone(), cx));
+        let sources = cx.new(|cx| {
+            SourcesPanel::new(studio.clone(), permissions.clone(), core_handle.clone(), cx)
+        });
         let window_bounds = main_frame
             .restored(cx)
             .unwrap_or_else(|| Bounds::centered(None, size(px(1280.), px(800.)), cx));
@@ -381,6 +392,7 @@ fn main() -> Result<()> {
                         connection.clone(),
                         session.clone(),
                         preview,
+                        sources.clone(),
                         cx,
                     )
                 })
@@ -403,11 +415,15 @@ fn main() -> Result<()> {
         // Settings may have made meanwhile; a move or resize saves its frame
         // soon after, and the quit saves it once more.
         let moved_frame = main_frame.clone();
-        let _ = main_window.update(cx, |_, window, cx| {
+        let focus_studio = studio.clone();
+        let _ = main_window.update(cx, |_shell, window, cx| {
+            let shell_weak = cx.weak_entity();
+            sources.update(cx, |panel, _| panel.bind_shell(shell_weak));
             ExitGuard::watch_main_window(window, cx);
             cx.observe_window_activation(window, move |_, window, _| {
                 if window.is_window_active() {
                     focus_permissions.recheck();
+                    focus_studio.set_clips_media_access(Some(focus_permissions.snapshot()));
                 }
             })
             .detach();
@@ -474,7 +490,7 @@ fn main() -> Result<()> {
     sleep::release(&sleep_guard);
     stop_backend(&supervisor, runtime.handle());
     instance.borrow_mut().take();
-    permissions.relaunch_if_requested();
+    permissions_after_run.relaunch_if_requested();
     Ok(())
 }
 

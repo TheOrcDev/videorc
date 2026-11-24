@@ -11,6 +11,7 @@ use videorc_app_core::{BackendState, ConnectionState, Tone};
 use super::bridge::Mirror;
 use super::session::SessionPanel;
 use crate::preview::Preview;
+use crate::screens::sources::SourcesPanel;
 use videorc_preview::lifecycle::WindowMode;
 
 /// The status bar's line: the supervisor's words, and whether the typed
@@ -67,6 +68,8 @@ pub struct Shell {
     session: Entity<SessionPanel>,
     /// The preview (plan 260 S2.3a, L1): its slot is the Studio page's.
     preview: Entity<Preview>,
+    /// Phase 3: Sources ⌘2.
+    sources: Entity<SourcesPanel>,
 }
 
 impl Shell {
@@ -75,6 +78,7 @@ impl Shell {
         connection: Entity<Mirror<String>>,
         session: Entity<SessionPanel>,
         preview: Entity<Preview>,
+        sources: Entity<SourcesPanel>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&backend, |_, _, cx| cx.notify()).detach();
@@ -82,12 +86,14 @@ impl Shell {
         // The preview notifies only when its slot's words or its window
         // change, never per video frame.
         cx.observe(&preview, |_, _, cx| cx.notify()).detach();
+        cx.observe(&sources, |_, _, cx| cx.notify()).detach();
         Self {
             page: PageId::Studio,
             backend,
             connection,
             session,
             preview,
+            sources,
         }
     }
 
@@ -95,7 +101,7 @@ impl Shell {
         self.page
     }
 
-    fn open(&mut self, page: PageId, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_page(&mut self, page: PageId, window: &mut Window, cx: &mut Context<Self>) {
         if self.page != page {
             self.page = page;
             window.set_window_title(&nav::window_title(page));
@@ -186,30 +192,31 @@ impl Shell {
                     .map(|key| format!("⌘{}", key.to_ascii_uppercase()))
                     .unwrap_or_default()
                     .into();
-                column = column.child(
-                    div()
-                        .id(page.id())
-                        .flex()
-                        .justify_between()
-                        .items_center()
-                        .px(px(8.))
-                        .py(px(5.))
-                        .rounded(px(6.))
-                        .text_size(px(13.))
-                        .text_color(rgb(TEXT))
-                        .when(selected, |row| row.bg(rgb(SELECTED)))
-                        .cursor_pointer()
-                        .child(page.label())
-                        .child(
-                            div()
-                                .text_color(rgb(MUTED))
-                                .text_size(px(11.))
-                                .child(shortcut),
-                        )
-                        .on_click(
-                            cx.listener(move |this, _, window, cx| this.open(page, window, cx)),
-                        ),
-                );
+                column =
+                    column.child(
+                        div()
+                            .id(page.id())
+                            .flex()
+                            .justify_between()
+                            .items_center()
+                            .px(px(8.))
+                            .py(px(5.))
+                            .rounded(px(6.))
+                            .text_size(px(13.))
+                            .text_color(rgb(TEXT))
+                            .when(selected, |row| row.bg(rgb(SELECTED)))
+                            .cursor_pointer()
+                            .child(page.label())
+                            .child(
+                                div()
+                                    .text_color(rgb(MUTED))
+                                    .text_size(px(11.))
+                                    .child(shortcut),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_page(page, window, cx)
+                            })),
+                    );
             }
         }
         column
@@ -221,6 +228,7 @@ impl Render for Shell {
         let status = self.backend.read(cx).value().clone();
         let connection = self.connection.read(cx).value().clone();
         let page = self.page;
+        let sources = self.sources.clone();
         div()
             .size_full()
             .flex()
@@ -241,6 +249,21 @@ impl Render for Shell {
                             .pt(px(40.))
                             .px(px(24.))
                             .child(self.studio_page(cx))
+                    } else if page == PageId::Sources {
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .px(px(24.))
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(px(20.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(page.label()),
+                            )
+                            .child(sources)
                     } else {
                         div()
                             .flex_1()
