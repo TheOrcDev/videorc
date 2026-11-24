@@ -16,6 +16,7 @@
 //! same directory is never touched (owed: the two apps excluding each other
 //! on one profile, docs/rust-ui/desktop-integration.md).
 
+use crate::encoding::base64url;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -75,23 +76,6 @@ fn random_token() -> String {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).expect("the OS random source");
     base64url(&bytes)
-}
-
-/// Unpadded base64url (the smoke server's encoding, kept local so the
-/// single-instance lock does not depend on the smoke module).
-fn base64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        let symbols = chunk.len() + 1;
-        for index in 0..symbols {
-            out.push(ALPHABET[((n >> (18 - 6 * index)) & 63) as usize] as char);
-        }
-    }
-    out
 }
 
 fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
