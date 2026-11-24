@@ -588,7 +588,6 @@ import type {
   SceneEditorDraftAck,
   SceneEditorDraftParams,
   SceneTransformPatch,
-  SessionCommentsPage,
   SessionDeletionOperation,
   SessionDetails,
   SessionHealthEventsPage,
@@ -4325,17 +4324,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         return
       }
       try {
-        let messages: LiveChatMessage[] = []
-        let cursor: string | undefined
-        do {
-          const page: SessionCommentsPage = await client.requestTyped('sessions.comments.list', {
-            sessionId,
-            cursor,
-            limit: Math.min(200, MAX_LIVE_CHAT_VIEW_MESSAGES - messages.length)
-          })
-          messages = [...page.messages, ...messages].slice(-MAX_LIVE_CHAT_VIEW_MESSAGES)
-          cursor = page.nextCursor
-        } while (cursor && messages.length < MAX_LIVE_CHAT_VIEW_MESSAGES)
+        // Plan 220 S1.6a: the backend reads (and caches) the transcript and
+        // its saved stats in one call.
+        const history = await client.requestTyped('sessions.comments.history', { sessionId })
+        const messages = history.messages.slice(-MAX_LIVE_CHAT_VIEW_MESSAGES)
         const snapshot = applyLiveChatSnapshot({
           sessionId,
           providers: [],
@@ -4343,13 +4335,15 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           unreadCount: messages.length,
           updatedAt: new Date().toISOString()
         })
-        const operations = await client
-          .request<CommentsSendOperation[]>('liveChat.sendOperations.list', { sessionId })
-          .catch(() => [])
         await publishLiveCommentsSnapshot({
           mode: { kind: 'history', sessionId, title, startedAt },
           snapshot,
-          latestSendOperation: operations.at(-1)
+          latestSendOperation: history.latestSendOperation,
+          history: {
+            viewers: history.viewers,
+            audience: history.audience,
+            chatTotals: history.chatTotals
+          }
         })
         await window.videorc?.setCommentsViewMode?.({
           kind: 'history',

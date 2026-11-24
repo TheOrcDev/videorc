@@ -54,7 +54,7 @@ import type {
   LiveChatMessage,
   LiveChatMessageFragment
 } from '@/lib/backend'
-import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
+import { monogramInitials, reportChatImageFailure, useCachedAvatar } from '@/lib/chat-avatar'
 import { clickSelectsText } from '@/lib/chat-list-keys'
 import { REMOVE_FROM_CHAT_LABEL, type RemovalStatusView } from '@/lib/chat-removal-view'
 import { groupEmoteOverlays } from '@/lib/chat-emotes'
@@ -767,7 +767,17 @@ function CommentContent({
       {/* Sized with the 20 px platform marks (plan 165): 32 px in the compact
           rail, 40 px (both lines) in the Stream Manager. */}
       <Avatar aria-hidden className="mt-0.5" size={density === 'comfortable' ? 'lg' : 'default'}>
-        {avatarUrl ? <AvatarImage alt="" src={avatarUrl} /> : null}
+        {avatarUrl ? (
+          // The avatar loads off-document, so its failure is reported here
+          // (a backend restart retires every route URL, plan 220 S1.6a).
+          <AvatarImage
+            alt=""
+            onLoadingStatusChange={(status) => {
+              if (status === 'error') reportChatImageFailure(avatarUrl)
+            }}
+            src={avatarUrl}
+          />
+        ) : null}
         <AvatarFallback>{monogramInitials(message.authorName)}</AvatarFallback>
       </Avatar>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">

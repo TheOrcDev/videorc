@@ -1,13 +1,16 @@
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useState, useSyncExternalStore, type ReactElement } from 'react'
 
+import { chatImageRoute } from '../../../shared/chat-avatar-bytes'
 import { cn } from '@/lib/utils'
 import type { CachedImageKind } from './chat-image-cache'
 
 export type { CachedImageKind } from './chat-image-cache'
 
-// Chat avatar display (Comments window upgrade S1). Avatars resolve through
-// main's allowlisted cache (videorc-asset://avatar/...) — never a hot-linked
-// CDN URL — and fall back to a monogram circle while unresolved or absent.
+// Chat avatar display (Comments window upgrade S1). Avatars, emotes and GIFs
+// resolve through the backend's allowlisted cache (plan 220 S1.6a): main
+// forwards `cacheChatAvatar` / `cacheChatGif` and the answer is the backend's
+// loopback route for the file, never a hot-linked CDN URL. A monogram (or the
+// text) shows while unresolved or refused.
 
 /** Initials for the monogram fallback: first letters of up to two words. A
  * leading symbol is skipped (`@ramxcodes` is R, not @, YouTube handles start
@@ -27,11 +30,69 @@ export function monogramInitials(name: string): string {
   return initials || '?'
 }
 
+// A route URL names the backend's port and this run's key, so it dies with
+// the backend: after a restart (or once the cache prunes a file) the <img>
+// fails. The first failure of a route image drops every resolved URL
+// (`chat-image-cache.ts`) and the hooks resolve again against the running
+// backend, at most once per interval so an engine that is away cannot loop.
+const CHAT_IMAGE_RESET_MIN_INTERVAL_MS = 5_000
+let chatImageEpoch = 0
+let lastChatImageResetAt = Number.NEGATIVE_INFINITY
+const chatImageEpochListeners = new Set<() => void>()
+
+function subscribeChatImageEpoch(listener: () => void): () => void {
+  chatImageEpochListeners.add(listener)
+  return () => chatImageEpochListeners.delete(listener)
+}
+
+function currentChatImageEpoch(): number {
+  return chatImageEpoch
+}
+
+/** An image from the backend's chat image route failed to load: resolve
+ * every chat image again (throttled). Anything else is ignored. */
+export function reportChatImageFailure(
+  localUrl: string | null | undefined,
+  now: number = Date.now()
+): boolean {
+  if (!chatImageRoute(localUrl)) return false
+  if (now - lastChatImageResetAt < CHAT_IMAGE_RESET_MIN_INTERVAL_MS) return false
+  lastChatImageResetAt = now
+  void import('./chat-image-cache')
+    .then(({ clearResolvedChatImages }) => clearResolvedChatImages())
+    .catch(() => undefined)
+    .then(() => {
+      chatImageEpoch += 1
+      for (const listener of chatImageEpochListeners) listener()
+    })
+  return true
+}
+
+// Load errors never bubble, but they pass every window's capture phase: one
+// listener covers every chat image <img> in the document.
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener(
+    'error',
+    (event) => {
+      const target = event.target
+      if (typeof HTMLImageElement !== 'undefined' && target instanceof HTMLImageElement) {
+        reportChatImageFailure(target.currentSrc || target.src)
+      }
+    },
+    true
+  )
+}
+
 export function useCachedAvatar(
   remoteUrl: string | undefined | null,
   kind: CachedImageKind = 'avatar'
 ): string | null {
   const [localUrl, setLocalUrl] = useState<string | null>(null)
+  const epoch = useSyncExternalStore(
+    subscribeChatImageEpoch,
+    currentChatImageEpoch,
+    currentChatImageEpoch
+  )
   useEffect(() => {
     if (!remoteUrl) {
       setLocalUrl(null)
@@ -49,7 +110,7 @@ export function useCachedAvatar(
     return () => {
       cancelled = true
     }
-  }, [remoteUrl, kind])
+  }, [remoteUrl, kind, epoch])
   return localUrl
 }
 

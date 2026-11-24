@@ -220,6 +220,7 @@ import type {
   ServerResponse,
   SessionAiArtifactsPage,
   SessionCommentsListParams,
+  SessionCommentsHistory,
   SessionCommentsPage,
   SessionChatTotals,
   SessionDeletionOperation,
@@ -296,6 +297,7 @@ import {
 } from './session-markers'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { sessionChatIdentifierSchema, sessionChatTotalsSchema } from './session-chat-totals'
+import { chatImageRoute } from './chat-avatar-bytes'
 import { STREAM_PLATFORMS } from './stream-platforms'
 import {
   BANNER_MAX_COUNT,
@@ -594,6 +596,11 @@ export interface BackendRpcMethodMap {
   'sessions.aiArtifacts.list': BackendRpcDefinition<SessionDetailListParams, SessionAiArtifactsPage>
   'sessions.storage': BackendRpcDefinition<undefined, SessionStorageTotals>
   'sessions.comments.list': BackendRpcDefinition<SessionCommentsListParams, SessionCommentsPage>
+  // Plan 220 S1.6a: one session's History view from the backend.
+  'sessions.comments.history': BackendRpcDefinition<{ sessionId: string }, SessionCommentsHistory>
+  // Plan 220 S1.6a: an allowlisted chat image into the backend's cache; its
+  // loopback route URL, or null when refused.
+  'chatImages.cache': BackendRpcDefinition<{ url: string; kind?: 'avatar' | 'gif' }, string | null>
   'sessions.comments.totals': BackendRpcDefinition<{ sessionId: string }, SessionChatTotals | null>
   'sessions.viewers.list': BackendRpcDefinition<SessionViewersListParams, SessionViewersPage>
   'sessions.audience.get': BackendRpcDefinition<{ sessionId: string }, AudienceSnapshot | null>
@@ -1978,6 +1985,14 @@ const discordTestResultSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<DiscordTestResult>
 // --- end Discord go-live announcement (plan 187) ---
+
+/** The backend's loopback route for one cached chat image (plan 220 S1.6a). */
+const chatImageRouteUrlSchema = runtimeSchema<string>('a backend chat image URL', (value, path) => {
+  if (chatImageRoute(value) === null) {
+    throw new RuntimeSchemaError(path, 'a backend chat image URL')
+  }
+  return value as string
+})
 
 const audienceSnapshotSchema = objectSchema(
   {
@@ -7638,6 +7653,30 @@ const runtimeContracts = {
     params: objectSchema({ sessionId: sessionChatIdentifierSchema }, { allowUnknown: false }),
     result: nullableSchema(sessionChatTotalsSchema)
   },
+  'sessions.comments.history': {
+    params: objectSchema({ sessionId: sessionChatIdentifierSchema }, { allowUnknown: false }),
+    result: objectSchema(
+      {
+        sessionId: sessionChatIdentifierSchema,
+        messages: arraySchema(boundedBackendPayloadSchema, { maxLength: 2000 }),
+        latestSendOperation: optionalSchema(boundedBackendPayloadSchema),
+        viewers: arraySchema(viewerSampleSchema, { maxLength: 1440 }),
+        audience: nullableSchema(audienceSnapshotSchema),
+        chatTotals: nullableSchema(sessionChatTotalsSchema)
+      },
+      { allowUnknown: false }
+    )
+  },
+  'chatImages.cache': {
+    params: objectSchema(
+      {
+        url: stringSchema({ minLength: 1, maxLength: 2048 }),
+        kind: optionalSchema(enumSchema(['avatar', 'gif'] as const))
+      },
+      { allowUnknown: false }
+    ),
+    result: nullableSchema(chatImageRouteUrlSchema)
+  },
   'sessions.comments.list': {
     params: objectSchema(
       {
@@ -8439,15 +8478,13 @@ export function isTypedBackendRpcMethod(method: string): method is BackendRpcMet
 
 export function validateBackendRpcParams(method: string, params: unknown): unknown {
   const contract = runtimeContracts[method as keyof typeof runtimeContracts] as
-    | RuntimeBackendRpcContract
-    | undefined
+    RuntimeBackendRpcContract | undefined
   return (contract?.params ?? boundedBackendParamsSchema).parse(params, `backend.${method}.params`)
 }
 
 export function validateBackendRpcResult(method: string, result: unknown): unknown {
   const contract = runtimeContracts[method as keyof typeof runtimeContracts] as
-    | RuntimeBackendRpcContract
-    | undefined
+    RuntimeBackendRpcContract | undefined
   return (contract?.result ?? boundedBackendPayloadSchema).parse(result, `backend.${method}.result`)
 }
 
@@ -8572,8 +8609,7 @@ const runtimeEventSchemas = {
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {
   const schema = runtimeEventSchemas[event as keyof typeof runtimeEventSchemas] as
-    | RuntimeSchema<unknown>
-    | undefined
+    RuntimeSchema<unknown> | undefined
   return (schema ?? boundedBackendPayloadSchema).parse(payload, `backend.event.${event}`)
 }
 

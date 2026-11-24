@@ -54,11 +54,12 @@ const PREVIEW_CARD_RECT = `(() => {
   return { x, y, width, height }
 })()`
 // The fake chatter's avatar and emote (plan 095). The URLs are on allowlisted
-// CDN hosts so main's `avatars:cache` accepts them, but they are never
-// fetched: the smoke seeds the app's avatar cache with flat-colour PNGs under
-// the file names main derives from the URLs, exactly as a chat row would have
-// cached them. The card then has to read those bytes back over `avatars:read`
-// and paint them, and the analyzer looks for each colour on the card. The
+// CDN hosts so the backend's `chatImages.cache` accepts them, but they are
+// never fetched: the smoke seeds the backend's chat image cache (plan 220
+// S1.6a) with flat-colour PNGs under the file names it derives from the URLs,
+// exactly as a chat row would have cached them. The card then has to read
+// those bytes back over `avatars:read` and paint them, and the analyzer looks
+// for each colour on the card. The
 // emote is a Kick-shaped URL (no `/1.0` for the card to swap for `/3.0`) and
 // wide, like a 7TV banner emote.
 const smokeChatImages = Object.freeze({
@@ -186,8 +187,10 @@ if (surface === 'studio') {
 async function runScenarioGroup({ label, scenarios, indexOffset, env = {} }) {
   const groupStateDirectory = join(outputDirectory, `${label}-app-state`)
   const userDataDirectory = join(groupStateDirectory, 'user-data')
+  const appDataDirectory = join(groupStateDirectory, 'app-data')
   for (const image of Object.values(smokeChatImages)) {
-    seedCachedChatImage(userDataDirectory, image)
+    // The backend keeps the cache beside its database: app-data here.
+    seedCachedChatImage(appDataDirectory, image)
   }
   const launched = await launchDevApp({
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
@@ -196,7 +199,7 @@ async function runScenarioGroup({ label, scenarios, indexOffset, env = {} }) {
       VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
       VIDEORC_SMOKE_STATE_DIR: outputDirectory,
       VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
-      VIDEORC_APP_DATA_DIR: join(groupStateDirectory, 'app-data'),
+      VIDEORC_APP_DATA_DIR: appDataDirectory,
       VIDEORC_USER_DATA_DIR: userDataDirectory,
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_COMMENTS_WINDOW: '1',
@@ -623,7 +626,7 @@ async function assertChatBox(scenario, scenarioDirectory, filePath, options) {
   }
 }
 
-/** Mirrors `avatarCacheFileName` in apps/desktop/src/main/avatar-cache.ts:
+/** Mirrors `cache_file_name` in crates/videorc-backend/src/chat_images.rs:
  * sha256(url) (32 hex) plus the extension from the URL path, `.img` otherwise. */
 function cachedChatImageFileName(url) {
   const hash = createHash('sha256').update(url).digest('hex').slice(0, 32)
@@ -634,8 +637,8 @@ function cachedChatImageFileName(url) {
   return `${hash}${extension ?? '.img'}`
 }
 
-function seedCachedChatImage(userDataDirectory, { url, pngBase64 }) {
-  const directory = join(userDataDirectory, 'avatar-cache')
+function seedCachedChatImage(databaseDirectory, { url, pngBase64 }) {
+  const directory = join(databaseDirectory, 'avatar-cache')
   mkdirSync(directory, { recursive: true })
   writeFileSync(join(directory, cachedChatImageFileName(url)), Buffer.from(pngBase64, 'base64'))
 }

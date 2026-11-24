@@ -30,7 +30,7 @@ import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
 import { useStudioChat, useStudioCore, useStudioShell } from '@/hooks/use-studio'
 import { useChatList } from '@/hooks/use-chat-list'
 import type { LiveChatMessage } from '@/lib/backend'
-import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
+import { monogramInitials, reportChatImageFailure, useCachedAvatar } from '@/lib/chat-avatar'
 import { copyChatText } from '@/lib/chat-link-actions'
 import { chatRowAfterMove, chatRowKeyCommand, clickSelectsText } from '@/lib/chat-list-keys'
 import { noticeViewerWords } from '@/lib/chat-notice'
@@ -402,7 +402,17 @@ function StudioChatRowContent({
   return (
     <>
       <Avatar aria-hidden className="mt-px" size="sm">
-        {avatarUrl ? <AvatarImage alt="" src={avatarUrl} /> : null}
+        {avatarUrl ? (
+          // The avatar loads off-document, so its failure is reported here
+          // (a backend restart retires every route URL, plan 220 S1.6a).
+          <AvatarImage
+            alt=""
+            onLoadingStatusChange={(status) => {
+              if (status === 'error') reportChatImageFailure(avatarUrl)
+            }}
+            src={avatarUrl}
+          />
+        ) : null}
         <AvatarFallback>{monogramInitials(message.authorName)}</AvatarFallback>
       </Avatar>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">

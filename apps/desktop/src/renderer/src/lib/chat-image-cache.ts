@@ -1,4 +1,4 @@
-/** Which of main's two cache kinds resolves a URL: avatars and emotes share
+/** Which of the backend's two cache rules resolves a URL: avatars and emotes share
  * one allowlist and cap; Twitch GIFs (plan 155) have their own. */
 export type CachedImageKind = 'avatar' | 'gif'
 
@@ -35,4 +35,10 @@ export function resolveAvatar(remoteUrl: string, kind: CachedImageKind): Promise
   // Eviction drops only our reference. Existing callers still receive the
   // result; settling never reinserts an evicted promise or revokes main's URL.
   return resolved
+}
+
+/** Forget every resolved URL: the backend restarted or pruned a file, so
+ * its route URLs are stale (`reportChatImageFailure`). */
+export function clearResolvedChatImages(): void {
+  avatarUrlCache.clear()
 }
