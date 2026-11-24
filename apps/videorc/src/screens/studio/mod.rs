@@ -141,7 +141,8 @@ impl StudioPage {
                 .items_center()
                 .child(button.on_click(move |_, _, cx| {
                     preview.update(cx, |preview, cx| preview.toggle_floating(cx));
-                })),
+                }))
+                .into_any_element(),
         )
     }
 }
@@ -200,7 +201,7 @@ impl Render for StudioPage {
                         .flex()
                         .flex_col()
                         .w(px(INSPECTOR_MAX_PX))
-                        .flex_shrink()
+                        .flex_shrink(0.)
                         .min_w_0()
                         .child(transport)
                         .child(inspector.flex_1()),

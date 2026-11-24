@@ -1,13 +1,13 @@
 //! The Sources page (plan 260 Phase 3, L4): video and audio capture homes,
 //! permission alerts, and Refresh. Words and state come from
 //! `videorc_app_core::studio::{sources_page, sources_audio}`; this module
-//! draws them and calls the Studio and Permissions.
+//! draws them with `videorc_kit` and calls the Studio and Permissions.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use gpui::{Context, FontWeight, SharedString, WeakEntity, Window, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Entity, SharedString, WeakEntity, Window, div, prelude::*, px};
 use tokio::sync::oneshot;
 use videorc_app_core::desktop::permissions::{
     MediaAccessSnapshot, PermissionPlatform, SystemPermissionPane,
@@ -26,29 +26,30 @@ use videorc_app_core::studio::health_page::OPEN_HEALTH_LABEL;
 use videorc_app_core::studio::source_selection::{PICKER_NONE_VALUE, PickerView, SourceKind};
 use videorc_app_core::studio::sources;
 use videorc_app_core::studio::sources_audio::{
-    self, SourcesAudioInputs, SourcesAudioView, copy as audio_copy,
+    SourcesAudioInputs, SourcesAudioView, copy as audio_copy,
 };
 use videorc_app_core::studio::sources_page::{
-    self, ChipTone, GrantAction, GrantRow, GrantState, PermissionInputs, SourcePermissionAlert,
+    ChipTone, GrantAction, GrantRow, GrantState, PermissionInputs, SourcePermissionAlert,
     SourcesPageInput, SourcesPageView, VideoSourceView, copy as page_copy, sources_page_view,
 };
 use videorc_app_core::studio::sources_section::copy as section_copy;
 use videorc_app_core::{BackendClient, Studio, StudioSnapshot};
+use videorc_kit::alert::{Alert, AlertVariant};
+use videorc_kit::badge::{Badge, BadgeVariant};
+use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::list_row::{GroupedList, ListRow};
+use videorc_kit::panel_section::PanelSection;
+use videorc_kit::scroll_area::ScrollArea;
+use videorc_kit::select::Select;
+use videorc_kit::slider::{Slider, SliderEvent, SliderState};
+use videorc_kit::switch::Switch;
+use videorc_kit::theme::{self, FONT, TypeScale, hsla};
+use videorc_kit::tokens::{size, text};
 
 use crate::app::permissions::Permissions;
 use crate::app::shell::Shell;
 
 pub type AppStudio = Studio<BackendClient>;
-
-const TEXT: u32 = 0xe8e8ea;
-const MUTED: u32 = 0x8e8e93;
-const BUTTON: u32 = 0x2f2f35;
-const HAIRLINE: u32 = 0x2c2c30;
-const WARN: u32 = 0xffd60a;
-const GOOD: u32 = 0x30d158;
-const ERROR: u32 = 0xff453a;
-const CHIP: u32 = 0x3a3a40;
-const METER: u32 = 0x48484e;
 
 fn runtime_platform() -> &'static str {
     match PermissionPlatform::current() {
@@ -118,13 +119,67 @@ fn permission_inputs<'a>(
     }
 }
 
-fn chip_colour(tone: ChipTone) -> u32 {
-    match tone {
-        ChipTone::Neutral => MUTED,
-        ChipTone::Good => GOOD,
-        ChipTone::Warn => WARN,
-        ChipTone::Error => ERROR,
+fn chip_badge(label: impl Into<SharedString>, tone: ChipTone) -> Badge {
+    Badge::new(label).variant(match tone {
+        ChipTone::Neutral => BadgeVariant::Neutral,
+        ChipTone::Good => BadgeVariant::Success,
+        ChipTone::Warn => BadgeVariant::Warning,
+        ChipTone::Error => BadgeVariant::Destructive,
+    })
+}
+
+fn meter_bar(
+    peak_db: Option<f64>,
+    show: bool,
+    track: videorc_kit::tokens::Color,
+    fill: videorc_kit::tokens::Color,
+) -> impl IntoElement {
+    let amount = if show {
+        peak_db
+            .map(|db| ((db + 60.0) / 60.0).clamp(0.0, 1.0))
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    div()
+        .h(px(8.))
+        .w_full()
+        .rounded(px(4.))
+        .bg(hsla(track))
+        .child(
+            div()
+                .h_full()
+                .w(px((amount * 220.0) as f32))
+                .rounded(px(4.))
+                .bg(hsla(fill)),
+        )
+}
+
+fn fill_select(id: impl Into<gpui::ElementId>, picker: &PickerView, disabled: bool) -> Select {
+    let selected = picker
+        .items
+        .iter()
+        .find(|item| item.selected && item.heading.is_empty())
+        .map(|item| item.value.clone());
+    let mut select = Select::new(id)
+        .placeholder(if picker.placeholder {
+            picker.label.clone()
+        } else {
+            "Choose…".to_string()
+        })
+        .disabled(disabled)
+        .width(280.0)
+        .value(selected.map(SharedString::from));
+    for item in &picker.items {
+        if !item.heading.is_empty() {
+            continue;
+        }
+        if item.disabled && !item.selected {
+            continue;
+        }
+        select = select.option(item.value.clone(), item.label.clone());
     }
+    select
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -170,9 +225,11 @@ impl SourcesModel {
 
 #[derive(Default)]
 struct SourcesUi {
-    open_picker: Option<&'static str>,
     more: HashSet<&'static str>,
     pending_alert: Option<SystemPermissionPane>,
+    mic_gain_live: bool,
+    sys_gain_live: bool,
+    sync_live: bool,
 }
 
 pub struct SourcesPanel {
@@ -183,6 +240,9 @@ pub struct SourcesPanel {
     shell: Option<WeakEntity<Shell>>,
     ui: SourcesUi,
     refreshing: bool,
+    mic_gain: Entity<SliderState>,
+    sys_gain: Entity<SliderState>,
+    sync_ms: Entity<SliderState>,
 }
 
 impl SourcesPanel {
@@ -199,6 +259,75 @@ impl SourcesPanel {
             &permissions.snapshot(),
             false,
         );
+        let mic_gain = cx.new(|_| {
+            SliderState::new()
+                .min(-24.0)
+                .max(24.0)
+                .step(1.0)
+                .default_value(model.audio.microphone.row.gain_db as f32)
+        });
+        let sys_gain = cx.new(|_| {
+            let gain = model
+                .audio
+                .system_audio
+                .as_ref()
+                .map(|s| s.row.gain_db as f32)
+                .unwrap_or(-6.0);
+            SliderState::new()
+                .min(-24.0)
+                .max(12.0)
+                .step(1.0)
+                .default_value(gain)
+        });
+        let sync_ms = cx.new(|_| {
+            SliderState::new()
+                .min(-1000.0)
+                .max(1000.0)
+                .step(10.0)
+                .default_value(model.audio.microphone.sync_ms as f32)
+        });
+
+        cx.subscribe(&mic_gain, |this, state, event: &SliderEvent, cx| {
+            let value = match event {
+                SliderEvent::Change(v) | SliderEvent::Release(v) => v.end(),
+            };
+            this.ui.mic_gain_live = matches!(event, SliderEvent::Change(_));
+            let studio = this.studio.clone();
+            this.run_studio(async move {
+                studio.set_microphone_gain(value).await;
+            });
+            let _ = state;
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe(&sys_gain, |this, state, event: &SliderEvent, cx| {
+            let value = match event {
+                SliderEvent::Change(v) | SliderEvent::Release(v) => v.end(),
+            };
+            this.ui.sys_gain_live = matches!(event, SliderEvent::Change(_));
+            let studio = this.studio.clone();
+            this.run_studio(async move {
+                studio.set_system_audio_gain(value).await;
+            });
+            let _ = state;
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe(&sync_ms, |this, state, event: &SliderEvent, cx| {
+            let value = match event {
+                SliderEvent::Change(v) | SliderEvent::Release(v) => v.end() as i32,
+            };
+            this.ui.sync_live = matches!(event, SliderEvent::Change(_));
+            let studio = this.studio.clone();
+            let reset = value == 0;
+            this.run_studio(async move {
+                studio.set_microphone_sync_offset(value, reset).await;
+            });
+            let _ = state;
+            cx.notify();
+        })
+        .detach();
+
         let studio_watch = studio.clone();
         let permissions_watch = permissions.clone();
         cx.spawn(async move |this, cx| {
@@ -229,6 +358,9 @@ impl SourcesPanel {
             shell: None,
             ui: SourcesUi::default(),
             refreshing: false,
+            mic_gain,
+            sys_gain,
+            sync_ms,
         }
     }
 
@@ -261,6 +393,35 @@ impl SourcesPanel {
         );
     }
 
+    fn sync_sliders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mic = self.model.audio.microphone.row.gain_db as f32;
+        if !self.ui.mic_gain_live {
+            self.mic_gain.update(cx, |state, cx| {
+                if (state.value().end() - mic).abs() >= 0.5 {
+                    state.set_value(mic, window, cx);
+                }
+            });
+        }
+        if let Some(system) = self.model.audio.system_audio.as_ref() {
+            let gain = system.row.gain_db as f32;
+            if !self.ui.sys_gain_live {
+                self.sys_gain.update(cx, |state, cx| {
+                    if (state.value().end() - gain).abs() >= 0.5 {
+                        state.set_value(gain, window, cx);
+                    }
+                });
+            }
+        }
+        let sync = self.model.audio.microphone.sync_ms as f32;
+        if !self.ui.sync_live {
+            self.sync_ms.update(cx, |state, cx| {
+                if (state.value().end() - sync).abs() >= 5.0 {
+                    state.set_value(sync, window, cx);
+                }
+            });
+        }
+    }
+
     fn refresh(&mut self, cx: &mut Context<Self>) {
         if self.refreshing {
             return;
@@ -285,7 +446,6 @@ impl SourcesPanel {
     }
 
     fn select_device(&mut self, kind: SourceKind, value: String, cx: &mut Context<Self>) {
-        self.ui.open_picker = None;
         cx.notify();
         let studio = self.studio.clone();
         let picked = (value != PICKER_NONE_VALUE).then_some(value);
@@ -365,75 +525,24 @@ impl SourcesPanel {
             let _ = shell.update(cx, |shell, cx| shell.open_page(page, window, cx));
         }
     }
-}
 
-fn status_chip(label: impl Into<SharedString>, tone: ChipTone) -> impl IntoElement {
-    div()
-        .px(px(8.))
-        .py(px(2.))
-        .rounded(px(6.))
-        .bg(rgb(CHIP))
-        .text_size(px(11.))
-        .text_color(rgb(chip_colour(tone)))
-        .child(label.into())
-}
+    fn toggle_more(&mut self, key: &'static str, cx: &mut Context<Self>) {
+        if !self.ui.more.insert(key) {
+            self.ui.more.remove(key);
+        }
+        cx.notify();
+    }
 
-fn section_heading(title: &'static str, description: &'static str) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .child(
-            div()
-                .text_size(px(15.))
-                .font_weight(FontWeight::MEDIUM)
-                .child(title),
-        )
-        .child(
-            div()
-                .text_size(px(12.))
-                .text_color(rgb(MUTED))
-                .child(description),
-        )
-}
-
-fn meter_bar(peak_db: Option<f64>, show: bool) -> impl IntoElement {
-    let fill = if show {
-        peak_db
-            .map(|db| ((db + 60.0) / 60.0).clamp(0.0, 1.0))
-            .unwrap_or(0.0)
-    } else {
-        0.0
-    };
-    div()
-        .h(px(8.))
-        .w_full()
-        .rounded(px(4.))
-        .bg(rgb(HAIRLINE))
-        .child(
-            div()
-                .h_full()
-                .w(px((fill * 220.0) as f32))
-                .rounded(px(4.))
-                .bg(rgb(METER)),
-        )
-}
-
-fn ghost_button(
-    id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(SharedString::from(id.into().to_string()))
-        .px(px(10.))
-        .py(px(5.))
-        .rounded(px(6.))
-        .border_1()
-        .border_color(rgb(HAIRLINE))
-        .bg(rgb(BUTTON))
-        .text_size(px(12.))
-        .cursor_pointer()
-        .child(label.into())
+    fn muted_line(
+        &self,
+        t: &videorc_kit::tokens::Theme,
+        text_value: impl Into<SharedString>,
+    ) -> impl IntoElement {
+        div()
+            .type_scale(text::META)
+            .text_color(hsla(t.muted_foreground))
+            .child(text_value.into())
+    }
 }
 
 impl SourcesPanel {
@@ -442,321 +551,185 @@ impl SourcesPanel {
         alerts: &[SourcePermissionAlert],
         device_problem: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let mut column = div().flex().flex_col().gap(px(8.));
         for alert in alerts {
             let pane = alert.pane;
             let pending = self.ui.pending_alert == Some(pane);
+            let entity = cx.entity();
             column = column.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .p(px(12.))
-                    .rounded(px(10.))
-                    .border_1()
-                    .border_color(rgb(HAIRLINE))
-                    .bg(rgb(BUTTON))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(alert.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .child(alert.description.clone()),
-                    )
-                    .child(
-                        ghost_button(
-                            format!("alert-{}", pane.as_str()),
-                            if pending {
-                                "…".into()
+                Alert::new(format!("alert-{}", pane.as_str()))
+                    .variant(AlertVariant::Warning)
+                    .title(alert.title.clone())
+                    .description(alert.description.clone())
+                    .action(
+                        Button::new(format!("alert-action-{}", pane.as_str()))
+                            .label(if pending {
+                                SharedString::from("…")
                             } else {
-                                alert.action_label.clone()
-                            },
-                        )
-                        .on_click(cx.listener(move |panel, _, _, cx| panel.run_alert(pane, cx))),
+                                alert.action_label.clone().into()
+                            })
+                            .variant(ButtonVariant::Outline)
+                            .disabled(pending)
+                            .on_click(move |_, _, cx| {
+                                entity.update(cx, |panel, cx| panel.run_alert(pane, cx));
+                            }),
                     ),
             );
         }
         if device_problem {
+            let entity = cx.entity();
             column = column.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .p(px(12.))
-                    .rounded(px(10.))
-                    .border_1()
-                    .border_color(rgb(HAIRLINE))
-                    .child(div().text_size(px(13.)).child(page_copy::DEVICE_PROBLEM))
-                    .child(
-                        div()
-                            .id("open-health")
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .cursor_pointer()
-                            .child(OPEN_HEALTH_LABEL)
-                            .on_click(cx.listener(|panel, _, window, cx| {
-                                panel.open_page(PageId::Diagnostics, window, cx);
-                            })),
+                Alert::new("device-problem")
+                    .variant(AlertVariant::Warning)
+                    .title(page_copy::DEVICE_PROBLEM)
+                    .action(
+                        Button::new("open-health")
+                            .label(OPEN_HEALTH_LABEL)
+                            .variant(ButtonVariant::Ghost)
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |panel, cx| {
+                                    panel.open_page(PageId::Diagnostics, window, cx);
+                                });
+                            }),
                     ),
             );
         }
-        column
+        column.into_any_element()
     }
 
-    fn render_picker_list(
-        &mut self,
+    fn render_picker(
+        &self,
         id: &'static str,
         kind: SourceKind,
         picker: &PickerView,
         disabled: bool,
         disabled_reason: Option<&str>,
+        t: &videorc_kit::tokens::Theme,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let open = self.ui.open_picker == Some(id);
+    ) -> AnyElement {
+        let entity = cx.entity();
         let mut block = div().flex().flex_col().gap(px(6.));
-        block = block.child(
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .justify_between()
-                .px(px(10.))
-                .py(px(8.))
-                .rounded(px(8.))
-                .border_1()
-                .border_color(rgb(HAIRLINE))
-                .bg(rgb(BUTTON))
-                .when(!disabled, |row| {
-                    row.cursor_pointer()
-                        .on_click(cx.listener(move |panel, _, _, cx| {
-                            panel.ui.open_picker = if panel.ui.open_picker == Some(id) {
-                                None
-                            } else {
-                                Some(id)
-                            };
-                            cx.notify();
-                        }))
-                })
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(rgb(if picker.placeholder { MUTED } else { TEXT }))
-                        .child(picker.label.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgb(MUTED))
-                        .child(if open { "▲" } else { "▼" }),
-                ),
-        );
+        if !picker.list_status.is_empty() {
+            block = block.child(self.muted_line(t, picker.list_status.clone()));
+        }
         if let Some(reason) = disabled_reason {
-            block = block.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgb(MUTED))
-                    .child(reason.to_string()),
-            );
+            block = block.child(self.muted_line(t, reason.to_string()));
         }
-        if open && !disabled {
-            let mut list = div()
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .p(px(6.))
-                .rounded(px(8.))
-                .border_1()
-                .border_color(rgb(HAIRLINE))
-                .bg(rgb(BUTTON));
-            if !picker.list_status.is_empty() {
-                list = list.child(
-                    div()
-                        .px(px(8.))
-                        .py(px(4.))
-                        .text_size(px(12.))
-                        .text_color(rgb(MUTED))
-                        .child(picker.list_status.clone()),
-                );
-            }
-            for (index, item) in picker.items.iter().enumerate() {
-                if !item.heading.is_empty() {
-                    list = list.child(
-                        div()
-                            .px(px(8.))
-                            .pt(px(8.))
-                            .pb(px(2.))
-                            .text_size(px(11.))
-                            .text_color(rgb(MUTED))
-                            .child(item.heading.clone()),
-                    );
-                    continue;
-                }
-                let value = item.value.clone();
-                let item_disabled = item.disabled;
-                list = list.child(
-                    div()
-                        .id(SharedString::from(format!("{id}-item-{index}")))
-                        .flex()
-                        .justify_between()
-                        .px(px(8.))
-                        .py(px(6.))
-                        .rounded(px(6.))
-                        .when(item.selected, |row| row.bg(rgb(CHIP)))
-                        .when(!item_disabled, |row| {
-                            row.cursor_pointer()
-                                .on_click(cx.listener(move |panel, _, _, cx| {
-                                    panel.select_device(kind, value.clone(), cx);
-                                }))
-                        })
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .text_color(rgb(if item_disabled { MUTED } else { TEXT }))
-                                .child(item.label.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(rgb(MUTED))
-                                .child(item.status.clone()),
-                        ),
-                );
-            }
-            block = block.child(list);
-        }
-        block
+        block = block.child(
+            fill_select(id, picker, disabled).on_change(move |value, _, cx| {
+                entity.update(cx, |panel, cx| {
+                    panel.select_device(kind, value.to_string(), cx);
+                });
+            }),
+        );
+        block.into_any_element()
     }
 
     fn render_video_row(
-        &mut self,
+        &self,
         title: &'static str,
         kind: SourceKind,
         picker_id: &'static str,
         video: &VideoSourceView,
+        t: &videorc_kit::tokens::Theme,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let disabled = video.disabled || video.row.disabled_reason.is_some();
-        let mut row = div()
+        let mut chips = div().flex().items_center().gap(px(8.));
+        if let Some(status) = video.status.as_ref() {
+            chips = chips.child(chip_badge(status.label.clone(), status.tone));
+        }
+        if let Some(line) = video.row.status.as_ref() {
+            chips = chips.child(chip_badge(line.message.clone(), ChipTone::Warn));
+        }
+        let mut body = div()
             .flex()
             .flex_col()
             .gap(px(8.))
-            .p(px(12.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(rgb(HAIRLINE));
-        let mut header = div().flex().items_center().gap(px(8.)).child(
-            div()
-                .text_size(px(14.))
-                .font_weight(FontWeight::MEDIUM)
-                .child(title),
-        );
-        if let Some(status) = video.status.as_ref() {
-            header = header.child(status_chip(status.label.clone(), status.tone));
-        }
-        if let Some(line) = video.row.status.as_ref() {
-            header = header.child(status_chip(line.message.clone(), ChipTone::Warn));
-        }
-        row = row.child(header);
+            .child(ListRow::new(format!("{picker_id}-title"), title).child(chips));
         if let Some(hint) = video.status.as_ref().and_then(|s| s.hint.as_ref()) {
-            row = row.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgb(MUTED))
-                    .child(hint.clone()),
-            );
+            body = body.child(div().px(px(12.)).child(self.muted_line(t, hint.clone())));
         }
-        row = row.child(self.render_picker_list(
+        body = body.child(div().px(px(12.)).child(self.render_picker(
             picker_id,
             kind,
             &video.row.picker,
             disabled,
             video.row.disabled_reason.as_deref(),
+            t,
             cx,
-        ));
+        )));
         if let Some(shortfall) = video.shortfall.as_ref() {
-            row = row.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgb(WARN))
-                    .child(shortfall.clone()),
+            body = body.child(
+                div().px(px(12.)).child(
+                    Alert::new(format!("{picker_id}-shortfall"))
+                        .variant(AlertVariant::Warning)
+                        .title(shortfall.clone()),
+                ),
             );
         } else if let Some(facts) = video.facts.as_ref() {
-            row = row.child(
+            body = body.child(
                 div()
-                    .text_size(px(12.))
-                    .text_color(rgb(MUTED))
-                    .child(facts.clone()),
+                    .px(px(12.))
+                    .pb(px(4.))
+                    .child(self.muted_line(t, facts.clone())),
             );
         }
         if let Some(scene) = video.scene.as_ref() {
-            row = row.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .child(scene.line.clone()),
-                    )
-                    .child(
-                        div()
-                            .id("open-scenes")
-                            .text_size(px(12.))
-                            .cursor_pointer()
-                            .child(scene.open_label)
-                            .on_click(cx.listener(|panel, _, window, cx| {
+            let entity = cx.entity();
+            let open_label = scene.open_label;
+            body = body.child(
+                ListRow::new(format!("{picker_id}-scene"), scene.line.clone()).child(
+                    Button::new(format!("{picker_id}-open-scenes"))
+                        .label(open_label)
+                        .variant(ButtonVariant::Ghost)
+                        .on_click(move |_, window, cx| {
+                            entity.update(cx, |panel, cx| {
                                 panel.open_page(PageId::Studio, window, cx);
-                            })),
-                    ),
+                            });
+                        }),
+                ),
             );
         }
         if let Some(low_light) = video.low_light.as_ref() {
             let checked = low_light.checked;
             let disabled = low_light.disabled;
-            row = row.child(
+            let entity = cx.entity();
+            body = body.child(
                 div()
-                    .id("low-light")
-                    .flex()
-                    .justify_between()
-                    .when(!disabled, |el| {
-                        el.cursor_pointer()
-                            .on_click(cx.listener(move |panel, _, _, _| {
-                                let studio = panel.studio.clone();
-                                panel.run_studio(async move {
-                                    let _ = studio.set_camera_low_light(!checked).await;
-                                });
-                            }))
-                    })
-                    .child(div().text_size(px(13.)).child(low_light.label))
+                    .child(
+                        ListRow::new("low-light", low_light.label).child(
+                            Switch::new("low-light-switch")
+                                .accessibility_label(low_light.label)
+                                .checked(checked)
+                                .disabled(disabled)
+                                .on_change(move |value, _, cx| {
+                                    entity.update(cx, |panel, _| {
+                                        let studio = panel.studio.clone();
+                                        panel.run_studio(async move {
+                                            let _ = studio.set_camera_low_light(value).await;
+                                        });
+                                    });
+                                }),
+                        ),
+                    )
                     .child(
                         div()
-                            .text_size(px(12.))
-                            .text_color(rgb(if checked { GOOD } else { MUTED }))
-                            .child(if checked { "On" } else { "Off" }),
+                            .px(px(12.))
+                            .pb(px(8.))
+                            .child(self.muted_line(t, low_light.description)),
                     ),
             );
-            row = row.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgb(MUTED))
-                    .child(low_light.description),
-            );
         }
-        row
+        GroupedList::new().item(body).into_any_element()
     }
 }
 
 impl Render for SourcesPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_sliders(window, cx);
+        let t = theme::current(window, cx).theme();
         let page = self.model.page.clone();
         let audio = self.model.audio.clone();
         let levels = self.model.levels.clone();
@@ -765,76 +738,61 @@ impl Render for SourcesPanel {
         } else {
             page_copy::REFRESH
         };
+        let entity = cx.entity();
 
-        let mut root = div().flex().flex_col().gap(px(16.)).overflow_hidden();
-        root = root.child(
-            div()
-                .flex()
-                .items_start()
-                .justify_between()
-                .gap(px(16.))
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(px(13.))
-                        .text_color(rgb(MUTED))
-                        .child(page.description),
-                )
-                .child(
-                    ghost_button("sources-refresh", refresh_label)
-                        .on_click(cx.listener(|panel, _, _, cx| panel.refresh(cx))),
-                ),
-        );
+        let header = PanelSection::new("sources-header")
+            .description(page.description)
+            .action(
+                Button::new("sources-refresh")
+                    .label(refresh_label)
+                    .variant(ButtonVariant::Secondary)
+                    .disabled(page.refreshing)
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |panel, cx| panel.refresh(cx));
+                    }),
+            );
 
-        if !page.alerts.is_empty() || page.device_problem {
-            root = root.child(self.render_alerts(&page.alerts, page.device_problem, cx));
-        }
-
-        let mut columns = div().flex().flex_row().items_start().gap(px(24.));
-
-        let mut video = div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .gap(px(12.))
-            .child(section_heading(page_copy::VIDEO, page.video_description));
-        video = video.child(self.render_video_row(
-            sources::copy::SCREEN,
-            SourceKind::Capture,
-            "screen-picker",
-            &page.screen,
-            cx,
-        ));
+        let mut video = PanelSection::new("sources-video")
+            .title(page_copy::VIDEO)
+            .description(page.video_description)
+            .child(self.render_video_row(
+                sources::copy::SCREEN,
+                SourceKind::Capture,
+                "screen-picker",
+                &page.screen,
+                t,
+                cx,
+            ));
         if let Some(synthetic) = page.synthetic.as_ref() {
             let checked = synthetic.checked;
             let disabled = synthetic.disabled;
+            let entity = cx.entity();
             video = video.child(
-                div()
-                    .id("synthetic")
-                    .flex()
-                    .justify_between()
-                    .when(!disabled, |el| {
-                        el.cursor_pointer()
-                            .on_click(cx.listener(move |panel, _, _, _| {
-                                let studio = panel.studio.clone();
-                                panel.run_studio(async move {
-                                    let _ = studio.set_test_pattern(!checked).await;
-                                });
-                            }))
-                    })
-                    .child(div().text_size(px(13.)).child(page_copy::SYNTHETIC))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(if checked { GOOD } else { MUTED }))
-                            .child(if checked { "On" } else { "Off" }),
-                    ),
-            );
-            video = video.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgb(MUTED))
-                    .child(page_copy::SYNTHETIC_DESCRIPTION),
+                GroupedList::new().item(
+                    div()
+                        .child(
+                            ListRow::new("synthetic", page_copy::SYNTHETIC).child(
+                                Switch::new("synthetic-switch")
+                                    .accessibility_label(page_copy::SYNTHETIC)
+                                    .checked(checked)
+                                    .disabled(disabled)
+                                    .on_change(move |value, _, cx| {
+                                        entity.update(cx, |panel, _| {
+                                            let studio = panel.studio.clone();
+                                            panel.run_studio(async move {
+                                                let _ = studio.set_test_pattern(value).await;
+                                            });
+                                        });
+                                    }),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .px(px(12.))
+                                .pb(px(8.))
+                                .child(self.muted_line(t, page_copy::SYNTHETIC_DESCRIPTION)),
+                        ),
+                ),
             );
         }
         video = video.child(self.render_video_row(
@@ -842,190 +800,145 @@ impl Render for SourcesPanel {
             SourceKind::Camera,
             "camera-picker",
             &page.camera,
+            t,
             cx,
         ));
-        columns = columns.child(video);
 
-        let mut audio_col = div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .gap(px(12.))
-            .child(section_heading(audio_copy::AUDIO, audio.description));
+        let mut audio_col = PanelSection::new("sources-audio")
+            .title(audio_copy::AUDIO)
+            .description(audio.description);
 
         // Microphone
         {
             let mic = &audio.microphone;
             let more = self.ui.more.contains("mic");
+            let muted = mic.row.muted;
+            let mut chips = div().flex().items_center().gap(px(8.));
+            if let Some(chip) = mic.chip.as_ref() {
+                chips = chips.child(chip_badge(chip.label.clone(), chip.tone));
+            }
+            if let Some(tag) = mic.sync_tag.as_ref() {
+                chips = chips.child(chip_badge(tag.clone(), ChipTone::Neutral));
+            }
+            let entity = cx.entity();
+            let mute = Switch::new("mute-mic")
+                .accessibility_label(if muted {
+                    audio_mixer::copy::UNMUTE_MICROPHONE
+                } else {
+                    audio_mixer::copy::MUTE_MICROPHONE
+                })
+                .checked(muted)
+                .on_change(move |_, _, cx| {
+                    entity.update(cx, |panel, _| panel.mute_toggle());
+                });
+            let entity = cx.entity();
+            let more_btn = Button::new("more-mic")
+                .label(if more { "Less" } else { "More" })
+                .variant(ButtonVariant::Ghost)
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |panel, cx| panel.toggle_more("mic", cx));
+                });
             let mut card = div()
                 .id(mic.focus)
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .p(px(12.))
-                .rounded(px(10.))
-                .border_1()
-                .border_color(rgb(HAIRLINE));
-            let mut header = div().flex().items_center().gap(px(8.)).child(
-                div()
-                    .text_size(px(14.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(audio_mixer::copy::MICROPHONE),
-            );
-            if let Some(chip) = mic.chip.as_ref() {
-                header = header.child(status_chip(chip.label.clone(), chip.tone));
-            }
-            if let Some(tag) = mic.sync_tag.as_ref() {
-                header = header.child(status_chip(tag.clone(), ChipTone::Neutral));
-            }
-            let muted = mic.row.muted;
-            header = header.child(
-                ghost_button(
-                    "mute-mic",
-                    if muted {
-                        audio_mixer::copy::UNMUTE_MICROPHONE
-                    } else {
-                        audio_mixer::copy::MUTE_MICROPHONE
-                    },
+                .child(
+                    ListRow::new("mic-title", audio_mixer::copy::MICROPHONE)
+                        .child(chips)
+                        .child(mute)
+                        .child(more_btn),
                 )
-                .ml_auto()
-                .on_click(cx.listener(|panel, _, _, _| panel.mute_toggle())),
-            );
-            header = header.child(
-                div()
-                    .id("more-mic")
-                    .px(px(8.))
-                    .py(px(4.))
-                    .text_size(px(12.))
-                    .text_color(rgb(MUTED))
-                    .cursor_pointer()
-                    .child(if more { "Less" } else { "More" })
-                    .on_click(cx.listener(|panel, _, _, cx| {
-                        if !panel.ui.more.insert("mic") {
-                            panel.ui.more.remove("mic");
-                        }
-                        cx.notify();
-                    })),
-            );
-            card = card.child(header);
-            card = card.child(self.render_picker_list(
-                "mic-picker",
-                SourceKind::Microphone,
-                &mic.row.picker,
-                mic.row.disabled_reason.is_some(),
-                mic.row.disabled_reason.as_deref(),
-                cx,
-            ));
+                .child(div().px(px(12.)).child(self.render_picker(
+                    "mic-picker",
+                    SourceKind::Microphone,
+                    &mic.row.picker,
+                    mic.row.disabled_reason.is_some(),
+                    mic.row.disabled_reason.as_deref(),
+                    t,
+                    cx,
+                )));
             if !mic.selected {
                 card = card.child(
                     div()
-                        .text_size(px(12.))
-                        .text_color(rgb(MUTED))
-                        .child(audio_copy::NO_MICROPHONE),
+                        .px(px(12.))
+                        .child(self.muted_line(t, audio_copy::NO_MICROPHONE)),
                 );
             } else {
-                card = card.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(rgb(MUTED))
-                        .child(audio_mixer::copy::MICROPHONE_LEVEL),
-                );
-                card = card.child(meter_bar(
-                    levels.microphone_peak_db,
-                    levels.live_at(Instant::now()) && !muted,
-                ));
+                card = card
+                    .child(
+                        div()
+                            .px(px(12.))
+                            .child(self.muted_line(t, audio_mixer::copy::MICROPHONE_LEVEL)),
+                    )
+                    .child(div().px(px(12.)).child(meter_bar(
+                        levels.microphone_peak_db,
+                        levels.live_at(Instant::now()) && !muted,
+                        t.border,
+                        t.muted_foreground,
+                    )));
                 if let Some(line) = mic.level_line {
-                    card = card.child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(line));
+                    card = card.child(div().px(px(12.)).child(self.muted_line(t, line)));
                 }
-                let gain = mic.row.gain_db;
+                let gain_text = mic.row.gain_text.clone();
                 card = card.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(div().text_size(px(12.)).child(audio_mixer::copy::GAIN))
+                    ListRow::new("mic-gain", audio_mixer::copy::GAIN)
+                        .meta(gain_text)
                         .child(
-                            div()
-                                .flex()
-                                .gap(px(8.))
-                                .child(
-                                    div()
-                                        .id("mic-gain-down")
-                                        .cursor_pointer()
-                                        .child("−")
-                                        .on_click(cx.listener(move |panel, _, _, _| {
-                                            let studio = panel.studio.clone();
-                                            let next = (gain - 1).clamp(-24, 24) as f32;
-                                            panel.run_studio(async move {
-                                                studio.set_microphone_gain(next).await;
-                                            });
-                                        })),
-                                )
-                                .child(div().text_size(px(12.)).child(mic.row.gain_text.clone()))
-                                .child(
-                                    div()
-                                        .id("mic-gain-up")
-                                        .cursor_pointer()
-                                        .child("+")
-                                        .on_click(cx.listener(move |panel, _, _, _| {
-                                            let studio = panel.studio.clone();
-                                            let next = (gain + 1).clamp(-24, 24) as f32;
-                                            panel.run_studio(async move {
-                                                studio.set_microphone_gain(next).await;
-                                            });
-                                        })),
-                                ),
+                            div().w(px(180.)).child(
+                                Slider::new(&self.mic_gain)
+                                    .accessibility_label(audio_mixer::copy::GAIN),
+                            ),
                         ),
                 );
                 if let Some(reset) = mic.row.gain_reset.clone() {
+                    let entity = cx.entity();
                     card = card.child(
-                        div()
-                            .id("mic-gain-reset")
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .cursor_pointer()
-                            .child(reset)
-                            .on_click(cx.listener(|panel, _, _, _| {
-                                let studio = panel.studio.clone();
-                                panel.run_studio(async move {
-                                    studio.set_microphone_gain(0.0).await;
-                                });
-                            })),
+                        div().px(px(12.)).child(
+                            Button::new("mic-gain-reset")
+                                .label(reset)
+                                .variant(ButtonVariant::Ghost)
+                                .on_click(move |_, _, cx| {
+                                    entity.update(cx, |panel, _| {
+                                        let studio = panel.studio.clone();
+                                        panel.run_studio(async move {
+                                            studio.set_microphone_gain(0.0).await;
+                                        });
+                                    });
+                                }),
+                        ),
                     );
                 }
                 let noise_on = mic.noise_reduction.checked;
                 let noise_disabled = mic.noise_reduction.disabled;
-                card = card.child(
-                    div()
-                        .id("noise-reduction")
-                        .flex()
-                        .justify_between()
-                        .when(!noise_disabled, |el| {
-                            el.cursor_pointer()
-                                .on_click(cx.listener(move |panel, _, _, _| {
-                                    let studio = panel.studio.clone();
-                                    panel.run_studio(async move {
-                                        studio.set_microphone_noise_suppression(!noise_on).await;
+                let entity = cx.entity();
+                card = card
+                    .child(
+                        ListRow::new("noise-reduction", audio_copy::NOISE_REDUCTION).child(
+                            Switch::new("noise-reduction-switch")
+                                .accessibility_label(audio_copy::NOISE_REDUCTION)
+                                .checked(noise_on)
+                                .disabled(noise_disabled)
+                                .on_change(move |value, _, cx| {
+                                    entity.update(cx, |panel, _| {
+                                        let studio = panel.studio.clone();
+                                        panel.run_studio(async move {
+                                            studio.set_microphone_noise_suppression(value).await;
+                                        });
                                     });
-                                }))
-                        })
-                        .child(div().text_size(px(13.)).child(audio_copy::NOISE_REDUCTION))
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(rgb(if noise_on { GOOD } else { MUTED }))
-                                .child(if noise_on { "On" } else { "Off" }),
+                                }),
                         ),
-                );
-                card = card.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(rgb(MUTED))
-                        .child(mic.noise_reduction.description.clone()),
-                );
+                    )
+                    .child(
+                        div()
+                            .px(px(12.))
+                            .pb(px(8.))
+                            .child(self.muted_line(t, mic.noise_reduction.description.clone())),
+                    );
             }
             if more {
                 let sync = mic.sync_ms;
+                let entity = cx.entity();
                 card = card.child(
                     div()
                         .flex()
@@ -1033,287 +946,201 @@ impl Render for SourcesPanel {
                         .gap(px(8.))
                         .pt(px(8.))
                         .border_t_1()
-                        .border_color(rgb(HAIRLINE))
+                        .border_color(hsla(t.border))
                         .child(
                             div()
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::MEDIUM)
+                                .px(px(12.))
+                                .type_scale(text::META)
+                                .font_weight(gpui::FontWeight::MEDIUM)
                                 .child(audio_copy::MORE_MICROPHONE),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(div().text_size(px(12.)).child(audio_copy::MICROPHONE_SYNC))
+                            ListRow::new("mic-sync", audio_copy::MICROPHONE_SYNC)
+                                .meta(format!("{sync:+} ms"))
                                 .child(
-                                    div()
-                                        .flex()
-                                        .gap(px(8.))
-                                        .child(
-                                            div()
-                                                .id("sync-down")
-                                                .cursor_pointer()
-                                                .child("−")
-                                                .on_click(cx.listener(move |panel, _, _, _| {
-                                                    let studio = panel.studio.clone();
-                                                    let next = (sync - 10).clamp(-1000, 1000);
-                                                    panel.run_studio(async move {
-                                                        studio
-                                                            .set_microphone_sync_offset(next, false)
-                                                            .await;
-                                                    });
-                                                })),
-                                        )
-                                        .child(
-                                            div().text_size(px(12.)).child(format!("{sync:+} ms")),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("sync-up")
-                                                .cursor_pointer()
-                                                .child("+")
-                                                .on_click(cx.listener(move |panel, _, _, _| {
-                                                    let studio = panel.studio.clone();
-                                                    let next = (sync + 10).clamp(-1000, 1000);
-                                                    panel.run_studio(async move {
-                                                        studio
-                                                            .set_microphone_sync_offset(next, false)
-                                                            .await;
-                                                    });
-                                                })),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("sync-reset")
-                                                .cursor_pointer()
-                                                .text_size(px(12.))
-                                                .text_color(rgb(MUTED))
-                                                .child("Reset")
-                                                .on_click(cx.listener(|panel, _, _, _| {
-                                                    let studio = panel.studio.clone();
-                                                    panel.run_studio(async move {
-                                                        studio
-                                                            .set_microphone_sync_offset(0, true)
-                                                            .await;
-                                                    });
-                                                })),
-                                        ),
+                                    div().w(px(180.)).child(
+                                        Slider::new(&self.sync_ms)
+                                            .accessibility_label(audio_copy::MICROPHONE_SYNC),
+                                    ),
+                                )
+                                .child(
+                                    Button::new("sync-reset")
+                                        .label("Reset")
+                                        .variant(ButtonVariant::Ghost)
+                                        .on_click(move |_, _, cx| {
+                                            entity.update(cx, |panel, _| {
+                                                let studio = panel.studio.clone();
+                                                panel.run_studio(async move {
+                                                    studio
+                                                        .set_microphone_sync_offset(0, true)
+                                                        .await;
+                                                });
+                                            });
+                                        }),
                                 ),
                         )
                         .child(
                             div()
-                                .text_size(px(12.))
-                                .text_color(rgb(MUTED))
-                                .child(mic.sync_description.clone()),
+                                .px(px(12.))
+                                .child(self.muted_line(t, mic.sync_description.clone())),
                         ),
                 );
                 if let Some(keep) = mic.keep_ready.as_ref() {
                     let checked = keep.checked;
-                    card = card.child(
-                        div()
-                            .id("keep-ready")
-                            .flex()
-                            .justify_between()
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |panel, _, _, _| {
-                                let studio = panel.studio.clone();
-                                panel.run_studio(async move {
-                                    studio.set_keep_microphone_warm(!checked).await;
-                                });
-                            }))
-                            .child(div().text_size(px(13.)).child(audio_copy::KEEP_READY))
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(if checked { GOOD } else { MUTED }))
-                                    .child(if checked { "On" } else { "Off" }),
+                    let entity = cx.entity();
+                    card = card
+                        .child(
+                            ListRow::new("keep-ready", audio_copy::KEEP_READY).child(
+                                Switch::new("keep-ready-switch")
+                                    .accessibility_label(audio_copy::KEEP_READY)
+                                    .checked(checked)
+                                    .on_change(move |value, _, cx| {
+                                        entity.update(cx, |panel, _| {
+                                            let studio = panel.studio.clone();
+                                            panel.run_studio(async move {
+                                                studio.set_keep_microphone_warm(value).await;
+                                            });
+                                        });
+                                    }),
                             ),
-                    );
-                    card = card.child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .child(keep.description.clone()),
-                    );
+                        )
+                        .child(
+                            div()
+                                .px(px(12.))
+                                .pb(px(8.))
+                                .child(self.muted_line(t, keep.description.clone())),
+                        );
                 }
             }
-            audio_col = audio_col.child(card);
+            audio_col = audio_col.child(GroupedList::new().item(card));
         }
 
         // System audio
         if let Some(system) = audio.system_audio.clone() {
             let more = self.ui.more.contains("system");
+            let mut chips = div().flex().items_center().gap(px(8.));
+            if let Some(chip) = system.chip.as_ref() {
+                chips = chips.child(chip_badge(chip.label.clone(), chip.tone));
+            } else if let Some(chip) = system.row.chip.as_ref() {
+                chips = chips.child(chip_badge(chip.label, ChipTone::Neutral));
+            }
+            let checked = system.row.checked;
+            let disabled = system.row.disabled;
+            let entity = cx.entity();
+            let toggle = Switch::new("system-audio-toggle")
+                .accessibility_label(audio_mixer::copy::SYSTEM_AUDIO)
+                .checked(checked)
+                .disabled(disabled)
+                .on_change(move |value, _, cx| {
+                    entity.update(cx, |panel, _| {
+                        let studio = panel.studio.clone();
+                        panel.run_studio(async move {
+                            studio.set_system_audio_enabled(value).await;
+                        });
+                    });
+                });
+            let entity = cx.entity();
+            let more_btn = Button::new("more-system")
+                .label(if more { "Less" } else { "More" })
+                .variant(ButtonVariant::Ghost)
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |panel, cx| panel.toggle_more("system", cx));
+                });
             let mut card = div()
                 .id(system.focus)
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .p(px(12.))
-                .rounded(px(10.))
-                .border_1()
-                .border_color(rgb(HAIRLINE));
-            let mut header = div().flex().items_center().gap(px(8.)).child(
-                div()
-                    .text_size(px(14.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(audio_mixer::copy::SYSTEM_AUDIO),
-            );
-            if let Some(chip) = system.chip.as_ref() {
-                header = header.child(status_chip(chip.label.clone(), chip.tone));
-            } else if let Some(chip) = system.row.chip.as_ref() {
-                header = header.child(status_chip(chip.label, ChipTone::Neutral));
-            }
-            let checked = system.row.checked;
-            let disabled = system.row.disabled;
-            header = header.child(
-                ghost_button("system-audio-toggle", if checked { "On" } else { "Off" })
-                    .ml_auto()
-                    .when(!disabled, |el| {
-                        el.on_click(cx.listener(move |panel, _, _, _| {
-                            let studio = panel.studio.clone();
-                            panel.run_studio(async move {
-                                studio.set_system_audio_enabled(!checked).await;
-                            });
-                        }))
-                    }),
-            );
-            header = header.child(
-                div()
-                    .id("more-system")
-                    .px(px(8.))
-                    .py(px(4.))
-                    .text_size(px(12.))
-                    .text_color(rgb(MUTED))
-                    .cursor_pointer()
-                    .child(if more { "Less" } else { "More" })
-                    .on_click(cx.listener(|panel, _, _, cx| {
-                        if !panel.ui.more.insert("system") {
-                            panel.ui.more.remove("system");
-                        }
-                        cx.notify();
-                    })),
-            );
-            card = card.child(header);
-            card = card.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgb(MUTED))
-                    .child(system.facts.clone()),
-            );
+                .child(
+                    ListRow::new("system-title", audio_mixer::copy::SYSTEM_AUDIO)
+                        .child(chips)
+                        .child(toggle)
+                        .child(more_btn),
+                )
+                .child(
+                    div()
+                        .px(px(12.))
+                        .child(self.muted_line(t, system.facts.clone())),
+                );
             if system.row.show_level {
-                card = card.child(meter_bar(
+                card = card.child(div().px(px(12.)).child(meter_bar(
                     levels.system_audio_peak_db,
                     levels.live_at(Instant::now()),
-                ));
+                    t.border,
+                    t.muted_foreground,
+                )));
             } else if system.row.idle_line {
                 card = card.child(
                     div()
-                        .text_size(px(12.))
-                        .text_color(rgb(MUTED))
-                        .child(audio_mixer::copy::IDLE_LINE),
+                        .px(px(12.))
+                        .child(self.muted_line(t, audio_mixer::copy::IDLE_LINE)),
                 );
             }
             if system.row.show_gain {
-                let gain = system.row.gain_db;
                 card = card.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(div().text_size(px(12.)).child(audio_mixer::copy::GAIN))
+                    ListRow::new("sys-gain", audio_mixer::copy::GAIN)
+                        .meta(system.row.gain_text.clone())
                         .child(
-                            div()
-                                .flex()
-                                .gap(px(8.))
-                                .child(
-                                    div()
-                                        .id("sys-gain-down")
-                                        .cursor_pointer()
-                                        .child("−")
-                                        .on_click(cx.listener(move |panel, _, _, _| {
-                                            let studio = panel.studio.clone();
-                                            let next = (gain - 1).clamp(-24, 12) as f32;
-                                            panel.run_studio(async move {
-                                                studio.set_system_audio_gain(next).await;
-                                            });
-                                        })),
-                                )
-                                .child(div().text_size(px(12.)).child(system.row.gain_text.clone()))
-                                .child(
-                                    div()
-                                        .id("sys-gain-up")
-                                        .cursor_pointer()
-                                        .child("+")
-                                        .on_click(cx.listener(move |panel, _, _, _| {
-                                            let studio = panel.studio.clone();
-                                            let next = (gain + 1).clamp(-24, 12) as f32;
-                                            panel.run_studio(async move {
-                                                studio.set_system_audio_gain(next).await;
-                                            });
-                                        })),
-                                ),
+                            div().w(px(180.)).child(
+                                Slider::new(&self.sys_gain)
+                                    .accessibility_label(audio_mixer::copy::GAIN),
+                            ),
                         ),
                 );
                 if let Some(reset) = system.row.gain_reset.clone() {
+                    let entity = cx.entity();
                     card = card.child(
-                        div()
-                            .id("sys-gain-reset")
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .cursor_pointer()
-                            .child(reset)
-                            .on_click(cx.listener(|panel, _, _, _| {
-                                let studio = panel.studio.clone();
-                                panel.run_studio(async move {
-                                    studio.set_system_audio_gain(-6.0).await;
-                                });
-                            })),
+                        div().px(px(12.)).child(
+                            Button::new("sys-gain-reset")
+                                .label(reset)
+                                .variant(ButtonVariant::Ghost)
+                                .on_click(move |_, _, cx| {
+                                    entity.update(cx, |panel, _| {
+                                        let studio = panel.studio.clone();
+                                        panel.run_studio(async move {
+                                            studio.set_system_audio_gain(-6.0).await;
+                                        });
+                                    });
+                                }),
+                        ),
                     );
                 }
             }
             if let Some(issue) = system.issue.clone() {
                 let action = system.issue_action;
-                card = card.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.))
-                        .p(px(8.))
-                        .rounded(px(8.))
-                        .bg(rgb(BUTTON))
-                        .child(div().text_size(px(12.)).child(issue))
-                        .when_some(action, |el, action| {
-                            el.child(
-                                div()
-                                    .id("system-issue-action")
-                                    .text_size(px(12.))
-                                    .cursor_pointer()
-                                    .child(match action {
-                                        IssueAction::OpenPermissions => {
-                                            audio_mixer::copy::OPEN_PERMISSIONS
-                                        }
-                                        IssueAction::Resume => audio_mixer::copy::RESUME,
-                                    })
-                                    .on_click(cx.listener(
-                                        move |panel, _, window, cx| match action {
-                                            IssueAction::OpenPermissions => {
-                                                panel.open_page(PageId::Settings, window, cx);
-                                            }
-                                            IssueAction::Resume => {
-                                                let studio = panel.studio.clone();
-                                                panel.run_studio(async move {
-                                                    studio.resume_system_audio().await;
-                                                });
-                                            }
-                                        },
-                                    )),
-                            )
-                        }),
-                );
+                let entity = cx.entity();
+                let mut alert = Alert::new("system-issue")
+                    .variant(AlertVariant::Warning)
+                    .title(issue);
+                if let Some(action) = action {
+                    let label = match action {
+                        IssueAction::OpenPermissions => audio_mixer::copy::OPEN_PERMISSIONS,
+                        IssueAction::Resume => audio_mixer::copy::RESUME,
+                    };
+                    alert = alert.action(
+                        Button::new("system-issue-action")
+                            .label(label)
+                            .variant(ButtonVariant::Outline)
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |panel, cx| match action {
+                                    IssueAction::OpenPermissions => {
+                                        panel.open_page(PageId::Settings, window, cx);
+                                    }
+                                    IssueAction::Resume => {
+                                        let studio = panel.studio.clone();
+                                        panel.run_studio(async move {
+                                            studio.resume_system_audio().await;
+                                        });
+                                    }
+                                });
+                            }),
+                    );
+                }
+                card = card.child(div().px(px(12.)).child(alert));
             }
             if more {
                 let echo = system.echo_guard;
+                let entity = cx.entity();
                 card = card.child(
                     div()
                         .flex()
@@ -1321,50 +1148,44 @@ impl Render for SourcesPanel {
                         .gap(px(8.))
                         .pt(px(8.))
                         .border_t_1()
-                        .border_color(rgb(HAIRLINE))
+                        .border_color(hsla(t.border))
                         .child(
                             div()
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::MEDIUM)
+                                .px(px(12.))
+                                .type_scale(text::META)
+                                .font_weight(gpui::FontWeight::MEDIUM)
                                 .child(audio_copy::MORE_SYSTEM_AUDIO),
                         )
                         .child(
-                            div()
-                                .id("echo-guard")
-                                .flex()
-                                .justify_between()
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |panel, _, _, _| {
-                                    let studio = panel.studio.clone();
-                                    panel.run_studio(async move {
-                                        studio.set_system_audio_echo_guard(!echo).await;
-                                    });
-                                }))
-                                .child(div().text_size(px(13.)).child(audio_copy::ECHO_GUARD))
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .text_color(rgb(if echo { GOOD } else { MUTED }))
-                                        .child(if echo { "On" } else { "Off" }),
-                                ),
+                            ListRow::new("echo-guard", audio_copy::ECHO_GUARD).child(
+                                Switch::new("echo-guard-switch")
+                                    .accessibility_label(audio_copy::ECHO_GUARD)
+                                    .checked(echo)
+                                    .on_change(move |value, _, cx| {
+                                        entity.update(cx, |panel, _| {
+                                            let studio = panel.studio.clone();
+                                            panel.run_studio(async move {
+                                                studio.set_system_audio_echo_guard(value).await;
+                                            });
+                                        });
+                                    }),
+                            ),
                         )
                         .child(
                             div()
-                                .text_size(px(12.))
-                                .text_color(rgb(MUTED))
-                                .child(system.echo_guard_description.clone()),
+                                .px(px(12.))
+                                .child(self.muted_line(t, system.echo_guard_description.clone())),
                         ),
                 );
                 for note in &system.notes {
                     card = card.child(
                         div()
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .child(format!("• {note}")),
+                            .px(px(12.))
+                            .child(self.muted_line(t, format!("• {note}"))),
                     );
                 }
             }
-            audio_col = audio_col.child(card);
+            audio_col = audio_col.child(GroupedList::new().item(card));
         }
 
         // Sounds
@@ -1374,69 +1195,81 @@ impl Render for SourcesPanel {
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .p(px(12.))
-                .rounded(px(10.))
-                .border_1()
-                .border_color(rgb(HAIRLINE));
-            card = card.child(
-                div()
-                    .text_size(px(14.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(audio_copy::SOUNDS),
-            );
+                .child(ListRow::new("sounds-title", audio_copy::SOUNDS));
             if sounds.show_level {
-                card = card.child(meter_bar(levels.sounds_peak_db, true));
+                card = card.child(div().px(px(12.)).child(meter_bar(
+                    levels.sounds_peak_db,
+                    true,
+                    t.border,
+                    t.muted_foreground,
+                )));
             } else {
                 card = card.child(
                     div()
-                        .text_size(px(12.))
-                        .text_color(rgb(MUTED))
-                        .child(audio_copy::SOUNDS_IDLE),
+                        .px(px(12.))
+                        .child(self.muted_line(t, audio_copy::SOUNDS_IDLE)),
                 );
             }
-            card = card.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(div().text_size(px(12.)).child(audio_copy::LEVEL))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(if sounds.disabled { MUTED } else { TEXT }))
-                            .child(sounds.volume_text.clone()),
+            card = card
+                .child(
+                    ListRow::new("sounds-level", audio_copy::LEVEL)
+                        .meta(sounds.volume_text.clone()),
+                )
+                .child(
+                    div()
+                        .px(px(12.))
+                        .child(self.muted_line(t, audio_copy::SOUNDS_LEVEL)),
+                )
+                .child(
+                    ListRow::new("hear-sounds", audio_copy::HEAR_SOUNDS).child(
+                        Switch::new("hear-sounds-switch")
+                            .accessibility_label(audio_copy::HEAR_SOUNDS)
+                            .checked(sounds.monitor)
+                            .disabled(sounds.disabled),
                     ),
-            );
-            card = card.child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgb(MUTED))
-                    .child(audio_copy::SOUNDS_LEVEL),
-            );
-            card = card.child(
-                div()
-                    .id("hear-sounds")
-                    .flex()
-                    .justify_between()
-                    .opacity(if sounds.disabled { 0.5 } else { 1.0 })
-                    .child(div().text_size(px(13.)).child(audio_copy::HEAR_SOUNDS))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(if sounds.monitor { GOOD } else { MUTED }))
-                            .child(if sounds.monitor { "On" } else { "Off" }),
-                    ),
-            );
-            card = card.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgb(MUTED))
-                    .child(audio_copy::HEAR_SOUNDS_DESCRIPTION),
-            );
-            audio_col = audio_col.child(card);
+                )
+                .child(
+                    div()
+                        .px(px(12.))
+                        .pb(px(8.))
+                        .child(self.muted_line(t, audio_copy::HEAR_SOUNDS_DESCRIPTION)),
+                );
+            audio_col = audio_col.last(true).child(GroupedList::new().item(card));
         }
 
-        columns = columns.child(audio_col);
-        root.child(columns)
+        div()
+            .id("sources-page")
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_h(px(0.))
+            .font_family(FONT)
+            .bg(hsla(t.glass_solid))
+            .text_color(hsla(t.foreground))
+            .type_scale(text::META)
+            .child(
+                ScrollArea::new("sources-scroll").child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .px(px(size::GUTTER))
+                        .py(px(8.))
+                        .gap(px(8.))
+                        .child(header)
+                        .children(
+                            (!page.alerts.is_empty() || page.device_problem)
+                                .then(|| self.render_alerts(&page.alerts, page.device_problem, cx)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_start()
+                                .gap(px(8.))
+                                .child(div().flex_1().min_w(px(360.)).child(video))
+                                .child(div().flex_1().min_w(px(360.)).child(audio_col)),
+                        ),
+                ),
+            )
     }
 }

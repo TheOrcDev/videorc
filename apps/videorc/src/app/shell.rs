@@ -88,8 +88,23 @@ impl Shell {
         cx.observe(&preview, |_, _, cx| cx.notify()).detach();
         cx.observe(&sources, |_, _, cx| cx.notify()).detach();
         // The Studio's jumps ("Open Destinations", a Session row) open that page.
-        cx.subscribe_in(&studio, |this, _, open: &OpenPage, window, cx| {
-            this.open_page(open.0, window, cx)
+        // `subscribe_in` needs a Window at bind time; Shell::new has none, so
+        // mirror the Settings Navigate path (page + docked preview) here.
+        cx.subscribe(&studio, |this, _, open: &OpenPage, cx| {
+            let page = open.0;
+            if this.page != page {
+                this.settings
+                    .update(cx, |settings, cx| settings.disarm_shortcut(cx));
+                this.page = page;
+                if page == PageId::Settings {
+                    this.settings
+                        .update(cx, |settings, cx| settings.refresh(cx));
+                }
+                this.preview.update(cx, |preview, _| {
+                    preview.set_docked_shown(page == PageId::Studio)
+                });
+                cx.notify();
+            }
         })
         .detach();
         cx.subscribe(&settings, |this, _, Navigate(page), cx| {
