@@ -5,9 +5,11 @@
 //! replaces these plain elements when it lands.
 
 use crate::screens::command_palette::{Command, CommandPalette};
+use crate::screens::notifications::{Centre, Hub, Navigate as NoticeNavigate, ToggleNotifications};
 use crate::screens::settings::{Navigate, SettingsScreen};
 use gpui::{Context, Entity, Focusable, Window, div, prelude::*, px};
 use videorc_app_core::nav::{self, PageId, ZONES};
+use videorc_app_core::notices::NoticeAction;
 use videorc_app_core::{BackendState, ConnectionState, Tone};
 use videorc_kit::{
     shortcut_keys::ShortcutKeys,
@@ -78,6 +80,8 @@ pub struct Shell {
     settings: Entity<SettingsScreen>,
     health: Entity<crate::screens::health::HealthScreen>,
     palette: Entity<CommandPalette>,
+    notices: Entity<Centre>,
+    notice_hub: Entity<Hub>,
 }
 
 impl Shell {
@@ -91,9 +95,33 @@ impl Shell {
         settings: Entity<SettingsScreen>,
         health: Entity<crate::screens::health::HealthScreen>,
         palette: Entity<CommandPalette>,
-        window: &Window,
+        notice_hub: Entity<Hub>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let notices = cx.new(|cx| Centre::new(notice_hub.clone(), "main", window, cx));
+        palette.update(cx, |palette, _| palette.set_notifications_available());
+        cx.subscribe_in(
+            &notice_hub,
+            window,
+            |this, _, navigation: &NoticeNavigate, window, cx| match navigation {
+                NoticeNavigate::Settings(tab) => this.open_settings(Some(*tab), window, cx),
+                NoticeNavigate::Action(NoticeAction::OpenHealth) => {
+                    this.open_page(PageId::Diagnostics, window, cx);
+                    window.activate_window();
+                }
+                NoticeNavigate::Action(NoticeAction::OpenPage(page)) => {
+                    this.open_page(*page, window, cx);
+                    window.activate_window();
+                }
+                NoticeNavigate::Action(NoticeAction::Copy { text }) => {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()))
+                }
+                NoticeNavigate::Action(NoticeAction::OpenUrl { url }) => cx.open_url(url),
+                _ => {}
+            },
+        )
+        .detach();
         cx.observe(&backend, |_, _, cx| cx.notify()).detach();
         cx.observe(&connection, |_, _, cx| cx.notify()).detach();
         // The preview notifies only when its slot's words or its window
@@ -114,6 +142,7 @@ impl Shell {
             &palette,
             window,
             |this, _, command: &Command, window, cx| match command {
+                Command::Notifications => this.notices.update(cx, |centre, cx| centre.toggle(cx)),
                 Command::Page(page) => this.open_page(*page, window, cx),
                 Command::Settings(tab) => this.open_settings(Some(*tab), window, cx),
                 Command::Setup => {
@@ -142,6 +171,8 @@ impl Shell {
             settings,
             health,
             palette,
+            notices,
+            notice_hub,
         }
     }
 
@@ -270,6 +301,16 @@ impl Render for Shell {
         let output = self.output.clone();
         div()
             .size_full()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.notice_hub.update(cx, |hub, _| hub.pressed())),
+            )
+            .on_key_down(
+                cx.listener(|this, _, _, cx| this.notice_hub.update(cx, |hub, _| hub.pressed())),
+            )
+            .on_action(cx.listener(|this, _: &ToggleNotifications, _, cx| {
+                this.notices.update(cx, |centre, cx| centre.toggle(cx))
+            }))
             .on_action(
                 cx.listener(|this, _: &super::menus::ToggleSearch, window, cx| {
                     this.toggle_search(window, cx)
@@ -372,8 +413,10 @@ impl Render for Shell {
                         .on_click(
                             cx.listener(|this, _, window, cx| this.toggle_search(window, cx)),
                         ),
-                    ),
+                    )
+                    .child(self.notices.clone()),
             )
             .child(self.palette.clone())
+            .child(self.notices.read(cx).toasts())
     }
 }

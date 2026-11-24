@@ -146,6 +146,7 @@ impl Facts {
 }
 
 pub struct StreamManager {
+    notices: gpui::Entity<crate::screens::notifications::Centre>,
     panes: Panes,
     facts: Facts,
     focus: FocusHandle,
@@ -154,11 +155,19 @@ pub struct StreamManager {
 
 impl StreamManager {
     fn new(frame: StreamManagerFrame, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let hub = cx
+            .global::<crate::screens::notifications::Shared>()
+            .0
+            .clone();
+        let notices = cx.new(|cx| {
+            crate::screens::notifications::Centre::new(hub, "stream-manager", window, cx)
+        });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         frame.moved(window);
         let bounds = cx.observe_window_bounds(window, move |_, window, _| frame.moved(window));
         Self {
+            notices,
             panes: Panes::default(),
             facts: Facts::default(),
             focus,
@@ -211,6 +220,11 @@ impl Render for StreamManager {
             .text_color(rgb(TEXT))
             .track_focus(&self.focus)
             .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(
+                |this, _: &crate::screens::notifications::ToggleNotifications, _, cx| {
+                    this.notices.update(cx, |centre, cx| centre.toggle(cx))
+                },
+            ))
             .on_action(
                 cx.listener(|this, _: &ShowSidekick, _, cx| this.run(PaneKey::ShowSidekick, cx)),
             )
@@ -239,5 +253,7 @@ impl Render for StreamManager {
                     .flex_row()
                     .children(regions),
             )
+            .child(videorc_kit::status_bar::StatusBar::new().child(self.notices.clone()))
+            .child(self.notices.read(cx).toasts())
     }
 }

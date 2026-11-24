@@ -25,9 +25,13 @@ type Content = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 pub struct Popover {
     id: ElementId,
     trigger: Option<Button>,
+    custom_trigger: Option<Box<dyn FnOnce(bool, &Window, &App) -> AnyElement>>,
+    controlled_open: Option<bool>,
+    on_open_change: Option<Rc<dyn Fn(bool, &mut Window, &mut App)>>,
     content: Option<Content>,
     anchor: Anchor,
     width: f32,
+    flush: bool,
     appearance: Option<Appearance>,
 }
 
@@ -36,9 +40,13 @@ impl Popover {
         Popover {
             id: id.into(),
             trigger: None,
+            custom_trigger: None,
+            controlled_open: None,
+            on_open_change: None,
             content: None,
             anchor: Anchor::TopLeft,
             width: 288.0,
+            flush: false,
             appearance: None,
         }
     }
@@ -46,6 +54,31 @@ impl Popover {
     /// The button that opens it; it shows as expanded while open.
     pub fn trigger(mut self, trigger: Button) -> Self {
         self.trigger = Some(trigger);
+        self
+    }
+
+    /// Controlled opening for a shell shortcut or a door in Search.
+    pub fn open(mut self, open: bool) -> Self {
+        self.controlled_open = Some(open);
+        self
+    }
+
+    pub fn on_open_change(
+        mut self,
+        handler: impl Fn(bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_open_change = Some(Rc::new(handler));
+        self
+    }
+
+    /// A status-bar control, retaining the Base popover's trigger behaviour.
+    pub fn trigger_with<E: IntoElement>(
+        mut self,
+        trigger: impl FnOnce(bool, &Window, &App) -> E + 'static,
+    ) -> Self {
+        self.custom_trigger = Some(Box::new(move |open, window, cx| {
+            trigger(open, window, cx).into_any_element()
+        }));
         self
     }
 
@@ -63,6 +96,12 @@ impl Popover {
     /// Which corner of the popup meets the trigger; top-left by default.
     pub fn anchor(mut self, anchor: Anchor) -> Self {
         self.anchor = anchor;
+        self
+    }
+
+    /// Flush lists supply their own header, row and footer insets.
+    pub fn flush(mut self) -> Self {
+        self.flush = true;
         self
     }
 
@@ -111,6 +150,7 @@ impl RenderOnce for Popover {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
         let width = self.width;
+        let flush = self.flush;
         let key = SharedString::from(format!("{}/motion", self.id));
         let motion = window.use_keyed_state(key.clone(), cx, |_, _| PopoverMotion {
             open: false,
@@ -118,7 +158,10 @@ impl RenderOnce for Popover {
         });
         let (open, last) = {
             let state = motion.read(cx);
-            (state.open, state.bounds.clone())
+            (
+                self.controlled_open.unwrap_or(state.open),
+                state.bounds.clone(),
+            )
         };
         let shown = presence(key, open, window, cx);
         let progress = shown.progress;
@@ -130,7 +173,7 @@ impl RenderOnce for Popover {
                 div().flex().flex_col().gap(px(12.0)).children(content),
             )
             .w(px(width))
-            .p(px(12.0))
+            .p(px(if flush { 0.0 } else { 12.0 }))
             .text_size(px(14.0))
             .text_color(hsla(t.popover_foreground))
         };
@@ -138,14 +181,18 @@ impl RenderOnce for Popover {
         let content = self.content;
         let in_popup = content.clone();
         let record = last.clone();
+        let callback = self.on_open_change;
         let mut popover = gpui_base::Popover::new(self.id)
             .anchor(self.anchor)
             .offset(px(6.0))
             .on_position(move |position, _| record.set(Some(position.bounds)))
             .on_open_change({
                 let motion = motion.clone();
-                move |now_open, _, cx| {
+                move |now_open, window, cx| {
                     let now_open = *now_open;
+                    if let Some(callback) = &callback {
+                        callback(now_open, window, cx);
+                    }
                     motion.update(cx, |state, cx| {
                         state.open = now_open;
                         cx.notify();
@@ -160,6 +207,12 @@ impl RenderOnce for Popover {
                 .id("popover-surface")
                 .occlude()
             });
+        if let Some(open) = self.controlled_open {
+            popover = popover.open(open);
+        }
+        if let Some(trigger) = self.custom_trigger {
+            popover = popover.trigger_with(trigger);
+        }
         if let Some(trigger) = self.trigger {
             popover = popover.trigger(trigger);
         }
