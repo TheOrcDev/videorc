@@ -157,6 +157,7 @@ pub const PORTED: &[PageId] = &[
     PageId::Studio,
     PageId::Sources,
     PageId::Live,
+    PageId::Guests,
     PageId::Settings,
     PageId::Diagnostics,
 ];

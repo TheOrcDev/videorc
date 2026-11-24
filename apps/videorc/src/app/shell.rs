@@ -24,6 +24,7 @@ use super::bridge::Mirror;
 use crate::preview::Preview;
 use crate::screens::destinations::DestinationsPanel;
 use crate::screens::go_live::GoLiveDialog;
+use crate::screens::guests::GuestsPanel;
 use crate::screens::output::OutputPanel;
 use crate::screens::sources::SourcesPanel;
 use crate::screens::studio::{StudioPage, transport::OpenPage};
@@ -81,6 +82,8 @@ pub struct Shell {
     output: Entity<OutputPanel>,
     /// Phase 3: Destinations ⌘6.
     destinations: Entity<DestinationsPanel>,
+    /// Phase 3: Guests ⌘7.
+    guests: Entity<GuestsPanel>,
     /// Phase 3: Go Live confirmation (over any page).
     go_live: Entity<GoLiveDialog>,
     settings: Entity<SettingsScreen>,
@@ -100,6 +103,7 @@ impl Shell {
         sources: Entity<SourcesPanel>,
         output: Entity<OutputPanel>,
         destinations: Entity<DestinationsPanel>,
+        guests: Entity<GuestsPanel>,
         go_live: Entity<GoLiveDialog>,
         settings: Entity<SettingsScreen>,
         health: Entity<crate::screens::health::HealthScreen>,
@@ -155,10 +159,15 @@ impl Shell {
         cx.observe(&sources, |_, _, cx| cx.notify()).detach();
         cx.observe(&output, |_, _, cx| cx.notify()).detach();
         cx.observe(&destinations, |_, _, cx| cx.notify()).detach();
+        cx.observe(&guests, |_, _, cx| cx.notify()).detach();
         cx.observe(&go_live, |_, _, cx| cx.notify()).detach();
         // Both routes use the same lifecycle, title and focus updates.
         cx.subscribe_in(&studio, window, |this, _, open: &OpenPage, window, cx| {
-            this.open_page(open.0, window, cx);
+            if let Some(tab) = open.settings_tab {
+                this.open_settings(Some(tab), window, cx);
+            } else {
+                this.open_page(open.page, window, cx);
+            }
         })
         .detach();
         cx.subscribe_in(&settings, window, |this, _, Navigate(page), window, cx| {
@@ -196,6 +205,7 @@ impl Shell {
             sources,
             output,
             destinations,
+            guests,
             go_live,
             settings,
             health,
@@ -337,6 +347,7 @@ impl Render for Shell {
         let sources = self.sources.clone();
         let output = self.output.clone();
         let destinations = self.destinations.clone();
+        let guests = self.guests.clone();
         div()
             .size_full()
             .on_mouse_down(
@@ -416,6 +427,18 @@ impl Render for Shell {
                             .gap(px(8.))
                             .child(div().type_scale(text::SECTION).child(page.label()))
                             .child(destinations)
+                    } else if page == PageId::Guests {
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .px(px(24.))
+                            .gap(px(8.))
+                            .child(div().type_scale(text::SECTION).child(page.label()))
+                            .child(guests)
                     } else {
                         div()
                             .flex_1()

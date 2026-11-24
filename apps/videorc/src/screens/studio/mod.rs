@@ -1,13 +1,14 @@
-//! The Studio page (plan 260 Phase 3, lane L1: preview and session;
-//! `studio-tab.tsx`). L1 owns this file, `transport.rs`, `space.rs` and the
-//! preview stage and session section as they land; L7 owns `audio/`,
-//! `scenes/` and `chat/`, which fill their slots here.
+//! The Studio page (plan 260 Phase 3: preview and session;
+//! `studio-tab.tsx`). Owns this file, `transport.rs`, `space.rs`, the
+//! preview stage, session, audio and takeover; `scenes/` and `chat/` fill
+//! their slots as they land.
 //!
 //! The grid follows the page's own width (P113): from 720 px the preview
 //! column spans the left and the transport heads the inspector on the
 //! right; narrower, the transport leads, then the preview, then the
 //! inspector.
 
+pub mod audio;
 pub mod layout;
 pub mod session;
 pub mod space;
@@ -31,6 +32,7 @@ use videorc_preview::lifecycle::WindowMode;
 
 use crate::preview::Preview;
 
+use audio::AudioSection;
 use layout::{INSPECTOR_MAX_PX, StudioLayout};
 use session::SessionSection;
 use space::{KEY_CONTEXT, SPACE, SpaceAction, SpacePress, ToggleRecord, space_action};
@@ -40,6 +42,7 @@ use transport::{OpenPage, Transport};
 /// Binds the page's keys; call once at start.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new(SPACE, ToggleRecord, Some(KEY_CONTEXT))]);
+    audio::bind_keys(cx);
 }
 
 pub struct StudioPage {
@@ -47,6 +50,7 @@ pub struct StudioPage {
     transport: Entity<Transport>,
     preview: Entity<Preview>,
     session: Entity<SessionSection>,
+    audio: Entity<AudioSection>,
     takeover: Entity<TakeoverSection>,
     /// The page's width at the last paint, for the breakpoint.
     width: f32,
@@ -69,6 +73,7 @@ impl StudioPage {
         transport: Entity<Transport>,
         preview: Entity<Preview>,
         session: Entity<SessionSection>,
+        audio: Entity<AudioSection>,
         takeover: Entity<TakeoverSection>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -76,6 +81,8 @@ impl StudioPage {
         cx.subscribe(&transport, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
         cx.subscribe(&session, |_, _, open: &OpenPage, cx| cx.emit(*open))
+            .detach();
+        cx.subscribe(&audio, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
         cx.subscribe(&takeover, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
@@ -91,6 +98,7 @@ impl StudioPage {
             transport,
             preview,
             session,
+            audio,
             takeover,
             width: 0.,
             space_held: false,
@@ -234,7 +242,8 @@ impl Render for StudioPage {
                     .flatten(),
             );
         // "Session inspector" (P114): cloud resume, the session section,
-        // chat, audio, quick settings and takeover, in that order.
+        // chat, audio, quick settings and takeover, in that order. Chat and
+        // quick settings fill their slots as they land.
         let inspector = div()
             .id("studio-session-inspector")
             .flex()
@@ -242,6 +251,7 @@ impl Render for StudioPage {
             .min_w_0()
             .min_h_0()
             .child(self.session.clone())
+            .child(self.audio.clone())
             .child(self.takeover.clone());
         let transport = self.transport.clone();
 

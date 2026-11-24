@@ -62,6 +62,7 @@ use app::shell::{Shell, StatusLine, connection_text};
 use app::{camera, capture, hotkeys, links, menus, sleep};
 use screens::destinations::DestinationsPanel;
 use screens::go_live::GoLiveDialog;
+use screens::guests::GuestsPanel;
 use screens::output::OutputPanel;
 use screens::sources::SourcesPanel;
 use screens::stream_manager::frame::StreamManagerFrame;
@@ -414,6 +415,7 @@ fn main() -> Result<()> {
         let output = cx.new(|cx| OutputPanel::new(studio.clone(), core_handle.clone(), cx));
         let destinations =
             cx.new(|cx| DestinationsPanel::new(studio.clone(), core_handle.clone(), cx));
+        let guests = cx.new(|cx| GuestsPanel::new(studio.clone(), core_handle.clone(), cx));
         let go_live = cx.new(|cx| GoLiveDialog::new(studio.clone(), core_handle.clone(), cx));
         let settings = cx.new(|cx| {
             screens::settings::SettingsScreen::new(
@@ -465,6 +467,16 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let audio = cx.new(|cx| {
+                    screens::studio::audio::AudioSection::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        studio_state.clone(),
+                        studio.mic_levels(),
+                        studio.cloud(),
+                        cx,
+                    )
+                });
                 let takeover = cx.new(|cx| {
                     TakeoverSection::new(
                         studio.backend().clone(),
@@ -478,6 +490,7 @@ fn main() -> Result<()> {
                         transport.clone(),
                         preview.clone(),
                         session,
+                        audio,
                         takeover,
                         window,
                         cx,
@@ -511,6 +524,7 @@ fn main() -> Result<()> {
                         sources.clone(),
                         output.clone(),
                         destinations.clone(),
+                        guests.clone(),
                         go_live.clone(),
                         settings.clone(),
                         health.clone(),
