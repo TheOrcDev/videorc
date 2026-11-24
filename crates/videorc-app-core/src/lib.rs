@@ -12,6 +12,7 @@ pub mod client;
 pub mod crash_log;
 pub mod desktop;
 mod encoding;
+pub mod guests;
 mod http;
 pub mod interruption;
 pub mod ledger;
