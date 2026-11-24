@@ -44,7 +44,7 @@ use shortcuts::PortalShortcutsHandle;
 /// the shortcuts and the `videorc://` handler carry over. The Wayland
 /// `app_id` its windows carry (`main.rs`) and the portal host Registry use it;
 /// the `.desktop` entry keeps Electron's `videorc.desktop`.
-pub const APP_ID: &str = "dev.theorcdev.videorc";
+pub const APP_ID: &str = crate::APP_ID;
 
 /// `CAPTURE_PROTECTION_UNSUPPORTED_REASON` (`shared/capture-protection.ts`):
 /// neither Wayland nor X11 lets an app keep its window out of a capture.
