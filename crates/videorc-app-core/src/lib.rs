@@ -25,6 +25,7 @@ pub mod restart;
 pub mod stream_manager;
 pub mod studio;
 pub mod supervisor;
+pub mod user_error;
 
 pub use client::{BackendClient, BackendEvent, ClientConfig, ConnectionState, EventFilter};
 pub use log::{Level, LogFileLimits, Logger, RotatingLogFile};
