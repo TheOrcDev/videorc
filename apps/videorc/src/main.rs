@@ -65,6 +65,7 @@ use screens::stream_manager::frame::StreamManagerFrame;
 use screens::studio::{
     self as studio_screen, StudioPage,
     session::SessionSection,
+    takeover::{TakeoverLink, TakeoverSection},
     transport::{SessionControls, Transport},
 };
 
@@ -366,6 +367,7 @@ fn main() -> Result<()> {
         let status = bridge::mirror(cx, backend_state.clone(), StatusLine::of);
         let connection = bridge::mirror(cx, connection_state.clone(), connection_text);
         let controls = bridge::mirror(cx, studio_state.clone(), SessionControls::of);
+        let takeover_link = bridge::mirror(cx, studio_state.clone(), TakeoverLink::of);
         let transport =
             cx.new(|cx| Transport::new(studio.clone(), core_handle.clone(), controls.clone(), cx));
         let sources = cx.new(|cx| {
@@ -410,8 +412,23 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let takeover = cx.new(|cx| {
+                    TakeoverSection::new(
+                        studio.backend().clone(),
+                        core_handle.clone(),
+                        takeover_link.clone(),
+                        cx,
+                    )
+                });
                 let studio_page = cx.new(|cx| {
-                    StudioPage::new(transport.clone(), preview.clone(), session, window, cx)
+                    StudioPage::new(
+                        transport.clone(),
+                        preview.clone(),
+                        session,
+                        takeover,
+                        window,
+                        cx,
+                    )
                 });
                 cx.new(|cx| {
                     Shell::new(
