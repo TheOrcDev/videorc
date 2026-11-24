@@ -9,6 +9,7 @@ use videorc_app_core::nav::{self, PageId, ZONES};
 use videorc_app_core::{BackendState, ConnectionState, Tone};
 
 use super::bridge::Mirror;
+use super::session::SessionPanel;
 
 /// The status bar's line: the supervisor's words, and whether the typed
 /// client has the backend's `backend.ready`.
@@ -60,12 +61,15 @@ pub struct Shell {
     page: PageId,
     backend: Entity<Mirror<StatusLine>>,
     connection: Entity<Mirror<String>>,
+    /// S2.4: Record, the clock, Stop and Go Live, on the Studio page.
+    session: Entity<SessionPanel>,
 }
 
 impl Shell {
     pub fn new(
         backend: Entity<Mirror<StatusLine>>,
         connection: Entity<Mirror<String>>,
+        session: Entity<SessionPanel>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&backend, |_, _, cx| cx.notify()).detach();
@@ -74,6 +78,7 @@ impl Shell {
             page: PageId::Studio,
             backend,
             connection,
+            session,
         }
     }
 
@@ -155,6 +160,7 @@ impl Render for Shell {
         let status = self.backend.read(cx).value().clone();
         let connection = self.connection.read(cx).value().clone();
         let page = self.page;
+        let session = self.session.clone();
         div()
             .size_full()
             .flex()
@@ -181,12 +187,18 @@ impl Render for Shell {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(page.label()),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .text_color(rgb(MUTED))
-                                    .child("This page comes in plan 260's Phase 3."),
-                            ),
+                            .map(|content| {
+                                if page == PageId::Studio {
+                                    content.child(session)
+                                } else {
+                                    content.child(
+                                        div()
+                                            .text_size(px(13.))
+                                            .text_color(rgb(MUTED))
+                                            .child("This page comes in plan 260's Phase 3."),
+                                    )
+                                }
+                            }),
                     ),
             )
             .child(
