@@ -1,0 +1,187 @@
+{
+  "note": "Plan 260 S1.2a. Each case is a request the renderer's caption painter (renderer/src/lib/caption-overlay.ts) drew; <id>.png is its PNG. These were made by plan 220's goldens script in videorc-rust at rendererCommit, whose caption painter is line for line the shipping one (only comments differ), on the same macOS and Electron (39.8.10) as this repo; scripts/overlay-raster-goldens.mjs remakes them here.",
+  "made": {
+    "date": "2026-11-12T20:19:52.581Z",
+    "macos": "26.5.1",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Videorc/0.20.1 Chrome/142.0.7444.265 Electron/39.8.10 Safari/537.36",
+    "rendererCommit": "942c50c341d81793c682883ca1907ae8a33c83db"
+  },
+  "cases": [
+    {
+      "id": "caption-glass-m-720p",
+      "request": {
+        "overlay": "caption",
+        "text": "Captions stay clear while we talk.",
+        "canvasWidth": 1280,
+        "canvasHeight": 720,
+        "textSize": "m",
+        "styleId": "glass"
+      }
+    },
+    {
+      "id": "caption-classic-m-720p",
+      "request": {
+        "overlay": "caption",
+        "text": "Outlines stay legible anywhere",
+        "canvasWidth": 1280,
+        "canvasHeight": 720,
+        "textSize": "m",
+        "styleId": "classic"
+      }
+    },
+    {
+      "id": "caption-lower-third-s-wrap",
+      "request": {
+        "overlay": "caption",
+        "text": "So the first thing we do is open the settings, then we pick the microphone, and after that we check the levels before going live tonight",
+        "canvasWidth": 1280,
+        "canvasHeight": 720,
+        "textSize": "s",
+        "styleId": "lower-third",
+        "maxBarWidthPx": 560
+      }
+    },
+    {
+      "id": "caption-high-contrast-s-vertical",
+      "request": {
+        "overlay": "caption",
+        "text": "White on black, for phones",
+        "canvasWidth": 1080,
+        "canvasHeight": 1920,
+        "textSize": "s",
+        "styleId": "high-contrast"
+      }
+    },
+    {
+      "id": "caption-glass-emoji-cjk",
+      "request": {
+        "overlay": "caption",
+        "text": "Hello 👋 こんにちは 🔥",
+        "canvasWidth": 1280,
+        "canvasHeight": 720,
+        "textSize": "m",
+        "styleId": "glass"
+      }
+    },
+    {
+      "id": "caption-high-contrast-l-360p-live",
+      "request": {
+        "overlay": "caption",
+        "text": "VIDEORC LIVE CAPTION RENDERER PROOF",
+        "canvasWidth": 640,
+        "canvasHeight": 360,
+        "textSize": "l",
+        "styleId": "high-contrast",
+        "maxBarWidthPx": 588
+      }
+    },
+    {
+      "id": "caption-high-contrast-m-portrait-rect",
+      "request": {
+        "overlay": "caption",
+        "text": "VIDEORC DUAL ORIENTATION CAPTION PROOF",
+        "canvasWidth": 720,
+        "canvasHeight": 1280,
+        "textSize": "m",
+        "styleId": "high-contrast",
+        "maxBarWidthPx": 547
+      }
+    },
+    {
+      "id": "caption-glass-l-1080p-rect",
+      "request": {
+        "overlay": "caption",
+        "text": "Big type for the 1080p stream",
+        "canvasWidth": 1920,
+        "canvasHeight": 1080,
+        "textSize": "l",
+        "styleId": "glass",
+        "maxBarWidthPx": 1766
+      }
+    },
+    {
+      "id": "caption-classic-s-1080p-rect",
+      "request": {
+        "overlay": "caption",
+        "text": "Classic outlines on a wide placed rect",
+        "canvasWidth": 1920,
+        "canvasHeight": 1080,
+        "textSize": "s",
+        "styleId": "classic",
+        "maxBarWidthPx": 1766
+      }
+    },
+    {
+      "id": "caption-lower-third-m-portrait-ellipsis",
+      "request": {
+        "overlay": "caption",
+        "text": "Lower third on the phone leg keeps the newest words when a long line runs past two rows",
+        "canvasWidth": 1080,
+        "canvasHeight": 1920,
+        "textSize": "m",
+        "styleId": "lower-third",
+        "maxBarWidthPx": 820
+      }
+    },
+    {
+      "id": "caption-frame-glass-m-720p-bottom",
+      "request": {
+        "overlay": "captionFrame",
+        "text": "Captions stay clear while we talk.",
+        "canvasWidth": 1280,
+        "canvasHeight": 720,
+        "position": "bottom",
+        "textSize": "m",
+        "styleId": "glass"
+      }
+    },
+    {
+      "id": "caption-frame-classic-l-portrait-top",
+      "request": {
+        "overlay": "captionFrame",
+        "text": "Outlines stay legible on phones too",
+        "canvasWidth": 720,
+        "canvasHeight": 1280,
+        "position": "top",
+        "textSize": "l",
+        "styleId": "classic"
+      }
+    },
+    {
+      "id": "caption-frame-lower-third-s-1080p-top",
+      "request": {
+        "overlay": "captionFrame",
+        "text": "So the first thing we do is open the settings, then we pick the microphone, and after that we check the levels",
+        "canvasWidth": 1920,
+        "canvasHeight": 1080,
+        "position": "top",
+        "textSize": "s",
+        "styleId": "lower-third"
+      }
+    },
+    {
+      "id": "caption-frame-high-contrast-l-360p-smoke",
+      "request": {
+        "overlay": "captionFrame",
+        "text": "VIDEORC LIVE CAPTION RENDERER PROOF",
+        "canvasWidth": 640,
+        "canvasHeight": 360,
+        "position": "bottom",
+        "textSize": "l",
+        "styleId": "high-contrast"
+      }
+    },
+    {
+      "id": "caption-preview-classic-m-960x540",
+      "request": {
+        "overlay": "captionFrame",
+        "text": "Your words become clear, live captions.",
+        "canvasWidth": 960,
+        "canvasHeight": 540,
+        "position": "bottom",
+        "textSize": "m",
+        "styleId": "classic"
+      }
+    }
+  ]
+}
