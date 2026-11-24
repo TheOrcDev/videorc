@@ -66,7 +66,7 @@ impl Hub {
                 {
                     return;
                 }
-                let state = serde_json::to_value(status.state)
+                let state = serde_json::to_value(&status.state)
                     .ok()
                     .and_then(|s| s.as_str().map(str::to_owned));
                 let running = sources::session::RunningSession {

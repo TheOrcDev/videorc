@@ -269,7 +269,7 @@ impl Render for Notes {
         status = status
             .child(
                 SegmentedControl::new("notes-text-size")
-                    .small()
+                    .small(true)
                     .manual(true)
                     .accessibility_label(TEXT_SIZE)
                     .value(Some(scale.id()))
