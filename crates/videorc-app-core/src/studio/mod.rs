@@ -26,7 +26,9 @@
 //!   L4), and its Studio half (`preview_scene_request`, the camera's look
 //!   on the layout).
 //! - [`sources`]: the devices and the committed scene as the backend reports
-//!   them; [`source_selection`] holds only the picker's kind for now.
+//!   them; [`source_selection`] the pickers, the builders and the reconcile;
+//!   [`live_sources`] and [`source_actions`] (S1.6b part 5a) a pick, idle or
+//!   inside a session, on plan 231's scenes.
 //! - [`scenes`] (S1.6b): plan 231's scene library as the Studio holds it,
 //!   read once the settings snapshot is in (the #1706 repair, the v1
 //!   migration, the working setup over the capture config, the scene on
@@ -61,12 +63,14 @@ pub mod health_page;
 pub mod js_value;
 pub mod latency;
 pub mod linux_desktop;
+pub mod live_sources;
 pub mod preview_scene;
 pub mod scene_editor;
 pub mod scene_switch;
 pub mod scenes;
 pub mod session;
 pub mod settings;
+pub mod source_actions;
 pub mod source_selection;
 pub mod sources;
 pub mod timecode;
@@ -160,7 +164,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 18] = [
+pub const STUDIO_EVENTS: [&str; 19] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -182,6 +186,8 @@ pub const STUDIO_EVENTS: [&str; 18] = [
     health::PREVIEW_SURFACE_STATUS_EVENT,
     // The mic sliver's bars (its view lands with the Session section).
     AUDIO_LEVELS_EVENT,
+    // S1.6b part 5a: the session's sources changed; read them again.
+    live_sources::SOURCES_CHANGED_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -384,6 +390,12 @@ pub struct StudioSnapshot {
     pub record_latency: RecordLatency,
     /// S1.6b: the scene library and the scene on stream.
     pub scenes: scenes::ScenesView,
+    /// S1.6b part 5a: a source change while a session runs
+    /// (`sourceSelectionState`).
+    pub live_sources: live_sources::LiveSourcesView,
+    /// S1.6b part 5a: why each picker waits (`sourceSwitchReason`): capture,
+    /// camera and microphone.
+    pub source_reasons: [Option<String>; 3],
 }
 
 /// What a start did.
@@ -454,6 +466,13 @@ struct Inner {
     latency: latency::LatencyTracker,
     /// S1.6b: the scenes' memory between events.
     scenes: scenes::ScenesCore,
+    /// S1.6b part 5a: the live source switch, its proof timer (when, for
+    /// which epoch, and whether it counts a proof read), why each picker
+    /// waits, and the returned picks already offered (`kind:id`).
+    live_sources: live_sources::LiveSources,
+    live_due: Option<(Instant, u64, bool)>,
+    source_reasons: [Option<String>; 3],
+    announced_returns: Vec<String>,
 }
 
 /// S2.6c: the exclusion list's bookkeeping.
@@ -682,6 +701,10 @@ impl<B: StudioBackend> Studio<B> {
             notices: SessionNotices::new(),
             latency: latency::LatencyTracker::new(),
             scenes: scenes::ScenesCore::default(),
+            live_sources: live_sources::LiveSources::default(),
+            live_due: None,
+            source_reasons: [None, None, None],
+            announced_returns: Vec::new(),
         };
         // Writes a previous run journaled wait in the cache until the
         // snapshot is in; then they are sent.
@@ -751,9 +774,20 @@ impl<B: StudioBackend> Studio<B> {
     /// retries when they fall due.
     pub async fn drive(self: Arc<Self>, mut events: broadcast::Receiver<BackendEvent>) {
         loop {
-            let due = self.lock().settings_retry_due;
+            let (due, live_due) = {
+                let inner = self.lock();
+                (inner.settings_retry_due, inner.live_due.map(|(at, ..)| at))
+            };
             let retry = async move {
                 match due {
+                    Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                    None => std::future::pending().await,
+                }
+            };
+            // S1.6b part 5a: the live switch's 250 ms proof read, and a new
+            // session's first read of its sources.
+            let live_read = async move {
+                match live_due {
                     Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
                     None => std::future::pending().await,
                 }
@@ -768,6 +802,7 @@ impl<B: StudioBackend> Studio<B> {
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
                 () = retry => self.retry_settings().await,
+                () = live_read => self.live_sources_due().await,
                 () = self.settings_retry.notified() => {}
             }
         }
@@ -796,6 +831,9 @@ impl<B: StudioBackend> Studio<B> {
                 };
                 self.publish();
                 self.emit_all(effects);
+                // S1.6b part 5a: a returned pick is offered only while a
+                // session runs.
+                self.announce_returning_sources().await;
             }
             BackendEvent::SceneChanged(scene) => {
                 self.lock().sources.set_scene(*scene);
@@ -805,6 +843,10 @@ impl<B: StudioBackend> Studio<B> {
                 self.lock().sources.set_devices(*devices);
                 self.publish();
                 self.flush_scene_writes().await;
+                // S1.6b part 5a: the working sources against the new list,
+                // and a pick that came back.
+                self.reconcile_working_sources().await;
+                self.announce_returning_sources().await;
             }
             BackendEvent::HealthEvent(event) => {
                 let commands = {
@@ -878,6 +920,10 @@ impl<B: StudioBackend> Studio<B> {
             }
             // The mic sliver reads these (the Session section, part 5).
             BackendEvent::Untyped { event, .. } if event == AUDIO_LEVELS_EVENT => {}
+            // S1.6b part 5a: the session's whole source authority, read again.
+            BackendEvent::Untyped { event, .. } if event == live_sources::SOURCES_CHANGED_EVENT => {
+                self.refresh_live_sources().await;
+            }
             BackendEvent::Untyped { event, payload } => {
                 // The Health page's telemetry (`stream.targets` feeds both it
                 // and the toasts).
@@ -1139,6 +1185,10 @@ impl<B: StudioBackend> Studio<B> {
         let _ = self.flush_settings().await;
         // S1.6b part 4: plan 258's D4 migration, once the scenes are read.
         self.settle_camera_background_migration().await;
+        // S1.6b part 5a: the working sources against the first device list.
+        if self.lock().bootstrap_generation == generation {
+            self.reconcile_working_sources().await;
+        }
     }
 
     /// S3.0g: `diagnostics.stats` and the four `preview.*.status` reads of
@@ -1332,8 +1382,11 @@ impl<B: StudioBackend> Studio<B> {
         self.publish();
         self.emit_all(effects);
         self.flush_scene_writes().await;
-        // The chat (`recoverLiveChatSnapshot`), the session's sources and the
-        // working sources are read again with their areas (S1.6b, S1.6e).
+        // S1.6b part 5a: the session's sources, and the working sources. The
+        // chat (`recoverLiveChatSnapshot`) is read again with its area
+        // (S1.6e).
+        self.refresh_live_sources().await;
+        self.reconcile_working_sources().await;
     }
 
     /// `refreshDevices` and the scene: the Sources page's Refresh.
@@ -1353,6 +1406,8 @@ impl<B: StudioBackend> Studio<B> {
         };
         self.publish();
         self.flush_scene_writes().await;
+        // S1.6b part 5a: the working sources against the list.
+        self.reconcile_working_sources().await;
         result
     }
 
@@ -2136,14 +2191,39 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     fn publish(&self) {
+        let start_in_flight = self.start_in_flight();
         let snapshot = {
-            let mut inner = self.lock();
+            let mut guard = self.lock();
+            let inner = &mut *guard;
+            // S1.6b part 5a: `sourceSelectionController.setSession` on every
+            // status applied; a new session's sources are read at once.
+            let session_status = inner.session.status().clone();
+            if inner.live_sources.set_session(
+                session_status.session_id.as_deref(),
+                &session_status.state,
+                session_status.replay_only,
+            ) && inner.live_sources.readable()
+            {
+                let epoch = inner.live_sources.epoch;
+                inner.live_due = Some((Instant::now(), epoch, false));
+                self.settings_retry.notify_one();
+            }
+            let reasons = {
+                let state: &Inner = inner;
+                [
+                    source_selection::SourceKind::Capture,
+                    source_selection::SourceKind::Camera,
+                    source_selection::SourceKind::Microphone,
+                ]
+                .map(|kind| source_actions::source_switch_reason_of(state, kind, start_in_flight))
+            };
+            inner.source_reasons = reasons;
             // Every status the Studio applied, through the clock.
             let status = inner.session.status().clone();
             if let Some(sample) = inner.latency.observe(&status, Instant::now()) {
                 self.config.logger.info(sample.log_line());
             }
-            let snapshot = Self::snapshot_of(&mut inner);
+            let snapshot = Self::snapshot_of(inner);
             (snapshot, std::mem::take(&mut inner.scenes.notices))
         };
         let (snapshot, scene_notices) = snapshot;
@@ -2215,6 +2295,8 @@ impl<B: StudioBackend> Studio<B> {
             },
             record_latency: inner.latency.last.clone(),
             scenes: inner.scenes_view(),
+            live_sources: inner.live_sources.view.clone(),
+            source_reasons: inner.source_reasons.clone(),
         }
     }
 }
