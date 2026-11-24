@@ -257,7 +257,8 @@ describe('NotificationCenter (plan 250, "The dropdown")', () => {
     await act(async () => root.render(null))
     // The close lands a turn later (see the StrictMode test below).
     await act(async () => new Promise((resolve) => setTimeout(resolve, 5)))
-    expect(store.count()).toEqual({ unread: 0, urgent: 1, tone: 'urgent' })
+    // Reading them does not clear them: both problems are still urgent.
+    expect(store.count()).toEqual({ unread: 0, urgent: 2, tone: 'urgent' })
   })
 
   // Seen by eye in the dev app: StrictMode runs an effect's cleanup at once

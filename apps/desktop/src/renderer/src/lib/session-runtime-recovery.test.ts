@@ -890,7 +890,8 @@ describe('record+stream notices (plan 174 B-6)', () => {
       currentNotice: null,
       replaceNotice: vi.fn()
     })
-    // It stays in the list as what happened, and its toast goes with it.
+    // It stays in the list as what happened. A warning never popped up (only
+    // urgent problems do), so there is no toast to take away.
     expect(notifications.snapshot()[0]).toMatchObject({
       key: 'stream-delivery',
       state: 'resolved',
@@ -898,7 +899,7 @@ describe('record+stream notices (plan 174 B-6)', () => {
       title: 'Your stream is choppy',
       detail: 'Viewers get 21 of 30 frames. Ended with the livestream.'
     })
-    expect(toast.dismiss).toHaveBeenCalledWith('notification:stream-delivery')
+    expect(toast.dismiss).not.toHaveBeenCalledWith('notification:stream-delivery')
     expect(notifications.count().tone).toBeNull()
   })
 
