@@ -70,6 +70,7 @@ impl TextInput {
     }
 
     /// Where the input was last painted (window coordinates).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the macOS IME script
     pub fn bounds(&self) -> Option<Bounds<Pixels>> {
         self.last_bounds
     }

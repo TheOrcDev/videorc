@@ -64,11 +64,72 @@ text, and screen-reader names on all three platforms (spellcheck waits):
 
 | D13 item | macOS state | Needs |
 | --- | --- | --- |
-| IME | GPUI's input path is right for Japanese and Chinese composition | A session with the real input methods (owner, or a contributor); Windows (WC-0.7: IMM32) and Linux (L5: fcitx5, XIM) |
-| Colour emoji | Pass | Windows and Linux shots |
+| IME | GPUI's input path is right for Japanese and Chinese composition | A session with the real input methods (owner, or a contributor); Windows (WC-0.7: IMM32). Linux: Wayland passes; X11 needs the XIM patch (see Linux) |
+| Colour emoji | Pass | Windows shots; Linux passes but for `❤️` (VS16) |
 | Inline emotes | They draw and wrap inline; animation is wasteful | The kit's timer-driven animated image (small, no GPUI patch) |
 | Selectable chat and Notes text | One block works (spike) | Chat rows as one `StyledText` each; Notes on the kit's input/editor (gpui-component, D3) |
 | Screen-reader names | Not in this spike | S0.6 |
+
+## Verdicts on Linux (ogre, 2026-11-24, lane L5)
+
+ogre: Omarchy, Hyprland 0.56.2, fcitx5 5.1.23 with Mozc (Japanese) and
+Pinyin. The owner's session was locked, so the spike ran in a **nested
+Hyprland** (same build) on the lab output (`videorc-lab`, 1920 x 1080 at
+**30 Hz**), with its own Xwayland for X11 and a **private fcitx5** (its own
+D-Bus session with no activatable services, a copy of the config) connected
+only to the nested display. Keys were typed into the nested compositor
+only (`linux/ime-drive-*.sh` refuse any other target): `wtype` on Wayland,
+`xdotool` on the nested Xwayland. Clocks flipped between 800 MHz (the T2
+PROCHOT) and 4 GHz; each run's clock is given.
+
+| Check | Line | Wayland (text-input-v3) | X11 (XIM, Xwayland) | Verdict |
+| --- | --- | --- | --- | --- |
+| IME, Japanese (Mozc) | Commits correctly | `nihon` composes `にほん` underlined inline, Space converts to `日本`, Enter commits it | Only with the GPUI fix below, plus fcitx5's on-the-spot style: `にほん` composes inline, converts to `日本`, commits | **Wayland PASS; X11 FAIL as shipped, PASS with a 9-line GPUI patch** |
+| IME, Chinese (Pinyin) | Commits correctly | `zhongwen` composes `zhong wen`, Space commits `中文` | Same as Japanese: commits `中文` with the patch (inline composition needs on-the-spot) | Same |
+| Candidate window | Sits at the input | GPUI sends the cursor rectangle (`set_cursor_rectangle`) and the XIM spot location; **no candidate window appeared in any screenshot of the nested compositor** | Same | **Unverified:** needs the owner's look on a real session |
+| Colour emoji | Draw in colour | Skin tones, ZWJ sequences, the flag in colour; **`❤️` draws as a white text heart** (VS16 ignored) | Same text system | **PASS, one gap** |
+| Font fallback | No missing glyphs | Japanese, both Chinese scripts, Korean, Arabic and Hebrew (right to left, joined), Thai, Hindi (shaped), Greek, Cyrillic | Same | **PASS** |
+| Tabular numbers | Equal digit widths | `1111111111` 61.01 px and `8888888888` 92.80 px, **the same with `tnum`** | Same | **FAIL: cause found** (below) |
+| 10,000-row chat, scrolling | 60 fps | 30.0 fps, p95 33.5 ms, max 36.3 ms | 30.0 fps, p95 33.4 ms | **Not measurable at 60:** the output runs at 30 Hz and GPUI keeps up with it (at 800 MHz). 60 fps needs a 60 Hz output |
+| Memory | +100 MB at most | 103.5 MB with 10,000 rows, 89.8 MB with none: **+13.7 MB** | 103.0 vs 89.5 MB: **+13.5 MB** | **PASS** |
+| First paint | 100 ms | Window open to first frame: 144 ms at 4 GHz (`--emotes timer` run), 600 ms at 800 MHz | 131 to 156 ms at 4 GHz, 506 to 524 ms at 800 MHz | **MISS** (as on macOS; S0.9 owns start-up) |
+| Animated emotes | Animate inline | GPUI's `img`: 61 % of a core at 30 redraws/s (800 MHz); timer-driven: 5.9 % at 12.6 redraws/s (4 GHz) | 63 % / 5.8 % | Same gap and fix as macOS |
+
+Found on Linux:
+
+- **GPUI's X11 XIM handshake breaks on focus.** `FocusIn` calls
+  `enable_ime`, which sends `CreateIc` (and `FocusOut` sends `ResetIc`)
+  with input method 0 while `Open` is still in flight. fcitx5 answers with
+  an error that `zed-xim` cannot parse (`XIMClientError: Can't read xim
+  message: Invalid Data`), GPUI drops XIM for the session, and every key
+  goes in raw. [`linux/gpui-x11-xim-handshake.patch`](linux/gpui-x11-xim-handshake.patch)
+  (against `gpui-pre-linux` 0.3.14, 9 lines) skips both until the
+  handshake has finished; with it the handshake completes, and Pinyin and
+  Mozc commit through XIM. The same code is in Zed's `gpui_linux`, so it
+  goes upstream. It was tested through a local `[patch.crates-io]`, not
+  added to this workspace.
+- **GPUI never sends `XIM_SET_IC_FOCUS`.** fcitx5 learns which context is
+  focused only from the first key, so an input method switched before any
+  key (`fcitx5-remote -s`) applies to no context. A small addition to the
+  same patch.
+- **fcitx5's XIM frontend draws composition in its own window by default**
+  (over the spot). GPUI asks for `PREEDIT_CALLBACKS`; with fcitx5's
+  `UseOnTheSpot=True` the composition shows inline in GPUI's input, as on
+  Wayland.
+- **`.SystemUIFont` is "IBM Plex Sans" on Linux** (hard-coded in
+  `gpui-pre-linux`), which Omarchy does not ship. cosmic-text then picks a
+  fallback face, and GPUI loads fallback faces with **empty font features**
+  (`cosmic_text_system.rs`, `font_id_for_cosmic_id`), so `tnum` is lost.
+  The kit should name the font Videorc bundles on Linux, never
+  `.SystemUIFont`; with a named, installed family the features are passed
+  through (not measured here).
+- `wtype` cannot type into X11 windows on Xwayland (its keymap does not
+  carry over); `xdotool` on the nested Xwayland does.
+
+Linux flags: `--ime-wait <ms>` pauses the script for typing with the real
+input method and records every change of the committed and composing text
+in `ime_observed`; `SPIKE_LOG=info|debug` prints GPUI's own log lines
+(the XIM and text-input handshakes).
 
 ## What it does
 
