@@ -40,9 +40,14 @@ use crate::notices::{NoticeCommand, ToastRequest};
 use crate::scenes::library::{Refused, ScenesState, StoredScenes, load_scenes};
 use crate::scenes::migration::StoredForMigration;
 use crate::scenes::model::{
-    SavedScene, hydrate_working_scene, load_json, merge_visual_sources, without_scene_app,
+    SavedScene, hydrate_working_scene, load_json, merge_visual_sources, same_scene_audio,
+    same_scene_visual, scene_audio, without_scene_app,
 };
 use crate::scenes::store::hydrate_scenes;
+use crate::scenes::switch_progress::{
+    SceneSwitchProgress, SceneSwitchStatusLine, SwitchCamera, scene_switch_status_line,
+    scene_switch_status_visible, scene_switch_status_visible_at,
+};
 use crate::scenes::v2::{MainDisplay, Orientation, Scene, SceneLibrary, SceneShows};
 use crate::scenes::view::{
     saved_scene_view, scene_display_refreshed, scene_draws_screen, scene_from_saved,
@@ -97,9 +102,38 @@ pub struct ScenesView {
     pub transaction_pending: bool,
     /// The working background as the last commit drew it (`workingBackground`).
     pub working_background: Option<Value>,
+    /// Part 3c (#1275): the switch running, what was clicked and the phase
+    /// it waits on (`sceneSwitchProgress`). Its status line is
+    /// [`ScenesView::progress_line`].
+    pub switch_progress: Option<SceneSwitchProgress>,
+    /// `savedSceneModified`: the look on stream that the scene on stream has
+    /// not taken yet, or audio that differs from the audio it pins. Its
+    /// screen is not part of it (D18).
+    pub saved_scene_modified: bool,
 }
 
 impl ScenesView {
+    /// The switch's status line at `now_ms` (`SceneSwitchStatus`): none
+    /// while no switch runs or for its first moment, unless it took over
+    /// another. `camera` is the chosen camera's name and slow frame rate.
+    pub fn progress_line(
+        &self,
+        now_ms: u64,
+        camera: Option<&SwitchCamera>,
+    ) -> Option<SceneSwitchStatusLine> {
+        let progress = self.switch_progress.as_ref()?;
+        scene_switch_status_visible(progress, now_ms)
+            .then(|| scene_switch_status_line(progress, camera))
+    }
+
+    /// When the status line shows, for a UI that draws again then (no timer
+    /// lives in the Studio).
+    pub fn progress_line_at(&self) -> Option<u64> {
+        self.switch_progress
+            .as_ref()
+            .map(scene_switch_status_visible_at)
+    }
+
     /// The stored scene on stream.
     pub fn on_stream(&self) -> Option<&Scene> {
         let id = self.on_stream_id.as_deref()?;
@@ -433,6 +467,7 @@ impl Inner {
                 .map(|app| (listed.id.clone(), app))
             })
             .collect();
+        let saved_scene_modified = self.saved_scene_modified(&scenes);
         ScenesView {
             loaded: true,
             library: Some(state.library.clone()),
@@ -446,7 +481,35 @@ impl Inner {
             pending_scene_id: self.scenes.switch.pending_id.clone(),
             transaction_pending: self.scenes.switch.transaction_pending,
             working_background: self.scenes.switch.working_background.clone(),
+            switch_progress: self.scenes.switch.progress.clone(),
+            saved_scene_modified,
         }
+    }
+
+    /// `savedSceneModified` (use-studio.tsx ~12328): the scene on stream, as
+    /// listed, against the working look with the scene's sources set to the
+    /// working ones, and its audio against the working audio.
+    fn saved_scene_modified(&self, listed: &[SavedScene]) -> bool {
+        let Some(id) = self.scenes.on_stream.as_deref() else {
+            return false;
+        };
+        let Some(working) = self.working_visual() else {
+            return false;
+        };
+        let config = &self.capture.config;
+        let working_audio = scene_audio(
+            &config["sources"],
+            config["audio"]["systemAudioEnabled"] == Value::Bool(true),
+        );
+        listed.iter().any(|entry| {
+            if entry.id != id {
+                return false;
+            }
+            let mut visual = entry.visual.clone();
+            visual["sources"] = working["sources"].clone();
+            !same_scene_visual(&visual, &working)
+                || !same_scene_audio(entry.audio.as_ref(), &working_audio)
+        })
     }
 }
 
@@ -479,9 +542,22 @@ impl<B: StudioBackend> Studio<B> {
 
     /// Add scene… and Duplicate (D5): stored scenes at the end, or right
     /// after `after_id` (a duplicate's original). A taken name or id is
-    /// refused, never renamed here.
-    pub async fn insert_scenes(&self, added: &[Scene], after_id: Option<&str>) -> bool {
+    /// refused, never renamed here. An app scene looks for its window in
+    /// `window_hints` first (the picker's front window, plan 210 D5), which
+    /// are taken even when the write is refused (as the renderer's
+    /// `Object.assign` before `insert`).
+    pub async fn insert_scenes(
+        &self,
+        added: &[Scene],
+        after_id: Option<&str>,
+        window_hints: &HashMap<String, String>,
+    ) -> bool {
         self.edit_scenes(|inner| {
+            inner.scenes.switch.window_hints.extend(
+                window_hints
+                    .iter()
+                    .map(|(id, hint)| (id.clone(), hint.clone())),
+            );
             let edit = inner
                 .scenes
                 .state
@@ -493,9 +569,17 @@ impl<B: StudioBackend> Studio<B> {
         .await
     }
 
-    /// Change screen…: a stored scene in its place.
-    pub async fn edit_scene(&self, scene: &Scene) -> bool {
+    /// Change screen…: a stored scene in its place; its app's window is
+    /// looked for at `window_hint` first.
+    pub async fn edit_scene(&self, scene: &Scene, window_hint: Option<&str>) -> bool {
         self.edit_scenes(|inner| {
+            if let Some(hint) = window_hint.filter(|hint| !hint.is_empty()) {
+                inner
+                    .scenes
+                    .switch
+                    .window_hints
+                    .insert(scene.id.clone(), hint.to_string());
+            }
             let edit = inner.scenes.state.as_ref().expect("checked").replace(scene);
             inner.write_edit(edit)
         })
@@ -506,6 +590,19 @@ impl<B: StudioBackend> Studio<B> {
     /// sources): the stored scene with it, in its place.
     pub async fn replace_listed_scene(&self, scene: &SavedScene) -> bool {
         self.edit_scenes(|inner| {
+            // An app scene's window is where it looks first.
+            let sources = scene.visual.get("sources");
+            if super::js_value::truthy(super::js_value::get(sources, "app"))
+                && let Some(window) =
+                    super::js_value::string(super::js_value::get(sources, "windowId"))
+                        .filter(|window| !window.is_empty())
+            {
+                inner
+                    .scenes
+                    .switch
+                    .window_hints
+                    .insert(scene.id.clone(), window.to_string());
+            }
             let Some(previous) = inner.stored_scene(&scene.id) else {
                 return false;
             };

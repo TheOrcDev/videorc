@@ -1393,21 +1393,31 @@ impl<B: StudioBackend> Studio<B> {
         // S3.1a: a start already on its way answers a second caller asking
         // for the same start with its own answer (`sessionStartInFlightRef`);
         // any other start is busy at once (the renderer answers it false).
-        let (answer, joined) = {
+        // S1.6b part 3c (#1643): a scene change awaiting its proof has not
+        // reached the capture config yet; started now, the session would
+        // commit the scene it is leaving. The start waits for it, then holds
+        // the scene it carries until its answer is applied, so a switch
+        // asked for meanwhile waits and goes to the session it started.
+        let (answer, joined, scene_hold) = loop {
+            self.wait_for_layout_proof().await;
             let mut in_flight = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
             match in_flight.as_ref() {
                 Some(start) if start.intent == intent && start.streaming == streaming => {
-                    (None, Some(start.answer.clone()))
+                    break (None, Some(start.answer.clone()), None);
                 }
                 Some(_) => return StartOutcome::Busy,
                 None => {
+                    // A switch minted since the wait: wait for it too.
+                    let Some(hold) = self.hold_start_scene() else {
+                        continue;
+                    };
                     let (answer, heard) = watch::channel(None);
                     *in_flight = Some(InFlightStart {
                         intent,
                         streaming: streaming.clone(),
                         answer: heard,
                     });
-                    (Some(answer), None)
+                    break (Some(answer), None, Some(hold));
                 }
             }
         };
@@ -1421,6 +1431,8 @@ impl<B: StudioBackend> Studio<B> {
         // Cleared however this start ends, a dropped future included.
         let clear = ClearInFlight(&self.in_flight);
         let outcome = self.start_once(intent, streaming).await;
+        // Every other way out (refused, failed, dropped) answers the hold.
+        drop(scene_hold);
         drop(clear);
         answer.send_replace(Some(outcome.clone()));
         outcome
@@ -1485,6 +1497,10 @@ impl<B: StudioBackend> Studio<B> {
                     inner.session.finish_start(status, Instant::now())
                 };
                 self.publish();
+                // #1643: the start's scene is committed and the session's
+                // state known: a scene change held for it now goes to the
+                // session it started.
+                self.release_start_scene();
                 self.emit_all(effects);
                 if resolution.session_active {
                     StartOutcome::Started
