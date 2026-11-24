@@ -11,15 +11,18 @@
 //! fallback, and the floating window's cards on the Studio page while the
 //! layer lives in the Preview window.
 //!
-//! Windows and Linux get their elements in S2.3b (D12's route) and S2.3c
-//! (S0.3's route); until then their slot says the preview failed to start,
-//! which is the truth.
+//! Linux has its element since S2.3c (`linux.rs`, S0.3's route: the
+//! presenter's child above GPUI's drawing, docked only for now). Windows
+//! gets its own in S2.3b (D12's route); until then its slot says the preview
+//! failed to start, which is the truth.
 
 #[cfg(target_os = "macos")]
 mod floating;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod scene;
 
 use gpui::{AnyElement, App, AppContext, Entity, FontWeight, Window, div, prelude::*, px, rgb};
@@ -29,6 +32,8 @@ use videorc_preview::element::Phase;
 use videorc_preview::lifecycle::WindowMode;
 use videorc_preview::words::{self, PreviewWords};
 
+#[cfg(target_os = "linux")]
+use gpui::canvas;
 #[cfg(target_os = "macos")]
 use {
     gpui::{
@@ -76,10 +81,12 @@ pub struct Preview {
     mode: WindowMode,
     /// The Studio page is the one showing (the docked slot is on screen).
     docked_shown: bool,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     logger: Logger,
     #[cfg(target_os = "macos")]
     native: Option<Native>,
+    #[cfg(target_os = "linux")]
+    native: Option<linux::Native>,
     #[cfg(target_os = "macos")]
     floating: Option<WindowHandle<floating::FloatingPreview>>,
     /// Pop out was pressed and the window is opening (`Preview::float`).
@@ -97,12 +104,16 @@ impl Preview {
         {
             Self::new_macos(setup, window, cx)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            linux::new(setup, window, cx)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = (setup.runtime, setup.backend, window);
             setup.logger.log(
                 Level::Warn,
-                "[preview] no preview element on this platform yet (S2.3b on Windows, S2.3c on Linux)",
+                "[preview] no preview element on this platform yet (S2.3b on Windows)",
             );
             cx.new(|_| Self {
                 phase: Phase::Fallback,
@@ -263,14 +274,20 @@ impl Preview {
         self.native.is_some()
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    fn native_ready(&self) -> bool {
+        self.native.is_some()
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     fn native_ready(&self) -> bool {
         false
     }
 
-    /// Whether the Preview can open in its own window here.
+    /// Whether the Preview can open in its own window here (macOS; Linux's
+    /// floating window is S2.3c's follow-up).
     pub fn can_float(&self) -> bool {
-        self.native_ready()
+        cfg!(target_os = "macos") && self.native_ready()
     }
 
     /// The shell says whether the Studio page shows: a slot that is not on
@@ -282,13 +299,15 @@ impl Preview {
         self.docked_shown = shown;
         #[cfg(target_os = "macos")]
         self.apply_visibility();
+        #[cfg(target_os = "linux")]
+        self.apply_linux_visibility();
     }
 
     /// The docked slot, for the Studio page: the video where the layer
     /// shows, and the words while no frame does.
     pub fn docked_slot(entity: &Entity<Self>, cx: &App) -> AnyElement {
         let preview = entity.read(cx);
-        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(unused_mut))]
         let mut slot = div()
             .relative()
             .size_full()
@@ -306,6 +325,27 @@ impl Preview {
                         let geometry = macos::geometry_of(window, bounds, cx);
                         let _ = weak.update(cx, |preview, _| {
                             preview.place(Host::Docked, bounds, geometry)
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
+        }
+        // Linux: the presenter's child follows the slot in window points;
+        // a pending reset-native-path rebuilds it here, where the window is.
+        #[cfg(target_os = "linux")]
+        if preview.mode == WindowMode::Docked && preview.native.is_some() {
+            let weak = entity.downgrade();
+            slot = slot.child(
+                canvas(
+                    move |bounds, window, cx| {
+                        let geometry = linux::geometry_of(window, bounds, cx);
+                        let _ = weak.update(cx, |preview, _| {
+                            preview.place_linux(window, bounds, geometry)
                         });
                     },
                     |_, _, _, _| {},
@@ -348,6 +388,8 @@ impl Preview {
         }
         #[cfg(not(target_os = "macos"))]
         let _ = cx;
+        #[cfg(target_os = "linux")]
+        self.stop_linux();
     }
 
     // --- macOS: placing, moving and healing the layer ---
