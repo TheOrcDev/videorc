@@ -50,7 +50,8 @@ import type {
   ScheduledEventMetadata,
   ScheduledStreamEvent,
   ScheduledStreamOperation,
-  ScheduledStreamProvider
+  ScheduledStreamProvider,
+  ScheduledTimeResolution
 } from '@/lib/backend'
 import type { useScheduledStreams } from '@/hooks/use-scheduled-streams'
 import { broadcastInfoIssues } from '@/lib/broadcast-info'
@@ -58,8 +59,8 @@ import { openLivestreamView } from '@/lib/livestream-tabs'
 import {
   formatGmtOffset,
   formatScheduledStart,
-  localTimeOffsets,
-  timeZoneLabel
+  timeZoneLabel,
+  wallTimeAt
 } from '@/lib/schedule-time'
 import { scheduledProviderLabel, scheduledProviderNoun } from '@/lib/scheduled-streams'
 import { userErrorMessage } from '@/lib/user-error'
@@ -69,6 +70,9 @@ const AUDIENCE_ITEMS = [
   { value: 'false', label: 'No, not made for kids' },
   { value: 'true', label: 'Yes, made for kids' }
 ] as const
+
+/** The backend's words for a repeated hour that has no earlier/later choice yet. */
+const OCCURS_TWICE = 'This local time occurs twice. Choose the earlier or later offset.'
 
 /** A failure in the form's words, never the raw error (plan 174 S2.4). */
 function formError(error: unknown, action: string): string {
@@ -110,19 +114,21 @@ export function scheduleBlockedReason({
   return null
 }
 
-function localWallTime(date: Date): string {
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
-}
-
 /** Two hours after a `datetime-local` value, in the same wall clock. */
 export function defaultPlannedEnd(localStart: string): string {
-  const start = new Date(localStart)
-  if (Number.isNaN(start.getTime())) return ''
-  return localWallTime(new Date(start.getTime() + 2 * 3_600_000))
+  const start = Date.parse(`${localStart}Z`)
+  if (Number.isNaN(start)) return ''
+  return wallTimeAt(start + 2 * 3_600_000, 0)
 }
 
+/** A new event starts an hour from now. */
+const FRESH_START_LEAD_MS = 3_600_000
+
 function freshMetadata(provider: ScheduledStreamProvider): ScheduledEventMetadata {
-  const local = localWallTime(new Date(Date.now() + 3_600_000))
+  // A placeholder in the renderer's own clock until `zoneOffsets` answers:
+  // Electron's tz data can be an hour off for the streamer's zone.
+  const startMs = Date.now() + FRESH_START_LEAD_MS
+  const local = wallTimeAt(startMs, -new Date(startMs).getTimezoneOffset())
   return {
     title: '',
     description: '',
@@ -179,7 +185,7 @@ export function ScheduleStreamDialog({
   const [titleTouched, setTitleTouched] = useState(Boolean(event))
   const [dirty, setDirty] = useState(false)
   const [discard, setDiscard] = useState(false)
-  const [resolved, setResolved] = useState('')
+  const [resolution, setResolution] = useState<ScheduledTimeResolution | null>(null)
   const [timeError, setTimeError] = useState('')
   const [error, setError] = useState('')
   const [conflict, setConflict] = useState(false)
@@ -195,24 +201,58 @@ export function ScheduleStreamDialog({
     setDirty(true)
   }
   const request = state.request
+  // A new event's default start, an hour from now, in the zone's wall clock
+  // as the backend's tz data has it. Kept only while the field is untouched.
+  const [placeholderStart] = useState(() => (event ? null : metadata.localStart))
+  useEffect(() => {
+    if (!placeholderStart) return
+    let active = true
+    const startMs = Date.now() + FRESH_START_LEAD_MS
+    void request<{ offsets: Record<string, number> }>('zoneOffsets', {
+      timeZones: [metadata.timeZone],
+      atUtc: new Date(startMs).toISOString()
+    })
+      .then(({ offsets }) => {
+        const offset = offsets[metadata.timeZone]
+        if (!active || offset === undefined) return
+        const localStart = wallTimeAt(startMs, offset)
+        setMetadata((old) =>
+          old.localStart === placeholderStart
+            ? {
+                ...old,
+                localStart,
+                plannedEndLocal:
+                  old.plannedEndLocal === defaultPlannedEnd(placeholderStart)
+                    ? defaultPlannedEnd(localStart)
+                    : old.plannedEndLocal
+              }
+            : old
+        )
+      })
+      .catch(() => undefined)
+    return () => {
+      active = false
+    }
+  }, [placeholderStart, metadata.timeZone, request])
   useEffect(() => {
     let active = true
     const timer = setTimeout(() => {
-      void request<{ startUtc: string }>('resolveTime', {
+      void request<ScheduledTimeResolution>('resolveTime', {
         localStart: metadata.localStart,
         timeZone: metadata.timeZone,
-        offsetChoice: metadata.offsetChoice
+        offsetChoice: metadata.offsetChoice,
+        plannedEndLocal: provider === 'x' ? (metadata.plannedEndLocal ?? null) : null
       })
-        .then(({ startUtc }) => {
+        .then((next) => {
           if (active) {
-            setResolved(startUtc)
-            setTimeError('')
+            setResolution(next)
+            setTimeError(next.startUtc ? '' : OCCURS_TWICE)
           }
         })
         .catch((error: Error) => {
           if (active) {
             setTimeError(error.message)
-            setResolved('')
+            setResolution(null)
           }
         })
     }, 150)
@@ -220,7 +260,15 @@ export function ScheduleStreamDialog({
       active = false
       clearTimeout(timer)
     }
-  }, [metadata.localStart, metadata.timeZone, metadata.offsetChoice, request])
+  }, [
+    metadata.localStart,
+    metadata.timeZone,
+    metadata.offsetChoice,
+    metadata.plannedEndLocal,
+    provider,
+    request
+  ])
+  const resolved = resolution?.startUtc ?? ''
   // X requires an end on every update, so the form never submits an open-ended
   // X broadcast; the local strings share one zone, so they compare directly.
   const plannedEndError =
@@ -244,13 +292,15 @@ export function ScheduleStreamDialog({
   const valid = blockedReason === null
   // The repeated-hour choice appears only when the clocks go back over the
   // chosen time (D-31), labelled with the two real offsets.
-  const offsets = localTimeOffsets(metadata.localStart, metadata.timeZone)
-  const ambiguous = offsets.length === 2
-  const offsetItems = [
-    { value: 'earlier', label: `The first, at ${formatGmtOffset(offsets[0])}` },
-    { value: 'later', label: `The second, at ${formatGmtOffset(offsets[1])}` }
-  ] as const
-  const zoneAt = resolved ? Date.parse(resolved) : Date.now()
+  const offsets = resolution?.repeatedHourOffsets ?? null
+  const ambiguous = offsets !== null
+  const offsetItems = offsets
+    ? ([
+        { value: 'earlier', label: `The first, at ${formatGmtOffset(offsets[0])}` },
+        { value: 'later', label: `The second, at ${formatGmtOffset(offsets[1])}` }
+      ] as const)
+    : []
+  const zoneAt = resolved || undefined
   const accounts = providerCapability?.accounts ?? state.capabilities?.accounts ?? []
   const accountNoun = provider === 'x' ? 'X account' : 'YouTube channel'
   const sendLabel = published ? `Update ${providerNoun}` : `Schedule on ${providerLabel}`
@@ -443,9 +493,9 @@ export function ScheduleStreamDialog({
                     />
                     {timeError ? (
                       <FieldError>{timeError}</FieldError>
-                    ) : resolved ? (
+                    ) : resolved && resolution?.startOffsetMinutes != null ? (
                       <FieldDescription data-testid="schedule-start-summary">
-                        {formatScheduledStart(resolved, metadata.timeZone)}
+                        {formatScheduledStart(resolved, resolution.startOffsetMinutes)}
                       </FieldDescription>
                     ) : null}
                   </Field>
@@ -481,12 +531,13 @@ export function ScheduleStreamDialog({
                           />
                         }
                       >
-                        {timeZoneLabel(metadata.timeZone, zoneAt)}
+                        {timeZoneLabel(metadata.timeZone, resolution?.startOffsetMinutes)}
                         <ChevronDownIcon data-icon="inline-end" />
                       </PopoverTrigger>
                       <PopoverContent className="p-0">
                         <TimeZoneList
-                          atMs={zoneAt}
+                          atUtc={zoneAt}
+                          request={request}
                           onSelect={(zone) => {
                             patch({ timeZone: zone })
                             setZoneOpen(false)
@@ -689,26 +740,51 @@ export function ScheduleStreamDialog({
 
 /**
  * Every time zone, named by its city and offset ("Madrid (GMT+2)", D-31) and
- * searchable by its id too. Built only while the picker is open.
+ * searchable by its id too. Built only while the picker is open; the offsets
+ * come from the backend's tz data, cities alone until they arrive.
  */
 function TimeZoneList({
-  atMs,
+  atUtc,
+  request,
   onSelect
 }: {
-  atMs: number
+  /** The event's start, or now when it has none yet. */
+  atUtc: string | undefined
+  request: ReturnType<typeof useScheduledStreams>['request']
   onSelect: (zone: string) => void
 }): ReactElement {
-  // Labelled once per opening, not on every search keystroke.
-  const zones = useMemo(() => {
+  const ids = useMemo(() => {
     const ids = Intl.supportedValuesOf('timeZone')
     if (!ids.includes('UTC')) ids.unshift('UTC')
-    return ids.map((zone) => ({ zone, label: timeZoneLabel(zone, atMs) }))
-  }, [atMs])
+    return ids
+  }, [])
+  // `null` until the backend answers; cities alone if it can't.
+  const [offsets, setOffsets] = useState<Record<string, number> | null>(null)
+  useEffect(() => {
+    let active = true
+    void request<{ offsets: Record<string, number> }>('zoneOffsets', {
+      timeZones: ids,
+      ...(atUtc ? { atUtc } : {})
+    })
+      .then((next) => next.offsets)
+      .catch(() => ({}))
+      .then((next) => {
+        if (active) setOffsets(next)
+      })
+    return () => {
+      active = false
+    }
+  }, [atUtc, ids, request])
+  // Labelled once per answer, not on every search keystroke.
+  const zones = useMemo(
+    () => (offsets ? ids.map((zone) => ({ zone, label: timeZoneLabel(zone, offsets[zone]) })) : []),
+    [ids, offsets]
+  )
   return (
     <Command>
       <CommandInput placeholder="Search time zones…" />
       <CommandList>
-        <CommandEmpty>No time zones found.</CommandEmpty>
+        <CommandEmpty>{offsets ? 'No time zones found.' : 'Loading time zones…'}</CommandEmpty>
         <CommandGroup>
           {zones.map(({ zone, label }) => (
             <CommandItem

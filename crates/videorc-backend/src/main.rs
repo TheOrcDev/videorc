@@ -219,6 +219,7 @@ mod test_temp_dir;
 mod transcript;
 mod twitch;
 mod twitch_chat;
+mod tzdb;
 mod usage_stats;
 #[cfg(target_os = "macos")]
 mod video_toolbox_encoder;
@@ -6532,6 +6533,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "scheduledStreams.get"
         | "scheduledStreams.operation"
         | "scheduledStreams.resolveTime"
+        | "scheduledStreams.zoneOffsets"
         | "scheduledStreams.candidates"
         | "account.get"
         | "entitlements.get"
@@ -16223,6 +16225,7 @@ async fn handle_text_message_with_role(
         | "scheduledStreams.get"
         | "scheduledStreams.operation"
         | "scheduledStreams.resolveTime"
+        | "scheduledStreams.zoneOffsets"
         | "scheduledStreams.candidates" => {
             match scheduled_streams_service::dispatch(state, &command.method, command.params).await
             {

@@ -1,6 +1,6 @@
 import { patchPreparedStreamTarget, type CaptureConfig } from '@/lib/capture'
 import type { BackendClient } from '@/backendClient'
-import { resolveLocalTimeMs } from '@/lib/schedule-time'
+import { offsetTimeZone } from '@/lib/schedule-time'
 import type {
   ScheduledStreamCapabilities,
   ScheduledStreamEvent,
@@ -108,32 +108,101 @@ export function scheduledPrivacyLabel(event: ScheduledStreamEvent): string | nul
 }
 
 /**
- * When the stream airs, in its own time zone ("Tue, Jan 1, 2035, 12:00 PM CET").
- * An X broadcast shows its planned end as a range ("12:00 – 1:30 PM CET"). The
- * planned end is a wall time in the start's zone, resolved on its own the way
- * the backend does, so a DST change between start and end shows the real end.
+ * When the stream airs, in its own time zone ("Tue, Jan 1, 2035, 12:00 PM GMT+1").
+ * An X broadcast shows its planned end as a range ("12:00 – 1:30 PM GMT+1").
+ * Both times come with the backend's UTC offsets, so a DST change between
+ * start and end shows the real end, and the renderer's older tz data never
+ * shifts either one.
  */
 export function scheduledWhenLabel(event: ScheduledStreamEvent, locale?: string): string {
-  const { timeZone, plannedEndLocal, localStart, offsetChoice } = event.requested
   const start = new Date(event.startUtc)
-  if (Number.isNaN(start.getTime())) return localStart.replace('T', ' ')
-  const format = new Intl.DateTimeFormat(locale, {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone,
-    timeZoneName: 'short'
-  })
-  const endMs =
-    event.provider === 'x' && plannedEndLocal
-      ? resolveLocalTimeMs(plannedEndLocal, timeZone, offsetChoice)
-      : null
-  return endMs !== null && endMs > start.getTime()
-    ? format.formatRange(start, new Date(endMs))
-    : format.format(start)
+  const times = event.times
+  if (Number.isNaN(start.getTime()) || !times) return event.requested.localStart.replace('T', ' ')
+  const format = (offsetMinutes: number) =>
+    new Intl.DateTimeFormat(locale, {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: offsetTimeZone(offsetMinutes),
+      timeZoneName: 'short'
+    })
+  const startFormat = format(times.startOffsetMinutes)
+  const end = event.provider === 'x' && times.plannedEndUtc ? new Date(times.plannedEndUtc) : null
+  if (!end || !(end.getTime() > start.getTime())) return startFormat.format(start)
+  const endOffset = times.plannedEndOffsetMinutes ?? times.startOffsetMinutes
+  return endOffset === times.startOffsetMinutes
+    ? startFormat.formatRange(start, end)
+    : `${startFormat.format(start)} – ${format(endOffset).format(end)}`
+}
+
+export interface ScheduledStartRepairView {
+  /** One plain line: "Time is an hour off on YouTube". */
+  line: string
+  /** `fix` re-sends the typed time; `edit` when that time no longer exists. */
+  action: 'fix' | 'edit'
+}
+
+/**
+ * The Upcoming flag for a YouTube or X event sent with older time zone rules
+ * (Vancouver, Edmonton, Inuvik, Winnipeg, Casablanca and Havana changed in
+ * 2026), or whose Fix time the platform refused: the platform shows a start
+ * (or, on X, an end) that isn't the time the streamer typed. `null` when the
+ * times are right, or the event isn't on the platform yet.
+ */
+export function scheduledStartRepair(event: ScheduledStreamEvent): ScheduledStartRepairView | null {
+  const repair = event.times?.repair
+  if (!repair || !event.providerEventId || !eventCanBeRepaired(event)) return null
+  const where = scheduledProviderLabel(event.provider)
+  const which = repair.part === 'end' ? 'End time' : 'Time'
+  if (!repair.correctedUtc) {
+    const typed = (
+      repair.part === 'end' ? (event.requested.plannedEndLocal ?? '') : event.requested.localStart
+    ).replace('T', ' ')
+    return {
+      line: `${which} is off on ${where}, and ${typed} no longer exists there`,
+      action: 'edit'
+    }
+  }
+  const off = Math.abs(Date.parse(repair.platformUtc) - Date.parse(repair.correctedUtc))
+  return { line: `${which} is ${offBy(off)} off on ${where}`, action: 'fix' }
+}
+
+function offBy(ms: number): string {
+  const minutes = Math.round(ms / 60_000)
+  if (minutes === 60) return 'an hour'
+  if (minutes % 60 === 0) return `${minutes / 60} hours`
+  return `${minutes} minutes`
+}
+
+function eventCanBeRepaired(event: ScheduledStreamEvent): boolean {
+  return (
+    !event.preparation &&
+    !event.createUncertain &&
+    event.operationState !== 'needs-reconciliation' &&
+    (event.lifecycle === 'draft' || event.lifecycle === 'scheduled')
+  )
+}
+
+/**
+ * Fix time: the saved metadata sent again unchanged through the scheduled
+ * update. The backend resolves the typed wall time with today's rules and
+ * moves the platform's start.
+ */
+export function scheduledStartRepairParams(event: ScheduledStreamEvent): {
+  eventId: string
+  expectedRevision: number
+  accountId: string
+  metadata: ScheduledStreamEvent['requested']
+} {
+  return {
+    eventId: event.id,
+    expectedRevision: event.revision,
+    accountId: event.accountId,
+    metadata: event.requested
+  }
 }
 
 export async function runScheduledOperation<T = unknown>(

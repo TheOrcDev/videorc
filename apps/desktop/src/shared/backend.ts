@@ -10239,6 +10239,37 @@ export interface ScheduledEventMetadata {
   /** X only: keep the replay available after the broadcast ends. */
   availableForReplay?: boolean | null
 }
+export interface ScheduledStreamTimes {
+  /** Minutes east of UTC at `startUtc`: Vancouver in December is -420. */
+  startOffsetMinutes: number
+  /** X only: the planned end the broadcast is sent with. */
+  plannedEndUtc: string | null
+  plannedEndOffsetMinutes: number | null
+  /**
+   * Present when the platform's start (or X's end) is not what the typed wall
+   * time means under the backend's tz data (sent with older rules, or a Fix
+   * time the platform refused): Upcoming offers Fix time.
+   */
+  repair?: {
+    /** `end`: X only, the start is right but the planned end is not. */
+    part: 'start' | 'end'
+    /** What the platform shows now. */
+    platformUtc: string
+    /** `null` when the wall time no longer exists: only an edit can fix it. */
+    correctedUtc: string | null
+    correctedOffsetMinutes: number | null
+  }
+}
+/** `scheduledStreams.resolveTime`: a form's times in the backend's tz data. */
+export interface ScheduledTimeResolution {
+  /** `null` only while a repeated hour waits for its earlier/later choice. */
+  startUtc: string | null
+  startOffsetMinutes: number | null
+  /** The start's two offsets, earlier first, when its wall time happens twice. */
+  repeatedHourOffsets: [number, number] | null
+  plannedEndUtc: string | null
+  plannedEndOffsetMinutes: number | null
+}
 export interface ScheduledStreamEvent {
   id: string
   schemaVersion: number
@@ -10248,6 +10279,11 @@ export interface ScheduledStreamEvent {
   accountLabel: string
   requested: ScheduledEventMetadata
   startUtc: string
+  /**
+   * The UTC offsets to show the times at, from the backend's bundled tz data
+   * (the renderer's ICU data can be older). Absent when the zone is unknown.
+   */
+  times?: ScheduledStreamTimes
   providerEventId: string | null
   watchUrl: string | null
   lifecycle:

@@ -15,7 +15,10 @@ khronos-egl = { version = "6", features = ["dynamic"], optional = true }
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10"
+# Zone rules for scheduled streams and the Pacific quota day, from the tz data
+# bundled into the binary on every OS (`tzdb.rs`). Bump jiff when IANA ships a
+# release that moves a zone people schedule in.
+jiff = { version = "1.0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
 ed25519-dalek = "2"
 futures-util = "0.3"
 hmac = "0.12"
