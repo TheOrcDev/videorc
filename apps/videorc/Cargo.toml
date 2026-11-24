@@ -23,3 +23,13 @@ gpui_platform = { workspace = true, features = ["font-kit", "runtime_shaders", "
 videorc-app-core = { workspace = true }
 # The core's own runtime (two workers), beside GPUI's executor.
 tokio = { version = "1.48", features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+# The OS interface (`src/platform/`, S2.6a). raw-window-handle reaches the
+# native window under a GPUI window on every platform.
+raw-window-handle = "0.6"
+
+# macOS: AppKit and IOKit, as spike S0.7 proved them under GPUI 0.3.14.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3.2"
+objc2-app-kit = { version = "0.3.2", features = ["NSView", "NSWindow", "NSResponder", "NSPanel", "NSGraphics"] }

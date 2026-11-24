@@ -20,17 +20,19 @@
 //! will.
 
 mod app;
+mod platform;
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use gpui::{
-    App, AppContext, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions,
-    point, px, size,
+    App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
 };
+use videorc_app_core::client::events::names;
+use videorc_app_core::desktop::deep_link::{DeepLinks, LinkSource};
 use videorc_app_core::desktop::single_instance::{self, Acquired, HANDOFF_WAIT};
 use videorc_app_core::nav::{self, PageId};
 use videorc_app_core::supervisor::STOP_GRACE;
@@ -42,8 +44,7 @@ use videorc_app_core::{
 use app::args;
 use app::bridge;
 use app::shell::{Shell, StatusLine, connection_text};
-
-actions!(videorc, [Quit]);
+use app::{links, menus, sleep};
 
 fn main() -> Result<()> {
     let args = args::parse()?;
@@ -151,15 +152,17 @@ fn main() -> Result<()> {
     });
 
     // The typed client on the backend's socket. Its event filter grows as
-    // the screens land; S2.1 needs only `backend.ready`.
-    let (client, _events) = BackendClient::start(
+    // the screens land: `backend.ready` always arrives, and the sleep guard
+    // reads `recording.status`.
+    let (client, events) = BackendClient::start(
         supervisor.state(),
         ClientConfig {
-            filter: EventFilter::include(Vec::<String>::new()),
+            filter: EventFilter::include([names::RECORDING_STATUS]),
             logger: logger.clone(),
             ..ClientConfig::default()
         },
     );
+    let client = Arc::new(client);
 
     // What the window says, on stderr too, for scripts and the build pass.
     let mut backend_lines = supervisor.state();
@@ -188,6 +191,12 @@ fn main() -> Result<()> {
         }
     });
 
+    // S2.6a: the display stays awake while a session runs, and links reach
+    // the core from the command line, the Apple Event and a second launch.
+    let sleep_guard = sleep::follow(runtime.handle(), events, logger.clone());
+    let deep_links: links::Links = Arc::new(DeepLinks::new(client.clone(), logger.clone()));
+    links::receive(&deep_links, &args.links, LinkSource::CommandLine);
+
     let backend_state = supervisor.state();
     let connection_state = client.state();
     // Taken by the quit: the shutdown handshake runs once.
@@ -195,17 +204,25 @@ fn main() -> Result<()> {
     let quit_supervisor = supervisor.clone();
     let runtime_handle = runtime.handle().clone();
     let quit_after = args.quit_after;
+    let quit_guard = sleep_guard.clone();
+    let handoff_links = deep_links.clone();
 
     let application = gpui_platform::application();
+    // Registered before `run`, so a link that starts the app is not lost.
+    let apple_links = deep_links.clone();
+    application.on_open_urls(move |urls| {
+        links::receive(&apple_links, &urls, LinkSource::AppleEvent);
+    });
     application.run(move |cx: &mut App| {
-        cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        // The menu bar from the core's template, and the keys it names.
+        menus::install(cx);
 
         // The backend stops with the shutdown handshake before the app goes.
         // GPUI gives quit observers a short deadline, so the wait happens
         // here, on the main thread, as Electron's `before-quit` holds the
         // quit until the backend confirms.
         cx.on_app_quit(move |_| {
+            sleep::release(&quit_guard);
             stop_backend(&quit_supervisor, &runtime_handle);
             async {}
         })
@@ -254,11 +271,12 @@ fn main() -> Result<()> {
                     .timer(Duration::from_millis(200))
                     .await;
                 let mut handed = false;
-                while let Ok(links) = handoff_rx.try_recv() {
+                while let Ok(handed_links) = handoff_rx.try_recv() {
                     eprintln!(
                         "[videorc-app] a second launch handed over {} link(s)",
-                        links.len()
+                        handed_links.len()
                     );
+                    links::receive(&handoff_links, &handed_links, LinkSource::SecondInstance);
                     handed = true;
                 }
                 if handed {
@@ -284,6 +302,7 @@ fn main() -> Result<()> {
 
     // Where the platform's run loop returns (not on macOS, which exits from
     // `terminate:`), stop the backend if the quit hook didn't.
+    sleep::release(&sleep_guard);
     stop_backend(&supervisor, runtime.handle());
     drop(instance);
     Ok(())
