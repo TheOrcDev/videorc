@@ -380,9 +380,18 @@ fn main() -> Result<()> {
         let status = bridge::mirror(cx, backend_state.clone(), StatusLine::of);
         let connection = bridge::mirror(cx, connection_state.clone(), connection_text);
         let controls = bridge::mirror(cx, studio_state.clone(), SessionControls::of);
+        let talk_show =
+            bridge::mirror(cx, studio.cloud(), screens::studio::transport::talk_show_of);
         let takeover_link = bridge::mirror(cx, studio_state.clone(), TakeoverLink::of);
-        let transport =
-            cx.new(|cx| Transport::new(studio.clone(), core_handle.clone(), controls.clone(), cx));
+        let transport = cx.new(|cx| {
+            Transport::new(
+                studio.clone(),
+                core_handle.clone(),
+                controls.clone(),
+                talk_show.clone(),
+                cx,
+            )
+        });
         let sources = cx.new(|cx| {
             SourcesPanel::new(studio.clone(), permissions.clone(), core_handle.clone(), cx)
         });

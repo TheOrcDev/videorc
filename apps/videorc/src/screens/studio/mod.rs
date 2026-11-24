@@ -19,11 +19,14 @@ use gpui::{
     KeyDownEvent, Window, canvas, div, prelude::*, px,
 };
 use videorc_app_core::StopOrigin;
-use videorc_app_core::studio::screen_views::SHOW_HERE_LABEL;
+use videorc_app_core::guests::view::CLOSE_THE_ROOM_LABEL;
+use videorc_app_core::studio::screen_views::{
+    CLOSE_THE_ROOM_UNAVAILABLE, PREVIEW_REPLACED_BY_SHOW_STAGE, SHOW_HERE_LABEL,
+};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, hsla};
-use videorc_kit::tokens::size;
-use videorc_kit::{Button, ButtonVariant};
+use videorc_kit::tokens::{size, text};
+use videorc_kit::{Button, ButtonSize, ButtonVariant};
 use videorc_preview::lifecycle::WindowMode;
 
 use crate::preview::Preview;
@@ -77,8 +80,10 @@ impl StudioPage {
         cx.subscribe(&takeover, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
         // The preview notifies only when its slot's words or its window
-        // change, never per video frame.
+        // change, never per video frame. The transport also carries the
+        // talk-show room (P122): the Preview yields to the Show stage card.
         cx.observe(&preview, |_, _, cx| cx.notify()).detach();
+        cx.observe(&transport, |_, _, cx| cx.notify()).detach();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         Self {
@@ -153,6 +158,36 @@ impl StudioPage {
                 .into_any_element(),
         )
     }
+
+    /// `TalkShowPreviewCard`: the Preview's place while the room is open.
+    fn show_stage_card(&self, _window: &mut Window, _cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("preview-replaced-by-show-stage")
+            .flex()
+            .flex_1()
+            .min_h_0()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(12.))
+            .child(
+                div()
+                    .type_scale(text::LABEL)
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(PREVIEW_REPLACED_BY_SHOW_STAGE),
+            )
+            .child(
+                Button::new("close-the-room")
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::Xs)
+                    .label(CLOSE_THE_ROOM_LABEL)
+                    .tooltip(CLOSE_THE_ROOM_UNAVAILABLE)
+                    .on_click(|_, _, _| {
+                        eprintln!("[videorc-app] Close the room: {CLOSE_THE_ROOM_UNAVAILABLE}");
+                    }),
+            )
+            .into_any_element()
+    }
 }
 
 impl Render for StudioPage {
@@ -171,6 +206,19 @@ impl Render for StudioPage {
         .absolute()
         .size_full();
 
+        let preview_replaced = self.transport.read(cx).talk_show(cx).preview_replaced;
+        let stage = if preview_replaced {
+            // P122: the Show stage replaces the Preview while the room is
+            // open. The Show stage itself is another lane; until it lands,
+            // Electron's TalkShowPreviewCard (P147) is the swap.
+            self.show_stage_card(window, cx)
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .child(Preview::docked_slot(&self.preview, cx))
+                .into_any_element()
+        };
         let preview_column = div()
             .id("studio-preview-column")
             .flex()
@@ -179,13 +227,12 @@ impl Render for StudioPage {
             .p(px(size::GUTTER))
             .min_w_0()
             .min_h_0()
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(Preview::docked_slot(&self.preview, cx)),
-            )
-            .children(self.dock_row(window, cx));
+            .child(stage)
+            .children(
+                (!preview_replaced)
+                    .then(|| self.dock_row(window, cx))
+                    .flatten(),
+            );
         // "Session inspector" (P114): cloud resume, the session section,
         // chat, audio, quick settings and takeover, in that order.
         let inspector = div()

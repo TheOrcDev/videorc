@@ -486,6 +486,15 @@ pub const OPEN_PREVIEW_LABEL: &str = "Open preview";
 pub const RETRY_PREVIEW_LABEL: &str = "Retry preview";
 pub const KEEP_ON_TOP_LABEL: &str = "Keep on top of other apps";
 pub const PREVIEW_SECTION_TITLE: &str = "Preview";
+/// `PREVIEW_REPLACED_BY_SHOW_STAGE` (`preview-stage.tsx`): the Show stage's
+/// card while the talk-show room is open (P122 / P147).
+pub const PREVIEW_REPLACED_BY_SHOW_STAGE: &str =
+    "The Show stage replaces the Preview while the room is open.";
+/// `talkShow.stopCloudRecording` is L7's; the Studio stubs the click until then.
+pub const STOP_CLOUD_RECORDING_UNAVAILABLE: &str =
+    "Stopping the cloud recording isn't available yet.";
+/// Closing the room from the Preview card waits for the Guests lane's close.
+pub const CLOSE_THE_ROOM_UNAVAILABLE: &str = "Closing the room isn't available yet.";
 
 /// The Studio's Preview stage.
 #[derive(Debug, Clone, PartialEq, Eq)]
