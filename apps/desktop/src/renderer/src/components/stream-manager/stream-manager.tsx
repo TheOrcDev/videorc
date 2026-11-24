@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import type { TimelineMarker } from '../../../../shared/cloud-markers'
 import {
   chatDeliveryActivityMatches,
@@ -555,6 +556,7 @@ export function StreamManager({
   onCohostUpgrade,
   communityCall
 }: StreamManagerProps): ReactElement {
+  const localTime = useLocalTime()
   // The buffer almost always arrives sorted: one scan instead of a copy and a
   // full sort per chat message (plan 191). Either way the rows are the same.
   const messages = useMemo<readonly LiveChatMessage[]>(
@@ -858,10 +860,13 @@ export function StreamManager({
             }
           : {})
       }),
+    // The stats format local times: recompute when the tz offsets arrive.
+    // oxlint-disable-next-line react/exhaustive-deps
     [
       dashboard,
       history,
       inHistory,
+      localTime,
       messages,
       nowMs,
       snapshot.providers,

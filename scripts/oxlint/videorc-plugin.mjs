@@ -20,8 +20,10 @@ const LOCAL_DATE_METHODS = new Set([
   'setMinutes',
   'setMonth',
   'setSeconds',
+  'toDateString',
   'toLocaleDateString',
-  'toLocaleTimeString'
+  'toLocaleTimeString',
+  'toTimeString'
 ])
 
 const MESSAGE =

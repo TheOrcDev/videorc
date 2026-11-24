@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import { LibraryCloudArchive } from './library-cloud-archive'
 import { LibraryCloudIsoTake, useCloudIsoLibrary } from './library-cloud-iso'
 import {
@@ -477,6 +478,7 @@ function CloudRecordingRow({
   onOpenLocal: (sessionId: string) => void
   onShowMarkers: () => void
 }): ReactElement {
+  useLocalTime()
   const view = cloudRowView(recording, download)
   const { status } = view
   const localSessionId = status.kind === 'downloaded' ? status.localSessionId : null

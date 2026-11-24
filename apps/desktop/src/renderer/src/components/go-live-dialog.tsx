@@ -1,4 +1,4 @@
-import { formatLocal, LOCAL_DATE_TIME } from '@/lib/local-time'
+import { formatLocal, LOCAL_DATE_TIME, useLocalTime } from '@/lib/local-time'
 import { CaptionsIcon, LivestreamIcon } from '@/components/icons'
 import { useId, useRef, useState, type KeyboardEvent, type ReactElement } from 'react'
 
@@ -747,6 +747,7 @@ export function GoLiveDestinationRow({
   onReconnect?: (destination: GoLiveDestinationPreflight) => void
   onRecheck?: () => void
 }): ReactElement {
+  useLocalTime()
   const { destination, ready, problem } = view
   const titleId = useId()
   const oauth = destination.authMode === 'oauth'

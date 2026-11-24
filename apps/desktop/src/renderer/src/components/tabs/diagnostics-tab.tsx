@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import { ChevronDownIcon, CloseIcon, HeartbeatIcon, WarningIcon } from '@/components/icons'
 import { useEffect, useId, useMemo, useState, type ReactElement, type ReactNode } from 'react'
 
@@ -83,6 +84,7 @@ const RECORDING_LOG_LIMIT = 120
 const APP_LOG_LIMIT = 80
 
 export function DiagnosticsTab(): ReactElement {
+  useLocalTime()
   const {
     handleSystemPermission,
     sessions,
@@ -502,6 +504,7 @@ function PermissionWarningAlert({
   onFix: () => void
   onDismiss: () => void
 }): ReactElement {
+  useLocalTime()
   return (
     <Alert data-pane={warning.pane} data-testid="health-permission-warning" variant="warning">
       <AlertTitle>{name ? `${name} needs permission` : 'Videorc needs a permission'}</AlertTitle>
@@ -1131,6 +1134,7 @@ function SessionLogRow({ entry }: { entry: SessionLogEntry }): ReactElement {
  * without this row a crash that already restarted is invisible.
  */
 function LastEngineCrash({ record }: { record: BackendCrashRecord | null }): ReactElement | null {
+  useLocalTime()
   if (!record) {
     return null
   }
@@ -1176,6 +1180,7 @@ function LogRow({
   message: string
   sourceId?: string
 }): ReactElement {
+  useLocalTime()
   return (
     <div className="border-b border-border py-2 text-xs select-text last:border-b-0">
       <div className="mb-1 flex flex-wrap items-center gap-2">

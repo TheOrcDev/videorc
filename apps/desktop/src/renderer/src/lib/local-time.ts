@@ -7,7 +7,10 @@
 // tz data: `time.localOffsets` sends the system zone's UTC offsets for a few
 // years around now, and every format here runs at a fixed offset from those
 // spans. The `videorc/no-system-local-time` lint rule keeps the rest of the
-// renderer on these helpers.
+// renderer on these helpers. Components that show a time call `useLocalTime()`
+// so they re-render when the spans arrive or refresh: no text stays on ICU's
+// hour.
+import { useSyncExternalStore } from 'react'
 import { BackendClient } from '@/backendClient'
 import type { LocalOffsetSpan, LocalOffsets } from '../../../shared/backend'
 import { offsetTimeZone } from '@/lib/schedule-time'
@@ -21,6 +24,8 @@ let spans: LocalOffsetSpan[] | null = null
 let spansZone: string | null = null
 let syncing: Promise<void> | null = null
 const formatters = new Map<string, Intl.DateTimeFormat>()
+let revision = 0
+const listeners = new Set<() => void>()
 
 /** The system's IANA zone name. Reading the name is safe; ICU's rules are not. */
 export function systemTimeZone(): string {
@@ -31,6 +36,30 @@ export function systemTimeZone(): string {
 export function setLocalOffsets(next: LocalOffsets | null): void {
   spans = next && next.spans.length ? [...next.spans].sort((a, b) => a.fromMs - b.fromMs) : null
   spansZone = next?.timeZone ?? null
+  formatters.clear()
+  revision += 1
+  for (const listener of listeners) listener()
+}
+
+/** Store subscription for `useLocalTime`. */
+export function subscribeLocalTime(listener: () => void): () => void {
+  listeners.add(listener)
+  return () => {
+    listeners.delete(listener)
+  }
+}
+
+/** Bumps each time the spans change, so memoized time text can depend on it. */
+export function localTimeRevision(): number {
+  return revision
+}
+
+/**
+ * Re-render when the local offsets arrive or refresh. Returns the revision,
+ * for the deps of a `useMemo` that formats times.
+ */
+export function useLocalTime(): number {
+  return useSyncExternalStore(subscribeLocalTime, localTimeRevision, localTimeRevision)
 }
 
 /**
@@ -119,7 +148,6 @@ async function syncOnce(attempt: number): Promise<void> {
     client = new BackendClient(connection)
     await client.connect()
     setLocalOffsets(await client.request<LocalOffsets>('time.localOffsets', { timeZone }))
-    formatters.clear()
   } catch (error) {
     console.warn('[local-time] using the system time zone data until Videorc answers:', error)
     const delay = RETRY_MS[attempt]

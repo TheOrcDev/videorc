@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import {
   AlertIcon,
   ClipIcon,
@@ -458,6 +459,7 @@ function RecordingList({
   onSelect: (sessionId: string) => void
   children: ReactNode
 }): ReactElement {
+  useLocalTime()
   const [query, setQuery] = useState('')
   const [showAll, setShowAll] = useState(false)
   const matches = useMemo(() => matchCleanCutRecordings(recordings, query), [recordings, query])

@@ -1,4 +1,4 @@
-import { formatLocal } from '@/lib/local-time'
+import { formatLocal, useLocalTime } from '@/lib/local-time'
 import {
   Fragment,
   useEffect,
@@ -757,6 +757,7 @@ function CommentContent({
   timestamps: CommentTimestamps
   nameIds?: CommentNameIds
 }): ReactElement {
+  useLocalTime()
   const avatarUrl = useCachedAvatar(message.authorAvatarUrl)
   const time = formatCommentTime(message.receivedAt)
   const noticeWords = noticeViewerWords(message)

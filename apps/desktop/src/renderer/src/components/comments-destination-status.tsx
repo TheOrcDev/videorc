@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import type { ReactElement } from 'react'
 
 import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -95,6 +96,7 @@ export function CommentsDestinationStatus({
   sendTargets?: StreamPlatform[]
   failures?: ChatSendFailure[]
 }): ReactElement | null {
+  useLocalTime()
   if (providers.length === 0 && mode === 'providers') {
     return null
   }

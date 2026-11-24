@@ -4,7 +4,9 @@ import {
   localDayKey,
   localDayKeyAfter,
   localOffsetMinutes,
+  localTimeRevision,
   setLocalOffsets,
+  subscribeLocalTime,
   systemTimeZone
 } from './local-time'
 
@@ -45,5 +47,16 @@ describe('local time from the backend tz data', () => {
     expect(localOffsetMinutes(at)).toBe(-new Date(at).getTimezoneOffset())
     setLocalOffsets({ timeZone: 'Not/This_Zone', spans: [{ fromMs: 0, offsetMinutes: 600 }] })
     expect(localOffsetMinutes(at)).toBe(-new Date(at).getTimezoneOffset())
+  })
+
+  it('tells subscribers each time the spans change, so time text re-renders', () => {
+    const seen: number[] = []
+    const unsubscribe = subscribeLocalTime(() => seen.push(localTimeRevision()))
+    const before = localTimeRevision()
+    setLocalOffsets(vancouver())
+    setLocalOffsets(null)
+    unsubscribe()
+    setLocalOffsets(vancouver())
+    expect(seen).toEqual([before + 1, before + 2])
   })
 })
