@@ -95,7 +95,7 @@ pub fn authenticate_backend_token(
     }
 }
 
-fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
     let mut different = left.len() ^ right.len();
     let width = left.len().max(right.len());
     for index in 0..width {

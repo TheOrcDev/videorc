@@ -403,12 +403,14 @@ export function smokeAppLaunchRefusal(env = {}, processEnv = process.env) {
  */
 // Environment the backend honours only in debug builds (`cfg!(debug_assertions)`):
 // the fake API origins (discord_announce/client.rs, youtube_quota.rs,
-// videorc_api.rs) and the mock account (account.rs). A release dev backend
-// ignores them: it sends the smoke's fixture webhook, token or calls to the
-// real service instead of the local fake, or runs signed out.
+// videorc_api.rs, and chat_images.rs's fake chat image CDN) and the mock
+// account (account.rs). A release dev backend ignores them: it sends the
+// smoke's fixture webhook, token or calls to the real service (or fetches the
+// real chat image CDNs) instead of the local fake, or runs signed out.
 export const DEBUG_ONLY_BACKEND_ENV = Object.freeze({
   VIDEORC_DISCORD_API_BASE_URL: 'calls the real service',
   VIDEORC_YOUTUBE_API_BASE_URL: 'calls the real service',
+  VIDEORC_CHAT_IMAGE_FAKE_ORIGIN: 'fetches the real chat image CDNs',
   VIDEORC_API_BASE_URL: 'calls the real Videorc API',
   VIDEORC_MOCK_ACCOUNT: 'runs signed out'
 })

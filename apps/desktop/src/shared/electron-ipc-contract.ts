@@ -107,7 +107,7 @@ import {
 import {
   CHAT_AVATAR_MAX_BYTES,
   chatAvatarBytesWithinCap,
-  managedAvatarFileName
+  chatImageRoute
 } from './chat-avatar-bytes'
 import { TWITCH_GIF_MODES, twitchGifAssetUrl, type TwitchGifMode } from './chat-gif'
 import {
@@ -720,14 +720,14 @@ const buddyPetFileBytesSchema = runtimeSchema<Uint8Array | null>(
     return value
   }
 )
-/** What the GIF cache hands back (plan 155): null, or the managed
- * `videorc-asset://avatar/<file>` URL of the cached file, nothing else. */
+/** What the chat image cache hands back (plan 155, plan 220 S1.6a): null,
+ * or the backend's loopback route for the cached file, nothing else. */
 const chatImageLocalUrlSchema = runtimeSchema<string | null>(
-  'null or a managed videorc-asset://avatar/<file> URL',
+  'null or a backend chat image URL',
   (value, path) => {
     if (value === null) return null
-    if (managedAvatarFileName(value) === null) {
-      throw new RuntimeSchemaError(path, 'null or a managed videorc-asset://avatar/<file> URL')
+    if (chatImageRoute(value) === null) {
+      throw new RuntimeSchemaError(path, 'null or a backend chat image URL')
     }
     return value as string
   }

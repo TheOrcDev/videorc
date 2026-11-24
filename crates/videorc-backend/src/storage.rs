@@ -8577,6 +8577,21 @@ impl Database {
         std::env::temp_dir().join("videorc-banners")
     }
 
+    /// The chat image cache beside the database (plan 260 S1.5a): the
+    /// `avatar-cache` folder Electron main kept in its userData folder, which
+    /// is this folder on macOS and Windows, so the cache carries over.
+    pub(crate) fn chat_image_cache_dir(&self) -> PathBuf {
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            return parent.join(crate::chat_images::CACHE_DIR_NAME);
+        }
+
+        std::env::temp_dir().join("videorc-avatar-cache")
+    }
+
     /// The managed `Sounds` directory beside `Screens` and `Banners` (plan
     /// 189). Only basenames reach the renderer; main's
     /// `videorc-asset://sound/<file>` resolver and the player join them onto

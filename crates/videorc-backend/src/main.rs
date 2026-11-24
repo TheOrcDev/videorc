@@ -47,6 +47,7 @@ mod capture_interruption;
 mod capture_log;
 mod capture_recovery;
 mod chat_commands;
+mod chat_images;
 mod chat_overlay;
 mod clean_cut;
 mod clip_marks;
@@ -73,6 +74,7 @@ mod cohost_library;
 mod cohost_throttle;
 mod color;
 mod comment_highlight;
+mod comments_history;
 mod community;
 mod community_service;
 mod community_store;
@@ -719,6 +721,9 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     register_stored_scheduled_thumbnails(&state).await;
     let app = Router::new()
         .route("/health", get(health_handler))
+        // Plan 260 S1.5a: cached chat avatars, emotes and GIFs, behind this
+        // run's key; the route serves the cache and never fetches.
+        .route("/chat-images/{file}", get(chat_images::serve_handler))
         .route("/preview/live.mjpeg", get(live_preview_handler))
         .route("/preview/live.jpg", get(live_preview_frame_handler))
         .route("/preview/camera/live.png", get(live_camera_frame_handler))
@@ -6629,6 +6634,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "obs.discover"
         | "obs.read"
         | "obs.readStreamKey"
+        // Plan 260 S1.5a: one session's History view, read from SQLite and
+        // the transcript cache.
+        | "sessions.comments.history"
         | "sessions.viewers.list"
         | "sessions.audience.get"
         | "stream.audience.snapshot"
@@ -6645,6 +6653,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "streamReport.email.get"
         | "discord.announce.get"
         | "discord.links.preview"
+        // Plan 260 S1.5a: an allowlisted chat image into the cache. It writes
+        // only the cache folder, never app state, and a GIF may take 15 s, so
+        // it runs beside other commands like `discord.links.preview`.
+        | "chatImages.cache"
         | "streamTargets.metadata.get"
         | "streamTargets.metadata.validate"
         | "streamTargets.manualKey.inspect"
@@ -15434,6 +15446,7 @@ async fn handle_text_message_with_role(
                     Ok(completion) => {
                         if completion.deleted {
                             posters::remove_session_poster(&completion.session_id).await;
+                            state.comments_history.remove(&completion.session_id);
                         }
                         ServerResponse::ok(command.id, completion)
                     }
@@ -15748,6 +15761,32 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<discord_announce::TestParams>(command.params) {
                 Ok(params) => {
                     discord_rpc(command.id, discord_announce::send_test(state, params).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sessions.comments.history" => {
+            match serde_json::from_value::<comments_history::CommentsHistoryParams>(command.params)
+            {
+                Ok(params) => match comments_history::load(state, &params.session_id).await {
+                    Ok(history) => ServerResponse::ok(command.id, history),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "session-comments-history-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "chatImages.cache" => {
+            match serde_json::from_value::<chat_images::ChatImageCacheParams>(command.params) {
+                Ok(params) => {
+                    ServerResponse::ok(command.id, chat_images::cache_for_rpc(state, params).await)
                 }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())

@@ -304,13 +304,19 @@ describe('Electron IPC contract', () => {
       expect(() => validateElectronInvokeArgs('chat-gifs:cache', [refused])).toThrow()
     }
     expect(() => validateElectronInvokeArgs('chat-gifs:cache', [])).toThrow()
-    // The result is null or a managed cache URL, never a remote one.
+    // The result is null or the backend's chat image route, never a remote URL.
     expect(validateElectronInvokeResult('chat-gifs:cache', null)).toBeNull()
-    const local = `videorc-asset://avatar/${'0'.repeat(32)}.gif`
+    const local = `http://127.0.0.1:4321/chat-images/${'0'.repeat(32)}.gif?key=${'a'.repeat(32)}`
     expect(validateElectronInvokeResult('chat-gifs:cache', local)).toBe(local)
     expect(() => validateElectronInvokeResult('chat-gifs:cache', url)).toThrow()
     expect(() =>
       validateElectronInvokeResult('chat-gifs:cache', 'videorc-asset://avatar/../x.gif')
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeResult(
+        'chat-gifs:cache',
+        `http://127.0.0.1:4321/chat-images/../x.gif?key=${'a'.repeat(32)}`
+      )
     ).toThrow()
   })
 
@@ -1074,7 +1080,7 @@ describe('Electron IPC contract', () => {
 
 describe('cached chat image bytes IPC (plan 095)', () => {
   it('returns null or bounded bytes, never another structured-clone value', () => {
-    const localUrl = 'videorc-asset://avatar/0123456789abcdef0123456789abcdef.png'
+    const localUrl = `http://127.0.0.1:4321/chat-images/0123456789abcdef0123456789abcdef.png?key=${'a'.repeat(32)}`
     expect(validateElectronInvokeArgs('avatars:read', [localUrl])).toEqual([localUrl])
     expect(() => validateElectronInvokeArgs('avatars:read', [''])).toThrow()
     expect(validateElectronInvokeResult('avatars:read', null)).toBeNull()

@@ -3,45 +3,52 @@ import { describe, expect, it } from 'vitest'
 import {
   CHAT_AVATAR_MAX_BYTES,
   chatAvatarBytesWithinCap,
-  managedAvatarFileName
+  chatImageRoute,
+  chatImageRouteUrl
 } from './chat-avatar-bytes'
 
-const cached = 'videorc-asset://avatar/0123456789abcdef0123456789abcdef.png'
+const key = 'fedcba9876543210fedcba9876543210'
+const cached = `http://127.0.0.1:4321/chat-images/0123456789abcdef0123456789abcdef.png?key=${key}`
 
-describe('managedAvatarFileName', () => {
-  it('names the cache file of a managed avatar URL', () => {
-    expect(managedAvatarFileName(cached)).toBe('0123456789abcdef0123456789abcdef.png')
-    expect(
-      managedAvatarFileName('videorc-asset://avatar/0123456789abcdef0123456789abcdef.webp')
-    ).toBe('0123456789abcdef0123456789abcdef.webp')
+describe('chatImageRoute', () => {
+  it('names the port, file and key of a backend chat image URL', () => {
+    expect(chatImageRoute(cached)).toEqual({
+      port: 4321,
+      fileName: '0123456789abcdef0123456789abcdef.png',
+      key
+    })
     // Emotes from URLs without an image extension are stored as `.img`.
-    expect(
-      managedAvatarFileName('videorc-asset://avatar/0123456789abcdef0123456789abcdef.img')
-    ).toBe('0123456789abcdef0123456789abcdef.img')
+    const emote = cached.replace('.png', '.img')
+    expect(chatImageRoute(emote)?.fileName).toBe('0123456789abcdef0123456789abcdef.img')
+    expect(chatImageRouteUrl(chatImageRoute(emote)!)).toBe(emote)
   })
 
-  it('refuses every other host, scheme and path shape', () => {
-    // Other hosts of the scheme never leak through the avatar read.
-    expect(
-      managedAvatarFileName('videorc-asset://background/0123456789abcdef0123456789abcdef.png')
-    ).toBeNull()
-    expect(managedAvatarFileName('videorc-asset://screen/takeover.png')).toBeNull()
-    expect(managedAvatarFileName('https://yt3.ggpht.com/a.png')).toBeNull()
-    expect(managedAvatarFileName('file:///etc/passwd')).toBeNull()
-    // Traversal, separators, encoded separators and bare names.
-    expect(managedAvatarFileName('videorc-asset://avatar/../prefs.json')).toBeNull()
-    expect(managedAvatarFileName('videorc-asset://avatar/..%2Fprefs.json')).toBeNull()
-    expect(managedAvatarFileName('videorc-asset://avatar/a/b.png')).toBeNull()
-    expect(managedAvatarFileName('videorc-asset://avatar/a\\b.png')).toBeNull()
-    expect(managedAvatarFileName('videorc-asset://avatar/')).toBeNull()
-    expect(managedAvatarFileName('videorc-asset://avatar/notahash.png')).toBeNull()
-    expect(
-      managedAvatarFileName('videorc-asset://avatar/0123456789ABCDEF0123456789ABCDEF.png')
-    ).toBeNull()
-    expect(managedAvatarFileName(`${cached}?x=1`)).toBeNull()
-    expect(managedAvatarFileName(42)).toBeNull()
-    expect(managedAvatarFileName(null)).toBeNull()
-    expect(managedAvatarFileName(`videorc-asset://avatar/${'a'.repeat(600)}`)).toBeNull()
+  it('refuses every other host, scheme, path, name and query shape', () => {
+    for (const refused of [
+      cached.replace('127.0.0.1', 'localhost'),
+      cached.replace('http://', 'https://'),
+      cached.replace('/chat-images/', '/preview/'),
+      cached.replace(':4321', ''),
+      cached.replace(':4321', ':999999'),
+      cached.replace(':4321', ':0'),
+      cached.replace('0123456789abcdef0123456789abcdef', '0123456789ABCDEF0123456789ABCDEF'),
+      cached.replace('0123456789abcdef0123456789abcdef.png', '../videorc.sqlite3'),
+      cached.replace('0123456789abcdef0123456789abcdef.png', '..%2Fvideorc.sqlite3'),
+      cached.replace('.png', '.svg'),
+      cached.replace(`?key=${key}`, ''),
+      cached.replace(key, 'short'),
+      `${cached}&x=1`,
+      `${cached}#x`,
+      'videorc-asset://avatar/0123456789abcdef0123456789abcdef.png',
+      'https://yt3.ggpht.com/a.png',
+      'file:///etc/passwd',
+      `${cached}${'a'.repeat(300)}`,
+      42,
+      null
+    ]) {
+      expect(chatImageRoute(refused), String(refused)).toBeNull()
+    }
+    expect(() => chatImageRouteUrl({ port: 4321, fileName: '../videorc.sqlite3', key })).toThrow()
   })
 })
 

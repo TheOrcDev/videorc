@@ -1054,6 +1054,11 @@ impl CommandCompletionSnapshot {
 
 #[derive(Clone)]
 pub struct AppState {
+    /// Plan 260 S1.5a: chat avatars, emotes and GIFs, fetched, cached and
+    /// served on `/chat-images/` with this run's key.
+    pub(crate) chat_images: Arc<crate::chat_images::ChatImages>,
+    /// Plan 260 S1.5a: the History view's transcripts.
+    pub(crate) comments_history: Arc<crate::comments_history::CommentsHistoryCache>,
     /// Handle for the process-lifetime Tokio runtime captured before any
     /// compositor-owned current-thread runtime is entered. Detached capture
     /// and preview supervisors must use this authority so retiring a
@@ -1449,6 +1454,7 @@ impl AppState {
         events: broadcast::Sender<ServerEvent>,
         database: Database,
     ) -> Self {
+        let chat_image_dir = database.chat_image_cache_dir();
         let oauth_store_path = (database.path().to_string_lossy() != ":memory:")
             .then(|| database.path().with_extension("oauth-pending.json"));
         // Plan 223: the watchdog's settings and the active takeover, read
@@ -1478,6 +1484,8 @@ impl AppState {
             crate::buddy_animator::BuddyAnimatorSource::for_persona(&cohost_settings.persona),
         ));
         Self {
+            chat_images: Arc::new(crate::chat_images::ChatImages::for_run(chat_image_dir)),
+            comments_history: Arc::new(crate::comments_history::CommentsHistoryCache::default()),
             process_runtime: tokio::runtime::Handle::try_current().ok(),
             process_shutdown_requested: Arc::new(AtomicBool::new(false)),
             process_shutdown_requested_notify: Arc::new(Notify::new()),

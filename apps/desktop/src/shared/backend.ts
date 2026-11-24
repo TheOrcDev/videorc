@@ -4899,6 +4899,19 @@ export interface SessionCommentsPage {
   nextCursor?: string
 }
 
+/** One session's History view from the backend (`sessions.comments.history`,
+ * plan 220 S1.6a): the newest saved messages (at most 2,000 and 8 MB), the
+ * latest send operation, and the saved stats. `audience` and `chatTotals` are
+ * null when the session has none. */
+export interface SessionCommentsHistory {
+  sessionId: string
+  messages: LiveChatMessage[]
+  latestSendOperation?: CommentsSendOperation
+  viewers: ViewerSample[]
+  audience: AudienceSnapshot | null
+  chatTotals: SessionChatTotals | null
+}
+
 export type StreamScreenStatus = 'ready' | 'missing'
 
 export interface StreamScreen {

@@ -1112,6 +1112,17 @@ test('debug-only backend env refuses the release dev backend, which would call t
     ),
     /VIDEORC_API_BASE_URL, VIDEORC_MOCK_ACCOUNT .*calls the real Videorc API and runs signed out/
   )
+  // Plan 260 S1.5a: the chat image fake host is debug-only too.
+  assert.match(
+    releaseBackendFakeOriginRefusal(
+      {
+        VIDEORC_DEV_BACKEND_PROFILE: 'release',
+        VIDEORC_CHAT_IMAGE_FAKE_ORIGIN: 'http://127.0.0.1:1'
+      },
+      {}
+    ),
+    /VIDEORC_CHAT_IMAGE_FAKE_ORIGIN only works with the debug backend/
+  )
   assert.equal(releaseBackendFakeOriginRefusal({ VIDEORC_MOCK_ACCOUNT: 'baseline' }, {}), null)
   // Debug backend, or no fake origin: launch as before.
   assert.equal(releaseBackendFakeOriginRefusal(fake, {}), null)
