@@ -32,7 +32,7 @@ use gpui::{
     App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
 };
 use videorc_app_core::client::events::names;
-use videorc_app_core::desktop::deep_link::{DeepLinks, LinkSource};
+use videorc_app_core::desktop::deep_link::{self, DeepLinks, LinkSource};
 use videorc_app_core::desktop::global_shortcuts::GlobalShortcutsConfig;
 use videorc_app_core::desktop::single_instance::{self, Acquired, HANDOFF_WAIT};
 use videorc_app_core::nav::{self, PageId};
@@ -61,28 +61,39 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&paths.user_data_dir)
         .with_context(|| format!("could not create {}", paths.user_data_dir.display()))?;
 
+    // The app's id before any window (Windows: the AppUserModelID toasts
+    // and the taskbar go by).
+    if let Err(error) = platform::current().set_app_id(APP_ID) {
+        eprintln!("[videorc-app] the app id didn't take ({error}); notifications may not show");
+    }
+
     // One instance per data directory, before any window: a second launch
     // hands its links to the first (which brings its window up) and exits,
     // as Electron's `second-instance`.
     let mut instance = match single_instance::acquire(&paths.user_data_dir) {
         Ok(Acquired::Primary(primary)) => Some(primary),
-        Ok(Acquired::Secondary(second)) => match second.hand_off(&args.links, HANDOFF_WAIT) {
-            Ok(pid) => {
-                eprintln!(
-                    "[videorc-app] Videorc is already running for {} (pid {pid}); handed it {} link(s), exiting.",
-                    paths.user_data_dir.display(),
-                    args.links.len()
-                );
-                std::process::exit(0);
+        Ok(Acquired::Secondary(second)) => {
+            if let Err(error) = platform::current().allow_handoff_focus() {
+                eprintln!("[videorc-app] the running app may not come to the front ({error})");
             }
-            Err(error) => {
-                eprintln!(
-                    "[videorc-app] another Videorc holds {} but did not answer ({error}); exiting rather than running twice.",
-                    paths.user_data_dir.display()
-                );
-                std::process::exit(1);
+            match second.hand_off(&args.links, HANDOFF_WAIT) {
+                Ok(pid) => {
+                    eprintln!(
+                        "[videorc-app] Videorc is already running for {} (pid {pid}); handed it {} link(s), exiting.",
+                        paths.user_data_dir.display(),
+                        args.links.len()
+                    );
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[videorc-app] another Videorc holds {} but did not answer ({error}); exiting rather than running twice.",
+                        paths.user_data_dir.display()
+                    );
+                    std::process::exit(1);
+                }
             }
-        },
+        }
         Err(error) => {
             eprintln!(
                 "[videorc-app] the single-instance lock is unavailable ({error}); running without it"
@@ -97,6 +108,19 @@ fn main() -> Result<()> {
         })
     {
         eprintln!("[videorc-app] second launches can't hand over ({error})");
+    }
+
+    // Where `videorc://` links open (Electron's
+    // `setAsDefaultProtocolClient`; a bundle or desktop entry declares it).
+    match platform::current().register_link_handler(deep_link::SCHEME) {
+        Ok(platform::LinkHandler::Registered) => {
+            eprintln!("[videorc-app] videorc:// links open this app now")
+        }
+        Ok(platform::LinkHandler::LeftFor(command)) => eprintln!(
+            "[videorc-app] videorc:// links stay with {command}; a development build leaves them (VIDEORC_REGISTER_LINKS=1 takes them)"
+        ),
+        Ok(platform::LinkHandler::Declared | platform::LinkHandler::AlreadyRegistered) => {}
+        Err(error) => eprintln!("[videorc-app] videorc:// links can't reach this app ({error})"),
     }
 
     // The app log: every backend stderr line and supervisor line, rotated.

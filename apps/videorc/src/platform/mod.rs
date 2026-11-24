@@ -7,7 +7,8 @@
 //! - macOS (`macos/`, lane L4): AppKit and IOKit through `objc2`.
 //! - Linux (`linux/`, lane L5): the portals and the session bus (#1809,
 //!   #1815 put the policy in `desktop::linux`).
-//! - Windows (`windows/`, the contributors).
+//! - Windows (`windows/`, S2.6b): Win32 through `windows-sys`, toasts
+//!   through WinRT; written without a build, verified by the contributors.
 //!
 //! Until a platform's module lands, [`Unsupported`] answers each call with a
 //! reason, never a pretend success.
@@ -20,9 +21,38 @@ use gpui::Window;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 /// What a call did, or why it couldn't.
 pub type OsResult<T> = Result<T, String>;
+
+/// Where `videorc://` links open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub enum LinkHandler {
+    /// The bundle or desktop entry declares it; nothing to write.
+    Declared,
+    /// This executable took the handler.
+    Registered,
+    /// This executable held it already.
+    AlreadyRegistered,
+    /// Another program holds it and this build leaves it there: the
+    /// command found.
+    LeftFor(String),
+}
+
+/// A system notification (Electron's `Notification`). The stream
+/// watchdog's alert sends one when the Stream Manager lands (Phase 3).
+#[allow(dead_code)]
+pub struct Notice {
+    pub title: String,
+    pub body: String,
+    pub silent: bool,
+    /// Runs on an OS thread when the notification is clicked while the app
+    /// runs.
+    pub on_click: Option<Box<dyn Fn() + Send + Sync>>,
+}
 
 /// The OS calls the app makes. Hide from stream and Keep on top are called
 /// by the windows that need them (Notes, Preview, the Stream Manager), which
@@ -50,13 +80,42 @@ pub trait Platform: Send + Sync {
     /// The app bundle's identifier, or `None` for a bare binary (macOS
     /// needs a bundle for notifications and TCC's per-app grants).
     fn bundle_id(&self) -> Option<String>;
+
+    /// Gives the process the app's id before any window opens. Windows
+    /// groups the taskbar and shows toasts by it (Electron's
+    /// `setAppUserModelId`); macOS and Linux read it from the bundle or the
+    /// desktop entry.
+    fn set_app_id(&self, _app_id: &str) -> OsResult<()> {
+        Ok(())
+    }
+
+    /// Makes this executable where `scheme://` links open (Electron's
+    /// `setAsDefaultProtocolClient`).
+    fn register_link_handler(&self, _scheme: &str) -> OsResult<LinkHandler> {
+        Ok(LinkHandler::Declared)
+    }
+
+    /// A second launch, before it hands its links over: lets the running
+    /// app bring its window to the front (Windows refuses the foreground to
+    /// a background process otherwise).
+    fn allow_handoff_focus(&self) -> OsResult<()> {
+        Ok(())
+    }
+
+    /// Shows a system notification.
+    fn notify(&self, _notice: Notice) -> OsResult<()> {
+        Err(format!(
+            "System notifications aren't written for {} yet (plan 260 S2.6)",
+            std::env::consts::OS
+        ))
+    }
 }
 
 /// A platform whose module has not landed: every call says so.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
 pub struct Unsupported;
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
 impl Unsupported {
     fn gap<T>(what: &str) -> OsResult<T> {
         Err(format!(
@@ -90,6 +149,10 @@ impl Platform for Unsupported {
     fn bundle_id(&self) -> Option<String> {
         None
     }
+
+    fn register_link_handler(&self, _: &str) -> OsResult<LinkHandler> {
+        Self::gap("The videorc:// handler")
+    }
 }
 
 /// This computer's platform.
@@ -98,7 +161,11 @@ pub fn current() -> &'static dyn Platform {
     {
         &macos::MacOs
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        &windows::Windows
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         &Unsupported
     }
