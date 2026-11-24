@@ -310,7 +310,7 @@ impl Render for GuestsPanel {
         } else if let GuestsAccess::Locked { reason, upsell } = access {
             let mut alert = Alert::new("guests-lock")
                 .variant(AlertVariant::Locked)
-                .title(*reason);
+                .title(reason);
             if upsell {
                 alert = alert.action(
                     Button::new("guests-premium")
@@ -439,7 +439,7 @@ impl Render for GuestsPanel {
                                 invite_url.clone()
                             })
                             .id("guests-invite-url")
-                            .accessibility_label(INVITE_ARIA),
+                            .aria_label(INVITE_ARIA),
                     )
                     .child(
                         Button::new("guests-invite-copy")

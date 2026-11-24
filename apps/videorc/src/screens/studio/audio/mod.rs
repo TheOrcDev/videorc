@@ -894,6 +894,7 @@ impl Render for AudioSection {
         // is a focus target so ⌘/Ctrl+↑/↓ can move between them (P218).
         PanelSection::new(STUDIO_AUDIO_FOCUS).child(
             div()
+                .id("studio-audio-channels")
                 .key_context(KEY_CONTEXT)
                 .on_action(cx.listener(Self::focus_previous_strip))
                 .on_action(cx.listener(Self::focus_next_strip))

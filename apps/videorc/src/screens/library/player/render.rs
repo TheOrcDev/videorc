@@ -25,7 +25,7 @@ impl Player {
         let mut timeline = div()
             .id("marker-timeline")
             .role(gpui::Role::Group)
-            .accessibility_label(p::MARKER_TIMELINE)
+            .aria_label(p::MARKER_TIMELINE)
             .relative()
             .h(px(24.))
             .w_full();
@@ -165,7 +165,7 @@ impl Render for Player {
                 div()
                     .id("recording-player-video")
                     .role(gpui::Role::Group)
-                    .accessibility_label(p::RECORDING_PLAYER)
+                    .aria_label(p::RECORDING_PLAYER)
                     .track_focus(&self.focus)
                     .on_key_down(cx.listener(Self::keys))
                     .on_mouse_down(
