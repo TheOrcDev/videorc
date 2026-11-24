@@ -102,7 +102,7 @@ impl ShortcutActions for StudioActions {
                 }
                 "system-audio-toggle" => {
                     studio
-                        .set_system_audio_enabled(!snapshot.capture.audio.system_audio_enabled)
+                        .set_system_audio_enabled(!snapshot.settings.capture.audio.system_audio_enabled)
                         .await;
                 }
                 "clip-mark" => {
