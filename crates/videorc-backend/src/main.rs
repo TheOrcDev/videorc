@@ -4526,6 +4526,17 @@ async fn publish_x_native_live(
 
     match &result {
         Ok(published) => {
+            if let Some(category) = &published.dropped_live_category {
+                log_x_lifecycle(
+                    state,
+                    session_id.as_deref(),
+                    protocol::HealthLevel::Info,
+                    "x-live-category-dropped",
+                    &format!(
+                        "X no longer lists the saved live category \"{category}\", so Go Live left it out. Pick another category in Stream details."
+                    ),
+                );
+            }
             log_x_lifecycle(
                 state,
                 session_id.as_deref(),
@@ -4577,6 +4588,28 @@ async fn publish_x_native_live(
     }
 
     result
+}
+
+/// X's live categories for the Stream details picker, read once a session
+/// (`refresh` reads them again).
+async fn x_live_categories(
+    state: &AppState,
+    params: x_live::XLiveCategoriesParams,
+) -> anyhow::Result<x_live::XLiveCategoriesResult> {
+    let accounts = state.database.list_platform_accounts()?;
+    let account = x_live::select_x_account(&accounts, params.account_id.as_deref())?;
+    let capability = x_live::x_native_live_capability(account)?;
+    x_live::ensure_x_native_live_available(&capability)?;
+    let credentials = x_live::x_livestream_credentials()?
+        .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?;
+    let categories = x_live::live_categories(
+        &reqwest::Client::new(),
+        &credentials,
+        &x_live::api_base_url(None),
+        params.refresh,
+    )
+    .await?;
+    Ok(x_live::XLiveCategoriesResult { categories })
 }
 
 async fn end_x_native_live(state: &AppState, params: XEndParams) -> anyhow::Result<XEndResult> {
@@ -6541,6 +6574,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "platformAccounts.youtube.channels"
         | "streamTargets.twitch.searchCategories"
         | "streamTargets.kick.searchCategories"
+        | "streamTargets.x.liveCategories"
         | "streamTargets.x.capability"
         | "screens.list"
         | "banners.list"
@@ -16326,6 +16360,21 @@ async fn handle_text_message_with_role(
                     Err(error) => {
                         ServerResponse::error(command.id, "x-capability-failed", error.to_string())
                     }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "streamTargets.x.liveCategories" => {
+            match serde_json::from_value::<x_live::XLiveCategoriesParams>(command.params) {
+                Ok(params) => match x_live_categories(state, params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "x-live-categories-failed",
+                        error.to_string(),
+                    ),
                 },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())

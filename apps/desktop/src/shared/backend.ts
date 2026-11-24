@@ -1420,6 +1420,13 @@ export interface StreamTargetMetadataDraft {
    * the announcement post. Undefined means announce (the platform default).
    */
   xAnnounce?: boolean
+  /**
+   * X live category (`GET /2/broadcasts/categories`): the permanent id Go
+   * Live sends as `live_category_id`, and the name the picker shows. Sticky:
+   * the last pick stays for the next stream.
+   */
+  xCategoryId?: string
+  xCategoryName?: string
   updatedAt: string
 }
 
@@ -1736,7 +1743,25 @@ export interface XPublishResult {
   tweetId?: string
   /** X answered 200: the source already had a live broadcast, returned unchanged. */
   alreadyLive?: boolean
+  /** The live category X answered with; absent when the broadcast has none. */
+  liveCategoryId?: string
   message: string
+}
+
+/** One X live category, in X's order: store the `id`, show the `name`. */
+export interface XLiveCategory {
+  id: string
+  name: string
+}
+
+/** `streamTargets.x.liveCategories`: read once a session; `refresh` reads X again. */
+export interface XLiveCategoriesParams {
+  accountId?: string
+  refresh?: boolean
+}
+
+export interface XLiveCategoriesResult {
+  categories: XLiveCategory[]
 }
 
 /**

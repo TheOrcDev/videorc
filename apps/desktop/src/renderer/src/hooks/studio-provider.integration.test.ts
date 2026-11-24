@@ -1415,6 +1415,13 @@ class StudioBackend {
           accountLabel: 'Kick Test Channel',
           title: 'Provider test stream'
         }
+      case 'streamTargets.x.liveCategories':
+        return {
+          categories: [
+            { id: 'gaming', name: 'Gaming' },
+            { id: 'music', name: 'Music' }
+          ]
+        }
       case 'streamTargets.x.capability':
         return {
           platform: 'x',

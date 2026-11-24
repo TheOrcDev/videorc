@@ -617,6 +617,8 @@ import type {
   TwitchCategory,
   KickAppliedMetadata,
   KickCategory,
+  XLiveCategory,
+  XLiveCategoriesResult,
   PreparedKickBroadcast,
   VideoPreset,
   VideoSettings,
@@ -963,6 +965,7 @@ function markOutputChosenByUser(): void {
 export const SESSION_DETAIL_BUFFER_LIMIT = 120
 const SESSION_DETAIL_CACHE_LIMIT = 8
 const EMPTY_KICK_CATEGORIES: KickCategory[] = []
+const EMPTY_X_LIVE_CATEGORIES: XLiveCategory[] = []
 
 export function capSessionDetailBuffer<T>(entries: T[]): T[] {
   return entries.slice(-SESSION_DETAIL_BUFFER_LIMIT)
@@ -1503,6 +1506,10 @@ export type StudioContextValue = {
   twitchCategorySearchPending: boolean
   kickCategories: KickCategory[]
   kickCategorySearchPending: boolean
+  /** X's live categories in X's order, read once a session for the X picker. */
+  xLiveCategories: XLiveCategory[]
+  /** Whether that read is running, done, or failed (the picker says so). */
+  xLiveCategoriesStatus: 'idle' | 'loading' | 'ready' | 'failed'
   xNativeCapability: XNativeLiveCapability | null
   /** Plan 094: the shared YouTube API quota breaker; `pausedUntil` while paused. */
   youtubeQuota: YouTubeQuotaStatus
@@ -1789,6 +1796,8 @@ export type StudioContextValue = {
   selectYouTubeChannel: (channelId: string, accountId?: string) => Promise<void>
   searchTwitchCategories: (query: string) => Promise<void>
   searchKickCategories: (query: string) => Promise<void>
+  /** Read X's live categories; `refresh` asks X again instead of the session's copy. */
+  loadXLiveCategories: (refresh?: boolean) => Promise<void>
   refreshXNativeCapability: (accountId?: string) => Promise<void>
   authorizeXLive: () => Promise<void>
   saveStreamMetadataDraft: () => Promise<void>
@@ -3225,6 +3234,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const [kickCategorySearchPending, setKickCategorySearchPending] = useState(false)
   const [xNativeCapability, setXNativeCapability] = useState<XNativeLiveCapability | null>(null)
   const [xNativeCapabilityLoading, setXNativeCapabilityLoading] = useState(false)
+  const [xLiveCategories, setXLiveCategories] = useState<XLiveCategory[]>(EMPTY_X_LIVE_CATEGORIES)
+  const [xLiveCategoriesStatus, setXLiveCategoriesStatus] =
+    useState<StudioContextValue['xLiveCategoriesStatus']>('idle')
   // Plan 094: one shared paused state for every YouTube Data API caller. The
   // backend owns it; the event clears it ({} = not paused) on its own.
   const [youtubeQuota, setYoutubeQuota] = useState<YouTubeQuotaStatus>({})
@@ -7920,6 +7932,39 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }
     void refreshXNativeCapability(account.accountId)
   }, [platformAccounts, refreshXNativeCapability])
+
+  // X's live categories (sorted by viewership, changing rarely): read once
+  // X Live can go live, for the Stream details picker. A failed read is the
+  // picker's to say, never a notification: nobody pressed anything.
+  const loadXLiveCategories = useCallback(
+    async (refresh = false) => {
+      if (!client) return
+      const account = platformAccounts.find((item) => item.platform === 'x')
+      try {
+        setXLiveCategoriesStatus('loading')
+        const result = await client.request<XLiveCategoriesResult>(
+          'streamTargets.x.liveCategories',
+          { accountId: account?.accountId, ...(refresh ? { refresh: true } : {}) }
+        )
+        setXLiveCategories(result.categories)
+        setXLiveCategoriesStatus('ready')
+      } catch (error) {
+        console.warn('[x] live categories unavailable', error)
+        setXLiveCategoriesStatus('failed')
+      }
+    },
+    [client, platformAccounts]
+  )
+
+  const xLiveReady = Boolean(xNativeCapability?.nativeAvailable)
+  useEffect(() => {
+    if (!xLiveReady) {
+      setXLiveCategories(EMPTY_X_LIVE_CATEGORIES)
+      setXLiveCategoriesStatus('idle')
+      return
+    }
+    void loadXLiveCategories()
+  }, [xLiveReady, loadXLiveCategories])
 
   const authorizeXLive = useCallback(async () => {
     if (!client || wsStatus !== 'connected') {
@@ -21693,6 +21738,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       twitchCategorySearchPending,
       kickCategories,
       kickCategorySearchPending,
+      xLiveCategories,
+      xLiveCategoriesStatus,
       xNativeCapability,
       xNativeCapabilityLoading,
       youtubeQuota,
@@ -21805,6 +21852,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       selectYouTubeChannel,
       searchTwitchCategories,
       searchKickCategories,
+      loadXLiveCategories,
       refreshXNativeCapability,
       authorizeXLive,
       saveStreamMetadataDraft,
@@ -21948,6 +21996,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       twitchCategorySearchPending,
       kickCategories,
       kickCategorySearchPending,
+      xLiveCategories,
+      xLiveCategoriesStatus,
       xNativeCapability,
       xNativeCapabilityLoading,
       youtubeQuota,
@@ -22060,6 +22110,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       selectYouTubeChannel,
       searchTwitchCategories,
       searchKickCategories,
+      loadXLiveCategories,
       refreshXNativeCapability,
       authorizeXLive,
       saveStreamMetadataDraft,

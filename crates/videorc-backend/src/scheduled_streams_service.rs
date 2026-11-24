@@ -1243,6 +1243,54 @@ fn x_source_id_slots(event: &mut ScheduledStreamEvent) -> Vec<&mut String> {
     slots
 }
 
+/// A scheduled X broadcast takes no category when it is made or started,
+/// so the saved one goes on with `PUT /2/broadcasts/:id` once it is live.
+/// Best effort: a category never fails the activation, and one X no longer
+/// lists is left out.
+async fn attach_x_live_category(state: &AppState, api: &XScheduledBroadcasts, broadcast_id: &str) {
+    let Some(category) = state
+        .database
+        .stream_metadata_draft()
+        .ok()
+        .as_ref()
+        .and_then(crate::x_live::x_live_category)
+    else {
+        return;
+    };
+    if crate::x_live::cached_live_categories(&api.credentials.user_id)
+        .is_some_and(|known| !known.iter().any(|listed| listed.id == category))
+    {
+        tracing::info!(
+            category = %category,
+            "scheduled X broadcast: X no longer lists the saved live category; left out"
+        );
+        return;
+    }
+    let changes = crate::x_live::XBroadcastChanges {
+        title: None,
+        live_category_id: Some(category.clone()),
+    };
+    match crate::x_live::update_broadcast(
+        &api.client,
+        &api.credentials,
+        &api.base,
+        broadcast_id,
+        &changes,
+    )
+    .await
+    {
+        Ok(updated) => tracing::info!(
+            category = ?updated.live_category_id,
+            "scheduled X broadcast: live category attached"
+        ),
+        Err(error) => tracing::warn!(
+            category = %category,
+            error = %error,
+            "scheduled X broadcast: live category not attached"
+        ),
+    }
+}
+
 /// Events saved before the `/2/sources` migration hold the old stream key
 /// as `source_id` (the deprecated routes used the key as the id). X now
 /// answers every scheduled-broadcast read with the real 19-digit source id,
@@ -1745,6 +1793,7 @@ async fn execute_x(
             }
         }
         let broadcast = broadcast.unwrap_or(Value::Null);
+        attach_x_live_category(state, &api, &id).await;
         let share = broadcast["share_url"]
             .as_str()
             .filter(|url| !url.is_empty())
@@ -3101,6 +3150,13 @@ mod x_tests {
             ("GET", ["2", "broadcasts", id]) => ok(
                 json!({"data":{"id":id,"broadcast_id":id,"media_key":format!("28_2116610227978326{:03}", id.len()),"state":"RUNNING","share_url":format!("https://x.com/i/broadcasts/{id}")}}),
             ),
+            ("PUT", ["2", "broadcasts", id]) => ok(json!({"data":{
+                "id":id,
+                "broadcast_id":id,
+                "state":"RUNNING",
+                "share_url":format!("https://x.com/i/broadcasts/{id}"),
+                "live_category_id":body["live_category_id"]
+            }})),
             ("PUT", ["2", "broadcasts", id, "state"]) => {
                 if body != json!({"state":"END"}) {
                     return problem(StatusCode::BAD_REQUEST, "Send exactly {\"state\":\"END\"}.");
@@ -3552,6 +3608,43 @@ mod x_tests {
         let data = fixture.lock().unwrap();
         assert_eq!(data.schedules.len(), 1);
         assert_eq!(data.sources.len(), 1);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn a_started_x_schedule_gets_the_saved_live_category() {
+        let (api, fixture, handle) = x_fixture().await;
+        let state = super::tests::state();
+        // Nothing saved: nothing is sent.
+        attach_x_live_category(&state, &api, "sched2").await;
+        assert!(
+            !fixture
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|(method, _, _)| method == "PUT")
+        );
+        let mut draft = state.database.stream_metadata_draft().unwrap();
+        let x = draft
+            .target_overrides
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::X)
+            .unwrap();
+        x.x_category_id = Some("gaming".into());
+        x.x_category_name = Some("Gaming".into());
+        state.database.save_stream_metadata_draft(draft).unwrap();
+        attach_x_live_category(&state, &api, "sched2").await;
+        let data = fixture.lock().unwrap();
+        let puts: Vec<_> = data
+            .calls
+            .iter()
+            .filter(|(method, _, _)| method == "PUT")
+            .collect();
+        assert_eq!(puts.len(), 1);
+        assert_eq!(puts[0].1, "/2/broadcasts/sched2");
+        assert_eq!(puts[0].2, json!({"live_category_id":"gaming"}));
+        drop(data);
         handle.abort();
     }
 
