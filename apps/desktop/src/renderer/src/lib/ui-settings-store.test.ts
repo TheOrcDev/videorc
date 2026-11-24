@@ -527,8 +527,10 @@ describe('the window transports', () => {
     expect(await chosen.get()).toEqual({ entries: {}, revision: 0, localStorageMigrated: true })
 
     const none = windowUiSettingsTransport({})
-    await expect(none.get()).rejects.toThrow('no engine access')
-    await expect(windowUiSettingsTransport(undefined).get()).rejects.toThrow('no engine access')
+    await expect(none.get()).rejects.toThrow("can't reach Videorc's settings")
+    await expect(windowUiSettingsTransport(undefined).get()).rejects.toThrow(
+      "can't reach Videorc's settings"
+    )
 
     // Such a window renders at once with the store unavailable and never retries.
     const timers: unknown[] = []
@@ -545,7 +547,7 @@ describe('the window transports', () => {
     })
     expect(await store.hydrate({ timeoutMs: 1_000 })).toMatchObject({
       state: 'unavailable',
-      reason: expect.stringContaining('no engine access')
+      reason: expect.stringContaining("can't reach Videorc's settings")
     })
     // Only the hydrate deadline was scheduled, no retry.
     expect(timers).toHaveLength(1)
