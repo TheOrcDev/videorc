@@ -182,11 +182,11 @@ impl SidekickScreen {
         let backend = self.studio.backend().clone();
         let read = self.runtime.spawn(async move {
             let settings = backend
-                .request("cohost.settings.get", json!(null))
+                .request("cohost.settings.get", json!({}))
                 .await
                 .ok()
                 .and_then(|value| CohostSettingsView::from_json(&value));
-            let account = backend.request("account.get", json!(null)).await.ok();
+            let account = backend.request("account.get", json!({})).await.ok();
             let signed_in = account
                 .as_ref()
                 .and_then(|value| value.get("status"))
