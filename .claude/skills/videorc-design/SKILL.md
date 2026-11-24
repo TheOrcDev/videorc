@@ -145,6 +145,12 @@ primitives and the same words. Only the tools differ.
   (`with_timed_transformation`), capped at 60 fps (`with_max_fps(60.)`,
   owner call 2026-11-24), and stops under Reduce Motion. Never a
   `request_animation_frame` loop: it redraws the whole window every frame.
+  The one short burst allowed is an overlay's 100 ms fade in and out
+  (`motion::presence`), which asks for frames only while it moves.
+- **Lit Record's glow holds steady at 85% in GPUI; it does not breathe**
+  (owner call 2026-11-24). A breath would redraw the window every frame for
+  the whole session (S0.4 measured 24% of a core). The Electron flavour's
+  breathing glow (D5) stays as it is.
 - **Shortcuts** come from the keymap through `ShortcutKeys`, so the chip
   cannot drift from the binding. **Toasts** tint their icon only.
 - **Guards.** `scripts/lib/gpui-design-guards.test.mjs` (`pnpm
@@ -181,7 +187,8 @@ for the owner, not a design choice.
     exception, the owner's call on 2026-11-01 (plan 005 in videorc-ui): lit
     Record's glow breathes while a session runs, like a camera's tally
     light, on opacity alone, and reduced motion holds it steady. The metal
-    itself never moves.
+    itself never moves. In the GPUI flavour the glow holds steady (owner
+    call 2026-11-24).
   - **Stream Manager's highlights and members are chrome** (2026-10-28,
     plan 0011). The owner asked for the highlights and every member's entry
     to look much stronger, in the Welcome screen's Liquid Chrome.
