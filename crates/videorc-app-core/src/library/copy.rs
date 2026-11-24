@@ -59,7 +59,7 @@ pub const NO_FILE_TO_PLAY: &str = "No file to play yet.";
 
 // The row's menu.
 pub const MENU_PLAY: &str = "Play";
-pub const MENU_BUDDY_REPORT: &str = "Buddy report";
+pub const MENU_BUDDY_REPORT: &str = "Sidekick report";
 /// S3.10c: Buddy → Clean cut on this recording, and its finished cut.
 pub const MENU_CLEAN_CUT: &str = "Make a clean cut…";
 pub const MENU_REVIEW_CLEAN_CUT: &str = "Review clean cut";
@@ -201,12 +201,12 @@ pub fn delete_title(count: usize) -> String {
 pub fn delete_description(count: usize) -> String {
     if count == 1 {
         format!(
-            "The video file goes to the {}. Its Library entry, markers, Buddy report and chat history are deleted and can't be restored.",
+            "The video file goes to the {}. Its Library entry, markers, Sidekick report and chat history are deleted and can't be restored.",
             trash_name()
         )
     } else {
         format!(
-            "The video files go to the {}. Their Library entries, markers, Buddy reports and chat history are deleted and can't be restored.",
+            "The video files go to the {}. Their Library entries, markers, Sidekick reports and chat history are deleted and can't be restored.",
             trash_name()
         )
     }
@@ -331,6 +331,18 @@ mod tests {
         ),
     ];
 
+    /// The code without its comments: a word a comment still mentions is not
+    /// one the renderer shows.
+    fn code(text: &str) -> String {
+        text.lines()
+            .filter(|line| {
+                let line = line.trim_start();
+                !(line.starts_with("//") || line.starts_with("/*") || line.starts_with('*'))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// JSX wraps lines and writes `&apos;`; TS escapes quotes. Compare the
     /// words, not the layout.
     fn words(text: &str) -> String {
@@ -344,7 +356,7 @@ mod tests {
     /// Every `pub const …: &str` in this file is still the renderer's.
     #[test]
     fn every_constant_is_still_in_the_renderer() {
-        let renderer = words(&SOURCES.join("\n"));
+        let renderer = words(&code(&SOURCES.join("\n")));
         let this = include_str!("copy.rs");
         let this = &this[..this.find("#[cfg(test)]").unwrap()];
         let mut checked = 0;
