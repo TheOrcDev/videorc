@@ -639,16 +639,25 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   // Only the explicitly public avatar and bubble become raster assets. Private
   // Sidekick configuration remains in this process and is never serialized.
   useEffect(() => {
+    // Plan 260 S1.8b: with the backend in the room (its dev switch) there is
+    // no room client here; the content still goes to the backend.
     const current = clientRef.current
-    if (!current || !roomOpen || !deps.avatar) return
+    if (!roomOpen || !deps.avatar || (!current && !client)) return
     let cancelled = false
     const avatar = deps.avatar
+    const handOver = (
+      content: import('@/lib/room-avatar-publisher').AvatarContent | null
+    ): void => {
+      void client?.requestTyped('cloud.room.avatar.set', { content }).catch(() => {})
+    }
     // A hide or a lost persona clears at once. Otherwise every output keeps
     // the last picture until the new one is drawn: clearing first blanked the
     // avatar on all outputs whenever the Sidekick started or stopped talking.
     // A stale render is dropped (`cancelled`); `set` fences an older upload.
-    if (!avatar.persona || !(avatar.layout.showOnStream || avatar.layout.showInRecording))
-      current.setAvatar(null)
+    if (!avatar.persona || !(avatar.layout.showOnStream || avatar.layout.showInRecording)) {
+      current?.setAvatar(null)
+      handOver(null)
+    }
     if (!avatar.persona) return
     void (async () => {
       const { renderCloudAvatar } = await import('@/lib/buddy-overlay')
@@ -673,7 +682,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       }
       // Plan 249 S5: an Alive pack also travels as an atlas for consumers that
       // animate it; a failure keeps the static content above, never blocks it.
-      let seed: Parameters<typeof current.setAvatarMotion>[0] = null
+      let seed: Parameters<TalkShowRoomClient['setAvatarMotion']>[0] = null
       let refused: string | null = null
       const persona = avatar.persona!
       if ((content.stream || content.recording) && persona.avatar.kind === 'alive') {
@@ -718,19 +727,20 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         }
       }
       if (!cancelled) {
-        current.setAvatar(content)
-        current.setAvatarMotion(seed, refused)
+        current?.setAvatar(content)
+        current?.setAvatarMotion(seed, refused)
+        handOver(content)
       }
     })().catch((error: unknown) => {
       if (!cancelled) {
-        current.failAvatar()
+        current?.failAvatar()
         callbacksRef.current.onError(error, 'render the room avatar')
       }
     })
     return () => {
       cancelled = true
     }
-  }, [deps.avatar, roomOpen, showId, snapshot.state])
+  }, [client, deps.avatar, roomOpen, showId, snapshot.state])
 
   useEffect(() => {
     if (!client || !roomOpen || !showId || !deps.avatar || snapshot.state !== 'connected') return

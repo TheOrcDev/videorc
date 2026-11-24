@@ -42,9 +42,10 @@ const AVATAR_MOTION_MAX_BYTES: usize = 16 * 1024;
 /// The connection's sender and the pages that animate now (egress pages
 /// whose receipt advertises animation, for an output the content shows,
 /// with an atlas variant to draw), kept by the avatar publisher.
-static MOTION: StdMutex<Option<(LocalParticipant, Vec<String>)>> = StdMutex::new(None);
+type MotionSlot = Option<(LocalParticipant, String, Vec<String>)>;
+static MOTION: StdMutex<MotionSlot> = StdMutex::new(None);
 
-fn motion_slot() -> std::sync::MutexGuard<'static, Option<(LocalParticipant, Vec<String>)>> {
+fn motion_slot() -> std::sync::MutexGuard<'static, MotionSlot> {
     MOTION
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -54,13 +55,20 @@ fn motion_slot() -> std::sync::MutexGuard<'static, Option<(LocalParticipant, Vec
 /// sent to the pages that animate. Answers who they are (the renderer's
 /// model sends a keyframe to a page it has not served yet).
 pub(crate) async fn send_motion(message: &Value) -> anyhow::Result<Vec<String>> {
-    let Some((local, targets)) = motion_slot().clone() else {
+    let Some((local, room_name, targets)) = motion_slot().clone() else {
         return Ok(Vec::new());
     };
     if targets.is_empty() {
         return Ok(targets);
     }
-    let payload = serde_json::to_vec(message)?;
+    // The renderer's model runs without the room: the host's session and the
+    // room are this connection's.
+    let mut message = message.clone();
+    if let Some(fields) = message.as_object_mut() {
+        fields.insert("publisherSid".to_string(), json!(local.sid().as_str()));
+        fields.insert("show".to_string(), json!(room_name));
+    }
+    let payload = serde_json::to_vec(&message)?;
     if payload.len() > AVATAR_MOTION_MAX_BYTES {
         anyhow::bail!("The avatar's motion message is over 16 KiB.");
     }
@@ -477,7 +485,7 @@ pub(crate) async fn run(
 ) {
     let mut avatar = AvatarState::default();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
-    *motion_slot() = Some((room.local_participant(), Vec::new()));
+    *motion_slot() = Some((room.local_participant(), room.name(), Vec::new()));
     let _clear = ClearMotion;
     loop {
         tokio::select! {
@@ -530,7 +538,7 @@ async fn send_due(
         let receipts = lock(receipts);
         avatar_peers(&receipts, &visible, now)
     };
-    if let Some((_, targets)) = motion_slot().as_mut() {
+    if let Some((_, _, targets)) = motion_slot().as_mut() {
         *targets = motion_targets(avatar.content.as_ref(), &peers);
     }
     let (status, accepted) = avatar.report(&peers, &local_sid, now);
