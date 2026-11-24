@@ -2940,6 +2940,30 @@
         }
       }
     },
+    "roomPresentationPeopleEvent": {
+      "showId": "show_talk_1",
+      "media": {
+        "camera": true,
+        "microphone": true,
+        "people": [
+          {
+            "identity": "g_ada",
+            "name": "Ada",
+            "camera": true,
+            "screen": false,
+            "audio": true,
+            "micMuted": false,
+            "cameraOff": false,
+            "speaking": true,
+            "quality": "good"
+          }
+        ],
+        "monitor": {
+          "video": true,
+          "audio": true
+        }
+      }
+    },
     "roomAvatarMotionParams": {
       "message": {
         "v": 1,

@@ -710,6 +710,8 @@ export interface BackendRpcMethodMap {
   'cloud.room.owner': BackendRpcDefinition<undefined, { backend: boolean }>
   'cloud.room.routing.set': BackendRpcDefinition<ProgramAudioSettings, { held: boolean }>
   'cloud.room.aux.set': BackendRpcDefinition<CloudRoomAuxSetParams, { held: boolean }>
+  /** Plan 260 S1.8d: the Program monitor takes the runner's return. */
+  'cloud.room.monitor.set': BackendRpcDefinition<{ enabled: boolean }, { held: boolean }>
   /** Plan 260 S1.8c c5: this computer controls the show with its devices on. */
   'cloud.room.html.set': BackendRpcDefinition<{ enabled: boolean }, { held: boolean }>
   'cloud.room.avatar.motion': BackendRpcDefinition<
@@ -7219,6 +7221,28 @@ const cloudRoomPresentationEventSchema = objectSchema(
               { allowUnknown: false }
             )
           ),
+          people: optionalSchema(
+            arraySchema(
+              objectSchema(
+                {
+                  identity: stringSchema({ minLength: 1, maxLength: 256 }),
+                  name: stringSchema({ maxLength: 256 }),
+                  camera: booleanSchema,
+                  screen: booleanSchema,
+                  audio: booleanSchema,
+                  micMuted: booleanSchema,
+                  cameraOff: booleanSchema,
+                  speaking: booleanSchema,
+                  quality: enumSchema(['excellent', 'good', 'poor', 'lost'])
+                },
+                { allowUnknown: false }
+              ),
+              { maxLength: 64 }
+            )
+          ),
+          monitor: optionalSchema(
+            objectSchema({ video: booleanSchema, audio: booleanSchema }, { allowUnknown: false })
+          ),
           aux: optionalSchema(
             objectSchema(
               {
@@ -8154,6 +8178,10 @@ const runtimeContracts = {
     result: cloudRoomPresentationSetResultSchema
   },
   'cloud.room.html.set': {
+    params: cloudRoomHtmlSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.monitor.set': {
     params: cloudRoomHtmlSetParamsSchema,
     result: cloudRoomPresentationSetResultSchema
   },

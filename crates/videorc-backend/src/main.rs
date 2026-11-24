@@ -128,6 +128,8 @@ mod room_media;
 mod room_overlays;
 mod room_program_camera;
 #[cfg(target_os = "macos")]
+mod room_remote;
+#[cfg(target_os = "macos")]
 mod room_routing;
 #[cfg(target_os = "macos")]
 mod room_scene;
@@ -757,6 +759,8 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
             "/preview/buddy/latest.bmp",
             get(preview_buddy_layer::latest_bmp_handler),
         )
+        // Plan 260 S1.8d: a person's picture in the backend's room.
+        .route("/room/remote/latest.bmp", get(room_remote_bmp_handler))
         // Plan 232 S11: an HTML banner's live picture for the proof surface.
         .route(
             html_overlay::HTML_OVERLAY_PREVIEW_ROUTE,
@@ -1759,6 +1763,79 @@ async fn live_screen_frame_handler(
         )
             .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// `?token=&identity=&source=&afterGeneration=&afterSequence=`: one person's
+/// camera or screen, or the monitor, and the frame the caller already has.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RoomRemoteFrameQuery {
+    token: String,
+    identity: String,
+    source: String,
+    #[serde(default)]
+    after_generation: Option<String>,
+    #[serde(default)]
+    after_sequence: Option<u64>,
+}
+
+/// `GET /room/remote/latest.bmp` (plan 260 S1.8d): the latest picture of a
+/// person in the backend's room, in the HTML overlay route's dialect
+/// (`200` BMP with its cursor, `204` unchanged, `204` empty).
+async fn room_remote_bmp_handler(
+    State(state): State<AppState>,
+    Query(query): Query<RoomRemoteFrameQuery>,
+) -> Response {
+    if http_backend_role(&state, &query.token).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let Some(frame) = room_remote::latest(&query.identity, &query.source) else {
+            return html_overlay::html_overlay_preview_response(
+                html_overlay::HtmlOverlayPreviewPoll::Empty,
+            );
+        };
+        if query.after_generation.as_deref() == Some(frame.generation.as_str())
+            && query.after_sequence == Some(frame.sequence)
+        {
+            return html_overlay::html_overlay_preview_response(
+                html_overlay::HtmlOverlayPreviewPoll::Unchanged {
+                    generation: frame.generation,
+                    sequence: frame.sequence,
+                },
+            );
+        }
+        let encoded = tokio::task::spawn_blocking(move || {
+            preview_buddy_layer::encode_bgra_bmp_with_alpha(frame.width, frame.height, &frame.bgra)
+                .map(|bmp| (frame, bmp))
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some((frame, bmp)) = encoded else {
+            return html_overlay::html_overlay_preview_response(
+                html_overlay::HtmlOverlayPreviewPoll::Empty,
+            );
+        };
+        html_overlay::html_overlay_preview_response(html_overlay::HtmlOverlayPreviewPoll::Frame {
+            generation: frame.generation,
+            sequence: frame.sequence,
+            width: frame.width,
+            height: frame.height,
+            bmp: axum::body::Bytes::from(bmp),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (
+            &query.identity,
+            &query.source,
+            &query.after_generation,
+            query.after_sequence,
+        );
+        html_overlay::html_overlay_preview_response(html_overlay::HtmlOverlayPreviewPoll::Empty)
     }
 }
 
@@ -6465,6 +6542,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.room.routing.set"
         | "cloud.room.aux.set"
         | "cloud.room.html.set"
+        | "cloud.room.monitor.set"
         | "cloud.recordings.download"
         | "cloud.archive.stop"
         | "cloud.archive.cancel"
@@ -13737,6 +13815,26 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }
+        // Plan 260 S1.8d: the Program monitor takes the runner's return in
+        // the backend's room.
+        "cloud.room.monitor.set" => {
+            let Some(enabled) = command
+                .params
+                .get("enabled")
+                .and_then(serde_json::Value::as_bool)
+            else {
+                return ServerResponse::error(command.id, "invalid-params", "Send enabled.");
+            };
+            #[cfg(target_os = "macos")]
+            {
+                if room_host::holds_seat() {
+                    room_remote::set_monitor(enabled);
+                    return ServerResponse::ok(command.id, serde_json::json!({ "held": true }));
+                }
+            }
+            let _ = enabled;
+            ServerResponse::ok(command.id, serde_json::json!({ "held": false }))
         }
         // Plan 260 S1.8c c5: whether the backend's room may publish the HTML
         // layers' sheet (this computer controls the show, devices on).

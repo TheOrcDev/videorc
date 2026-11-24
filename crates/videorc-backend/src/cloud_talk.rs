@@ -1121,6 +1121,41 @@ pub struct RoomMediaStatus {
     /// The auxiliary track (room sounds and system audio), S1.8c c4d.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aux: Option<RoomAuxStatus>,
+    /// The room's other people, as the stage shows them (S1.8d d1): their
+    /// pictures at `/room/remote/latest.bmp`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people: Vec<RoomRemotePerson>,
+    /// The runner's return, while the Program monitor takes it (S1.8d d1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor: Option<RoomRemoteMonitor>,
+}
+
+/// One person in the room as the host receives them (the renderer room's
+/// `TalkShowPerson`, without the tracks).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomRemotePerson {
+    pub identity: String,
+    pub name: String,
+    /// A camera picture is coming in.
+    pub camera: bool,
+    /// A shared screen is coming in.
+    pub screen: bool,
+    /// Their microphone is coming in.
+    pub audio: bool,
+    pub mic_muted: bool,
+    pub camera_off: bool,
+    pub speaking: bool,
+    /// `excellent`, `good`, `poor` or `lost`.
+    pub quality: String,
+}
+
+/// The runner's return as the host receives it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomRemoteMonitor {
+    pub video: bool,
+    pub audio: bool,
 }
 
 /// The auxiliary track as the renderer room's `RoomAuxStatus` and its
