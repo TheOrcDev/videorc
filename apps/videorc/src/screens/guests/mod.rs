@@ -67,7 +67,7 @@ fn cloud_facts(status: Option<&CloudStatus>) -> Option<CloudRoomFacts> {
     })
 }
 
-fn asking_badge(count: u32) -> String {
+fn asking_badge(count: usize) -> String {
     if count == 1 {
         "1 wants to join".into()
     } else {

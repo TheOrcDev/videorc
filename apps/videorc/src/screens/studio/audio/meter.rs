@@ -65,8 +65,8 @@ pub fn lcd_meter(
                 .child(div().text_color(lit_ink).child(lcd.readout.clone()))
                 .child(
                     div()
-                        .text_color(if lcd.clip { lit_ink } else { dim_ink })
-                        .child(if lcd.clip {
+                        .text_color(if lcd.clipping { lit_ink } else { dim_ink })
+                        .child(if lcd.clipping {
                             SharedString::from("CLIP")
                         } else {
                             SharedString::from("clip")

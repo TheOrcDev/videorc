@@ -18,6 +18,7 @@ use gpui::{
 };
 use tokio::sync::watch;
 use videorc_app_core::settings_page::SettingsTab;
+use videorc_app_core::studio::StudioBackend;
 use videorc_app_core::studio::audio_levels::MicLevels;
 use videorc_app_core::studio::audio_mixer::{
     self, MICROPHONE_GAIN_DEFAULT, MICROPHONE_GAIN_RANGE, SYSTEM_AUDIO_GAIN_DEFAULT,
