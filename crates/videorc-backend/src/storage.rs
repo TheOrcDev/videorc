@@ -7216,10 +7216,11 @@ impl Database {
     /// `unless_updated_after` is left out when its row (or, once deleted, its
     /// tombstone) changed after that time (Unix ms); when it lands it is
     /// stamped with that time, not now, so replays of several journals keep
-    /// the order the writes happened in. Every delete that lands leaves a
-    /// tombstone, which also keeps an `if_absent` copy from bringing the key
-    /// back. Returns what landed and the revision after it; nothing landing
-    /// (and no mark) leaves the revision alone.
+    /// the order the writes happened in. Every delete not left out leaves a
+    /// tombstone, the key held or not, which also keeps an `if_absent` copy
+    /// from bringing the key back. Returns what landed and the revision after
+    /// it; nothing landing (a delete of an absent key only moves its
+    /// tombstone) and no mark leaves the revision alone.
     pub fn ui_settings_apply(
         &self,
         put: &BTreeMap<String, serde_json::Value>,
@@ -7298,13 +7299,17 @@ impl Database {
             }
             let removed =
                 transaction.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+            // Even a key already absent gets (or advances) its tombstone: two
+            // journals' delete at t20 and put at t10 must leave it deleted in
+            // either order. Only a removed row changes what windows see, so
+            // only that is announced and moves the revision.
+            transaction.execute(
+                "INSERT INTO app_settings (key, value_json, updated_at)
+                 VALUES (?1, 'true', ?2)
+                 ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at",
+                params![format!("{UI_SETTINGS_TOMBSTONE_PREFIX}{name}"), stamp(name)],
+            )?;
             if removed > 0 {
-                transaction.execute(
-                    "INSERT INTO app_settings (key, value_json, updated_at)
-                     VALUES (?1, 'true', ?2)
-                     ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at",
-                    params![format!("{UI_SETTINGS_TOMBSTONE_PREFIX}{name}"), stamp(name)],
-                )?;
                 landed_delete.push(name.clone());
             }
         }

@@ -103,10 +103,9 @@ function fakeEngine(initial: Record<string, UiSettingsValue> = {}) {
     }
     for (const key of params.delete ?? []) {
       if (changedSince(key, params)) continue
-      if (entries.delete(key)) {
-        updatedAt.set(key, params.unlessUpdatedAfter?.[key] ?? clock)
-        deletes.push(key)
-      }
+      // Held or not, the key's tombstone moves to this delete.
+      updatedAt.set(key, params.unlessUpdatedAfter?.[key] ?? clock)
+      if (entries.delete(key)) deletes.push(key)
     }
     const landed = Object.keys(put).length > 0 || deletes.length > 0
     if (landed || params.localStorageMigrated) revision += 1
@@ -770,11 +769,16 @@ describe('UI settings store (plan 220 S1.4a)', () => {
         delete: deletes,
         at: Object.fromEntries([...Object.keys(put), ...deletes].map((key) => [key, at]))
       })
-    // Enumerated newest first: the t20 journal before the t10 one.
+    // Enumerated newest first: the t20 journal before the t10 one. orcleTab
+    // never existed: its t20 delete must still outrank the t10 put.
     const storage = fakeStorage({
-      [`${UI_SETTINGS_JOURNAL_PREFIX}window-new`]: journal({ 'videorc.theme': 'v2' }, [], 20),
+      [`${UI_SETTINGS_JOURNAL_PREFIX}window-new`]: journal(
+        { 'videorc.theme': 'v2' },
+        ['videorc.orcleTab'],
+        20
+      ),
       [`${UI_SETTINGS_JOURNAL_PREFIX}window-old`]: journal(
-        { 'videorc.theme': 'v1', 'videorc.notesTab': 'stale' },
+        { 'videorc.theme': 'v1', 'videorc.notesTab': 'stale', 'videorc.orcleTab': 'old' },
         [],
         10
       )
@@ -805,6 +809,7 @@ describe('UI settings store (plan 220 S1.4a)', () => {
     // The t20 write stands over the t10 one, and the t15 delete over the t10 put.
     expect(engine.entries.get('videorc.theme')).toBe('v2')
     expect(engine.entries.has('videorc.notesTab')).toBe(false)
+    expect(engine.entries.has('videorc.orcleTab')).toBe(false)
     expect(recovering.get('videorc.theme')).toBe('v2')
     expect(recovering.has('videorc.notesTab')).toBe(false)
     // Both journals were replayed whole, so both are gone.

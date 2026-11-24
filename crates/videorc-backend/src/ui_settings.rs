@@ -745,6 +745,55 @@ mod tests {
     }
 
     #[test]
+    fn a_delete_of_an_absent_key_still_outranks_an_older_put_in_either_order() {
+        let (t5, t10, t20) = (1_795_000_005_000, 1_795_000_010_000, 1_795_000_020_000);
+        for delete_first in [true, false] {
+            // K never existed: delete@t20 and put@t10, from two journals.
+            let (state, mut events) = test_state();
+            let steps = if delete_first {
+                [(None, t20), (Some(json!("old")), t10)]
+            } else {
+                [(Some(json!("old")), t10), (None, t20)]
+            };
+            for (value, at) in steps {
+                replay(&state, "videorc.theme", value, at);
+            }
+            let snapshot = get(&state.database, UiSettingsGetParams::default()).unwrap();
+            assert!(
+                !snapshot.entries.contains_key("videorc.theme"),
+                "absent key, delete first: {delete_first}"
+            );
+            // A delete of an absent key changes nothing a window sees: only
+            // the put that landed (when it came first) was announced.
+            let announced = std::iter::from_fn(|| events.try_recv().ok()).count();
+            assert_eq!(
+                announced,
+                if delete_first { 0 } else { 2 },
+                "delete first: {delete_first}"
+            );
+
+            // An existing t5 tombstone advanced by a delete@t20 of the
+            // absent key outranks a put@t10, in either order.
+            let (state, _) = test_state();
+            replay(&state, "videorc.tab", Some(json!("chat")), t5 - 1_000);
+            replay(&state, "videorc.tab", None, t5);
+            let steps = if delete_first {
+                [(None, t20), (Some(json!("old")), t10)]
+            } else {
+                [(Some(json!("old")), t10), (None, t20)]
+            };
+            for (value, at) in steps {
+                replay(&state, "videorc.tab", value, at);
+            }
+            let snapshot = get(&state.database, UiSettingsGetParams::default()).unwrap();
+            assert!(
+                !snapshot.entries.contains_key("videorc.tab"),
+                "advanced tombstone, delete first: {delete_first}"
+            );
+        }
+    }
+
+    #[test]
     fn a_snapshot_never_pairs_old_entries_with_a_newer_revision() {
         let (state, _) = test_state();
         let database = &state.database;
