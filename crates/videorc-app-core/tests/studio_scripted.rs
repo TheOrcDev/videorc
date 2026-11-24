@@ -38,6 +38,8 @@ struct Script {
     settings_set_fails: bool,
     /// `session.start` waits for a permit here when set.
     start_gate: Option<Arc<Semaphore>>,
+    /// `session.stop` waits for a permit here when set.
+    stop_gate: Option<Arc<Semaphore>>,
     /// The store, as the backend would hold it.
     settings: BTreeMap<String, Value>,
     revision: u64,
@@ -174,6 +176,10 @@ impl StudioBackend for Scripted {
 
     async fn session_stop(&self, _params: SessionStopParams) -> Result<RecordingStatus, RpcError> {
         self.note("session.stop");
+        let gate = self.script.lock().unwrap().stop_gate.clone();
+        if let Some(gate) = gate {
+            gate.acquire().await.unwrap().forget();
+        }
         let mut script = self.script.lock().unwrap();
         script
             .stop_answers
@@ -547,6 +553,44 @@ async fn record_then_stop_walks_idle_starting_recording_stopping_idle() {
         StopOutcome::Stopped(true)
     );
     assert_eq!(backend.count("session.stop"), 1);
+}
+
+#[tokio::test]
+async fn a_second_stop_while_one_runs_gets_its_answer() {
+    // `stopSessionInFlightPromiseRef`: the second Stop joins the first, so a
+    // failed stop is not followed by a fresh `session.stop` nobody clicked.
+    let backend = Scripted::new();
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| {
+        script.stop_gate = Some(gate.clone());
+        script.stop_answers.push_back(Err(RpcError::new(
+            "session.stop",
+            "session-stop-failed",
+            "The recorder did not answer.",
+        )));
+    });
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    studio.set_test_pattern(true).await.unwrap();
+    assert_eq!(studio.start_recording().await, StartOutcome::Started);
+
+    let (first, second, ()) = tokio::join!(studio.stop(), studio.stop(), async {
+        for _ in 0..100 {
+            if backend.count("session.stop") == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        gate.add_permits(1);
+    });
+    assert_eq!((first, second), (false, false));
+    assert_eq!(backend.count("session.stop"), 1);
+    assert_eq!(studio.snapshot().session.phase, SessionPhase::Recording);
+
+    // Once it ended, the next Stop is a stop of its own.
+    gate.add_permits(1);
+    assert!(studio.stop().await);
+    assert_eq!(backend.count("session.stop"), 2);
 }
 
 #[tokio::test]

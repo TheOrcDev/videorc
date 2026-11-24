@@ -45,12 +45,14 @@
 
 pub mod backend;
 pub mod camera_background;
+pub mod camera_frame_rate;
 pub mod capture_config;
 pub mod families;
 pub mod health;
 pub mod health_page;
 pub mod js_value;
 pub mod latency;
+pub mod linux_desktop;
 pub mod preview_scene;
 pub mod session;
 pub mod settings;
@@ -389,10 +391,10 @@ struct InFlightStart {
     answer: watch::Receiver<Option<StartOutcome>>,
 }
 
-/// Clears the start in flight when its start ends.
-struct ClearInFlight<'a>(&'a Mutex<Option<InFlightStart>>);
+/// Clears the start (or stop) in flight when it ends.
+struct ClearInFlight<'a, T>(&'a Mutex<Option<T>>);
 
-impl Drop for ClearInFlight<'_> {
+impl<T> Drop for ClearInFlight<'_, T> {
     fn drop(&mut self) {
         *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
@@ -620,6 +622,9 @@ pub struct Studio<B: StudioBackend> {
     start_lock: tokio::sync::Mutex<()>,
     /// One stop at a time.
     stop_lock: tokio::sync::Mutex<()>,
+    /// The stop in flight, whose answer a second Stop gets
+    /// (`stopSessionInFlightPromiseRef`).
+    stop_in_flight: Mutex<Option<watch::Receiver<Option<bool>>>>,
     /// One exclusion request at a time, each with the newest list.
     exclusion_lock: tokio::sync::Mutex<()>,
     /// One settings batch in flight at a time.
@@ -672,6 +677,7 @@ impl<B: StudioBackend> Studio<B> {
             telemetry,
             support_bundle: tokio::sync::Mutex::new(()),
             in_flight: Mutex::new(None),
+            stop_in_flight: Mutex::new(None),
             start_lock: tokio::sync::Mutex::new(()),
             stop_lock: tokio::sync::Mutex::new(()),
             exclusion_lock: tokio::sync::Mutex::new(()),
@@ -1661,6 +1667,39 @@ impl<B: StudioBackend> Studio<B> {
     /// unless the session already ended. True when the stop answered (or
     /// nothing was running), false when the request failed.
     pub async fn stop(&self) -> bool {
+        // A Stop while one is on its way answers with that stop's answer,
+        // never a fresh `session.stop` after it failed
+        // (`stopSessionInFlightPromiseRef`).
+        let (answer, joined) = {
+            let mut in_flight = self
+                .stop_in_flight
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match in_flight.as_ref() {
+                Some(heard) => (None, Some(heard.clone())),
+                None => {
+                    let (answer, heard) = watch::channel(None);
+                    *in_flight = Some(heard);
+                    (Some(answer), None)
+                }
+            }
+        };
+        if let Some(mut heard) = joined {
+            return match heard.wait_for(Option::is_some).await {
+                Ok(ok) => ok.unwrap_or(false),
+                Err(_) => false,
+            };
+        }
+        let answer = answer.expect("set above");
+        // Cleared however this stop ends, a dropped future included.
+        let clear = ClearInFlight(&self.stop_in_flight);
+        let ok = self.stop_once().await;
+        drop(clear);
+        answer.send_replace(Some(ok));
+        ok
+    }
+
+    async fn stop_once(&self) -> bool {
         let _after_start = self.start_lock.lock().await;
         let _one_at_a_time = self.stop_lock.lock().await;
         let requested_at_ms = {
