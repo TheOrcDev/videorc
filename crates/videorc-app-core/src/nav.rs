@@ -153,6 +153,7 @@ const FIXED_KEYS: [(PageId, PageKey); 4] = [
 /// The page routes installed by the GPUI app. This is availability, not a
 /// claim of visual/runtime parity in docs/gpui/parity.md.
 pub const PORTED: &[PageId] = &[
+    PageId::Library,
     PageId::Studio,
     PageId::Sources,
     PageId::Live,

@@ -172,6 +172,55 @@ impl Hub {
             cx.notify();
         }
     }
+    pub fn attach_library(
+        &mut self,
+        mut notices: tokio::sync::broadcast::Receiver<videorc_app_core::library::LibraryNotice>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |entity, cx| {
+            loop {
+                let notice = match notices.recv().await {
+                    Ok(notice) => notice,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                };
+                if entity
+                    .update(cx, |this, cx| {
+                        use videorc_app_core::library::{
+                            LibraryNotice, cloud::CloudDownloadNotice,
+                        };
+                        let input = match notice {
+                            LibraryNotice::NoiseCleanupCompleted(done) => {
+                                sources::session::noise_cleanup_completed(
+                                    &done.job_id,
+                                    &done.output_session_id,
+                                )
+                            }
+                            LibraryNotice::CloudDownload(CloudDownloadNotice::Saved {
+                                recording_id,
+                                ..
+                            }) => sources::work::cloud_download_saved(&recording_id),
+                            LibraryNotice::CloudDownload(CloudDownloadNotice::Failed {
+                                recording_id,
+                                known,
+                                ..
+                            }) => sources::work::cloud_download_failed(
+                                &recording_id,
+                                "Couldn't download the cloud recording.",
+                                known.as_deref(),
+                            ),
+                        };
+                        this.store.publish(input, now());
+                        this.flush(cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
     pub fn pressed(&mut self) {
         self.store.set_pressed();
     }
@@ -220,12 +269,14 @@ impl Hub {
         matches!(
             action,
             NoticeAction::RetryStart
+                | NoticeAction::OpenLibrary { .. }
                 | NoticeAction::Copy { .. }
                 | NoticeAction::OpenHealth
                 | NoticeAction::ResumeSystemAudio
                 | NoticeAction::OpenUrl { .. }
                 | NoticeAction::OpenPage(
                     PageId::Studio
+                        | PageId::Library
                         | PageId::Sources
                         | PageId::Recording
                         | PageId::Settings

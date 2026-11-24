@@ -204,6 +204,7 @@ fn main() -> Result<()> {
                     .into_iter()
                     .chain([camera::VIRTUAL_CAMERA_CHANGED, app::exit::CLOUD_STATE])
                     .chain(screens::settings::EVENTS)
+                    .chain(videorc_app_core::library::LIBRARY_EVENTS)
                     .chain(["session.log"]),
             ),
             logger: logger.clone(),
@@ -215,6 +216,18 @@ fn main() -> Result<()> {
     // anything, so the Studio keeps the first one (it must see
     // `backend.ready`).
     let capture_events = client.subscribe();
+    let library_events = client.subscribe();
+    let library_files = screens::library::files::Files::new(supervisor.state());
+    let library = Arc::new(screens::library::Core::new(
+        client.clone(),
+        library_files.clone(),
+    ));
+    // Subscribe first, then recover Ready if the client connected before
+    // the Library was installed. Reconnects are driven by this same receiver.
+    if let ConnectionState::Connected { ready, .. } = &*client.state().borrow() {
+        library.on_event(videorc_app_core::BackendEvent::Ready(ready.clone()));
+    }
+    runtime.spawn(library.clone().drive(library_events));
 
     // S2.4: the Studio driver on the client (the session, the settings, the
     // sources), fed by the client's events on the core's runtime. The views
@@ -342,6 +355,7 @@ fn main() -> Result<()> {
                 cx,
             )
         });
+        notices.update(cx, |hub, cx| hub.attach_library(library.notices(), cx));
         cx.set_global(screens::notifications::Shared(notices.clone()));
 
         // Hide from stream: content protection and the capture filter's
@@ -469,6 +483,16 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let library_page = cx.new(|cx| {
+                    screens::library::LibraryScreen::new(
+                        library.clone(),
+                        library_files.clone(),
+                        studio.clone(),
+                        core_handle.clone(),
+                        window,
+                        cx,
+                    )
+                });
                 let palette = cx.new(|cx| {
                     screens::command_palette::CommandPalette::new(
                         studio.clone(),
@@ -489,6 +513,7 @@ fn main() -> Result<()> {
                         go_live.clone(),
                         settings.clone(),
                         health.clone(),
+                        library_page,
                         palette,
                         notices.clone(),
                         window,
