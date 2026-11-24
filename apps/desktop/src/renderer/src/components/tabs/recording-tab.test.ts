@@ -264,7 +264,7 @@ describe('separate files encoder notice (plan 200 D4)', () => {
       config: separateFiles
     })
     expect(notice()?.textContent).toBe(
-      'Separate files at 4K · 30 fps use about 3× the encoder. If your Mac falls behind, Videorc stops the separate files and keeps the main recording.'
+      'Separate files at 4K · 30 fps use about 3× the encoder. If your computer falls behind, Videorc stops the separate files and keeps the main recording.'
     )
   })
 

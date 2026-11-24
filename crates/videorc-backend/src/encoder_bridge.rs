@@ -3775,8 +3775,10 @@ pub fn start_synthetic_recording_bridge(
         effective_encoder_bridge_output_role(diagnostics_context),
     );
     let stop = Arc::new(AtomicBool::new(false));
+    // #1631: Media Foundation legs share the ISO stop boundary too, so every
+    // file of a take ends on the Combined file's last frame.
     let graceful_stop_at = (start_barrier.is_some()
-        && video_output.uses_video_toolbox()
+        && video_output.uses_encoded_h264()
         && effective_encoder_bridge_output_role(diagnostics_context)
             != EncoderBridgeOutputRole::Stream)
         .then(|| {
@@ -4167,7 +4169,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let direct_d3d11_enabled = false;
     let mut output_queue_policy = encoder_bridge_output_queue_policy(diagnostics_context)
         .for_arrival_stamped_raw_input(video_output);
-    if video_output.uses_video_toolbox()
+    if video_output.uses_encoded_h264()
         && let Some(barrier) = start_barrier.as_ref()
     {
         output_queue_policy =
@@ -5994,6 +5996,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                                     .encode_frame(&frame.frame.bytes, sequence.saturating_sub(1))
                                 {
                                     Ok(frames) => {
+                                        // #1631: the ISO Stop drain counts
+                                        // ticks the encoder accepted, as
+                                        // VideoToolbox's `Submitted` does.
+                                        last_submitted_video_end = sequence;
                                         let encode_elapsed = encode_started_at.elapsed();
                                         video_toolbox_submit_times_ms
                                             .push(encode_elapsed.as_secs_f64() * 1000.0);

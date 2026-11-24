@@ -8,7 +8,7 @@
 // Every change goes through its own control's setter, with that control's
 // locks and gates: Output's size and rate wait while a session runs and for
 // "Save a local recording", and pass the same entitlement gate; separate
-// source recordings work on a Mac only; the captions language waits while a
+// source recordings work on a Mac or Windows only; the captions language waits while a
 // session runs. The recordings folder is chosen in a folder picker, so an
 // agent can only put it back to the default. Videorc Camera (plan 214 E2)
 // refuses in the Output row's own words where it can't run, and is refused

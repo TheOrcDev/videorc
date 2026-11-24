@@ -35,12 +35,15 @@ pub const REFUSAL_RECORD_DISABLED: &str = "separate-source-recordings-record-dis
 pub const REFUSAL_MISSING_CAMERA: &str = "separate-source-recordings-missing-camera";
 pub const REFUSAL_MISSING_SCREEN: &str = "separate-source-recordings-missing-screen";
 pub const REFUSAL_DROP_COMBINED: &str = "separate-source-recordings-drop-combined-unsupported";
-/// Release test 146, plan 0001: the ISO writers are VideoToolbox-only, so
-/// the take is refused up front, before any Library row exists.
+/// Release test 146, plan 0001: a platform without an encoded, timestamped
+/// bridge for the ISO writers refuses the take up front, before any Library
+/// row exists.
 pub const REFUSAL_UNSUPPORTED_PLATFORM: &str = "separate-source-recordings-unsupported-platform";
-/// Where Separate source recordings can run: the ISO legs need the
-/// timestamped VideoToolbox MPEG-TS bridge, which only macOS has.
-pub const SEPARATE_SOURCE_RECORDINGS_SUPPORTED: bool = cfg!(target_os = "macos");
+/// Where Separate source recordings can run: the ISO legs need a timestamped
+/// encoded MPEG-TS bridge, VideoToolbox on macOS and Media Foundation on
+/// Windows (#1631). Linux's raw YUV bridge cannot be stream-copied.
+pub const SEPARATE_SOURCE_RECORDINGS_SUPPORTED: bool =
+    cfg!(any(target_os = "macos", target_os = "windows"));
 /// Health code when a session asked for ISO legs but the capture path cannot
 /// carry them (legacy FFmpeg capture, raw YUV bridge, Windows D3D11 pump).
 pub const HEALTH_UNAVAILABLE: &str = "separate-source-recordings-unavailable";
@@ -221,7 +224,7 @@ fn validate_separate_source_recordings_on(
     }
     if !platform_supported {
         bail!(
-            "{REFUSAL_UNSUPPORTED_PLATFORM}: Separate source recordings work on Mac only for now. Turn them off in Output to record."
+            "{REFUSAL_UNSUPPORTED_PLATFORM}: Separate source recordings work on Mac and Windows only for now. Turn them off in Output to record."
         );
     }
     if !params.output.record_enabled {
@@ -522,7 +525,9 @@ pub(crate) fn iso_muxer_ffmpeg_args(
         fps,
         crate::recording::ENCODED_RECORDING_INPUT_THREAD_QUEUE_PACKETS,
     )
-    .context("Separate source recordings need an encoded VideoToolbox bridge")?;
+    .context(
+        "Separate source recordings need an encoded VideoToolbox or Media Foundation bridge",
+    )?;
     args.extend([
         "-map".to_string(),
         format!("{video_input_index}:v:0"),
@@ -2515,7 +2520,7 @@ mod tests {
         assert!(validate_separate_source_recordings_on(&off, false).is_ok());
         assert_eq!(
             SEPARATE_SOURCE_RECORDINGS_SUPPORTED,
-            cfg!(target_os = "macos")
+            cfg!(any(target_os = "macos", target_os = "windows"))
         );
     }
 
@@ -2824,7 +2829,7 @@ mod tests {
         )
         .expect_err("raw YUV cannot be stream-copied");
         assert!(
-            format!("{error:#}").contains("encoded VideoToolbox"),
+            format!("{error:#}").contains("encoded VideoToolbox or Media Foundation"),
             "{error:#}"
         );
     }

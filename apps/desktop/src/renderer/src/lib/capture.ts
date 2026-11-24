@@ -247,13 +247,14 @@ export type SeparateSourceRecordingsIneligibility =
   | 'missing-screen'
 
 /**
- * Release test 146, plan 0001: the ISO writers need the VideoToolbox MPEG-TS
- * bridge, so only macOS can save the Screen and Camera files. An unknown
- * platform (runtime info not loaded yet) is not refused here; the backend
- * refuses an unsupported start before any Library row exists.
+ * Release test 146, plan 0001: the ISO writers need an encoded, timestamped
+ * bridge (VideoToolbox on macOS, Media Foundation on Windows, #1631), so Linux
+ * cannot save the Screen and Camera files. An unknown platform (runtime info
+ * not loaded yet) is not refused here; the backend refuses an unsupported
+ * start before any Library row exists.
  */
 export function separateSourceRecordingsSupported(platform: string | undefined): boolean {
-  return platform === undefined || platform === 'darwin'
+  return platform === undefined || platform === 'darwin' || platform === 'win32'
 }
 
 /**
@@ -280,7 +281,7 @@ export function separateSourceRecordingsIneligibilityCopy(
 ): string {
   switch (reason) {
     case 'unsupported-platform':
-      return 'Works on Mac only for now. On this computer every recording is the Combined file.'
+      return 'Works on Mac and Windows only for now. On this computer every recording is the Combined file.'
     case 'record-disabled':
       return 'Turn on local recording to save separate source files.'
     case 'missing-camera':
@@ -317,7 +318,7 @@ export function separateSourceRecordingsEncoderNotice(
   if (!separateSourceRecordingsForSession(config, platform)) return null
   const { video } = config
   if (Math.min(video.width, video.height) < 2160 && video.fps < 60) return null
-  return `Separate files at ${formatVideoQuality(video)} use about 3× the encoder. If your Mac falls behind, Videorc stops the separate files and keeps the main recording.`
+  return `Separate files at ${formatVideoQuality(video)} use about 3× the encoder. If your computer falls behind, Videorc stops the separate files and keeps the main recording.`
 }
 
 /** The part of a scene the vertical stream needs: its 9:16 layout. */
