@@ -23,6 +23,9 @@ use serde::{Deserialize, Serialize};
 use crate::ffmpeg::ffmpeg_file_path;
 use crate::process_job::spawn_owned_std;
 
+// Plan 260 S1.1: these wire types live in `videorc-protocol` now.
+pub use videorc_protocol::repair::GateStatus;
+
 pub const MAINTENANCE_CANCELLED: &str = "maintenance cancelled";
 pub const STRICT_AV_SKEW_HARD_FAIL_MS: f64 = 150.0;
 pub const STRICT_MAX_AUDIO_GAP_MS: f64 = 20.0;
@@ -2444,38 +2447,6 @@ pub fn write_repair_reports(
 }
 
 // --- Post-recording quality gate (slice 8) ---
-
-/// The post-recording quality-gate result for one finalized file. This is the backend
-/// decision; the renderer-facing status strings (`checking`/`repairing`/`ready`/
-/// `not-100%`/`cancelled`) are mapped in the protocol slice.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "status", rename_all = "kebab-case")]
-pub enum GateStatus {
-    /// Passed every objective gate as-is.
-    Ready {
-        path: String,
-        /// Plan 200 C8: a quick check of a long recording (sampled windows).
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        sampled: bool,
-    },
-    /// Failed the gate but was repaired in place (backup kept) and now passes.
-    Repaired { path: String, interpolated: bool },
-    /// Could not be brought to 100%; the original visible file is kept, with reasons.
-    /// `needs_attention` marks verdicts a user would actually notice (a missing
-    /// stream) as opposed to pacing/skew residuals only visible to the analyzer.
-    NotHundredPercent {
-        path: String,
-        reasons: Vec<String>,
-        #[serde(default)]
-        needs_attention: bool,
-        /// Plan 200 C8: a quick check of a long recording (sampled windows).
-        /// It is reported, never repaired automatically.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        sampled: bool,
-    },
-    /// The gate itself could not run (e.g. the file could not be probed).
-    Failed { path: String, reason: String },
-}
 
 /// Plain-English reasons for a set of issues (drives the "not 100%" warning copy).
 pub fn issue_reasons(issues: &[QualityIssue]) -> Vec<String> {

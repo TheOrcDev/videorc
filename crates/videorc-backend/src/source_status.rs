@@ -1,13 +1,2 @@
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "kebab-case")]
-pub enum SourceLifecycleStatus {
-    #[default]
-    Stopped,
-    Starting,
-    Live,
-    PermissionNeeded,
-    SourceMissing,
-    Failed,
-}
+// Plan 260 S1.1: these wire types live in `videorc-protocol` now.
+pub use videorc_protocol::source_status::SourceLifecycleStatus;

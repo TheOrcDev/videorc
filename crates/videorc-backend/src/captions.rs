@@ -29,6 +29,11 @@ use crate::videorc_api::{
     CAPTION_CHUNK_UPLOAD_TIMEOUT, CaptionChunkFailure, CaptionChunkResponse, VideorcApiClient,
 };
 
+// Plan 260 S1.1: these wire types live in `videorc-protocol` now.
+pub use videorc_protocol::captions::{
+    CaptionBurnTarget, CaptionOverlayPosition, CaptionStyleId, CaptionTextSize,
+};
+
 pub const CAPTION_SAMPLE_RATE: u32 = 16_000;
 pub const CAPTION_CHUNK_SECONDS: f64 = 3.0;
 /// Bounded frame queue between the realtime audio thread and the session task.
@@ -600,28 +605,6 @@ pub fn render_srt(chunks: &[CaptionChunkRecord]) -> String {
     srt
 }
 
-/// Caption text size for the burned copy (mirrors the renderer knob).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CaptionTextSize {
-    S,
-    #[default]
-    M,
-    L,
-}
-
-/// Visual preset captured with each session. The renderer owns the actual
-/// recipe, while Rust persists the stable identity for artifact/session parity.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CaptionStyleId {
-    #[default]
-    Classic,
-    Glass,
-    LowerThird,
-    HighContrast,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptionStyleSnapshot {
@@ -667,29 +650,6 @@ pub fn caption_style_error_code(error: &anyhow::Error) -> &'static str {
         "captions-style-stale"
     } else {
         "captions-style-invalid"
-    }
-}
-
-/// Which caption products the user selected for this session. `Recording`
-/// means a non-destructive aligned `(captioned)` copy; the source recording is
-/// never a live burn target.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CaptionBurnTarget {
-    #[default]
-    Off,
-    Stream,
-    Recording,
-    Both,
-}
-
-impl CaptionBurnTarget {
-    pub fn burns_stream(self) -> bool {
-        matches!(self, CaptionBurnTarget::Stream | CaptionBurnTarget::Both)
-    }
-
-    pub fn requests_captioned_copy(self) -> bool {
-        matches!(self, CaptionBurnTarget::Recording | CaptionBurnTarget::Both)
     }
 }
 
@@ -2493,14 +2453,6 @@ async fn cleanup_registered_caption_file(
 const OVERLAY_MAX_WIDTH: u32 = 4096;
 const OVERLAY_MAX_HEIGHT: u32 = 2048;
 const OVERLAY_MAX_ENCODED_BYTES: usize = 4 * 1024 * 1024;
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CaptionOverlayPosition {
-    Top,
-    #[default]
-    Bottom,
-}
 
 /// Where a composited overlay bitmap lands when its push carried no rect
 /// (older callers and smokes): one of the snap presets, resolved against the

@@ -3220,6 +3220,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-segmentation",
  "uuid",
+ "videorc-protocol",
  "videorc-wer-helper",
  "webpki-root-certs",
  "windows",
@@ -3269,6 +3270,12 @@ version = "0.1.0"
 [[package]]
 name = "videorc-protocol"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "videorc-updater"
