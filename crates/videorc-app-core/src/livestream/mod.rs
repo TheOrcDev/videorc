@@ -25,6 +25,10 @@
 //!   [`captions_preflight`]'s captions rules.
 //! - [`lifecycle`]: each platform's prepare, start and end steps, with
 //!   [`lifecycle_copy`]'s status lines.
+//! - [`watchdog_section`]: Destinations → Watchdog, the checks and where
+//!   alerts reach you.
+//! - [`stream_report`]: Destinations → After the stream, the stream report
+//!   email and the saved streams.
 //!
 //! Plan 260 S1.6c lands this area in parts, caught up with Electron: the
 //! destinations; the Go Live dialog, the output plan, Ready to go live and
@@ -51,8 +55,10 @@ pub mod on_air;
 pub mod plan;
 pub mod ready;
 pub mod setup;
+pub mod stream_report;
 pub mod targets;
 pub mod watchdog;
+pub mod watchdog_section;
 
 use accounts::{
     AccountValidation, PlatformAccount, ProviderCredentials, XCapability, YouTubeChannel,
