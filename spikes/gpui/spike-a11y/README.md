@@ -72,7 +72,7 @@ the dialog open.
 | The list | **PASS** | Six `AXGroup` items in an `AXList`, each named, pressable (one pressed: "Interview" selected); GPUI's tree carries `position_in_set`, `size_of_set` and `selected` |
 | The dialog | **PASS** | An `AXWindow` "Delete Interview?" with the description as its help, a heading, the text, and `AXButton` Cancel and Delete; Cancel pressed through the API closed it |
 | A headless test clicks Record | **PASS** | `clicking_record_starts_and_stops`: `TestAppContext`, `simulate_click` on the button's bounds, on and off (34 s build on the warm target, 0.00 s run) |
-| VoiceOver speaks it | **OWED** | Still owed. A 2026-11-24 attempt was stopped: the owner said not to turn VoiceOver on. The tree/driver/headless passes above still stand. Needs a quiet machine or an explicit owner VoiceOver window (two minutes) |
+| VoiceOver speaks it | **REPLACED** (owner, 2026-11-24: VoiceOver stays off) | [`macos/ax-check.sh`](macos/ax-check.sh) reads the window through the Accessibility API VoiceOver uses and prints what VoiceOver would say for each node (name and role description, the list's item count, each item's place), then runs the checks below. Runs in the build pass |
 | Tab order | **NOT RUN** | GPUI reports 8 tab stops; the driver could not keep the window key on this shared screen (each foreground action hands focus back) |
 
 ## Found
@@ -94,6 +94,36 @@ the dialog open.
 - **GPUI doesn't draw a covered window**, so neither its pixels nor its
   accessibility tree update until it is uncovered. On a shared screen a
   driver must keep its window visible.
+
+## macOS without VoiceOver: the Accessibility API check
+
+The owner asked for VoiceOver to stay off. [`macos/ax-check.sh`](macos/ax-check.sh)
+builds the spike, opens its window and runs
+[`macos/ax-driver.swift`](macos/ax-driver.swift), which reads the window
+through `AXUIElement`, the API VoiceOver itself reads, then stops the spike.
+It is the macOS form of [`linux/atspi-driver.py`](linux/atspi-driver.py).
+
+```sh
+spikes/gpui/spike-a11y/macos/ax-check.sh [report.json]
+```
+
+It needs Accessibility access for the terminal, and the window uncovered for
+about 15 s (GPUI doesn't draw, or update the tree of, a covered window). It
+prints what VoiceOver would say ("Scenes, list, 6 items", "Interview, 4 of
+6", "Record, button"), then a PASS or FAIL per check:
+
+- the tree reaches the platform (named buttons, after AccessKit's lazy start);
+- `AXButton` "Record" found by role and name, pressed, and back as "Stop recording";
+- `AXList` "Scenes" with six named items; the second pressed and selected;
+- "Delete scene…" opens the dialog: in the tree, with its title, its
+  description (help) and Cancel and Delete; Cancel closes it;
+- the background hidden while the dialog is open, and focus back on
+  "Delete scene…" after it closes: both expected to **FAIL** on GPUI 0.3.14,
+  as on Linux (the kit's dialog owes both).
+
+The report (JSON) holds the tree, the spoken lines and every check. Written
+2026-11-24 without a build (owner order); the driver typechecks
+(`swiftc -typecheck`). First run: the build pass.
 
 ## Verdicts on Linux (ogre, 2026-11-24, lane L5)
 
