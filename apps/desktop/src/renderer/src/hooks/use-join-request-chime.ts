@@ -2,13 +2,13 @@ import { useEffect } from 'react'
 
 import type { BackendClient } from '@/backendClient'
 import { createJoinRequestChime, playJoinChime } from '@/lib/join-request-chime'
-import { currentPlatform, isMacPlatform } from '@/lib/platform'
+import { currentPlatform, isWindowsPlatform } from '@/lib/platform'
 
-/** Plan 260 S1.3 fence: on macOS the backend rings the chime itself
- * (`join_chime.rs`, through its CoreAudio monitor); Windows and Linux ring it
- * here until their backend output lands. */
+/** Plan 260 S1.3 fence: on macOS and Linux the backend rings the chime
+ * itself (`join_chime.rs`, through its CoreAudio or PipeWire monitor); Windows
+ * rings it here until its backend output lands. */
 export function rendererPlaysJoinChime(platform: string | undefined): boolean {
-  return !isMacPlatform(platform)
+  return isWindowsPlatform(platform)
 }
 
 /**

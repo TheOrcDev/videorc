@@ -126,6 +126,28 @@ pub fn summary(state: &ChatCommandsState) -> ChatCommandsSummary {
     }
 }
 
+/// `nextChatCommandFailures`: one entry per chat and reason in a session; a
+/// new session starts over, and the newest [`FAILURES_MAX`] stay. `None` when
+/// nothing changed.
+pub fn next_failures(
+    current: &[ChatCommandReplyFailed],
+    failure: ChatCommandReplyFailed,
+) -> Option<Vec<ChatCommandReplyFailed>> {
+    let mut same_session: Vec<ChatCommandReplyFailed> = current
+        .iter()
+        .filter(|entry| entry.session_id == failure.session_id)
+        .cloned()
+        .collect();
+    if same_session.iter().any(|entry| {
+        entry.destination_id == failure.destination_id && entry.reason == failure.reason
+    }) {
+        return None;
+    }
+    same_session.push(failure);
+    let keep = same_session.len().saturating_sub(FAILURES_MAX);
+    Some(same_session.split_off(keep))
+}
+
 /// Length the way both languages count it: Unicode code points.
 pub fn text_length(text: &str) -> usize {
     text.chars().count()
@@ -600,5 +622,39 @@ mod tests {
         let fresh = save_params(None, "go", "d", "r");
         assert_eq!(fresh.id, None);
         assert!(fresh.enabled);
+    }
+
+    fn failed(session: &str, destination: &str, reason: &str) -> ChatCommandReplyFailed {
+        ChatCommandReplyFailed {
+            session_id: session.to_string(),
+            destination_id: destination.to_string(),
+            platform: "youtube".to_string(),
+            command: "go".to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    #[test]
+    fn reply_failures_keep_one_per_chat_and_reason_in_the_newest_session() {
+        let first = next_failures(&[], failed("s1", "yt", "Chat is off.")).expect("new");
+        assert_eq!(
+            next_failures(&first, failed("s1", "yt", "Chat is off.")),
+            None
+        );
+        let two = next_failures(&first, failed("s1", "twitch", "Chat is off.")).expect("new");
+        assert_eq!(two.len(), 2);
+        let fresh = next_failures(&two, failed("s2", "yt", "Chat is off.")).expect("new");
+        assert_eq!(fresh, [failed("s2", "yt", "Chat is off.")]);
+
+        let mut list = Vec::new();
+        for index in 0..FAILURES_MAX + 5 {
+            list =
+                next_failures(&list, failed("s1", "yt", &format!("reason {index}"))).expect("new");
+        }
+        assert_eq!(list.len(), FAILURES_MAX);
+        assert_eq!(
+            list.last().map(|f| f.reason.clone()),
+            Some(format!("reason {}", FAILURES_MAX + 4))
+        );
     }
 }

@@ -29,6 +29,7 @@ pub mod nav;
 pub mod notices;
 pub mod paths;
 pub mod process;
+pub mod resources;
 pub mod restart;
 pub mod scenes;
 pub mod settings_page;

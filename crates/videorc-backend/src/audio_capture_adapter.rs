@@ -1859,7 +1859,17 @@ fn assemble_pcm_with(
             continue;
         }
         stats.record_captured_frames(packet.frames as u64);
-        stats.record_live_peak(samples.iter().copied().map(f32::abs).fold(0.0, f32::max));
+        // Plan 260 S1.3: the peak and the standby meter's window in one pass
+        // (a Linux microphone standing by for the idle meter reads it).
+        let (peak, sum_squares) = samples
+            .iter()
+            .fold((0.0_f32, 0.0_f32), |(peak, sum), sample| {
+                (peak.max(sample.abs()), sum + sample * sample)
+            });
+        stats.record_live_peak(peak);
+        if !samples.is_empty() {
+            stats.record_level_window(peak, (sum_squares / samples.len() as f32).sqrt());
+        }
         match output.try_send(AudioFrame {
             timestamp_micros,
             captured_at,

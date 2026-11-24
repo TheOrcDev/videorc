@@ -13,7 +13,7 @@ import { useDocumentVisible } from '@/hooks/use-document-visible'
 import { useStudioCore, useStudioCloud } from '@/hooks/use-studio'
 import { micVisualAnalyserEnabled, microphoneAccessOpen } from '@/lib/mic-visual-gate'
 import {
-  isCoreAudioMicrophoneId,
+  isBackendMeteredMicrophoneId,
   warmMicrophoneMeterOnly,
   warmMicrophoneRetryDelayMs,
   warmMicrophoneWanted
@@ -65,10 +65,11 @@ const IDLE_PIPELINE: MicVisualPipeline = Object.freeze({
  *
  * Plan 260 S1.3a (owner 2026-11-09): a CoreAudio microphone is metered by the
  * backend's standing-by microphone (`audio.mic.arm`, its `audio.levels`), and
- * the renderer opens nothing. Only a Windows or Linux input still gets the
- * visual-only browser stream below, and only between sessions (D1: S1.3c
- * replaces it with a backend meter-only capture). During a session or a Clips
- * bus every meter reads the bus.
+ * the renderer opens nothing; since S1.3 a Linux PipeWire microphone is too
+ * (the backend arms it meter-only). Only a Windows input still gets the
+ * visual-only browser stream below, and only between sessions (D1: a backend
+ * meter-only capture on Windows replaces it). During a session or a Clips bus
+ * every meter reads the bus.
  */
 export function StudioMicVisualProvider({
   enabled,
@@ -169,7 +170,7 @@ export function StudioMicVisualProvider({
         workspaceVisible: enabled,
         documentVisible,
         microphoneSelected: Boolean(selectionKey),
-        backendMetered: isCoreAudioMicrophoneId(selectionKey),
+        backendMetered: isBackendMeteredMicrophoneId(selectionKey),
         muted: captureConfig.audio.microphoneMuted,
         sessionActive: busOwnsMicrophone
       })

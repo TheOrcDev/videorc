@@ -51,9 +51,12 @@ use videorc_app_core::{
 
 use app::args;
 use app::bridge;
+use app::exit::ExitGuard;
+use app::frames::MainFrame;
+use app::hide::HideFromStream;
 use app::permissions::Permissions;
 use app::shell::{Shell, StatusLine, connection_text};
-use app::{capture, hotkeys, links, menus, sleep};
+use app::{camera, capture, hotkeys, links, menus, sleep};
 
 /// Electron's app id (`electron-builder.yml`), kept on every platform: the
 /// macOS bundle id, Videorc Camera's host, Linux's desktop entry and the
@@ -174,12 +177,18 @@ fn main() -> Result<()> {
     });
 
     // The typed client on the backend's socket. Its event filter grows as
-    // the screens land: `backend.ready` always arrives, and the sleep guard
-    // reads `recording.status`.
+    // the screens land: `backend.ready` always arrives; the sleep guard, the
+    // permission restarts and the quit while on air read `recording.status`;
+    // the quit also reads the talk show room's `cloud.state`; Videorc
+    // Camera's extension follows `virtualCamera.changed`.
     let (client, events) = BackendClient::start(
         supervisor.state(),
         ClientConfig {
-            filter: EventFilter::include([names::RECORDING_STATUS]),
+            filter: EventFilter::include([
+                names::RECORDING_STATUS,
+                camera::VIRTUAL_CAMERA_CHANGED,
+                app::exit::CLOUD_STATE,
+            ]),
             logger: logger.clone(),
             ..ClientConfig::default()
         },
@@ -224,6 +233,13 @@ fn main() -> Result<()> {
         capture_state,
         logger.clone(),
     );
+    // Videorc Camera's extension: activated when the backend's switch is on.
+    let _camera = camera::Camera::install(
+        runtime.handle(),
+        supervisor.state(),
+        client.subscribe(),
+        logger.clone(),
+    );
     let deep_links: links::Links = Arc::new(DeepLinks::new(client.clone(), logger.clone()));
     links::receive(&deep_links, &args.links, LinkSource::CommandLine);
 
@@ -241,6 +257,8 @@ fn main() -> Result<()> {
     let quit_supervisor = supervisor.clone();
     let runtime_handle = runtime.handle().clone();
     let quit_after = args.quit_after;
+    // The main window's frame, saved in the data directory.
+    let main_frame = MainFrame::new(&paths.user_data_dir, logger.clone());
     let quit_guard = sleep_guard.clone();
     let quit_permissions = permissions.clone();
     let focus_permissions = permissions.clone();
@@ -249,6 +267,9 @@ fn main() -> Result<()> {
     let quit_instance = instance.clone();
     let hotkey_logger = logger.clone();
     let handoff_links = deep_links.clone();
+    // The quit while on air: the guard follows the backend's events.
+    let exit_events = client.subscribe();
+    let exit_runtime = runtime.handle().clone();
 
     let application = gpui_platform::application();
     // Registered before `run`, so a link that starts the app is not lost.
@@ -258,7 +279,12 @@ fn main() -> Result<()> {
     });
     application.run(move |cx: &mut App| {
         // The menu bar from the core's template, and the keys it names.
+        ExitGuard::install(cx, &exit_runtime, exit_events);
         menus::install(cx);
+
+        // Hide from stream: content protection and the capture filter's
+        // list, which the Studio sends with the screen capture when it lands.
+        let _capture_filter_ids = HideFromStream::install(cx);
 
         // Global shortcuts: the registry behind the core's gate. The app runs
         // no shortcut action until the Studio lands, so every key is named in
@@ -289,7 +315,9 @@ fn main() -> Result<()> {
 
         let status = bridge::mirror(cx, backend_state.clone(), StatusLine::of);
         let connection = bridge::mirror(cx, connection_state.clone(), connection_text);
-        let window_bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
+        let window_bounds = main_frame
+            .restored(cx)
+            .unwrap_or_else(|| Bounds::centered(None, size(px(1280.), px(800.)), cx));
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(window_bounds)),
@@ -326,15 +354,28 @@ fn main() -> Result<()> {
         cx.activate(true);
 
         // The main window coming to the front re-checks a grant System
-        // Settings may have made meanwhile.
+        // Settings may have made meanwhile; a move or resize saves its frame
+        // soon after, and the quit saves it once more.
+        let moved_frame = main_frame.clone();
         let _ = main_window.update(cx, |_, window, cx| {
+            ExitGuard::watch_main_window(window, cx);
             cx.observe_window_activation(window, move |_, window, _| {
                 if window.is_window_active() {
                     focus_permissions.recheck();
                 }
             })
             .detach();
+            cx.observe_window_bounds(window, move |_, window, cx| {
+                moved_frame.moved(window, cx);
+            })
+            .detach();
         });
+        let quit_frame = main_frame.clone();
+        cx.on_app_quit(move |cx| {
+            let _ = main_window.update(cx, |_, window, _| quit_frame.save(window));
+            async {}
+        })
+        .detach();
 
         // Closing the last window quits, as Electron does on Windows and
         // Linux. (On macOS Electron keeps the app in the Dock; the menu bar

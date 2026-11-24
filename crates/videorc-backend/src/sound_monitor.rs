@@ -7,10 +7,13 @@
 //! here after every change; this module only plays them.
 //!
 //! Never doubled (plan 069 decision 9): the monitor is its own mix and its own
-//! output, and nothing here reaches the session bus. Its sound leaves this
-//! process through CoreAudio, and the System audio capture runs in this same
-//! process with `setExcludesCurrentProcessAudio(true)`
-//! (`system_audio_capture.rs`), so ScreenCaptureKit drops it. `pnpm
+//! output, and nothing here reaches the session bus. On macOS its sound leaves
+//! this process through CoreAudio, and the System audio capture runs in this
+//! same process with `setExcludesCurrentProcessAudio(true)`
+//! (`system_audio_capture.rs`), so ScreenCaptureKit drops it. On Linux it is
+//! one PipeWire playback stream (`linux_sound_output.rs`); Linux has no
+//! System audio capture yet (plan 257 S8), and the stream is marked so that
+//! S8 leaves it out. `pnpm
 //! smoke:soundboard` proves it: an on-air press with System audio on lands in
 //! the file once, and a monitor-only voice playing through a System-audio
 //! recording leaves nothing at 1 kHz while an afplay control tone does.
@@ -20,9 +23,9 @@
 //! output device. It follows the system's default output (the device Chromium's
 //! Web Audio monitor used).
 //!
-//! macOS only (S1.3b fence): Windows and Linux keep the renderer's Web Audio
-//! monitor (`renderer/src/lib/sound-monitor.ts`) until S1.3d gives the
-//! backend an output there, and [`SoundMonitor`] is inert on them.
+//! macOS and Linux (plan 260 S1.3): Windows keeps the renderer's Web Audio
+//! monitor (`renderer/src/lib/sound-monitor.ts`) until the backend has an
+//! output there, and [`SoundMonitor`] is inert on it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -288,11 +291,11 @@ pub(crate) fn late_join_offset(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MonitorMode {
-    /// Windows and Linux: the renderer plays previews (S1.3b fence).
+    /// Windows: the renderer plays previews (S1.3 fence).
     Inert,
     /// Tests: the mix is kept and driven by hand; no device ever opens.
     Detached,
-    /// macOS: the default output device.
+    /// macOS (CoreAudio) and Linux (PipeWire): the default output.
     Device,
 }
 
@@ -315,7 +318,7 @@ impl Default for SoundMonitor {
     fn default() -> Self {
         let mode = if cfg!(test) {
             MonitorMode::Detached
-        } else if cfg!(target_os = "macos") {
+        } else if cfg!(any(target_os = "macos", target_os = "linux")) {
             MonitorMode::Device
         } else {
             MonitorMode::Inert
@@ -524,11 +527,13 @@ fn log_reports(mix: &StdMutex<MonitorMix>) {
 pub(crate) struct DeviceOutput {
     #[cfg(target_os = "macos")]
     _unit: coreaudio::audio_unit::AudioUnit,
+    #[cfg(target_os = "linux")]
+    _stream: crate::linux_sound_output::PlaybackStream,
     pub(crate) device_name: String,
 }
 
 impl DeviceOutput {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn open(mix: Arc<StdMutex<MonitorMix>>) -> anyhow::Result<Self> {
         Self::open_with(move |buffer| lock(&mix).render(buffer))
     }
@@ -581,15 +586,33 @@ impl DeviceOutput {
         })
     }
 
-    #[cfg(not(target_os = "macos"))]
+    /// Plan 260 S1.3 (Linux): opens one PipeWire playback stream to the
+    /// default sink and plays `render`'s 48 kHz interleaved stereo, called
+    /// on PipeWire's real-time thread for each quantum. A panic in it plays
+    /// silence; it never unwinds into PipeWire.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn open_with(
+        mut render: impl FnMut(&mut [f32]) + Send + 'static,
+    ) -> anyhow::Result<Self> {
+        let stream = crate::linux_sound_output::PlaybackStream::open(
+            MONITOR_SAMPLE_RATE,
+            Box::new(move |buffer: &mut [f32]| render_callback_into(&mut render, buffer, 2)),
+        )?;
+        Ok(Self {
+            _stream: stream,
+            device_name: "the default output (PipeWire)".to_string(),
+        })
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     fn open(_mix: Arc<StdMutex<MonitorMix>>) -> anyhow::Result<Self> {
         anyhow::bail!("this platform's renderer plays sound previews")
     }
 }
 
 /// The real-time side: render (the monitor's under its mix lock), and never
-/// unwind into CoreAudio (a panic plays silence instead).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// unwind into CoreAudio or PipeWire (a panic plays silence instead).
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 fn render_callback_into(render: &mut impl FnMut(&mut [f32]), buffer: &mut [f32], channels: usize) {
     if channels != 2 {
         buffer.fill(0.0);

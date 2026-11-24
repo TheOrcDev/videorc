@@ -3,11 +3,13 @@
 //! The same two rising notes a fifth apart, the same envelopes and level,
 //! synthesized once to the monitor's PCM and played through the soundboard
 //! monitor's output (`sound_monitor.rs`): the system output only. It never
-//! reaches the room, the program or a recording: System audio capture runs in
-//! this process with `excludesCurrentProcessAudio`, as for the monitor.
+//! reaches the room, the program or a recording: on macOS System audio capture
+//! runs in this process with `excludesCurrentProcessAudio`, as for the
+//! monitor; Linux has no System audio capture yet, and the monitor's PipeWire
+//! stream is marked for S8 to leave out.
 //!
-//! macOS only for now: the monitor has no output on Windows or Linux yet, so
-//! their renderer still rings it (`rendererPlaysJoinChime`).
+//! macOS and Linux (plan 260 S1.3): the monitor has no output on Windows yet,
+//! so its renderer still rings it (`rendererPlaysJoinChime`).
 
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -89,7 +91,7 @@ pub(crate) fn chime_pcm() -> Arc<[i16]> {
 /// it played (false where the backend has no output, or within the gap).
 pub(crate) fn ring(state: &AppState) -> bool {
     static LAST_RANG: StdMutex<Option<Instant>> = StdMutex::new(None);
-    if !cfg!(target_os = "macos") {
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
         return false;
     }
     {

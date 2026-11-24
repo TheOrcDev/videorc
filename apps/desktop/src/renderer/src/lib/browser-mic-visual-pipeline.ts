@@ -6,7 +6,7 @@ import {
 
 /**
  * Browser adapter for the shared visual-only microphone analyser. Plan 220
- * S1.3a: loaded only for a Windows or Linux microphone's idle meter.
+ * S1.3: loaded only for a Windows microphone's idle meter.
  */
 export function createBrowserMicVisualPipeline(): MicVisualPipeline {
   // The pipeline talks to analyser wrappers; Web Audio's connect() accepts

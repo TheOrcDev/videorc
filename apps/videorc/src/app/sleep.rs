@@ -1,16 +1,16 @@
 //! The display sleep guard (plan 260 S2.6a/b): the core's policy
-//! (`desktop::sleep_guard`, Electron's `display-sleep-guard.ts`) on the
-//! backend's `recording.status`, the OS call behind [`crate::platform`].
+//! (`desktop::sleep_guard`, Electron's `display-sleep-guard.ts`) on main's
+//! capture state ([`super::capture`]), the OS call behind [`crate::platform`].
 //! macOS stops every ScreenCaptureKit stream when the display sleeps, so the
 //! display is kept awake while a session writes or sends something; a lost
 //! connection is unknown, which never holds it.
 
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::broadcast;
+use tokio::sync::watch;
+use videorc_app_core::Logger;
 use videorc_app_core::desktop::capture_state::MainCaptureState;
 use videorc_app_core::desktop::sleep_guard::DisplaySleepGuard;
-use videorc_app_core::{BackendEvent, Logger};
 
 use crate::platform;
 
@@ -26,7 +26,7 @@ pub type Guard = Arc<Mutex<DisplaySleepGuard<Start, Stop>>>;
 /// ([`release`]).
 pub fn follow(
     runtime: &tokio::runtime::Handle,
-    mut events: broadcast::Receiver<BackendEvent>,
+    mut capture: watch::Receiver<MainCaptureState>,
     logger: Logger,
 ) -> Guard {
     let start_logger = logger.clone();
@@ -52,16 +52,14 @@ pub fn follow(
     let follower = guard.clone();
     runtime.spawn(async move {
         loop {
-            let state = match events.recv().await {
-                Ok(BackendEvent::RecordingStatus(status)) => MainCaptureState::from_status(&status),
-                Ok(BackendEvent::ConnectionClosed { .. }) => MainCaptureState::Unknown,
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
-            };
+            let state = *capture.borrow_and_update();
             follower
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .update(state);
+            if capture.changed().await.is_err() {
+                break;
+            }
         }
     });
     guard

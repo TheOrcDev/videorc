@@ -16,7 +16,7 @@ import {
   type SoundRelayAction,
   type SoundboardSummary
 } from '../../../shared/sound-commands'
-import { currentPlatform, isMacPlatform } from './platform'
+import { currentPlatform, isWindowsPlatform } from './platform'
 import type { SoundboardSnapshot, SoundboardStore } from './soundboard-store'
 import type { SoundMonitor } from './sound-monitor'
 
@@ -49,9 +49,9 @@ export interface SoundboardHostDeps {
   ) => Promise<{ ok: boolean; message?: string }>
 }
 
-/** Plan 260 S1.3b fence: the backend plays the monitor on macOS. */
+/** Plan 260 S1.3 fence: the backend plays the monitor on macOS and Linux. */
 export function rendererPlaysMonitor(platform: string | undefined): boolean {
-  return !isMacPlatform(platform)
+  return isWindowsPlatform(platform)
 }
 
 const browserDeps = (): SoundboardHostDeps => ({
