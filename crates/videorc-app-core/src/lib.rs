@@ -13,6 +13,7 @@ pub mod client;
 pub mod crash_log;
 pub mod desktop;
 mod encoding;
+pub mod guests;
 mod http;
 pub mod interruption;
 pub mod ledger;
@@ -22,6 +23,7 @@ pub mod notices;
 pub mod paths;
 pub mod process;
 pub mod restart;
+pub mod stream_manager;
 pub mod studio;
 pub mod supervisor;
 

@@ -416,3 +416,80 @@ fn the_captioned_copys_frames_are_golden_cases() {
         );
     }
 }
+
+/// Plan 260 S1.2d (plan 220's): the bubbles `buddy.overlay.set` draws for `smoke:buddy-pet`'s
+/// bubble run (its Say line at the smoke's Buddy rect on both legs of a
+/// 1280x720 record-plus-stream session, 1920x1080 on Linux), the vertical
+/// leg's bubble at the default portrait corner and a shout cut by the
+/// ellipsis at the default landscape corner are exactly golden cases' states.
+#[test]
+fn the_buddy_push_bubbles_are_golden_cases() {
+    use crate::overlay_layout::{
+        OverlayItem, OverlayOrientation, OverlayRect, OverlaySnap, overlay_snap_rect,
+    };
+    use videorc_protocol::cohost::CohostBubbleStyle;
+
+    let smoke_line = "Welcome in, everyone. Grab a seat and stay a while!";
+    let smoke_rect = OverlayRect::new(0.7, 0.3, 0.2, 0.62);
+    let live = [
+        (
+            "buddy-speech-720p-smoke",
+            super::buddy_bubble(
+                smoke_line,
+                CohostBubbleStyle::Speech,
+                (1280, 720),
+                smoke_rect,
+            ),
+        ),
+        (
+            "buddy-speech-1080p-smoke",
+            super::buddy_bubble(
+                smoke_line,
+                CohostBubbleStyle::Speech,
+                (1920, 1080),
+                smoke_rect,
+            ),
+        ),
+        (
+            "buddy-thought-portrait-default",
+            super::buddy_bubble(
+                "Which door was it again, the red one or the blue one?",
+                CohostBubbleStyle::Thought,
+                (1080, 1920),
+                overlay_snap_rect(
+                    OverlayItem::Buddy,
+                    OverlayOrientation::Vertical,
+                    OverlaySnap::BottomRight,
+                ),
+            ),
+        ),
+        (
+            "buddy-shout-break-overflow",
+            super::buddy_bubble(
+                "noooooooooooooooooooooooooooo way that was the cleanest clutch of the whole night chat, clip it right now please",
+                CohostBubbleStyle::Shout,
+                (1280, 720),
+                overlay_snap_rect(
+                    OverlayItem::Buddy,
+                    OverlayOrientation::Horizontal,
+                    OverlaySnap::BottomRight,
+                ),
+            ),
+        ),
+    ];
+    let cases = load().cases;
+    for (id, drawn) in live {
+        let case = cases.iter().find(|case| case.id == id).expect(id);
+        let OverlayState::Buddy(golden) = &case.request else {
+            panic!("{id} is not a Buddy case");
+        };
+        assert_eq!(drawn.text, golden.text, "{id}");
+        assert_eq!(drawn.style, golden.style, "{id}");
+        assert_eq!(
+            (drawn.canvas_width, drawn.canvas_height),
+            (golden.canvas_width, golden.canvas_height),
+            "{id}"
+        );
+        assert_eq!(drawn.rect, golden.rect, "{id}");
+    }
+}

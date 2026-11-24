@@ -90,7 +90,18 @@ const NAME_TOKEN_MIN_LETTERS: usize = 3;
 /// The persona name's word tokens as the current wake words (plan 164 S-A7).
 /// The engine sets them whenever the settings change, so the detector and
 /// the marker grammar read the current name on every utterance.
+#[cfg(not(test))]
 static PERSONA_WAKE_TOKENS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+// Tests run in parallel and each one names its own persona (directly, or by
+// building a `CohostEngine`). One store for the whole process let a parallel
+// test rename the persona between another test's set and its asserts (a
+// Windows CI red on 2026-11-24), so each test thread keeps its own.
+#[cfg(test)]
+thread_local! {
+    static PERSONA_WAKE_TOKENS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 /// Fold a letter to plain ASCII where a speech model would: Latin-1 accents
 /// drop their marks, everything else keeps its lowercase form.
@@ -165,15 +176,24 @@ pub fn wake_name_tokens(persona_name: &str) -> Vec<String> {
 /// Make the persona's name wake the Buddy from now on (plan 164 S-A7).
 pub fn set_persona_wake_tokens(persona_name: &str) {
     let tokens = wake_name_tokens(persona_name);
+    #[cfg(not(test))]
     if let Ok(mut current) = PERSONA_WAKE_TOKENS.write() {
         *current = tokens;
     }
+    #[cfg(test)]
+    PERSONA_WAKE_TOKENS.with(|current| *current.borrow_mut() = tokens);
 }
 
+#[cfg(not(test))]
 fn is_persona_wake_token(text: &str) -> bool {
     PERSONA_WAKE_TOKENS
         .read()
         .is_ok_and(|tokens| tokens.iter().any(|token| token == text))
+}
+
+#[cfg(test)]
+fn is_persona_wake_token(text: &str) -> bool {
+    PERSONA_WAKE_TOKENS.with(|tokens| tokens.borrow().iter().any(|token| token == text))
 }
 
 /// The form a name takes to meet speech (plan 186 S11): lowercase, Latin
@@ -3968,6 +3988,19 @@ mod tests {
         // A new name forgets the old one.
         set_persona_wake_tokens("Sidekick");
         assert_eq!(highlight("Zarquon, highlight the last comment"), None);
+    }
+
+    #[test]
+    fn a_parallel_test_renaming_the_persona_does_not_rename_this_one() {
+        set_persona_wake_tokens("Zarquon the Goblin");
+        std::thread::spawn(|| set_persona_wake_tokens("Sidekick"))
+            .join()
+            .unwrap();
+        assert_eq!(
+            detect_one("Zarquon, say hello to Jay.", &WAKE_REQUIRED)
+                .map(|command| (command.kind, command.target)),
+            Some((CommandKind::Greet, name("jay")))
+        );
     }
 
     #[test]

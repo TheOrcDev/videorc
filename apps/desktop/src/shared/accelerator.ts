@@ -158,7 +158,8 @@ export function normalizeAccelerator(
 }
 
 // A global binding takes the key away from EVERY app, so these would break
-// the machine rather than add a shortcut. Stored normalized.
+// the machine rather than add a shortcut. Stored normalized. Each command
+// (close, undo/redo, quit, switch, lock …) is blocked on every platform.
 const RESERVED: Record<'mac' | 'other', ReadonlySet<string>> = {
   mac: new Set([
     'Cmd+Q',
@@ -172,20 +173,40 @@ const RESERVED: Record<'mac' | 'other', ReadonlySet<string>> = {
     'Cmd+X',
     'Cmd+Z',
     'Cmd+Shift+Z',
-    'Cmd+A'
+    'Cmd+A',
+    'Cmd+Shift+3',
+    'Cmd+Shift+4',
+    'Cmd+Shift+5',
+    'Cmd+Ctrl+Q',
+    'Cmd+Alt+Escape'
   ]),
   other: new Set([
+    'Ctrl+W',
     'Ctrl+C',
     'Ctrl+V',
     'Ctrl+X',
     'Ctrl+Z',
+    'Ctrl+Shift+Z',
     'Ctrl+Y',
     'Ctrl+A',
     'Alt+F4',
     'Alt+Tab',
     'Ctrl+Alt+Delete',
-    'Ctrl+Shift+Escape'
+    'Ctrl+Shift+Escape',
+    'Super+L',
+    'Super+D',
+    'Super+Tab'
   ])
+}
+
+/**
+ * Ctrl+Alt is AltGr on Windows and Linux: AltGr+Q types @ and AltGr+7 types {
+ * on German, Polish, Nordic and other layouts, so a global Ctrl+Alt+key would
+ * take a character away from every app (plan 231 D5). With Shift (or Win)
+ * held too it is no longer AltGr, which is why the scene keys add Shift.
+ */
+function isAltGrChord(modifiers: readonly AcceleratorModifier[]): boolean {
+  return modifiers.join('+') === 'Ctrl+Alt'
 }
 
 export function validateAccelerator(
@@ -201,7 +222,10 @@ export function validateAccelerator(
   const hasRealModifier = parsed.modifiers.some((modifier) => modifier !== 'Shift')
   if (!hasRealModifier && !isFunctionKey) return { ok: false, reason: 'needs-modifier' }
   const normalized = [...parsed.modifiers, parsed.key].join('+')
-  if (RESERVED[isMac(platform) ? 'mac' : 'other'].has(normalized)) {
+  if (
+    RESERVED[isMac(platform) ? 'mac' : 'other'].has(normalized) ||
+    (!isMac(platform) && isAltGrChord(parsed.modifiers))
+  ) {
     return { ok: false, reason: 'system-reserved' }
   }
   return { ok: true }

@@ -2862,7 +2862,7 @@ fn decode_caption_overlay(png_base64: &str) -> Result<PreparedCaptionOverlay> {
 
 /// A straight-alpha RGBA bar (decoded from a PNG, or drawn by the backend)
 /// readied for both compositor pixel orders.
-fn prepare_rgba_caption_overlay(
+pub(crate) fn prepare_rgba_caption_overlay(
     width: u32,
     height: u32,
     rgba: Vec<u8>,

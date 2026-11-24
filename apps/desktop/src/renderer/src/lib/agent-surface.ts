@@ -153,7 +153,9 @@ function destinationProjection(
     const ready = isStreamTargetStartReady(target)
     const override = draft?.targetOverrides.find((entry) => entry.platform === target.platform)
     const title = present(override?.customize ? override.title : draft?.title)
-    const category = present(override?.twitchCategoryName ?? override?.kickCategoryName)
+    const category = present(
+      override?.twitchCategoryName ?? override?.kickCategoryName ?? override?.xCategoryName
+    )
     return {
       id: target.id,
       platform: target.platform,

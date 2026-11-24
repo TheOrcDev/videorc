@@ -115,7 +115,7 @@ import { DEFAULT_OVERLAY_LAYOUT, overlaySnapRect } from '@/lib/overlay-layout'
 import { bannerSnapRect } from '@/lib/banner-place'
 import { BackgroundAssetsProvider } from './use-background-assets'
 import { useFrameSource } from './use-frame-source'
-import { useStudioMicVisualSource } from './use-studio-mic-sources'
+import { useStudioMicMeterSource } from './use-studio-mic-sources'
 import { StudioMicVisualProvider, useStudioMicVisualLifecycle } from './use-studio-mic-visual'
 import {
   StudioProvider,
@@ -1415,6 +1415,13 @@ class StudioBackend {
           accountLabel: 'Kick Test Channel',
           title: 'Provider test stream'
         }
+      case 'streamTargets.x.liveCategories':
+        return {
+          categories: [
+            { id: 'gaming', name: 'Gaming' },
+            { id: 'music', name: 'Music' }
+          ]
+        }
       case 'streamTargets.x.capability':
         return {
           platform: 'x',
@@ -1917,7 +1924,7 @@ type StudioObservation = {
 
 /** A mixer-like consumer: reads frames (which retains analyser demand) and reports lifecycle. */
 function MicVisualProbe({ observe }: { observe: (active: boolean) => void }): null {
-  useFrameSource(useStudioMicVisualSource(), () => undefined)
+  useFrameSource(useStudioMicMeterSource({ gainDb: 0, muted: false }), () => undefined)
   const lifecycle = useStudioMicVisualLifecycle()
   useEffect(() => observe(lifecycle.active), [lifecycle.active, observe])
   return null
@@ -20808,11 +20815,13 @@ describe('real StudioProvider lifecycle', () => {
     expect(await api.getPendingOAuthCallbacks()).toEqual(pendingProviderCallbacks)
   })
 
-  it('meters the mic on a real idle Studio and keeps it open across a session', async () => {
+  it('meters a non-CoreAudio mic on a real idle Studio and closes it for a session', async () => {
     // The meter is armed by the mixer being on screen, not by a session: the
     // question it answers ("is my microphone working?") is asked before
     // recording starts. B2 previously kept it closed while idle; that made an
-    // idle meter indistinguishable from a dead microphone.
+    // idle meter indistinguishable from a dead microphone. plan 260 S1.3a
+    // (D3, owner 2026-11-09): a session's meters read the bus, so Chromium's
+    // microphone closes for it and reopens after.
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
@@ -20887,24 +20896,23 @@ describe('real StudioProvider lifecycle', () => {
       await latest()?.core.startSession()
     })
     await waitForObservation(() => latest()?.recording.recording.state === 'recording')
-    expect(micLifecycle.at(-1)).toBe(true)
-    // Starting a session must REUSE the open stream, not open a second one.
+    // The session never meters through Chromium: the idle stream closed.
+    await waitForObservation(() => micLifecycle.at(-1) === false)
     expect(audio.getUserMedia).toHaveBeenCalledTimes(1)
     expect(audio.getUserMedia.mock.calls[0]?.[0]).toMatchObject({
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
       video: false
     })
-    expect(audio.contexts).toHaveLength(1)
+    expect(audio.contexts[0]?.close).toHaveBeenCalledTimes(1)
 
     await act(async () => {
       await latest()?.core.stopSession()
     })
     await waitForObservation(() => latest()?.recording.recording.state === 'idle')
-    // Stopping the session leaves the meter running: the mixer is still on
+    // Stopping the session brings the idle meter back: the mixer is still on
     // screen, and the user is still entitled to see their level.
-    expect(micLifecycle.at(-1)).toBe(true)
-    expect(audio.contexts[0]?.close).not.toHaveBeenCalled()
-    expect(audio.getUserMedia).toHaveBeenCalledTimes(1)
+    await waitForObservation(() => micLifecycle.at(-1) === true)
+    expect(audio.getUserMedia).toHaveBeenCalledTimes(2)
   }, 15_000)
 })
 

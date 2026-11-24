@@ -14,17 +14,25 @@
 // 2. Still (Motion 0, sleep after 30 s), a recording only: a manual `wave`
 //    from `cohost.pet.react` shows its cell but the body never moves, and 30 s
 //    of silence later the pet sleeps (expect `sleep`).
+// 3. Bubble (plan 260 S1.2d), Electron: a record+stream session on one
+//    profile, the renderer seeded to the same shape so it names both legs'
+//    canvases. A Say line: the renderer sends the line, its style and each
+//    canvas (`buddy.overlay.set`, no pixels) and the backend draws the bubble.
+//    It must show above the pet in the recording and in the local RTMP sink
+//    (the macOS aux leg), at its golden's size (`buddy-speech-720p-smoke`,
+//    macOS), and be gone once the line ends. The GPUI app names the bubble
+//    once its Studio lands; until then this run says SKIP there.
 //
 // Evidence (recordings, per-frame timelines, summaries) stays in the output
 // directory printed at the end.
 
 import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, repoRoot, smokeAppKind } from './lib/app-launcher.mjs'
 import {
   COMMENT_HIGHLIGHT_MARKER_RGB,
   commentHighlightImagePngBase64
@@ -32,6 +40,8 @@ import {
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import {
   BUDDY_PET_FIXTURE_NEUTRAL,
+  buddyBubbleBox,
+  buddyBubbleRegion,
   buddyPetBodyTravel,
   buddyPetBox,
   buddyPetMedianBox,
@@ -41,6 +51,8 @@ import {
   readBuddyPetFrame,
   writeBuddyPetFixturePack
 } from './lib/buddy-pet-fixture.mjs'
+import { decodePng } from './lib/image-stats.mjs'
+import { seedCaptureConfig } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const outputDirectory = resolve(
@@ -63,6 +75,14 @@ const MIN_REACTION_TRAVEL_PX = 4
 /** ... and no further than compression noise with Motion 0. */
 const MAX_STILL_TRAVEL_PX = 2
 const SLEEP_AFTER_SECONDS = 30
+/** The bubble run's Say line, the state of the golden cases
+ * `buddy-speech-720p-smoke` and `buddy-speech-1080p-smoke` (plan 260 S1.2d):
+ * 52 characters, so it stays up 3.1 s. */
+const BUBBLE_LINE = 'Welcome in, everyone. Grab a seat and stay a while!'
+/** The bubble must show this long in each file... */
+const MIN_BUBBLE_SECONDS = 1.5
+/** ... at its golden's porcelain size, give or take the encoder's edges. */
+const BUBBLE_SIZE_TOLERANCE_PX = 4
 
 mkdirSync(outputDirectory, { recursive: true })
 
@@ -114,11 +134,16 @@ try {
 
   summary.runs.push(
     await runLively(ws, smoke, { settings, packId, frames }),
-    await runStill(ws, smoke, { settings, packId, frames })
+    await runStill(ws, smoke, { settings, packId, frames }),
+    await runBubble(ws, smoke, { settings, packId })
   )
   writeFileSync(join(outputDirectory, 'buddy-pet-summary.json'), JSON.stringify(summary, null, 2))
+  const bubble = summary.runs[2]
+  const bubbleLine = bubble.skipped
+    ? `the bubble run was skipped (${bubble.skipped})`
+    : `the backend drew the Say line's bubble ${bubble.recording.size.join('x')} in the recording and ${bubble.stream.size.join('x')} on the RTMP stream (golden ${bubble.golden ? bubble.golden.join('x') : 'not compared'}) for ${bubble.recording.seconds.toFixed(1)} s and ${bubble.stream.seconds.toFixed(1)} s, then cleared it`
   console.log(
-    `Buddy pet smoke PASS: the follow played ${summary.runs[0].followCell}, the card turned the gaze to ${summary.runs[0].leftGazeCell}, the Say line alternated talk-a/talk-b, the body moved ${summary.runs[0].reactionTravelPx} px while reacting at Motion 0.45 (the wave alone ${summary.runs[0].followTravelPx} px) and ${summary.runs[1].reactionTravelPx} px at Motion 0, and the pet slept ${summary.runs[1].sleepAfterReactionSeconds.toFixed(1)} s after the last activity. Evidence: ${outputDirectory}`
+    `Buddy pet smoke PASS: the follow played ${summary.runs[0].followCell}, the card turned the gaze to ${summary.runs[0].leftGazeCell}, the Say line alternated talk-a/talk-b, the body moved ${summary.runs[0].reactionTravelPx} px while reacting at Motion 0.45 (the wave alone ${summary.runs[0].followTravelPx} px) and ${summary.runs[1].reactionTravelPx} px at Motion 0, the pet slept ${summary.runs[1].sleepAfterReactionSeconds.toFixed(1)} s after the last activity, and ${bubbleLine}. Evidence: ${outputDirectory}`
   )
 } catch (error) {
   writeFileSync(
@@ -400,7 +425,175 @@ async function runStill(ws, smoke, { settings, packId, frames }) {
   }
 }
 
-async function startSession(ws, smoke, directory, { stream }) {
+/**
+ * Plan 260 S1.2d: the Buddy's bubble drawn by the backend, on both legs. A
+ * record+stream session whose stream shares the recording's profile (the
+ * macOS stream still leaves from its own aux leg), and the renderer seeded
+ * to the same shape, so the canvases it names for the primary and the
+ * auxiliary target are the legs' own. The pet holds still (Motion 0) so the
+ * bubble anchored on its head does not move.
+ */
+async function runBubble(ws, smoke, { settings, packId }) {
+  const label = 'bubble'
+  if (smokeAppKind() === 'gpui') {
+    const skipped = 'the GPUI app names the bubble once its Studio lands'
+    console.log(`[${label}] SKIP: ${skipped}`)
+    return { label, skipped }
+  }
+  const directory = join(outputDirectory, label)
+  mkdirSync(directory, { recursive: true })
+  await wear(ws, settings, packId, { intensity: 0, sleepAfterSeconds: 180, breathing: false })
+  const video = buddyPetRecordingVideo({ stream: true })
+  await seedCaptureConfig(
+    smoke,
+    {
+      recordEnabled: true,
+      streamEnabled: true,
+      // No destination: the stream goes out at the recording's profile, as
+      // the session below does through `output.rtmp`.
+      streaming: { enabled: false },
+      video: { preset: 'custom', ...video }
+    },
+    { app: 'electron', timeoutMs, forgetWorkingScene: false }
+  )
+  const streamKey = `buddy-bubble-${Date.now()}`
+  const target = {
+    serverUrl: `rtmp://127.0.0.1:${rtmpPort + 1}/live`,
+    streamKey,
+    listenUrl: `rtmp://127.0.0.1:${rtmpPort + 1}/live/${streamKey}`,
+    receivedPath: join(directory, 'stream-received.flv')
+  }
+  const listener = spawnRtmpListener(target)
+  let sessionActive = false
+  try {
+    await sleep(listenerBindMs)
+    if (listener.process.exitCode !== null) {
+      throw new Error(`The local RTMP listener exited: ${listener.stderr.join('').trim()}`)
+    }
+    const started = await startSession(ws, smoke, directory, {
+      stream: target,
+      sharedProfile: true
+    })
+    sessionActive = true
+    const startedAt = Date.now()
+    await sleepUntil(startedAt + 3000)
+    await request(ws, timeoutMs, 'cohost.utterance.say', { text: BUBBLE_LINE })
+    const say = (Date.now() - startedAt) / 1000
+    // The line stays up 3.1 s; the files run on 3 s past its end.
+    await sleepUntil(startedAt + 9500)
+    const stopped = await request(ws, timeoutMs, 'session.stop', {})
+    sessionActive = false
+    await stopRtmpListener(listener)
+    const recordingPath = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120_000 })
+    assertArtifactFile(label, recordingPath)
+    assertArtifactFile(`${label} stream`, target.receivedPath)
+    const golden = goldenBubbleSize(video)
+    const files = {}
+    for (const [name, path] of [
+      ['recording', recordingPath],
+      ['stream', target.receivedPath]
+    ]) {
+      const timeline = await readBubbleTimeline(path, { video })
+      writeFileSync(join(directory, `bubble-${name}-timeline.json`), JSON.stringify(timeline))
+      files[name] = checkBubbleTimeline(`${label} ${name}`, timeline, { golden })
+    }
+    console.log(
+      `[${label}] say@${say.toFixed(2)} recording ${JSON.stringify(files.recording)} stream ${JSON.stringify(files.stream)} golden ${JSON.stringify(golden)}`
+    )
+    return { label, say, recordingPath, golden, ...files }
+  } finally {
+    if (sessionActive) await requestSafe(ws, 'session.stop', {})
+    await stopRtmpListener(listener)
+  }
+}
+
+/** The porcelain's size in the golden the backend's bubble is held to for
+ * this canvas (the renderer's own PNG), `[width, height]`; null off macOS,
+ * where the goldens' fonts are not the host's. */
+function goldenBubbleSize(video) {
+  if (process.platform !== 'darwin') return null
+  const id = video.width === 1920 ? 'buddy-speech-1080p-smoke' : 'buddy-speech-720p-smoke'
+  const png = decodePng(
+    readFileSync(
+      join(
+        repoRoot,
+        'crates',
+        'videorc-backend',
+        'tests',
+        'fixtures',
+        'overlay-raster',
+        `${id}.png`
+      )
+    )
+  )
+  const found = buddyBubbleBox(png.data, png.width, png.height, { channels: 4 })
+  if (!found) throw new Error(`The golden ${id} has no porcelain.`)
+  const [left, top, right, bottom] = found.box
+  return [right - left + 1, bottom - top + 1]
+}
+
+/** The bubble in every frame of a file, inside the region above the pet. */
+async function readBubbleTimeline(path, { video }) {
+  const size = probeVideoSize(path)
+  if (size?.width !== video.width || size?.height !== video.height) {
+    throw new Error(`${path} is ${JSON.stringify(size)}, expected ${video.width}x${video.height}`)
+  }
+  const region = buddyBubbleRegion(
+    buddyPetBox(BUDDY_RECT, size.width, size.height),
+    size.width,
+    size.height
+  )
+  const frameBytes = region.width * region.height * 3
+  const timeline = []
+  await decodeFrames(
+    path,
+    `fps=${video.fps},crop=${region.width}:${region.height}:${region.x}:${region.y},format=rgb24`,
+    frameBytes,
+    (frame) => {
+      const found = buddyBubbleBox(frame, region.width, region.height, { minPixels: 1500 })
+      timeline.push({
+        t: timeline.length / video.fps,
+        size: found ? [found.box[2] - found.box[0] + 1, found.box[3] - found.box[1] + 1] : null,
+        pixels: found?.pixels ?? 0
+      })
+    }
+  )
+  return timeline
+}
+
+/** The bubble shows for a while after the file's first second, never in it,
+ * is gone by the file's last second, and (on macOS) is its golden's size. */
+function checkBubbleTimeline(label, timeline, { golden }) {
+  const fps = timeline.length > 1 ? 1 / (timeline[1].t - timeline[0].t) : 30
+  const shown = timeline.filter((sample) => sample.size)
+  const early = timeline.filter((sample) => sample.t < 1 && sample.size)
+  const end = timeline.at(-1)?.t ?? 0
+  const late = timeline.filter((sample) => sample.t > end - 1 && sample.size)
+  const describeShown = () =>
+    `${shown.length} of ${timeline.length} frames, first at ${shown[0]?.t.toFixed(2) ?? '-'} s`
+  if (shown.length / fps < MIN_BUBBLE_SECONDS) {
+    throw new Error(`[${label}] the bubble showed in ${describeShown()}`)
+  }
+  if (early.length > 0 || late.length > 0) {
+    throw new Error(
+      `[${label}] the bubble showed outside its line: ${early.length} frames in the first second, ${late.length} in the last (${describeShown()})`
+    )
+  }
+  const median = (values) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]
+  const size = [median(shown.map((s) => s.size[0])), median(shown.map((s) => s.size[1]))]
+  if (
+    golden &&
+    (Math.abs(size[0] - golden[0]) > BUBBLE_SIZE_TOLERANCE_PX ||
+      Math.abs(size[1] - golden[1]) > BUBBLE_SIZE_TOLERANCE_PX)
+  ) {
+    throw new Error(
+      `[${label}] the bubble is ${size.join('x')}, its golden ${golden.join('x')} (${describeShown()})`
+    )
+  }
+  return { size, seconds: shown.length / fps, first: shown[0].t }
+}
+
+async function startSession(ws, smoke, directory, { stream, sharedProfile = false }) {
   await ensureOverlayLayout(ws)
   const video = buddyPetRecordingVideo({ stream: Boolean(stream) })
   const outputAuthorization = await smokeCommand(smoke, 'authorize-smoke-resource', {
@@ -414,6 +607,7 @@ async function startSession(ws, smoke, directory, { stream }) {
     sessionParams({
       outputDirectoryCapability: outputAuthorization.capabilityId,
       stream,
+      sharedProfile,
       video
     })
   )
@@ -423,7 +617,9 @@ async function startSession(ws, smoke, directory, { stream }) {
   return { ...started, video }
 }
 
-function sessionParams({ outputDirectoryCapability, stream, video }) {
+/** `sharedProfile`: the stream goes to `output.rtmp` at the recording's
+ * profile, with no destination list (the bubble run). */
+function sessionParams({ outputDirectoryCapability, stream, sharedProfile = false, video }) {
   const timestamp = '2026-01-01T00:00:00.000Z'
   return {
     sources: { testPattern: true },
@@ -456,7 +652,7 @@ function sessionParams({ outputDirectoryCapability, stream, video }) {
         streamKey: stream?.streamKey ?? ''
       }
     },
-    ...(stream
+    ...(stream && !sharedProfile
       ? {
           streaming: {
             enabled: true,
@@ -506,8 +702,25 @@ async function readRecording(path, { frames, video }) {
     width: Math.min(size.width, box[0] + box[2] + margin) - Math.max(0, box[0] - margin),
     height: Math.min(size.height, box[1] + box[3] + margin) - Math.max(0, box[1] - margin)
   }
-  const frameBytes = crop.width * crop.height * 3
   const timeline = []
+  await decodeFrames(
+    path,
+    `fps=${video.fps},crop=${crop.width}:${crop.height}:${crop.x}:${crop.y},format=rgb24`,
+    crop.width * crop.height * 3,
+    (frame) => {
+      const read = readBuddyPetFrame(frame, crop.width, crop.height, {
+        box,
+        origin: [crop.x, crop.y],
+        frames
+      })
+      timeline.push({ t: timeline.length / video.fps, ...read })
+    }
+  )
+  return timeline
+}
+
+/** Decode a file through `filter` to raw frames of `frameBytes`, one call each. */
+function decodeFrames(path, filter, frameBytes, onFrame) {
   const args = [
     '-nostdin',
     '-hide_banner',
@@ -517,26 +730,20 @@ async function readRecording(path, { frames, video }) {
     path,
     '-an',
     '-vf',
-    `fps=${video.fps},crop=${crop.width}:${crop.height}:${crop.x}:${crop.y},format=rgb24`,
+    filter,
     '-f',
     'rawvideo',
     'pipe:1'
   ]
-  await new Promise((resolveDecode, rejectDecode) => {
+  return new Promise((resolveDecode, rejectDecode) => {
     const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
     let pending = Buffer.alloc(0)
     const stderr = []
     child.stdout.on('data', (chunk) => {
       pending = pending.length ? Buffer.concat([pending, chunk]) : chunk
       while (pending.length >= frameBytes) {
-        const frame = pending.subarray(0, frameBytes)
+        onFrame(pending.subarray(0, frameBytes))
         pending = pending.subarray(frameBytes)
-        const read = readBuddyPetFrame(frame, crop.width, crop.height, {
-          box,
-          origin: [crop.x, crop.y],
-          frames
-        })
-        timeline.push({ t: timeline.length / video.fps, ...read })
       }
     })
     child.stderr.setEncoding('utf8')
@@ -550,7 +757,6 @@ async function readRecording(path, { frames, video }) {
         )
     })
   })
-  return timeline
 }
 
 function sampleGaze(timeline, run) {

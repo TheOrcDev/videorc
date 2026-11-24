@@ -122,10 +122,7 @@ for (const scenario of scenarios) {
           // Preserve the real recording-folder fixture rather than bypassing storage.
           assert.equal(
             readFileSync(join(obsRoot, 'basic/profiles/Fixture Profile/basic.ini'), 'utf8'),
-            readFileSync(
-              new URL('../../apps/desktop/src/main/obs-fixtures/basic.ini', import.meta.url),
-              'utf8'
-            )
+            readFileSync(new URL('../../protocol-fixtures/obs/basic.ini', import.meta.url), 'utf8')
           )
           return {
             connections: {

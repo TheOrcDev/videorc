@@ -2200,6 +2200,33 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 | P1509 | No menu bar | Packaged Windows and Linux builds have no menu *(Windows and Linux)* | `main/app-menu.ts:66` | n/a | [ ] | [ ] |
 | P1510 | Text context menu | Spelling suggestions or "No Guesses Found"; Cut, Copy, Paste, Select All | `main/context-menu.ts:25` | [ ] | [ ] | [ ] |
 
+**Known gaps in the GPUI menu bar** (plan 260 S2.6a part 1, #1857, lane L4).
+To fix before Phase 3 ticks these lines on macOS:
+
+- **P1497, "Paste and Match Style" and "Delete": left out.** GPUI 0.3.14's
+  `OsAction` covers only Undo, Redo, Cut, Copy, Paste and Select All, so a
+  menu item can't carry `pasteAsPlainText:` or `delete:`. Planned fix: two
+  app actions that send the selector down the key window's responder chain
+  (`NSApp sendAction:to:nil from:` behind `platform/macos`), or a patch to
+  GPUI's macOS menu builder that adds both as `OsAction`s.
+- **P1498, Edit → Speech (Start Speaking, Stop Speaking): left out**, for
+  the same reason. Planned fix: the same GPUI menu-builder patch (a Speech
+  submenu with `startSpeaking:` and `stopSpeaking:`), or append the submenu
+  to the Edit menu's `NSMenu` after `cx.set_menus`, behind `platform/macos`.
+- **P1494, "About Videorc": listed but disabled.** GPUI enables a menu item
+  only when its action has a handler, and there is no About handler yet.
+  Planned fix: a `Platform::show_about_panel` call
+  (`NSApp orderFrontStandardAboutPanel:`, which reads the bundle's name,
+  version and credits), with the `About` action's handler calling it.
+- **P1515 and P1496, the Dock's Quit, a logout and a restart while on
+  air: not held.** The app holds Quit (⌘Q, the menu), the main window's
+  close button and Close Window (S2.6a part 7, #1900), but these reach
+  `NSApplication terminate:`, and GPUI 0.3.14 implements only
+  `applicationWillTerminate:`, which can't cancel. Planned fix: a GPUI patch
+  for `applicationShouldTerminate:` that answers `NSTerminateLater` while the
+  End livestream question is up and replies with
+  `replyToApplicationShouldTerminate:`.
+
 ### OS integration: dock, lifecycle, deep links, single instance
 
 | # | Control | What it does | Source | macOS | Windows | Linux |

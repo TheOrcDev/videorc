@@ -16,6 +16,12 @@
 //! it as `audio.levels` (microphone only, no session) about 20 times a second,
 //! so the meter shows the microphone whenever Studio is open, not only during
 //! a session.
+//!
+//! Plan 260 S1.3a: the standing-by microphone is the only idle meter feed for a
+//! CoreAudio microphone (the renderer opens no microphone of its own). With
+//! Keep microphone ready off the renderer arms it meter-only (D2, owner
+//! 2026-11-09): `session.start` never takes that source; it drops it and opens
+//! the device fresh, exactly as before.
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -39,6 +45,9 @@ pub struct WarmMicrophone {
     /// The opening that installed this source; its standby meter runs while
     /// this source is the one in the slot.
     generation: u64,
+    /// Plan 260 S1.3a (D2): opened for the idle meter only. A session never
+    /// takes it (`take_for_capture` drops it and the session opens fresh).
+    meter_only: bool,
 }
 
 /// Plan 092: how often a standing-by warm microphone reports its level.
@@ -164,6 +173,17 @@ impl WarmMicrophoneSlot {
     /// Installs an opened source; a previous one is dropped (stopped).
     #[cfg(test)]
     pub fn install(&self, device_id: u32, source: InitialAudioSource) -> WarmMicrophoneStatus {
+        self.install_for_test(device_id, source, false)
+    }
+
+    /// `install`, choosing whether the source is the idle meter's only.
+    #[cfg(test)]
+    pub fn install_for_test(
+        &self,
+        device_id: u32,
+        source: InitialAudioSource,
+        meter_only: bool,
+    ) -> WarmMicrophoneStatus {
         let previous = {
             let mut guard = self
                 .inner
@@ -175,6 +195,7 @@ impl WarmMicrophoneSlot {
                 armed_at: Instant::now(),
                 gain_db: 0.0,
                 generation: self.generation.load(Ordering::Acquire),
+                meter_only,
             })
         };
         drop(previous);
@@ -187,6 +208,7 @@ impl WarmMicrophoneSlot {
         device_id: u32,
         source: InitialAudioSource,
         gain_db: f32,
+        meter_only: bool,
     ) -> Option<WarmMicrophoneStatus> {
         let previous = {
             let mut slot = self.inner.lock().unwrap_or_else(|p| p.into_inner());
@@ -201,6 +223,7 @@ impl WarmMicrophoneSlot {
                 armed_at: Instant::now(),
                 gain_db,
                 generation: opening.generation,
+                meter_only,
             })
         };
         drop(previous);
@@ -218,11 +241,13 @@ impl WarmMicrophoneSlot {
             .map(|warm| (warm.source.stats_handle(), warm.gain_db))
     }
 
-    /// Applies live gain/mute changes to the warm source of `device_id`.
+    /// Applies live gain/mute changes to the warm source of `device_id`, and
+    /// whether it is the idle meter's only (Keep microphone ready switched).
     pub fn update_processing_settings(
         &self,
         device_id: u32,
         settings: AudioProcessingSettings,
+        meter_only: bool,
     ) -> bool {
         let mut guard = self
             .inner
@@ -233,6 +258,7 @@ impl WarmMicrophoneSlot {
                 // Standby PCM stays raw; the session bus owns gain/mute. Only
                 // the standby meter applies the gain.
                 warm.gain_db = settings.gain_db;
+                warm.meter_only = meter_only;
                 true
             }
             _ => false,
@@ -254,19 +280,30 @@ impl WarmMicrophoneSlot {
     /// Hands the warm source to a capture when it is the requested device,
     /// applying the session's processing settings. The slot is empty
     /// afterwards; the renderer re-arms once the session ends.
+    ///
+    /// Plan 260 S1.3a (D2): a meter-only source is never handed over. It
+    /// leaves the slot and closes here (its standby meter ends with it), and
+    /// None makes the session open the device fresh, exactly as it did when
+    /// Keep microphone ready was off and nothing stood by.
     pub fn take_for_capture(
         &self,
         device_id: u32,
         _settings: AudioProcessingSettings,
     ) -> Option<InitialAudioSource> {
-        let mut guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if guard.as_ref()?.device_id != device_id {
+        let warm = {
+            let mut guard = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.as_ref()?.device_id != device_id {
+                return None;
+            }
+            guard.take()?
+        };
+        if warm.meter_only {
+            drop(warm);
             return None;
         }
-        let warm = guard.take()?;
         Some(warm.source)
     }
 }
@@ -310,6 +347,7 @@ pub async fn arm_warm_microphone(
         gain_db: params.microphone_gain_db,
         muted: params.microphone_muted,
     };
+    let meter_only = params.meter_only;
     // Active-session admission precedes even an idempotent standby update.
     let work = state.ffmpeg_work.snapshot();
     if work.capture_active
@@ -323,7 +361,7 @@ pub async fn arm_warm_microphone(
     }
     if state
         .warm_microphone
-        .update_processing_settings(device_id, settings)
+        .update_processing_settings(device_id, settings, meter_only)
     {
         return state.warm_microphone.status();
     }
@@ -360,18 +398,25 @@ pub async fn arm_warm_microphone(
         return refused("session-active", None);
     }
     let generation = opening.generation;
-    let Some(status) =
-        state
-            .warm_microphone
-            .install_if_current(&opening, device_id, source, settings.gain_db)
-    else {
+    let Some(status) = state.warm_microphone.install_if_current(
+        &opening,
+        device_id,
+        source,
+        settings.gain_db,
+        meter_only,
+    ) else {
         return refused("superseded", None);
     };
     tokio::spawn(stream_standby_levels(state.clone(), generation));
     state.emit_log(
         "info",
         format!(
-            "Warm microphone armed: {} (CoreAudio device {device_id}).",
+            "Warm microphone armed{}: {} (CoreAudio device {device_id}).",
+            if meter_only {
+                " for the meter only"
+            } else {
+                ""
+            },
             status.device_name.as_deref().unwrap_or("unknown device")
         ),
     );
@@ -446,8 +491,8 @@ mod tests {
         assert_eq!(installed.device_id, Some(7));
         assert!(slot.is_armed_for(7));
         assert!(!slot.is_armed_for(8));
-        assert!(slot.update_processing_settings(7, settings(3.0)));
-        assert!(!slot.update_processing_settings(8, settings(3.0)));
+        assert!(slot.update_processing_settings(7, settings(3.0), false));
+        assert!(!slot.update_processing_settings(8, settings(3.0), false));
 
         assert!(
             slot.take_for_capture(8, settings(0.0)).is_none(),
@@ -482,7 +527,7 @@ mod tests {
             "the warm source's own window"
         );
         assert_eq!(gain_db, 0.0);
-        assert!(slot.update_processing_settings(7, settings(6.0)));
+        assert!(slot.update_processing_settings(7, settings(6.0), false));
         assert_eq!(
             slot.standby_meter(generation).map(|(_, gain)| gain),
             Some(6.0)
@@ -523,6 +568,76 @@ mod tests {
         assert_eq!(silent.rms_db, crate::protocol::AUDIO_LEVEL_FLOOR_DB);
     }
 
+    /// Plan 260 S1.3a (D2, owner 2026-11-09): with Keep microphone ready
+    /// off, the standby microphone feeds the idle meter only. Record drops it
+    /// and opens the device fresh, as when nothing stood by.
+    #[test]
+    fn a_meter_only_standby_meters_but_is_never_handed_to_a_session() {
+        let slot = WarmMicrophoneSlot::default();
+        let warm = test_native_audio_source(settings(0.0));
+        let warm_stats = warm.stats_handle();
+        slot.install_for_test(7, InitialAudioSource::warm(warm), true);
+        let generation = slot.generation.load(Ordering::Acquire);
+        let (stats, _) = slot
+            .standby_meter(generation)
+            .expect("a meter-only source still meters");
+        assert!(Arc::ptr_eq(&stats, &warm_stats));
+        assert!(slot.status().armed);
+
+        assert!(
+            slot.take_for_capture(8, settings(0.0)).is_none(),
+            "another device leaves it standing by"
+        );
+        assert!(slot.status().armed);
+        assert!(
+            slot.take_for_capture(7, settings(0.0)).is_none(),
+            "a session opens the device fresh instead of taking the meter's source"
+        );
+        assert!(!slot.status().armed, "Record closes the meter-only source");
+        assert!(
+            slot.standby_meter(generation).is_none(),
+            "and its standby meter ends with it"
+        );
+    }
+
+    #[test]
+    fn keep_microphone_ready_switches_the_standing_source_in_place() {
+        let slot = WarmMicrophoneSlot::default();
+        let warm = test_native_audio_source(settings(0.0));
+        let warm_stats = warm.stats_handle();
+        slot.install_for_test(7, InitialAudioSource::warm(warm), true);
+        // Keep microphone ready switched on: the same source becomes Record's.
+        assert!(slot.update_processing_settings(7, settings(0.0), false));
+        let taken = slot
+            .take_for_capture(7, settings(0.0))
+            .expect("a ready microphone is handed over");
+        assert!(Arc::ptr_eq(&taken.stats_handle(), &warm_stats));
+
+        slot.install_for_test(
+            7,
+            InitialAudioSource::warm(test_native_audio_source(settings(0.0))),
+            false,
+        );
+        // And off again: Record no longer takes it.
+        assert!(slot.update_processing_settings(7, settings(0.0), true));
+        assert!(slot.take_for_capture(7, settings(0.0)).is_none());
+        assert!(!slot.status().armed);
+    }
+
+    #[test]
+    fn meter_only_is_omitted_when_false_and_defaults_off() {
+        let params: WarmMicrophoneArmParams =
+            serde_json::from_str(r#"{"microphoneId":"microphone:coreaudio:7"}"#).unwrap();
+        assert!(!params.meter_only, "an older renderer's request hands over");
+        let wire = serde_json::to_value(&params).unwrap();
+        assert!(wire.get("meterOnly").is_none(), "{wire}");
+        let params: WarmMicrophoneArmParams =
+            serde_json::from_str(r#"{"microphoneId":"microphone:coreaudio:7","meterOnly":true}"#)
+                .unwrap();
+        assert!(params.meter_only);
+        assert_eq!(serde_json::to_value(&params).unwrap()["meterOnly"], true);
+    }
+
     #[test]
     fn install_replaces_and_disarm_releases() {
         let slot = WarmMicrophoneSlot::default();
@@ -555,6 +670,7 @@ mod tests {
                 microphone_id: Some("microphone:avfoundation:0".to_string()),
                 microphone_gain_db: 0.0,
                 microphone_muted: false,
+                meter_only: false,
             },
         )
         .await;
@@ -567,6 +683,7 @@ mod tests {
                 microphone_id: Some("microphone:coreaudio:99".to_string()),
                 microphone_gain_db: 0.0,
                 microphone_muted: false,
+                meter_only: true,
             },
         )
         .await;
@@ -634,7 +751,8 @@ mod tests {
                 WarmMicrophoneArmParams {
                     microphone_id: Some("microphone:coreaudio:99".into()),
                     microphone_gain_db: 0.0,
-                    microphone_muted: false
+                    microphone_muted: false,
+                    meter_only: false
                 }
             )
             .await
@@ -680,7 +798,8 @@ mod tests {
                 &opening,
                 7,
                 InitialAudioSource::warm(test_native_audio_source(settings(0.0))),
-                0.0
+                0.0,
+                false
             )
             .is_none()
         );

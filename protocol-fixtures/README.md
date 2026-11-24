@@ -224,3 +224,14 @@ field it does not know).
 - Rust: `cargo test -p videorc-backend camera_background_status_fixture`
 - TypeScript:
   `pnpm --filter @videorc/desktop exec vitest run src/shared/backend-rpc-contract.test.ts`
+
+## `obs/`
+
+A scrubbed copy of a real OBS Studio setup for OBS import (O1; the backend
+reads it since plan 260 S1.5d): `collection.json` (multi-scene,
+multi-camera, macOS sources), a profile's `basic.ini` (4K at 24 NTSC) and
+`service.json` (its stream key is `fixture-not-a-real-key`). The renderer's
+mapping tests and `pnpm smoke:obs-import` use the same files.
+
+- Rust: `cargo test -p videorc-backend obs_import`
+- TypeScript: `pnpm --filter @videorc/desktop test -- obs-import-map.test.ts`

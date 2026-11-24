@@ -142,6 +142,7 @@ mod native_preview_host;
 mod noise_cleanup;
 mod oauth;
 mod oauth_callback_page;
+mod obs_import;
 mod overlay_layout;
 #[allow(
     dead_code,
@@ -4526,6 +4527,17 @@ async fn publish_x_native_live(
 
     match &result {
         Ok(published) => {
+            if let Some(category) = &published.dropped_live_category {
+                log_x_lifecycle(
+                    state,
+                    session_id.as_deref(),
+                    protocol::HealthLevel::Info,
+                    "x-live-category-dropped",
+                    &format!(
+                        "X no longer lists the saved live category \"{category}\", so Go Live left it out. Pick another category in Stream details."
+                    ),
+                );
+            }
             log_x_lifecycle(
                 state,
                 session_id.as_deref(),
@@ -4577,6 +4589,80 @@ async fn publish_x_native_live(
     }
 
     result
+}
+
+/// A live X broadcast's title or category, changed while it runs (`PUT
+/// /2/broadcasts/:id`). The answer is X's own: the page shows it, since a
+/// read right after can still return the old values.
+async fn update_x_broadcast(
+    state: &AppState,
+    params: x_live::XUpdateBroadcastParams,
+) -> anyhow::Result<x_live::XBroadcastUpdated> {
+    let session_id = params.session_id.clone();
+    let accounts = state.database.list_platform_accounts()?;
+    let account = x_live::select_x_account(&accounts, params.account_id.as_deref())?;
+    let capability = x_live::x_native_live_capability(account)?;
+    x_live::ensure_x_native_live_available(&capability)?;
+    let credentials = x_live::x_livestream_credentials()?
+        .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?;
+    let result = x_live::update_broadcast(
+        &reqwest::Client::new(),
+        &credentials,
+        &x_live::api_base_url(None),
+        &params.broadcast_id,
+        &x_live::XBroadcastChanges {
+            title: params.title,
+            live_category_id: params.live_category_id,
+        },
+    )
+    .await;
+    match &result {
+        Ok(updated) => log_x_lifecycle(
+            state,
+            session_id.as_deref(),
+            protocol::HealthLevel::Info,
+            "x-broadcast-updated",
+            &format!(
+                "X broadcast {} updated: title {}, category {}.",
+                updated.broadcast_id,
+                updated.title.as_deref().map_or_else(
+                    || "not reported".to_string(),
+                    |title| format!("\"{title}\"")
+                ),
+                updated.live_category_id.as_deref().unwrap_or("none")
+            ),
+        ),
+        Err(error) => log_x_lifecycle(
+            state,
+            session_id.as_deref(),
+            protocol::HealthLevel::Warn,
+            "x-broadcast-update-failed",
+            &format!("X broadcast update failed: {error}"),
+        ),
+    }
+    result
+}
+
+/// X's live categories for the Stream details picker, read once a session
+/// (`refresh` reads them again).
+async fn x_live_categories(
+    state: &AppState,
+    params: x_live::XLiveCategoriesParams,
+) -> anyhow::Result<x_live::XLiveCategoriesResult> {
+    let accounts = state.database.list_platform_accounts()?;
+    let account = x_live::select_x_account(&accounts, params.account_id.as_deref())?;
+    let capability = x_live::x_native_live_capability(account)?;
+    x_live::ensure_x_native_live_available(&capability)?;
+    let credentials = x_live::x_livestream_credentials()?
+        .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?;
+    let categories = x_live::live_categories(
+        &reqwest::Client::new(),
+        &credentials,
+        &x_live::api_base_url(None),
+        params.refresh,
+    )
+    .await?;
+    Ok(x_live::XLiveCategoriesResult { categories })
 }
 
 async fn end_x_native_live(state: &AppState, params: XEndParams) -> anyhow::Result<XEndResult> {
@@ -6356,6 +6442,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "streamTargets.x.startLiveAuthorization"
         | "streamTargets.x.prepare"
         | "streamTargets.x.publish"
+        | "streamTargets.x.updateBroadcast"
         | "streamTargets.x.end"
         // Plan 184: talks to videorc.com (and the show's node).
         | "cloud.show.end"
@@ -6517,6 +6604,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "sessions.storage"
         | "sessions.comments.list"
         | "sessions.comments.totals"
+        // Plan 260 S1.5d: OBS's own config files, read and never written.
+        | "obs.discover"
+        | "obs.read"
+        | "obs.readStreamKey"
         | "sessions.viewers.list"
         | "sessions.audience.get"
         | "stream.audience.snapshot"
@@ -6541,6 +6632,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "platformAccounts.youtube.channels"
         | "streamTargets.twitch.searchCategories"
         | "streamTargets.kick.searchCategories"
+        | "streamTargets.x.liveCategories"
         | "streamTargets.x.capability"
         | "screens.list"
         | "banners.list"
@@ -12320,18 +12412,19 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 260 S1.2d: the backend draws the bubble from the line that is
+        // up; a `pngBase64` bubble (the previous release's path) is still
+        // installed.
         "buddy.overlay.set" => {
-            match serde_json::from_value::<buddy_overlay::SetBuddyOverlayParams>(command.params) {
-                Ok(params) => {
-                    match buddy_overlay::set_buddy_overlay(&state.buddy_overlay, params).await {
-                        Ok(info) => ServerResponse::ok(command.id, info),
-                        Err(error) => ServerResponse::error(
-                            command.id,
-                            "buddy-overlay-invalid",
-                            error.to_string(),
-                        ),
-                    }
-                }
+            match serde_json::from_value::<buddy_overlay::BuddyOverlaySetRequest>(command.params) {
+                Ok(request) => match buddy_overlay::set_buddy_overlay(state, request).await {
+                    Ok(info) => ServerResponse::ok(command.id, info),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        buddy_overlay::buddy_overlay_error_code(&error),
+                        format!("{error:#}"),
+                    ),
+                },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
@@ -15475,6 +15568,26 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "obs.discover" => ServerResponse::ok(command.id, obs_import::discover_for_rpc().await),
+        "obs.read" => match serde_json::from_value::<obs_import::ObsReadParams>(command.params) {
+            Ok(params) => match obs_import::read_setup_for_rpc(params).await {
+                Ok(setup) => ServerResponse::ok(command.id, setup),
+                Err(error) => ServerResponse::error(command.id, "obs-read-failed", error),
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        // Never echo the key in a log or an error: only the answer holds it.
+        "obs.readStreamKey" => {
+            match serde_json::from_value::<obs_import::ObsReadStreamKeyParams>(command.params) {
+                Ok(params) => ServerResponse::ok(
+                    command.id,
+                    obs_import::read_stream_key_for_rpc(params).await,
+                ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "discord.webhook.save" => {
             match serde_json::from_value::<discord_announce::SaveWebhookParams>(command.params) {
                 Ok(params) => discord_rpc(
@@ -16332,6 +16445,21 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "streamTargets.x.liveCategories" => {
+            match serde_json::from_value::<x_live::XLiveCategoriesParams>(command.params) {
+                Ok(params) => match x_live_categories(state, params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "x-live-categories-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "streamTargets.x.startLiveAuthorization" => match start_x_live_authorization(state).await {
             Ok(result) => ServerResponse::ok(command.id, result),
             Err(error) => {
@@ -16366,6 +16494,19 @@ async fn handle_text_message_with_role(
                     }
                     Err(error) => {
                         ServerResponse::error(command.id, "x-publish-failed", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "streamTargets.x.updateBroadcast" => {
+            match serde_json::from_value::<x_live::XUpdateBroadcastParams>(command.params) {
+                Ok(params) => match update_x_broadcast(state, params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "x-update-failed", error.to_string())
                     }
                 },
                 Err(error) => {
