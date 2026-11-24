@@ -13,10 +13,9 @@
 //!   texture route binds to Slint's image; the UI's bind answers;
 //! - the Linux presenter (S4.2c, `crate::linux`): the leased slot's index
 //!   goes to the presenter thread, which copies the slot into a buffer of
-//!   its own (Wayland) or puts it from the MIT-SHM segment (X11) and answers
-//!   once the ring's slot is no longer read: after the copy, or after the X
-//!   server's completion. The lease is held until that answer, with no
-//!   deadline, so the writer never touches a slot the display server reads.
+//!   its own (a `wl_buffer`, or a frame of its MIT-SHM segment) and answers
+//!   once the copy is done. The lease is held until that answer, with no
+//!   deadline; the display server only ever reads the presenter's copies.
 //!
 //! Either way a frame that was shown counts as presented in the feed's
 //! telemetry, which the first-frame and presenting contracts read
