@@ -743,7 +743,6 @@ export interface BackendRpcMethodMap {
   /** Plan 260 S1.8: whether the backend holds the room's host seat (its dev
    * switch); asked before the renderer starts a room client. */
   'cloud.room.owner': BackendRpcDefinition<undefined, { backend: boolean }>
-  },
   'cloud.room.routing.set': BackendRpcDefinition<ProgramAudioSettings, { held: boolean }>
   'cloud.room.avatar.motion': BackendRpcDefinition<
     CloudRoomAvatarMotionParams,

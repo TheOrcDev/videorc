@@ -359,7 +359,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   // Plan 260 S1.8c c4c: with the backend in the room, the program audio
   // routing (speech and auxiliary gain and mute) goes there; it sends it on
   // to the program pages that route.
-  const backendHolds = backendMedia !== null
+  const backendHolds = backendOwned || backendMedia !== null
   useEffect(() => {
     if (!client || !roomOpen || !backendHolds) return
     let sent = ''

@@ -263,6 +263,16 @@ async fn hold(
             }
             Ok((room, mut events)) => {
                 let room = Arc::new(room);
+                // Subscriptions start closed, before any publisher starts:
+                // LiveKit allows everyone until told otherwise, and the
+                // routing task grants only what the receipts allow (c4c).
+                if let Err(error) = room
+                    .local_participant()
+                    .set_track_subscription_permissions(false, Vec::new())
+                    .await
+                {
+                    tracing::warn!("The room's subscriptions could not be closed: {error}");
+                }
                 attempt = 0;
                 report(&state, CloudRoomClientState::Connected, None);
                 // Data messages are not replayed: the stage goes out on every
