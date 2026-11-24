@@ -74,7 +74,6 @@
     "src/main/native-preview-run-authority.test.ts": 90,
     "src/main/native-preview-scene-authority.test.ts": 90,
     "src/main/native-preview-window-stacking.test.ts": 140,
-    "src/main/obs-import.test.ts": 120,
     "src/main/packaged-test-hooks.test.ts": 100,
     "src/main/permission-relaunch.test.ts": 110,
     "src/main/persistent-directory-authority.test.ts": 180,

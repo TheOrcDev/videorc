@@ -142,6 +142,7 @@ mod native_preview_host;
 mod noise_cleanup;
 mod oauth;
 mod oauth_callback_page;
+mod obs_import;
 mod overlay_layout;
 #[allow(
     dead_code,
@@ -6517,6 +6518,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "sessions.storage"
         | "sessions.comments.list"
         | "sessions.comments.totals"
+        // Plan 260 S1.5d: OBS's own config files, read and never written.
+        | "obs.discover"
+        | "obs.read"
+        | "obs.readStreamKey"
         | "sessions.viewers.list"
         | "sessions.audience.get"
         | "stream.audience.snapshot"
@@ -15470,6 +15475,26 @@ async fn handle_text_message_with_role(
                 Ok(params) => {
                     discord_rpc(command.id, discord_announce::update(state, params).await)
                 }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "obs.discover" => ServerResponse::ok(command.id, obs_import::discover_for_rpc().await),
+        "obs.read" => match serde_json::from_value::<obs_import::ObsReadParams>(command.params) {
+            Ok(params) => match obs_import::read_setup_for_rpc(params).await {
+                Ok(setup) => ServerResponse::ok(command.id, setup),
+                Err(error) => ServerResponse::error(command.id, "obs-read-failed", error),
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        // Never echo the key in a log or an error: only the answer holds it.
+        "obs.readStreamKey" => {
+            match serde_json::from_value::<obs_import::ObsReadStreamKeyParams>(command.params) {
+                Ok(params) => ServerResponse::ok(
+                    command.id,
+                    obs_import::read_stream_key_for_rpc(params).await,
+                ),
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }

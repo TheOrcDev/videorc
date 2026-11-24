@@ -667,7 +667,6 @@ import {
   mainPumpFrameDeliveryStalled,
   mainPumpStatusCompatibilityMayPresent
 } from './native-preview-main-pump-health'
-import { discoverObs, readObsSetup, readObsStreamKey } from './obs-import'
 import { initAutoUpdater, registerUpdaterIpc, updaterDiagnostics } from './updater'
 import {
   sanitizedChildProcessEnvironment,
@@ -832,6 +831,7 @@ import type {
   NotesDocument,
   NotesWindowState,
   OAuthCallbackEnvelope,
+  ObsDiscovery,
   ObsSetup,
   PreviewSurfaceCompositorUpdateParams,
   NativePreviewHostWindow,
@@ -12246,6 +12246,10 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'room.camera.processed.inspect',
   'room.microphone.inspect',
   'resource.capability.register_thumbnail',
+  // Plan 260 S1.5d: OBS import reads OBS's own files in the backend.
+  'obs.discover',
+  'obs.read',
+  'obs.readStreamKey',
   // Plan 232: how an HTML overlay's page stands; only main hosts them.
   'htmlOverlays.host.report',
   ...SMOKE_BACKEND_RPC_METHOD_NAMES,
@@ -18010,7 +18014,7 @@ async function readObsSetupForRenderer(
   collection: string,
   profile: string
 ): Promise<ObsSetup | null> {
-  const setup = readObsSetup(collection, profile)
+  const setup = await requestBackendAdmin<ObsSetup | null>('obs.read', { collection, profile })
   if (!setup) {
     return null
   }
@@ -19029,17 +19033,19 @@ app.whenReady().then(async () => {
   secureIpcHandle('agents:add-to-app', (_event, app: unknown, token: unknown) =>
     addAgentToInstalledApp(app as AgentAddApp, token as string)
   )
-  // OBS setup import (O1): read-only discovery over OBS Studio's config files.
-  // The stream key never rides these payloads — obs:read strips it; the apply
-  // flow requests it exactly once via obs:read-stream-key.
-  secureIpcHandle('obs:discover', () => discoverObs())
+  // OBS setup import (O1): the backend reads OBS Studio's config files (plan
+  // 260 S1.5d). The stream key never rides these payloads: obs:read has only
+  // hasKey, and the apply flow asks for the key once via obs:read-stream-key.
+  secureIpcHandle('obs:discover', () => requestBackendAdmin<ObsDiscovery>('obs.discover'))
   secureIpcHandle('obs:read', (_event, collection: string, profile: string) =>
     typeof collection === 'string' && typeof profile === 'string'
       ? readObsSetupForRenderer(collection, profile)
       : null
   )
   secureIpcHandle('obs:read-stream-key', (_event, profile: string) =>
-    typeof profile === 'string' ? readObsStreamKey(profile) : null
+    typeof profile === 'string'
+      ? requestBackendAdmin<string | null>('obs.readStreamKey', { profile })
+      : null
   )
   // Library Delete: recordings move to the system Trash — Trash IS the undo;
   // nothing in the app hard-deletes a user's file (Library rewrite L3).
