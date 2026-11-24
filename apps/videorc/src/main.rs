@@ -58,11 +58,15 @@ use app::exit::ExitGuard;
 use app::frames::MainFrame;
 use app::hide::HideFromStream;
 use app::permissions::Permissions;
-use app::session::{SessionControls, SessionPanel};
 use app::shell::{Shell, StatusLine, connection_text};
 use app::{camera, capture, hotkeys, links, menus, sleep};
 use screens::sources::SourcesPanel;
 use screens::stream_manager::frame::StreamManagerFrame;
+use screens::studio::{
+    self as studio_screen, StudioPage,
+    session::SessionSection,
+    transport::{SessionControls, Transport},
+};
 
 /// Electron's app id (`electron-builder.yml`), kept on every platform: the
 /// macOS bundle id, Videorc Camera's host, Linux's desktop entry and the
@@ -322,6 +326,7 @@ fn main() -> Result<()> {
         // The menu bar from the core's template, and the keys it names.
         ExitGuard::install(cx, &exit_runtime, exit_events);
         menus::install(cx);
+        studio_screen::bind_keys(cx);
 
         // Hide from stream: content protection and the capture filter's
         // list, which the Studio sends with the screen capture when it lands.
@@ -357,8 +362,8 @@ fn main() -> Result<()> {
         let status = bridge::mirror(cx, backend_state.clone(), StatusLine::of);
         let connection = bridge::mirror(cx, connection_state.clone(), connection_text);
         let controls = bridge::mirror(cx, studio_state.clone(), SessionControls::of);
-        let session = cx
-            .new(|cx| SessionPanel::new(studio.clone(), core_handle.clone(), controls.clone(), cx));
+        let transport =
+            cx.new(|cx| Transport::new(studio.clone(), core_handle.clone(), controls.clone(), cx));
         let sources = cx.new(|cx| {
             SourcesPanel::new(studio.clone(), permissions.clone(), core_handle.clone(), cx)
         });
@@ -391,11 +396,23 @@ fn main() -> Result<()> {
                     cx,
                 );
                 *preview_slot.borrow_mut() = Some(preview.clone());
+                let session = cx.new(|cx| {
+                    SessionSection::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        studio_state.clone(),
+                        studio.telemetry(),
+                        cx,
+                    )
+                });
+                let studio_page = cx.new(|cx| {
+                    StudioPage::new(transport.clone(), preview.clone(), session, window, cx)
+                });
                 cx.new(|cx| {
                     Shell::new(
                         status.clone(),
                         connection.clone(),
-                        session.clone(),
+                        studio_page,
                         preview,
                         sources.clone(),
                         settings.clone(),

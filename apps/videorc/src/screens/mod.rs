@@ -7,3 +7,4 @@ pub mod sources;
 // when the kit lands; their rules are tested now.
 #[allow(dead_code)]
 pub mod stream_manager;
+pub mod studio;

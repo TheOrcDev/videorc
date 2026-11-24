@@ -5,7 +5,7 @@
 //! replaces these plain elements when it lands.
 
 use crate::screens::settings::{Navigate, SettingsScreen};
-use gpui::{Context, Entity, Window, div, prelude::*, px};
+use gpui::{Context, Entity, Focusable, Window, div, prelude::*, px};
 use videorc_app_core::nav::{self, PageId, ZONES};
 use videorc_app_core::{BackendState, ConnectionState, Tone};
 use videorc_kit::{
@@ -15,10 +15,9 @@ use videorc_kit::{
 };
 
 use super::bridge::Mirror;
-use super::session::SessionPanel;
 use crate::preview::Preview;
 use crate::screens::sources::SourcesPanel;
-use videorc_preview::lifecycle::WindowMode;
+use crate::screens::studio::{StudioPage, transport::OpenPage};
 
 /// The status bar's line: the supervisor's words, and whether the typed
 /// client has the backend's `backend.ready`.
@@ -62,8 +61,9 @@ pub struct Shell {
     page: PageId,
     backend: Entity<Mirror<StatusLine>>,
     connection: Entity<Mirror<String>>,
-    /// S2.4: Record, the clock, Stop and Go Live, on the Studio page.
-    session: Entity<SessionPanel>,
+    /// The Studio page (plan 260 Phase 3): the preview, the transport and
+    /// the session inspector.
+    studio: Entity<StudioPage>,
     /// The preview (plan 260 S2.3a, L1): its slot is the Studio page's.
     preview: Entity<Preview>,
     /// Phase 3: Sources ⌘2.
@@ -75,7 +75,7 @@ impl Shell {
     pub fn new(
         backend: Entity<Mirror<StatusLine>>,
         connection: Entity<Mirror<String>>,
-        session: Entity<SessionPanel>,
+        studio: Entity<StudioPage>,
         preview: Entity<Preview>,
         sources: Entity<SourcesPanel>,
         settings: Entity<SettingsScreen>,
@@ -87,6 +87,11 @@ impl Shell {
         // change, never per video frame.
         cx.observe(&preview, |_, _, cx| cx.notify()).detach();
         cx.observe(&sources, |_, _, cx| cx.notify()).detach();
+        // The Studio's jumps ("Open Destinations", a Session row) open that page.
+        cx.subscribe_in(&studio, |this, _, open: &OpenPage, window, cx| {
+            this.open_page(open.0, window, cx)
+        })
+        .detach();
         cx.subscribe(&settings, |this, _, Navigate(page), cx| {
             this.page = *page;
             this.preview.update(cx, |preview, _| {
@@ -99,7 +104,7 @@ impl Shell {
             page: PageId::Studio,
             backend,
             connection,
-            session,
+            studio,
             preview,
             sources,
             settings,
@@ -139,55 +144,13 @@ impl Shell {
             self.preview.update(cx, |preview, _| {
                 preview.set_docked_shown(page == PageId::Studio)
             });
+            // Space records only while the Studio page holds focus.
+            if page == PageId::Studio {
+                let focus = self.studio.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
             cx.notify();
         }
-    }
-
-    /// The Studio page (S2.3a's and S2.4's parts of it): the preview's slot,
-    /// the button that moves the Preview into its own window and back
-    /// (`preview-stage.tsx`'s "Pop out" and "Show here"), and the session
-    /// controls.
-    fn studio_page(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let (floating, can_float) = {
-            let preview = self.preview.read(cx);
-            (preview.mode() == WindowMode::Floating, preview.can_float())
-        };
-        let mut header = div().flex().justify_between().items_center().child(
-            div()
-                .type_scale(text::SECTION)
-                .child(PageId::Studio.label()),
-        );
-        if can_float {
-            header = header.child(
-                div()
-                    .id("preview-pop-out")
-                    .px(px(10.))
-                    .py(px(4.))
-                    .rounded(px(radius::ROW))
-                    .bg(hsla(t.accent))
-                    .type_scale(text::META)
-                    .cursor_pointer()
-                    .child(if floating { "Show here" } else { "Pop out" })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.preview
-                            .update(cx, |preview, cx| preview.toggle_floating(cx));
-                    })),
-            );
-        }
-        div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .gap(px(12.))
-            .pb(px(16.))
-            .child(header)
-            .child(
-                div()
-                    .flex_1()
-                    .child(Preview::docked_slot(&self.preview, cx)),
-            )
-            // S2.4's session controls, under the preview.
-            .child(self.session.clone())
     }
 
     fn sidebar(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -276,8 +239,7 @@ impl Render for Shell {
                             .flex()
                             .flex_col()
                             .pt(px(40.))
-                            .px(px(24.))
-                            .child(self.studio_page(t, cx))
+                            .child(self.studio.clone())
                     } else if page == PageId::Sources {
                         div()
                             .flex_1()
