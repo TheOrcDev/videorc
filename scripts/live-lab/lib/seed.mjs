@@ -1,3 +1,4 @@
+import { readUiSettingJs, seedUiSettingsJs } from '../../lib/renderer-profile-seed.mjs'
 import { isLoopbackRtmp } from './launch.mjs'
 import { LAB_MIC_SOURCE } from './linux-desktop.mjs'
 import { isLinux } from './platform.mjs'
@@ -15,7 +16,8 @@ import { isLinux } from './platform.mjs'
 //    localStorage, the environment, argv or a log.
 // 3. `remote.control.enable` (backend): the remote surface and its discovery file.
 // 4. The renderer's saved Studio (the UI settings store since plan 260 S1.4b,
-//    written over CDP through `window.__videorcUiSettings`, then a
+//    read and written over CDP through the renderer's seam once the window's
+//    store holds its snapshot (`readUiSettingJs`, `seedUiSettingsJs`), then a
 //    reload): lab display as Screen, camera off, BlackHole as mic, the
 //    screen-only scene on stream, stream on, record off, captions off, and
 //    only the seeded destinations enabled. Since scenes v2 the Studio starts
@@ -38,6 +40,8 @@ export const YOUTUBE_RTMPS_URL = 'rtmps://a.rtmps.youtube.com:443/live2'
 export const LAB_SCENE = 'screen-only'
 export const SEED_SETTLE_DEADLINE_MS = 20_000
 const SEED_SETTLE_POLL_MS = 250
+/** The page's wait for its UI settings store, under the lab's 15 s CDP call. */
+export const LAB_UI_SETTINGS_READY_MS = 12_000
 const MIC_NAME = /blackhole/i
 // Plan 179: Linux lists exactly one screen row, the ScreenCast portal (the
 // output it captures is the lab share picker's answer, see session.mjs), and
@@ -428,7 +432,9 @@ export async function seedProfile({
   }
   const readKey = async (key) => {
     try {
-      const text = await evaluate(`window.__videorcUiSettings?.getItem(${JSON.stringify(key)})`)
+      const text = await evaluate(
+        readUiSettingJs(key, { readyTimeoutMs: LAB_UI_SETTINGS_READY_MS })
+      )
       return text ? JSON.parse(text) : null
     } catch {
       return null
@@ -453,7 +459,7 @@ export async function seedProfile({
     [ONBOARDING_KEY, ONBOARDING_DISMISSED_VALUE]
   ]
   await evaluate(
-    `(() => { for (const [key, value] of ${JSON.stringify(writes)}) window.__videorcUiSettings.setItem(key, value); return true })()`
+    seedUiSettingsJs(Object.fromEntries(writes), { readyTimeoutMs: LAB_UI_SETTINGS_READY_MS })
   )
   await reloadAndWait()
   // The reloaded Studio commits its scene to the backend and saves its config

@@ -13,6 +13,7 @@ import {
 import { createMemoryUiSettingsEngine } from './ui-settings-test-store'
 import {
   createBackendUiSettingsTransport,
+  createUiSettingsSmokeSeam,
   hydrateUiSettingsBeforeFirstRender
 } from './ui-settings-window'
 
@@ -134,6 +135,55 @@ describe('a window that rendered before its snapshot (plan 220 S1.4b)', () => {
     await store.whenHydrated()
     await Promise.resolve()
     expect(reload).not.toHaveBeenCalled()
+  })
+})
+
+// S1.4b.2: smokes seed right after launch or a reload, while the window is
+// still hydrating. The seam refuses those writes (loudly) and says when the
+// window is ready for them.
+describe('the smoke seam (plan 220 S1.4b.2)', () => {
+  it('refuses a write while hydrating, and is ready once the window rendered with its snapshot', async () => {
+    const late = lateEngine({ 'videorc.aiConsent': '0' })
+    const store = createUiSettingsStore({ transport: late.transport, storage: null, log: quiet })
+    setWindowUiSettingsStoreForTests(store)
+    const rendering = hydrateUiSettingsBeforeFirstRender(60_000, vi.fn())
+    const seam = createUiSettingsSmokeSeam()
+    expect(() => seam.setItem('videorc.aiConsent', '1')).toThrow(
+      "This window's UI settings store has no snapshot yet (hydrating); write after it hydrates."
+    )
+    let ready = false
+    const waiting = seam.ready().then(() => (ready = true))
+    await Promise.resolve()
+    expect(ready).toBe(false)
+    late.answer()
+    await waiting
+    expect((await rendering).state).toBe('hydrated')
+    expect(seam.getItem('videorc.aiConsent')).toBe('0')
+    seam.setItem('videorc.aiConsent', '1')
+    await seam.flush()
+    expect(store.get('videorc.aiConsent')).toBe('1')
+    // Ready at once from then on.
+    await expect(seam.ready()).resolves.toBeUndefined()
+  })
+
+  it('is never ready in a window that rendered without its snapshot, even once it arrives', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const late = lateEngine({})
+    const store = createUiSettingsStore({ transport: late.transport, storage: null, log: quiet })
+    setWindowUiSettingsStoreForTests(store)
+    const reload = vi.fn()
+    expect((await hydrateUiSettingsBeforeFirstRender(1, reload)).state).toBe('unavailable')
+    const seam = createUiSettingsSmokeSeam()
+    const refusal =
+      'This window rendered without its UI settings snapshot (The engine did not answer within 1 ms; still waiting.); it reloads once the snapshot arrives, so seed the reloaded window.'
+    await expect(seam.ready()).rejects.toThrow(refusal)
+    // The snapshot arrives: the window reloads, and this one stays refused.
+    late.answer()
+    await store.whenHydrated()
+    await Promise.resolve()
+    expect(reload).toHaveBeenCalledTimes(1)
+    await expect(seam.ready()).rejects.toThrow(refusal)
+    warn.mockRestore()
   })
 })
 

@@ -81,7 +81,7 @@ import { analyzeRecording } from './lib/recording-analyzer.mjs'
 import { connectRemote, remoteRequest } from './lib/remote-control-client.mjs'
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
-import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
+import { reloadKeepingSeedJs, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
@@ -476,10 +476,11 @@ try {
     'eval-js',
     {
       code: `
+        const settings = await ${UI_SETTINGS_READY_JS};
         const key = 'videorc.captureConfig';
         let current = {};
-        try { current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}') ?? {}; } catch {}
-        window.__videorcUiSettings.setItem(key, JSON.stringify({ ...current, video: params.video, recordEnabled: true, streamEnabled: false, streaming: params.streaming }));
+        try { current = JSON.parse(settings.getItem(key) ?? '{}') ?? {}; } catch {}
+        settings.setItem(key, JSON.stringify({ ...current, video: params.video, recordEnabled: true, streamEnabled: false, streaming: params.streaming }));
         ${reloadKeepingSeedJs({ forgetWorkingScene: false })}
         return true;
       `,
@@ -699,7 +700,7 @@ try {
 
   // 4. Studio round trips against backend-confirmed state.
   const sceneLibraryV2 = await evalRenderer(
-    `return JSON.parse(window.__videorcUiSettings.getItem('videorc.scenes.v2'))`
+    `return JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2'))`
   )
   const screenOnlyId = sceneLibraryV2.scenes.find(
     (scene) => scene.layouts.horizontal.layoutPreset === 'screen-only'
@@ -708,7 +709,7 @@ try {
   // than a transient synthetic toggle left on the previous scene.
   if (
     (await evalRenderer(`
-    const scene = JSON.parse(window.__videorcUiSettings.getItem('videorc.scenes.v2')).scenes.find((entry) => entry.id === ${JSON.stringify(screenOnlyId)});
+    const scene = JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2')).scenes.find((entry) => entry.id === ${JSON.stringify(screenOnlyId)});
     scene.shows = {kind: 'test-pattern'};
     return await window.__videorcSmokeScenePresets.edit(scene);
   `)) !== true
@@ -726,7 +727,7 @@ try {
   if (!sideId) fail('the fresh library must contain a Side by side scene')
   if (
     (await evalRenderer(
-      `const scene = JSON.parse(window.__videorcUiSettings.getItem('videorc.scenes.v2')).scenes.find((scene) => scene.id === ${JSON.stringify(sideId)}); scene.layouts.horizontal.layoutPreset = 'screen-only'; return window.__videorcSmokeScenePresets.edit(scene)`
+      `const scene = JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2')).scenes.find((scene) => scene.id === ${JSON.stringify(sideId)}); scene.layouts.horizontal.layoutPreset = 'screen-only'; return window.__videorcSmokeScenePresets.edit(scene)`
     )) !== true
   )
     fail('could not prepare the missing-layout refusal')

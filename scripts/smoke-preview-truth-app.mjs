@@ -16,7 +16,7 @@ import { classifyBuddyPetTag, writeBuddyPetFixturePack } from './lib/buddy-pet-f
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
-import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
+import { RELOAD_KEEPING_SEED_JS, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 assert.equal(process.platform, 'darwin', 'Preview truth requires the macOS dev app')
@@ -282,9 +282,10 @@ try {
   await command('eval-js', {
     video: sessionParams(null).output.video,
     code: `
+      const settings = await ${UI_SETTINGS_READY_JS};
       const key = 'videorc.captureConfig';
-      const current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}');
-      window.__videorcUiSettings.setItem(key, JSON.stringify({ ...current,
+      const current = JSON.parse(settings.getItem(key) ?? '{}');
+      settings.setItem(key, JSON.stringify({ ...current,
         video: params.video, layout: { ...current.layout, layoutPreset: 'screen-only' },
         recordEnabled: true, streamEnabled: false,
         replayBuffer: { enabled: false, explicit: true }

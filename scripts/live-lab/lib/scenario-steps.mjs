@@ -2,10 +2,11 @@ import { randomUUID } from 'node:crypto'
 import { appendFile, mkdir, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { readUiSettingJs, seedUiSettingsJs } from '../../lib/renderer-profile-seed.mjs'
 import { YOUTUBE_4K_STREAM_GATES } from '../../lib/youtube-4k-stream-gate.mjs'
 import { createCanvas } from './charts.mjs'
 import { phraseOverlap } from './feature-events.mjs'
-import { CAPTURE_CONFIG_KEY } from './seed.mjs'
+import { CAPTURE_CONFIG_KEY, LAB_UI_SETTINGS_READY_MS } from './seed.mjs'
 import { isLiveJournalState } from './youtube-side.mjs'
 
 // Plan 178 U9 step 2. The steps the suites are composed from (plan 176 test
@@ -223,11 +224,13 @@ export function outputProfileStep({ id = 'output-profile', profileParam = 'profi
       const name = ctx.params?.[profileParam] ?? '1080p30'
       const profile = OUTPUT_PROFILES[name]
       if (!profile) throw new Error(`unknown output profile "${name}"`)
-      const saved = JSON.parse(
-        (await ctx.ui.evaluate(
-          `window.__videorcUiSettings?.getItem(${JSON.stringify(CAPTURE_CONFIG_KEY)})`
-        )) ?? 'null'
-      )
+      const readSaved = async () =>
+        JSON.parse(
+          (await ctx.ui.evaluate(
+            readUiSettingJs(CAPTURE_CONFIG_KEY, { readyTimeoutMs: LAB_UI_SETTINGS_READY_MS })
+          )) ?? 'null'
+        )
+      const saved = await readSaved()
       if (!saved?.streaming) throw new Error('the Studio config is not seeded')
       const next = {
         ...saved,
@@ -242,7 +245,10 @@ export function outputProfileStep({ id = 'output-profile', profileParam = 'profi
         }
       }
       await ctx.ui.evaluate(
-        `(() => { window.__videorcUiSettings.setItem(${JSON.stringify(CAPTURE_CONFIG_KEY)}, ${JSON.stringify(JSON.stringify(next))}); return true })()`
+        seedUiSettingsJs(
+          { [CAPTURE_CONFIG_KEY]: JSON.stringify(next) },
+          { readyTimeoutMs: LAB_UI_SETTINGS_READY_MS }
+        )
       )
       // The backend relays a remote intent once, to the renderer connected at
       // that moment; one sent before the reloaded renderer is back is lost
@@ -255,11 +261,7 @@ export function outputProfileStep({ id = 'output-profile', profileParam = 'profi
       rendererBack.catch(() => undefined)
       await ctx.ui.reload()
       await rendererBack
-      const check = JSON.parse(
-        (await ctx.ui.evaluate(
-          `window.__videorcUiSettings?.getItem(${JSON.stringify(CAPTURE_CONFIG_KEY)})`
-        )) ?? 'null'
-      )
+      const check = await readSaved()
       const applied = (check?.streaming?.targets ?? [])
         .filter((target) => target?.enabled)
         .every((target) => target.outputPreset === profile.preset)

@@ -27,6 +27,11 @@ import { appendFileSync, existsSync, mkdtempSync, statSync, writeFileSync } from
 import { cpus, loadavg, platform, release, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
+import {
+  ONBOARDING_STORAGE_KEY,
+  seedUiSettingsJs,
+  UI_SETTINGS_READY_TIMEOUT_MS
+} from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
   freeformLiveSurfaceReady,
@@ -67,23 +72,23 @@ class Cdp {
       })
     })
   }
-  send(method, params = {}) {
+  send(method, params = {}, { timeoutMs = 15000 } = {}) {
     const id = ++this.serial
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new Error(`CDP ${method} timeout`))
-      }, 15000)
+      }, timeoutMs)
       this.pending.set(id, { resolve, reject, timer })
       this.socket.send(JSON.stringify({ id, method, params }))
     })
   }
-  async eval(expression) {
-    const result = await this.send('Runtime.evaluate', {
-      expression,
-      returnByValue: true,
-      awaitPromise: true
-    })
+  async eval(expression, { timeoutMs } = {}) {
+    const result = await this.send(
+      'Runtime.evaluate',
+      { expression, returnByValue: true, awaitPromise: true },
+      { timeoutMs }
+    )
     if (result.exceptionDetails)
       throw new Error(
         result.exceptionDetails.exception?.description ?? result.exceptionDetails.text
@@ -176,9 +181,10 @@ try {
   cdp = await Cdp.connect(target.webSocketDebuggerUrl)
   await cdp.send('Page.bringToFront')
   backend = await connectBackend(launched.connections['backend-ready'], timeoutMs)
-  await cdp.eval(
-    `window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'creator-ux-v1')`
-  )
+  // The window may still be hydrating its UI settings store: the seed waits.
+  await cdp.eval(seedUiSettingsJs({ [ONBOARDING_STORAGE_KEY]: 'creator-ux-v1' }), {
+    timeoutMs: UI_SETTINGS_READY_TIMEOUT_MS + 5000
+  })
   await command('enable-synthetic-source', { settleMs: 100 })
   await command('select-camera-device', { settleMs: 100 })
   await cdp.eval(

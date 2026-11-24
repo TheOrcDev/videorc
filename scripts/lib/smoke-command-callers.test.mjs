@@ -209,6 +209,40 @@ function collectLiteralCommands(commands, path, source, pattern) {
   }
 }
 
+// Plan 220 S1.4b.2: the renderer's UI settings seam refuses a write until the
+// window's store holds its snapshot, and smokes seed right after launch or a
+// reload, while it is still hydrating (smoke:agent-mcp, smoke:buddy-act and
+// smoke:record-latency failed at step 1). Every seed gets the seam through
+// the shared wait in lib/renderer-profile-seed.mjs; a script only reads it
+// directly (a poll: before the snapshot every key reads null).
+test('every UI settings seed waits for the window store before it writes', () => {
+  const seedHelper = join(scriptsRoot, 'lib', 'renderer-profile-seed.mjs')
+  const direct = []
+  const unawaited = []
+  for (const path of scriptFiles()) {
+    if (path === seedHelper) continue
+    const source = readFileSync(path, 'utf8')
+    for (const match of source.matchAll(/__videorcUiSettings(.{0,10})/g)) {
+      if (!/^\?\.getItem\(/.test(match[1])) {
+        direct.push(`${relativeScriptPath(path)}:${lineNumber(source, match.index)}`)
+      }
+    }
+    for (const match of source.matchAll(
+      /(.{0,8})\$\{(UI_SETTINGS_READY_JS|uiSettingsReadyJs\()/g
+    )) {
+      if (!/\bawait\s+$/.test(match[1])) {
+        unawaited.push(`${relativeScriptPath(path)}:${lineNumber(source, match.index)}`)
+      }
+    }
+  }
+  assert.deepEqual(
+    direct,
+    [],
+    'Write through seedUiSettingsJs, reloadKeepingSeedJs or `await ${UI_SETTINGS_READY_JS}` (scripts/lib/renderer-profile-seed.mjs), never window.__videorcUiSettings itself.'
+  )
+  assert.deepEqual(unawaited, [], 'The UI settings wait is a promise: await it.')
+})
+
 function scriptFiles(directory = scriptsRoot) {
   const paths = []
   for (const entry of readdirSync(directory, { withFileTypes: true })) {

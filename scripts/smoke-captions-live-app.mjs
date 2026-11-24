@@ -24,7 +24,7 @@ import {
 } from './lib/captions-live-artifact.mjs'
 import { startFakeCaptionService } from './lib/fake-caption-service.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
-import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
+import { reloadKeepingSeedJs, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { evaluateMicrophoneLossContinuity } from './lib/microphone-loss-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -675,8 +675,9 @@ async function proveStreamOnlyMidSession(smoke, target) {
 async function seedRendererCaptionsProfile(smoke, recordEnabled = true) {
   const seeded = await smokeCommand(smoke, 'eval-js', {
     code: `
+      const settings = await ${UI_SETTINGS_READY_JS}
       let current = {}
-      try { current = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}') } catch {}
+      try { current = JSON.parse(settings.getItem('videorc.captureConfig') ?? '{}') } catch {}
       const next = {
         ...current,
         // Mirror the direct backend record+stream shape so the renderer owns
@@ -695,8 +696,8 @@ async function seedRendererCaptionsProfile(smoke, recordEnabled = true) {
           textSize: 'l'
         }
       }
-      window.__videorcUiSettings.setItem('videorc.captureConfig', JSON.stringify(next))
-      window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'permissions-v1')
+      settings.setItem('videorc.captureConfig', JSON.stringify(next))
+      settings.setItem('videorc.onboardingComplete', 'permissions-v1')
       // The reload rides the seed's own eval: a second eval could find the
       // renderer's own write already over the seed (plan 0008).
       ${reloadKeepingSeedJs({ forgetWorkingScene: false, delayMs: 150 })}

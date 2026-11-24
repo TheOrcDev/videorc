@@ -38,6 +38,7 @@ import {
   startFakeCloudWeb
 } from './lib/fake-cloud-web.mjs'
 import { runFreezedetect } from './lib/recording-analyzer.mjs'
+import { seedUiSettingsJs } from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -2552,7 +2553,7 @@ async function prepareCloudSectionShots(smoke) {
   let host = await devtoolsHost()
   await cdpEvaluate(
     host,
-    `window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'creator-ux-v1'); location.reload(); 'ok'`
+    `${seedUiSettingsJs({ 'videorc.onboardingComplete': 'creator-ux-v1' })}.then(() => { location.reload(); return 'ok' })`
   )
   await waitFor(
     async () =>
@@ -2695,7 +2696,11 @@ async function cdpCall(host, method, params) {
 }
 
 async function cdpEvaluate(host, expression) {
-  const result = await cdpCall(host, 'Runtime.evaluate', { expression, returnByValue: true })
+  const result = await cdpCall(host, 'Runtime.evaluate', {
+    expression,
+    returnByValue: true,
+    awaitPromise: true
+  })
   return result?.result?.value
 }
 

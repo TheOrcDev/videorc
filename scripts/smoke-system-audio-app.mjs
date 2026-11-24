@@ -108,7 +108,7 @@ import {
   toneWavArgs,
   wallToFileSeconds
 } from './lib/system-audio-gates.mjs'
-import { RELOAD_KEEPING_SEED_JS } from './lib/renderer-profile-seed.mjs'
+import { RELOAD_KEEPING_SEED_JS, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { bundledFfmpegPath } from './lib/recording-studio-gates.mjs'
 import { createTonePlayer } from './lib/tone-player.mjs'
 import { missingWindowsCaptureWorker } from './lib/windows-capture-worker.mjs'
@@ -510,9 +510,10 @@ async function seedRenderer(smoke, sources) {
     'eval-js',
     {
       code: `
+        const settings = await ${UI_SETTINGS_READY_JS};
         const key = 'videorc.captureConfig';
         let current = {};
-        try { current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}') ?? {}; } catch {}
+        try { current = JSON.parse(settings.getItem(key) ?? '{}') ?? {}; } catch {}
         // Screen-only on the synthetic source (the dev app has no camera
         // grant), with Clips on. The idle case starts with System audio On.
         const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
@@ -523,7 +524,7 @@ async function seedRenderer(smoke, sources) {
         const sources = params.sources ?? (params.noMicrophone
           ? { ...(current.sources ?? {}), microphoneId: undefined, microphoneName: undefined, microphoneOff: true }
           : current.sources);
-        window.__videorcUiSettings.setItem(key, JSON.stringify({ ...current, video: params.video, sources, layout, audio, recordEnabled: true, streamEnabled: false, replayBuffer: { enabled: true, explicit: false } }));
+        settings.setItem(key, JSON.stringify({ ...current, video: params.video, sources, layout, audio, recordEnabled: true, streamEnabled: false, replayBuffer: { enabled: true, explicit: false } }));
         ${RELOAD_KEEPING_SEED_JS}
         return true;
       `,

@@ -19,7 +19,7 @@ import {
   firstRunPerformanceCheckSettled,
   firstRunSourceStartLines
 } from './lib/first-run-smoke-gate.mjs'
-import { seedUiSettingsJs } from './lib/renderer-profile-seed.mjs'
+import { seedUiSettingsJs, UI_SETTINGS_READY_TIMEOUT_MS } from './lib/renderer-profile-seed.mjs'
 
 if (process.platform !== 'darwin')
   throw new Error('First-run app smoke requires macOS; Windows acceptance is owner-owed.')
@@ -118,25 +118,25 @@ async function connect(url) {
   return {
     listeners,
     close: () => ws.close(),
-    call: (method, params = {}) =>
+    call: (method, params = {}, { timeoutMs = 10000 } = {}) =>
       new Promise((resolveCall, reject) => {
         const id = ++nextId
         const timer = setTimeout(() => {
           pending.delete(id)
           reject(new Error(`CDP ${method} timed out`))
-        }, 10000)
+        }, timeoutMs)
         pending.set(id, { resolve: resolveCall, reject, timer })
         ws.send(JSON.stringify({ id, method, params }))
       })
   }
 }
 
-async function evaluate(expression) {
-  const result = await cdp.call('Runtime.evaluate', {
-    expression,
-    returnByValue: true,
-    awaitPromise: true
-  })
+async function evaluate(expression, { timeoutMs } = {}) {
+  const result = await cdp.call(
+    'Runtime.evaluate',
+    { expression, returnByValue: true, awaitPromise: true },
+    { timeoutMs }
+  )
   if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails))
   return result.result?.value
 }
@@ -296,7 +296,12 @@ async function reloadWith(keys) {
   const previousDocument = previous.documentId
   // A fresh profile holding only `keys` (plan 220 S1.4b: the product keys
   // live in the UI settings store; the theme also keeps its pre-paint copy).
-  if (keys) await evaluate(seedUiSettingsJs(keys, { replace: true }))
+  // The seed waits for the window's store (CDP attaches while it may still be hydrating).
+  if (keys) {
+    await evaluate(seedUiSettingsJs(keys, { replace: true }), {
+      timeoutMs: UI_SETTINGS_READY_TIMEOUT_MS + 5000
+    })
+  }
   await cdp.call('Page.reload', { ignoreCache: true })
   // Do not accidentally accept the previous document's state.
   await waitFor(

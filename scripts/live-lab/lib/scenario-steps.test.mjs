@@ -230,12 +230,26 @@ test('outputProfileStep waits for the reloaded renderer before the next intent',
     let reloaded = false
     let rendererBack = false
     const readsBeforeBack = []
+    // The page's `window.__videorcUiSettings`; the step's reads and writes
+    // run against it as page code.
+    const seam = {
+      getItem(key) {
+        if (reloaded && !rendererBack) readsBeforeBack.push(key)
+        return key === 'videorc.captureConfig' ? stored : null
+      },
+      setItem(key, value) {
+        if (key === 'videorc.captureConfig') stored = value
+      },
+      flush: async () => {},
+      ready: async () => {},
+      status: () => ({ hydration: { state: 'hydrated' } })
+    }
     ctx.ui = {
       async evaluate(expression) {
-        const set = /__videorcUiSettings\.setItem\("[^"]+", (".*")\); return true/.exec(expression)
-        if (set) stored = JSON.parse(set[1])
-        else if (reloaded && !rendererBack) readsBeforeBack.push(expression)
-        return set ? true : stored
+        return new Function('window', 'localStorage', `return ${expression}`)(
+          { __videorcUiSettings: seam },
+          { setItem() {}, clear() {} }
+        )
       },
       async reload() {
         reloaded = true
