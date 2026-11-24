@@ -14,6 +14,8 @@ pub struct SourcesState {
     /// Whether `devices.list` has answered on this connection; an empty
     /// list before that is not "no devices".
     pub devices_known: bool,
+    /// Counts the device lists read (`deviceList.devices` changing).
+    pub devices_revision: u64,
     pub scene: Option<Scene>,
 }
 
@@ -25,6 +27,7 @@ impl Default for SourcesState {
                 warnings: Vec::new(),
             },
             devices_known: false,
+            devices_revision: 0,
             scene: None,
         }
     }
@@ -49,6 +52,7 @@ impl SourcesState {
     pub fn set_devices(&mut self, devices: DeviceList) {
         self.devices = devices;
         self.devices_known = true;
+        self.devices_revision += 1;
     }
 
     /// The backend is gone: the list is stale until the next read.

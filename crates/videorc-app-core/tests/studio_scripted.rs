@@ -54,6 +54,9 @@ struct Script {
     /// a method with none left is not connected), and every call made.
     livestream: BTreeMap<String, VecDeque<Result<Value, RpcError>>>,
     livestream_calls: Vec<(String, Value)>,
+    /// S1.6b: the device ids `devices.list` answers (the default: a camera
+    /// and a display).
+    device_ids: Option<Vec<String>>,
 }
 
 struct Scripted {
@@ -92,7 +95,11 @@ impl StudioBackend for Scripted {
 
     async fn devices(&self) -> Result<DeviceList, RpcError> {
         self.note("devices.list");
-        Ok(devices(&["camera:1", "screen:screencapturekit:1"]))
+        let ids = self.script.lock().unwrap().device_ids.clone();
+        Ok(match ids {
+            Some(ids) => devices(&ids.iter().map(String::as_str).collect::<Vec<_>>()),
+            None => devices(&["camera:1", "screen:screencapturekit:1"]),
+        })
     }
 
     async fn recording_status(&self) -> Result<RecordingStatus, RpcError> {
@@ -427,7 +434,10 @@ async fn the_bootstrap_reads_everything_in_one_go() {
     assert!(after.sources.scene.is_some());
     assert_eq!(after.health.tone(), HealthTone::Ok);
     assert!(after.settings.hydrated);
-    assert_eq!(after.settings.revision, 9);
+    // S1.6b: a profile with no scene library migrates and stores it once,
+    // with the bootstrap's flush.
+    assert_eq!(after.settings.revision, 10);
+    assert!(after.scenes.loaded);
     assert_eq!(after.settings.theme.as_deref(), Some("light"));
     assert!(after.settings.studio.keep_original_recording());
     let mut calls = backend.calls();
@@ -439,7 +449,8 @@ async fn the_bootstrap_reads_everything_in_one_go() {
             "health.ping",
             "recording.status",
             "scene.get",
-            "ui.settings.get"
+            "ui.settings.get",
+            "ui.settings.set"
         ]
     );
 
@@ -1281,4 +1292,274 @@ async fn an_accounts_announcement_never_validates_them_again() {
             .await;
     }
     assert_eq!(validations(&backend), before);
+}
+
+// --- S1.6b part 3: the Studio's scenes on plan 231's library ---
+
+/// One of Electron's scene migration fixtures (a profile's stored keys).
+fn scene_fixture(name: &str) -> Value {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/desktop/src/renderer/src/lib/__fixtures__/scenes")
+        .join(format!("{name}.json"));
+    serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+}
+
+/// The store seeded with a fixture's keys, each as the JSON text the
+/// renderer's `localStorage` held.
+fn seed_fixture(backend: &Scripted, fixture: &Value) {
+    backend.with(|script| {
+        for (key, value) in fixture.as_object().unwrap() {
+            script
+                .settings
+                .insert(key.clone(), Value::String(value.to_string()));
+        }
+    });
+}
+
+/// A stored key, parsed.
+fn stored_json(backend: &Scripted, key: &str) -> Option<Value> {
+    let script = backend.script.lock().unwrap();
+    let text = script.settings.get(key)?.as_str()?.to_string();
+    serde_json::from_str(&text).ok()
+}
+
+fn scene_ids(view: &videorc_app_core::studio::scenes::ScenesView) -> Vec<String> {
+    view.scenes.iter().map(|scene| scene.id.clone()).collect()
+}
+
+#[tokio::test]
+async fn a_new_profile_gets_the_default_scenes_on_its_display_stored_once() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    assert!(!studio.snapshot().scenes.loaded);
+    studio.handle_event(ready()).await;
+    let view = studio.snapshot().scenes;
+    assert!(view.loaded);
+    assert!(!view.read_only);
+    assert_eq!(
+        scene_ids(&view),
+        [
+            "default-screen-camera",
+            "default-screen-only",
+            "default-camera-only",
+            "default-side-by-side"
+        ]
+    );
+    // The capture config's layout (Screen + camera) names the scene on.
+    assert_eq!(view.on_stream_id.as_deref(), Some("default-screen-camera"));
+    // The device list named the main display for every screen scene.
+    let stored = stored_json(&backend, keys::SCENES).expect("the library is stored");
+    assert_eq!(stored["version"], 2);
+    assert_eq!(stored["onStreamId"], "default-screen-camera");
+    assert_eq!(
+        stored["scenes"][0]["shows"]["screenId"],
+        "screen:screencapturekit:1"
+    );
+    // D15: the moved keys are in the settings, and the library let them go.
+    assert!(stored.get("pendingShortcuts").is_none());
+    assert!(
+        stored_json(&backend, keys::SETTINGS).unwrap()["globalShortcuts"].is_object(),
+        "the settings hold the migrated keys"
+    );
+    // One launch write; a reconnect reads nothing again.
+    assert_eq!(backend.count("ui.settings.set"), 1);
+    studio.handle_event(ready()).await;
+    assert_eq!(backend.count("ui.settings.set"), 1);
+    assert_eq!(studio.snapshot().scenes, view);
+}
+
+#[tokio::test]
+async fn a_v1_profile_migrates_with_its_layout_keys_moved_to_scene_keys() {
+    let backend = Scripted::new();
+    seed_fixture(&backend, &scene_fixture("builtin-user-layout-keys"));
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let view = studio.snapshot().scenes;
+    assert!(view.loaded);
+    assert!(view.error.is_none());
+    let stored = stored_json(&backend, keys::SCENES).expect("migrated and stored");
+    assert!(stored.get("pendingShortcuts").is_none());
+    let settings = stored_json(&backend, keys::SETTINGS).unwrap();
+    let shortcuts = &settings["globalShortcuts"];
+    // The layout keys became scene keys (which ones stay custom depends on
+    // the platform's position keys, checked in `scenes::v2_tests`); the
+    // other keys stay.
+    assert!(shortcuts.get("layouts").is_none());
+    assert!(shortcuts["scenes"].is_object());
+    assert_eq!(shortcuts["recordToggle"], "Control+Alt+R");
+    assert_eq!(shortcuts["layoutNext"], "Control+Alt+Right");
+    // v1 is read, never written.
+    assert!(backend.script.lock().unwrap().settings[keys::SCENE_PRESETS].is_string());
+    assert_eq!(
+        stored_json(&backend, keys::SCENE_PRESETS).unwrap(),
+        scene_fixture("builtin-user-layout-keys")["videorc.scene-presets.v1"]
+    );
+}
+
+#[tokio::test]
+async fn a_library_from_0_34_is_repaired_and_its_working_scene_goes_on() {
+    let backend = Scripted::new();
+    let fixture = scene_fixture("v2-vertical-camera-only");
+    seed_fixture(&backend, &fixture);
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let stored = stored_json(&backend, keys::SCENES).unwrap();
+    assert_eq!(stored["verticalLayoutsRepaired"], true);
+    let snapshot = studio.snapshot();
+    // The working setup laid over the capture config: a 9:16 studio on
+    // Camera only, which the library names.
+    assert_eq!(
+        snapshot.settings.capture_doc["layout"]["layoutPreset"],
+        "vertical-camera-only"
+    );
+    assert_eq!(
+        snapshot.scenes.on_stream_id.as_deref(),
+        Some("default-camera-only")
+    );
+    // Listed in the studio's orientation.
+    let listed = snapshot
+        .scenes
+        .scenes
+        .iter()
+        .find(|scene| scene.id == "default-camera-only")
+        .unwrap();
+    assert_eq!(
+        listed.visual["layout"]["layoutPreset"],
+        "vertical-camera-only"
+    );
+}
+
+#[tokio::test]
+async fn a_library_from_a_newer_videorc_is_never_written() {
+    let backend = Scripted::new();
+    let fixture = scene_fixture("unknown-version");
+    seed_fixture(&backend, &fixture);
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let view = studio.snapshot().scenes;
+    assert!(view.read_only);
+    assert!(view.error.is_some());
+    assert!(!view.scenes.is_empty());
+    assert_eq!(
+        stored_json(&backend, keys::SCENES).unwrap(),
+        fixture[keys::SCENES]
+    );
+    let id = view.scenes[0].id.clone();
+    assert!(!studio.move_scene(&id, 1).await);
+    assert!(!studio.rename_scene(&id, "Talk").await);
+    assert_eq!(
+        stored_json(&backend, keys::SCENES).unwrap(),
+        fixture[keys::SCENES]
+    );
+}
+
+#[tokio::test]
+async fn the_main_display_is_named_when_the_device_list_first_has_one() {
+    let backend = Scripted::new();
+    backend.with(|script| script.device_ids = Some(vec!["camera:1".to_string()]));
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let stored = stored_json(&backend, keys::SCENES).unwrap();
+    // The main display, not named yet.
+    assert_eq!(stored["scenes"][0]["shows"]["screenId"], "");
+    let writes = backend.count("ui.settings.set");
+
+    studio
+        .handle_event(BackendEvent::DevicesChanged(Box::new(devices(&[
+            "camera:1",
+            "screen:screencapturekit:2",
+        ]))))
+        .await;
+    let stored = stored_json(&backend, keys::SCENES).unwrap();
+    assert_eq!(
+        stored["scenes"][0]["shows"]["screenId"],
+        "screen:screencapturekit:2"
+    );
+    assert_eq!(backend.count("ui.settings.set"), writes + 1);
+    // Named once: another list changes nothing.
+    studio
+        .handle_event(BackendEvent::DevicesChanged(Box::new(devices(&[
+            "camera:1",
+            "screen:screencapturekit:3",
+        ]))))
+        .await;
+    assert_eq!(backend.count("ui.settings.set"), writes + 1);
+}
+
+#[tokio::test]
+async fn the_library_edits_write_the_whole_library_and_a_taken_name_is_said() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    let mut notices = studio.notices();
+    studio.handle_event(ready()).await;
+
+    assert!(studio.move_scene("default-side-by-side", 0).await);
+    let stored = stored_json(&backend, keys::SCENES).unwrap();
+    assert_eq!(stored["scenes"][0]["id"], "default-side-by-side");
+    assert_eq!(
+        scene_ids(&studio.snapshot().scenes)[0],
+        "default-side-by-side"
+    );
+
+    assert!(studio.rename_scene("default-camera-only", "  Talk ").await);
+    let library = studio.snapshot().scenes.library.unwrap();
+    let talk = library
+        .scenes
+        .iter()
+        .find(|scene| scene.id == "default-camera-only")
+        .unwrap();
+    assert_eq!(talk.name, "Talk");
+
+    assert!(
+        !studio
+            .rename_scene("default-camera-only", "screen only")
+            .await
+    );
+    let said: Vec<String> = std::iter::from_fn(|| notices.try_recv().ok())
+        .filter_map(|command| command.notice().map(|notice| notice.title.clone()))
+        .collect();
+    assert_eq!(said, ["A scene with this name already exists."]);
+
+    // D2: a Screen pick writes the scene's screen.
+    let shows = videorc_app_core::scenes::v2::SceneShows::TestPattern;
+    assert!(
+        studio
+            .set_scene_shows("default-screen-only", shows.clone())
+            .await
+    );
+    assert!(!studio.set_scene_shows("default-screen-only", shows).await);
+    let stored = stored_json(&backend, keys::SCENES).unwrap();
+    let screen_only = stored["scenes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|scene| scene["id"] == "default-screen-only")
+        .unwrap()
+        .clone();
+    assert_eq!(screen_only["shows"]["kind"], "test-pattern");
+
+    // Duplicate: after its original.
+    let mut copy = studio
+        .snapshot()
+        .scenes
+        .library
+        .unwrap()
+        .scenes
+        .iter()
+        .find(|scene| scene.id == "default-screen-camera")
+        .unwrap()
+        .clone();
+    copy.id = "copy".to_string();
+    copy.name = "Screen + camera 2".to_string();
+    assert!(
+        studio
+            .insert_scenes(std::slice::from_ref(&copy), Some("default-screen-camera"))
+            .await
+    );
+    let ids = scene_ids(&studio.snapshot().scenes);
+    let original = ids
+        .iter()
+        .position(|id| id == "default-screen-camera")
+        .unwrap();
+    assert_eq!(ids[original + 1], "copy");
 }
