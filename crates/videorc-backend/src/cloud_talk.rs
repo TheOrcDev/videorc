@@ -1127,6 +1127,7 @@ pub struct RoomMediaStatus {
 /// system capture's state (`roomAudioRouting.status`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct RoomAuxStatus {
     /// Room sounds are on for this room.
     pub enabled: bool,
@@ -1141,6 +1142,7 @@ pub struct RoomAuxStatus {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum RoomAuxState {
     Off,
     Blocked,
@@ -1150,6 +1152,7 @@ pub enum RoomAuxState {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum RoomSystemAudioState {
     Off,
     Opening,
