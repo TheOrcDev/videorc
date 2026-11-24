@@ -937,6 +937,33 @@ Routes: S1.2, S1.3, S1.6a, S1.6d and S1.8 touch recording, audio or rooms:
 Implementation · `fable-5.1` · 9. The rest: Implementation · `gpt-6.1-sol`
 · 8.
 
+#### S1.8 cut (L2, 2026-11-24)
+
+Today the renderer holds the only host connection (`lib/talk-show-room.ts`
+and its publishers, about 6,500 lines), and the backend publishes nothing.
+Guest media never enters the backend compositor: the runner (node shows) or
+the program page (managed shows) composes and records in the cloud. Guest
+media reaches the desktop only for the Show stage, the guest captions mix
+and the Program monitor. S1.8 moves this in five slices, each shippable with
+the renderer still working until its part switches:
+
+| # | Slice | Done when |
+| --- | --- | --- |
+| S1.8a | The backend joins the room as `host:<showId>` with no media: `room_token` stays in the backend, and the reconnect, backoff and duplicate-host rules and the client state move with it (no more `cloud.room.client.report`). Behind a switch; the renderer still publishes | Against a local `livekit-server` with a browser guest: join, a dropped network and rejoin, a take-over from another device; `cloud.state`'s client state matches what the renderer showed |
+| S1.8b | Data and byte streams: the stage, screen privacy and its acks, latency (from RTC stats), overlays (the `cloud.room.overlay` hop goes away), and the scene, graphics, avatar, avatar motion, HTML manifest and capability topics; `cloud.presentation.accepted` handled in-process | The protocol fixtures and a program-page run where the graphics, scene and avatar apply; the renderer publishers deleted |
+| S1.8c | Host media from the backend: camera (keyed by the compositor, replacing `talk-show-camera-effects`), microphone (the native processed PCM), screen through the privacy still, aux and system audio, the HTML sheet track; host speech tapped natively | The room spike's checks from Electron with the backend publishing; a guest sees and hears the host; codecs and simulcast as today (VP8, 180p/360p/720p; screen one layer at 4 Mbps; aux stereo RED 128 kbps) |
+| S1.8d | Subscriptions back as preview feeds: guests' and the runner's return video, guest audio played natively, the guest captions mix in-process, the Program monitor and Videorc Camera from native frames (the `/room-program-camera/frames` upload goes away) | The stage shows the guests, the monitor switch changes the subscriptions, captions still arrive |
+| S1.8e | The renderer side removed: `talk-show-room.ts` and its dependents, the alpha fixtures, main's room IPC bridges; `use-talk-show-room` a view of status and events | `livekit-client` gone from `package.json` and the bundle; the talk-show smokes pass |
+
+The SDK is a macOS dependency first (`[target.'cfg(target_os = "macos")']`):
+S0.8 measured +22.9 MB raw (+6.7 MB xz) on arm64, and the Windows
+cross-build fails in `webrtc-sys`'s C++ bridge, with the native Windows and
+Linux builds still owed (a contributor's PC; L5 on ogre). Windows and Linux
+keep the renderer's room, as D9's fallback allows, until those builds pass;
+then the dependency widens and their renderer path goes in S1.8e. Traps
+from S0.8: `-ObjC` on macOS, `TrackPublished` only after the join, and the
+release strip on this Mac.
+
 ### Phase 2: the shell, on all three platforms
 
 | # | Slice | Lane | Done when |
