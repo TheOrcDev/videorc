@@ -8154,12 +8154,12 @@ export type UiSettingsValue = Exclude<UiSettingsJson, null>
 
 /** A key is 1 to 256 characters, no control characters, no surrounding whitespace. */
 export const UI_SETTINGS_KEY_MAX_CHARS = 256
-/** Largest value, serialized (1 MiB). */
-export const UI_SETTINGS_VALUE_MAX_BYTES = 1024 * 1024
+/** Largest value, serialized (8 MiB: a previous release's whole scene library fits). */
+export const UI_SETTINGS_VALUE_MAX_BYTES = 8 * 1024 * 1024
 /** Most keys one batch (puts plus deletes) or one read may name. */
 export const UI_SETTINGS_BATCH_MAX_KEYS = 256
-/** Largest batch, every value serialized (4 MiB). */
-export const UI_SETTINGS_BATCH_MAX_BYTES = 4 * 1024 * 1024
+/** Largest batch, every value serialized (12 MiB). */
+export const UI_SETTINGS_BATCH_MAX_BYTES = 12 * 1024 * 1024
 /** Longest writer id. */
 export const UI_SETTINGS_WRITER_MAX_CHARS = 128
 
@@ -8184,6 +8184,11 @@ export interface UiSettingsSetParams {
   ifAbsent?: boolean
   /** Marks the one-time `localStorage` migration done. */
   localStorageMigrated?: boolean
+  /**
+   * A journal replay's write times (Unix ms) by key: a key the store changed
+   * after that time is left out. Every key named here is put or deleted.
+   */
+  unlessUpdatedAfter?: Record<string, number>
   /** The writing window's id, echoed on the event so it can skip its own change. */
   writer?: string
 }

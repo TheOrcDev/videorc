@@ -3488,6 +3488,13 @@ describe('UI settings store wire contract (plan 220 S1.4a)', () => {
       delete: ['videorc.orcleTab']
     }
     expect(validateBackendRpcParams('ui.settings.set', batch)).toEqual(batch)
+    const replay = {
+      put: { 'videorc.theme': 'dark' },
+      delete: ['videorc.orcleTab'],
+      unlessUpdatedAfter: { 'videorc.theme': 1_795_000_000_000, 'videorc.orcleTab': 0 },
+      writer: 'window-next'
+    }
+    expect(validateBackendRpcParams('ui.settings.set', replay)).toEqual(replay)
     expect(validateBackendRpcParams('ui.settings.set', {})).toEqual({})
     for (const change of [
       wire.changeFull,
@@ -3510,6 +3517,9 @@ describe('UI settings store wire contract (plan 220 S1.4a)', () => {
       { delete: ['videorc.theme', 'videorc.theme'] },
       { put: { 'videorc.theme': 'x' }, extra: true },
       { writer: '' },
+      { put: { 'videorc.theme': 'x' }, unlessUpdatedAfter: { 'videorc.other': 1 } },
+      { put: { 'videorc.theme': 'x' }, unlessUpdatedAfter: { 'videorc.theme': -1 } },
+      { put: { 'videorc.theme': 'x' }, unlessUpdatedAfter: { 'videorc.theme': 1.5 } },
       {
         put: Object.fromEntries(Array.from({ length: 257 }, (_, i) => [`videorc.k${i}`, i]))
       }

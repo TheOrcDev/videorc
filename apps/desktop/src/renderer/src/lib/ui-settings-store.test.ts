@@ -14,6 +14,7 @@ import {
   createUiSettingsStore,
   migrationRefusal,
   UI_SETTINGS_JOURNAL_PREFIX,
+  type UiSettingsLocks,
   type UiSettingsStorage,
   type UiSettingsTransport
 } from './ui-settings-store'
@@ -60,12 +61,22 @@ function fakeStorage(seed: Record<string, string> = {}): UiSettingsStorage & {
  */
 function fakeEngine(initial: Record<string, UiSettingsValue> = {}) {
   const entries = new Map(Object.entries(initial))
+  // Each key's last write, on the engine's clock (Unix ms).
+  let clock = 0
+  const updatedAt = new Map([...entries.keys()].map((key) => [key, clock]))
   let revision = 0
   let localStorageMigrated = false
   const listeners = new Set<(change: UiSettingsChange) => void>()
   const sets: UiSettingsSetParams[] = []
   let online = true
   let holdGet: (() => void) | null = null
+  let holdGetResult: Promise<void> | null = null
+  const changedSince = (key: string, params: UiSettingsSetParams): boolean => {
+    const written = params.unlessUpdatedAfter?.[key]
+    if (written === undefined) return false
+    const updated = updatedAt.get(key)
+    return entries.has(key) && updated !== undefined && updated > written
+  }
 
   function snapshot(params?: UiSettingsGetParams): UiSettingsSnapshot {
     const wanted = params?.keys?.length ? new Set(params.keys) : null
@@ -84,10 +95,13 @@ function fakeEngine(initial: Record<string, UiSettingsValue> = {}) {
     const deletes: string[] = []
     for (const [key, value] of Object.entries(params.put ?? {})) {
       if (params.ifAbsent && entries.has(key)) continue
+      if (changedSince(key, params)) continue
       entries.set(key, value)
+      updatedAt.set(key, clock)
       put[key] = value
     }
     for (const key of params.delete ?? []) {
+      if (changedSince(key, params)) continue
       if (entries.delete(key)) deletes.push(key)
     }
     const landed = Object.keys(put).length > 0 || deletes.length > 0
@@ -107,7 +121,13 @@ function fakeEngine(initial: Record<string, UiSettingsValue> = {}) {
       async get(params) {
         if (!online) throw new Error("Videorc's engine isn't connected.")
         if (holdGet) await new Promise<void>((resolve) => (holdGet = resolve))
-        return structuredClone(snapshot(params))
+        const taken = structuredClone(snapshot(params))
+        if (holdGetResult) {
+          const held = holdGetResult
+          holdGetResult = null
+          await held
+        }
+        return taken
       },
       async set(params) {
         if (!online) throw new Error("Videorc's engine isn't connected.")
@@ -139,6 +159,16 @@ function fakeEngine(initial: Record<string, UiSettingsValue> = {}) {
     },
     setOnline(next: boolean) {
       online = next
+    },
+    /** Moves the engine's clock (and the windows' if they share it). */
+    setClock(next: number) {
+      clock = next
+    },
+    /** The next snapshot is taken at once but answered only on release. */
+    holdNextGetResult() {
+      let release = () => {}
+      holdGetResult = new Promise<void>((resolve) => (release = resolve))
+      return () => release()
     },
     holdNextGet() {
       holdGet = () => {}
@@ -232,17 +262,33 @@ describe('UI settings store (plan 220 S1.4a)', () => {
     expect(engine.sets.map((batch) => Object.keys(batch.put ?? {}).length)).toEqual([256, 44])
   })
 
-  it('leaves a key or value past the limits in localStorage, named, and still hydrates', async () => {
+  it('migrates a value past the old 1 MiB limit, such as a large scene library', async () => {
     const engine = fakeEngine()
-    const log = { warn: vi.fn(), error: vi.fn(), info: vi.fn() }
+    const library = JSON.stringify({ scenes: ['x'.repeat(2 * 1024 * 1024)] })
     const store = createUiSettingsStore({
       transport: engine.transport(),
-      storage: fakeStorage({
-        'videorc.theme': 'dark',
-        'videorc.huge': 'x'.repeat(UI_SETTINGS_VALUE_MAX_BYTES),
-        [`videorc.${'k'.repeat(UI_SETTINGS_KEY_MAX_CHARS)}`]: '1',
-        'videorc.bad\nkey': '1'
-      }),
+      storage: fakeStorage({ 'videorc.scenes.v2': library }),
+      writer: 'w',
+      log: quiet
+    })
+    expect(await store.hydrate()).toMatchObject({ state: 'hydrated', migrated: 1, skipped: [] })
+    expect(engine.entries.get('videorc.scenes.v2')).toBe(library)
+    expect(engine.localStorageMigrated).toBe(true)
+  })
+
+  it('holds a value past the limits read-only from localStorage and leaves the migration open', async () => {
+    const engine = fakeEngine()
+    const log = { warn: vi.fn(), error: vi.fn(), info: vi.fn() }
+    const huge = 'x'.repeat(UI_SETTINGS_VALUE_MAX_BYTES)
+    const storage = fakeStorage({
+      'videorc.theme': 'dark',
+      'videorc.huge': huge,
+      [`videorc.${'k'.repeat(UI_SETTINGS_KEY_MAX_CHARS)}`]: '1',
+      'videorc.bad\nkey': '1'
+    })
+    const store = createUiSettingsStore({
+      transport: engine.transport(),
+      storage,
       writer: 'w',
       log
     })
@@ -257,12 +303,52 @@ describe('UI settings store (plan 220 S1.4a)', () => {
     })
     expect(engine.entries.get('videorc.theme')).toBe('dark')
     expect(engine.entries.has('videorc.huge')).toBe(false)
-    expect(engine.localStorageMigrated).toBe(true)
-    expect(log.error).toHaveBeenCalledTimes(3)
+    // Never marked done, so nothing reads the held keys as missing for good.
+    expect(engine.localStorageMigrated).toBe(false)
+    expect(engine.sets.every((batch) => !batch.localStorageMigrated)).toBe(true)
+    expect(store.get('videorc.huge')).toBe(huge)
+    expect(log.error).toHaveBeenCalledTimes(4)
     expect(log.error).toHaveBeenCalledWith(
       expect.stringContaining('"videorc.huge" stays in localStorage')
     )
+    expect(log.error).toHaveBeenCalledWith(expect.stringContaining('migration stays open'))
     expect(migrationRefusal('videorc.theme', 'dark')).toBeNull()
+
+    // The next launch tries again, copies nothing twice and still holds it.
+    const next = createUiSettingsStore({
+      transport: engine.transport(),
+      storage,
+      writer: 'w2',
+      log: quiet
+    })
+    expect(await next.hydrate()).toMatchObject({ state: 'hydrated', migrated: 0 })
+    expect(next.get('videorc.huge')).toBe(huge)
+    expect(engine.localStorageMigrated).toBe(false)
+  })
+
+  it('fails the hydrate loudly when localStorage cannot be read, and marks nothing', async () => {
+    const engine = fakeEngine()
+    const storage: UiSettingsStorage = {
+      ...fakeStorage(),
+      get length(): number {
+        throw new Error('The storage is corrupt.')
+      }
+    }
+    const store = createUiSettingsStore({
+      transport: engine.transport(),
+      storage,
+      writer: 'w',
+      log: quiet,
+      locks: null,
+      setTimeout: () => 0,
+      clearTimeout: () => {}
+    })
+    expect(await store.hydrate({ timeoutMs: 1_000 })).toMatchObject({
+      state: 'unavailable',
+      reason: expect.stringContaining('localStorage could not be read')
+    })
+    expect(engine.localStorageMigrated).toBe(false)
+    expect(engine.sets).toEqual([])
   })
 
   it('reads say nothing is known before the snapshot, and writes are cached, journaled and flushed after it', async () => {
@@ -289,7 +375,8 @@ describe('UI settings store (plan 220 S1.4a)', () => {
     expect(store.status().pendingWrites).toEqual(['videorc.settingsTab'])
     expect(JSON.parse(storage.getItem(`${UI_SETTINGS_JOURNAL_PREFIX}window-main`)!)).toEqual({
       put: { 'videorc.settingsTab': 'recording' },
-      delete: []
+      delete: [],
+      at: { 'videorc.settingsTab': expect.any(Number) }
     })
     await flushMicrotasks()
     expect(engine.sets).toHaveLength(0)
@@ -492,6 +579,183 @@ describe('UI settings store (plan 220 S1.4a)', () => {
     expect(heard).toEqual([['videorc.theme']])
     // The same promise for every later caller.
     expect(await store.hydrate()).toEqual(result)
+  })
+
+  it('hydrates with the migrated profile when another window migrated it after this snapshot', async () => {
+    const engine = fakeEngine()
+    const storage = fakeStorage(previousReleaseProfile)
+    const late = createUiSettingsStore({
+      transport: engine.transport(),
+      storage,
+      writer: 'window-late',
+      log: quiet,
+      locks: null
+    })
+    // `late` reads revision 0, unmigrated; its answer waits.
+    const release = engine.holdNextGetResult()
+    const lateHydrating = late.hydrate()
+    await flushMicrotasks()
+    // Meanwhile `main` migrates the profile: revision 1, which `late` buffers.
+    const main = createUiSettingsStore({
+      transport: engine.transport(),
+      storage,
+      writer: 'window-main',
+      log: quiet,
+      locks: null
+    })
+    expect(await main.hydrate()).toMatchObject({ state: 'hydrated', revision: 1 })
+    release()
+    // `late`'s own migration lands nothing but the mark (revision 2); the
+    // profile reaches it all the same.
+    expect(await lateHydrating).toMatchObject({ state: 'hydrated', revision: 2, migrated: 0 })
+    for (const [key, value] of Object.entries(previousReleaseProfile)) {
+      expect(late.get(key)).toBe(value)
+    }
+  })
+
+  it("leaves an open window's journal to it, and replays a closed window's", async () => {
+    const engine = fakeEngine()
+    const storage = fakeStorage()
+    const held = new Set<string>()
+    const locks: UiSettingsLocks = {
+      hold(name, release) {
+        held.add(name)
+        void release.then(() => held.delete(name))
+      },
+      async ifFree(name, task) {
+        if (held.has(name)) return null
+        held.add(name)
+        try {
+          return await task()
+        } finally {
+          held.delete(name)
+        }
+      }
+    }
+    // An open window whose write the engine has not taken yet.
+    const base = engine.transport()
+    let stall = false
+    const stuck: UiSettingsTransport = {
+      ...base,
+      set: (params) => (stall ? new Promise<UiSettingsChange>(() => {}) : base.set(params))
+    }
+    const open = createUiSettingsStore({
+      transport: stuck,
+      storage,
+      writer: 'window-open',
+      log: quiet,
+      locks
+    })
+    await open.hydrate()
+    stall = true
+    open.set('videorc.theme', 'light')
+    await flushMicrotasks()
+    const openJournal = `${UI_SETTINGS_JOURNAL_PREFIX}window-open`
+    expect(storage.getItem(openJournal)).toContain('light')
+
+    const next = createUiSettingsStore({
+      transport: engine.transport(),
+      storage,
+      writer: 'window-next',
+      log: quiet,
+      locks
+    })
+    expect(await next.hydrate()).toMatchObject({ state: 'hydrated', replayed: 0 })
+    expect(engine.entries.has('videorc.theme')).toBe(false)
+    expect(storage.getItem(openJournal)).toContain('light')
+
+    // Closed: its lock is free, so the next window replays and removes it.
+    open.dispose()
+    await flushMicrotasks()
+    const after = createUiSettingsStore({
+      transport: engine.transport(),
+      storage,
+      writer: 'window-after',
+      log: quiet,
+      locks
+    })
+    expect(await after.hydrate()).toMatchObject({ state: 'hydrated', replayed: 1 })
+    expect(engine.entries.get('videorc.theme')).toBe('light')
+    expect(storage.getItem(openJournal)).toBeNull()
+  })
+
+  it('never replays a stale journal over a newer write, nor removes a journal rewritten meanwhile', async () => {
+    const engine = fakeEngine()
+    const storage = fakeStorage()
+    let clock = 10
+    engine.setClock(clock)
+    // Without Web Locks every journal replays, by its write times.
+    const writerBase = engine.transport()
+    let cutOff = false
+    const flaky: UiSettingsTransport = {
+      ...writerBase,
+      set: async (params) => {
+        if (cutOff) throw new Error("Videorc's engine isn't connected.")
+        return writerBase.set(params)
+      }
+    }
+    const writer = createUiSettingsStore({
+      transport: flaky,
+      storage,
+      writer: 'window-a',
+      log: quiet,
+      locks: null,
+      now: () => clock,
+      setTimeout: () => 0,
+      clearTimeout: () => {}
+    })
+    await writer.hydrate()
+    cutOff = true
+    writer.set('videorc.theme', 'v1')
+    writer.set('videorc.notesTab', 'chat')
+    await expect(writer.flush()).rejects.toThrow("isn't connected")
+    const journalKey = `${UI_SETTINGS_JOURNAL_PREFIX}window-a`
+
+    // Another window writes the theme later, and the engine takes it.
+    clock = 20
+    engine.setClock(clock)
+    const other = createUiSettingsStore({
+      transport: engine.transport(),
+      storage: null,
+      writer: 'window-b',
+      log: quiet,
+      locks: null
+    })
+    await other.hydrate()
+    other.set('videorc.theme', 'v2')
+    await other.flush()
+
+    // A third window replays window-a's journal; while its batch is in
+    // flight, window-a writes again, so the journal changes under it.
+    clock = 30
+    engine.setClock(clock)
+    const base = engine.transport()
+    let releaseReplay = () => {}
+    const replaying: UiSettingsTransport = {
+      ...base,
+      set: async (params) => {
+        await new Promise<void>((resolve) => (releaseReplay = resolve))
+        return base.set(params)
+      }
+    }
+    const replayer = createUiSettingsStore({
+      transport: replaying,
+      storage,
+      writer: 'window-c',
+      log: quiet,
+      locks: null
+    })
+    const hydrating = replayer.hydrate()
+    await flushMicrotasks()
+    writer.set('videorc.orcleTab', 'buddy')
+    releaseReplay()
+    expect(await hydrating).toMatchObject({ state: 'hydrated', replayed: 1 })
+    // The stale v1 never overwrote v2; the absent key landed.
+    expect(engine.entries.get('videorc.theme')).toBe('v2')
+    expect(replayer.get('videorc.theme')).toBe('v2')
+    expect(engine.entries.get('videorc.notesTab')).toBe('chat')
+    // The rewritten journal stays for its window.
+    expect(storage.getItem(journalKey)).toContain('buddy')
   })
 
   it('refuses a null or undefined value: that is a remove', async () => {

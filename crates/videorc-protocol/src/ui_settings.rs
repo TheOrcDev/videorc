@@ -51,6 +51,11 @@ pub struct UiSettingsSetParams {
     /// Marks the one-time `localStorage` migration done on this profile.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub local_storage_migrated: bool,
+    /// A journal replay's write times (Unix ms) by key: a put or delete of a
+    /// key the store changed after that time is left out, so a stale journal
+    /// never overwrites a newer value. Every key named here is put or deleted.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unless_updated_after: BTreeMap<String, u64>,
     /// The writing window's id, echoed on `ui.settings.changed` so that
     /// window can skip its own change (what the `storage` event did).
     #[serde(default, skip_serializing_if = "Option::is_none")]

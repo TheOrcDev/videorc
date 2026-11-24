@@ -7,9 +7,14 @@
 //!
 //! Limits are explicit refusals, never silent trims: a key is 1 to 256
 //! characters without control characters or surrounding whitespace, a value
-//! is any JSON but `null` (that is a delete) at most 1 MiB serialized, a
-//! batch names at most 256 keys and 4 MiB in all, and a key cannot be put
+//! is any JSON but `null` (that is a delete) at most 8 MiB serialized (room
+//! for the largest scene library a previous release kept in `localStorage`),
+//! a batch names at most 256 keys and 12 MiB in all, and a key cannot be put
 //! and deleted in the same batch.
+//!
+//! A journal replay names each key's write time (`unlessUpdatedAfter`): a key
+//! the store changed after it is left out, so a window's stale journal never
+//! overwrites what another window wrote since.
 //!
 //! The one-time `localStorage` migration is the renderer's (it is the only
 //! side that can read `localStorage`): it sends every key the store lacks as
@@ -31,11 +36,12 @@ use crate::storage::Database;
 /// Longest key, in characters.
 pub const MAX_KEY_CHARS: usize = 256;
 /// Largest value, serialized, in bytes.
-pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
+pub const MAX_VALUE_BYTES: usize = 8 * 1024 * 1024;
 /// Most keys one batch (puts plus deletes, or a `get`) may name.
 pub const MAX_BATCH_KEYS: usize = 256;
-/// Largest batch, every value serialized, in bytes.
-pub const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
+/// Largest batch, every value serialized, in bytes. One largest value fits
+/// with room for the request around it under the socket's 16 MiB frame.
+pub const MAX_BATCH_BYTES: usize = 12 * 1024 * 1024;
 /// Longest writer id, in characters.
 pub const MAX_WRITER_CHARS: usize = 128;
 
@@ -151,26 +157,33 @@ pub fn validate_set(params: &UiSettingsSetParams) -> Result<(), UiSettingsInvali
             return invalid(format!("UI setting {key:?} is deleted twice in one batch."));
         }
     }
+    for key in params.unless_updated_after.keys() {
+        if !params.put.contains_key(key) && !deleted.contains(key) {
+            return invalid(format!(
+                "UI setting {key:?} has a write time but is neither put nor deleted."
+            ));
+        }
+    }
     Ok(())
 }
 
-/// `ui.settings.get`: the whole store, or the named keys that exist.
+/// `ui.settings.get`: the whole store, or the named keys that exist. The
+/// entries, the revision and the migration mark are read together, so a
+/// batch landing meanwhile is either all in the snapshot or after it.
 pub fn get(
     database: &Database,
     params: UiSettingsGetParams,
 ) -> Result<UiSettingsSnapshot, UiSettingsError> {
     validate_get(&params)?;
-    let mut entries = database.ui_settings_all()?;
+    let mut snapshot = database.ui_settings_snapshot()?;
     if !params.keys.is_empty() {
         let wanted: std::collections::BTreeSet<&str> =
             params.keys.iter().map(String::as_str).collect();
-        entries.retain(|key, _| wanted.contains(key.as_str()));
+        snapshot
+            .entries
+            .retain(|key, _| wanted.contains(key.as_str()));
     }
-    Ok(UiSettingsSnapshot {
-        entries,
-        revision: database.ui_settings_revision()?,
-        local_storage_migrated: database.ui_settings_local_storage_migrated()?,
-    })
+    Ok(snapshot)
 }
 
 /// `ui.settings.set`: validate, apply the batch in one transaction and, when
@@ -190,6 +203,7 @@ pub fn set(
         &params.delete,
         params.if_absent,
         params.local_storage_migrated,
+        &params.unless_updated_after,
     )?;
     let change = UiSettingsChange {
         revision: applied.revision,
@@ -499,8 +513,8 @@ mod tests {
             UiSettingsSnapshot::default(),
             "a refused batch lands nothing"
         );
-        // A batch of 4 MiB in 1 MiB values is one byte too many in all.
-        let five: BTreeMap<String, Value> = (0..5)
+        // Two largest values are past the batch limit in all.
+        let two: BTreeMap<String, Value> = (0..2)
             .map(|i| {
                 (
                     format!("videorc.big{i}"),
@@ -508,12 +522,24 @@ mod tests {
                 )
             })
             .collect();
+        assert!(MAX_VALUE_BYTES * 2 > MAX_BATCH_BYTES);
         assert!(matches!(
             set(
                 &state,
                 UiSettingsSetParams {
-                    put: five,
+                    put: two,
                     ..UiSettingsSetParams::default()
+                }
+            ),
+            Err(UiSettingsError::Invalid(_))
+        ));
+        // A write time for a key the batch neither puts nor deletes.
+        assert!(matches!(
+            set(
+                &state,
+                UiSettingsSetParams {
+                    unless_updated_after: BTreeMap::from([("videorc.other".to_string(), 1)]),
+                    ..put(&[("videorc.a", json!(1))])
                 }
             ),
             Err(UiSettingsError::Invalid(_))
@@ -528,6 +554,110 @@ mod tests {
             ),
             Err(UiSettingsError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn a_value_as_large_as_a_previous_release_scene_library_lands() {
+        let (state, _) = test_state();
+        let library = json!("x".repeat(MAX_VALUE_BYTES - 2));
+        let change = set(
+            &state,
+            UiSettingsSetParams {
+                if_absent: true,
+                local_storage_migrated: true,
+                ..put(&[("videorc.scenes.v2", library.clone())])
+            },
+        )
+        .unwrap();
+        assert_eq!(change.put["videorc.scenes.v2"], library);
+        let snapshot = get(&state.database, UiSettingsGetParams::default()).unwrap();
+        assert_eq!(snapshot.entries["videorc.scenes.v2"], library);
+        assert!(snapshot.local_storage_migrated);
+    }
+
+    #[test]
+    fn a_journal_replay_never_overwrites_or_deletes_a_newer_write() {
+        let (state, mut events) = test_state();
+        set(
+            &state,
+            put(&[
+                ("videorc.theme", json!("dark")),
+                ("videorc.tab", json!("chat")),
+            ]),
+        )
+        .unwrap();
+        let _ = next_change(&mut events);
+        let before = chrono::Utc::now().timestamp_millis() as u64 - 60_000;
+        let after = chrono::Utc::now().timestamp_millis() as u64 + 60_000;
+
+        // Written before the store's values: nothing lands, nothing is announced.
+        let stale = set(
+            &state,
+            UiSettingsSetParams {
+                delete: vec!["videorc.tab".to_string()],
+                unless_updated_after: BTreeMap::from([
+                    ("videorc.theme".to_string(), before),
+                    ("videorc.tab".to_string(), before),
+                ]),
+                ..put(&[("videorc.theme", json!("stale"))])
+            },
+        )
+        .unwrap();
+        assert!(stale.put.is_empty() && stale.delete.is_empty());
+        assert_eq!(stale.revision, 1);
+        assert!(events.try_recv().is_err());
+
+        // A key the store lacks lands whatever the time; a later write lands.
+        let replayed = set(
+            &state,
+            UiSettingsSetParams {
+                delete: vec!["videorc.tab".to_string()],
+                unless_updated_after: BTreeMap::from([
+                    ("videorc.theme".to_string(), after),
+                    ("videorc.tab".to_string(), after),
+                    ("videorc.notesTab".to_string(), 0),
+                ]),
+                ..put(&[
+                    ("videorc.theme", json!("light")),
+                    ("videorc.notesTab", json!("notes")),
+                ])
+            },
+        )
+        .unwrap();
+        assert_eq!(replayed.revision, 2);
+        assert_eq!(replayed.put.len(), 2);
+        assert_eq!(replayed.delete, vec!["videorc.tab".to_string()]);
+        let snapshot = get(&state.database, UiSettingsGetParams::default()).unwrap();
+        assert_eq!(snapshot.entries["videorc.theme"], json!("light"));
+        assert_eq!(snapshot.entries["videorc.notesTab"], json!("notes"));
+        assert!(!snapshot.entries.contains_key("videorc.tab"));
+    }
+
+    #[test]
+    fn a_snapshot_never_pairs_old_entries_with_a_newer_revision() {
+        let (state, _) = test_state();
+        let database = &state.database;
+        let none = BTreeMap::new();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for index in 0..300 {
+                    let put = BTreeMap::from([(format!("videorc.k{index}"), json!(index))]);
+                    database
+                        .ui_settings_apply(&put, &[], false, index == 299, &none)
+                        .unwrap();
+                }
+            });
+            // Every batch adds one key and one revision, so a consistent
+            // snapshot always holds as many keys as its revision.
+            loop {
+                let snapshot = get(database, UiSettingsGetParams::default()).unwrap();
+                assert_eq!(snapshot.entries.len() as u64, snapshot.revision);
+                if snapshot.local_storage_migrated {
+                    assert_eq!(snapshot.revision, 300);
+                    break;
+                }
+            }
+        });
     }
 
     #[test]

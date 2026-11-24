@@ -217,6 +217,42 @@ enum StoredCredentialsPurge {
     CheckpointBusy,
 }
 
+/// One `app_settings` row's JSON, read on `conn` (inside its transaction).
+fn setting_json<T: serde::de::DeserializeOwned>(conn: &Connection, key: &str) -> Result<Option<T>> {
+    conn.query_row(
+        "SELECT value_json FROM app_settings WHERE key = ?1",
+        params![key],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(|value_json| serde_json::from_str::<T>(&value_json))
+    .transpose()
+    .with_context(|| format!("app setting {key} holds unreadable JSON"))
+}
+
+/// Every UI setting on `conn`, keyed by its renderer name (the `ui:` prefix
+/// removed).
+fn ui_settings_entries(conn: &Connection) -> Result<BTreeMap<String, serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT key, value_json FROM app_settings
+         WHERE substr(key, 1, ?1) = ?2
+         ORDER BY key ASC",
+    )?;
+    let prefix_len = UI_SETTINGS_KEY_PREFIX.len() as i64;
+    let rows = stmt.query_map(params![prefix_len, UI_SETTINGS_KEY_PREFIX], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut entries = BTreeMap::new();
+    for row in rows {
+        let (key, value_json) = row?;
+        let name = key[UI_SETTINGS_KEY_PREFIX.len()..].to_string();
+        let value: serde_json::Value = serde_json::from_str(&value_json)
+            .with_context(|| format!("UI setting {name} holds unreadable JSON"))?;
+        entries.insert(name, value);
+    }
+    Ok(entries)
+}
+
 fn setting_exists(conn: &Connection, key: &str) -> Result<bool> {
     Ok(conn
         .query_row(
@@ -7150,59 +7186,66 @@ impl Database {
     // rows (`uiSettingsRevision`, `uiSettingsLocalStorageMigrated`) stay
     // outside the namespace, so a `get` of the whole store never lists them.
 
-    /// Every UI setting, keyed by its renderer name (the `ui:` prefix removed).
-    pub fn ui_settings_all(&self) -> Result<BTreeMap<String, serde_json::Value>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT key, value_json FROM app_settings
-             WHERE substr(key, 1, ?1) = ?2
-             ORDER BY key ASC",
-        )?;
-        let prefix_len = UI_SETTINGS_KEY_PREFIX.len() as i64;
-        let rows = stmt.query_map(params![prefix_len, UI_SETTINGS_KEY_PREFIX], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut entries = BTreeMap::new();
-        for row in rows {
-            let (key, value_json) = row?;
-            let name = key[UI_SETTINGS_KEY_PREFIX.len()..].to_string();
-            let value: serde_json::Value = serde_json::from_str(&value_json)
-                .with_context(|| format!("UI setting {name} holds unreadable JSON"))?;
-            entries.insert(name, value);
-        }
-        Ok(entries)
-    }
-
-    /// The store's revision: bumped by every batch that lands something.
-    pub fn ui_settings_revision(&self) -> Result<u64> {
-        Ok(self
-            .load_setting::<u64>(UI_SETTINGS_REVISION_KEY)?
-            .unwrap_or(0))
-    }
-
-    /// Whether the one-time `localStorage` migration ran on this profile.
-    pub fn ui_settings_local_storage_migrated(&self) -> Result<bool> {
-        Ok(self
-            .load_setting::<bool>(UI_SETTINGS_LOCAL_STORAGE_MIGRATED_KEY)?
-            .unwrap_or(false))
+    /// Every UI setting, keyed by its renderer name (the `ui:` prefix removed),
+    /// with the revision and the migration mark, all read in one transaction
+    /// under one lock: a batch is wholly in the snapshot or wholly after it.
+    pub fn ui_settings_snapshot(
+        &self,
+    ) -> Result<videorc_protocol::ui_settings::UiSettingsSnapshot> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let entries = ui_settings_entries(&transaction)?;
+        let revision = setting_json::<u64>(&transaction, UI_SETTINGS_REVISION_KEY)?.unwrap_or(0);
+        let local_storage_migrated =
+            setting_json::<bool>(&transaction, UI_SETTINGS_LOCAL_STORAGE_MIGRATED_KEY)?
+                .unwrap_or(false);
+        transaction.commit()?;
+        Ok(videorc_protocol::ui_settings::UiSettingsSnapshot {
+            entries,
+            revision,
+            local_storage_migrated,
+        })
     }
 
     /// One batch in one transaction: the puts (only onto absent keys when
-    /// `if_absent`), then the deletes, then the migration mark. Returns what
-    /// landed and the revision after it; nothing landing (and no mark) leaves
-    /// the revision alone.
+    /// `if_absent`), then the deletes, then the migration mark. A key named in
+    /// `unless_updated_after` is left out when its row changed after that
+    /// time (Unix ms). Returns what landed and the revision after it; nothing
+    /// landing (and no mark) leaves the revision alone.
     pub fn ui_settings_apply(
         &self,
         put: &BTreeMap<String, serde_json::Value>,
         delete: &[String],
         if_absent: bool,
         mark_local_storage_migrated: bool,
+        unless_updated_after: &BTreeMap<String, u64>,
     ) -> Result<UiSettingsApplied> {
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
         let now = Utc::now().to_rfc3339();
         let mut landed_put = BTreeMap::new();
         let mut landed_delete = Vec::new();
+        let changed_since = |key: &str, name: &str| -> Result<bool> {
+            let Some(written_ms) = unless_updated_after.get(name) else {
+                return Ok(false);
+            };
+            let updated_at: Option<String> = transaction
+                .query_row(
+                    "SELECT updated_at FROM app_settings WHERE key = ?1",
+                    params![key],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let written_ms = i64::try_from(*written_ms).unwrap_or(i64::MAX);
+            Ok(match updated_at {
+                None => false,
+                Some(updated_at) => match chrono::DateTime::parse_from_rfc3339(&updated_at) {
+                    Ok(updated) => updated.timestamp_millis() > written_ms,
+                    // A time that doesn't parse is treated as newer: the row stays.
+                    Err(_) => true,
+                },
+            })
+        };
         for (name, value) in put {
             let key = format!("{UI_SETTINGS_KEY_PREFIX}{name}");
             if if_absent {
@@ -7217,6 +7260,9 @@ impl Database {
                     continue;
                 }
             }
+            if changed_since(&key, name)? {
+                continue;
+            }
             transaction.execute(
                 "INSERT INTO app_settings (key, value_json, updated_at)
                  VALUES (?1, ?2, ?3)
@@ -7227,22 +7273,17 @@ impl Database {
         }
         for name in delete {
             let key = format!("{UI_SETTINGS_KEY_PREFIX}{name}");
+            if changed_since(&key, name)? {
+                continue;
+            }
             let removed =
                 transaction.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
             if removed > 0 {
                 landed_delete.push(name.clone());
             }
         }
-        let previous_revision: u64 = transaction
-            .query_row(
-                "SELECT value_json FROM app_settings WHERE key = ?1",
-                params![UI_SETTINGS_REVISION_KEY],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .map(|value_json| serde_json::from_str::<u64>(&value_json))
-            .transpose()?
-            .unwrap_or(0);
+        let previous_revision =
+            setting_json::<u64>(&transaction, UI_SETTINGS_REVISION_KEY)?.unwrap_or(0);
         let landed = !landed_put.is_empty() || !landed_delete.is_empty();
         let revision = if landed || mark_local_storage_migrated {
             let next = previous_revision + 1;

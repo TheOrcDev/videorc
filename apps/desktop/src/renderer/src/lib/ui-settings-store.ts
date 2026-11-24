@@ -13,17 +13,29 @@
 // Before the engine answers (the window opened before the backend was up, the
 // engine is restarting): reads say so (`undefined`, one warning per key, a
 // count in `status()`), never a silent default; writes land in the cache and
-// in a per-window journal in `localStorage`, so a window closed before the
-// engine returns loses nothing: the next hydrate (any window, next launch)
-// replays every journal. The hydrate itself is bounded: past the deadline the
+// in a per-window journal in `localStorage`, with each key's write time, so a
+// window closed before the engine returns loses nothing: the next hydrate
+// (any window, next launch) replays the journals of windows no longer open.
+// A window holds a Web Lock named for it while it lives, so a journal whose
+// lock is held belongs to an open window and is left to it; where the origin
+// has no Web Locks, every journal replays. Either way a replay sends each
+// key's write time (`unlessUpdatedAfter`), so it never overwrites what the
+// store took after it, and a journal is removed only if it did not change
+// while it replayed. The hydrate itself is bounded: past the deadline the
 // window renders with the store `unavailable` and the hydrate keeps trying.
 //
 // The one-time `localStorage` migration runs inside the first hydrate of a
 // profile the previous release wrote: every `videorc.*` key the store lacks
-// is copied verbatim (a JSON string per key) in `ifAbsent` batches marked
-// `localStorageMigrated`, so two windows racing the same launch never
-// overwrite each other. The `localStorage` values stay where they are, so a
-// rollback to the previous release still finds them.
+// (and no journal names) is copied verbatim (a JSON string per key) in
+// `ifAbsent` batches marked `localStorageMigrated`, so two windows racing the
+// same launch never overwrite each other. A value past the store's limits is
+// never dropped: the migration stays open (unmarked, tried again next launch)
+// and the window holds that value from `localStorage`, read-only, so nothing
+// reads it as missing. A `localStorage` that can't be read fails the hydrate.
+// After the migration or a replay wrote, the window reads a fresh snapshot:
+// a batch's answer is a delta, never the whole store. The `localStorage`
+// values stay where they are, so a rollback to the previous release still
+// finds them.
 
 import type {
   UiSettingsChange,
@@ -80,7 +92,11 @@ export type UiSettingsHydration =
       revision: number
       /** Keys the migration copied in this hydrate (0 on a migrated profile). */
       migrated: number
-      /** Keys the migration left in `localStorage` because they are past the store's limits (named in the console). */
+      /**
+       * Keys past the store's limits (named in the console): left in
+       * `localStorage`, held read-only in this window, and the migration
+       * stays open so the next launch tries again.
+       */
       skipped: readonly string[]
       /** Journaled writes replayed in this hydrate. */
       replayed: number
@@ -114,20 +130,60 @@ export interface UiSettingsStore {
   dispose(): void
 }
 
+/** The Web Locks a window holds for its life, so others know it is open. */
+export interface UiSettingsLocks {
+  /** Holds `name` until `release` settles. */
+  hold(name: string, release: Promise<void>): void
+  /** Runs `task` holding `name` when nobody holds it; null when someone does. */
+  ifFree<T>(name: string, task: () => Promise<T>): Promise<T | null>
+}
+
 export interface UiSettingsStoreDeps {
   transport: UiSettingsTransport
   /** The window's `localStorage` (the migration source and the journal), or null. */
   storage: UiSettingsStorage | null
   writer?: string
   log?: Pick<Console, 'warn' | 'error' | 'info'>
+  /** Unix ms: each journaled write's time. */
   now?: () => number
   setTimeout?: (callback: () => void, ms: number) => unknown
   clearTimeout?: (handle: unknown) => void
+  /** Defaults to the window's `navigator.locks`; null where there are none. */
+  locks?: UiSettingsLocks | null
 }
 
 interface Journal {
   put: Record<string, UiSettingsValue>
   delete: string[]
+  /** Each key's write time (Unix ms); a key without one replays only onto a key the store lacks. */
+  at: Record<string, number>
+}
+
+function writerLockName(writer: string): string {
+  return `${UI_SETTINGS_JOURNAL_PREFIX}${writer}`
+}
+
+function browserLocks(): UiSettingsLocks | null {
+  let manager: LockManager | undefined
+  try {
+    manager = typeof navigator === 'undefined' ? undefined : navigator.locks
+  } catch {
+    return null
+  }
+  if (!manager) return null
+  const locks = manager
+  return {
+    hold(name, release) {
+      void locks.request(name, () => release).catch(() => {})
+    },
+    async ifFree<T>(name: string, task: () => Promise<T>): Promise<T | null> {
+      let result: T | null = null
+      await locks.request(name, { ifAvailable: true }, async (lock) => {
+        if (lock) result = await task()
+      })
+      return result
+    }
+  }
 }
 
 function newWriterId(): string {
@@ -163,7 +219,15 @@ function parseJournal(raw: string | null): Journal | null {
     const deletes = Array.isArray(parsed.delete)
       ? parsed.delete.filter((key): key is string => typeof key === 'string')
       : []
-    return { put: put as Record<string, UiSettingsValue>, delete: deletes }
+    const at =
+      parsed.at && typeof parsed.at === 'object' && !Array.isArray(parsed.at)
+        ? Object.fromEntries(
+            Object.entries(parsed.at).filter(
+              ([, time]) => typeof time === 'number' && Number.isSafeInteger(time) && time >= 0
+            )
+          )
+        : {}
+    return { put: put as Record<string, UiSettingsValue>, delete: deletes, at }
   } catch {
     return null
   }
@@ -175,6 +239,8 @@ export function createUiSettingsStore(deps: UiSettingsStoreDeps): UiSettingsStor
   const log = deps.log ?? console
   const schedule = deps.setTimeout ?? ((callback, ms) => setTimeout(callback, ms))
   const unschedule = deps.clearTimeout ?? ((handle) => clearTimeout(handle as number))
+  const now = deps.now ?? Date.now
+  const locks = deps.locks === undefined ? browserLocks() : deps.locks
   const journalKey = `${UI_SETTINGS_JOURNAL_PREFIX}${writer}`
 
   const entries = new Map<string, UiSettingsValue>()
@@ -183,6 +249,20 @@ export function createUiSettingsStore(deps: UiSettingsStoreDeps): UiSettingsStor
   // confirms it: a remote change or a migration copy for it is older.
   const pendingPut = new Map<string, UiSettingsValue>()
   const pendingDelete = new Set<string>()
+  const pendingAt = new Map<string, number>()
+  let releaseWriterLock: (() => void) | null = null
+  if (locks) {
+    try {
+      locks.hold(
+        writerLockName(writer),
+        new Promise<void>((resolve) => {
+          releaseWriterLock = resolve
+        })
+      )
+    } catch (error) {
+      log.warn(`[ui-settings] this window could not mark itself open: ${describe(error)}`)
+    }
+  }
   const readsBeforeHydration: string[] = []
   const bufferedChanges: UiSettingsChange[] = []
   let hydration: UiSettingsHydration = { state: 'idle' }
@@ -222,7 +302,8 @@ export function createUiSettingsStore(deps: UiSettingsStoreDeps): UiSettingsStor
       }
       const journal: Journal = {
         put: Object.fromEntries(pendingPut),
-        delete: [...pendingDelete]
+        delete: [...pendingDelete],
+        at: Object.fromEntries(pendingAt)
       }
       storage.setItem(journalKey, JSON.stringify(journal))
     } catch (error) {
@@ -263,13 +344,15 @@ export function createUiSettingsStore(deps: UiSettingsStoreDeps): UiSettingsStor
    * (its limits are checked here first, so a refusal can only mean the engine
    * is away). A key or value past the limits is named and left where it is.
    */
-  function localStorageMigrationBatches(): {
+  function localStorageMigrationBatches(journaled: ReadonlySet<string>): {
     batches: Record<string, UiSettingsValue>[]
     skipped: string[]
+    held: Map<string, string>
   } {
     const batches: Record<string, UiSettingsValue>[] = []
     const skipped: string[] = []
-    if (!storage) return { batches, skipped }
+    const held = new Map<string, string>()
+    if (!storage) return { batches, skipped, held }
     let batch: Record<string, UiSettingsValue> = {}
     let batchKeys = 0
     let batchBytes = 0
@@ -277,11 +360,14 @@ export function createUiSettingsStore(deps: UiSettingsStoreDeps): UiSettingsStor
       if (!key.startsWith(UI_SETTINGS_LOCAL_STORAGE_PREFIX)) continue
       if (key.startsWith(UI_SETTINGS_JOURNAL_PREFIX)) continue
       if (entries.has(key) || pendingPut.has(key) || pendingDelete.has(key)) continue
+      // A journal's write or delete of it is newer than the old copy.
+      if (journaled.has(key)) continue
       const value = storage.getItem(key)
       if (value === null) continue
       const refusal = migrationRefusal(key, value)
       if (refusal) {
         skipped.push(key)
+        held.set(key, value)
         log.error(`[ui-settings] "${key}" stays in localStorage, not migrated: ${refusal}`)
         continue
       }
@@ -300,80 +386,172 @@ export function createUiSettingsStore(deps: UiSettingsStoreDeps): UiSettingsStor
       batchBytes += bytes
     }
     batches.push(batch)
-    return { batches, skipped }
+    return { batches, skipped, held }
   }
 
-  async function migrateLocalStorage(): Promise<{ migrated: number; skipped: string[] }> {
+  async function migrateLocalStorage(journaled: ReadonlySet<string>): Promise<{
+    migrated: number
+    skipped: string[]
+    held: Map<string, string>
+    wrote: boolean
+  }> {
     let plan: ReturnType<typeof localStorageMigrationBatches>
     try {
-      plan = localStorageMigrationBatches()
+      plan = localStorageMigrationBatches(journaled)
     } catch (error) {
-      log.error(
-        `[ui-settings] localStorage could not be read; the migration will try again next launch: ${describe(error)}`
+      throw new Error(
+        `localStorage could not be read, so the previous version's settings can't move yet: ${describe(error)}`,
+        { cause: error }
       )
-      return { migrated: 0, skipped: [] }
     }
+    // Only a migration that copied every key is marked done.
+    const complete = plan.skipped.length === 0
     let migrated = 0
+    let wrote = false
     for (const [index, put] of plan.batches.entries()) {
+      const mark = complete && index === plan.batches.length - 1
+      if (!mark && Object.keys(put).length === 0) continue
       const change = await transport.set({
         put,
         ifAbsent: true,
-        localStorageMigrated: index === plan.batches.length - 1,
+        localStorageMigrated: mark,
         writer
       })
+      wrote = true
       migrated += Object.keys(change.put).length
-      applyChange(change, true)
     }
-    return { migrated, skipped: plan.skipped }
+    if (!complete) {
+      log.error(
+        `[ui-settings] the localStorage migration stays open: ${plan.skipped.length} key(s) are held read-only from localStorage, and the next launch tries again`
+      )
+    }
+    return { migrated, skipped: plan.skipped, held: plan.held, wrote }
   }
 
-  /** Every window's journal in this storage (this window's included): replayed, then removed. */
-  async function replayJournals(): Promise<number> {
-    if (!storage) return 0
-    let keys: string[]
-    try {
-      keys = storageKeys(storage).filter((key) => key.startsWith(UI_SETTINGS_JOURNAL_PREFIX))
-    } catch (error) {
-      log.warn(`[ui-settings] could not read the journals: ${describe(error)}`)
-      return 0
-    }
-    let replayed = 0
+  /** The other windows' journals in this storage, and every key they name. */
+  function otherJournals(): { keys: string[]; named: Set<string> } {
+    const named = new Set<string>()
+    if (!storage) return { keys: [], named }
+    const keys = storageKeys(storage).filter(
+      (key) => key.startsWith(UI_SETTINGS_JOURNAL_PREFIX) && key !== journalKey
+    )
     for (const key of keys) {
-      if (key === journalKey) continue
       const journal = parseJournal(storage.getItem(key))
-      if (!journal) {
-        storage.removeItem(key)
-        continue
+      for (const entry of [...Object.keys(journal?.put ?? {}), ...(journal?.delete ?? [])]) {
+        named.add(entry)
       }
-      const put = Object.fromEntries(
-        Object.entries(journal.put).filter(
-          ([entry]) => !pendingPut.has(entry) && !pendingDelete.has(entry)
-        )
-      )
-      const deletes = journal.delete.filter(
-        (entry) => !pendingPut.has(entry) && !pendingDelete.has(entry) && !(entry in put)
-      )
-      if (Object.keys(put).length > 0 || deletes.length > 0) {
-        const change = await transport.set({ put, delete: deletes, writer })
-        applyChange(change, true)
-        replayed += Object.keys(put).length + deletes.length
-      }
-      storage.removeItem(key)
     }
-    return replayed
+    return { keys, named }
   }
 
-  async function hydrateOnce(): Promise<UiSettingsHydration> {
-    const snapshot = await transport.get()
-    if (disposed) return { state: 'unavailable', reason: 'The window closed.' }
+  /**
+   * Replays one journal by its write times, then removes it unless it
+   * changed meanwhile. Returns how many of its writes landed.
+   */
+  async function replayJournal(key: string): Promise<{ replayed: number; wrote: boolean }> {
+    if (!storage) return { replayed: 0, wrote: false }
+    const raw = storage.getItem(key)
+    const journal = parseJournal(raw)
+    if (!journal) {
+      if (raw !== null && storage.getItem(key) === raw) storage.removeItem(key)
+      return { replayed: 0, wrote: false }
+    }
+    const put = Object.fromEntries(
+      Object.entries(journal.put).filter(
+        ([entry]) => !pendingPut.has(entry) && !pendingDelete.has(entry)
+      )
+    )
+    const deletes = journal.delete.filter(
+      (entry) => !pendingPut.has(entry) && !pendingDelete.has(entry) && !(entry in put)
+    )
+    let replayed = 0
+    let wrote = false
+    if (Object.keys(put).length > 0 || deletes.length > 0) {
+      const unlessUpdatedAfter = Object.fromEntries(
+        [...Object.keys(put), ...deletes].map((entry) => [entry, journal.at[entry] ?? 0])
+      )
+      const change = await transport.set({ put, delete: deletes, unlessUpdatedAfter, writer })
+      wrote = true
+      replayed = Object.keys(change.put).length + change.delete.length
+    }
+    // Its window may have written it again meanwhile: that journal is newer.
+    if (storage.getItem(key) === raw) storage.removeItem(key)
+    return { replayed, wrote }
+  }
+
+  /** A journal whose window is still open is left to it; another one replays. */
+  async function replayJournalUnlessOpen(
+    key: string
+  ): Promise<{ replayed: number; wrote: boolean }> {
+    if (locks) {
+      const progress = { ran: false }
+      try {
+        const result = await locks.ifFree(
+          writerLockName(key.slice(UI_SETTINGS_JOURNAL_PREFIX.length)),
+          () => {
+            progress.ran = true
+            return replayJournal(key)
+          }
+        )
+        return result ?? { replayed: 0, wrote: false }
+      } catch (error) {
+        if (progress.ran) throw error
+        log.warn(
+          `[ui-settings] could not tell whether the window behind ${key} is still open (${describe(error)}); its journal replays by its write times`
+        )
+      }
+    }
+    return replayJournal(key)
+  }
+
+  /** Puts `snapshot` in the cache whole: keys it lacks go, unless this window has them pending. */
+  function loadSnapshot(snapshot: UiSettingsSnapshot): void {
+    for (const key of [...entries.keys()]) {
+      if (key in snapshot.entries || pendingPut.has(key) || pendingDelete.has(key)) continue
+      entries.delete(key)
+    }
     for (const [key, value] of Object.entries(snapshot.entries)) {
       if (pendingPut.has(key) || pendingDelete.has(key)) continue
       entries.set(key, value)
     }
     revision = snapshot.revision
-    let migration = { migrated: 0, skipped: [] as string[] }
-    if (!snapshot.localStorageMigrated) migration = await migrateLocalStorage()
-    const replayed = await replayJournals()
+  }
+
+  async function hydrateOnce(): Promise<UiSettingsHydration> {
+    const snapshot = await transport.get()
+    if (disposed) return { state: 'unavailable', reason: 'The window closed.' }
+    loadSnapshot(snapshot)
+    let journals: ReturnType<typeof otherJournals>
+    try {
+      journals = otherJournals()
+    } catch (error) {
+      log.warn(`[ui-settings] could not read the journals: ${describe(error)}`)
+      journals = { keys: [], named: new Set() }
+    }
+    let migration = {
+      migrated: 0,
+      skipped: [] as string[],
+      held: new Map<string, string>(),
+      wrote: false
+    }
+    if (!snapshot.localStorageMigrated) migration = await migrateLocalStorage(journals.named)
+    let replayed = 0
+    let wrote = migration.wrote
+    for (const key of journals.keys) {
+      const replay = await replayJournalUnlessOpen(key)
+      replayed += replay.replayed
+      wrote ||= replay.wrote
+    }
+    // A batch's answer is a delta: changes from other windows it skipped
+    // past are in a fresh snapshot, not in it.
+    if (wrote) {
+      loadSnapshot(await transport.get())
+      if (disposed) return { state: 'unavailable', reason: 'The window closed.' }
+    }
+    for (const [key, value] of migration.held) {
+      if (entries.has(key) || pendingPut.has(key) || pendingDelete.has(key)) continue
+      entries.set(key, value)
+    }
     hydrated = true
     for (const change of bufferedChanges.splice(0)) {
       if (change.revision > revision) applyChange(change, true)
@@ -485,6 +663,9 @@ export function createUiSettingsStore(deps: UiSettingsStoreDeps): UiSettingsStor
         for (const key of sent.delete) {
           if (pendingDelete.has(key) && !pendingPut.has(key)) pendingDelete.delete(key)
         }
+        for (const key of [...sent.put.keys(), ...sent.delete]) {
+          if (!pendingPut.has(key) && !pendingDelete.has(key)) pendingAt.delete(key)
+        }
         if (change.revision > revision) revision = change.revision
         lastSendError = null
         retryStep = 0
@@ -571,6 +752,7 @@ export function createUiSettingsStore(deps: UiSettingsStoreDeps): UiSettingsStor
       entries.set(key, value)
       pendingDelete.delete(key)
       pendingPut.set(key, value)
+      pendingAt.set(key, now())
       writeJournal()
       notify(new Set([key]))
       scheduleFlush()
@@ -580,6 +762,7 @@ export function createUiSettingsStore(deps: UiSettingsStoreDeps): UiSettingsStor
       const held = entries.delete(key)
       pendingPut.delete(key)
       pendingDelete.add(key)
+      pendingAt.set(key, now())
       writeJournal()
       if (held) notify(new Set([key]))
       scheduleFlush()
@@ -600,6 +783,7 @@ export function createUiSettingsStore(deps: UiSettingsStoreDeps): UiSettingsStor
         retryHandle = null
       }
       listeners.clear()
+      releaseWriterLock?.()
       transport.close?.()
     }
   }

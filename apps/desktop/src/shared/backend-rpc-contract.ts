@@ -4403,12 +4403,25 @@ export const uiSettingsSetParamsSchema = runtimeSchema<UiSettingsSetParams>(
         delete: optionalSchema(uiSettingsKeyListSchema),
         ifAbsent: optionalSchema(booleanSchema),
         localStorageMigrated: optionalSchema(booleanSchema),
+        unlessUpdatedAfter: optionalSchema(
+          recordSchema(numberSchema({ integer: true, min: 0 }), {
+            maxKeys: UI_SETTINGS_BATCH_MAX_KEYS
+          })
+        ),
         writer: uiSettingsWriterSchema
       },
       { allowUnknown: false }
     ).parse(value, path) as UiSettingsSetParams
     const put = batch.put ?? {}
     const deletes = batch.delete ?? []
+    for (const key of Object.keys(batch.unlessUpdatedAfter ?? {})) {
+      if (!(key in put) && !deletes.includes(key)) {
+        throw new RuntimeSchemaError(
+          `${path}.unlessUpdatedAfter`,
+          `a write time only for a key the batch puts or deletes (${key})`
+        )
+      }
+    }
     if (Object.keys(put).length + deletes.length > UI_SETTINGS_BATCH_MAX_KEYS) {
       throw new RuntimeSchemaError(
         path,
