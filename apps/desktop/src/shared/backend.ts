@@ -6243,6 +6243,26 @@ export interface RoomMediaStatus {
   screen?: RoomScreenStatus
   /** Plan 260 S1.8c c4d: the auxiliary track (room sounds, system audio). */
   aux?: RoomMediaAuxStatus
+  /** Plan 260 S1.8d: the room's other people; their pictures at
+   * `/room/remote/latest.bmp?identity=&source=camera|screen`. */
+  people?: RoomRemotePerson[]
+  /** Plan 260 S1.8d: the runner's return while the Program monitor takes it
+   * (`source=monitor`). */
+  monitor?: { video: boolean; audio: boolean }
+}
+
+/** One person in the backend's room as the host receives them. Mirrors Rust
+ * `RoomRemotePerson`. */
+export interface RoomRemotePerson {
+  identity: string
+  name: string
+  camera: boolean
+  screen: boolean
+  audio: boolean
+  micMuted: boolean
+  cameraOff: boolean
+  speaking: boolean
+  quality: 'excellent' | 'good' | 'poor' | 'lost'
 }
 
 /** The backend room's auxiliary track, as the renderer room's
