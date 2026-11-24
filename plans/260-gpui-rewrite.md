@@ -1002,6 +1002,26 @@ readiness checks and the cards for the avatar's motion read the backend's
 room. c4b, after c4: the stage's hand-picked screen or window shares into
 the room through a second capture (c3 shares only the scene's own screen,
 the one the preview runs; today's room shares any picked source).
+S1.8d's parts (cut 2026-11-24; the renderer reads remote tracks in one
+place, `#publish()`, plus audio playback, the captions mix and the latency
+sampler): d1 the backend subscribes as the renderer did (every guest
+publication, the runner only with the Program monitor), decodes each remote
+video track (`NativeVideoStream`) into a latest-frame store served at
+`/room/remote/latest.bmp` (the `/preview/camera/latest.bmp` pattern) and
+reports the people (camera, screen, mic muted, camera off, speaking,
+quality) on `cloud.room.presentation`'s media entry; d2 the Studio's stage,
+guest cards and Program monitor draw those frames when the backend holds the
+room; d3 guest audio played natively with echo cancellation (S1.3b's
+CoreAudio output generalised to a pushed mix, LiveKit's libwebrtc APM, the
+guest mix as the far end, every room microphone frame through it), stacked
+on S1.3b; d4 the guest captions mix in-process (on-stage, unmuted guest
+microphones from `NativeAudioStream`, into the `cloud.speech.guests.*`
+path without the round trip); d5 the Program monitor's return audio
+through d3's output behind its Listen toggle. The Videorc Camera's room
+program (`/room-program-camera/frames`, a DOM raster of the managed-show
+Program preview, off in production) keeps its renderer producer, now
+drawing d2's frames, until Phase 2's GPUI program view composes it
+natively.
 c6 (latency) moved after S1.8d (decided 2026-11-24): the host's samples of
 the guests' tracks as it receives them need S1.8d's subscriptions, so the
 join is ported once, complete, with no partial reports.
