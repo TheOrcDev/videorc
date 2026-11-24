@@ -158,6 +158,19 @@ describe('shortcutRecorderName (plan 174 I-17)', () => {
     ).toBe('Mark a clip: Unassigned')
   })
 
+  it('saves a numpad key under its Electron name and reads it as the keycap', () => {
+    const step = shortcutRecorderStep(press('NumpadAdd', { control: true }), 'win32', free)
+    expect(step).toEqual({ type: 'commit', accelerator: 'Ctrl+numadd' })
+    expect(
+      shortcutRecorderName({
+        label: 'Mark a clip',
+        value: 'Ctrl+numadd',
+        armed: false,
+        platform: 'win32'
+      })
+    ).toBe('Mark a clip: Ctrl+Num +')
+  })
+
   it("names Videorc's own key while no global key is set", () => {
     const appKey = { accelerator: 'Space', where: 'in Studio' }
     expect(
