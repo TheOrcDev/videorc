@@ -53,6 +53,7 @@ import {
 } from '@/lib/stage-screens'
 import { cloudAvatarAtlasReason } from '@/lib/cloud-avatar-refusal'
 import type { AvatarMotionSource } from '../../../shared/cloud-avatar-view'
+import type { RoomAvatarMotion } from '@/lib/room-avatar-motion'
 
 // The host's room, from the Studio's side (plan 224 C-G4). The backend owns
 // the show and the room's facts (`cloud.state`); this hook owns the renderer's
@@ -246,6 +247,17 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   // program pages draw of the graphics comes from it.
   const [backendGraphics, setBackendGraphics] = useState<RoomPresentationStatus | null>(null)
   const [backendAvatar, setBackendAvatar] = useState<RoomPresentationStatus | null>(null)
+  // Plan 260 S1.8b: with the backend in the room, the avatar's motion model
+  // runs here on its own and hands each message to the backend, which sends
+  // it to the pages that animate (until the model moves to app-core).
+  const backendMotionRef = useRef<{ motion: RoomAvatarMotion; timer: number } | null>(null)
+  const stopBackendMotion = useCallback(() => {
+    const running = backendMotionRef.current
+    backendMotionRef.current = null
+    if (!running) return
+    window.clearInterval(running.timer)
+    running.motion.close()
+  }, [])
   const clientRef = useRef<TalkShowRoomClient | null>(null)
   /** Plan 249 S24: the kept avatar per output view, so it is sent on change only. */
   const keptAvatarRef = useRef(new Map<string, string>())
@@ -646,9 +658,45 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     let cancelled = false
     const avatar = deps.avatar
     const handOver = (
-      content: import('@/lib/room-avatar-publisher').AvatarContent | null
+      content: import('@/lib/room-avatar-publisher').AvatarContent | null,
+      seed: Parameters<TalkShowRoomClient['setAvatarMotion']>[0] = null
     ): void => {
-      void client?.requestTyped('cloud.room.avatar.set', { content }).catch(() => {})
+      void client
+        ?.requestTyped('cloud.room.avatar.set', { content })
+        .then(async (answer) => {
+          if (cancelled) return
+          stopBackendMotion()
+          if (!answer.held || !seed || !client) return
+          const { RoomAvatarMotion, ROOM_AVATAR_MOTION_FLUSH_MS } =
+            await import('@/lib/room-avatar-motion')
+          if (cancelled) return
+          // The backend stamps the host's session and the room, and answers
+          // the pages that animate; one stand-in consumer keeps the model
+          // sending, and each page it has not served gets a keyframe.
+          const STAND_IN = 'backend'
+          let motion: RoomAvatarMotion | null = null
+          motion = new RoomAvatarMotion(
+            {
+              show: showId ?? '',
+              publisherSid: 'PA_backend',
+              now: Date.now,
+              send: async (bytes) => {
+                const message = JSON.parse(new TextDecoder().decode(bytes)) as unknown
+                const sent = await client.requestTyped('cloud.room.avatar.motion', {
+                  message: message as import('../../../shared/cloud-avatar-motion').MotionMessage
+                })
+                motion?.setConsumers([STAND_IN, ...sent.targets])
+              }
+            },
+            seed.settings,
+            seed.inputs
+          )
+          motion.setConsumers([STAND_IN])
+          const running = motion
+          const timer = window.setInterval(() => void running.flush(), ROOM_AVATAR_MOTION_FLUSH_MS)
+          backendMotionRef.current = { motion: running, timer }
+        })
+        .catch(() => {})
     }
     // A hide or a lost persona clears at once. Otherwise every output keeps
     // the last picture until the new one is drawn: clearing first blanked the
@@ -729,7 +777,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       if (!cancelled) {
         current?.setAvatar(content)
         current?.setAvatarMotion(seed, refused)
-        handOver(content)
+        handOver(content, seed)
       }
     })().catch((error: unknown) => {
       if (!cancelled) {
@@ -739,8 +787,9 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     })
     return () => {
       cancelled = true
+      stopBackendMotion()
     }
-  }, [client, deps.avatar, roomOpen, showId, snapshot.state])
+  }, [client, deps.avatar, roomOpen, showId, snapshot.state, stopBackendMotion])
 
   useEffect(() => {
     if (!client || !roomOpen || !showId || !deps.avatar || snapshot.state !== 'connected') return
@@ -774,6 +823,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     if (!client || !roomOpen) return
     return client.on('cohost.pet.animator', (payload) => {
       clientRef.current?.avatarMotionEvent(payload)
+      backendMotionRef.current?.motion.backend(payload)
     })
   }, [client, roomOpen])
 
