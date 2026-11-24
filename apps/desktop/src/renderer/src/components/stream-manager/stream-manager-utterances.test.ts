@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { StreamManager, type StreamManagerProps } from '@/components/stream-manager/stream-manager'
 import type { CohostUtterance, LiveChatSnapshot } from '@/lib/backend'
 import { EMPTY_COHOST_STATE } from '@/lib/cohost-view'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 const snapshot: LiveChatSnapshot = {
   sessionId: 's1',
@@ -153,7 +154,7 @@ describe('StreamManager: how Sidekick talks reaches the relay (plan 211 S-C1, D3
   }
 
   it('sends `{ talk }` alone for each value, never `mode`', async () => {
-    localStorage.setItem('videorc.buddyAutoChatConsent', '1')
+    uiSettingsStorage().setItem('videorc.buddyAutoChatConsent', '1')
     const onCohostAutoChatChange = vi.fn()
     await render([], { cohostAutoChat: autoChat, onCohostAutoChatChange })
     expect(container.querySelector('[data-buddy-talk="off"]')?.getAttribute('aria-checked')).toBe(
@@ -168,6 +169,5 @@ describe('StreamManager: how Sidekick talks reaches the relay (plan 211 S-C1, D3
       [{ talk: 'suggest' }],
       [{ talk: 'off' }]
     ])
-    localStorage.clear()
   })
 })

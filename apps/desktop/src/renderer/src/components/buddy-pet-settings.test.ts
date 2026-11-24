@@ -15,6 +15,7 @@ import { writeBuddyWornPack } from '@/lib/buddy-worn-pack'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
 import { BuddyPetSettings } from './buddy-pet-settings'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
@@ -119,7 +120,6 @@ beforeEach(() => {
   mocked.react.mockClear()
   mocked.openCreator.mockClear()
   mocked.previews.length = 0
-  localStorage.clear()
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
@@ -238,7 +238,7 @@ describe('BuddyPetSettings: Avatar (plan 168 S-D2)', () => {
     await render({ list: pets([PACK_A, { ...PACK_B, packId: 'bundled:buddy' }]) })
     await act(async () => kindButton('Alive').click())
     expect(lastPersona().avatar).toEqual({ kind: 'alive', packId: PACK_A.packId })
-    expect(localStorage.getItem('videorc.buddyWornPack:p-1')).toBe(PACK_A.packId)
+    expect(uiSettingsStorage().getItem('videorc.buddyWornPack:p-1')).toBe(PACK_A.packId)
 
     await render({
       cohost: settings({ avatar: { kind: 'alive', packId: PACK_A.packId } }),

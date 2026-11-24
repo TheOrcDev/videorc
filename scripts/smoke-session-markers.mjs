@@ -95,7 +95,9 @@ try {
     }
   }
   console.log('session markers: detached composer and active recording')
-  await command('eval-js', { code: "localStorage.setItem('videorc.aiConsent','1'); return true" })
+  await command('eval-js', {
+    code: "window.__videorcUiSettings.setItem('videorc.aiConsent','1'); return true"
+  })
   await ask('cohost.settings.set', { enabled: true, listen: true })
   // Consent is React state read at mount; reload the isolated profile so the
   // real capture effect owns the same grant as this test's voice configuration.

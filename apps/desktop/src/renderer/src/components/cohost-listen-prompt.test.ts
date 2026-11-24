@@ -5,13 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { CohostListenPrompt } from '@/components/cohost-pane'
 import { COHOST_LISTEN_PROMPT_STORAGE_KEY } from '@/lib/cohost-view'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 let root: Root
 let container: HTMLDivElement
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-  localStorage.clear()
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
@@ -20,7 +20,6 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount())
   container.remove()
-  localStorage.clear()
   vi.unstubAllGlobals()
 })
 
@@ -48,7 +47,7 @@ describe('CohostListenPrompt', () => {
     await act(async () => button('Turn on').click())
     expect(onTurnOn).toHaveBeenCalledTimes(1)
     expect(prompt()).toBeNull()
-    expect(localStorage.getItem(COHOST_LISTEN_PROMPT_STORAGE_KEY)).toBe('1')
+    expect(uiSettingsStorage().getItem(COHOST_LISTEN_PROMPT_STORAGE_KEY)).toBe('1')
   })
 
   it('Not now is final too, across a remount', async () => {

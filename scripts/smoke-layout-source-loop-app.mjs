@@ -96,7 +96,7 @@ try {
       smokeCommand(smoke, 'preview-surface-scene-state'),
       smokeCommand(smoke, 'eval-js', {
         code: `
-          const stored = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}');
+          const stored = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}');
           return {
             layoutPreset: stored.layout?.layoutPreset ?? null,
             video: stored.video ?? null

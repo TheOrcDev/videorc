@@ -17,6 +17,7 @@ import {
   BuddyPostingConsentDialog,
   useBuddyTalkRequest
 } from './buddy-chat-controls'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 let root: Root
 let container: HTMLDivElement
@@ -36,7 +37,6 @@ function autoChat(overrides: Partial<CohostAutoChat> = {}): CohostAutoChat {
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-  localStorage.clear()
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
@@ -129,7 +129,7 @@ describe('How the avatar talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5,
     await press(talkButton('bubble'))
     expect(dialog()).toBeNull()
     expect(onTalkChange).toHaveBeenLastCalledWith('bubble')
-    expect(localStorage.getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBeNull()
+    expect(uiSettingsStorage().getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBeNull()
 
     await render(autoChat({ talk: 'suggest' }))
     await press(talkButton('off'))
@@ -153,7 +153,7 @@ describe('How the avatar talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5,
     expect(onTalkChange).toHaveBeenCalledTimes(1)
     expect(onTalkChange).toHaveBeenLastCalledWith('suggest')
     expect(dialog()).toBeNull()
-    expect(localStorage.getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBe('1')
+    expect(uiSettingsStorage().getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBe('1')
 
     // Consented already: Suggest applies at once.
     onTalkChange.mockClear()
@@ -172,7 +172,7 @@ describe('How the avatar talks (plan 164 S-D6, plan 174 S3.14a, plan 211 D1, D5,
     await act(async () => notNow?.click())
     expect(onTalkChange).not.toHaveBeenCalled()
     expect(dialog()).toBeNull()
-    expect(localStorage.getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBeNull()
+    expect(uiSettingsStorage().getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBeNull()
   })
 
   it("names the control and asks in the streamer's name for its avatar, else Flint (plan 174 J2-20, plan 239 D2)", async () => {
@@ -336,7 +336,7 @@ describe('One posting consent for the control and Use Suggest (plan 239 D3)', ()
     await act(async () => dialogButton('buddy-chat-accept').click())
     expect(onTalkChange).toHaveBeenLastCalledWith('suggest')
     expect(dialog()).toBeNull()
-    expect(localStorage.getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBe('1')
+    expect(uiSettingsStorage().getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBe('1')
   })
 
   it('opens the same dialog from the control, and Not now changes nothing', async () => {
@@ -349,11 +349,11 @@ describe('One posting consent for the control and Use Suggest (plan 239 D3)', ()
     await act(async () => notNow?.click())
     expect(dialog()).toBeNull()
     expect(onTalkChange).not.toHaveBeenCalled()
-    expect(localStorage.getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBeNull()
+    expect(uiSettingsStorage().getItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY)).toBeNull()
   })
 
   it('applies Use Suggest at once once consent was given, and nothing when already there', async () => {
-    localStorage.setItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY, '1')
+    uiSettingsStorage().setItem(BUDDY_AUTO_CHAT_CONSENT_STORAGE_KEY, '1')
     await renderOwner('bubble')
     await act(async () => dialogButton('use-suggest').click())
     expect(dialog()).toBeNull()

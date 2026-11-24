@@ -2552,7 +2552,7 @@ async function prepareCloudSectionShots(smoke) {
   let host = await devtoolsHost()
   await cdpEvaluate(
     host,
-    `localStorage.setItem('videorc.onboardingComplete', 'creator-ux-v1'); location.reload(); 'ok'`
+    `window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'creator-ux-v1'); location.reload(); 'ok'`
   )
   await waitFor(
     async () =>

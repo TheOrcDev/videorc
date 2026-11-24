@@ -232,7 +232,7 @@ test('outputProfileStep waits for the reloaded renderer before the next intent',
     const readsBeforeBack = []
     ctx.ui = {
       async evaluate(expression) {
-        const set = /localStorage\.setItem\("[^"]+", (".*")\); return true/.exec(expression)
+        const set = /__videorcUiSettings\.setItem\("[^"]+", (".*")\); return true/.exec(expression)
         if (set) stored = JSON.parse(set[1])
         else if (reloaded && !rendererBack) readsBeforeBack.push(expression)
         return set ? true : stored

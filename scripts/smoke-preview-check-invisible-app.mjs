@@ -872,8 +872,8 @@ async function runAll() {
   await evaluate(
     `
       const key = 'videorc.captureConfig';
-      const current = JSON.parse(localStorage.getItem(key) ?? '{}');
-      localStorage.setItem(key, JSON.stringify({ ...current,
+      const current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}');
+      window.__videorcUiSettings.setItem(key, JSON.stringify({ ...current,
         video: params.video, layout: { ...current.layout, ...params.layout },
         sources: { ...(current.sources ?? {}), cameraId: undefined, cameraName: undefined, cameraOff: true, testPattern: false },
         recordEnabled: true, streamEnabled: false,

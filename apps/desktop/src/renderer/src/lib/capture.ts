@@ -45,6 +45,7 @@ import {
   VERTICAL_LAYOUT_PRESETS
 } from '../../../shared/backend'
 import { STREAM_PLATFORMS } from '../../../shared/stream-platforms'
+import { uiSettingsStorage } from './ui-settings-storage'
 
 export type SettingsState = {
   cameraLooks?: Record<string, CameraLook>
@@ -1607,8 +1608,9 @@ export function withoutRetiredSettings<T extends object>(settings: T): T {
   return Object.fromEntries(Object.entries(settings).filter(([key]) => !retired.has(key))) as T
 }
 
+/** A stored JSON object from the UI settings store (plan 220 S1.4b), over `fallback`'s fields. */
 export function loadJson<T>(key: string, fallback: T): T {
-  const raw = localStorage.getItem(key)
+  const raw = uiSettingsStorage().getItem(key)
   if (!raw) {
     return fallback
   }

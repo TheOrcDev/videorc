@@ -220,6 +220,7 @@ import {
   replayStartWaitsForScreen
 } from '@/lib/replay-buffer-grants'
 import { registerSupportBundleExport, toast } from '@/lib/toast'
+import { uiSettingsStorage, windowUiSettingsHydrated } from '@/lib/ui-settings-storage'
 import { CLOUD_TOAST_ID } from '@/lib/cloud-toast-id'
 import { NO_TALK_SHOW, type TalkShowContextValue } from '@/lib/talk-show-context'
 import type { TalkShowRoomControllerDeps } from '@/hooks/use-talk-show-room'
@@ -955,7 +956,10 @@ const SESSION_LIST_PAGE_LIMIT = 50
 
 function outputChosenByUser(): boolean {
   try {
-    return localStorage.getItem(STORAGE_KEYS.outputChosenByUser) !== null
+    // Before the UI settings store has its snapshot nothing is known, and an
+    // unknown answer must never let a check apply an output: say chosen.
+    if (!windowUiSettingsHydrated()) return true
+    return uiSettingsStorage().getItem(STORAGE_KEYS.outputChosenByUser) !== null
   } catch {
     return true
   }
@@ -963,7 +967,7 @@ function outputChosenByUser(): boolean {
 
 function markOutputChosenByUser(): void {
   try {
-    localStorage.setItem(STORAGE_KEYS.outputChosenByUser, '1')
+    uiSettingsStorage().setItem(STORAGE_KEYS.outputChosenByUser, '1')
   } catch {
     // Storage unavailable: the check then only ever suggests.
   }
@@ -4700,11 +4704,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // consent that silently reset to off on every launch left cloud AI doing
   // nothing with no visible reason (2026-07-11 report).
   const [aiConsent, setAiConsentState] = useState(
-    () => localStorage.getItem(AI_CONSENT_STORAGE_KEY) === '1'
+    () => uiSettingsStorage().getItem(AI_CONSENT_STORAGE_KEY) === '1'
   )
   const setAiConsent = useCallback((consent: boolean) => {
     setAiConsentState(consent)
-    localStorage.setItem(AI_CONSENT_STORAGE_KEY, consent ? '1' : '0')
+    uiSettingsStorage().setItem(AI_CONSENT_STORAGE_KEY, consent ? '1' : '0')
   }, [])
   const [startRequestPending, setStartRequestPending] = useState(false)
   const [stopRequestPending, setStopRequestPending] = useState(false)
@@ -4919,7 +4923,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }
     if (muteChanges) {
       try {
-        localStorage.setItem(
+        uiSettingsStorage().setItem(
           STORAGE_KEYS.captureConfig,
           JSON.stringify(persistableCaptureConfig(captureConfigRef.current))
         )
@@ -5327,7 +5331,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   useEffect(() => {
     rememberedAppsRef.current = rememberedSceneApps(rememberedAppsRef.current, sceneLibrary.scenes)
     try {
-      localStorage.setItem(SCENE_WINDOW_APPS_KEY, JSON.stringify(rememberedAppsRef.current))
+      uiSettingsStorage().setItem(SCENE_WINDOW_APPS_KEY, JSON.stringify(rememberedAppsRef.current))
     } catch {
       /* Device memory is best effort. */
     }
@@ -5484,7 +5488,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         queueMicrotask(() => autosaveSavedScene(persisted, savedSceneId, visual))
       }
       try {
-        localStorage.setItem(
+        uiSettingsStorage().setItem(
           WORKING_SCENE_KEY,
           JSON.stringify({
             version: 1,
@@ -8011,13 +8015,13 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   useEffect(() => {
     if (migratedShortcuts && settings.globalShortcuts === migratedShortcuts)
       shortcutMigrationHeldRef.current = true
-    localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify(settings))
+    uiSettingsStorage().setItem(STORAGE_KEYS.settings, JSON.stringify(settings))
     if (shortcutMigrationHeldRef.current && settleSceneShortcuts())
       shortcutMigrationHeldRef.current = false
   }, [settings, migratedShortcuts, settleSceneShortcuts])
 
   useEffect(() => {
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify(persistableCaptureConfig(captureConfig))
     )
@@ -12639,7 +12643,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             sceneLibrary.scenes
           )
           try {
-            localStorage.setItem(SCENE_WINDOW_APPS_KEY, JSON.stringify(rememberedAppsRef.current))
+            uiSettingsStorage().setItem(
+              SCENE_WINDOW_APPS_KEY,
+              JSON.stringify(rememberedAppsRef.current)
+            )
           } catch {
             /* Best effort. */
           }

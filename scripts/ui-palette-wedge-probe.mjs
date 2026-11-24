@@ -143,7 +143,7 @@ try {
   await cdp.send('Runtime.enable')
 
   await cdp.send('Runtime.evaluate', {
-    expression: `localStorage.setItem('videorc.onboardingComplete', 'creator-ux-v1'); localStorage.setItem('videorc.theme', 'dark'); location.reload()`
+    expression: `window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'creator-ux-v1'); window.__videorcUiSettings.setItem('videorc.theme', 'dark'); localStorage.setItem('videorc.theme', 'dark'); location.reload()`
   })
   await sleep(6000)
   cdp.events.length = 0

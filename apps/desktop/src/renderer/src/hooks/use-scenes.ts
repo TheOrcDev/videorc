@@ -5,6 +5,7 @@ import { movedScenes } from '@/lib/scene-order'
 import { sceneNameError, WORKING_SCENE_KEY } from '@/lib/scene-presets'
 import { SCENES_KEY, type MainDisplay, type Scene, type SceneLibrary } from '@/lib/scenes'
 import { toast } from '@/lib/toast'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 type ScenesState = {
   library: SceneLibrary
@@ -89,8 +90,9 @@ function repairStoredScenes(): void {
   const repair = scenesStore().repairStoredSceneVerticals(read(SCENES_KEY), read(WORKING_SCENE_KEY))
   if (!repair) return
   try {
-    if (repair.working) localStorage.setItem(WORKING_SCENE_KEY, JSON.stringify(repair.working))
-    localStorage.setItem(SCENES_KEY, JSON.stringify(repair.library))
+    if (repair.working)
+      uiSettingsStorage().setItem(WORKING_SCENE_KEY, JSON.stringify(repair.working))
+    uiSettingsStorage().setItem(SCENES_KEY, JSON.stringify(repair.library))
   } catch {
     /* Kept as stored: the next launch repairs it. */
   }
@@ -155,7 +157,7 @@ export function useScenes() {
   const write = useCallback((library: SceneLibrary, options?: { quiet?: boolean }): boolean => {
     if (current.current.readOnly) return false
     try {
-      localStorage.setItem(SCENES_KEY, JSON.stringify(library))
+      uiSettingsStorage().setItem(SCENES_KEY, JSON.stringify(library))
     } catch {
       if (!options?.quiet)
         toast.error("Couldn't save the scene", {

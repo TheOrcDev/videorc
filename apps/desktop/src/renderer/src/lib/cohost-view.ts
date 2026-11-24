@@ -24,6 +24,7 @@ import { formatRelativeTime } from './format-time'
 import { plural } from './format'
 import { BUDDY_POSTS_PROMISE } from './buddy-auto-chat-view'
 import type { EntitlementUiGate } from './entitlement-ui'
+import { uiSettingsStorage } from './ui-settings-storage'
 
 export {
   applyCohostState,
@@ -810,16 +811,8 @@ export function cohostListenPromptVisible({
   return enabled && listen === false && !dismissed
 }
 
-function localStorageOrNull(): Storage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage
-  } catch {
-    return null
-  }
-}
-
 export function readCohostListenPromptDismissed(
-  storage: Pick<Storage, 'getItem'> | null = localStorageOrNull()
+  storage: Pick<Storage, 'getItem'> | null = uiSettingsStorage()
 ): boolean {
   try {
     return cohostNudgeDismissedFromStorage(storage?.getItem(COHOST_LISTEN_PROMPT_STORAGE_KEY))
@@ -830,7 +823,7 @@ export function readCohostListenPromptDismissed(
 
 /** Best effort: blocked storage keeps the answer for this window's life only. */
 export function persistCohostListenPromptDismissed(
-  storage: Pick<Storage, 'setItem'> | null = localStorageOrNull()
+  storage: Pick<Storage, 'setItem'> | null = uiSettingsStorage()
 ): void {
   try {
     storage?.setItem(COHOST_LISTEN_PROMPT_STORAGE_KEY, '1')

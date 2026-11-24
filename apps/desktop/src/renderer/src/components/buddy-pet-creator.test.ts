@@ -21,6 +21,7 @@ import type { BuddyPetCreatorClient } from '@/hooks/use-buddy-pet-creator'
 import { BUDDY_PET_ATLAS_SHEETS } from '../../../shared/buddy-pet-creator'
 
 import { BuddyPetCreator } from './buddy-pet-creator'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
@@ -192,7 +193,6 @@ beforeEach(() => {
   onClose.mockClear()
   patchCohostSettings.mockClear()
   readBuddyCreationFile.mockClear()
-  localStorage.clear()
   clearBuddyOnboardingRequest()
   Object.assign(window, { videorc: { readBuddyCreationFile } })
   Object.assign(URL, { createObjectURL: () => 'blob:atlas', revokeObjectURL: () => undefined })
@@ -358,7 +358,9 @@ describe('BuddyPetCreator (plan 168 S-F5)', () => {
     expect(byTestId('buddy-pet-mark-extras')?.getAttribute('aria-pressed')).toBe('true')
     expect(next().disabled).toBe(false)
     // The marks are kept on this device, by build (plan 174 S3.15a).
-    expect(JSON.parse(localStorage.getItem(BUDDY_PET_REVIEW_MARKS_STORAGE_KEY) ?? '{}')).toEqual({
+    expect(
+      JSON.parse(uiSettingsStorage().getItem(BUDDY_PET_REVIEW_MARKS_STORAGE_KEY) ?? '{}')
+    ).toEqual({
       [BUILD]: Object.fromEntries(BUDDY_PET_REVIEW_ROWS.map((row) => [row.key, 1]))
     })
 
@@ -432,7 +434,7 @@ describe('BuddyPetCreator (plan 168 S-F5)', () => {
       persona: expect.objectContaining({ avatar: { kind: 'alive', packId: PACK } })
     })
     expect(onClose).toHaveBeenCalledTimes(1)
-    expect(localStorage.getItem(BUDDY_PET_REVIEW_MARKS_STORAGE_KEY)).toBeNull()
+    expect(uiSettingsStorage().getItem(BUDDY_PET_REVIEW_MARKS_STORAGE_KEY)).toBeNull()
     // The cells and the pack come from the creation folder, through main.
     expect(readBuddyCreationFile).toHaveBeenCalledWith('default', BUILD, 'pack/manifest.json')
     expect(readBuddyCreationFile).toHaveBeenCalledWith('default', BUILD, 'pack/mascot.webp')

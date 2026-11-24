@@ -322,7 +322,7 @@ async function applyTheme(devtoolsHost, theme) {
   if (!main) throw new Error('Main window CDP target not found.')
   await cdpEvaluate(
     main.webSocketDebuggerUrl,
-    `localStorage.setItem('videorc.onboardingComplete', 'creator-ux-v1'); localStorage.setItem('videorc.theme', ${JSON.stringify(theme)}); location.reload(); true`
+    `window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'creator-ux-v1'); window.__videorcUiSettings.setItem('videorc.theme', ${JSON.stringify(theme)}); localStorage.setItem('videorc.theme', ${JSON.stringify(theme)}); location.reload(); true`
   )
   await sleep(7000)
 }

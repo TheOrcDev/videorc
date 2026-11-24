@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 
 import { BUILT_IN_PASSWORD_MANAGERS, type FollowFrontAppContext } from './follow-front-app'
+import { uiSettingsStorage } from './ui-settings-storage'
 
 // Plan 210 D11: Hide screen for password managers, per device. On by
 // default, with a built-in list the streamer can add apps to and take apps
@@ -231,7 +232,7 @@ export function parsePrivacySettings(value: unknown): PrivacySettings {
 }
 
 export function loadPrivacySettings(
-  storage: Pick<Storage, 'getItem'> | undefined = globalThis.localStorage
+  storage: Pick<Storage, 'getItem'> | undefined = uiSettingsStorage()
 ): PrivacySettings {
   try {
     const raw = storage?.getItem(PRIVACY_SETTINGS_STORAGE_KEY)
@@ -244,7 +245,7 @@ export function loadPrivacySettings(
 /** Stores the settings; the defaults store nothing, so a fresh device keeps none. */
 export function savePrivacySettings(
   settings: PrivacySettings,
-  storage: Pick<Storage, 'setItem' | 'removeItem'> | undefined = globalThis.localStorage
+  storage: Pick<Storage, 'setItem' | 'removeItem'> | undefined = uiSettingsStorage()
 ): void {
   try {
     const isDefault =

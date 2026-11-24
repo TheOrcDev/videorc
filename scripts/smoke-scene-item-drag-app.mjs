@@ -175,7 +175,9 @@ try {
   cdp = await Cdp.connect(target.webSocketDebuggerUrl)
   await cdp.send('Page.bringToFront')
   backend = await connectBackend(launched.connections['backend-ready'], timeoutMs)
-  await cdp.eval(`localStorage.setItem('videorc.onboardingComplete', 'creator-ux-v1')`)
+  await cdp.eval(
+    `window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'creator-ux-v1')`
+  )
   await cdp.eval(`(${installGestureEndRecorder.toString()})()`)
   // A cold dev server can still be transforming the lazy Sources tab here
   // (its fallback reads "Loading Sources…"): give it a few tries.

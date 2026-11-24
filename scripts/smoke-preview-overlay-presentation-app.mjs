@@ -298,8 +298,8 @@ try {
     video,
     code: `
       const key = 'videorc.captureConfig';
-      const current = JSON.parse(localStorage.getItem(key) ?? '{}');
-      localStorage.setItem(key, JSON.stringify({ ...current,
+      const current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}');
+      window.__videorcUiSettings.setItem(key, JSON.stringify({ ...current,
         video: params.video, layout: { ...current.layout, layoutPreset: 'screen-only' },
         recordEnabled: true, streamEnabled: false,
         replayBuffer: { enabled: false, explicit: true }

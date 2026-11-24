@@ -116,7 +116,7 @@ import { isSortedChronologically, sortMessagesChronological } from '@/lib/live-c
 import { activityItems, thankYouDraft, type ActivityItem } from '@/lib/stream-activity'
 import { formatHistoryDate, statItems } from '@/lib/stream-manager-stats'
 import {
-  browserStorage,
+  statsLayoutStorage,
   loadStatsLayout,
   saveStatsLayout,
   type StatsLayout
@@ -877,10 +877,10 @@ export function StreamManager({
   )
 
   // The streamer's own order and picks for the stats bar (plan 057, D2).
-  const [statsLayout, setStatsLayout] = useState(() => loadStatsLayout(browserStorage()))
+  const [statsLayout, setStatsLayout] = useState(() => loadStatsLayout(statsLayoutStorage()))
   const changeStatsLayout = useCallback((next: StatsLayout): void => {
     setStatsLayout(next)
-    saveStatsLayout(browserStorage(), next)
+    saveStatsLayout(statsLayoutStorage(), next)
   }, [])
 
   const showBuddy = useCallback((): void => {

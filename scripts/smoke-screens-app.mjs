@@ -304,7 +304,7 @@ try {
           code: `
           const deadline = performance.now() + 5000;
           while (performance.now() < deadline) {
-            const muted = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}').audio?.microphoneMuted;
+            const muted = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}').audio?.microphoneMuted;
             if (muted === ${JSON.stringify(expected)}) return muted;
             await sleep(25);
           }

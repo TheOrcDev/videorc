@@ -445,11 +445,22 @@ describe('first-run startup ordering', () => {
 
   it('wires the shell to snapshot before rendering and withholds What’s New until finalized', () => {
     const shell = readFileSync(new URL('../components/app-shell.tsx', import.meta.url), 'utf8')
-    expect(shell.indexOf('createFirstRunStartup(localStorage)')).toBeLessThan(
+    // Plan 220 S1.4b: taken on the first render from the hydrated store, or
+    // once its late snapshot arrives (the placeholder shows meanwhile).
+    expect(shell.indexOf('function takeFirstRunStartup')).toBeLessThan(
       shell.indexOf('export function AppShell')
     )
-    expect(shell).toContain('firstRunStartup?.finalize(runtimeInfo)')
-    expect(shell).toContain('if (!runtimeInfo || firstRunVisibility !== null) return')
+    expect(shell).toContain(
+      'if (windowUiSettingsHydrated()) firstRunStartupValue = createFirstRunStartup()'
+    )
+    expect(shell.indexOf('() => takeFirstRunStartup() !== undefined')).toBeLessThan(
+      shell.indexOf('useEffect(')
+    )
+    expect(shell).toContain('windowUiSettingsStore().whenHydrated().then(settle)')
+    expect(shell).toContain(
+      'if (!runtimeInfo || firstRunVisibility !== null || !firstRunStartupKnown) return'
+    )
+    expect(shell).toContain('takeFirstRunStartup()?.finalize(runtimeInfo)')
     expect(shell).toContain('firstRunVisibility === null ? undefined : runtimeInfo?.version')
     expect(shell).toContain("whatsNew.open && firstRunVisibility === 'hide' && !setupOpen")
     expect(shell).not.toContain('shouldShowPermissionsOnboarding')
@@ -460,10 +471,14 @@ describe('first-run startup ordering', () => {
     expect(shell).not.toContain('PermissionsOnboarding')
     expect(shell).toContain("surface === 'setup' && setupMode")
     expect(shell).toContain('<FirstRunPlaceholder />')
-    expect(shell).toContain("initialStep={replay ? 'permissions' : firstRunStartup?.step}")
-    expect(shell).toContain('initialGoal={firstRunStartup?.goal ?? null}')
-    expect(shell).toContain('onEnterStep={(step) => firstRunStartup?.enterStep(step, setupMode)}')
-    expect(shell).toContain('onGoalChange={(goal) => firstRunStartup?.setGoal(goal, setupMode)}')
+    expect(shell).toContain("initialStep={replay ? 'permissions' : takeFirstRunStartup()?.step}")
+    expect(shell).toContain('initialGoal={takeFirstRunStartup()?.goal ?? null}')
+    expect(shell).toContain(
+      'onEnterStep={(step) => takeFirstRunStartup()?.enterStep(step, setupMode)}'
+    )
+    expect(shell).toContain(
+      'onGoalChange={(goal) => takeFirstRunStartup()?.setGoal(goal, setupMode)}'
+    )
     // A replay returns to its page before the record could be written.
     const leave = shell.slice(
       shell.indexOf('const leaveFirstRunSetup'),
@@ -471,7 +486,7 @@ describe('first-run startup ordering', () => {
     )
     expect(leave.indexOf('setActive(openTab ?? replay.returnTo)')).toBeGreaterThan(0)
     expect(leave.indexOf('setActive(openTab ?? replay.returnTo)')).toBeLessThan(
-      leave.indexOf('firstRunStartup?.complete(completion)')
+      leave.indexOf('takeFirstRunStartup()?.complete(completion)')
     )
     // Setup lands on the Studio unless a step names another page (plan 207 D10).
     expect(leave).toContain("setActive(openTab ?? 'studio')")

@@ -44,6 +44,9 @@ export default defineConfig({
             new TimingReporter(resolve(reportFile), root)
           ]
         }
-      : {})
+      : {}),
+    // Plan 260 S1.4b (plan 220 S1.4b): every test gets a fresh, hydrated UI
+    // settings store.
+    setupFiles: ['src/renderer/src/lib/ui-settings-test-setup.ts']
   }
 })

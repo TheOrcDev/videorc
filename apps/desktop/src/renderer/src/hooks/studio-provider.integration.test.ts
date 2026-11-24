@@ -153,6 +153,7 @@ import {
 } from '../lib/capture'
 import { deriveNoiseCleanupView } from '../lib/noise-cleanup-view'
 import { SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY } from '../lib/screen-takeover-microphone'
+import { uiSettingsStorage } from '../lib/ui-settings-storage'
 import type {
   WindowsLiveAudioSmokeRequest,
   WindowsLiveAudioSmokeState
@@ -2230,12 +2231,12 @@ function sceneNamed(core: Pick<StudioCoreContextValue, 'savedScenes'>, name: str
 }
 /** The scene as the library stores it (`videorc.scenes.v2`). */
 function storedSceneNamed(name: string): StoredScene {
-  return (JSON.parse(localStorage.getItem(SCENES_KEY)!) as SceneLibrary).scenes.find(
+  return (JSON.parse(uiSettingsStorage().getItem(SCENES_KEY)!) as SceneLibrary).scenes.find(
     (scene) => scene.name === name
   )!
 }
 function storedLibrary(): SceneLibrary {
-  return JSON.parse(localStorage.getItem(SCENES_KEY)!) as SceneLibrary
+  return JSON.parse(uiSettingsStorage().getItem(SCENES_KEY)!) as SceneLibrary
 }
 
 // Plan 231 review: two displays and a library seeded before the Studio mounts.
@@ -2273,7 +2274,10 @@ function seedSceneLibrary(
   onStreamId: string,
   extra: Partial<SceneLibrary> = {}
 ): void {
-  localStorage.setItem(SCENES_KEY, JSON.stringify({ version: 2, scenes, onStreamId, ...extra }))
+  uiSettingsStorage().setItem(
+    SCENES_KEY,
+    JSON.stringify({ version: 2, scenes, onStreamId, ...extra })
+  )
 }
 /** The program's layout requests since `from`, or the vertical leg's (`leg`). */
 function layoutApplies(backend: StudioBackend, from: number, leg: boolean) {
@@ -2402,7 +2406,7 @@ describe('real StudioProvider lifecycle', () => {
     if (!connected) api.getBackendConnection = async () => null
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify({ ...defaultCaptureConfig, layout: backend.currentLayout })
     )
@@ -2765,7 +2769,7 @@ describe('real StudioProvider lifecycle', () => {
       })
     )
     restoreEnvironment = testDom.restore
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify({
         ...defaultCaptureConfig,
@@ -3480,7 +3484,7 @@ describe('real StudioProvider lifecycle', () => {
 
     const beforeScene = latest().core.scene
     const beforeConfig = latest().core.captureConfig
-    const beforeCheckpoint = localStorage.getItem(WORKING_SCENE_KEY)
+    const beforeCheckpoint = uiSettingsStorage().getItem(WORKING_SCENE_KEY)
     const status = preciseTransformStatus(backend)
     const releaseTransform = backend.deferResponse('scene.source.transform.update', status)
     let transform!: ReturnType<StudioCoreContextValue['setSceneSourceTransform']>
@@ -3517,7 +3521,7 @@ describe('real StudioProvider lifecycle', () => {
     )
     expect(latest().core.savedScenePendingId).toBe(first.id)
     expect(latest().core.activeSavedSceneId).toBe(second.id)
-    expect(localStorage.getItem(WORKING_SCENE_KEY)).toBe(beforeCheckpoint)
+    expect(uiSettingsStorage().getItem(WORKING_SCENE_KEY)).toBe(beforeCheckpoint)
 
     await act(async () => {
       releaseSelection()
@@ -3528,7 +3532,7 @@ describe('real StudioProvider lifecycle', () => {
       first.visual.layout.sourceTransformOverrides
     )
     expect(latest().core.savedSceneModified).toBe(false)
-    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).sceneId).toBe(first.id)
+    expect(JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).sceneId).toBe(first.id)
   })
 
   it('rehydrates failed recovery, single-flights retry, and rejects its stale response', async () => {
@@ -4362,7 +4366,7 @@ describe('real StudioProvider lifecycle', () => {
       })
     )
     restoreEnvironment = testDom.restore
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify({
         ...defaultCaptureConfig,
@@ -4667,7 +4671,7 @@ describe('real StudioProvider lifecycle', () => {
         latest()?.core.captureConfig.audio.microphoneMuted === true
     )
     expect(
-      JSON.parse(localStorage.getItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY) ?? 'null')
+      JSON.parse(uiSettingsStorage().getItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY) ?? 'null')
     ).toEqual({ priorMicrophoneMuted: false })
 
     // A full renderer reload retains both the backend takeover and ownership of
@@ -4689,7 +4693,7 @@ describe('real StudioProvider lifecycle', () => {
         latest()?.core.activeScreen === null &&
         latest()?.core.captureConfig.audio.microphoneMuted === false
     )
-    expect(localStorage.getItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY)).toBeNull()
+    expect(uiSettingsStorage().getItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY)).toBeNull()
 
     await act(async () => latest()?.core.activateScreen(takeoverScreen.id))
     await waitForObservation(
@@ -4716,7 +4720,7 @@ describe('real StudioProvider lifecycle', () => {
         latest()?.core.activeScreen === null &&
         latest()?.core.captureConfig.audio.microphoneMuted === false
     )
-    expect(localStorage.getItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY)).toBeNull()
+    expect(uiSettingsStorage().getItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY)).toBeNull()
   })
 
   it('releases a takeover-owned mute at launch even when another bootstrap request fails', async () => {
@@ -4743,11 +4747,11 @@ describe('real StudioProvider lifecycle', () => {
     })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY,
       JSON.stringify({ priorMicrophoneMuted: false })
     )
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify({
         ...defaultCaptureConfig,
@@ -4758,18 +4762,21 @@ describe('real StudioProvider lifecycle', () => {
     // record, so the stored mute is never left without the record that
     // releases it.
     const releaseWrites: string[] = []
-    const setItem = localStorage.setItem.bind(localStorage)
-    const removeItem = localStorage.removeItem.bind(localStorage)
-    vi.spyOn(localStorage, 'setItem').mockImplementation((key: string, value: string) => {
-      if (
-        key === STORAGE_KEYS.captureConfig &&
-        JSON.parse(value).audio?.microphoneMuted === false
-      ) {
-        releaseWrites.push('unmuted config')
-      }
-      setItem(key, value)
-    })
-    vi.spyOn(localStorage, 'removeItem').mockImplementation((key: string) => {
+    const storage = uiSettingsStorage()
+    const setItem = storage.setItem.bind(storage)
+    const removeItem = storage.removeItem.bind(storage)
+    const setItemSpy = vi
+      .spyOn(storage, 'setItem')
+      .mockImplementation((key: string, value: string) => {
+        if (
+          key === STORAGE_KEYS.captureConfig &&
+          JSON.parse(value).audio?.microphoneMuted === false
+        ) {
+          releaseWrites.push('unmuted config')
+        }
+        setItem(key, value)
+      })
+    const removeItemSpy = vi.spyOn(storage, 'removeItem').mockImplementation((key: string) => {
       if (key === SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY) {
         releaseWrites.push('ownership removed')
       }
@@ -4801,11 +4808,14 @@ describe('real StudioProvider lifecycle', () => {
         latest()?.core.activeScreen === null &&
         latest()?.core.captureConfig.audio.microphoneMuted === false
     )
-    expect(localStorage.getItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY)).toBeNull()
+    expect(uiSettingsStorage().getItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY)).toBeNull()
     expect(
-      JSON.parse(localStorage.getItem(STORAGE_KEYS.captureConfig) ?? '{}').audio.microphoneMuted
+      JSON.parse(uiSettingsStorage().getItem(STORAGE_KEYS.captureConfig) ?? '{}').audio
+        .microphoneMuted
     ).toBe(false)
     expect(releaseWrites.slice(0, 2)).toEqual(['unmuted config', 'ownership removed'])
+    setItemSpy.mockRestore()
+    removeItemSpy.mockRestore()
   })
 
   // Plan 195 S4: `screens.active` rides the liveControl lane, which a slow
@@ -6181,8 +6191,11 @@ describe('real StudioProvider lifecycle', () => {
     Object.assign(api, { openCommentsWindow })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify({ openStreamManagerOnLive: true }))
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
+      STORAGE_KEYS.settings,
+      JSON.stringify({ openStreamManagerOnLive: true })
+    )
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify({
         ...defaultCaptureConfig,
@@ -6357,7 +6370,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify({
         ...defaultCaptureConfig,
@@ -6506,7 +6519,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify({
         ...defaultCaptureConfig,
@@ -6682,7 +6695,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify({
         ...defaultCaptureConfig,
@@ -6916,7 +6929,7 @@ describe('real StudioProvider lifecycle', () => {
       })
     )
     restoreEnvironment = testDom.restore
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify(youtubeOauthStreamCaptureConfig())
     )
@@ -6984,7 +6997,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify(youtubeOauthStreamCaptureConfig())
     )
@@ -7053,7 +7066,7 @@ describe('real StudioProvider lifecycle', () => {
     ;(api as unknown as { exitApp: typeof exitApp }).exitApp = exitApp
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify({
         ...defaultCaptureConfig,
@@ -8049,11 +8062,13 @@ describe('real StudioProvider lifecycle', () => {
         sceneNamed(latest(), 'Presentation').visual.layout.cameraZoom === 160
     )
     expect(latest().savedSceneModified).toBe(false)
-    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.cameraZoom).toBe(160)
+    expect(
+      JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).visual.layout.cameraZoom
+    ).toBe(160)
     expect(storedSceneNamed('Presentation').layouts.horizontal.cameraZoom).toBe(160)
     expect(storedSceneNamed('Closeup').layouts.horizontal.cameraZoom).toBe(175)
     // The library is v2 only: the v1 key is never written (D15).
-    expect(localStorage.getItem(SCENE_LIBRARY_KEY)).toBeNull()
+    expect(uiSettingsStorage().getItem(SCENE_LIBRARY_KEY)).toBeNull()
     expect(storedLibrary().onStreamId).toBe(first.id)
     // Undo is one more commit while the scene is on: it keeps the undone look.
     await act(async () => {
@@ -8267,12 +8282,15 @@ describe('real StudioProvider lifecycle', () => {
         background: null
       })
     }
-    localStorage.setItem(SCENE_LIBRARY_KEY, JSON.stringify({ version: 1, scenes: [appScene] }))
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
+      SCENE_LIBRARY_KEY,
+      JSON.stringify({ version: 1, scenes: [appScene] })
+    )
+    uiSettingsStorage().setItem(
       WORKING_SCENE_KEY,
       JSON.stringify({ version: 1, origin: 'saved', sceneId: appScene.id, visual: appScene.visual })
     )
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify({
         ...defaultCaptureConfig,
@@ -8665,12 +8683,14 @@ describe('real StudioProvider lifecycle', () => {
     // Kept per camera in the settings, never in a scene or the capture config.
     await waitForObservation(
       () =>
-        JSON.parse(localStorage.getItem(STORAGE_KEYS.settings) ?? '{}').cameraBackgrounds?.[
+        JSON.parse(uiSettingsStorage().getItem(STORAGE_KEYS.settings) ?? '{}').cameraBackgrounds?.[
           'camera:1'
         ]?.mode === 'blur'
     )
     expect(JSON.stringify(storedLibrary())).not.toContain('cameraBackground')
-    expect(localStorage.getItem(STORAGE_KEYS.captureConfig)).not.toContain('cameraBackground')
+    expect(uiSettingsStorage().getItem(STORAGE_KEYS.captureConfig)).not.toContain(
+      'cameraBackground'
+    )
     // Record carries it too.
     await act(async () => latest().startSession())
     await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'recording')
@@ -8810,7 +8830,9 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => latest().refreshBackend({ fresh: true }))
     expect(latest().captureConfig.sources.cameraOff).toBe(true)
     expect(latest().captureConfig.sources.cameraId).toBeUndefined()
-    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.sources.cameraOff).toBe(true)
+    expect(
+      JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).visual.sources.cameraOff
+    ).toBe(true)
     const staleOnConfig = {
       ...latest().captureConfig,
       sources: buildCameraSources(latest().captureConfig.sources, cameras, 'camera:1')
@@ -8818,7 +8840,7 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => root!.unmount())
     root = null
     // The working checkpoint owns visual intent even if capture storage is older.
-    localStorage.setItem(STORAGE_KEYS.captureConfig, JSON.stringify(staleOnConfig))
+    uiSettingsStorage().setItem(STORAGE_KEYS.captureConfig, JSON.stringify(staleOnConfig))
     observations.length = 0
     root = await mountStudioProvider(testDom.container, (value) => {
       observations.push(value)
@@ -8901,7 +8923,8 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().scene!.sources.find((source) => source.kind === 'camera')!.visible).toBe(true)
     expect(latest().captureConfig.layout.sourceVisibility?.camera).toBe(true)
     expect(
-      JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility.camera
+      JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility
+        .camera
     ).toBe(true)
     backend.layoutApplyFailure = null
     await act(async () => {
@@ -8911,7 +8934,8 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().savedSceneModified).toBe(false)
     expect(latest().captureConfig.sources.cameraId).toBe('camera:1')
     expect(
-      JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility.camera
+      JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility
+        .camera
     ).toBe(false)
     expect(
       backend.sentCommands.filter((command) => command.method === 'scene.source.visibility.update')
@@ -8977,7 +9001,8 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().scene!.sources.find((source) => source.kind === 'camera')!.visible).toBe(true)
     expect(latest().captureConfig.layout.sourceVisibility?.camera).toBe(true)
     expect(
-      JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility.camera
+      JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility
+        .camera
     ).toBe(true)
     backend.layoutApplyFailure = 'request-outcome-unknown-after-commit'
     const start = backend.sentCommands.length
@@ -8990,7 +9015,8 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().captureConfig.sources.cameraId).toBe(hidden.visual.sources.cameraId)
     expect(latest().captureConfig.sources.cameraOff).not.toBe(true)
     expect(
-      JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility.camera
+      JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility
+        .camera
     ).toBe(false)
     expect(
       backend.sentCommands
@@ -9048,7 +9074,7 @@ describe('real StudioProvider lifecycle', () => {
       await act(async () => {
         expect(saveScene('Visible')).toBe(true)
       })
-      const checkpoint = localStorage.getItem(WORKING_SCENE_KEY)
+      const checkpoint = uiSettingsStorage().getItem(WORKING_SCENE_KEY)
       const camera = latest().scene!.sources.find((source) => source.kind === 'camera')!
       const hiddenScene = {
         ...backend.currentScene,
@@ -9086,7 +9112,7 @@ describe('real StudioProvider lifecycle', () => {
         )
         expect(canSaveScene()).toBe(false)
         expect(latest().savedSceneModified).toBe(false)
-        expect(localStorage.getItem(WORKING_SCENE_KEY)).toBe(checkpoint)
+        expect(uiSettingsStorage().getItem(WORKING_SCENE_KEY)).toBe(checkpoint)
         if (outcome === 'superseded') {
           await act(async () => latest().applyCameraPreset({ cameraZoom: 143 }))
           await waitForObservation(
@@ -9117,7 +9143,7 @@ describe('real StudioProvider lifecycle', () => {
             expect(latest().scene!.sources.find((source) => source.id === camera.id)!.visible).toBe(
               false
             )
-            expect(localStorage.getItem(WORKING_SCENE_KEY)).toBe(checkpoint)
+            expect(uiSettingsStorage().getItem(WORKING_SCENE_KEY)).toBe(checkpoint)
           }
         }
         if (
@@ -9163,8 +9189,8 @@ describe('real StudioProvider lifecycle', () => {
           )
           expect(latest().savedSceneModified).toBe(false)
           expect(
-            JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility
-              .camera
+            JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).visual.layout
+              .sourceVisibility.camera
           ).toBe(false)
           expect(latest().captureConfig.layout.sourceVisibility?.camera).toBe(false)
         } else {
@@ -9176,8 +9202,8 @@ describe('real StudioProvider lifecycle', () => {
             true
           )
           expect(
-            JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility
-              .camera
+            JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).visual.layout
+              .sourceVisibility.camera
           ).toBe(true)
         }
         expect(latest().captureConfig.sources.cameraId).toBe('camera:1')
@@ -9231,7 +9257,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().captureConfig.sources.windowId).toBeUndefined()
     expect(latest().activeSavedSceneId).toBe(saved.id)
     expect(latest().captureConfig.layoutFramingMemory.layouts['screen-camera'].cameraZoom).toBe(100)
-    const storage = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+    const storage = vi.spyOn(uiSettingsStorage(), 'setItem').mockImplementation(() => {
       throw new Error('full')
     })
     await act(async () => {
@@ -9325,7 +9351,10 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().scene?.background?.assetId).toBe('builtin-bg-01')
     expect(latest().captureConfig.layoutFramingMemory).toEqual(memory)
     expect(
-      sameSceneVisual(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual, firstNow.visual)
+      sameSceneVisual(
+        JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).visual,
+        firstNow.visual
+      )
     ).toBe(true)
     backend.layoutApplyFailure = 'definite'
     await act(async () => {
@@ -9334,7 +9363,10 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().activeSavedSceneId).toBe(first.id)
     expect(latest().captureConfig.layoutFramingMemory).toEqual(memory)
     expect(
-      sameSceneVisual(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual, firstNow.visual)
+      sameSceneVisual(
+        JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).visual,
+        firstNow.visual
+      )
     ).toBe(true)
     backend.layoutApplyFailure = null
     await act(async () => latest().applyWorkingBackgroundStyle({ dimPercent: 35 }))
@@ -9354,7 +9386,7 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => latest().activeSavedSceneId === before.id && canSaveScene())
     expect(latest().savedScenes.some((scene) => scene.id === first.id)).toBe(false)
     expect(storedLibrary().onStreamId).toBe(before.id)
-    const checkpoint = JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!)
+    const checkpoint = JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!)
     expect(checkpoint.sceneId).toBe(before.id)
     expect(latest().captureConfig.layout.layoutPreset).toBe(before.visual.layout.layoutPreset)
   })
@@ -9447,11 +9479,11 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().captureConfig.layout.cameraZoom).toBe(first.visual.layout.cameraZoom)
     expect(latest().savedScenes).toHaveLength(count)
     expect(latest().scene?.background?.assetId).toBe('builtin-bg-01')
-    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.background.assetId).toBe(
-      'builtin-bg-01'
-    )
+    expect(
+      JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).visual.background.assetId
+    ).toBe('builtin-bg-01')
     expect(backend.currentLayout.cameraZoom).toBe(first.visual.layout.cameraZoom)
-    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).sceneId).toBe(first.id)
+    expect(JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).sceneId).toBe(first.id)
   })
 
   it('keeps actual Scene controls eligible across composition retirement and ignores delayed older proof', async () => {
@@ -9477,7 +9509,7 @@ describe('real StudioProvider lifecycle', () => {
       })
     )
     restoreEnvironment = testDom.restore
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.captureConfig,
       JSON.stringify({
         ...defaultCaptureConfig,
@@ -9645,7 +9677,7 @@ describe('real StudioProvider lifecycle', () => {
         })
       )
       restoreEnvironment = testDom.restore
-      localStorage.setItem(
+      uiSettingsStorage().setItem(
         STORAGE_KEYS.captureConfig,
         JSON.stringify({ ...defaultCaptureConfig, sources })
       )
@@ -9892,9 +9924,9 @@ describe('real StudioProvider lifecycle', () => {
         .some((command) => command.method === 'scene.load_from_capture_config')
     )
     await act(async () => latest().refreshBackend({ fresh: true }))
-    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.sources.cameraId).toBe(
-      cameraId
-    )
+    expect(
+      JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).visual.sources.cameraId
+    ).toBe(cameraId)
     expect(latest().captureConfig.layout.cameraZoom).toBe(145)
     expect(latest().activeSavedSceneId).toBe(saved.id)
     // Plan 231 D11: the edit saved into the scene before the remount.
@@ -9935,8 +9967,8 @@ describe('real StudioProvider lifecycle', () => {
     const saved = sceneNamed(latest(), 'Launch')
     await act(async () => root!.unmount())
     observations.length = 0
-    const working = JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!)
-    localStorage.setItem(
+    const working = JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!)
+    uiSettingsStorage().setItem(
       WORKING_SCENE_KEY,
       JSON.stringify({
         ...working,
@@ -10151,9 +10183,9 @@ describe('real StudioProvider lifecycle', () => {
       expect(storedSceneNamed('beta').shows).toEqual(beta.shows)
       expect(latest().activeSavedSceneId).toBe(alpha.id)
       expect(latest().captureConfig.sources.windowId).toBe('window:alpha')
-      expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.sources.windowId).toBe(
-        'window:alpha'
-      )
+      expect(
+        JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).visual.sources.windowId
+      ).toBe('window:alpha')
       expect(canSaveScene()).toBe(true)
     } finally {
       release()
@@ -10698,7 +10730,7 @@ describe('real StudioProvider lifecycle', () => {
       scenes: { 'default-screen-only': 'Control+F14', 'default-side-by-side': 'Control+F15' }
     }
     seedSceneLibrary(scenes, 'default-screen-camera', { pendingShortcuts: migrated })
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.settings,
       JSON.stringify({
         animateSceneChanges: true,
@@ -10716,7 +10748,7 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => storedLibrary().pendingShortcuts === undefined)
     expect(latest().settings.globalShortcuts).toEqual(migrated)
     expect(latest().settings.animateSceneChanges).toBe(true)
-    const settings = JSON.parse(localStorage.getItem(STORAGE_KEYS.settings)!)
+    const settings = JSON.parse(uiSettingsStorage().getItem(STORAGE_KEYS.settings)!)
     expect(settings.globalShortcuts).toEqual(migrated)
     // The library stays the one stored: never made again.
     expect(storedLibrary().scenes.map((scene) => scene.name)).toEqual(
@@ -10815,7 +10847,7 @@ describe('real StudioProvider lifecycle', () => {
       })
     )
     restoreEnvironment = testDom.restore
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       STORAGE_KEYS.settings,
       JSON.stringify({
         animateSceneChanges: true,
@@ -10839,12 +10871,12 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().settings.animateSceneChanges).toBe(true)
     await waitForObservation(
       () =>
-        JSON.parse(localStorage.getItem(STORAGE_KEYS.settings)!).globalShortcuts?.scenes?.[
+        JSON.parse(uiSettingsStorage().getItem(STORAGE_KEYS.settings)!).globalShortcuts?.scenes?.[
           sceneNamed(latest(), 'Screen only').id
         ] === 'Control+F14'
     )
     expect(
-      JSON.parse(localStorage.getItem(STORAGE_KEYS.settings)!).globalShortcuts.layouts
+      JSON.parse(uiSettingsStorage().getItem(STORAGE_KEYS.settings)!).globalShortcuts.layouts
     ).toBeUndefined()
 
     // The streamer changes a key: the next launch keeps it, and migrates nothing.
@@ -10934,7 +10966,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().activeSavedSceneId).toBe(saved.id)
     expect(latest().scene?.background?.assetId).toBe('builtin-bg-01')
     expect(latest().captureConfig.layoutFramingMemory).toEqual(memory)
-    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).sceneId).toBe(saved.id)
+    expect(JSON.parse(uiSettingsStorage().getItem(WORKING_SCENE_KEY)!).sceneId).toBe(saved.id)
     expect(notification('preview-behind')).toMatchObject({
       tone: 'news',
       title: 'The preview may be behind'
@@ -14248,7 +14280,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem('videorc.aiConsent', '1')
+    uiSettingsStorage().setItem('videorc.aiConsent', '1')
     const observations: StudioObservation[] = []
     const latest = (): StudioObservation | undefined => observations.at(-1)
 
@@ -14275,7 +14307,7 @@ describe('real StudioProvider lifecycle', () => {
     // No account is signed in on this fake backend, so cloud AI readiness is
     // NOT ready — and the persisted consent must survive untouched. (The
     // removed auto-revoke effect flipped it to '0' on mount.)
-    expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
+    expect(uiSettingsStorage().getItem('videorc.aiConsent')).toBe('1')
   })
 
   // Live Chat Co-host S2: the renderer must start the engine for the live chat
@@ -14295,7 +14327,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem('videorc.aiConsent', '1')
+    uiSettingsStorage().setItem('videorc.aiConsent', '1')
     const observations: StudioObservation[] = []
     const latest = (): StudioObservation | undefined => observations.at(-1)
 
@@ -14404,7 +14436,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem('videorc.aiConsent', '1')
+    uiSettingsStorage().setItem('videorc.aiConsent', '1')
     const observations: StudioObservation[] = []
     const latest = (): StudioObservation | undefined => observations.at(-1)
     await act(async () => {
@@ -14469,7 +14501,7 @@ describe('real StudioProvider lifecycle', () => {
         listening: consent ? { state: 'on' } : { state: 'blocked', reasonCode: 'consent-required' }
       })
       expect(latest()!.chat.liveChatSnapshot.sessionId).toBe('consent-live')
-      expect(localStorage.getItem('videorc.aiConsent')).toBe(consent ? '1' : '0')
+      expect(uiSettingsStorage().getItem('videorc.aiConsent')).toBe(consent ? '1' : '0')
     }
     expect(
       backend.sentCommands
@@ -14509,7 +14541,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem('videorc.aiConsent', '0')
+    uiSettingsStorage().setItem('videorc.aiConsent', '0')
     const observations: StudioObservation[] = []
     const latest = (): StudioObservation | undefined => observations.at(-1)
 
@@ -14592,7 +14624,7 @@ describe('real StudioProvider lifecycle', () => {
     Object.assign(api, { pushCohostEnableResult })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem('videorc.aiConsent', consent)
+    uiSettingsStorage().setItem('videorc.aiConsent', consent)
     const observations: StudioObservation[] = []
     const latest = (): StudioObservation | undefined => observations.at(-1)
     root = await mountStudioProvider(testDom.container, (value) => {
@@ -14619,13 +14651,13 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => latest()?.core.buddyConsentRequested === true)
     // Asking writes nothing: no consent and no settings until the answer.
     expect(settingsWrites()).toEqual([])
-    expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
+    expect(uiSettingsStorage().getItem('videorc.aiConsent')).toBe('0')
 
     await act(async () => latest()!.core.answerBuddyConsent(true))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
     expect(latest()!.core.buddyConsentRequested).toBe(false)
     expect(latest()!.core.aiConsent).toBe(true)
-    expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
+    expect(uiSettingsStorage().getItem('videorc.aiConsent')).toBe('1')
     // One click never grants consent and listening at once (the Phase 0 review).
     expect(settingsWrites()).toEqual([{ enabled: true }])
     expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: false })
@@ -14637,7 +14669,7 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === false)
     expect(settingsWrites()).toEqual([{ enabled: true }, { listen: true }, { enabled: false }])
     expect(latest()!.core.cohostSettings?.listen).toBe(true)
-    expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
+    expect(uiSettingsStorage().getItem('videorc.aiConsent')).toBe('1')
     expect(toastSpies.error).not.toHaveBeenCalled()
   }, 15_000)
 
@@ -14650,7 +14682,7 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => latest()?.core.buddyConsentRequested === false)
 
     expect(latest()!.core.aiConsent).toBe(false)
-    expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
+    expect(uiSettingsStorage().getItem('videorc.aiConsent')).toBe('0')
     expect(settingsWrites()).toEqual([])
     expect(latest()!.core.cohostSettings?.enabled).toBe(false)
   }, 15_000)
@@ -14671,7 +14703,7 @@ describe('real StudioProvider lifecycle', () => {
 
     await act(async () => latest()!.core.setAiConsent(false))
     await waitForObservation(() => latest()?.core.aiConsent === false)
-    expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
+    expect(uiSettingsStorage().getItem('videorc.aiConsent')).toBe('0')
     expect(settingsWrites()).toEqual([{ enabled: true }])
     expect(latest()!.core.cohostSettings?.enabled).toBe(true)
 
@@ -14692,7 +14724,7 @@ describe('real StudioProvider lifecycle', () => {
       emitApi('onCohostEnableRequest', { requestId: 'enable-1', enabled: true, grantConsent: true })
     })
     await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 1)
-    expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
+    expect(uiSettingsStorage().getItem('videorc.aiConsent')).toBe('1')
     expect(settingsWrites()).toEqual([{ enabled: true }])
     expect(pushCohostEnableResult).toHaveBeenLastCalledWith({
       requestId: 'enable-1',
@@ -14853,7 +14885,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem('videorc.aiConsent', '1')
+    uiSettingsStorage().setItem('videorc.aiConsent', '1')
     const observations: StudioObservation[] = []
     const latest = (): StudioObservation | undefined => observations.at(-1)
     root = await mountStudioProvider(testDom.container, (value) => {
@@ -14983,8 +15015,8 @@ describe('real StudioProvider lifecycle', () => {
     })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem('videorc.aiConsent', '1')
-    localStorage.setItem('videorc.cleanCutAuto', '1')
+    uiSettingsStorage().setItem('videorc.aiConsent', '1')
+    uiSettingsStorage().setItem('videorc.cleanCutAuto', '1')
     const observations: StudioObservation[] = []
     const latest = (): StudioObservation | undefined => observations.at(-1)
     root = await mountStudioProvider(testDom.container, (value) => {
@@ -15028,7 +15060,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(starts()).toEqual([
       { sessionId: 'clean-cut-1', mode: 'clean', consentToUploadAudio: true }
     ])
-    expect(JSON.parse(localStorage.getItem('videorc.cleanCutAttempted') ?? '[]')).toEqual([
+    expect(JSON.parse(uiSettingsStorage().getItem('videorc.cleanCutAttempted') ?? '[]')).toEqual([
       'clean-cut-1'
     ])
 
@@ -15094,7 +15126,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
-    localStorage.setItem('videorc.aiConsent', '1')
+    uiSettingsStorage().setItem('videorc.aiConsent', '1')
     const observations: StudioObservation[] = []
     const latest = (): StudioObservation | undefined => observations.at(-1)
     root = await mountStudioProvider(testDom.container, (value) => {
@@ -20319,7 +20351,7 @@ describe('real StudioProvider lifecycle', () => {
     const testDom = installProviderTestEnvironment(api)
     restoreEnvironment = testDom.restore
     if (chosen) {
-      localStorage.setItem(STORAGE_KEYS.outputChosenByUser, '1')
+      uiSettingsStorage().setItem(STORAGE_KEYS.outputChosenByUser, '1')
     }
     const observations: StudioObservation[] = []
     const latest = (): StudioObservation | undefined => observations.at(-1)

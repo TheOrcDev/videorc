@@ -4031,9 +4031,9 @@ async function seedRendererSystemAudio() {
     code: `
       const key = 'videorc.captureConfig';
       let current = {};
-      try { current = JSON.parse(localStorage.getItem(key) ?? '{}') ?? {}; } catch {}
+      try { current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}') ?? {}; } catch {}
       const audio = { ...(current.audio ?? {}), systemAudioEnabled: true, systemAudioGainDb: -6 };
-      localStorage.setItem(key, JSON.stringify({ ...current, audio }));
+      window.__videorcUiSettings.setItem(key, JSON.stringify({ ...current, audio }));
       ${reloadKeepingSeedJs({ forgetWorkingScene: false })}
       return true;
     `

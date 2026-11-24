@@ -30,6 +30,7 @@ import {
   usePrivacySettings,
   type PrivacySettings
 } from './privacy-settings'
+import { uiSettingsStorage } from './ui-settings-storage'
 
 const names = (settings: PrivacySettings): string[] =>
   passwordManagerEntries(settings).map((entry) => entry.name)
@@ -201,17 +202,15 @@ describe('privacy settings (plan 210 D11)', () => {
 describe('privacy settings store', () => {
   beforeEach(() => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-    localStorage.clear()
     resetPrivacySettingsForTest()
   })
   afterEach(() => {
-    localStorage.clear()
     resetPrivacySettingsForTest()
     vi.unstubAllGlobals()
   })
 
   it('reads the stored value once, persists updates and re-renders readers', async () => {
-    localStorage.setItem(
+    uiSettingsStorage().setItem(
       PRIVACY_SETTINGS_STORAGE_KEY,
       JSON.stringify({ hideForPasswordManagers: false })
     )
@@ -231,7 +230,7 @@ describe('privacy settings store', () => {
     expect(seen).toEqual([false, true])
     expect(getPrivacySettings().hideForPasswordManagers).toBe(true)
     // Back to the defaults: nothing stays stored.
-    expect(localStorage.getItem(PRIVACY_SETTINGS_STORAGE_KEY)).toBeNull()
+    expect(uiSettingsStorage().getItem(PRIVACY_SETTINGS_STORAGE_KEY)).toBeNull()
     await act(async () => root.unmount())
   })
 })

@@ -214,9 +214,9 @@ try {
     code: `
       const key = 'videorc.captureConfig';
       let current = {};
-      try { current = JSON.parse(localStorage.getItem(key) ?? '{}') ?? {}; } catch {}
-      localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, recordEnabled: true, streamEnabled: false }));
-      localStorage.setItem('videorc.aiConsent', '1');
+      try { current = JSON.parse(window.__videorcUiSettings?.getItem(key) ?? '{}') ?? {}; } catch {}
+      window.__videorcUiSettings.setItem(key, JSON.stringify({ ...current, video: params.video, recordEnabled: true, streamEnabled: false }));
+      window.__videorcUiSettings.setItem('videorc.aiConsent', '1');
       ${reloadKeepingSeedJs({ forgetWorkingScene: false })}
       return true;
     `,
@@ -238,7 +238,7 @@ try {
   await waitUntil('the Screen only scene to own the test pattern', async () => {
     const edited = await command('eval-js', {
       code: `
-        const library = JSON.parse(localStorage.getItem('videorc.scenes.v2') ?? 'null');
+        const library = JSON.parse(window.__videorcUiSettings.getItem('videorc.scenes.v2') ?? 'null');
         const scene = library?.scenes?.find((entry) => entry.layouts?.horizontal?.layoutPreset === 'screen-only');
         if (!scene || !window.__videorcSmokeScenePresets) return null;
         scene.shows = { kind: 'test-pattern' };

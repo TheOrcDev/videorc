@@ -3,6 +3,7 @@
 // when the post-update dialog should appear.
 
 import { toast } from '@/lib/toast'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 import { openVideorcWebLink, VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 
 export const WHATS_NEW_STORAGE_KEY = 'videorc.whatsNewLastSeenVersion'
@@ -171,7 +172,10 @@ export interface WhatsNewResult {
 type LastSeenStore = Pick<Storage, 'getItem' | 'setItem'>
 
 /** The last seen version advances on a good answer or a dismissal, never on a failed fetch. */
-export function markWhatsNewSeen(version: string, store: LastSeenStore = localStorage): void {
+export function markWhatsNewSeen(
+  version: string,
+  store: LastSeenStore = uiSettingsStorage()
+): void {
   store.setItem(WHATS_NEW_STORAGE_KEY, version)
 }
 
@@ -185,7 +189,7 @@ export function markWhatsNewSeen(version: string, store: LastSeenStore = localSt
 export async function checkWhatsNew({
   version,
   runtimePlatform,
-  store = localStorage,
+  store = uiSettingsStorage(),
   fetchImpl
 }: {
   version: string

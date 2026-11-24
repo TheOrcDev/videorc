@@ -1,3 +1,5 @@
+import { uiSettingsStorage } from './ui-settings-storage'
+
 export const SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY = 'videorc.screenTakeoverMuteOwnership.v1'
 
 export type ScreenTakeoverMuteOwnership = Readonly<{
@@ -38,7 +40,7 @@ export function screenTakeoverMicrophoneTransition(input: {
 }
 
 export function loadScreenTakeoverMuteOwnership(
-  storage: Pick<Storage, 'getItem'> = localStorage
+  storage: Pick<Storage, 'getItem'> = uiSettingsStorage()
 ): ScreenTakeoverMuteOwnership | null {
   try {
     const raw = storage.getItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY)
@@ -57,7 +59,7 @@ export function loadScreenTakeoverMuteOwnership(
 
 export function persistScreenTakeoverMuteOwnership(
   ownership: ScreenTakeoverMuteOwnership | null,
-  storage: Pick<Storage, 'setItem' | 'removeItem'> = localStorage
+  storage: Pick<Storage, 'setItem' | 'removeItem'> = uiSettingsStorage()
 ): void {
   try {
     if (ownership) {
@@ -66,7 +68,7 @@ export function persistScreenTakeoverMuteOwnership(
       storage.removeItem(SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY)
     }
   } catch {
-    // Storage can be unavailable in hardened/test renderer contexts. The ref
-    // still preserves ownership for this renderer lifetime.
+    // The store can refuse a write. The ref still preserves ownership for
+    // this renderer lifetime.
   }
 }

@@ -166,7 +166,7 @@ try {
   // before the app reads it — so set keys, then do the ONE reload that is the
   // experiment itself, capturing before and after.
   await cdp.send('Runtime.evaluate', {
-    expression: `localStorage.setItem('videorc.onboardingComplete', 'creator-ux-v1'); localStorage.setItem('videorc.theme', 'dark')`
+    expression: `window.__videorcUiSettings.setItem('videorc.onboardingComplete', 'creator-ux-v1'); window.__videorcUiSettings.setItem('videorc.theme', 'dark'); localStorage.setItem('videorc.theme', 'dark')`
   })
 
   const { windowId } = await smokeCommand(smoke, 'main-window-id')

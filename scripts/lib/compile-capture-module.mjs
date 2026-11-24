@@ -34,7 +34,8 @@ export function withRelativeAliases(code, source) {
  * capture.ts's runtime imports and theirs, from the repository root. Plan 174
  * S1.4 gave capture.ts the formatters and the platform words, and
  * layout-framing-memory the layout labels; plan 213 I gave it the camera look,
- * and plan 258 S1 the camera background.
+ * and plan 258 S1 the camera background; plan 260 S1.4b reads its stored
+ * config through the UI settings store.
  * A module missing here fails every smoke that compiles capture.ts with
  * "Cannot find module".
  */
@@ -49,6 +50,8 @@ const CAPTURE_RUNTIME_DEPENDENCIES = [
   'apps/desktop/src/renderer/src/lib/layout-labels.ts',
   'apps/desktop/src/renderer/src/lib/platform-copy.ts',
   'apps/desktop/src/renderer/src/lib/platform.ts',
+  'apps/desktop/src/renderer/src/lib/ui-settings-storage.ts',
+  'apps/desktop/src/renderer/src/lib/ui-settings-store.ts',
   'apps/desktop/src/shared/backend.ts',
   'apps/desktop/src/shared/stream-platforms.ts'
 ]

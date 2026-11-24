@@ -81,6 +81,7 @@ import {
   type RemovalAnswer
 } from '@/lib/chat-removal-view'
 import { holdUndoableAction, type UndoableAction } from '@/lib/undoable-action'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 import { hydrateUiSettingsBeforeFirstRender } from '@/lib/ui-settings-window'
 import { mergeModerationOperations } from '../../shared/chat-moderation'
 import { reconcileBrokerCommentsSnapshot } from '../../shared/comments-snapshot-delta'
@@ -402,7 +403,7 @@ function CommentsWindowApp(): ReactElement {
   const [cohost, setCohost] = useState<CohostWindowState>(offCohostWindowState)
   const [cohostActionPending, setCohostActionPending] = useState(false)
   const [cohostNudgeDismissed, setCohostNudgeDismissed] = useState(() =>
-    cohostNudgeDismissedFromStorage(localStorage.getItem(COHOST_NUDGE_STORAGE_KEY))
+    cohostNudgeDismissedFromStorage(uiSettingsStorage().getItem(COHOST_NUDGE_STORAGE_KEY))
   )
   useEffect(() => {
     const applyView = (next: CommentsViewSnapshot): void => {
@@ -989,7 +990,7 @@ function CommentsWindowApp(): ReactElement {
           onCohostListenOn={turnListeningOn}
           onCohostNudgeDismiss={() => {
             setCohostNudgeDismissed(true)
-            localStorage.setItem(COHOST_NUDGE_STORAGE_KEY, '1')
+            uiSettingsStorage().setItem(COHOST_NUDGE_STORAGE_KEY, '1')
           }}
           onCohostDismissFlag={(flag) => void sendCohostAction('dismiss-flag')(flag.messageId)}
           onCohostDismissQuestion={(question) =>

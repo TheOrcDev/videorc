@@ -371,7 +371,7 @@ test('the working scene puts Screen only on stream with no camera', () => {
 })
 
 /**
- * A fake Studio over a Map-backed localStorage. On reload it starts the way
+ * A fake Studio over a Map-backed UI settings store. On reload it starts the way
  * use-studio.tsx does: the working scene's sources and layout override the
  * saved config, and its scene goes to the backend. `settleAfterPolls` delays
  * that, like the real re-persist a few seconds after the reload.
@@ -429,7 +429,7 @@ function fakeStudio({ storage = {}, settleAfterPolls = 2, ignoresWorkingScene = 
       throw new Error(method)
     },
     evaluate: async (expression) =>
-      new Function('localStorage', `return ${expression}`)(localStorage),
+      new Function('window', `return ${expression}`)({ __videorcUiSettings: localStorage }),
     reloadAndWait: async () => {
       calls.push({ method: 'reload' })
       pending = settleAfterPolls

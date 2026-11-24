@@ -17,6 +17,7 @@ import {
 import { cloudAiUploadGate } from './entitlement-ui'
 import { applyFinalizationEvent } from './session-finalization'
 import { withWorkNotifications } from './notify'
+import { uiSettingsStorage } from './ui-settings-storage'
 
 // Plan 119 S15: with "Make a clean cut of every recording" on, a recording
 // that finishes its MP4 gets its clean cut without a click. Cloud consent
@@ -141,12 +142,15 @@ export interface CleanCutAutoContext {
   consent: boolean
   entitlements: EntitlementsSnapshot | null
   capabilities: AiCapabilities | null
-  /** localStorage by default; null when unavailable. Every access is guarded. */
+  /**
+   * The UI settings store by default (plan 220 S1.4b); null when unavailable.
+   * Every access is guarded.
+   */
   storage?: CleanCutStorage | null
 }
 
 // Backstop for the storage ledger: a second finalized event in this window
-// never starts a second job, even when localStorage throws.
+// never starts a second job, even when storage throws.
 const claimedSessionIds = new Set<string>()
 
 /** Tests only. */
@@ -264,11 +268,7 @@ async function findSessionRow(
 }
 
 function browserStorage(): CleanCutStorage | null {
-  try {
-    return globalThis.localStorage ?? null
-  } catch {
-    return null
-  }
+  return uiSettingsStorage()
 }
 
 function readStorage(storage: CleanCutStorage | null, key: string): string | null {
