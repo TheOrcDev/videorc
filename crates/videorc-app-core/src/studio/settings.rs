@@ -541,8 +541,11 @@ pub fn retry_delay(step: usize) -> Duration {
 }
 
 /// The store's limits (`ui_settings.rs`, `UI_SETTINGS_*` in `shared/backend.ts`).
+/// A value is at most 8 MiB serialized, so a previous release's whole scene
+/// library fits (#1833 raised it from 1 MiB). The limits stay in the backend,
+/// not `videorc-protocol`, so they are mirrored here.
 pub const KEY_MAX_CHARS: usize = 256;
-pub const VALUE_MAX_BYTES: usize = 1024 * 1024;
+pub const VALUE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 /// `migrationRefusal`: why the store would refuse this key or value, or
 /// `None`. A write past the limits fails at once, as full web storage did,
@@ -894,6 +897,12 @@ mod tests {
         );
         assert!(write_refusal("videorc.\u{0007}", None).is_some());
         assert!(write_refusal(" videorc.x", None).is_some());
+        let library = Value::String("x".repeat(2 * 1024 * 1024));
+        assert_eq!(
+            write_refusal(keys::THEME, Some(&library)),
+            None,
+            "a value past the old 1 MiB limit is kept"
+        );
         let huge = Value::String("x".repeat(VALUE_MAX_BYTES));
         assert!(
             write_refusal(keys::THEME, Some(&huge))
