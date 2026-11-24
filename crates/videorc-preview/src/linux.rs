@@ -25,9 +25,12 @@
 //!   child, so the picture fits the slot as viewporter fits it on Wayland.
 //!   The ring's lease goes once the copy is done; a frame of the presenter's
 //!   own is written again only after its `ShmCompletion` (or the X error
-//!   that refused its put). Nothing waits on the server without a bound, so
-//!   a quit or a stalled server never holds the thread, and the ring lease
-//!   never depends on the server at all.
+//!   that refused its put). The ring lease never depends on the server. A
+//!   stalled server can still hold the thread inside a write or a reply
+//!   wait (x11rb has no deadline on either), so those are bounded from
+//!   outside: the setup's one checked request gets `SETUP_WAIT`, and the
+//!   presenter's drop shuts the connection's socket down when the thread
+//!   has not ended `SHUTDOWN_GRACE` after its quit.
 //!
 //! Both are the "layer route" of the element on Linux, named
 //! `wl-shm-subsurface` or `x11-shm-child-window` in the surface's status:
@@ -67,6 +70,12 @@ const RELEASE_WAIT: Duration = Duration::from_millis(250);
 const OWN_BUFFERS: usize = 3;
 /// The thread's idle poll: it wakes for a command, a server event, or this.
 const IDLE_POLL: Duration = Duration::from_millis(250);
+/// X11: how long the drop lets the thread end by itself after its Quit
+/// before it shuts the connection's socket down under it.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+/// X11: how long a setup request may wait for the server's verdict before
+/// the connection is shut down.
+const SETUP_WAIT: Duration = Duration::from_secs(2);
 
 /// A host window the presenter can attach to: it needs the window's handle
 /// (the `wl_surface`, the X11 window) and the display's (the `wl_display`).
@@ -272,6 +281,12 @@ impl PresenterClient {
 pub struct Presenter {
     client: PresenterClient,
     thread: Option<JoinHandle<()>>,
+    /// Disconnects when the thread ends (its sender goes with it).
+    ended: Receiver<()>,
+    /// X11: a duplicate of the connection's socket, so the drop can shut it
+    /// down when the thread does not end by itself (a flush or a reply wait
+    /// on a stalled server). `None` on Wayland: that display is winit's.
+    x11_socket: Option<OwnedFd>,
     placement: Option<Placement>,
     hidden: bool,
 }
@@ -289,6 +304,8 @@ impl Presenter {
         let bell = Arc::new(Doorbell::new()?);
         let (commands, inbox) = mpsc::channel::<Command>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<Backing, String>>();
+        let (ended_tx, ended) = mpsc::channel::<()>();
+        let (socket_tx, socket_rx) = mpsc::channel::<OwnedFd>();
         // Set when `attach` stopped waiting: a child built after that closes
         // at once instead of serving a caller that is gone.
         let abandoned = Arc::new(AtomicBool::new(false));
@@ -297,6 +314,8 @@ impl Presenter {
         let thread = std::thread::Builder::new()
             .name("videorc-linux-presenter".to_string())
             .spawn(move || {
+                // Dropped when the thread ends: the drop's grace wait.
+                let _ended = ended_tx;
                 let wanted = |backing: Backing| {
                     !thread_abandoned.load(Ordering::Acquire) && ready_tx.send(Ok(backing)).is_ok()
                 };
@@ -312,10 +331,17 @@ impl Presenter {
                     }
                 } else if handles.x11_window != 0 {
                     match x11::Child::build(handles) {
-                        Ok(child) if wanted(Backing::X11ChildWindow) => {
-                            child.run(inbox, &thread_bell);
+                        Ok(child) => {
+                            // Before the readiness, so `attach` has it.
+                            if let Some(socket) = child.cancel_handle() {
+                                let _ = socket_tx.send(socket);
+                            }
+                            if wanted(Backing::X11ChildWindow) {
+                                child.run(inbox, &thread_bell);
+                            } else {
+                                child.close();
+                            }
                         }
-                        Ok(child) => child.close(),
                         Err(error) => {
                             let _ = ready_tx.send(Err(format!("X11 child window: {error}")));
                         }
@@ -378,6 +404,8 @@ impl Presenter {
                 backing,
             },
             thread: Some(thread),
+            ended,
+            x11_socket: socket_rx.try_recv().ok(),
             placement: None,
             hidden: false,
         })
@@ -430,10 +458,38 @@ impl Presenter {
 impl Drop for Presenter {
     fn drop(&mut self) {
         self.client.send(Command::Quit);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        // X11: the thread sees the Quit within one poll, unless it is inside
+        // a write or a reply wait on a server that stopped reading. Past the
+        // grace, its socket is shut down from here: every wait on it ends
+        // with an error, the thread takes its child down (the requests fail;
+        // the server frees a gone client's resources) and ends, and its own
+        // buffers go with it. So the join below is bounded on X11. On
+        // Wayland the thread only ever waits for a bounded poll.
+        if let Some(socket) = self.x11_socket.as_ref()
+            && matches!(
+                self.ended.recv_timeout(SHUTDOWN_GRACE),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            )
+        {
+            eprintln!(
+                "[preview] x11 presenter: no end within {SHUTDOWN_GRACE:?} of its quit; its connection is shut down"
+            );
+            shutdown_socket(socket.as_raw_fd());
         }
+        let _ = thread.join();
     }
+}
+
+/// Shuts a socket down both ways: a blocked read or write on it, in any
+/// thread, returns with an error. The descriptor stays open (its owner
+/// closes it).
+fn shutdown_socket(fd: libc::c_int) {
+    // SAFETY: shutdown on a descriptor the caller keeps open; it never
+    // touches memory.
+    unsafe { libc::shutdown(fd, libc::SHUT_RDWR) };
 }
 
 /// Polls `fds` until one is readable or `timeout` passes; the answer says
@@ -1100,6 +1156,7 @@ mod x11 {
     use std::time::{Duration, Instant};
 
     use x11rb::connection::Connection;
+    use x11rb::cookie::VoidCookie;
     use x11rb::protocol::Event;
     use x11rb::protocol::render::{self, ConnectionExt as _};
     use x11rb::protocol::shape::{self, ConnectionExt as _};
@@ -1109,7 +1166,7 @@ mod x11 {
 
     use super::{
         Command, Doorbell, IDLE_POLL, Mapped, NativeHandles, OWN_BUFFERS, Placement, RELEASE_WAIT,
-        RingMapping, own_memory, poll_readable, report,
+        RingMapping, SETUP_WAIT, own_memory, poll_readable, report, shutdown_socket,
     };
 
     /// One ring's frames on the X side: the ring itself, read-only (the
@@ -1248,6 +1305,40 @@ mod x11 {
             })
         }
 
+        /// A duplicate of the connection's socket for the presenter's drop
+        /// (see `Presenter::drop`).
+        pub(super) fn cancel_handle(&self) -> Option<std::os::fd::OwnedFd> {
+            self.conn.stream().as_fd().try_clone_to_owned().ok()
+        }
+
+        /// The server's verdict on one request, within `SETUP_WAIT`. x11rb's
+        /// `check` waits for it with no deadline, so it waits on a helper
+        /// thread; past the wait the socket is shut down, which ends that
+        /// wait with an error (the helper is joined before this returns) and
+        /// the connection with it, so the child stops at its next poll.
+        fn check_within(
+            conn: &RustConnection,
+            cookie: VoidCookie<'_, RustConnection>,
+            what: &str,
+        ) -> Result<(), String> {
+            std::thread::scope(|scope| {
+                let (verdict_tx, verdict) = std::sync::mpsc::channel();
+                scope.spawn(move || {
+                    let _ = verdict_tx.send(cookie.check());
+                });
+                match verdict.recv_timeout(SETUP_WAIT) {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => Err(format!("{what}: {error}")),
+                    Err(_) => {
+                        shutdown_socket(conn.stream().as_raw_fd());
+                        Err(format!(
+                            "{what}: the X server did not answer within {SETUP_WAIT:?}; its connection is shut down"
+                        ))
+                    }
+                }
+            })
+        }
+
         fn drain_events(&mut self) -> Result<(), String> {
             while let Some(event) = self
                 .conn
@@ -1320,11 +1411,15 @@ mod x11 {
                 .conn
                 .generate_id()
                 .map_err(|error| format!("{error}"))?;
-            self.conn
+            let attached = self
+                .conn
                 .shm_attach_fd(segment, frames_fd, true)
-                .map_err(|error| format!("shm_attach_fd: {error}"))?
-                .check()
-                .map_err(|error| format!("shm_attach_fd (MIT-SHM 1.2 fd passing): {error}"))?;
+                .map_err(|error| format!("shm_attach_fd: {error}"))?;
+            Self::check_within(
+                &self.conn,
+                attached,
+                "shm_attach_fd (MIT-SHM 1.2 fd passing)",
+            )?;
             let pixmap = self
                 .conn
                 .generate_id()
