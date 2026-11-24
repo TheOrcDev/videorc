@@ -1002,6 +1002,9 @@ readiness checks and the cards for the avatar's motion read the backend's
 room. c4b, after c4: the stage's hand-picked screen or window shares into
 the room through a second capture (c3 shares only the scene's own screen,
 the one the preview runs; today's room shares any picked source).
+c6 (latency) moved after S1.8d (decided 2026-11-24): the host's samples of
+the guests' tracks as it receives them need S1.8d's subscriptions, so the
+join is ported once, complete, with no partial reports.
 
 **Blockers for turning the backend's room on by default** (until both
 land, the switch `VIDEORC_BACKEND_ROOM` stays a dev switch):
