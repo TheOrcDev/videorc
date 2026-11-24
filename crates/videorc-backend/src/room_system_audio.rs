@@ -42,6 +42,21 @@ pub(crate) struct Command {
     frames: u32,
 }
 impl Command {
+    /// The backend room's own command (plan 260 S1.8c c4d): the same
+    /// contract the renderer's bridge sends.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn new(action: &str, generation: u64, show_id: &str) -> Self {
+        Self {
+            action: action.to_string(),
+            generation,
+            show_id: show_id.to_string(),
+            role: "host-system-audio".to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+            frames: 480,
+        }
+    }
+
     fn valid(&self) -> bool {
         self.generation > 0
             && self.generation <= 9_007_199_254_740_991
@@ -52,6 +67,13 @@ impl Command {
             && self.channels == 2
             && self.frames == 480
             && matches!(self.action.as_str(), "open" | "pull" | "close")
+    }
+}
+impl Frame {
+    /// Interleaved stereo at 48 kHz.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn samples(&self) -> &[f32] {
+        &self.samples
     }
 }
 #[derive(Serialize)]

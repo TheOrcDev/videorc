@@ -12,6 +12,7 @@ import {
   systemControllerStep
 } from '@/lib/room-audio-routing'
 import { withRestoredBanners } from '@/lib/cloud-restored-banners'
+import { soundboard } from '@/lib/soundboard-store'
 import {
   forgetGraphicsSource,
   graphicsSourceHeld,
@@ -375,6 +376,57 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     send()
     return roomAudioRouting.subscribe(send)
   }, [client, roomOpen, backendHolds])
+  // Plan 260 S1.8c c4d: room sounds and the room's system audio drive the
+  // backend room's aux track; its status shows where the renderer room's did
+  // (the soundboard's room sounds, the routing's system state).
+  useEffect(() => {
+    if (!client || !roomOpen || !backendHolds) return
+    roomAudioRouting.disarmSystem()
+    if (!soundboard.getSnapshot().roomAux)
+      soundboard.setRoomAux({
+        enabled: false,
+        state: 'off',
+        reason: null,
+        queuedVoices: [],
+        trackSid: null,
+        observed: {},
+        productionQualified: false
+      })
+    let sent = ''
+    const send = (): void => {
+      const params = {
+        sounds: soundboard.getSnapshot().roomAux?.enabled === true,
+        system: roomAudioRouting.getSnapshot().system
+      }
+      const key = JSON.stringify(params)
+      if (key === sent) return
+      sent = key
+      void client.requestTyped('cloud.room.aux.set', params).catch(() => {
+        sent = ''
+      })
+    }
+    send()
+    const offs = [soundboard.subscribe(send), roomAudioRouting.subscribe(send)]
+    return () => {
+      offs.forEach((off) => off())
+      soundboard.setRoomAux(undefined)
+      roomAudioRouting.disarmSystem()
+    }
+  }, [client, roomOpen, backendHolds])
+  useEffect(() => {
+    const aux = backendMedia?.aux
+    if (!aux) return
+    soundboard.setRoomAux({
+      enabled: soundboard.getSnapshot().roomAux?.enabled ?? aux.enabled,
+      state: aux.state,
+      reason: aux.reason,
+      queuedVoices: [],
+      trackSid: aux.trackSid,
+      observed: aux.observed,
+      productionQualified: false
+    })
+    roomAudioRouting.status(aux.systemState, aux.systemReason)
+  }, [backendMedia])
   // Plan 260 S1.8c: with the backend in the room (its dev switch), the host's
   // microphone goes there, in the room microphone bridge's settings and
   // bounds. The backend keeps it only while it holds the host seat (it

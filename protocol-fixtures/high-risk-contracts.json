@@ -2914,6 +2914,32 @@
       "speechMuted": false,
       "auxiliaryMuted": true
     },
+    "roomAuxSetParams": {
+      "sounds": true,
+      "system": {
+        "enabled": true,
+        "gainDb": -6,
+        "muted": false
+      }
+    },
+    "roomPresentationAuxEvent": {
+      "showId": "show_talk_1",
+      "media": {
+        "camera": true,
+        "microphone": true,
+        "aux": {
+          "enabled": true,
+          "state": "published",
+          "reason": null,
+          "trackSid": "TR_aux_1",
+          "observed": {
+            "EG_program_h": 1764000000420
+          },
+          "systemState": "capturing",
+          "systemReason": "System source attached. Final audibility and clock sync are unqualified."
+        }
+      }
+    },
     "roomAvatarMotionParams": {
       "message": {
         "v": 1,
