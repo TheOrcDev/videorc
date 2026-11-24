@@ -8,6 +8,7 @@
 //! `videorc-preview`) compile unchanged.
 
 pub mod buddy;
+pub mod chat;
 pub mod client;
 pub mod crash_log;
 pub mod desktop;
