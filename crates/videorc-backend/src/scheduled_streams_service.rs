@@ -3461,6 +3461,62 @@ mod x_tests {
     }
 
     #[tokio::test]
+    async fn fix_time_resends_the_typed_time_and_clears_the_flag() {
+        let (api, fixture, handle) = x_fixture().await;
+        let state = super::tests::state();
+        let mut draft = x_event();
+        draft.requested.time_zone = "America/Vancouver".into();
+        draft.requested.local_start = "2035-01-01T10:00".into();
+        draft.requested.planned_end_local = Some("2035-01-01T12:00".into());
+        let (mut event, m, mut op) = reserve(&state, draft);
+        execute_x(&state, "schedule", &m, &mut event, &mut op, &api, |_, _| {
+            Ok(())
+        })
+        .await
+        .unwrap();
+        state
+            .database
+            .checkpoint_scheduled_operation(&event, &op, true)
+            .unwrap();
+        // Sent with tz 2025b, which still had Vancouver on UTC-8 in January.
+        event.start_utc = "2035-01-01T18:00:00+00:00".into();
+        let flagged = event.clone().public().times.unwrap().start_repair.unwrap();
+        assert_eq!(
+            flagged.corrected_start_utc.as_deref(),
+            Some("2035-01-01T17:00:00Z")
+        );
+
+        // Fix time: the saved metadata, unchanged, through the scheduled update.
+        let mut fix = x_mutation(&event);
+        fix.metadata = Some(event.requested.clone());
+        event.start_utc = event.requested.validate_for("x", false).unwrap();
+        let (mut event, mut op, _) = state
+            .database
+            .begin_scheduled_operation(event, &fix, "update")
+            .unwrap();
+        execute_x(&state, "update", &fix, &mut event, &mut op, &api, |_, _| {
+            Ok(())
+        })
+        .await
+        .unwrap();
+        {
+            let data = fixture.lock().unwrap();
+            let put = data
+                .calls
+                .iter()
+                .rfind(|(method, path, _)| {
+                    method == "PUT" && path.contains("/broadcasts/scheduled/")
+                })
+                .unwrap();
+            assert_eq!(put.2["scheduled_start_ms"], "2051283600000"); // 17:00Z
+            assert_eq!(put.2["scheduled_end_ms"], "2051290800000"); // 19:00Z
+        }
+        assert!(misresolved_start(&event).is_none());
+        assert!(event.public().times.unwrap().start_repair.is_none());
+        handle.abort();
+    }
+
+    #[tokio::test]
     async fn x_prepare_reads_the_owned_source_and_release_preserves_the_schedule() {
         let (api, fixture, handle) = x_fixture().await;
         let state = super::tests::state();

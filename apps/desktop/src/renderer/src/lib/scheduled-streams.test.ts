@@ -6,7 +6,7 @@ import {
   scheduledPrivacyLabel,
   scheduledProviderSections,
   scheduledStartRepair,
-  scheduledStartRepairMutation,
+  scheduledStartRepairParams,
   scheduledWhenLabel,
   selectScheduledStreamForTarget,
   settleScheduledXTargets
@@ -404,21 +404,21 @@ describe('start times sent with older time zone rules', () => {
       ...overrides
     })
 
-  it('flags a published event and fixes it by sending the saved metadata again', () => {
-    const view = scheduledStartRepair(stale(), 'en-US')
-    expect(view?.title).toBe('YouTube shows the wrong start time')
-    expect(view?.description).toMatch(/moves it to .*10:00\s?AM GMT-7, the time you chose\.$/)
-    expect(view?.action).toBe('fix')
-    expect(scheduledStartRepairMutation(stale())).toEqual({
-      action: 'update',
-      fields: { accountId: 'channel', metadata: stale().requested }
+  it('says how far off the platform is and re-sends the typed time unchanged', () => {
+    expect(scheduledStartRepair(stale())).toEqual({
+      line: 'Time is an hour off on YouTube',
+      action: 'fix'
+    })
+    expect(scheduledStartRepair(stale({ provider: 'x' }))?.line).toBe('Time is an hour off on X')
+    expect(scheduledStartRepairParams(stale())).toEqual({
+      eventId: stale().id,
+      expectedRevision: stale().revision,
+      accountId: 'channel',
+      metadata: stale().requested
     })
   })
 
-  it('fixes a draft locally, and asks for an edit when the time no longer exists', () => {
-    const draft = stale({ providerEventId: null, lifecycle: 'draft' })
-    expect(scheduledStartRepair(draft, 'en-US')?.title).toBe('The start time is out of date')
-    expect(scheduledStartRepairMutation(draft).action).toBe('saveDraft')
+  it('asks for an edit when the typed time no longer exists', () => {
     const gone = stale({
       times: {
         startOffsetMinutes: -480,
@@ -427,12 +427,15 @@ describe('start times sent with older time zone rules', () => {
         startRepair: { correctedStartUtc: null, correctedStartOffsetMinutes: null }
       }
     })
-    expect(scheduledStartRepair(gone)).toMatchObject({ action: 'edit' })
-    expect(scheduledStartRepair(gone)?.description).toContain('2026-12-15 10:00 no longer exists')
+    expect(scheduledStartRepair(gone)).toEqual({
+      line: 'Time is off on YouTube, and 2026-12-15 10:00 no longer exists there',
+      action: 'edit'
+    })
   })
 
-  it('stays quiet when the start is right or the event is busy or over', () => {
+  it('stays quiet when the start is right, the event is not on the platform, or it is busy or over', () => {
     expect(scheduledStartRepair(scheduledEvent())).toBeNull()
+    expect(scheduledStartRepair(stale({ providerEventId: null, lifecycle: 'draft' }))).toBeNull()
     expect(scheduledStartRepair(stale({ lifecycle: 'live' }))).toBeNull()
     expect(scheduledStartRepair(stale({ createUncertain: true }))).toBeNull()
     expect(scheduledStartRepair(stale({ operationState: 'needs-reconciliation' }))).toBeNull()

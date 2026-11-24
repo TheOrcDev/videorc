@@ -1,6 +1,6 @@
 import { patchPreparedStreamTarget, type CaptureConfig } from '@/lib/capture'
 import type { BackendClient } from '@/backendClient'
-import { formatScheduledStart, offsetTimeZone } from '@/lib/schedule-time'
+import { offsetTimeZone } from '@/lib/schedule-time'
 import type {
   ScheduledStreamCapabilities,
   ScheduledStreamEvent,
@@ -139,47 +139,35 @@ export function scheduledWhenLabel(event: ScheduledStreamEvent, locale?: string)
 }
 
 export interface ScheduledStartRepairView {
-  title: string
-  description: string
-  /** `fix` re-sends the saved wall time; `edit` opens the form to choose another. */
+  /** One plain line: "Time is an hour off on YouTube". */
+  line: string
+  /** `fix` re-sends the typed time; `edit` when that time no longer exists. */
   action: 'fix' | 'edit'
 }
 
 /**
- * The Upcoming flag for an event whose saved start isn't what its typed time
- * means any more: it was sent with older time zone rules (Vancouver,
- * Edmonton, Inuvik, Winnipeg, Casablanca and Havana changed in 2026), so
- * the platform shows the wrong hour. `null` when the start is right.
+ * The Upcoming flag for a YouTube or X event sent with older time zone rules
+ * (Vancouver, Edmonton, Inuvik, Winnipeg, Casablanca and Havana changed in
+ * 2026): the platform shows a start that isn't the time the streamer typed.
+ * `null` when the start is right, or the event isn't on the platform yet.
  */
-export function scheduledStartRepair(
-  event: ScheduledStreamEvent,
-  locale?: string
-): ScheduledStartRepairView | null {
+export function scheduledStartRepair(event: ScheduledStreamEvent): ScheduledStartRepairView | null {
   const repair = event.times?.startRepair
-  if (!repair || !eventCanBeRepaired(event)) return null
-  const published = Boolean(event.providerEventId)
-  const label = scheduledProviderLabel(event.provider)
-  const title = published ? `${label} shows the wrong start time` : 'The start time is out of date'
-  const typed = event.requested.localStart.replace('T', ' ')
-  if (repair.correctedStartUtc && repair.correctedStartOffsetMinutes != null) {
-    const corrected = formatScheduledStart(
-      repair.correctedStartUtc,
-      repair.correctedStartOffsetMinutes,
-      { locale }
-    )
-    return {
-      title,
-      description: published
-        ? `Time zone rules changed after it was scheduled. Fix time moves it to ${corrected}, the time you chose.`
-        : `Time zone rules changed after it was saved. Fix time keeps ${corrected}, the time you chose.`,
-      action: 'fix'
-    }
+  if (!repair || !event.providerEventId || !eventCanBeRepaired(event)) return null
+  const where = scheduledProviderLabel(event.provider)
+  if (!repair.correctedStartUtc) {
+    const typed = event.requested.localStart.replace('T', ' ')
+    return { line: `Time is off on ${where}, and ${typed} no longer exists there`, action: 'edit' }
   }
-  return {
-    title,
-    description: `Time zone rules changed after it was saved, and ${typed} no longer exists there. Edit it to choose another time.`,
-    action: 'edit'
-  }
+  const off = Math.abs(Date.parse(event.startUtc) - Date.parse(repair.correctedStartUtc))
+  return { line: `Time is ${offBy(off)} off on ${where}`, action: 'fix' }
+}
+
+function offBy(ms: number): string {
+  const minutes = Math.round(ms / 60_000)
+  if (minutes === 60) return 'an hour'
+  if (minutes % 60 === 0) return `${minutes / 60} hours`
+  return `${minutes} minutes`
 }
 
 function eventCanBeRepaired(event: ScheduledStreamEvent): boolean {
@@ -192,16 +180,21 @@ function eventCanBeRepaired(event: ScheduledStreamEvent): boolean {
 }
 
 /**
- * Fix time: the saved metadata, sent again unchanged. The backend resolves
- * its wall time with today's rules and updates the platform (or the draft).
+ * Fix time: the saved metadata sent again unchanged through the scheduled
+ * update. The backend resolves the typed wall time with today's rules and
+ * moves the platform's start.
  */
-export function scheduledStartRepairMutation(event: ScheduledStreamEvent): {
-  action: 'update' | 'saveDraft'
-  fields: { accountId: string; metadata: ScheduledStreamEvent['requested'] }
+export function scheduledStartRepairParams(event: ScheduledStreamEvent): {
+  eventId: string
+  expectedRevision: number
+  accountId: string
+  metadata: ScheduledStreamEvent['requested']
 } {
   return {
-    action: event.providerEventId ? 'update' : 'saveDraft',
-    fields: { accountId: event.accountId, metadata: event.requested }
+    eventId: event.id,
+    expectedRevision: event.revision,
+    accountId: event.accountId,
+    metadata: event.requested
   }
 }
 
