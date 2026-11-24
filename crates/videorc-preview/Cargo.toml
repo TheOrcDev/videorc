@@ -7,3 +7,38 @@ publish = false
 description = "Plan 260: The preview element: on macOS a CAMetalLayer presented on its own thread from the backend's IOSurface ring, the lease loop, the first-frame and presenting contracts; the Linux Wayland/X11 presenter."
 
 [dependencies]
+anyhow = "1.0"
+raw-window-handle = "0.6"
+serde_json = "1.0"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "1.19", features = ["v4"] }
+videorc-app-core = { workspace = true }
+videorc-gpu-import = { workspace = true }
+videorc-preview-ring = { workspace = true }
+videorc-protocol = { workspace = true }
+# Only for `wgpu::TextureFormat`, which the import crate's API speaks.
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "metal"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Plan 220 S4.2c: the Linux presenter (`linux.rs`): a `wl_subsurface` fed by
+# a `wl_shm` pool over the ring on winit's own display (the spike's route,
+# S4.2b), the doorbell pipe and the poll.
+libc = "0.2"
+wayland-client = "0.31"
+# The system libwayland backend: the connection is winit's own
+# (`Backend::from_foreign_display`), so the child shares the host window's
+# display and the compositor sees one client.
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.32", features = ["client"] }
+# The X11 child window over MIT-SHM (fd passing), scaled by XRender, with an
+# empty input shape so clicks reach the host.
+x11rb = { version = "0.13", features = ["render", "shape", "shm"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = { version = "0.6.4" }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSGraphics", "NSResponder", "NSScreen", "NSView", "NSWindow", "objc2-core-foundation", "objc2-quartz-core"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFCGTypes"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSObject"] }
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "block2", "MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLLibrary", "MTLTexture", "MTLPixelFormat", "MTLResource", "MTLTypes", "MTLSampler", "MTLDrawable", "objc2-core-foundation"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal", "CABase", "CALayer", "CAMetalLayer", "CATransaction"] }
