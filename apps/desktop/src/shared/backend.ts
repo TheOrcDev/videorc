@@ -8418,6 +8418,25 @@ export interface BuddyOverlaySnapshot {
   bubble: BuddyBubble | null
 }
 
+/** `captions.overlay.set` (plan 260 S1.2b): the caption line the backend
+ * draws for one leg at that leg's canvas, and blits inside `rect`. Mirrors
+ * Rust `CaptionOverlaySetRequest`, which still accepts the previous release's
+ * `pngBase64` bar for one release. */
+export interface SetCaptionOverlayParams {
+  text: string
+  textSize: 's' | 'm' | 'l'
+  styleId: CaptionStyleId
+  /** The canvas the bar is drawn for: the leg's output size. */
+  canvasWidth: number
+  canvasHeight: number
+  position: 'top' | 'bottom'
+  /** The captions rect for this leg's orientation (plan 164): the bar wraps
+   *  to its width. Omitted keeps the `position` bar. */
+  rect?: OverlayRect
+  target: OverlayTarget
+  styleRevision: number
+}
+
 /** `buddy.overlay.set`: the renderer's raster of the bubble for one output
  * canvas (plan 168 D16: the bubble only, its tail tip on the bitmap's
  * bottom-centre; the backend draws the pet and anchors the bubble above its

@@ -636,6 +636,7 @@ import type {
   YouTubeStreamStatusResult,
   OverlayLayout,
   OverlayRect,
+  SetCaptionOverlayParams,
   SetCommentHighlightParams,
   CameraBackground,
   ViewerSample
@@ -15349,26 +15350,45 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   }
   captionOverlayWorkerRef.current = async (work) => {
     let pushed = false
-    const { renderCaptionOverlayPng } = await loadCaptionOverlay()
     for (const output of work.outputs) {
-      const pngBase64 = await renderCaptionOverlayPng({
-        text: work.text,
-        canvasWidth: output.canvasWidth,
-        canvasHeight: output.canvasHeight,
-        textSize: work.textSize,
-        styleId: work.styleId,
-        maxBarWidthPx: output.rect ? Math.floor(output.rect.w * output.canvasWidth) : undefined
-      })
-      if (!pngBase64 || work.epoch !== captionOverlayEpochRef.current) return
-      const frame = {
-        pngBase64,
-        position: work.position,
-        ...(output.rect ? { rect: output.rect } : {}),
-        target: output.target,
-        styleRevision: work.styleRevision
+      if (work.room) {
+        // The cloud room's runner still takes the renderer's PNG (rooms move
+        // to the backend in plan 260 S1.8).
+        const { renderCaptionOverlayPng } = await loadCaptionOverlay()
+        const pngBase64 = await renderCaptionOverlayPng({
+          text: work.text,
+          canvasWidth: output.canvasWidth,
+          canvasHeight: output.canvasHeight,
+          textSize: work.textSize,
+          styleId: work.styleId,
+          maxBarWidthPx: output.rect ? Math.floor(output.rect.w * output.canvasWidth) : undefined
+        })
+        if (!pngBase64 || work.epoch !== captionOverlayEpochRef.current) return
+        const frame = {
+          pngBase64,
+          position: work.position,
+          ...(output.rect ? { rect: output.rect } : {}),
+          target: output.target,
+          styleRevision: work.styleRevision
+        }
+        await work.client.requestTyped('cloud.speech.overlay', { ...work.room, frame })
+      } else {
+        // Plan 260 S1.2b: the backend draws the bar from the line's text at
+        // this leg's canvas (`overlay_raster`, this painter in Rust).
+        if (!work.text.trim() || work.epoch !== captionOverlayEpochRef.current) return
+        const params: SetCaptionOverlayParams = {
+          text: work.text,
+          textSize: work.textSize,
+          styleId: work.styleId,
+          canvasWidth: output.canvasWidth,
+          canvasHeight: output.canvasHeight,
+          position: work.position,
+          ...(output.rect ? { rect: output.rect } : {}),
+          target: output.target,
+          styleRevision: work.styleRevision
+        }
+        await work.client.request('captions.overlay.set', params)
       }
-      if (work.room) await work.client.requestTyped('cloud.speech.overlay', { ...work.room, frame })
-      else await work.client.request('captions.overlay.set', frame)
       pushed = true
     }
     if (pushed && work.epoch === captionOverlayEpochRef.current) {

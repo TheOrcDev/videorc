@@ -145,7 +145,7 @@ mod oauth_callback_page;
 mod overlay_layout;
 #[allow(
     dead_code,
-    reason = "plan 260 S1.2a: switched on overlay by overlay in S1.2b to S1.2e"
+    reason = "plan 260 S1.2: the cue frames and the card, chat and Sidekick painters switch on in S1.2c to S1.2e"
 )]
 mod overlay_raster;
 mod panic_hook;
@@ -11747,9 +11747,11 @@ async fn handle_text_message_with_role(
                     "Room caption pixels require the current host speech session.",
                 );
             }
-            match serde_json::from_value::<captions::SetCaptionOverlayParams>(command.params) {
-                Ok(params) => {
-                    match captions::install_caption_overlays(&state.caption_overlay, params) {
+            // Plan 260 S1.2b: the backend draws the bar from the line's text;
+            // a `pngBase64` bar (the previous release's path) is still installed.
+            match serde_json::from_value::<captions::CaptionOverlaySetRequest>(command.params) {
+                Ok(request) => {
+                    match captions::set_caption_overlay(&state.caption_overlay, request).await {
                         Ok(info) => ServerResponse::ok(command.id, info),
                         Err(error) => ServerResponse::error(
                             command.id,
