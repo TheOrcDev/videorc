@@ -65,6 +65,7 @@ use app::{camera, capture, hotkeys, links, menus, sleep};
 use screens::stream_manager::frame::StreamManagerFrame;
 use screens::studio::{
     self as studio_screen, StudioPage,
+    session::SessionSection,
     transport::{SessionControls, Transport},
 };
 
@@ -380,8 +381,11 @@ fn main() -> Result<()> {
                     cx,
                 );
                 *preview_slot.borrow_mut() = Some(preview.clone());
-                let studio_page =
-                    cx.new(|cx| StudioPage::new(transport.clone(), preview.clone(), window, cx));
+                let session =
+                    cx.new(|cx| SessionSection::new(studio_state.clone(), studio.telemetry(), cx));
+                let studio_page = cx.new(|cx| {
+                    StudioPage::new(transport.clone(), preview.clone(), session, window, cx)
+                });
                 cx.new(|cx| {
                     Shell::new(status.clone(), connection.clone(), studio_page, preview, cx)
                 })

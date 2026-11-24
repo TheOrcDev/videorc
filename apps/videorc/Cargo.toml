@@ -24,6 +24,8 @@ videorc-app-core = { workspace = true }
 # The design system, synced from videorc-ui's GPUI flavour (`ui:sync
 # --flavour gpui`); the screens draw only with it.
 videorc-kit = { workspace = true }
+# The Session section's clock for the core's on-air facts.
+chrono = "0.4"
 # The core's own runtime (two workers), beside GPUI's executor.
 tokio = { version = "1.48", features = ["rt-multi-thread", "sync", "time", "macros"] }
 # The preview element (plan 260 S2.3a, L1): the presenter, the lease feed,

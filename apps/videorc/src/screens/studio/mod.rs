@@ -9,6 +9,7 @@
 //! inspector.
 
 pub mod layout;
+pub mod session;
 pub mod space;
 pub mod transport;
 
@@ -26,6 +27,7 @@ use videorc_preview::lifecycle::WindowMode;
 use crate::preview::Preview;
 
 use layout::{INSPECTOR_MAX_PX, StudioLayout};
+use session::SessionSection;
 use space::{KEY_CONTEXT, SPACE, SpaceAction, SpacePress, ToggleRecord, space_action};
 use transport::{OpenPage, Transport};
 
@@ -38,6 +40,7 @@ pub struct StudioPage {
     focus: FocusHandle,
     transport: Entity<Transport>,
     preview: Entity<Preview>,
+    session: Entity<SessionSection>,
     /// The page's width at the last paint, for the breakpoint.
     width: f32,
     /// The Space now dispatching is a held key's repeat.
@@ -58,10 +61,13 @@ impl StudioPage {
     pub fn new(
         transport: Entity<Transport>,
         preview: Entity<Preview>,
+        session: Entity<SessionSection>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.subscribe(&transport, |_, _, open: &OpenPage, cx| cx.emit(*open))
+            .detach();
+        cx.subscribe(&session, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
         // The preview notifies only when its slot's words or its window
         // change, never per video frame.
@@ -72,6 +78,7 @@ impl StudioPage {
             focus,
             transport,
             preview,
+            session,
             width: 0.,
             space_held: false,
         }
@@ -170,7 +177,8 @@ impl Render for StudioPage {
             .flex()
             .flex_col()
             .min_w_0()
-            .min_h_0();
+            .min_h_0()
+            .child(self.session.clone());
         let transport = self.transport.clone();
 
         let grid = match layout {
