@@ -13877,10 +13877,19 @@ async fn handle_text_message_with_role(
                             cloud_talk::GuestAction::Remove | cloud_talk::GuestAction::Ban
                         );
                         let guest_id = params.guest_id.clone();
+                        // The deny's permissions update goes out first.
                         #[cfg(target_os = "macos")]
                         {
                             if removes {
-                                room_routing::deny(&guest_id);
+                                let applied = room_routing::deny(&guest_id);
+                                if tokio::time::timeout(Duration::from_secs(3), applied)
+                                    .await
+                                    .is_err()
+                                {
+                                    tracing::warn!(
+                                        "The removed guest's subscriptions were not confirmed revoked in 3 s; removing anyway (the deny stays)."
+                                    );
+                                }
                             }
                         }
                         match context
@@ -13889,9 +13898,12 @@ async fn handle_text_message_with_role(
                         {
                             Ok(status) => ServerResponse::ok(command.id, status),
                             Err(error) => {
+                                // Only an explicit refusal lifts the deny:
+                                // after a timeout or a server error the
+                                // removal may have happened.
                                 #[cfg(target_os = "macos")]
                                 {
-                                    if removes {
+                                    if removes && cloud_talk::guest_action_refused(&error) {
                                         room_routing::undeny(&guest_id);
                                     }
                                 }
