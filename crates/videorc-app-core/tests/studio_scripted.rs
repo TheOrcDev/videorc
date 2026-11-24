@@ -71,6 +71,13 @@ struct Script {
     /// `compositor.status` says it draws.
     scene_get: Option<Value>,
     backend_layout: Option<Value>,
+    /// S1.6b part 5d: how `audio.processing.update` answers, in order
+    /// (`None` applies the request, `Some(reason)` refuses it; none left:
+    /// not connected), every request it got, and a gate it waits at (after
+    /// the request is recorded) when set.
+    audio_answers: VecDeque<Option<&'static str>>,
+    audio_updates: Vec<AudioProcessingUpdateParams>,
+    audio_gate: Option<Arc<Semaphore>>,
 }
 
 struct Scripted {
@@ -208,17 +215,40 @@ impl StudioBackend for Scripted {
             .unwrap_or_else(|| Ok(status(RecordingState::Stopping, Some("s1"))))
     }
 
-    // S2.4c's requests: not part of these tests (tests/remote_executor.rs
-    // and the `remote` module's own tests cover them).
+    /// S1.6b part 5d: the live audio sync's update, answered as scripted.
     async fn audio_processing_update(
         &self,
         params: AudioProcessingUpdateParams,
     ) -> Result<AudioProcessingUpdateResult, RpcError> {
         self.note("audio.processing.update");
-        Err(RpcError::not_connected(&format!(
-            "audio.processing.update for {}",
-            params.session_id
-        )))
+        let gate = {
+            let mut script = self.script.lock().unwrap();
+            script.audio_updates.push(params.clone());
+            script.audio_gate.clone()
+        };
+        if let Some(gate) = gate {
+            gate.acquire().await.unwrap().forget();
+        }
+        let answer = self.script.lock().unwrap().audio_answers.pop_front();
+        match answer {
+            Some(reason) => Ok(AudioProcessingUpdateResult {
+                microphone_noise_suppression: params
+                    .microphone_noise_suppression
+                    .unwrap_or_default(),
+                confirmed_microphone_noise_suppression: None,
+                applied: reason.is_none(),
+                session_id: params.session_id.clone(),
+                microphone_gain_db: params.microphone_gain_db,
+                microphone_muted: params.microphone_muted,
+                reason_code: reason.map(str::to_string),
+                confirmed_microphone_gain_db: None,
+                confirmed_microphone_muted: None,
+            }),
+            None => Err(RpcError::not_connected(&format!(
+                "audio.processing.update for {}",
+                params.session_id
+            ))),
+        }
     }
 
     async fn remote_intent_ack(&self, _params: RemoteIntentAckParams) -> Result<(), RpcError> {
@@ -2199,6 +2229,181 @@ async fn the_microphone_row_says_muted_and_muted_for_takeover() {
         held.microphone.takeover_hint,
         Some("Your microphone comes back on when the takeover ends.")
     );
+}
+
+// S1.6b part 5d: the live audio sync (plan 069) and the mute saved first.
+
+/// The capture config's audio as the store holds it.
+fn stored_audio(backend: &Scripted) -> Value {
+    let stored = backend
+        .script
+        .lock()
+        .unwrap()
+        .settings
+        .get(keys::CAPTURE_CONFIG)
+        .cloned()
+        .expect("the capture config is stored");
+    let config = match stored {
+        Value::String(text) => serde_json::from_str(&text).expect("stored as JSON text"),
+        other => other,
+    };
+    config["audio"].clone()
+}
+
+/// A recording the Studio started (`s1`), so the live sync holds what its
+/// start sent.
+async fn recording_studio(backend: &Arc<Scripted>) -> Arc<Studio<Scripted>> {
+    let studio = new_studio(backend);
+    studio.handle_event(ready()).await;
+    studio.set_test_pattern(true).await.unwrap();
+    assert_eq!(studio.start_recording().await, StartOutcome::Started);
+    assert_eq!(
+        backend.count("audio.processing.update"),
+        0,
+        "an untouched start sends the session nothing"
+    );
+    studio
+}
+
+/// `requestRemoteMicrophoneMute` during a recording: the mute is in the
+/// capture config (and the store) before the session answers, then the
+/// call answers once the session applied it.
+#[tokio::test]
+async fn a_mute_during_a_recording_is_saved_before_the_session_answers() {
+    let backend = Scripted::new();
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| {
+        script.audio_gate = Some(gate.clone());
+        script.audio_answers.push_back(None);
+    });
+    let studio = recording_studio(&backend).await;
+
+    let muting = tokio::spawn({
+        let studio = studio.clone();
+        async move { studio.request_microphone_mute(true).await }
+    });
+    eventually("the mute is on its way to the session", || {
+        backend.count("audio.processing.update") == 1
+    })
+    .await;
+    assert!(studio.snapshot().settings.capture.audio.microphone_muted);
+    assert_eq!(stored_audio(&backend)["microphoneMuted"], json!(true));
+    assert!(!muting.is_finished(), "the session has not answered");
+    assert_eq!(
+        studio.snapshot().system_audio.applied_microphone_muted,
+        Some(false),
+        "the session still holds what its start sent"
+    );
+
+    gate.add_permits(1);
+    assert!(muting.await.unwrap(), "the session applied it");
+    assert_eq!(
+        studio.snapshot().system_audio.applied_microphone_muted,
+        Some(true)
+    );
+    let sent = backend.script.lock().unwrap().audio_updates.clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].session_id, "s1");
+    assert!(sent[0].microphone_muted);
+    assert_eq!(
+        sent[0].system_audio_enabled, None,
+        "the session holds the start's System audio"
+    );
+    assert!(studio.snapshot().settings.capture.audio.microphone_muted);
+    // The toggle reads what the session holds: muted, so it unmutes.
+    backend.with(|script| script.audio_answers.push_back(None));
+    gate.add_permits(1);
+    assert!(
+        studio
+            .set_microphone_muted(videorc_app_core::studio::MicrophoneMode::Toggle)
+            .await
+    );
+    assert!(!studio.snapshot().settings.capture.audio.microphone_muted);
+}
+
+/// A Gain drag while one update is in flight: the session gets only the
+/// newest value after it.
+#[tokio::test]
+async fn gain_changes_while_one_update_is_in_flight_send_only_the_newest() {
+    let backend = Scripted::new();
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| {
+        script.audio_gate = Some(gate.clone());
+        script.audio_answers.extend([None, None]);
+    });
+    let studio = recording_studio(&backend).await;
+
+    let first = tokio::spawn({
+        let studio = studio.clone();
+        async move { studio.set_microphone_gain(3.0).await }
+    });
+    eventually("the first update is in flight", || {
+        backend.count("audio.processing.update") == 1
+    })
+    .await;
+    studio.set_microphone_gain(6.0).await;
+    studio.set_microphone_gain(9.0).await;
+    assert_eq!(
+        backend.count("audio.processing.update"),
+        1,
+        "one request in flight"
+    );
+    assert_eq!(
+        studio.snapshot().settings.capture.audio.microphone_gain_db,
+        9.0
+    );
+
+    gate.add_permits(2);
+    first.await.unwrap();
+    let gains: Vec<f32> = backend
+        .script
+        .lock()
+        .unwrap()
+        .audio_updates
+        .iter()
+        .map(|update| update.microphone_gain_db)
+        .collect();
+    assert_eq!(gains, [3.0_f32, 9.0]);
+    assert!(!studio.snapshot().system_audio.live_controls_disabled);
+}
+
+/// A capture without live audio controls: the controls go back to what the
+/// session last accepted, stay pinned there for the session, and say why.
+#[tokio::test]
+async fn an_unavailable_live_control_restores_and_disables_the_controls() {
+    use videorc_app_core::studio::live_audio::copy;
+    let backend = Scripted::new();
+    backend.with(|script| {
+        script
+            .audio_answers
+            .push_back(Some("live-audio-control-unavailable"));
+    });
+    let studio = recording_studio(&backend).await;
+
+    studio.set_microphone_gain(6.0).await;
+    assert_eq!(backend.count("audio.processing.update"), 1);
+    let snapshot = studio.snapshot();
+    assert_eq!(snapshot.settings.capture.audio.microphone_gain_db, 0.0);
+    assert_eq!(
+        stored_audio(&backend)["microphoneGainDb"].as_f64(),
+        Some(0.0)
+    );
+    assert!(snapshot.system_audio.live_controls_disabled);
+    assert_eq!(
+        snapshot.last_error.as_deref(),
+        Some(copy::CONTROLS_UNAVAILABLE)
+    );
+
+    // Pinned for the session: a later edit goes back at once, unsent, and
+    // a mute that would change it is refused.
+    studio.set_microphone_gain(3.0).await;
+    assert_eq!(
+        studio.snapshot().settings.capture.audio.microphone_gain_db,
+        0.0
+    );
+    assert!(!studio.request_microphone_mute(true).await);
+    assert!(!studio.snapshot().settings.capture.audio.microphone_muted);
+    assert_eq!(backend.count("audio.processing.update"), 1);
 }
 
 // S1.6b part 3c: the start races (#1643), apply-after-proof and the failure
