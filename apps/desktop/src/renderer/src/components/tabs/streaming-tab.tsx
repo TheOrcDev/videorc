@@ -29,6 +29,7 @@ import { PanelSection } from '@/components/panel-section'
 import { StatusBadge } from '@/components/status-badge'
 import { BroadcastInfoFields } from '@/components/streaming/broadcast-info-fields'
 import { CategoryCombobox } from '@/components/streaming/category-combobox'
+import { XCategoryField } from '@/components/streaming/x-category-field'
 import { DestinationCard } from '@/components/streaming/destination-card'
 import { LinuxSetupAlert } from '@/components/linux-setup-alert'
 import { useLinuxDesktopCheck } from '@/hooks/use-linux-desktop-check'
@@ -80,7 +81,8 @@ import type {
   StreamTargetRuntime,
   StreamTargetSettings,
   TwitchCategory,
-  KickCategory
+  KickCategory,
+  XLiveCategory
 } from '@/lib/backend'
 import { streamingDestinationCap, streamingDestinationEnableGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
@@ -92,6 +94,7 @@ import { otherDestinationsLine } from '@/lib/stream-target-notices'
 import { destinationStateLabel } from '@/lib/state-labels'
 import { broadcastThumbnailHint } from '@/lib/broadcast-info'
 import { streamLanguageOptions } from '@/lib/stream-languages'
+import type { XLiveCategoriesStatus } from '@/lib/x-live-categories'
 
 /**
  * Destinations (plan 174 S1.6b, A-14; plan 235 D6): Setup, Upcoming and
@@ -186,6 +189,9 @@ function StreamingSetup({
     kickCategories,
     kickCategorySearchPending,
     searchKickCategories,
+    xLiveCategories,
+    xLiveCategoriesStatus,
+    loadXLiveCategories,
     xNativeCapability,
     xNativeCapabilityLoading,
     refreshXNativeCapability,
@@ -410,6 +416,8 @@ function StreamingSetup({
           twitchCategorySearchPending={twitchCategorySearchPending}
           kickCategories={kickCategories}
           kickCategorySearchPending={kickCategorySearchPending}
+          xLiveCategories={xLiveCategories}
+          xLiveCategoriesStatus={xLiveCategoriesStatus}
           targets={streaming.targets}
           validation={streamMetadataValidation}
           onPatchDraft={patchStreamMetadataDraft}
@@ -417,6 +425,7 @@ function StreamingSetup({
           onSave={() => void saveStreamMetadataDraft()}
           onSearchTwitchCategories={searchTwitchCategories}
           onSearchKickCategories={searchKickCategories}
+          onRetryXLiveCategories={() => void loadXLiveCategories(true)}
         />
         {/* Plan 226: viewers type !name and Videorc answers as you. Free, and
             editable while live: a change answers the next !name. */}
@@ -560,11 +569,14 @@ export function MetadataEditor({
   twitchCategorySearchPending,
   kickCategories = [],
   kickCategorySearchPending = false,
+  xLiveCategories = [],
+  xLiveCategoriesStatus = 'idle',
   onPatchDraft,
   onPatchTarget,
   onSave,
   onSearchTwitchCategories,
-  onSearchKickCategories
+  onSearchKickCategories,
+  onRetryXLiveCategories
 }: {
   draft: StreamMetadataDraft | null
   validation: StreamMetadataValidation | null
@@ -583,6 +595,9 @@ export function MetadataEditor({
   kickCategories?: KickCategory[]
   kickCategorySearchPending?: boolean
   onSearchKickCategories?: (query: string) => Promise<void>
+  xLiveCategories?: XLiveCategory[]
+  xLiveCategoriesStatus?: XLiveCategoriesStatus
+  onRetryXLiveCategories?: () => void
 }): ReactElement {
   // Unsaved edits (plan 174 S3.5b, D-5): an edit marks the draft as it was
   // loaded; a save or a reload brings a new `updatedAt`, which ends it.
@@ -717,10 +732,13 @@ export function MetadataEditor({
                         twitchCategorySearchPending={twitchCategorySearchPending}
                         kickCategories={kickCategories}
                         kickCategorySearchPending={kickCategorySearchPending}
+                        xLiveCategories={xLiveCategories}
+                        xLiveCategoriesStatus={xLiveCategoriesStatus}
                         validation={validation}
                         onPatch={(patch) => patchTarget(override.platform, patch)}
                         onSearchTwitchCategories={onSearchTwitchCategories}
                         onSearchKickCategories={onSearchKickCategories}
+                        onRetryXLiveCategories={onRetryXLiveCategories}
                       />
                     </AccordionContent>
                   </AccordionItem>
@@ -747,10 +765,13 @@ function MetadataOverride({
   twitchCategorySearchPending,
   kickCategories,
   kickCategorySearchPending,
+  xLiveCategories,
+  xLiveCategoriesStatus,
   validation,
   onPatch,
   onSearchTwitchCategories,
-  onSearchKickCategories
+  onSearchKickCategories,
+  onRetryXLiveCategories
 }: {
   override: StreamMetadataDraft['targetOverrides'][number]
   draft: StreamMetadataDraft
@@ -764,6 +785,9 @@ function MetadataOverride({
   kickCategories: KickCategory[]
   kickCategorySearchPending: boolean
   onSearchKickCategories?: (query: string) => Promise<void>
+  xLiveCategories: XLiveCategory[]
+  xLiveCategoriesStatus: XLiveCategoriesStatus
+  onRetryXLiveCategories?: () => void
 }): ReactElement {
   const titleIssue = metadataIssue(validation, 'title', override.platform)
   const twitch = override.platform === 'twitch'
@@ -817,7 +841,7 @@ function MetadataOverride({
             ) : null}
             {x ? (
               <FieldDescription>
-                X broadcasts carry a title only; it doubles as the announcement post text.
+                On X the title is also the announcement post's text.
               </FieldDescription>
             ) : null}
           </Field>
@@ -942,6 +966,17 @@ function MetadataOverride({
           />
           <FieldDescription>Kick needs a category from its list.</FieldDescription>
         </Field>
+      ) : null}
+
+      {x ? (
+        <XCategoryField
+          categories={xLiveCategories}
+          disabled={disabled}
+          override={override}
+          status={xLiveCategoriesStatus}
+          onPatch={onPatch}
+          onRetry={onRetryXLiveCategories}
+        />
       ) : null}
 
       {x ? (

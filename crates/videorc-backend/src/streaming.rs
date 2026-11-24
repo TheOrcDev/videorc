@@ -204,6 +204,13 @@ pub struct StreamTargetMetadataDraft {
     /// (`should_not_tweet`). None means announce (the platform default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x_announce: Option<bool>,
+    /// X live category (`GET /2/broadcasts/categories`): the permanent id
+    /// Go Live sends as `live_category_id`, and the name the picker shows.
+    /// Sticky: the last pick stays for the next stream, as X recommends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_category_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_category_name: Option<String>,
     pub updated_at: String,
 }
 
@@ -386,6 +393,8 @@ pub fn default_stream_metadata_draft(updated_at: String) -> StreamMetadataDraft 
                 kick_category_id: None,
                 kick_category_name: None,
                 x_announce: (platform == StreamPlatform::X).then_some(true),
+                x_category_id: None,
+                x_category_name: None,
                 updated_at: updated_at.clone(),
             })
             .collect(),
@@ -912,6 +921,14 @@ mod tests {
         let wire = serde_json::to_value(kick).unwrap();
         assert!(wire.get("kickCategoryId").is_none());
         assert!(wire.get("kickCategoryName").is_none());
+        let x = draft
+            .target_overrides
+            .iter()
+            .find(|target| target.platform == StreamPlatform::X)
+            .unwrap();
+        let wire = serde_json::to_value(x).unwrap();
+        assert!(wire.get("xCategoryId").is_none());
+        assert!(wire.get("xCategoryName").is_none());
     }
 
     #[test]
