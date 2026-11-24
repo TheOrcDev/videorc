@@ -740,45 +740,6 @@ impl PreviewCameraShared {
         }
     }
 
-    /// Plan 255: one SRT Camera frame from its pacer, counted like a capture
-    /// callback so cadence checks and recovery see a live camera.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub(crate) fn publish_srt_frame(
-        &mut self,
-        width: u32,
-        height: u32,
-        bytes: Vec<u8>,
-        pixel_buffer: Option<crate::frame_store::RetainedPixelBuffer>,
-    ) {
-        let started_at = Instant::now();
-        self.capture_timings.record_callback_at(started_at);
-        self.capture_callback_count = self.capture_callback_count.saturating_add(1);
-        self.frames_captured = self.frames_captured.saturating_add(1);
-        self.frames_in_window = self.frames_in_window.saturating_add(1);
-        let window_started = *self.window_started_at.get_or_insert(started_at);
-        let elapsed = window_started.elapsed();
-        if elapsed >= Duration::from_millis(500) {
-            self.source_fps = Some(self.frames_in_window as f64 / elapsed.as_secs_f64().max(0.001));
-            self.frames_in_window = 0;
-            self.window_started_at = Some(started_at);
-        }
-        let frame_bytes = bytes.len() as u64;
-        let sequence = self.frames_captured;
-        self.frame_store.publish_with_source_handles(
-            sequence,
-            width,
-            height,
-            PreviewCameraPixelFormat::Bgra8,
-            started_at,
-            bytes,
-            None,
-            pixel_buffer,
-        );
-        let publish_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-        self.capture_timings
-            .record_valid_frame(0.0, 0.0, publish_ms, frame_bytes);
-    }
-
     /// A frame read from the capture process pipe (Windows dshow, Linux v4l2)
     /// or drawn by the plan 258 fixture camera is that source's capture
     /// callback. Count it like the AVFoundation sample-buffer callback:
@@ -5672,6 +5633,68 @@ fn publish_bgra_frame(
     next_buffer
 }
 
+/// Plan 255: one SRT Camera frame or still from its pacer, counted like a
+/// capture callback so cadence checks and recovery see a live camera.
+/// False when an effect's stage took it: it reaches the store later.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn publish_srt_frame(
+    shared: &Arc<StdMutex<PreviewCameraShared>>,
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+    pixel_buffer: Option<crate::frame_store::RetainedPixelBuffer>,
+) -> bool {
+    let started_at = Instant::now();
+    let mut guard = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.record_pipe_frame_callback(started_at);
+    guard.frames_captured = guard.frames_captured.saturating_add(1);
+    guard.frames_in_window = guard.frames_in_window.saturating_add(1);
+    let window_started = *guard.window_started_at.get_or_insert(started_at);
+    let elapsed = window_started.elapsed();
+    if elapsed >= Duration::from_millis(500) {
+        guard.source_fps = Some(guard.frames_in_window as f64 / elapsed.as_secs_f64().max(0.001));
+        guard.frames_in_window = 0;
+        guard.window_started_at = Some(started_at);
+    }
+    let frame_bytes = bytes.len() as u64;
+    let sequence = guard.frames_captured;
+    if guard.effect.is_armed() {
+        let pixels = match pixel_buffer {
+            #[cfg(target_os = "macos")]
+            Some(pixel_buffer) => effect_stage::EffectPixels::PixelBuffer(pixel_buffer),
+            _ => effect_stage::EffectPixels::Bytes(bytes),
+        };
+        let frame = effect_stage::EffectFrame {
+            width,
+            height,
+            pixels,
+        };
+        let pending = effect_stage::on_armed_capture(&mut guard, frame, sequence, started_at);
+        drop(guard);
+        if let Some(pending) = pending {
+            effect_stage::finish_cover(shared, pending);
+        }
+        return false;
+    }
+    guard.frame_store.publish_with_source_handles(
+        sequence,
+        width,
+        height,
+        PreviewCameraPixelFormat::Bgra8,
+        started_at,
+        bytes,
+        None,
+        pixel_buffer,
+    );
+    let publish_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    guard
+        .capture_timings
+        .record_valid_frame(0.0, 0.0, publish_ms, frame_bytes);
+    true
+}
+
 /// Plan 258 S2: the fixture camera's capture loop. It draws the fixture at
 /// the capture box and the requested rate and publishes each frame like a
 /// pipe camera, until the stop channel fires or its sender drops.
@@ -5907,16 +5930,13 @@ mod srt {
                             }
                         }
                     };
-                    camera
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .publish_srt_frame(
-                            frame.width,
-                            frame.height,
-                            bytes,
-                            zero_copy.then(|| frame.pixel_buffer.clone()),
-                        );
-                    true
+                    super::publish_srt_frame(
+                        &camera,
+                        frame.width,
+                        frame.height,
+                        bytes,
+                        zero_copy.then(|| frame.pixel_buffer.clone()),
+                    )
                 },
                 |text: &str| {
                     let mirrored = crate::srt_camera::scene_mirrors_camera();
@@ -5932,10 +5952,7 @@ mod srt {
                     };
                     // Copied before the lock: the compositor reads frames under it.
                     let bytes = bgra.clone();
-                    camera
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .publish_srt_frame(STILL_WIDTH, STILL_HEIGHT, bytes, None);
+                    super::publish_srt_frame(&camera, STILL_WIDTH, STILL_HEIGHT, bytes, None);
                 },
             );
             let _ = receiver.join();
