@@ -345,11 +345,9 @@ impl Reader {
                 continue;
             }
             let handle = RingHandle {
-                kind: if ring.handle_kind == "file-mapping" {
-                    "file-mapping"
-                } else {
-                    "memfd-path"
-                },
+                // An unknown kind is refused by the platform's open below,
+                // by name.
+                kind: videorc_preview_ring::handle_kind(&ring.handle_kind).unwrap_or("unknown"),
                 name: ring.handle.clone(),
                 bytes: ring.bytes,
             };

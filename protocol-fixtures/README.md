@@ -87,6 +87,18 @@ hand; both functions must reproduce every case:
 - Rust: `cargo test -p videorc-backend preview_program`
 - TypeScript: `pnpm --filter @videorc/desktop test -- overlay-layout.test.ts`
 
+## `preview-cpu-ring.json`
+
+Plan 260 S1.7 (from plan 220 S4.1d): the CPU preview ring's wire shapes,
+`preview.cpu.open`'s answer and `preview.cpu.status` (`PreviewCpuRingStatus`,
+`PreviewCpuRing` in `crates/videorc-protocol`). Absent fields are omitted,
+never `null`; the handle is a memfd path on Linux, a file-mapping name on
+Windows and a POSIX shared memory name on macOS (`handleKind`: `memfd-path`,
+`file-mapping`, `posix-shm`).
+
+- Rust: `cargo test -p videorc-backend --bin videorc-backend -- preview_cpu_ring`
+- Reader: `crates/videorc-preview/src/cpu_frames.rs`; Electron has no consumer.
+
 ## `screen-privacy.json`
 
 Hide screen's wire shapes (plan 210 S7): the `ScreenPrivacy` state as

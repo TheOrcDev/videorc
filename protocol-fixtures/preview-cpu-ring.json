@@ -1,0 +1,40 @@
+{
+  "note": "Plan 260 S1.7 (from plan 220 S4.1d): the CPU preview ring's wire shapes (preview.cpu.open answers a status; preview.cpu.status). Absent fields are omitted, never null. Rust: cargo test -p videorc-backend --bin videorc-backend -- preview_cpu_ring. The reader is videorc-preview's cpu_frames.rs; Electron has no consumer.",
+  "closed": {
+    "open": false,
+    "ringsCreated": 0,
+    "framesWritten": 0,
+    "framesIdle": 0,
+    "framesWithoutPixels": 0,
+    "framesSkipped": 0,
+    "convertMsLast": 0.0,
+    "convertMsMax": 0.0,
+    "message": "No CPU preview ring: no client has opened one (preview.cpu.open)."
+  },
+  "openWithRing": {
+    "open": true,
+    "ring": {
+      "handleKind": "memfd-path",
+      "handle": "/proc/4242/fd/17",
+      "bytes": 24887296,
+      "pid": 4242,
+      "generation": 1,
+      "slotCount": 3,
+      "width": 1920,
+      "height": 1080,
+      "stride": 7680,
+      "pixelFormat": "bgra8",
+      "headerBytes": 4096,
+      "slotOffset": 4096,
+      "slotBytes": 8294400
+    },
+    "ringsCreated": 1,
+    "framesWritten": 300,
+    "framesIdle": 12,
+    "framesWithoutPixels": 2,
+    "framesSkipped": 0,
+    "convertMsLast": 1.8,
+    "convertMsMax": 4.2,
+    "lastSourceSequence": 314
+  }
+}

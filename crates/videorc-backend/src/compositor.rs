@@ -7229,6 +7229,11 @@ async fn run_synthetic_compositor_loop(
                         },
                     )
                 });
+                // Plan 260 S1.7: the CPU preview ring's writer picks the
+                // newest program frame on its own thread; this never waits.
+                if published.primary_published {
+                    crate::preview_cpu_ring::notify_frame(&state);
+                }
                 // Adoption at the publish boundary uses the same recovery/
                 // health acknowledgements as the periodic maintenance path.
                 if let Some(change) = live_sources.pending_camera_change.take()

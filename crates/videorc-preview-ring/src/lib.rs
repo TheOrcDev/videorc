@@ -11,8 +11,10 @@
 //!
 //! - **The region** is a memory file: `memfd_create` on Linux, handed to
 //!   the app as its `/proc/<pid>/fd/<n>` path (same user; the app opens it
-//!   read-write for the lease word); a named file mapping on Windows. The
-//!   platform halves are in `linux.rs` and `windows.rs`; everything about
+//!   read-write for the lease word); a named file mapping on Windows; a
+//!   POSIX shared memory object (`shm_open`, mode 0600) on macOS (plan 260
+//!   S1.7). The platform halves are in `linux.rs`, `windows.rs` and
+//!   `macos.rs`; everything about
 //!   the layout and the protocol is here and runs on every platform (tests
 //!   use a heap region).
 //! - **The layout** (`Header`, `SlotHeader`) is little-endian, page-aligned,
@@ -29,7 +31,8 @@
 //! - **The wake.** A futex on the header's `wake` word on Linux (a named
 //!   event on Windows): the reader sleeps until the writer publishes, with
 //!   a timeout, so an idle preview costs nothing and a live one needs no
-//!   polling.
+//!   polling. macOS has no cross-process futex in a stable API: its reader
+//!   looks at the `wake` word every 2 ms instead.
 //!
 //! The format is `bgra8`, row-major, top-down, `stride = width * 4`: what the
 //! compositor's BMP route carried, what `wl_shm`'s ARGB8888 and X11's
@@ -49,9 +52,14 @@ mod windows;
 #[cfg(windows)]
 use windows as platform;
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos as platform;
+
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
 mod unsupported;
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
 use unsupported as platform;
 
 /// The ring's magic, `VRCPUPRV` as little-endian bytes.
@@ -87,7 +95,7 @@ impl std::fmt::Display for RingError {
         match self {
             RingError::Unsupported(what) => write!(
                 f,
-                "the CPU preview ring is Windows and Linux only (plan 220 S4.1d): {what}"
+                "the CPU preview ring runs on macOS, Windows and Linux only (plan 260 S1.7): {what}"
             ),
             RingError::Io(error) => write!(f, "{error}"),
             RingError::Dimensions(what) => {
@@ -109,8 +117,10 @@ impl From<std::io::Error> for RingError {
 /// What the app needs to map the ring: the platform's name for the region.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingHandle {
-    /// `memfd-path` (Linux: a `/proc/<pid>/fd/<n>` path) or `file-mapping`
-    /// (Windows: a `Local\…` mapping name; the wake event is `<name>-wake`).
+    /// `memfd-path` (Linux: a `/proc/<pid>/fd/<n>` path), `file-mapping`
+    /// (Windows: a `Local\…` mapping name; the wake event is `<name>-wake`)
+    /// or `posix-shm` (macOS: an `shm_open` name). [`handle_kind`] maps the
+    /// wire's string to it.
     pub kind: &'static str,
     pub name: String,
     /// The region's size in bytes (Windows maps by size; Linux checks it).
@@ -684,6 +694,17 @@ impl Drop for LeasedFrame<'_> {
     }
 }
 
+/// The handle kind a wire string names (`PreviewCpuRing::handle_kind`),
+/// `None` for a kind this crate does not know.
+pub fn handle_kind(wire: &str) -> Option<&'static str> {
+    match wire {
+        "memfd-path" => Some("memfd-path"),
+        "file-mapping" => Some("file-mapping"),
+        "posix-shm" => Some("posix-shm"),
+        _ => None,
+    }
+}
+
 /// The monotonic clock both sides stamp frames with, in microseconds.
 pub fn now_micros() -> u64 {
     platform::now_micros()
@@ -714,7 +735,7 @@ mod tests {
         assert_eq!(&MAGIC.to_le_bytes(), b"VRCPUPRV");
     }
 
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(any(target_os = "linux", windows, target_os = "macos"))]
     mod live {
         use super::super::*;
         use std::sync::Arc;
