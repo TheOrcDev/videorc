@@ -94,7 +94,10 @@ export const RUST_READS_DESKTOP_FILES = Object.freeze([
   'apps/desktop/src/renderer/src/lib/settings-tabs.ts',
   'apps/desktop/src/renderer/src/lib/buddy-tabs.ts',
   'apps/desktop/src/renderer/src/lib/avatar-tabs.ts',
-  'apps/desktop/src/renderer/src/lib/livestream-tabs.ts'
+  'apps/desktop/src/renderer/src/lib/livestream-tabs.ts',
+  // videorc-preview's words are checked against the Preview card's copy
+  // byte for byte (plan 260 S1.7b).
+  'apps/desktop/src/renderer/src/components/preview-stage.tsx'
 ])
 
 export function isRustReachableDesktopPath(path) {
