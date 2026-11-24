@@ -89,7 +89,12 @@ export const RUST_READS_DESKTOP_FILES = Object.freeze([
   'apps/desktop/src/main/media-access.ts',
   'apps/desktop/src/main/runtime-info.ts',
   // The typed client's deadline table is checked against it (S1.6s part 4).
-  'apps/desktop/src/renderer/src/backendClient.ts'
+  'apps/desktop/src/renderer/src/backendClient.ts',
+  // videorc-app-core's nav tests read these (plan 260 S1.6f).
+  'apps/desktop/src/renderer/src/lib/settings-tabs.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-tabs.ts',
+  'apps/desktop/src/renderer/src/lib/avatar-tabs.ts',
+  'apps/desktop/src/renderer/src/lib/livestream-tabs.ts'
 ])
 
 export function isRustReachableDesktopPath(path) {
