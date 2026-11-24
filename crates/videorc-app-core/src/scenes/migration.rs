@@ -626,6 +626,7 @@ pub fn default_scenes(main: Option<&MainDisplay>, now: &str) -> Vec<Scene> {
 /// its v1 library (left alone when `read_only`, a v2 version this build
 /// doesn't know), its working setup, its capture config and its shortcuts.
 /// Reads only; anything that doesn't read migrates the defaults.
+#[derive(Clone)]
 pub struct StoredForMigration<'a> {
     pub read_only: bool,
     /// `videorc.scene-presets.v1`.
