@@ -2057,6 +2057,56 @@ async fn a_screen_pick_changes_the_screen_of_the_scene_on_stream() {
     );
 }
 
+/// S1.6b part 5a (plan 231 D2): the Sources picker's idle Screen pick never
+/// leaves the scene on stream: it is that scene's screen, and the capture's.
+#[tokio::test]
+async fn an_idle_screen_pick_is_the_screen_of_the_scene_on_stream() {
+    use videorc_app_core::studio::source_selection::SourceKind;
+    let backend = Scripted::new();
+    backend.with(|script| {
+        script.device_ids = Some(vec![
+            "camera:1".to_string(),
+            "screen:screencapturekit:1".to_string(),
+            "screen:screencapturekit:2".to_string(),
+        ]);
+        script.settings.insert(
+            keys::CAPTURE_CONFIG.to_string(),
+            Value::String(capture_config_with_camera().to_string()),
+        );
+    });
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let on_stream = studio
+        .snapshot()
+        .scenes
+        .on_stream_id
+        .expect("a scene is on stream");
+    assert_eq!(studio.source_switch_reason(SourceKind::Capture), None);
+    studio
+        .select_source_device(SourceKind::Capture, Some("screen:screencapturekit:2"))
+        .await
+        .expect("the pick lands");
+    let snapshot = studio.snapshot();
+    assert_eq!(
+        snapshot.scenes.on_stream_id.as_deref(),
+        Some(on_stream.as_str()),
+        "the scene stays on stream"
+    );
+    assert_eq!(
+        stored_scene(&backend, &on_stream).unwrap()["shows"]["screenId"],
+        "screen:screencapturekit:2"
+    );
+    assert_eq!(
+        snapshot.settings.capture_doc["sources"]["screenId"],
+        "screen:screencapturekit:2"
+    );
+    // The camera, another kind, is left as it was.
+    assert_eq!(
+        snapshot.settings.capture_doc["sources"]["cameraId"],
+        "camera:1"
+    );
+}
+
 // S1.6b part 3c: the start races (#1643), apply-after-proof and the failure
 // reconciliation, the switch's progress (#1275), the manual-apply
 // listeners.
