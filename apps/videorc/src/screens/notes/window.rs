@@ -5,7 +5,7 @@ use gpui::{
     App, AppContext, Bounds, Context, FocusHandle, Global, Subscription, Window, WindowHandle, div,
     prelude::*, px, size,
 };
-use gpui_base::input::{InputEvent, Textarea, TextareaState};
+use gpui_base::input::InputEvent;
 use videorc_app_core::desktop::capture_protection::{ProtectionResult, WindowRole};
 use videorc_kit::{
     alert::{Alert, AlertVariant},
@@ -13,7 +13,8 @@ use videorc_kit::{
     pin_window_button::PinWindowButton,
     segmented_control::{Segment, SegmentedControl},
     status_bar::StatusBar,
-    theme::{self, FONT, hsla, with_alpha},
+    textarea::{Textarea, TextareaState},
+    theme::{self, FONT, hsla},
     window,
     window_frame::{WindowFrame, WindowHeader},
 };
@@ -238,21 +239,6 @@ impl Render for Notes {
         let this = cx.entity().downgrade();
         let text_size = scale.px();
 
-        self.text.update(cx, |state, cx| {
-            if state.presentation().is_disabled() != self.load_failed {
-                state.set_disabled(self.load_failed, cx);
-            }
-            state.set_editor_style(gpui_base::input::InputEditorStyle {
-                foreground: hsla(t.foreground),
-                muted_foreground: hsla(t.muted_foreground),
-                background: gpui::transparent_black(),
-                border: gpui::transparent_black(),
-                selection: hsla(with_alpha(t.foreground, 0.2)),
-                caret: hsla(t.foreground),
-                ..Default::default()
-            });
-        });
-
         let mut status = StatusBar::new().leading(div().child(words));
         if !self.load_failed {
             status = status.leading(div().child(save_words));
@@ -318,15 +304,14 @@ impl Render for Notes {
             .font_family(FONT)
             .child(WindowHeader::new(WINDOW_NAME).mac(mac))
             .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .px(px(22.))
-                    .py(px(20.))
-                    .text_size(px(text_size))
-                    .line_height(px(text_size * 1.45))
-                    .text_color(hsla(t.foreground))
-                    .child(div().size_full().child(Textarea::new(&self.text))),
+                div().flex_1().min_h(px(0.)).px(px(22.)).py(px(20.)).child(
+                    Textarea::new("notes-body", &self.text)
+                        .plain(true)
+                        .disabled(self.load_failed)
+                        .text_size(px(text_size))
+                        .accessibility_label(WINDOW_NAME)
+                        .ground(t.glass_solid),
+                ),
             );
 
         if !self.capture_protected {

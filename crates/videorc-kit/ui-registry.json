@@ -41,7 +41,8 @@
     "empty",
     "page-tabs",
     "settings-row",
-    "checkbox"
+    "checkbox",
+    "textarea"
   ],
   "keepLocal": []
 }
