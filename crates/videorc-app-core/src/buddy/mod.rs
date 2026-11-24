@@ -13,6 +13,7 @@
 
 pub mod clean_cut_drafts;
 pub mod clean_cut_review;
+pub mod community;
 pub mod copy;
 pub mod library;
 pub mod look;
