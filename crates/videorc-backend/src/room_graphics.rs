@@ -395,6 +395,7 @@ impl GraphicsState {
             revision: self.revision,
             observed,
             guests: None,
+            background: None,
         };
         if self.last_status.as_ref() == Some(&status) {
             return (None, accepted);
@@ -580,6 +581,7 @@ async fn send_due(
                 show_id: show_id.to_string(),
                 graphics: Some(status),
                 avatar: None,
+                scene: None,
             },
         );
     }

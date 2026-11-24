@@ -100,11 +100,12 @@ mod room_microphone;
 mod room_clock;
 mod room_frame_bridge;
 // Plan 249 S13b: the processed camera role's native producer.
+mod room_camera_source;
+// Plan 260 S1.8: the talk show's room from the backend (macOS first).
 #[cfg(target_os = "macos")]
 mod room_assets;
 #[cfg(target_os = "macos")]
 mod room_avatar;
-mod room_camera_source;
 #[cfg(target_os = "macos")]
 #[allow(
     dead_code,
@@ -112,10 +113,6 @@ mod room_camera_source;
 )]
 mod room_capability;
 #[cfg(target_os = "macos")]
-#[allow(
-    dead_code,
-    reason = "plan 260 S1.8b: the avatar and scene publishers read the content in the next parts"
-)]
 mod room_content;
 #[cfg(target_os = "macos")]
 mod room_graphics;
@@ -124,6 +121,8 @@ mod room_host;
 #[cfg(target_os = "macos")]
 mod room_overlays;
 mod room_program_camera;
+#[cfg(target_os = "macos")]
+mod room_scene;
 mod room_system_audio;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;

@@ -7015,6 +7015,21 @@ const roomPresentationStatusSchema = objectSchema(
         },
         { allowUnknown: false }
       )
+    ),
+    background: optionalSchema(
+      objectSchema(
+        {
+          wanted: objectSchema(
+            { h: stringSchema({ maxLength: 16 }), v: stringSchema({ maxLength: 16 }) },
+            { allowUnknown: false }
+          ),
+          drawn: recordSchema(boundedJsonValueSchema({ maxDepth: 3, maxNodes: 16 }), {
+            maxKeys: 32
+          }),
+          unsupported: numberSchema({ integer: true, min: 0 })
+        },
+        { allowUnknown: false }
+      )
     )
   },
   { allowUnknown: false }
@@ -7084,7 +7099,8 @@ const cloudRoomPresentationEventSchema = objectSchema(
   {
     showId: boundedString,
     graphics: optionalSchema(roomPresentationStatusSchema),
-    avatar: optionalSchema(roomPresentationStatusSchema)
+    avatar: optionalSchema(roomPresentationStatusSchema),
+    scene: optionalSchema(roomPresentationStatusSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRoomPresentationEvent>
