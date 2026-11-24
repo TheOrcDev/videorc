@@ -63,6 +63,7 @@ use app::{camera, capture, hotkeys, links, menus, sleep};
 use screens::destinations::DestinationsPanel;
 use screens::go_live::GoLiveDialog;
 use screens::guests::GuestsPanel;
+use screens::images_sounds::{ImagesPanel, SoundsPanel};
 use screens::notes::frame::NotesFrame;
 use screens::output::OutputPanel;
 use screens::sources::SourcesPanel;
@@ -426,6 +427,7 @@ fn main() -> Result<()> {
                 cx,
             )
         });
+        let images = cx.new(|cx| ImagesPanel::new(studio.clone(), core_handle.clone(), cx));
         let go_live = cx.new(|cx| GoLiveDialog::new(studio.clone(), core_handle.clone(), cx));
         let settings = cx.new(|cx| {
             screens::settings::SettingsScreen::new(
@@ -534,6 +536,8 @@ fn main() -> Result<()> {
                     )
                 });
                 palette.update(cx, |palette, _| palette.bind_dialogs(dialogs.clone()));
+                let sounds =
+                    cx.new(|cx| SoundsPanel::new(studio.clone(), core_handle.clone(), window, cx));
                 cx.new(|cx| {
                     Shell::new(
                         status.clone(),
@@ -545,6 +549,8 @@ fn main() -> Result<()> {
                         destinations.clone(),
                         guests.clone(),
                         sidekick.clone(),
+                        images.clone(),
+                        sounds,
                         go_live.clone(),
                         settings.clone(),
                         health.clone(),
@@ -592,6 +598,18 @@ fn main() -> Result<()> {
                     window,
                     cx,
                 )
+            });
+        });
+        cx.on_action(move |_: &menus::ShowImages, cx| {
+            let _ = main_window.update(cx, |shell, window, cx| {
+                shell.open_page(PageId::Assets, window, cx);
+                window.activate_window();
+            });
+        });
+        cx.on_action(move |_: &menus::ShowSounds, cx| {
+            let _ = main_window.update(cx, |shell, window, cx| {
+                shell.open_page(PageId::Sounds, window, cx);
+                window.activate_window();
             });
         });
 
