@@ -1,0 +1,23 @@
+[package]
+name = "spike-chrome"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Plan 260 spike S0.4 and WC-0.6: Liquid Chrome drawn by GPUI, for by-eye shots against Electron"
+
+# A look spike: its result is the shots, so it writes no summary.json.
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+# The metal rasterised once per size and scale (LC_ROUTE=raster), already in
+# GPUI's tree: resvg 0.46 with tiny-skia 0.11, image 0.25, smallvec 1.
+resvg = { version = "=0.46.0", default-features = false }
+image = { version = "0.25", default-features = false }
+smallvec = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The window number for `screencapture -l` (macOS only).
+objc2 = "0.6"
+raw-window-handle.workspace = true
