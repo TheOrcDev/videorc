@@ -8411,6 +8411,13 @@ mod tests {
                 .as_ref()
                 .is_some_and(|settings| settings.valid())
         );
+        // `cloud.room.routing.set`: the program's speech and auxiliary audio.
+        let routing = high_risk_fixture("/cloud/roomRoutingSetParams");
+        let settings: crate::cloud_talk::ProgramAudioSettings =
+            serde_json::from_value(routing.clone()).unwrap();
+        assert!(settings.valid());
+        assert!((settings.speech_gain - 0.5).abs() < 1e-9);
+        assert!(settings.auxiliary_muted);
         // `cloud.room.screen.set`: the scene's screen by its native id.
         let screen = high_risk_fixture("/cloud/roomScreenSetParams");
         let params: crate::cloud_talk::CloudRoomMediaSetParams =

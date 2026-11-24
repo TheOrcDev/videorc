@@ -356,6 +356,25 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   useEffect(() => {
     mediaDepsRef.current.onBackendMedia?.(backendMedia)
   }, [backendMedia])
+  // Plan 260 S1.8c c4c: with the backend in the room, the program audio
+  // routing (speech and auxiliary gain and mute) goes there; it sends it on
+  // to the program pages that route.
+  const backendHolds = backendOwned || backendMedia !== null
+  useEffect(() => {
+    if (!client || !roomOpen || !backendHolds) return
+    let sent = ''
+    const send = (): void => {
+      const program = roomAudioRouting.getSnapshot().program
+      const key = JSON.stringify(program)
+      if (key === sent) return
+      sent = key
+      void client.requestTyped('cloud.room.routing.set', program).catch(() => {
+        sent = ''
+      })
+    }
+    send()
+    return roomAudioRouting.subscribe(send)
+  }, [client, roomOpen, backendHolds])
   // Plan 260 S1.8c: with the backend in the room (its dev switch), the host's
   // microphone goes there, in the room microphone bridge's settings and
   // bounds. The backend keeps it only while it holds the host seat (it

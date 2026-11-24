@@ -129,6 +129,8 @@ mod room_media;
 mod room_overlays;
 mod room_program_camera;
 #[cfg(target_os = "macos")]
+mod room_routing;
+#[cfg(target_os = "macos")]
 mod room_scene;
 #[cfg(target_os = "macos")]
 mod room_screen;
@@ -6569,6 +6571,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.room.camera.set"
         | "cloud.room.screen.set"
         | "cloud.room.owner"
+        | "cloud.room.routing.set"
         | "cloud.recordings.download"
         | "cloud.archive.stop"
         | "cloud.archive.cancel"
@@ -13992,6 +13995,26 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 260 S1.8c: what the program page plays of the host's speech
+        // and auxiliary audio, for the backend's room to route.
+        "cloud.room.routing.set" => {
+            match serde_json::from_value::<cloud_talk::ProgramAudioSettings>(command.params) {
+                Ok(settings) if !settings.valid() => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "The program gains are out of range.",
+                ),
+                #[cfg(target_os = "macos")]
+                Ok(settings) if room_host::holds_seat() => {
+                    room_routing::set_routing(settings);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         // Plan 260 S1.8b: one message of the renderer's avatar motion model,
         // sent to the pages that animate; answers who they are.
         "cloud.room.avatar.motion" => {
@@ -14108,17 +14131,54 @@ async fn handle_text_message_with_role(
         "cloud.guest.act" => {
             match serde_json::from_value::<cloud_talk::GuestActParams>(command.params) {
                 Ok(params) => match cloud_context(state) {
-                    Some(context) => match context
-                        .act_on_guest(account::stored_session_token(), params)
-                        .await
-                    {
-                        Ok(status) => ServerResponse::ok(command.id, status),
-                        Err(error) => ServerResponse::error(
-                            command.id,
-                            "cloud-guest-action-failed",
-                            format!("{error:#}"),
-                        ),
-                    },
+                    Some(context) => {
+                        // Plan 260 S1.8 (#1895): a removed or banned guest's
+                        // grant goes before the web takes them out, and stays
+                        // gone until the host lets them in again.
+                        let removes = matches!(
+                            params.action,
+                            cloud_talk::GuestAction::Remove | cloud_talk::GuestAction::Ban
+                        );
+                        let guest_id = params.guest_id.clone();
+                        // The deny's permissions update goes out first.
+                        #[cfg(target_os = "macos")]
+                        {
+                            if removes {
+                                let applied = room_routing::deny(&guest_id);
+                                if tokio::time::timeout(Duration::from_secs(3), applied)
+                                    .await
+                                    .is_err()
+                                {
+                                    tracing::warn!(
+                                        "The removed guest's subscriptions were not confirmed revoked in 3 s; removing anyway (the deny stays)."
+                                    );
+                                }
+                            }
+                        }
+                        match context
+                            .act_on_guest(account::stored_session_token(), params)
+                            .await
+                        {
+                            Ok(status) => ServerResponse::ok(command.id, status),
+                            Err(error) => {
+                                // Only an explicit refusal lifts the deny:
+                                // after a timeout or a server error the
+                                // removal may have happened.
+                                #[cfg(target_os = "macos")]
+                                {
+                                    if removes && cloud_talk::guest_action_refused(&error) {
+                                        room_routing::undeny(&guest_id);
+                                    }
+                                }
+                                let _ = (removes, &guest_id);
+                                ServerResponse::error(
+                                    command.id,
+                                    "cloud-guest-action-failed",
+                                    format!("{error:#}"),
+                                )
+                            }
+                        }
+                    }
                     None => cloud_unavailable(command.id),
                 },
                 Err(error) => {

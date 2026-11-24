@@ -200,6 +200,59 @@ pub enum GuestAction {
     DisallowScreenShare,
 }
 
+/// Whether a failed guest action was an explicit refusal by the web (a 4xx
+/// answer): the action certainly did not happen. A transport failure, a
+/// timeout, a server error or anything not known to be the web's answer may
+/// have happened remotely (plan 260 S1.8, #1895: a removal's deny stays).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn guest_action_refused(error: &anyhow::Error) -> bool {
+    use crate::cloud_show::CloudApiError;
+    match error.downcast_ref::<CloudApiError>() {
+        Some(
+            CloudApiError::Transport(_)
+            | CloudApiError::NodeUnreachable
+            | CloudApiError::RoomsUnavailable
+            | CloudApiError::Full
+            | CloudApiError::Disabled,
+        ) => false,
+        Some(CloudApiError::Other { status, .. }) => (400..500).contains(status),
+        Some(_) => true,
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod guest_action_refusal_tests {
+    use super::guest_action_refused;
+    use crate::cloud_show::CloudApiError;
+
+    fn other(status: u16) -> anyhow::Error {
+        anyhow::Error::new(CloudApiError::Other {
+            status,
+            code: "x".to_string(),
+            message: "x".to_string(),
+        })
+    }
+
+    #[test]
+    fn only_an_explicit_web_refusal_counts() {
+        assert!(guest_action_refused(&other(404)));
+        assert!(guest_action_refused(&anyhow::Error::new(
+            CloudApiError::Unauthorized
+        )));
+        assert!(!guest_action_refused(&other(502)));
+        assert!(!guest_action_refused(&anyhow::Error::new(
+            CloudApiError::Transport("timed out".to_string())
+        )));
+        assert!(!guest_action_refused(&anyhow::Error::new(
+            CloudApiError::RoomsUnavailable
+        )));
+        assert!(!guest_action_refused(&anyhow::anyhow!(
+            "the deadline passed"
+        )));
+    }
+}
+
 /// `POST /api/cloud/shows/:id/guests/:guestId`'s body.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1019,6 +1072,38 @@ impl RoomScreenSettings {
         (self.source_id.starts_with("screen:") || self.source_id.starts_with("window:"))
             && self.source_id.len() <= 512
             && !self.source_id.contains(['\0', '\r', '\n'])
+    }
+}
+
+/// `cloud.room.routing.set` (plan 260 S1.8c c4c): what the program page
+/// plays of the host's speech and auxiliary audio (`ProgramAudioSettings`,
+/// plan 249 S8), sent to routing-capable program pages on
+/// `videorc.audio-routing.v1`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ProgramAudioSettings {
+    pub(crate) speech_gain: f64,
+    pub(crate) auxiliary_gain: f64,
+    pub(crate) speech_muted: bool,
+    pub(crate) auxiliary_muted: bool,
+}
+
+impl Default for ProgramAudioSettings {
+    fn default() -> Self {
+        Self {
+            speech_gain: 1.0,
+            auxiliary_gain: 1.0,
+            speech_muted: false,
+            auxiliary_muted: false,
+        }
+    }
+}
+
+impl ProgramAudioSettings {
+    pub(crate) fn valid(&self) -> bool {
+        [self.speech_gain, self.auxiliary_gain]
+            .iter()
+            .all(|gain| gain.is_finite() && (0.0..=1.0).contains(gain))
     }
 }
 
