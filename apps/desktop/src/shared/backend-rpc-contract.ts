@@ -48,6 +48,7 @@ import type {
   ScheduledStreamMutation,
   ScheduledStreamCapabilities,
   ScheduledStreamCandidate,
+  LocalOffsets,
   ScheduledTimeResolution,
   CaptureRecoveryStatus,
   CohostCommandChooseParams,
@@ -449,6 +450,10 @@ export interface BackendRpcMethodMap {
   'scheduledStreams.zoneOffsets': BackendRpcDefinition<
     { timeZones: string[]; atUtc?: string },
     { offsets: Record<string, number> }
+  >
+  'time.localOffsets': BackendRpcDefinition<
+    { timeZone: string; fromUtc?: string; untilUtc?: string },
+    LocalOffsets
   >
   'scheduledStreams.candidates': BackendRpcDefinition<
     { eventId: string },
@@ -7322,6 +7327,29 @@ const runtimeContracts = {
     ),
     result: objectSchema(
       { offsets: recordSchema(utcOffsetMinutes, { maxKeys: 1_000 }) },
+      { allowUnknown: false }
+    )
+  },
+  'time.localOffsets': {
+    params: objectSchema(
+      {
+        timeZone: boundedString,
+        fromUtc: optionalSchema(timestamp),
+        untilUtc: optionalSchema(timestamp)
+      },
+      { allowUnknown: false }
+    ),
+    result: objectSchema(
+      {
+        timeZone: boundedString,
+        spans: arraySchema(
+          objectSchema(
+            { fromMs: numberSchema({ integer: true }), offsetMinutes: utcOffsetMinutes },
+            { allowUnknown: false }
+          ),
+          { maxLength: 256 }
+        )
+      },
       { allowUnknown: false }
     )
   },

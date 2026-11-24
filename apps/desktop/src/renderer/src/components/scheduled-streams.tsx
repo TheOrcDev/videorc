@@ -1,3 +1,4 @@
+import { formatLocal, LOCAL_DATE_TIME } from '@/lib/local-time'
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
 import { lastCheckedLabel } from '@/hooks/use-scheduled-streams'
 import { openLivestreamView } from '@/lib/livestream-tabs'
@@ -755,7 +756,7 @@ function ScheduledMetaLine({
     <Tooltip>
       <TooltipTrigger render={line} />
       <TooltipContent align="start">
-        Last checked {new Date(lastSyncedAt).toLocaleString()}
+        Last checked {formatLocal(Date.parse(lastSyncedAt), LOCAL_DATE_TIME)}
       </TooltipContent>
     </Tooltip>
   )

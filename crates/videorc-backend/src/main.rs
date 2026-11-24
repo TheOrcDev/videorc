@@ -6543,6 +6543,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "scheduledStreams.resolveTime"
         | "scheduledStreams.zoneOffsets"
         | "scheduledStreams.candidates"
+        | "time.localOffsets"
         | "account.get"
         | "entitlements.get"
         | "cloud.clips.status"
@@ -16301,6 +16302,10 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "time.localOffsets" => match tzdb::local_offsets(&command.params, chrono::Utc::now()) {
+            Ok(value) => ServerResponse::ok(command.id, value),
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
         "streamTargets.youtube.prepare" => {
             match serde_json::from_value::<YouTubePrepareParams>(command.params) {
                 Ok(params) => match prepare_youtube_stream_target(state, params).await {

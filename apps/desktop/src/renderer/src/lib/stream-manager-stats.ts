@@ -1,3 +1,4 @@
+import { formatLocal } from '@/lib/local-time'
 import { topWatchdogAlert } from './watchdog-rank'
 import type { WatchdogAlert } from '@/lib/backend'
 import type {
@@ -117,18 +118,15 @@ export function formatMoneyShort(amountMicros: number, currency: string): string
 }
 
 function timeOfDay(iso: string): string {
-  const date = new Date(iso)
-  return Number.isNaN(date.getTime())
-    ? ''
-    : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return formatLocal(Date.parse(iso), { hour: '2-digit', minute: '2-digit' })
 }
 
 /** A finished session's day, the one spelling the window uses (plan 174 H-30). */
 export function formatHistoryDate(iso: string): string {
-  const started = new Date(iso)
-  return Number.isNaN(started.getTime())
+  const started = Date.parse(iso)
+  return Number.isNaN(started)
     ? 'History'
-    : started.toLocaleDateString([], { month: 'short', day: 'numeric' })
+    : formatLocal(started, { month: 'short', day: 'numeric' })
 }
 
 function sessionItem(input: StatsInput): StatItemModel {

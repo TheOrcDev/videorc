@@ -1,3 +1,4 @@
+import { formatLocal, LOCAL_DATE_TIME } from '@/lib/local-time'
 import { CaptionsIcon, LivestreamIcon } from '@/components/icons'
 import { useId, useRef, useState, type KeyboardEvent, type ReactElement } from 'react'
 
@@ -761,7 +762,7 @@ export function GoLiveDestinationRow({
       ? [
           scheduledTitle ? `Scheduled: ${scheduledTitle}` : 'Scheduled event',
           scheduledPrivacy ? capitalize(scheduledPrivacy) : undefined,
-          scheduledStart ? new Date(scheduledStart).toLocaleString() : undefined
+          scheduledStart ? formatLocal(Date.parse(scheduledStart), LOCAL_DATE_TIME) : undefined
         ]
           .filter(Boolean)
           .join(' · ')

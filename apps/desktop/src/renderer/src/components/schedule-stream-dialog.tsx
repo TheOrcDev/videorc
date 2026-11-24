@@ -1,3 +1,4 @@
+import { localOffsetMinutes, systemTimeZone } from '@/lib/local-time'
 import { ChevronDownIcon } from '@/components/icons'
 import { useEffect, useMemo, useState, type ReactElement } from 'react'
 import { ConfirmDialog } from '@/components/confirm-dialog'
@@ -125,17 +126,16 @@ export function defaultPlannedEnd(localStart: string): string {
 const FRESH_START_LEAD_MS = 3_600_000
 
 function freshMetadata(provider: ScheduledStreamProvider): ScheduledEventMetadata {
-  // A placeholder in the renderer's own clock until `zoneOffsets` answers:
-  // Electron's tz data can be an hour off for the streamer's zone.
+  // A placeholder on the local clock until `zoneOffsets` answers for the zone.
   const startMs = Date.now() + FRESH_START_LEAD_MS
-  const local = wallTimeAt(startMs, -new Date(startMs).getTimezoneOffset())
+  const local = wallTimeAt(startMs, localOffsetMinutes(startMs))
   return {
     title: '',
     description: '',
     privacy: 'private',
     madeForKids: false,
     localStart: local,
-    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    timeZone: systemTimeZone(),
     offsetChoice: null,
     thumbnailAssetId: null,
     // X requires a planned end on every update; start from the usual two hours.

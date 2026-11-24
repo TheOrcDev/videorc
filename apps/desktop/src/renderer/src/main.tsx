@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 
 import { App } from './App'
 import { AppErrorBoundary } from './components/app-error-boundary'
+import { startLocalTimeSync } from './lib/local-time'
 import './styles.css'
 
 // React's dev build logs every component render onto the performance timeline
@@ -26,6 +27,8 @@ if (import.meta.env.DEV && localStorage.getItem('videorc.reactPerfTrack') !== '1
     return nativeMeasure(name, startOrOptions, endMark)
   }
 }
+
+void startLocalTimeSync()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

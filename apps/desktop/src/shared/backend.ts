@@ -10261,6 +10261,18 @@ export interface ScheduledStreamTimes {
   }
 }
 /** `scheduledStreams.resolveTime`: a form's times in the backend's tz data. */
+/** One stretch of a zone's UTC offset, from `fromMs` until the next span. */
+export interface LocalOffsetSpan {
+  fromMs: number
+  offsetMinutes: number
+}
+
+/** `time.localOffsets`: a zone's offsets from the backend's bundled tz data. */
+export interface LocalOffsets {
+  timeZone: string
+  spans: LocalOffsetSpan[]
+}
+
 export interface ScheduledTimeResolution {
   /** `null` only while a repeated hour waits for its earlier/later choice. */
   startUtc: string | null
