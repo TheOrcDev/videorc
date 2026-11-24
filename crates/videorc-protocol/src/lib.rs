@@ -13,6 +13,7 @@
 
 pub mod buddy_pet;
 pub mod captions;
+pub mod cloud_source_iso;
 pub mod cohost;
 pub mod community;
 pub mod live_chat_moderation;
