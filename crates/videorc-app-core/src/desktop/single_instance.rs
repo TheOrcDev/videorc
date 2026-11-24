@@ -155,6 +155,28 @@ pub fn acquire(dir: &Path) -> io::Result<Acquired> {
     }))
 }
 
+/// How long a relaunched process waits for the instance that relaunched it
+/// to let go of the lock ([`acquire_after_relaunch`]).
+pub const RELAUNCH_LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// [`acquire`] for a process the app started to replace itself (Reopen
+/// Videorc after a permission grant): the old instance may still hold the
+/// lock while it quits, and a plain `acquire` would make this launch the
+/// secondary and hand its links to the instance that is going away. Retries
+/// until this launch is the primary or `wait` passes; after that it is what
+/// `acquire` last found. The relaunch marks the new process (an argument or
+/// variable it sets) so only that launch waits.
+pub fn acquire_after_relaunch(dir: &Path, wait: Duration) -> io::Result<Acquired> {
+    let until = Instant::now() + wait;
+    loop {
+        match acquire(dir)? {
+            Acquired::Primary(primary) => return Ok(Acquired::Primary(primary)),
+            secondary if Instant::now() >= until => return Ok(secondary),
+            Acquired::Secondary(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
 impl Primary {
     /// Serves second launches on a thread: each handoff's links reach
     /// `on_handoff` (an empty list still asks for the window).
@@ -337,6 +359,31 @@ mod tests {
         drop(first);
         assert!(!dir.path().join(INSTANCE_FILE).exists());
         assert!(matches!(acquire(dir.path()).unwrap(), Acquired::Primary(_)));
+    }
+
+    #[test]
+    fn a_relaunch_waits_for_the_quitting_instance_and_then_takes_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = acquire(dir.path()).unwrap();
+        assert!(matches!(old, Acquired::Primary(_)));
+        // Still held for the whole wait: the relaunch ends up the secondary.
+        assert!(matches!(
+            acquire_after_relaunch(dir.path(), Duration::from_millis(150)).unwrap(),
+            Acquired::Secondary(_)
+        ));
+        // The old instance quits a moment after the relaunch started.
+        let quitting = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(old);
+        });
+        let started = Instant::now();
+        let relaunched = acquire_after_relaunch(dir.path(), Duration::from_secs(5)).unwrap();
+        quitting.join().unwrap();
+        let Acquired::Primary(primary) = relaunched else {
+            panic!("the relaunch must take the lock once the old instance lets go");
+        };
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        assert_eq!(primary.info.pid, std::process::id());
     }
 
     #[test]
