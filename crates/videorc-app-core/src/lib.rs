@@ -17,6 +17,7 @@ pub mod log;
 pub mod paths;
 pub mod process;
 pub mod restart;
+pub mod studio;
 pub mod supervisor;
 
 pub use client::{BackendClient, BackendEvent, ClientConfig, ConnectionState, EventFilter};
