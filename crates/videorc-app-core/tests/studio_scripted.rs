@@ -4239,3 +4239,87 @@ async fn an_x_playback_check_is_told_once_per_broadcast_and_status() {
     studio.handle_event(verified()).await;
     assert!(shown_titles(&mut notices).is_empty());
 }
+
+fn shown_ids(
+    notices: &mut tokio::sync::broadcast::Receiver<videorc_app_core::notices::NoticeCommand>,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    while let Ok(command) = notices.try_recv() {
+        if let videorc_app_core::notices::NoticeCommand::Show(notice) = command {
+            ids.extend(notice.id.clone());
+        }
+    }
+    ids
+}
+
+fn cloud_state(payload: Value) -> BackendEvent {
+    BackendEvent::Untyped {
+        event: "cloud.state".into(),
+        payload,
+    }
+}
+
+#[tokio::test]
+async fn a_hand_off_latches_what_it_stopped_until_this_computer_is_back_on_air() {
+    let backend = Scripted::new();
+    answer_livestream(
+        &backend,
+        "cloud.status",
+        json!({ "phase": "off", "entitled": true }),
+    );
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let state = studio.cloud_now();
+    assert_eq!(state.status.expect("read at bootstrap").phase, "off");
+    assert!(state.handed_off.is_empty());
+
+    studio
+        .handle_event(cloud_state(json!({
+            "phase": "hold",
+            "stoppedBy": "hand-off",
+            "sessionId": "s1",
+            "show": { "id": "show1" },
+            "onAir": { "thisDevice": false, "waiting": true },
+        })))
+        .await;
+    assert_eq!(studio.cloud_now().handed_off, vec!["s1", "show1"]);
+
+    studio
+        .handle_event(cloud_state(json!({
+            "phase": "live",
+            "stoppedBy": "hand-off",
+            "show": { "id": "show1" },
+            "onAir": { "thisDevice": true, "waiting": false },
+        })))
+        .await;
+    assert!(studio.cloud_now().handed_off.is_empty());
+}
+
+#[tokio::test]
+async fn cloud_actions_toast_under_one_id_and_focus_asks_once_per_ten_seconds() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let mut notices = studio.notices();
+
+    studio.set_cloud_settings(json!({ "enabled": true })).await;
+    assert_eq!(shown_ids(&mut notices), vec!["videorc-cloud".to_string()]);
+
+    answer_livestream(
+        &backend,
+        "cloud.show.handOff",
+        json!({ "confirmed": false }),
+    );
+    assert!(studio.hand_off_cloud_show().await);
+    assert_eq!(shown_ids(&mut notices), vec!["videorc-cloud".to_string()]);
+    assert!(!studio.hand_off_cloud_show().await);
+
+    studio.check_cloud_show(20_000).await;
+    studio.check_cloud_show(25_000).await;
+    studio.check_cloud_show(30_000).await;
+    let checks = livestream_methods(&backend)
+        .into_iter()
+        .filter(|m| m == "cloud.show.check")
+        .count();
+    assert_eq!(checks, 2);
+}
