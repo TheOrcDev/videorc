@@ -274,6 +274,60 @@ impl<B: StudioBackend> Studio<B> {
         )
         .await;
     }
+
+    /// `cloud.room.open` (Guests ⌘7).
+    pub async fn open_talk_room(&self, title: Option<String>, platforms: Vec<String>) {
+        let mut params = json!({ "platforms": platforms });
+        if let Some(title) = title.filter(|t| !t.trim().is_empty()) {
+            params["title"] = json!(title);
+        }
+        self.cloud_action("cloud.room.open", params, "open", "the room")
+            .await;
+    }
+
+    /// `cloud.room.close`.
+    pub async fn close_talk_room(&self) {
+        self.cloud_action("cloud.room.close", Value::Null, "close", "the room")
+            .await;
+    }
+
+    /// `cloud.room.invite.rotate`.
+    pub async fn rotate_talk_invite(&self) {
+        self.cloud_action(
+            "cloud.room.invite.rotate",
+            Value::Null,
+            "make",
+            "a new link",
+        )
+        .await;
+    }
+
+    /// `cloud.room.door.set`.
+    pub async fn set_talk_door(&self, open: bool) {
+        self.cloud_action(
+            "cloud.room.door.set",
+            json!({ "open": open }),
+            "change",
+            "the door",
+        )
+        .await;
+    }
+
+    /// `cloud.guest.decide` (`let-in` / `decline`).
+    pub async fn decide_talk_guest(&self, request_id: &str, decision: &str) {
+        let action = if decision == "let-in" {
+            "let the guest in"
+        } else {
+            "decline the guest"
+        };
+        self.cloud_action(
+            "cloud.guest.decide",
+            json!({ "requestId": request_id, "decision": decision }),
+            action,
+            "",
+        )
+        .await;
+    }
 }
 
 #[cfg(test)]
