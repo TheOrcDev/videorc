@@ -51,7 +51,7 @@ development mode), so these are an upper bound for the packaged app.
 
 | State | Electron renderer | GPU process | Main | Helpers | Electron total | Backend | FFmpeg |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Idle, Studio, preview closed (180 s, load 3 to 4) | 14.7 | 6.6 | 0.9 | 0.1 | 22.3 | not captured | |
+| Idle, Studio, preview closed (180 s, load 3 to 5) | 14.7 | 6.6 | 0.9 | 0.1 | 22.3 | 0.1 | |
 | Recording 1080p60, native preview docked (300 s, load 9 to 12) | 36.2 (p95 55) | 14.4 | 8.5 | 0.9 | 60.0 | 16.0 (p95 18.7) | 2.1 |
 
 Memory, median at the end of the run: idle, the renderer 232 MB, main
@@ -62,6 +62,7 @@ backend 106 MB, FFmpeg 20 MB, total up to 1.24 GB. The recording ran at
 
 Measured with `scripts/performance-scenario-runner.mjs` (`ui-idle`,
 `record-1080p60`, `--report-only`); idle CPU from `ps` CPU time of the
-app's processes over 180 s, because `ui-idle` samples memory only. Owed: the
+app's processes over 180 s, because `ui-idle` samples memory only (the
+backend's from a second run, 2026-11-24: 0.22 s of CPU in 180 s). Owed: the
 packaged 0.37.1 app's numbers (the `performance-macos` workflow on its
-authorized runner), and the backend's idle CPU.
+authorized runner).
