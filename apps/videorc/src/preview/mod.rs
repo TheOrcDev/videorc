@@ -21,7 +21,7 @@ mod floating;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod scene;
 

@@ -113,6 +113,7 @@ impl LibraryScreen {
                 let implemented = matches!(
                     item.id,
                     MenuId::Play
+                        | MenuId::Markers
                         | MenuId::Reveal
                         | MenuId::ExportMp4
                         | MenuId::Rename
@@ -331,9 +332,9 @@ impl Render for LibraryScreen {
                         .label(copy::MENU_PLAY)
                         .variant(ButtonVariant::Ghost)
                         .disabled(row.play_reason.is_some() || row.menu_disabled)
-                        .tooltip(row.play_reason.unwrap_or(copy::PLAY_RECORDING))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.action(play_id.clone(), MenuId::Play, window, cx)
+                        .tooltip(row.play_reason.unwrap_or(copy::PLAY_IN_DEFAULT_PLAYER))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.external_recording(play_id.clone(), cx)
                         })),
                 )
                 .child(
@@ -359,7 +360,7 @@ impl Render for LibraryScreen {
                         this.focus.focus(window, cx);
                         if matches!(event,gpui::ClickEvent::Mouse(event) if event.up.click_count==2)
                         {
-                            this.action(id.clone(), MenuId::Play, window, cx);
+                            this.external_recording(id.clone(), cx);
                         }
                     }),
                 );
@@ -547,6 +548,6 @@ impl Render for LibraryScreen {
                     ),
             );
         }
-        root
+        root.child(self.player.clone())
     }
 }

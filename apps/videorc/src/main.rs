@@ -489,6 +489,7 @@ fn main() -> Result<()> {
                         library_files.clone(),
                         studio.clone(),
                         core_handle.clone(),
+                        preview_logger.clone(),
                         window,
                         cx,
                     )

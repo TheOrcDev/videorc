@@ -30,6 +30,7 @@ impl Global for Shared {}
 pub enum Delivery {
     Store(Effect),
     Press(Notice),
+    PressToast { id: String, toast: ToastData },
     Dismiss(String),
 }
 #[derive(Clone)]
@@ -220,6 +221,12 @@ impl Hub {
             }
         })
         .detach();
+    }
+    /// A toast belonging to an explicit press (for example marker delete/Undo).
+    /// Automatic work uses the typed notice store instead.
+    pub fn press_toast(&mut self, id: String, toast: ToastData, cx: &mut Context<Self>) {
+        self.pressed();
+        cx.emit(Delivery::PressToast { id, toast });
     }
     pub fn pressed(&mut self) {
         self.store.set_pressed();
@@ -439,6 +446,9 @@ impl Centre {
             Delivery::Store(Effect::Dismiss { key }) | Delivery::Dismiss(key) => self
                 .toaster
                 .update(cx, |toaster, cx| toaster.dismiss(&key.into(), window, cx)),
+            Delivery::PressToast { id, toast } => self
+                .toaster
+                .update(cx, |toaster, cx| toaster.show(id, toast, window, cx)),
             Delivery::Press(notice) => {
                 let id = notice
                     .id
