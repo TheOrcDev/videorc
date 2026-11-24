@@ -1010,7 +1010,7 @@ fn runnable(path: &str, platform: Platform) -> bool {
 
 pub(crate) fn find_claude_cli(
     environment: &AgentEnvironment,
-    can_run: &dyn Fn(&str) -> bool,
+    can_run: &(dyn Fn(&str) -> bool + Sync),
 ) -> Option<String> {
     claude_cli_candidates(environment)
         .into_iter()
@@ -1030,7 +1030,7 @@ pub(crate) async fn add_to_claude_code(
     bridge_path: &str,
     token: &str,
     environment: &AgentEnvironment,
-    can_run: &dyn Fn(&str) -> bool,
+    can_run: &(dyn Fn(&str) -> bool + Sync),
     run: &RunCli,
     log: &(dyn Fn(&str) + Sync),
 ) -> ClaudeCodeInstall {
