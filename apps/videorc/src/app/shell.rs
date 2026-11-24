@@ -23,6 +23,7 @@ use videorc_kit::{
 use super::bridge::Mirror;
 use crate::preview::Preview;
 use crate::screens::destinations::DestinationsPanel;
+use crate::screens::go_live::GoLiveDialog;
 use crate::screens::output::OutputPanel;
 use crate::screens::sources::SourcesPanel;
 use crate::screens::studio::{StudioPage, transport::OpenPage};
@@ -80,6 +81,8 @@ pub struct Shell {
     output: Entity<OutputPanel>,
     /// Phase 3: Destinations ⌘6.
     destinations: Entity<DestinationsPanel>,
+    /// Phase 3: Go Live confirmation (over any page).
+    go_live: Entity<GoLiveDialog>,
     settings: Entity<SettingsScreen>,
     health: Entity<crate::screens::health::HealthScreen>,
     palette: Entity<CommandPalette>,
@@ -96,6 +99,7 @@ impl Shell {
         sources: Entity<SourcesPanel>,
         output: Entity<OutputPanel>,
         destinations: Entity<DestinationsPanel>,
+        go_live: Entity<GoLiveDialog>,
         settings: Entity<SettingsScreen>,
         health: Entity<crate::screens::health::HealthScreen>,
         palette: Entity<CommandPalette>,
@@ -134,6 +138,7 @@ impl Shell {
         cx.observe(&sources, |_, _, cx| cx.notify()).detach();
         cx.observe(&output, |_, _, cx| cx.notify()).detach();
         cx.observe(&destinations, |_, _, cx| cx.notify()).detach();
+        cx.observe(&go_live, |_, _, cx| cx.notify()).detach();
         // Both routes use the same lifecycle, title and focus updates.
         cx.subscribe_in(&studio, window, |this, _, open: &OpenPage, window, cx| {
             this.open_page(open.0, window, cx);
@@ -174,6 +179,7 @@ impl Shell {
             sources,
             output,
             destinations,
+            go_live,
             settings,
             health,
             palette,
@@ -436,6 +442,7 @@ impl Render for Shell {
                     .child(self.notices.clone()),
             )
             .child(self.palette.clone())
+            .child(self.go_live.clone())
             .child(self.notices.read(cx).toasts())
     }
 }
