@@ -7,10 +7,13 @@
 //! session through the live audio sync (plan 069, [`super::live_audio`]):
 //! the control writes the capture config, then the sync's pass (Electron's
 //! microphone sync effect in `use-studio.tsx`) queues the newest state on
-//! the session's latest-wins queue. The caller that finds no drain running
-//! drains it; a pass the Studio runs on its own (a status, the connection, a
-//! start's answer) leaves the drain to [`Studio::drive`], so an update in
-//! flight never holds up the events. A rejection rolls the controls back
+//! the session's latest-wins queue. Only [`Studio::drive`] drains it (the
+//! callers kick it), beside the events, so an update in flight never holds
+//! up the events, a control never waits for the store's round trip to reach
+//! the session, and a control's future dropped partway strands nothing
+//! (review of #1862). Every capture config writer runs the pass
+//! ([`Studio::update_capture_config`] included), so a saved scene's System
+//! audio reaches a running session too. A rejection rolls the controls back
 //! and a capture without live controls pins them for the session.
 //!
 //! The mute is Electron's `requestRemoteMicrophoneMute`
@@ -286,8 +289,11 @@ fn write_microphone(config: &mut Value, values: &MicValues) {
     );
 }
 
-/// A drain's claim on its queue, given back if the drain is dropped before
-/// it ends (its reply never arrives); dropped with the Studio's lock free.
+/// [`Studio::drive`]'s claim on the queue while it drains, given back if the
+/// drive is dropped before the drain ends (the Studio stopping: its reply
+/// never arrives, and no drain follows it); dropped with the Studio's lock
+/// free. No control drains inline, so a control's dropped future never
+/// abandons a request the backend may still be applying.
 struct DrainClaim<'a> {
     inner: &'a Mutex<Inner>,
     token: u64,
@@ -328,10 +334,12 @@ impl<B: StudioBackend> Studio<B> {
     /// the mute is written to the capture config and the next session
     /// starts with it. While a session runs, the toggle reads what the
     /// session holds (not the controls); the mute is saved to the capture
-    /// config first, then the live sync sends it, and this answers once the
-    /// session applied it. False when the session's state is unknown, its
-    /// live controls are disabled, or it refused the mute (the rejection
-    /// rolls the controls back).
+    /// config first (the Studio's config, as `commitRequestedMute`), then the
+    /// live sync sends it from [`Self::drive`] while the store's write goes
+    /// out beside it, and this answers once the session applied it. Dropping
+    /// this future only drops the answer. False when the session's state is
+    /// unknown, its live controls are disabled, or it refused the mute (the
+    /// rejection rolls the controls back).
     pub async fn set_microphone_muted(&self, mode: MicrophoneMode) -> bool {
         let pick = move |muted: bool| match mode {
             MicrophoneMode::Mute => true,
@@ -371,7 +379,7 @@ impl<B: StudioBackend> Studio<B> {
             return self.commit_microphone_muted(muted).await;
         };
         // Saved first (`commitRequestedMute`), then the live sync sends it.
-        let (claimed, waiter) = {
+        let waiter = {
             let mut guard = self.lock();
             let inner = &mut *guard;
             if let Err(error) = self.stage_capture_config(inner, |config| {
@@ -411,15 +419,13 @@ impl<B: StudioBackend> Studio<B> {
             } else {
                 None
             };
-            // The capture config changed: the sync's pass runs.
-            self.stage_live_audio_pass(inner);
-            (inner.claim_live_audio_drain(), waiter)
+            // The capture config changed: the sync's pass runs, and the drive
+            // sends the mute at once, without waiting for the store.
+            self.stage_live_audio_and_kick(inner);
+            waiter
         };
         self.publish();
         self.flush_audio_write("the microphone mute").await;
-        if let Some(token) = claimed {
-            self.drain_live_audio(token).await;
-        }
         match waiter {
             Some(waiter) => waiter.await.unwrap_or(false),
             None => true,
@@ -531,10 +537,10 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     /// `setAudio`: one audio field into the capture config, then, while a
-    /// recording or livestream runs, the live sync's pass (this caller
-    /// drains the queue when no drain runs).
+    /// recording or livestream runs, the live sync's pass; [`Self::drive`]
+    /// sends it while the store's write goes out.
     async fn write_audio(&self, field: &str, value: Value) {
-        let claimed = {
+        {
             let mut guard = self.lock();
             let inner = &mut *guard;
             if let Err(error) = self.stage_capture_config(inner, |config| {
@@ -546,14 +552,10 @@ impl<B: StudioBackend> Studio<B> {
                 ));
                 return;
             }
-            self.stage_live_audio_pass(inner);
-            inner.claim_live_audio_drain()
-        };
+            self.stage_live_audio_and_kick(inner);
+        }
         self.publish();
         self.flush_audio_write(field).await;
-        if let Some(token) = claimed {
-            self.drain_live_audio(token).await;
-        }
     }
 
     /// The store takes the audio write (it waits in the journal while the
@@ -588,6 +590,18 @@ impl<B: StudioBackend> Studio<B> {
         }
     }
 
+    /// The sync's pass under the lock, and [`Self::drive`] woken when its
+    /// queue holds work nobody drains. Every capture config writer runs it
+    /// (review of #1862). True when a pin-back write was staged (the
+    /// caller's flush sends it).
+    pub(super) fn stage_live_audio_and_kick(&self, inner: &mut Inner) -> bool {
+        let staged = self.stage_live_audio_pass(inner);
+        if inner.live_audio_wants_drain() {
+            self.live_audio_kick.notify_one();
+        }
+        staged
+    }
+
     /// The sync's pass after a change the Studio heard on its own (a status,
     /// the connection, a start's or a stop's answer, another window's
     /// edit). Its drain is [`Self::drive`]'s, never this caller's.
@@ -609,7 +623,8 @@ impl<B: StudioBackend> Studio<B> {
         }
     }
 
-    /// [`Self::drive`]'s drain: the queue's work nobody else drains.
+    /// [`Self::drive`]'s drain, the queue's only drainer: woken by every
+    /// pass that leaves work waiting.
     pub(super) async fn drain_live_audio_when_kicked(&self) {
         loop {
             self.live_audio_kick.notified().await;
