@@ -147,24 +147,22 @@ impl<B: StudioBackend> Studio<B> {
         let mut capture = self.snapshot().settings.capture_doc;
         capture["streaming"] = sent.clone();
         let params = plan::probe_params(&capture, false, false)?;
-        let key = crate::livestream::ready::probe_key(&params);
-        self.check_stream_output(params, false).await;
-        match self.details_now().topology {
-            Topology::Ready {
-                key: settled,
-                result,
-            } if settled == key => {
+        // A check already running for this request is joined; one that
+        // couldn't settle is no pass.
+        match self.check_stream_output(params, false).await {
+            Some(Topology::Ready { result, .. }) => {
                 let split_rejected = result["outputRoles"]
                     .as_array()
                     .is_some_and(|roles| roles.iter().any(|r| r == "stream"))
                     && result["effectiveBridgeOutput"].as_str() == Some("raw-yuv420p");
                 split_rejected.then(|| go_live_copy::SPLIT_UNAVAILABLE.to_string())
             }
-            Topology::Failed {
-                key: settled,
-                message,
-            } if settled == key => Some(go_live_copy::output_check_failed(&message)),
-            _ => None,
+            Some(Topology::Failed { message, .. }) => {
+                Some(go_live_copy::output_check_failed(&message))
+            }
+            _ => Some(go_live_copy::output_check_failed(
+                go_live_copy::OUTPUT_CHECK_UNSETTLED,
+            )),
         }
     }
 

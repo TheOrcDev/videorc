@@ -13,6 +13,9 @@ pub const SPLIT_UNAVAILABLE: &str = "This computer can't encode the recording an
 pub fn output_check_failed(message: &str) -> String {
     format!("Livestream output check failed: {message}")
 }
+/// The check had no answer for this Go Live: offline, replaced by a newer
+/// check, or abandoned.
+pub const OUTPUT_CHECK_UNSETTLED: &str = "It didn't finish. Try again.";
 pub const SCHEDULED_EVENT_CHANGED: &str = "The scheduled event changed";
 pub const SCHEDULED_EVENT_CHANGED_DESCRIPTION: &str =
     "Review its updated visibility and details, then confirm again.";
