@@ -24,6 +24,8 @@ use videorc_app_core::desktop::permissions::{
     MediaAccessPermission, MediaAccessStatus, MediaPane, PermissionFuture,
 };
 
+#[cfg(target_os = "linux")]
+pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
@@ -108,10 +110,10 @@ pub trait Platform: Send + Sync {
 }
 
 /// A platform whose module has not landed: every call says so.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "linux"), allow(dead_code))]
 pub struct Unsupported;
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "linux"), allow(dead_code))]
 impl Unsupported {
     fn gap<T>(what: &str) -> OsResult<T> {
         Err(format!(
@@ -153,7 +155,11 @@ pub fn current() -> &'static dyn Platform {
     {
         &macos::MacOs
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::platform()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         &Unsupported
     }

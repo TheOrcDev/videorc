@@ -7934,9 +7934,11 @@ name = "videorc-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ashpd",
  "block2 0.6.2",
  "chrono",
  "dispatch2",
+ "futures-util",
  "global-hotkey",
  "gpui-pre",
  "gpui-pre-platform",
