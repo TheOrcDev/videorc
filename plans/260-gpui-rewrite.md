@@ -807,6 +807,34 @@ platform. S0.8 and S0.9 inform the plan and do not gate it.
 | S0.11 | The parity list from the code: `docs/gpui/parity.md`, one line per control, a column per platform | Docs only, no build | L6 | Research · `gpt-6.1-sol` · 8 | Every row of [What parity means](#what-parity-means) expanded; its Windows column is the testing plan's checklist |
 | S0.12 | The spikes branch: `spikes/gpui` in `TheOrcDev/videorc` with a spikes workspace, S0.0's spike as the model, the `summary.json` format and a README per spike | This Mac, no slot | L6 | Implementation · `gpt-6.1-sol` · 7 | A contributor can clone it, build the model and see the summary format; nothing reaches `main` |
 
+#### S0.9 results on macOS (2026-11-24, lane L4)
+
+The spikes workspace (`spikes/gpui`), `gpui-pre` 0.3.14, the owner's M4
+MacBook Pro, `CARGO_BUILD_JOBS=1` in a fresh target under the build slot,
+load average 3 to 5. Evidence: `~/cloud-test/reports/2026-11-23-plan-260/s0-9/`.
+
+| What | Number |
+| --- | --- |
+| Clean release build (`spike-desktop`: GPUI, menus, hotkey, trash) | 263 s, 1,170 MB of target |
+| Incremental release build (one file touched) | 4.6 s |
+| Clean debug build, same target | 147 s, +2,255 MB (3,425 MB with release) |
+| Incremental debug build | 1.0 s |
+| Release binary | 10.0 MB; 7.4 MB stripped (`spike-text` 13.1 / 10.0 MB) |
+| A spike as a signed `.app` | 7.0 MB; 3.1 MB zipped, 3.6 MB as a DMG |
+| Today's Electron app (0.37.x, installed) | 491 MB; 203 MB zipped. Electron's framework (254 MB, 109 MB zipped) and `app.asar` (97 MB, 23 MB zipped) are what GPUI removes; the backend, FFmpeg, MCP and assets that stay zip to 67 MB |
+| Bump, one week (0.3.13 → 0.3.14), all five spike crates | 2 lines break, both `gpui::NativeView`, new in 0.3.14 |
+| Bump, one month (0.3.10 → 0.3.14) | 7 lines break: the same 2, and 5 in the input element copied from GPUI's own example (the `Element` trait changed). Menus, windows, notifications and the accessibility API compiled unchanged |
+
+- A release build needs Xcode's Metal Toolchain: without `runtime_shaders`
+  `gpui-pre-apple`'s build script runs `xcrun metal`, which fails here
+  ("missing Metal Toolchain"). Start-up numbers taken with
+  `runtime_shaders` include compiling the shaders at launch, so they are
+  an upper bound for a release build.
+- Expected download for the GPUI app: about 75 to 95 MB against 203 MB
+  today, depending on the final binary (the spikes are 3 to 4 MB zipped).
+- Bumps are cheap so far, and `NativeView` (the macOS preview's
+  foundation) is a week old in `gpui-pre`: keep the exact pin (D1).
+
 ### Phase 1: the core lands in the shipping repo (ships in Electron, starts now)
 
 Phase 1 needs no GPUI, and each move leaves Electron better if the rewrite
