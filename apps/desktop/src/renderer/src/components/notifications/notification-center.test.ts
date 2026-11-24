@@ -245,7 +245,8 @@ describe('NotificationCenter (plan 250, "The dropdown")', () => {
   it('marks everything read when it closes, and nothing pops up while it is open', async () => {
     const door = { show: vi.fn(), resolved: vi.fn(), dismiss: vi.fn() }
     store.setPopUpDoor(door)
-    store.publish({ key: 'a', kind: kind('problem'), title: 'A' })
+    // Only an urgent problem pops up, live or not (the owner's rule).
+    store.publish({ key: 'a', kind: kind('problem'), title: 'A', tone: 'urgent' })
     expect(door.show).toHaveBeenCalledTimes(1)
     await render()
     await act(async () => {
