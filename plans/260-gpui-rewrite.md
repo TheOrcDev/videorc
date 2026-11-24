@@ -824,12 +824,15 @@ load average 3 to 5. Evidence: `~/cloud-test/reports/2026-11-23-plan-260/s0-9/`.
 | Today's Electron app (0.37.x, installed) | 491 MB; 203 MB zipped. Electron's framework (254 MB, 109 MB zipped) and `app.asar` (97 MB, 23 MB zipped) are what GPUI removes; the backend, FFmpeg, MCP and assets that stay zip to 67 MB |
 | Bump, one week (0.3.13 → 0.3.14), all five spike crates | 2 lines break, both `gpui::NativeView`, new in 0.3.14 |
 | Bump, one month (0.3.10 → 0.3.14) | 7 lines break: the same 2, and 5 in the input element copied from GPUI's own example (the `Element` trait changed). Menus, windows, notifications and the accessibility API compiled unchanged |
+| Start-up, launch to the first window with content (5 rounds, measured from outside the app: window list, then ScreenCaptureKit) | GPUI `spike-text` (10,000-row chat) median **297 ms** (285 to 592); `spike-desktop` 332 ms (315 to 423). Electron 0.37 (the installed app, a fresh isolated profile) median **706 ms** (633 to 1,449), and its first launch showed no window within 2 s. Load average 2.9 to 3.4 |
+| `backend.ready` | Electron spawns the backend 310 to 330 ms after launch; ready follows 40 to 45 ms later on a fresh profile (744 ms in one round; 0.7 to 1.2 s on the owner's real data, from the installed app's log). A GPUI app spawns it first thing in `main`, so `backend.ready` arrives about 300 ms earlier |
 
 - A release build needs Xcode's Metal Toolchain: without `runtime_shaders`
   `gpui-pre-apple`'s build script runs `xcrun metal`, which fails here
-  ("missing Metal Toolchain"). Start-up numbers taken with
-  `runtime_shaders` include compiling the shaders at launch, so they are
-  an upper bound for a release build.
+  ("missing Metal Toolchain"). The GPUI start-up numbers include
+  compiling the shaders at launch (`runtime_shaders`), so they are an
+  upper bound for a release build. Start-up passes S0.9's line ("no
+  slower than Electron's"): about 400 ms faster to first content.
 - Expected download for the GPUI app: about 75 to 95 MB against 203 MB
   today, depending on the final binary (the spikes are 3 to 4 MB zipped).
 - Bumps are cheap so far, and `NativeView` (the macOS preview's
