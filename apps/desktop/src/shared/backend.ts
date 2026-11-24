@@ -6167,12 +6167,20 @@ export interface CloudRoomMicrophoneSettings {
   offsetMs: number
 }
 
-/** `cloud.room.microphone.set` (plan 260 S1.8c): the host's microphone for
- * the backend's room while it holds the host seat; `null` takes it off. The
- * camera's device and effects join it in c2. Mirrors Rust
- * `CloudRoomMediaSetParams`. */
+/** The camera the Studio has on for the backend's room (the Sources camera,
+ * which the native preview camera runs). Its key, look and background are
+ * the backend's own scene layout, so only the device travels. */
+export interface CloudRoomCameraSettings {
+  deviceId: string
+}
+
+/** The host's media for the backend's room while it holds the host seat
+ * (plan 260 S1.8c), one method per kind: `cloud.room.microphone.set` sends
+ * `microphone`, `cloud.room.camera.set` sends `camera`; `null` takes it off.
+ * Mirrors Rust `CloudRoomMediaSetParams`. */
 export interface CloudRoomMediaSetParams {
-  microphone: CloudRoomMicrophoneSettings | null
+  microphone?: CloudRoomMicrophoneSettings | null
+  camera?: CloudRoomCameraSettings | null
 }
 
 /** `cloud.room.avatar.motion` (plan 260 S1.8b): one message of the
