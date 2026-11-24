@@ -89,7 +89,8 @@ impl Store {
             cached: Vec::new(),
             counted: Count::default(),
             effects: Vec::new(),
-            guard: None,
+            // Electron's store guards every title and detail by default.
+            guard: Some(super::guard::guard_text),
         }
     }
 
