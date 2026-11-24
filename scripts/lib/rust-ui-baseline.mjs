@@ -641,13 +641,18 @@ async function shootIdleStates({ ctx, tryStep, only, missing }) {
     await ctx.shoot('library', 'kebab-menu')
     await ctx.dismiss()
   })
-  if (wanted(only, 'library-player')) {
-    missing(
-      'library-player',
-      'default',
-      'The Electron app has no in-app player: Play opens the recording in the OS default player (Play in the default player). The Rust app decodes playback in the backend (P3-D3), so there is no Electron screen to match.'
+  // The in-app player lives in the Library's Markers dialog (session-player.tsx):
+  // row ⋯ menu → Markers.
+  await tryStep('library-player', 'default', async () => {
+    await ctx.open('library')
+    await ctx.js(
+      `const row = await waitFor(() => document.querySelector('main [role=grid] [role=rowgroup]:not(:first-child) [role=row]'), 'a library session'); const buttons = [...row.querySelectorAll('button')]; buttons.at(-1).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 })); buttons.at(-1).click(); await sleep(800); return true`
     )
-  }
+    await ctx.click('^Markers$', { selector: '[role=menuitem]' })
+    await sleep(2000)
+    await ctx.shoot('library-player', 'default')
+    await ctx.dismiss()
+  })
   await tryStep('livestream-upcoming', 'schedule', async () => {
     await ctx.open('streaming')
     await ctx.click('^Upcoming$', { selector: '[role=tab]' })

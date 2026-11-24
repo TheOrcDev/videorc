@@ -83,7 +83,8 @@ export const BASELINE_NOTES = Object.freeze([
   'The profile is the test pattern with the camera and the microphone off, the Demo scene working, and three saved scenes: Talking head and Side by side need a camera, so they read "Resolve sources". The clips ring is off. Destinations hold fake keys; the on-air shot streams only to a local RTMP sink.',
   'Not fixed between runs: Library session names, dates and thumbnails (two real 3 s test-pattern recordings), the Schedule dialog clock, the recording and on-air timers, and any host notice the app raises.',
   'Buddy "unlocked" is the signed-in run: the dev-only mock session served by a local fake (no real account), so Buddy library rows read "not available right now". "Locked" is the signed-out run.',
-  'First run is shot with prefers-reduced-motion so the backdrop holds still, from a profile that holds only the first-run record.'
+  'First run is shot with prefers-reduced-motion so the backdrop holds still, from a profile that holds only the first-run record.',
+  'Plan 260 S0.10: the app is the dev build (electron-vite dev renderer) of main, whose app code is unchanged since 0.37.1; appCommit is that tree plus the shooter. The backend is the release profile for the idle, windows, live and first-run parts, and the debug profile for the signed-in buddy part (the mock account is debug-only). The Library player is the Markers dialog (row menu, Markers).'
 ])
 
 const SAFE_ID = /^[a-z0-9][a-z0-9-]*$/

@@ -5,7 +5,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { homedir, hostname, platform, release } from 'node:os'
+import { arch, homedir, platform, release } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { repoRoot } from './app-launcher.mjs'
@@ -43,7 +43,7 @@ export async function runBaselineCli({ arg, flag }) {
     const manifest = manifestFromFolder(folder, {
       appCommit: arg('app-commit') ?? appCommit,
       date,
-      host: `${hostname().split('.')[0]}, ${platform()} ${release()}`
+      host: `${platform()} ${release()} ${arch()}`
     })
     const problems = manifestProblems(manifest, folder)
     const target = join(repoRoot, 'docs', 'gpui', 'baseline-manifest.json')
