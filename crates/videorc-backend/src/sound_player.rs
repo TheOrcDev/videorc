@@ -178,6 +178,11 @@ fn now_ms() -> u64 {
 }
 
 impl SoundPlayer {
+    /// Plays a short cue on the monitor (plan 260 S1.3c, the join chime).
+    pub(crate) fn play_cue(&self, key: u64, pcm: Arc<[i16]>) -> bool {
+        self.monitor.play_cue(key, pcm)
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, PlayerState> {
         self.inner
             .lock()

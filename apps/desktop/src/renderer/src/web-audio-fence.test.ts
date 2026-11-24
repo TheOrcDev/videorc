@@ -5,10 +5,9 @@ import { describe, expect, it } from 'vitest'
 // Plan 260 S1.3: the backend owns audio. The renderer opens a Web Audio
 // context only behind the fences that wait for the Windows and Linux
 // machines (the idle meter of a non-CoreAudio microphone, S1.3a; the
-// soundboard monitor, S1.3b: on macOS the backend plays it), for the join
-// chime until the backend plays it (S1.3, next), and in the talk-show room's
-// media until rooms move into the backend (S1.8). Each one that moves comes
-// off this list.
+// soundboard monitor, S1.3b; the join chime, S1.3c: on macOS the backend
+// plays both), and in the talk-show room's media until rooms move into the
+// backend (S1.8). Each one that moves comes off this list.
 
 /** The talk-show room's own media (and its dev fixture): they leave the
  * renderer with `livekit-client` in S1.8. */
