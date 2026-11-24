@@ -1,7 +1,7 @@
 //! The few icons the primitives draw themselves (`components/icons.tsx`
 //! names them): Phosphor, MIT, in the weight the React twin draws (regular,
-//! or fill for an alert's tone), as SVG masks the element's text colour
-//! tints. Screens bring their own icons.
+//! fill for an alert's tone, bold for the kebab's dots), as SVG masks the
+//! element's text colour tints. Screens bring their own icons.
 
 use gpui::{Hsla, IntoElement, Styled, Svg, px, svg};
 
@@ -33,6 +33,10 @@ pub enum IconName {
     WarningFill,
     /// `LockIcon` (Phosphor's LockKey).
     LockFill,
+    /// `MoreIcon` at Phosphor's bold weight: the kebab menu's dots.
+    DotsThreeBold,
+    /// `SpinnerIcon` (Phosphor's CircleNotch): work that is running.
+    CircleNotch,
 }
 
 impl IconName {
@@ -51,6 +55,8 @@ impl IconName {
             IconName::CheckCircleFill => include_bytes!("../icons/check-circle-fill.svg"),
             IconName::WarningFill => include_bytes!("../icons/warning-fill.svg"),
             IconName::LockFill => include_bytes!("../icons/lock-key-fill.svg"),
+            IconName::DotsThreeBold => include_bytes!("../icons/dots-three-bold.svg"),
+            IconName::CircleNotch => include_bytes!("../icons/circle-notch.svg"),
         }
     }
 }

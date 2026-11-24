@@ -34,6 +34,7 @@ pub struct StatusBarAction {
     tooltip_shortcut: Option<&'static str>,
     on_click: Option<ClickHandler>,
     appearance: Option<Appearance>,
+    expanded: bool,
 }
 
 /// The tooltip's words: the override, else the hint, else the name of an
@@ -62,6 +63,7 @@ impl StatusBarAction {
             tooltip_shortcut: None,
             on_click: None,
             appearance: None,
+            expanded: false,
         }
     }
 
@@ -127,6 +129,19 @@ impl StatusBarAction {
     }
 }
 
+/// A status-bar action opens a menu (the Stream Manager's Highlight
+/// position): it shows as expanded while open.
+impl gpui_base::Selectable for StatusBarAction {
+    fn selected(mut self, selected: bool) -> Self {
+        self.expanded = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.expanded
+    }
+}
+
 impl RenderOnce for StatusBarAction {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
@@ -159,6 +174,7 @@ impl RenderOnce for StatusBarAction {
             label: self.label,
             pressed: self.pressed,
             disabled: self.disabled,
+            expanded: self.expanded,
             icon_only,
             tooltip: tip,
             on_click: self.on_click,

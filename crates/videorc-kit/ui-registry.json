@@ -27,7 +27,12 @@
     "window-frame",
     "status-bar",
     "status-bar-action",
-    "status-dot"
+    "status-dot",
+    "hover-card",
+    "dropdown-menu",
+    "context-menu",
+    "kebab-menu",
+    "kebab-context-menu"
   ],
   "keepLocal": []
 }
