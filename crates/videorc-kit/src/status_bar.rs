@@ -157,6 +157,8 @@ pub(crate) struct Press {
     pub label: SharedString,
     pub pressed: Option<bool>,
     pub disabled: bool,
+    /// The menu it opens is open (`aria-expanded`).
+    pub expanded: bool,
     pub icon_only: bool,
     pub tooltip: Option<TooltipBuilder>,
     pub on_click: Option<ClickHandler>,
@@ -170,6 +172,7 @@ impl Press {
             label,
             pressed,
             disabled,
+            expanded,
             icon_only,
             tooltip,
             on_click,
@@ -190,8 +193,9 @@ impl Press {
         }
         let mut button = gpui_base::Button::new(id)
             .disabled(disabled)
+            .selected(expanded)
             .accessibility_label(label);
-        button = action_chip(button, t, false, disabled, icon_only);
+        button = action_chip(button, t, expanded, disabled, icon_only);
         if let Some(tooltip) = tooltip {
             button = button.tooltip(move |window, cx| tooltip(window, cx));
         }
@@ -286,6 +290,7 @@ impl RenderOnce for StatusBarHint {
             label: self.label,
             pressed: self.pressed,
             disabled: false,
+            expanded: false,
             icon_only: false,
             tooltip: None,
             on_click: self.on_click,
