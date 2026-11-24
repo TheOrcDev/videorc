@@ -362,6 +362,27 @@ impl SoundMonitor {
         }
     }
 
+    /// Plays a short cue once (plan 260 S1.3c, the join chime) beside the
+    /// player's voices, under a key the player never uses, so `sync` leaves
+    /// it to play out. Whether the monitor has an output to play it on.
+    pub(crate) fn play_cue(&self, key: u64, pcm: Arc<[i16]>) -> bool {
+        if self.mode == MonitorMode::Inert {
+            return false;
+        }
+        let mut control = lock(&self.control);
+        let started = lock(&self.mix).start(&MonitorVoice {
+            key,
+            pcm,
+            gain: 1.0,
+            looping: false,
+            offset_frames: 0,
+        });
+        if started {
+            self.wake(&mut control);
+        }
+        started
+    }
+
     /// A one-shot's end timer fired: the monitor lets it play out instead of
     /// fading it (it started a little after the press, so it ends a little
     /// after the timer).

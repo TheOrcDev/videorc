@@ -95,6 +95,7 @@ mod ffmpeg_work;
 mod fifo;
 mod frame_store;
 mod html_overlay;
+mod join_chime;
 mod output_session;
 mod preview_debug_sample;
 mod provider_output;
@@ -19074,7 +19075,10 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
             })
         }),
         // Plan 224: "Ada wants to join", one event per new request.
+        // Plan 260 S1.3c: the backend rings the chime itself where it has an
+        // output (macOS); the renderer rings it elsewhere.
         request: std::sync::Arc::new(move |request| {
+            join_chime::ring(&request_state);
             request_state.emit_event(cloud_talk::CLOUD_ROOM_REQUESTS_EVENT, request);
         }),
         // Plan 234 T3: an overlay for the host's renderer to send to the
