@@ -66,9 +66,9 @@ const IDLE_PIPELINE: MicVisualPipeline = Object.freeze({
  * Plan 260 S1.3a (owner 2026-11-09): a CoreAudio microphone is metered by the
  * backend's standing-by microphone (`audio.mic.arm`, its `audio.levels`), and
  * the renderer opens nothing; since S1.3 a Linux PipeWire microphone is too
- * (the backend arms it meter-only). Only a Windows input still gets the
- * visual-only browser stream below, and only between sessions (D1: a backend
- * meter-only capture on Windows replaces it). During a session or a Clips bus
+ * (the backend arms it meter-only), and since S1.3 on Windows a DirectShow one.
+ * Only an input no backend can stand by would still get the
+ * visual-only browser stream below, and only between sessions (D1). During a session or a Clips bus
  * every meter reads the bus.
  */
 export function StudioMicVisualProvider({

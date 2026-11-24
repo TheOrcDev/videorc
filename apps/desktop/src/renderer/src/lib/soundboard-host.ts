@@ -16,7 +16,6 @@ import {
   type SoundRelayAction,
   type SoundboardSummary
 } from '../../../shared/sound-commands'
-import { currentPlatform, isWindowsPlatform } from './platform'
 import type { SoundboardSnapshot, SoundboardStore } from './soundboard-store'
 import type { SoundMonitor } from './sound-monitor'
 
@@ -49,14 +48,14 @@ export interface SoundboardHostDeps {
   ) => Promise<{ ok: boolean; message?: string }>
 }
 
-/** Plan 260 S1.3 fence: the backend plays the monitor on macOS and Linux. */
-export function rendererPlaysMonitor(platform: string | undefined): boolean {
-  return isWindowsPlatform(platform)
+/** Plan 260 S1.3: the backend plays the monitor on macOS, Linux and Windows. */
+export function rendererPlaysMonitor(): boolean {
+  return false
 }
 
 const browserDeps = (): SoundboardHostDeps => ({
   api: window.videorc,
-  rendererMonitor: rendererPlaysMonitor(currentPlatform()),
+  rendererMonitor: rendererPlaysMonitor(),
   loadMonitor: () => import('./sound-monitor'),
   seedStarters: async (store) => (await import('./sound-starters')).seedStarterSounds(store),
   runAction: async (store, action) => {

@@ -60,16 +60,14 @@ afterEach(async () => {
 })
 
 describe('useJoinRequestChime', () => {
-  // Plan 260 S1.3: on macOS the backend rings it; the window stays quiet.
+  // Plan 260 S1.3: the backend rings it on every platform; the window stays quiet.
   it('leaves the chime to the backend where the backend plays it', async () => {
     const { client, handlers } = fakeClient()
     await render(client, true, false)
 
     handlers.get('cloud.room.requests')?.()
     expect(play).not.toHaveBeenCalled()
-    expect(rendererPlaysJoinChime('darwin')).toBe(false)
-    expect(rendererPlaysJoinChime('win32')).toBe(true)
-    expect(rendererPlaysJoinChime('linux')).toBe(false)
+    expect(rendererPlaysJoinChime()).toBe(false)
   })
 
   it('chimes when someone asks to join an open room', async () => {

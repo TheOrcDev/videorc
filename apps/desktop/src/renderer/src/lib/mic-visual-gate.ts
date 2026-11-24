@@ -8,10 +8,10 @@ import type { MediaAccessStatus } from '@/lib/backend'
 //
 // Plan 260 S1.3a (owner 2026-11-09): the analyser is the last renderer
 // microphone, kept ONLY for the idle meter of a microphone the backend cannot
-// meter between sessions yet: the Windows inputs (D1; a backend meter-only
-// capture there deletes this). A CoreAudio or PipeWire input is metered by the
-// backend's standing-by microphone (Linux's since S1.3), and no session or
-// Clips bus ever meters through Chromium (D3; issue 1064).
+// stand by (D1). Since S1.3 on Windows none is left: a CoreAudio, PipeWire or
+// DirectShow input is metered by the backend's standing-by microphone, and no
+// session or Clips bus ever meters through Chromium (D3; issue 1064). Its
+// cleanup deletes this.
 
 export type MicVisualGateInput = Readonly<{
   /** Studio or Sources tab is the active workspace tab. */
@@ -42,8 +42,8 @@ export type MicVisualGateInput = Readonly<{
  * An idle meter used to need a running session or the "Monitor input"
  * toggle, so an idle Studio showed bars pinned at the floor — indistinguishable
  * from a dead microphone, which is exactly what people check before they hit
- * record. The meter is live whenever it is being looked at; on Windows and
- * this analyser is what makes it so on Windows.
+ * record. The meter is live whenever it is being looked at; the backend's
+ * standing-by microphone makes it so on every platform since S1.3.
  *
  * The cost is deliberate and visible: the OS shows its microphone indicator
  * while the mixer is open, because the microphone genuinely is. Leaving the
@@ -66,7 +66,7 @@ export function micVisualAnalyserEnabled(input: MicVisualGateInput): boolean {
  * The meter's state beside the bars, for its data attribute and the probes.
  * `live` = a session is running and the signal path is up; `monitoring` =
  * idle and a level is actually arriving (the backend's standing-by
- * microphone, or the analyser on Windows); `muted` = the microphone is
+ * microphone); `muted` = the microphone is
  * muted, so flat bars are the mute and not a dead microphone; `silent` = the
  * running bus reads digital silence from an unmuted microphone (issue 1064:
  * the recording gets nothing, whatever the room sounds like); `idle` = off

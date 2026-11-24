@@ -6,10 +6,11 @@
 //! reaches the room, the program or a recording: on macOS System audio capture
 //! runs in this process with `excludesCurrentProcessAudio`, as for the
 //! monitor; Linux has no System audio capture yet, and the monitor's PipeWire
-//! stream is marked for S8 to leave out.
+//! stream is marked for S8 to leave out; on Windows the System audio process
+//! loopback excludes the app's process tree, this backend included.
 //!
-//! macOS and Linux (plan 260 S1.3): the monitor has no output on Windows yet,
-//! so its renderer still rings it (`rendererPlaysJoinChime`).
+//! macOS, Linux and Windows (plan 260 S1.3): the backend rings it everywhere,
+//! and no renderer does (`rendererPlaysJoinChime` is false).
 
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -91,7 +92,7 @@ pub(crate) fn chime_pcm() -> Arc<[i16]> {
 /// it played (false where the backend has no output, or within the gap).
 pub(crate) fn ring(state: &AppState) -> bool {
     static LAST_RANG: StdMutex<Option<Instant>> = StdMutex::new(None);
-    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+    if !cfg!(any(target_os = "macos", target_os = "linux", windows)) {
         return false;
     }
     {

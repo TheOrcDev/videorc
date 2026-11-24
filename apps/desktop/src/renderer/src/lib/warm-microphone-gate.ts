@@ -17,7 +17,7 @@ export type WarmMicrophoneGateInput = Readonly<{
   workspaceVisible: boolean
   /** The window is actually on screen (main-fed, never DOM visibility alone). */
   documentVisible: boolean
-  /** Selected microphone id; CoreAudio inputs stand by, and PipeWire ones for the meter only. */
+  /** Selected microphone id; CoreAudio inputs stand by, and PipeWire and DirectShow ones for the meter only. */
   microphoneId: string | undefined
   /** Capture config mute — a muted mixer releases the device like the analyser does. */
   muted: boolean
@@ -29,14 +29,14 @@ export function isCoreAudioMicrophoneId(id: string | undefined): boolean {
 
 /**
  * Plan 260 S1.3: a microphone the backend stands by and meters between
- * sessions: a CoreAudio input (macOS), or a PipeWire source (Linux, through
- * the capture worker, for the meter only). Windows inputs still meter in the
- * renderer.
+ * sessions: a CoreAudio input (macOS), or a capture-worker input, for the
+ * meter only: a PipeWire source (Linux) or a DirectShow microphone (Windows).
  */
 export function isBackendMeteredMicrophoneId(id: string | undefined): boolean {
   return (
     isCoreAudioMicrophoneId(id) ||
-    (typeof id === 'string' && id.startsWith('microphone:linux-pulse:'))
+    (typeof id === 'string' &&
+      (id.startsWith('microphone:linux-pulse:') || id.startsWith('microphone:windows-dshow:')))
   )
 }
 

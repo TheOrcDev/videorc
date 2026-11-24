@@ -315,6 +315,7 @@ mod windows_mf_probe;
 mod windows_mf_rejections;
 #[cfg(target_os = "windows")]
 mod windows_mf_standby;
+mod windows_sound_output;
 mod x_chat;
 mod x_live;
 mod x_oauth1;
@@ -19530,7 +19531,7 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
         }),
         // Plan 224: "Ada wants to join", one event per new request.
         // Plan 260 S1.3c: the backend rings the chime itself where it has an
-        // output (macOS, Linux); the renderer rings it on Windows.
+        // output (macOS, Linux, Windows).
         request: std::sync::Arc::new(move |request| {
             join_chime::ring(&request_state);
             request_state.emit_event(cloud_talk::CLOUD_ROOM_REQUESTS_EVENT, request);

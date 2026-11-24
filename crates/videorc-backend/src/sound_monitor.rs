@@ -13,7 +13,9 @@
 //! (`system_audio_capture.rs`), so ScreenCaptureKit drops it. On Linux it is
 //! one PipeWire playback stream (`linux_sound_output.rs`); Linux has no
 //! System audio capture yet (plan 257 S8), and the stream is marked so that
-//! S8 leaves it out. `pnpm
+//! S8 leaves it out. On Windows it is one WASAPI render stream
+//! (`windows_sound_output.rs`), and the System audio process loopback
+//! excludes the app's process tree, this backend included. `pnpm
 //! smoke:soundboard` proves it: an on-air press with System audio on lands in
 //! the file once, and a monitor-only voice playing through a System-audio
 //! recording leaves nothing at 1 kHz while an afplay control tone does.
@@ -23,9 +25,9 @@
 //! output device. It follows the system's default output (the device Chromium's
 //! Web Audio monitor used).
 //!
-//! macOS and Linux (plan 260 S1.3): Windows keeps the renderer's Web Audio
-//! monitor (`renderer/src/lib/sound-monitor.ts`) until the backend has an
-//! output there, and [`SoundMonitor`] is inert on it.
+//! macOS, Linux and Windows (plan 260 S1.3): the renderer's Web Audio monitor
+//! (`renderer/src/lib/sound-monitor.ts`) no longer plays anywhere;
+//! [`SoundMonitor`] is inert only on a platform with no output here.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -291,11 +293,12 @@ pub(crate) fn late_join_offset(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MonitorMode {
-    /// Windows: the renderer plays previews (S1.3 fence).
+    /// A platform with no output here: nothing plays.
     Inert,
     /// Tests: the mix is kept and driven by hand; no device ever opens.
     Detached,
-    /// macOS (CoreAudio) and Linux (PipeWire): the default output.
+    /// macOS (CoreAudio), Linux (PipeWire) and Windows (WASAPI): the
+    /// default output.
     Device,
 }
 
@@ -318,7 +321,7 @@ impl Default for SoundMonitor {
     fn default() -> Self {
         let mode = if cfg!(test) {
             MonitorMode::Detached
-        } else if cfg!(any(target_os = "macos", target_os = "linux")) {
+        } else if cfg!(any(target_os = "macos", target_os = "linux", windows)) {
             MonitorMode::Device
         } else {
             MonitorMode::Inert
@@ -529,11 +532,13 @@ pub(crate) struct DeviceOutput {
     _unit: coreaudio::audio_unit::AudioUnit,
     #[cfg(target_os = "linux")]
     _stream: crate::linux_sound_output::PlaybackStream,
+    #[cfg(windows)]
+    _stream: crate::windows_sound_output::PlaybackStream,
     pub(crate) device_name: String,
 }
 
 impl DeviceOutput {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     fn open(mix: Arc<StdMutex<MonitorMix>>) -> anyhow::Result<Self> {
         Self::open_with(move |buffer| lock(&mix).render(buffer))
     }
@@ -604,15 +609,36 @@ impl DeviceOutput {
         })
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    /// Plan 260 S1.3 (Windows): opens one WASAPI shared-mode render stream
+    /// to the default output and plays `render`'s 48 kHz interleaved stereo,
+    /// called on the stream's own MMCSS thread for each period. A panic in it
+    /// plays silence; it never unwinds into WASAPI.
+    #[cfg(windows)]
+    pub(crate) fn open_with(
+        mut render: impl FnMut(&mut [f32]) + Send + 'static,
+    ) -> anyhow::Result<Self> {
+        let stream = crate::windows_sound_output::PlaybackStream::open(
+            MONITOR_SAMPLE_RATE,
+            Box::new(move |buffer: &mut [f32]| render_callback_into(&mut render, buffer, 2)),
+        )?;
+        Ok(Self {
+            _stream: stream,
+            device_name: "the default output (WASAPI)".to_string(),
+        })
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     fn open(_mix: Arc<StdMutex<MonitorMix>>) -> anyhow::Result<Self> {
         anyhow::bail!("this platform's renderer plays sound previews")
     }
 }
 
 /// The real-time side: render (the monitor's under its mix lock), and never
-/// unwind into CoreAudio or PipeWire (a panic plays silence instead).
-#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+/// unwind into CoreAudio, PipeWire or WASAPI (a panic plays silence instead).
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux", windows)),
+    allow(dead_code)
+)]
 fn render_callback_into(render: &mut impl FnMut(&mut [f32]), buffer: &mut [f32], channels: usize) {
     if channels != 2 {
         buffer.fill(0.0);
