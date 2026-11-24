@@ -72,10 +72,7 @@ pub fn status_word_from_value(value: &str) -> String {
     }
 }
 
-/// The ping ring's cycle (Tailwind's `animate-ping`).
-pub const PING: Duration = Duration::from_secs(1);
-
-/// dot at 60% to twice the dot, gone (`ping`, eased out).
+/// Dot at 60% to twice the dot, gone (`ping`, eased out).
 pub fn ping(delta: f32) -> (f32, f32) {
     let eased = 1.0 - (1.0 - delta.clamp(0.0, 1.0)).powi(3);
     (DOT * (1.0 + eased), 0.6 * (1.0 - eased))
