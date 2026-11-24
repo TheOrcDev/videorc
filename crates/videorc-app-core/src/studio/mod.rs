@@ -27,6 +27,10 @@
 //!   on the layout).
 //! - [`sources`]: the devices and the committed scene as the backend reports
 //!   them; [`source_selection`] holds only the picker's kind for now.
+//! - [`scenes`] (S1.6b): plan 231's scene library as the Studio holds it,
+//!   read once the settings snapshot is in (the #1706 repair, the v1
+//!   migration, the working setup over the capture config, the scene on
+//!   stream), named on the main display, and its edits.
 //! - [`backend`]: the requests the Studio makes, as a trait, so the driver
 //!   runs against a scripted fake in tests and the typed client in the app.
 //! - [`Studio`]: the driver. It takes the typed client's events, runs the
@@ -54,6 +58,7 @@ pub mod js_value;
 pub mod latency;
 pub mod linux_desktop;
 pub mod preview_scene;
+pub mod scenes;
 pub mod session;
 pub mod settings;
 pub mod source_selection;
@@ -370,6 +375,8 @@ pub struct StudioSnapshot {
     pub capture_exclusion: CaptureExclusionView,
     /// The last click-to-status samples (Health's Start and stop).
     pub record_latency: RecordLatency,
+    /// S1.6b: the scene library and the scene on stream.
+    pub scenes: scenes::ScenesView,
 }
 
 /// What a start did.
@@ -438,6 +445,8 @@ struct Inner {
     notices: SessionNotices,
     /// The record click-to-status clock.
     latency: latency::LatencyTracker,
+    /// S1.6b: the scenes' memory between events.
+    scenes: scenes::ScenesCore,
 }
 
 /// S2.6c: the exclusion list's bookkeeping.
@@ -510,6 +519,14 @@ impl CaptureMemory {
         self.config = config;
         self.seen = Some(stored);
     }
+
+    /// S1.6b: the config as the Studio holds it, changed without a write
+    /// (the working setup laid over it at launch, as the renderer's first
+    /// state is): the stored value it came from stays the one it syncs on.
+    fn replace_config(&mut self, config: Value) {
+        self.view = CaptureConfigView::from_loaded(&config);
+        self.config = config;
+    }
 }
 
 impl Inner {
@@ -517,6 +534,9 @@ impl Inner {
     /// the store first).
     fn settings_view(&mut self) -> SettingsView {
         self.capture.sync(self.settings.get(keys::CAPTURE_CONFIG));
+        // S1.6b: the library, read once the snapshot is in (the working
+        // setup laid over the capture config with it).
+        self.sync_scenes();
         let generation = self.settings.generation();
         if self.views.as_ref().map(|(seen, ..)| *seen) != Some(generation) {
             self.views = Some((
@@ -654,6 +674,7 @@ impl<B: StudioBackend> Studio<B> {
             exclusion: Exclusion::default(),
             notices: SessionNotices::new(),
             latency: latency::LatencyTracker::new(),
+            scenes: scenes::ScenesCore::default(),
         };
         // Writes a previous run journaled wait in the cache until the
         // snapshot is in; then they are sent.
@@ -776,6 +797,7 @@ impl<B: StudioBackend> Studio<B> {
             BackendEvent::DevicesChanged(devices) => {
                 self.lock().sources.set_devices(*devices);
                 self.publish();
+                self.flush_scene_writes().await;
             }
             BackendEvent::HealthEvent(event) => {
                 let commands = {
@@ -1300,6 +1322,7 @@ impl<B: StudioBackend> Studio<B> {
         };
         self.publish();
         self.emit_all(effects);
+        self.flush_scene_writes().await;
         // The chat (`recoverLiveChatSnapshot`), the session's sources and the
         // working sources are read again with their areas (S1.6b, S1.6e).
     }
@@ -1320,6 +1343,7 @@ impl<B: StudioBackend> Studio<B> {
             devices.and(scene)
         };
         self.publish();
+        self.flush_scene_writes().await;
         result
     }
 
@@ -2083,9 +2107,12 @@ impl<B: StudioBackend> Studio<B> {
             if let Some(sample) = inner.latency.observe(&status, Instant::now()) {
                 self.config.logger.info(sample.log_line());
             }
-            Self::snapshot_of(&mut inner)
+            let snapshot = Self::snapshot_of(&mut inner);
+            (snapshot, std::mem::take(&mut inner.scenes.notices))
         };
+        let (snapshot, scene_notices) = snapshot;
         self.snapshot.send_replace(snapshot);
+        self.post(scene_notices);
     }
 
     fn emit_all(&self, effects: Vec<SessionEffect>) {
@@ -2151,6 +2178,7 @@ impl<B: StudioBackend> Studio<B> {
                 last: inner.exclusion.last.clone(),
             },
             record_latency: inner.latency.last.clone(),
+            scenes: inner.scenes_view(),
         }
     }
 }

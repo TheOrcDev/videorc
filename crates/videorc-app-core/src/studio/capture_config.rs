@@ -207,6 +207,27 @@ pub fn layout_preset_is_vertical(preset: &str) -> bool {
     VERTICAL_LAYOUT_PRESETS.contains(&preset)
 }
 
+/// `simulcastArmed` (plan 231 D4): the stream is on, at least one enabled
+/// destination is vertical-bound, and the Studio is in 16:9 (the vertical
+/// leg shows the scene on stream's 9:16 layout). In a 9:16 studio the one
+/// canvas is portrait: no second leg exists to arm.
+pub fn simulcast_armed(config: &Value) -> bool {
+    let streaming = &config["streaming"];
+    let enabled_ids = streaming["enabledTargetIds"].as_array();
+    config["streamEnabled"] == Value::Bool(true)
+        && streaming["enabled"] == Value::Bool(true)
+        && !config["layout"]["layoutPreset"]
+            .as_str()
+            .is_some_and(layout_preset_is_vertical)
+        && streaming["targets"].as_array().is_some_and(|targets| {
+            targets.iter().any(|target| {
+                target["enabled"] == Value::Bool(true)
+                    && target["outputOrientation"] == "vertical"
+                    && enabled_ids.is_some_and(|ids| ids.contains(&target["id"]))
+            })
+        })
+}
+
 /// `isPlatformOAuthAvailable`: Facebook, TikTok, Instagram and Custom RTMP
 /// use a stream key only.
 pub fn is_platform_oauth_available(platform: &str) -> bool {
