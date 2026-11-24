@@ -2110,7 +2110,13 @@ impl<B: StudioBackend> Studio<B> {
     ) -> Result<(), RpcError> {
         {
             let mut guard = self.lock();
-            self.stage_capture_config(&mut guard, edit)?;
+            let inner = &mut *guard;
+            self.stage_capture_config(inner, edit)?;
+            // S1.6b part 5d (review of #1862): every writer reaches a running
+            // session through the live sync, as Electron's sync effect hears
+            // every `captureConfig.audio` change (a saved scene's System
+            // audio among them). Its pin-back, if any, goes in this flush.
+            self.stage_live_audio_and_kick(inner);
         }
         self.publish();
         self.flush_settings().await

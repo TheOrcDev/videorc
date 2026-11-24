@@ -2251,9 +2251,19 @@ fn stored_audio(backend: &Scripted) -> Value {
 }
 
 /// A recording the Studio started (`s1`), so the live sync holds what its
-/// start sent.
+/// start sent. Its drive runs: the drive alone drains the live sync's queue
+/// (review of #1862). The events reach the Studio through `handle_event`;
+/// the drive's own channel stays open, and quiet, for the test.
 async fn recording_studio(backend: &Arc<Scripted>) -> Arc<Studio<Scripted>> {
     let studio = new_studio(backend);
+    let (keep_open, events) = broadcast::channel::<BackendEvent>(16);
+    tokio::spawn({
+        let studio = studio.clone();
+        async move {
+            let _keep_open = keep_open;
+            studio.drive(events).await;
+        }
+    });
     studio.handle_event(ready()).await;
     studio.set_test_pattern(true).await.unwrap();
     assert_eq!(studio.start_recording().await, StartOutcome::Started);
@@ -2355,6 +2365,11 @@ async fn gain_changes_while_one_update_is_in_flight_send_only_the_newest() {
 
     gate.add_permits(2);
     first.await.unwrap();
+    // The drive sends the newest once the first settles.
+    eventually("the newest gain follows", || {
+        backend.count("audio.processing.update") == 2
+    })
+    .await;
     let gains: Vec<f32> = backend
         .script
         .lock()
@@ -2381,6 +2396,12 @@ async fn an_unavailable_live_control_restores_and_disables_the_controls() {
     let studio = recording_studio(&backend).await;
 
     studio.set_microphone_gain(6.0).await;
+    // The drive sends it and settles the refusal; the rollback is stored.
+    eventually("the refusal rolls the controls back", || {
+        studio.snapshot().system_audio.live_controls_disabled
+            && stored_audio(&backend)["microphoneGainDb"].as_f64() == Some(0.0)
+    })
+    .await;
     assert_eq!(backend.count("audio.processing.update"), 1);
     let snapshot = studio.snapshot();
     assert_eq!(snapshot.settings.capture.audio.microphone_gain_db, 0.0);
@@ -2404,6 +2425,86 @@ async fn an_unavailable_live_control_restores_and_disables_the_controls() {
     assert!(!studio.request_microphone_mute(true).await);
     assert!(!studio.snapshot().settings.capture.audio.microphone_muted);
     assert_eq!(backend.count("audio.processing.update"), 1);
+}
+
+/// A mute whose caller goes away while its request is in flight (a closed
+/// window, a cancelled task) strands nothing: the drive owns the request,
+/// settles it, and sends the next change after it, never two at once
+/// (review of #1862).
+#[tokio::test]
+async fn a_dropped_control_strands_nothing_on_the_live_queue() {
+    let backend = Scripted::new();
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| {
+        script.audio_gate = Some(gate.clone());
+        script.audio_answers.extend([None, None]);
+    });
+    let studio = recording_studio(&backend).await;
+
+    let muting = tokio::spawn({
+        let studio = studio.clone();
+        async move { studio.request_microphone_mute(true).await }
+    });
+    eventually("the mute is in flight", || {
+        backend.count("audio.processing.update") == 1
+    })
+    .await;
+    muting.abort();
+    let _ = muting.await;
+
+    // The next change waits behind the dropped caller's request.
+    studio.set_microphone_gain(6.0).await;
+    assert_eq!(
+        backend.count("audio.processing.update"),
+        1,
+        "one request in flight"
+    );
+    gate.add_permits(2);
+    eventually("the gain follows the settled mute", || {
+        backend.count("audio.processing.update") == 2
+    })
+    .await;
+    eventually("the session holds the mute", || {
+        studio.snapshot().system_audio.applied_microphone_muted == Some(true)
+    })
+    .await;
+    let sent = backend.script.lock().unwrap().audio_updates.clone();
+    assert!(sent[1].microphone_muted);
+    assert_eq!(sent[1].microphone_gain_db, 6.0);
+}
+
+/// A writer other than the controls (a saved scene's System audio, through
+/// `update_capture_config`) reaches a running session too, as Electron's
+/// sync effect hears every `captureConfig.audio` change (review of #1862).
+#[tokio::test]
+async fn a_capture_config_write_reaches_the_running_session() {
+    let backend = Scripted::new();
+    backend.with(|script| script.audio_answers.push_back(None));
+    let studio = recording_studio(&backend).await;
+
+    let on = !studio
+        .snapshot()
+        .settings
+        .capture
+        .audio
+        .system_audio_enabled;
+    studio
+        .update_capture_config(|config| {
+            videorc_app_core::studio::capture_config::set_path(
+                config,
+                &["audio", "systemAudioEnabled"],
+                Some(json!(on)),
+            );
+        })
+        .await
+        .unwrap();
+    eventually("the session is told", || {
+        backend.count("audio.processing.update") == 1
+    })
+    .await;
+    let sent = backend.script.lock().unwrap().audio_updates.clone();
+    assert_eq!(sent[0].session_id, "s1");
+    assert_eq!(sent[0].system_audio_enabled, Some(on));
 }
 
 // S1.6b part 3c: the start races (#1643), apply-after-proof and the failure

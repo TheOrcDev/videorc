@@ -60,7 +60,10 @@ fn the_switch_shows_what_the_session_confirms() {
     });
     assert_eq!(echo.state_label, "Paused");
     assert_eq!(system_audio_status(&echo, true).unwrap().label, "Paused");
-    assert!(system_audio_issue_copy(SystemAudioIssue::Echo, true).contains("this Mac"));
+    assert!(system_audio_issue_copy(SystemAudioIssue::Echo, "Mac").contains("this Mac"));
+    // `platformCopy`: Linux says "computer" (review of #1862).
+    assert!(system_audio_issue_copy(SystemAudioIssue::Echo, "computer").contains("this computer"));
+    assert!(["Mac", "PC", "computer"].contains(&this_computer_word()));
 }
 
 #[test]
