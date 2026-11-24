@@ -56,7 +56,6 @@ use tokio::sync::{broadcast, watch};
 use super::capture_config::{self, simulcast_armed};
 use super::js_value::{get, string, truthy};
 use super::settings::{SettingWrite, StudioSettings, encode, keys};
-use super::source_selection::{SourceKind, merge_source_kind};
 use super::{Connection, Inner, Studio, StudioBackend};
 use crate::client::RpcError;
 use crate::log::Logger;
@@ -411,6 +410,18 @@ impl SwitchCore {
         self.last_commit
             .as_ref()
             .map_or(0, |commit| commit.revision)
+    }
+
+    /// `layoutIntentAwaitingProofRef !== null`: a commit waits for its
+    /// proof (S1.6b part 5a: the working sources' reconcile waits too).
+    pub(super) fn awaits_proof(&self) -> bool {
+        self.awaiting_proof.is_some()
+    }
+
+    /// `workingAppRef`: the app the working setup was made for, if any
+    /// (S1.6b part 5a: the reconcile resolves its window first).
+    pub(super) fn working_app_ref(&self) -> Option<&Value> {
+        self.working_app.as_ref()
     }
 
     /// The working setup's app, background and origin at launch
@@ -2440,8 +2451,10 @@ impl<B: StudioBackend> Studio<B> {
             return ApplyResult::landed(true);
         }
         // A recording or livestream switches to the scene's microphone
-        // through the session's source switch, which lands with the live
-        // sources (S1.6b part 5); the session keeps its microphone here.
+        // through the session's source switch (S1.6b part 5a).
+        if let Some(microphone) = microphone {
+            self.switch_scene_microphone(microphone).await;
+        }
         ApplyResult::landed(true)
     }
 
@@ -2685,11 +2698,11 @@ impl<B: StudioBackend> Studio<B> {
             let inner = &mut *guard;
             inner.capture.sync(inner.settings.get(keys::CAPTURE_CONFIG));
             let current = inner.capture.config.clone();
-            let sources = if inner.scenes.switch.awaiting_proof.is_some() {
-                merge_source_kind(&current["sources"], &confirmed, SourceKind::Microphone)
-            } else {
-                confirmed
-            };
+            let sources = super::live_sources::confirmed_sources_for_commit(
+                &current["sources"],
+                &confirmed,
+                inner.scenes.switch.awaiting_proof.is_some(),
+            );
             if sources == current["sources"] {
                 false
             } else {
