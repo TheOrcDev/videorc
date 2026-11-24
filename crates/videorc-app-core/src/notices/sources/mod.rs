@@ -8,6 +8,7 @@
 //!
 //! [`Input`]: super::Input
 
+pub mod app;
 pub mod cloud;
 pub mod devices;
 pub mod health;
