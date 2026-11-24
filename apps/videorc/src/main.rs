@@ -33,6 +33,7 @@ use gpui::{
 };
 use videorc_app_core::client::events::names;
 use videorc_app_core::desktop::deep_link::{DeepLinks, LinkSource};
+use videorc_app_core::desktop::global_shortcuts::GlobalShortcutsConfig;
 use videorc_app_core::desktop::single_instance::{self, Acquired, HANDOFF_WAIT};
 use videorc_app_core::nav::{self, PageId};
 use videorc_app_core::supervisor::STOP_GRACE;
@@ -44,7 +45,7 @@ use videorc_app_core::{
 use app::args;
 use app::bridge;
 use app::shell::{Shell, StatusLine, connection_text};
-use app::{links, menus, sleep};
+use app::{hotkeys, links, menus, sleep};
 
 fn main() -> Result<()> {
     let args = args::parse()?;
@@ -205,6 +206,7 @@ fn main() -> Result<()> {
     let runtime_handle = runtime.handle().clone();
     let quit_after = args.quit_after;
     let quit_guard = sleep_guard.clone();
+    let hotkey_logger = logger.clone();
     let handoff_links = deep_links.clone();
 
     let application = gpui_platform::application();
@@ -217,11 +219,20 @@ fn main() -> Result<()> {
         // The menu bar from the core's template, and the keys it names.
         menus::install(cx);
 
+        // Global shortcuts: the registry behind the core's gate. The app runs
+        // no shortcut action until the Studio lands, so every key is named in
+        // the log and left unregistered (never taken from every app for
+        // nothing); the settings store's keys replace the defaults then.
+        let global_keys = hotkeys::Hotkeys::install(cx, Rc::new(hotkeys::NoActions), hotkey_logger);
+        global_keys.apply(&GlobalShortcutsConfig::default(), hotkeys::node_platform());
+        let quit_keys = global_keys.clone();
+
         // The backend stops with the shutdown handshake before the app goes.
         // GPUI gives quit observers a short deadline, so the wait happens
         // here, on the main thread, as Electron's `before-quit` holds the
         // quit until the backend confirms.
         cx.on_app_quit(move |_| {
+            quit_keys.release_all();
             sleep::release(&quit_guard);
             stop_backend(&quit_supervisor, &runtime_handle);
             async {}

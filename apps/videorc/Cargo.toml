@@ -24,6 +24,9 @@ videorc-app-core = { workspace = true }
 # The core's own runtime (two workers), beside GPUI's executor.
 tokio = { version = "1.48", features = ["rt-multi-thread", "sync", "time", "macros"] }
 
+# Global shortcuts (S2.6a part 2): Carbon on macOS, RegisterHotKey on
+# Windows, X11 on Linux, behind the core's gate.
+global-hotkey = "0.7"
 # The OS interface (`src/platform/`, S2.6a). raw-window-handle reaches the
 # native window under a GPUI window on every platform.
 raw-window-handle = "0.6"
