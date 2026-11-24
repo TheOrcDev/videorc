@@ -30,6 +30,7 @@ import { StatusBadge } from '@/components/status-badge'
 import { BroadcastInfoFields } from '@/components/streaming/broadcast-info-fields'
 import { CategoryCombobox } from '@/components/streaming/category-combobox'
 import { XCategoryField } from '@/components/streaming/x-category-field'
+import { XLiveEditSection } from '@/components/streaming/x-live-edit-section'
 import { DestinationCard } from '@/components/streaming/destination-card'
 import { LinuxSetupAlert } from '@/components/linux-setup-alert'
 import { useLinuxDesktopCheck } from '@/hooks/use-linux-desktop-check'
@@ -95,6 +96,7 @@ import { destinationStateLabel } from '@/lib/state-labels'
 import { broadcastThumbnailHint } from '@/lib/broadcast-info'
 import { streamLanguageOptions } from '@/lib/stream-languages'
 import type { XLiveCategoriesStatus } from '@/lib/x-live-categories'
+import { liveXTarget } from '@/lib/x-live-edit'
 
 /**
  * Destinations (plan 174 S1.6b, A-14; plan 235 D6): Setup, Upcoming and
@@ -192,6 +194,7 @@ function StreamingSetup({
     xLiveCategories,
     xLiveCategoriesStatus,
     loadXLiveCategories,
+    updateXBroadcast,
     xNativeCapability,
     xNativeCapabilityLoading,
     refreshXNativeCapability,
@@ -208,6 +211,8 @@ function StreamingSetup({
     : null
   const youtubeQuotaPaused = youtubeQuotaPausedUntil(youtubeQuota)
   const streaming = captureConfig.streaming
+  // Live on X: the broadcast on air, whose title and category change at once.
+  const liveX = liveXTarget(streaming.targets)
   const livestreamingEntitlementReason = entitlementDisabledReason(entitlements, 'livestreaming')
   const streamingControlsDisabled =
     isSessionActive ||
@@ -405,6 +410,18 @@ function StreamingSetup({
             ))}
           </GroupedList>
         </PanelSection>
+        {liveX ? (
+          <XLiveEditSection
+            accountId={liveX.accountId}
+            broadcastId={liveX.platformBroadcastId}
+            categories={xLiveCategories}
+            categoriesStatus={xLiveCategoriesStatus}
+            draft={streamMetadataDraft}
+            key={liveX.platformBroadcastId}
+            onRetryCategories={() => void loadXLiveCategories(true)}
+            onUpdate={updateXBroadcast}
+          />
+        ) : null}
         {/* Stream details: its own section below the destinations; the rows
             own accounts and keys, this owns what the stream says (ux-ia plan,
             slice 7; plan 174 S3.5b). */}

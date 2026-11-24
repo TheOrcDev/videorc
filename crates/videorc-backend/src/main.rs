@@ -4591,6 +4591,58 @@ async fn publish_x_native_live(
     result
 }
 
+/// A live X broadcast's title or category, changed while it runs (`PUT
+/// /2/broadcasts/:id`). The answer is X's own: the page shows it, since a
+/// read right after can still return the old values.
+async fn update_x_broadcast(
+    state: &AppState,
+    params: x_live::XUpdateBroadcastParams,
+) -> anyhow::Result<x_live::XBroadcastUpdated> {
+    let session_id = params.session_id.clone();
+    let accounts = state.database.list_platform_accounts()?;
+    let account = x_live::select_x_account(&accounts, params.account_id.as_deref())?;
+    let capability = x_live::x_native_live_capability(account)?;
+    x_live::ensure_x_native_live_available(&capability)?;
+    let credentials = x_live::x_livestream_credentials()?
+        .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?;
+    let result = x_live::update_broadcast(
+        &reqwest::Client::new(),
+        &credentials,
+        &x_live::api_base_url(None),
+        &params.broadcast_id,
+        &x_live::XBroadcastChanges {
+            title: params.title,
+            live_category_id: params.live_category_id,
+        },
+    )
+    .await;
+    match &result {
+        Ok(updated) => log_x_lifecycle(
+            state,
+            session_id.as_deref(),
+            protocol::HealthLevel::Info,
+            "x-broadcast-updated",
+            &format!(
+                "X broadcast {} updated: title {}, category {}.",
+                updated.broadcast_id,
+                updated.title.as_deref().map_or_else(
+                    || "not reported".to_string(),
+                    |title| format!("\"{title}\"")
+                ),
+                updated.live_category_id.as_deref().unwrap_or("none")
+            ),
+        ),
+        Err(error) => log_x_lifecycle(
+            state,
+            session_id.as_deref(),
+            protocol::HealthLevel::Warn,
+            "x-broadcast-update-failed",
+            &format!("X broadcast update failed: {error}"),
+        ),
+    }
+    result
+}
+
 /// X's live categories for the Stream details picker, read once a session
 /// (`refresh` reads them again).
 async fn x_live_categories(
@@ -6390,6 +6442,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "streamTargets.x.startLiveAuthorization"
         | "streamTargets.x.prepare"
         | "streamTargets.x.publish"
+        | "streamTargets.x.updateBroadcast"
         | "streamTargets.x.end"
         // Plan 184: talks to videorc.com (and the show's node).
         | "cloud.show.end"
@@ -16441,6 +16494,19 @@ async fn handle_text_message_with_role(
                     }
                     Err(error) => {
                         ServerResponse::error(command.id, "x-publish-failed", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "streamTargets.x.updateBroadcast" => {
+            match serde_json::from_value::<x_live::XUpdateBroadcastParams>(command.params) {
+                Ok(params) => match update_x_broadcast(state, params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "x-update-failed", error.to_string())
                     }
                 },
                 Err(error) => {

@@ -619,6 +619,8 @@ import type {
   KickCategory,
   XLiveCategory,
   XLiveCategoriesResult,
+  XBroadcastUpdated,
+  XUpdateBroadcastParams,
   PreparedKickBroadcast,
   VideoPreset,
   VideoSettings,
@@ -1793,6 +1795,8 @@ export type StudioContextValue = {
   searchKickCategories: (query: string) => Promise<void>
   /** Read X's live categories; `refresh` asks X again instead of the session's copy. */
   loadXLiveCategories: (refresh?: boolean) => Promise<void>
+  /** Live on X: change the broadcast's title or category while it runs; X's answer. */
+  updateXBroadcast: (params: XUpdateBroadcastParams) => Promise<XBroadcastUpdated>
   refreshXNativeCapability: (accountId?: string) => Promise<void>
   authorizeXLive: () => Promise<void>
   saveStreamMetadataDraft: () => Promise<void>
@@ -7952,6 +7956,14 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       }
     },
     [client, platformAccounts]
+  )
+
+  const updateXBroadcast = useCallback(
+    async (params: XUpdateBroadcastParams): Promise<XBroadcastUpdated> => {
+      if (!client) throw new Error('Videorc is reconnecting. Try again in a moment.')
+      return client.request<XBroadcastUpdated>('streamTargets.x.updateBroadcast', params)
+    },
+    [client]
   )
 
   const xLiveReady = Boolean(xNativeCapability?.nativeAvailable)
@@ -21853,6 +21865,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       searchTwitchCategories,
       searchKickCategories,
       loadXLiveCategories,
+      updateXBroadcast,
       refreshXNativeCapability,
       authorizeXLive,
       saveStreamMetadataDraft,
@@ -22111,6 +22124,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       searchTwitchCategories,
       searchKickCategories,
       loadXLiveCategories,
+      updateXBroadcast,
       refreshXNativeCapability,
       authorizeXLive,
       saveStreamMetadataDraft,
