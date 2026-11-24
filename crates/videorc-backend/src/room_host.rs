@@ -399,6 +399,15 @@ async fn hold(
                 ));
                 // The auxiliary track (S1.8c c4d): room sounds and system
                 // audio, for current media v2 consumers.
+                // The room's latency on a managed show (c6), as the
+                // renderer's RoomLatencyHost measured it.
+                let (latency_done, latency_stopped) = oneshot::channel::<()>();
+                tokio::spawn(crate::room_latency::run(
+                    state.clone(),
+                    room.clone(),
+                    show_id.clone().unwrap_or_default(),
+                    latency_stopped,
+                ));
                 let (aux_done, aux_stopped) = oneshot::channel::<()>();
                 tokio::spawn(crate::room_aux::run(
                     state.clone(),
@@ -537,6 +546,7 @@ async fn hold(
                 drop(remote_done);
                 drop(guest_speech_done);
                 drop(playout_done);
+                drop(latency_done);
                 crate::room_aux::disarm_system();
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
