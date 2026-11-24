@@ -1614,7 +1614,7 @@ pub fn clips_stopped(reason: Option<&str>) -> Notice {
 
 /// The Clips toasts' door to the Output page (replay-buffer.ts's
 /// `openOutput`, `openWorkspaceTab('recording')`).
-const OPEN_OUTPUT: &str = "Open Output";
+pub const OPEN_OUTPUT: &str = "Open Output";
 
 fn open_output() -> NoticeAction {
     NoticeAction::OpenPage(crate::nav::PageId::Recording)
