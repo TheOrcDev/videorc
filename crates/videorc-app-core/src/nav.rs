@@ -155,6 +155,7 @@ const FIXED_KEYS: [(PageId, PageKey); 4] = [
 pub const PORTED: &[PageId] = &[
     PageId::Studio,
     PageId::Sources,
+    PageId::Live,
     PageId::Settings,
     PageId::Diagnostics,
 ];
@@ -1054,7 +1055,7 @@ mod tests {
     fn installed_pages_are_reachable_but_health_has_no_sidebar_key() {
         assert!(PageId::Diagnostics.ported());
         assert!(PageId::Diagnostics.key().is_none());
-        assert!(!PageId::Live.ported());
+        assert!(PageId::Live.ported());
         assert!(menu_availability(&[]).pages.contains(&PageKey::Settings));
     }
 }

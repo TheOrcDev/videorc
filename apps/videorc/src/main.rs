@@ -60,6 +60,7 @@ use app::hide::HideFromStream;
 use app::permissions::Permissions;
 use app::shell::{Shell, StatusLine, connection_text};
 use app::{camera, capture, hotkeys, links, menus, sleep};
+use screens::destinations::DestinationsPanel;
 use screens::output::OutputPanel;
 use screens::sources::SourcesPanel;
 use screens::stream_manager::frame::StreamManagerFrame;
@@ -387,6 +388,8 @@ fn main() -> Result<()> {
             SourcesPanel::new(studio.clone(), permissions.clone(), core_handle.clone(), cx)
         });
         let output = cx.new(|cx| OutputPanel::new(studio.clone(), core_handle.clone(), cx));
+        let destinations =
+            cx.new(|cx| DestinationsPanel::new(studio.clone(), core_handle.clone(), cx));
         let settings = cx.new(|cx| {
             screens::settings::SettingsScreen::new(
                 studio.clone(),
@@ -471,6 +474,7 @@ fn main() -> Result<()> {
                         preview,
                         sources.clone(),
                         output.clone(),
+                        destinations.clone(),
                         settings.clone(),
                         health.clone(),
                         palette,
