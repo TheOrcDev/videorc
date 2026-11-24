@@ -13789,15 +13789,14 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        // Plan 260 S1.8a: with the backend holding the host seat the
-        // renderer must stay out of the room (one `host:<showId>`).
-        #[cfg(target_os = "macos")]
-        "cloud.room.token.refresh" if room_host::holds_seat() => ServerResponse::error(
-            command.id,
-            "cloud-room-held-by-backend",
-            "The backend holds the talk show's host seat.",
-        ),
         "cloud.room.token.refresh" => match cloud_context(state) {
+            // Plan 260 S1.8a: with the backend holding the host seat the
+            // renderer must stay out of the room (one `host:<showId>`).
+            _ if backend_holds_room_seat() => ServerResponse::error(
+                command.id,
+                "cloud-room-held-by-backend",
+                "The backend holds the talk show's host seat.",
+            ),
             Some(context) => match context.room_token(account::stored_session_token()).await {
                 Ok(answer) => ServerResponse::ok(command.id, answer),
                 Err(error) => ServerResponse::error(
@@ -13858,15 +13857,14 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        // Plan 260 S1.8a: the backend reports its own room connection; the
-        // renderer's, refused a token, would only contradict it.
-        #[cfg(target_os = "macos")]
-        "cloud.room.client.report" if room_host::holds_seat() => match cloud_context(state) {
-            Some(context) => ServerResponse::ok(command.id, context.status()),
-            None => cloud_unavailable(command.id),
-        },
         "cloud.room.client.report" => {
             match serde_json::from_value::<cloud_talk::RoomClientReportParams>(command.params) {
+                // Plan 260 S1.8a: the backend reports its own room
+                // connection; the renderer's, refused a token, would only
+                // contradict it.
+                Ok(_) if backend_holds_room_seat() => {
+                    ServerResponse::ok(command.id, cloud_show_status(state))
+                }
                 Ok(params) => match cloud_context(state) {
                     Some(context) => ServerResponse::ok(command.id, context.report_client(params)),
                     None => cloud_unavailable(command.id),
@@ -19205,6 +19203,20 @@ fn cloud_talk_error_code(error: &anyhow::Error, default: &'static str) -> &'stat
         return code;
     }
     default
+}
+
+/// Plan 260 S1.8a: does the backend's own room hold the talk show's host
+/// seat? A match guard inside an RPC arm, never on the arm itself: the
+/// websocket inventory reads only plain top-level arms.
+#[cfg(target_os = "macos")]
+fn backend_holds_room_seat() -> bool {
+    room_host::holds_seat()
+}
+
+/// The backend's room is macOS only (plan 260 S1.8).
+#[cfg(not(target_os = "macos"))]
+fn backend_holds_room_seat() -> bool {
+    false
 }
 
 fn cloud_show_status(state: &AppState) -> cloud_show::CloudStatus {
