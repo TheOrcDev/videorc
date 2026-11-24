@@ -305,8 +305,9 @@ pub fn cancellation_notice(job: &NoiseCleanupJob) -> (&'static str, String) {
 
 /// Each job's progress and outcome, pushed by the backend.
 pub const STATUS_EVENT: &str = "noiseCleanup.status";
-pub const COMPLETED_TITLE: &str = "Noise cleanup complete";
-pub const COMPLETED_DETAIL: &str = "A separate cleaned copy is ready. The original wasn't changed.";
+pub const JOB_COMPLETED_TITLE: &str = "Noise cleanup complete";
+pub const JOB_COMPLETED_DETAIL: &str =
+    "A separate cleaned copy is ready. The original wasn't changed.";
 
 /// `showNoiseCleanupCompleted`: one entry per job behind the bell, with
 /// Play and Show in Finder on the cleaned copy.
@@ -715,8 +716,8 @@ mod tests {
         let recovery = include_str!(
             "../../../../apps/desktop/src/renderer/src/lib/session-runtime-recovery.ts"
         );
-        assert!(recovery.contains(&format!("title: '{COMPLETED_TITLE}'")));
-        assert!(recovery.contains(&format!("detail: \"{COMPLETED_DETAIL}\"")));
+        assert!(recovery.contains(&format!("title: '{JOB_COMPLETED_TITLE}'")));
+        assert!(recovery.contains(&format!("detail: \"{JOB_COMPLETED_DETAIL}\"")));
         assert!(recovery.contains("key: `noise-cleanup:${jobId}`"));
     }
 }
