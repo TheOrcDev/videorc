@@ -56,9 +56,17 @@ fn frames() -> std::sync::MutexGuard<'static, BTreeMap<(String, String), RemoteF
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// The latest picture of one person's camera or screen, or the monitor.
+/// The latest picture of one person's camera or screen, or the monitor's
+/// (by its source alone: the Studio does not know the runner's identity).
 pub(crate) fn latest(identity: &str, source: &str) -> Option<RemoteFrame> {
-    frames()
+    let frames = frames();
+    if source == "monitor" {
+        return frames
+            .iter()
+            .find(|((_, kind), _)| kind == "monitor")
+            .map(|(_, frame)| frame.clone());
+    }
+    frames
         .get(&(identity.to_string(), source.to_string()))
         .cloned()
 }
