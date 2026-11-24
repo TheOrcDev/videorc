@@ -7729,7 +7729,10 @@ mod macos {
             } else {
                 None
             };
-        let raw_skip_cpu_copy = should_skip_camera_capture_cpu_copy(source_pixel_buffer.is_some());
+        // Plan 260 S1.8c: while a room keeps the camera (the backend
+        // publishes it), the frames keep their CPU bytes for the room.
+        let raw_skip_cpu_copy = should_skip_camera_capture_cpu_copy(source_pixel_buffer.is_some())
+            && !crate::room_camera_source::kept_for_room();
         // The stage reads a BGRA camera buffer in place (Vision and Metal).
         let effect_takes_buffer = effect_armed && pixel_format == kCVPixelFormatType_32BGRA;
         let skip_cpu_copy = raw_skip_cpu_copy || effect_takes_buffer;

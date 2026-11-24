@@ -8399,6 +8399,18 @@ mod tests {
                 .as_ref()
                 .is_some_and(|settings| settings.valid())
         );
+        // `cloud.room.camera.set`: the same type, the camera's kind.
+        let camera = high_risk_fixture("/cloud/roomCameraSetParams");
+        let params: crate::cloud_talk::CloudRoomMediaSetParams =
+            serde_json::from_value(camera.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&params).unwrap(), camera);
+        assert!(params.microphone.is_none());
+        assert!(
+            params
+                .camera
+                .as_ref()
+                .is_some_and(|settings| settings.valid())
+        );
         // `cloud.room.avatar.motion` carries one motion message as it is.
         let motion = high_risk_fixture("/cloud/roomAvatarMotionParams");
         assert!(motion["message"].is_object());

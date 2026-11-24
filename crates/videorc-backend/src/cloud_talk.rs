@@ -989,13 +989,34 @@ pub struct CloudRoomAvatarSetParams {
     pub guests: Option<bool>,
 }
 
-/// `cloud.room.microphone.set` (plan 260 S1.8c): the host's microphone for
-/// the backend's room, in the room microphone bridge's own settings shape;
-/// `null` takes it off. The camera's device and effects join it in c2.
+/// The host's media for the backend's room (plan 260 S1.8c), one method per
+/// kind: `cloud.room.microphone.set` sends `microphone` (the room microphone
+/// bridge's own settings shape), `cloud.room.camera.set` sends `camera`;
+/// `null` takes it off.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CloudRoomMediaSetParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) microphone: Option<crate::room_microphone::Settings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) camera: Option<RoomCameraSettings>,
+}
+
+/// The camera the Studio has on for the room (the Sources camera, which the
+/// native preview camera runs). Its key, look and background are the
+/// backend's own scene layout, so only the device travels.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RoomCameraSettings {
+    pub(crate) device_id: String,
+}
+
+impl RoomCameraSettings {
+    pub(crate) fn valid(&self) -> bool {
+        !self.device_id.is_empty()
+            && self.device_id.len() <= 512
+            && !self.device_id.contains(['\0', '\r', '\n'])
+    }
 }
 
 /// One scene background picture, immutable and named by its hash.

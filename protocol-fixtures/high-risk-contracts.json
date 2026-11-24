@@ -2879,6 +2879,11 @@
         "offsetMs": 40
       }
     },
+    "roomCameraSetParams": {
+      "camera": {
+        "deviceId": "camera:avfoundation:0"
+      }
+    },
     "roomAvatarMotionParams": {
       "message": {
         "v": 1,

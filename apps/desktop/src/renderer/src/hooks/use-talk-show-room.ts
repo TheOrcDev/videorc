@@ -927,6 +927,17 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     systemEpochRef.current = step.epoch
     if (step.disarm) roomAudioRouting.disarmSystem()
   }, [controller, stoppedBy])
+  // Plan 260 S1.8c: with the backend in the room (its dev switch), the camera
+  // goes on and off there; its key, look and background are the scene
+  // layout's, which the backend already has. `held: false` otherwise.
+  useEffect(() => {
+    if (!client || !roomOpen) return
+    void client
+      .requestTyped('cloud.room.camera.set', {
+        camera: cameraOn && cameraId ? { deviceId: cameraId } : null
+      })
+      .catch(() => {})
+  }, [client, roomOpen, cameraOn, cameraId])
   useEffect(() => {
     if (!client || !roomOpen || !showId || controllerEpoch === 0) return
     void client

@@ -370,6 +370,7 @@ interface HighRiskContractFixtures {
     roomAvatarSetParams: CloudRoomAvatarSetParams
     roomAvatarMotionParams: CloudRoomAvatarMotionParams
     roomMicrophoneSetParams: CloudRoomMediaSetParams
+    roomCameraSetParams: CloudRoomMediaSetParams
     roomSceneCommitParams: CloudRoomSceneCommitParams
     // Plan 243 C1: another device on air, and a show waiting after a hand-off.
     statusOnAirElsewhere: CloudStatus
@@ -728,7 +729,8 @@ describe('shared high-risk protocol fixture', () => {
       roomAvatarSetParams,
       roomAvatarMotionParams,
       roomSceneCommitParams,
-      roomMicrophoneSetParams
+      roomMicrophoneSetParams,
+      roomCameraSetParams
     } = fixtures.cloud
     expect(jsonShape(validateBackendEventPayload('cloud.state', statusTalk))).toEqual(statusTalk)
     expect(jsonShape(validateBackendRpcResult('cloud.room.open', statusTalk))).toEqual(statusTalk)
@@ -794,6 +796,22 @@ describe('shared high-risk protocol fixture', () => {
     ]) {
       expect(() => validateBackendRpcParams('cloud.room.microphone.set', { microphone })).toThrow()
     }
+    // The camera: on with its device, off with null; each method takes its own kind.
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.camera.set', roomCameraSetParams))
+    ).toEqual(roomCameraSetParams)
+    expect(validateBackendRpcParams('cloud.room.camera.set', { camera: null })).toEqual({
+      camera: null
+    })
+    expect(() =>
+      validateBackendRpcParams('cloud.room.camera.set', { camera: { deviceId: '' } })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('cloud.room.camera.set', roomMicrophoneSetParams)
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('cloud.room.microphone.set', roomCameraSetParams)
+    ).toThrow()
     expect(() =>
       validateBackendRpcParams('cloud.room.scene.commit', {
         ...roomSceneCommitParams,
