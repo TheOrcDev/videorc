@@ -82,6 +82,9 @@ pub struct Preview {
     native: Option<Native>,
     #[cfg(target_os = "macos")]
     floating: Option<WindowHandle<floating::FloatingPreview>>,
+    /// Pop out was pressed and the window is opening (`Preview::float`).
+    #[cfg(target_os = "macos")]
+    opening: bool,
 }
 
 impl Preview {
@@ -214,6 +217,7 @@ impl Preview {
                     host: Host::Docked,
                 }),
                 floating: None,
+                opening: false,
             }
         })
     }
@@ -227,6 +231,7 @@ impl Preview {
             logger,
             native: None,
             floating: None,
+            opening: false,
         }
     }
 
@@ -244,6 +249,13 @@ impl Preview {
             WindowMode::Floating => Some(words::away(self.phase)),
             WindowMode::Docked => words::phase(self.phase),
         }
+    }
+
+    /// What the Preview window says over its video while no frame shows
+    /// there (opening, failed or stalled), or nothing.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn floating_words(&self) -> Option<PreviewWords> {
+        words::phase(self.phase)
     }
 
     #[cfg(target_os = "macos")]
@@ -401,25 +413,30 @@ impl Preview {
         true
     }
 
+    /// Pop out: the window opens once this update has ended. `open_window`
+    /// draws the new window before it returns, and that draw's canvas places
+    /// the layer through this entity, which is leased while the Studio's
+    /// button updates it: opening from here would lease it twice.
     #[cfg(target_os = "macos")]
     fn float(&mut self, cx: &mut Context<Self>) {
-        if self.native.is_none() || self.floating.is_some() {
+        if self.native.is_none() || self.floating.is_some() || self.opening {
             return;
         }
+        self.opening = true;
         let weak = cx.entity().downgrade();
-        let bounds = gpui::Bounds::centered(None, size(px(960.), px(540.)), cx);
-        let opened = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Preview".into()),
-                    ..Default::default()
-                }),
-                kind: WindowKind::Floating,
-                ..Default::default()
-            },
-            move |window, cx| floating::FloatingPreview::build(weak, window, cx),
-        );
+        cx.defer(move |cx| open_floating(weak, cx));
+    }
+
+    /// The Preview window is open (or did not open): its view takes the
+    /// layer. Its first draw has already happened, while the layer was still
+    /// docked, so its canvas placed nothing; it draws again from here.
+    #[cfg(target_os = "macos")]
+    fn floated(
+        &mut self,
+        opened: anyhow::Result<WindowHandle<floating::FloatingPreview>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.opening = false;
         let handle = match opened {
             Ok(handle) => handle,
             Err(error) => {
@@ -427,9 +444,15 @@ impl Preview {
                     Level::Error,
                     &format!("[preview] the Preview window did not open: {error:#}"),
                 );
+                cx.notify();
                 return;
             }
         };
+        if self.native.is_none() {
+            // Stopped while the window opened (quit): nothing to show in it.
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+            return;
+        }
         let view = handle.update(cx, |floating, _, _| floating.host_view());
         let hosted = match view {
             Ok(Ok(view)) => Ok(view),
@@ -454,6 +477,8 @@ impl Preview {
             self.logger
                 .log(Level::Info, "[preview] the Preview is in its own window");
         }
+        // The window's canvas places the layer on its next draw.
+        let _ = handle.update(cx, |_, window, _| window.refresh());
         cx.notify();
     }
 
@@ -526,6 +551,36 @@ impl Preview {
                 }
             }
         }
+    }
+}
+
+/// Opens the Preview window, outside any update of the Preview entity (see
+/// [`Preview::float`]), and hands it to the Preview.
+#[cfg(target_os = "macos")]
+fn open_floating(preview: WeakEntity<Preview>, cx: &mut App) {
+    let bounds = gpui::Bounds::centered(None, size(px(960.), px(540.)), cx);
+    let builder = preview.clone();
+    let opened = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Preview".into()),
+                ..Default::default()
+            }),
+            kind: WindowKind::Floating,
+            ..Default::default()
+        },
+        move |window, cx| floating::FloatingPreview::build(builder, window, cx),
+    );
+    let window = opened.as_ref().ok().copied();
+    if preview
+        .update(cx, |preview, cx| preview.floated(opened, cx))
+        .is_err()
+        && let Some(window) = window
+    {
+        // The Preview went while the window opened (the app is quitting):
+        // nothing would dock or close it.
+        let _ = window.update(cx, |_, window, _| window.remove_window());
     }
 }
 
