@@ -1842,8 +1842,11 @@ export type StudioContextValue = {
   /**
    * Instant record (P5): keep the selected CoreAudio microphone open while
    * Studio is visible so `session.start` takes it warm. Never load-bearing.
+   * Plan 260 S1.3a: it is also the idle meter's only feed; `meterOnly`
+   * (Keep microphone ready off) opens it for the meter and Record opens the
+   * device fresh.
    */
-  armWarmMicrophone: () => Promise<WarmMicrophoneStatus | null>
+  armWarmMicrophone: (options?: { meterOnly?: boolean }) => Promise<WarmMicrophoneStatus | null>
   disarmWarmMicrophone: () => Promise<WarmMicrophoneStatus | null>
   warmMicrophone: WarmMicrophoneStatus | null
   /** A start in the saved output mode: the smoke harness's hook, nothing in the app. */
@@ -14538,7 +14541,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   ])
 
   const [warmMicrophone, setWarmMicrophone] = useState<WarmMicrophoneStatus | null>(null)
-  const armWarmMicrophone = useCallback(async () => {
+  const armWarmMicrophone = useCallback(async (options?: { meterOnly?: boolean }) => {
     const activeClient = clientRef.current
     if (!activeClient) return null
     const config = captureConfigRef.current
@@ -14546,7 +14549,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       const status = await activeClient.request<WarmMicrophoneStatus>('audio.mic.arm', {
         microphoneId: config.sources.microphoneId,
         microphoneGainDb: config.audio.microphoneGainDb,
-        microphoneMuted: config.audio.microphoneMuted
+        microphoneMuted: config.audio.microphoneMuted,
+        // Sent only when set, so the default request is unchanged on the wire.
+        ...(options?.meterOnly ? { meterOnly: true } : {})
       })
       if (clientRef.current === activeClient) setWarmMicrophone(status)
       return status

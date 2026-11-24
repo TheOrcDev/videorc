@@ -2218,6 +2218,7 @@ pub struct AudioMeterProbeParams {
 /// `audio.mic.arm` (instant-record P5): keep the selected CoreAudio
 /// microphone open while Studio is visible so `session.start` takes it
 /// warm instead of opening the device and waiting for its first callback.
+/// Plan 260 S1.3a: the standing-by microphone is also every idle meter's feed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WarmMicrophoneArmParams {
@@ -2226,6 +2227,11 @@ pub struct WarmMicrophoneArmParams {
     pub microphone_gain_db: f32,
     #[serde(default)]
     pub microphone_muted: bool,
+    /// Plan 260 S1.3a (D2, owner 2026-11-09): open the microphone for the
+    /// idle meter only (Keep microphone ready off). `session.start` never
+    /// takes it: it drops it and opens the device fresh, as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub meter_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2237,7 +2243,8 @@ pub struct WarmMicrophoneStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_name: Option<String>,
     /// Why the microphone is not armed (`not-coreaudio`, `session-active`,
-    /// `disabled-for-smoke`, `open-failed`, `disarmed`).
+    /// `disabled-for-smoke`, `open-failed`, `cleanup-pending`, `opening`,
+    /// `superseded`, `disarmed`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default)]

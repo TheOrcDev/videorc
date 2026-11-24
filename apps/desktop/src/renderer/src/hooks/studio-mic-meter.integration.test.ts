@@ -5,8 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { MediaAccessStatus } from '@/lib/backend'
 
+// Plan 260 S1.3a: the renderer analyser serves only a Windows or Linux
+// microphone's idle meter, so its cases run on a DirectShow input; a CoreAudio
+// input is metered by the backend's standing-by microphone alone.
 const fixture = vi.hoisted(() => ({
-  microphoneId: 'microphone:coreaudio:42' as string | undefined,
+  microphoneId: 'microphone:dshow:53747564696f' as string | undefined,
   microphoneName: 'Studio microphone',
   muted: false,
   gainDb: 0,
@@ -18,8 +21,9 @@ const fixture = vi.hoisted(() => ({
   keepWarm: false,
   liveLevel: null as number | null,
   livePeak: null as number | null,
-  arm: vi.fn(async () => null),
+  arm: vi.fn(async (_options?: { meterOnly?: boolean }) => null),
   disarm: vi.fn(async () => null),
+  warmMicrophone: null as { armed: boolean; reason?: string; capturedFrames: number } | null,
   now: 0,
   timers: [] as Array<{ at: number; callback: () => void }>
 }))
@@ -46,14 +50,20 @@ vi.mock('@/hooks/use-studio', () => ({
     deviceList: {
       devices: [
         {
-          id: 'microphone:coreaudio:42',
+          id: 'microphone:dshow:53747564696f',
           name: 'Studio microphone',
           kind: 'microphone',
           status: 'available'
         },
         {
-          id: 'microphone:coreaudio:43',
+          id: 'microphone:dshow:5265706c6163656d656e74',
           name: 'Replacement microphone',
+          kind: 'microphone',
+          status: 'available'
+        },
+        {
+          id: 'microphone:coreaudio:42',
+          name: 'MacBook microphone',
           kind: 'microphone',
           status: 'available'
         }
@@ -66,6 +76,7 @@ vi.mock('@/hooks/use-studio', () => ({
     settings: { keepMicrophoneWarm: fixture.keepWarm },
     armWarmMicrophone: fixture.arm,
     disarmWarmMicrophone: fixture.disarm,
+    warmMicrophone: fixture.warmMicrophone,
     sourceSwitchReason: () => null,
     switchSourceDeviceLive: vi.fn(),
     setCaptureConfig: vi.fn(),
@@ -122,8 +133,9 @@ describe('production microphone meter demand', () => {
     await act(async () => root.unmount())
     container.remove()
     advanceBackendClock(2_000)
-    fixture.microphoneId = 'microphone:coreaudio:42'
+    fixture.microphoneId = 'microphone:dshow:53747564696f'
     fixture.microphoneName = 'Studio microphone'
+    fixture.warmMicrophone = null
     fixture.muted = false
     fixture.gainDb = 0
     fixture.permission = 'granted'
@@ -177,7 +189,7 @@ describe('production microphone meter demand', () => {
     ['Studio', AudioSection],
     ['Sources', SourcesAudioMixer]
   ] as const) {
-    it(`starts and paints ${label}'s idle fallback with warming disabled`, async () => {
+    it(`starts and paints ${label}'s idle analyser for a Windows or Linux microphone`, async () => {
       expect(backendAudioLevels.isLive()).toBe(false)
       await render(consumer)
       await vi.waitFor(() => expect(environment.getUserMedia).toHaveBeenCalledTimes(1))
@@ -232,14 +244,15 @@ describe('production microphone meter demand', () => {
       )
     })
 
-    it(`uses backend levels first for ${label}, recovers after standby stalls, and releases fallback when levels return`, async () => {
+    it(`uses backend levels first for ${label}, recovers after they stall, and releases the analyser when levels return`, async () => {
       fixture.keepWarm = true
       await publishLevels(-6)
       await render(consumer)
       await publishLevels(-6)
       await frames()
       expect(environment.getUserMedia).not.toHaveBeenCalled()
-      expect(fixture.arm).toHaveBeenCalled()
+      // Not a CoreAudio input: nothing for the backend to keep standing by.
+      expect(fixture.arm).not.toHaveBeenCalled()
       expect(readMeter()).toBeCloseTo(-6, 1)
 
       await act(async () => advanceBackendClock(1_001))
@@ -259,6 +272,60 @@ describe('production microphone meter demand', () => {
     })
   }
 
+  // Plan 260 S1.3a (owner 2026-11-09): a CoreAudio microphone's idle meter
+  // reads only the backend's standing-by microphone; Keep microphone ready
+  // off arms it meter-only (D2). The renderer opens no microphone for it.
+  for (const [label, consumer] of [
+    ['Studio', AudioSection],
+    ['Sources', SourcesAudioMixer]
+  ] as const) {
+    for (const keepWarm of [true, false]) {
+      it(`meters ${label}'s CoreAudio microphone idle from the backend only (Keep ready ${keepWarm ? 'on' : 'off'})`, async () => {
+        fixture.microphoneId = 'microphone:coreaudio:42'
+        fixture.microphoneName = 'MacBook microphone'
+        fixture.keepWarm = keepWarm
+        await render(consumer)
+        expect(fixture.arm).toHaveBeenLastCalledWith(keepWarm ? undefined : { meterOnly: true })
+        expect(container.querySelector('[data-videorc-mic-monitor-state="idle"]')).not.toBeNull()
+
+        // The standing-by microphone's events carry no session. The first one
+        // turns the meter onto the backend's source; the next one paints.
+        for (let index = 0; index < 2; index += 1) {
+          await act(async () =>
+            backendAudioLevels.publish({
+              microphone: { peakDb: -9, rmsDb: -15 },
+              masterClippedSamples: 0
+            })
+          )
+        }
+        await frames()
+        expect(readMeter()).toBeCloseTo(-9, 1)
+        expect(
+          container.querySelector('[data-videorc-mic-monitor-state="monitoring"]')
+        ).not.toBeNull()
+
+        // The standby stalls: the meter rests, and nothing opens in its place.
+        await act(async () => advanceBackendClock(1_001))
+        await frames()
+        expect(container.querySelector('[data-videorc-mic-monitor-state="idle"]')).not.toBeNull()
+        expect(environment.getUserMedia).not.toHaveBeenCalled()
+        expect(environment.contexts).toHaveLength(0)
+      })
+    }
+  }
+
+  it('says why a CoreAudio idle meter has no level when the standby microphone failed to open', async () => {
+    fixture.microphoneId = 'microphone:coreaudio:42'
+    fixture.microphoneName = 'MacBook microphone'
+    fixture.warmMicrophone = { armed: false, reason: 'open-failed', capturedFrames: 0 }
+    await render(SourcesAudioMixer)
+    await frames()
+    expect(fixture.arm).toHaveBeenCalled()
+    expect(container.textContent).toContain('Live level unavailable. Recording still works.')
+    expect(container.querySelector('[data-videorc-mic-monitor-state="idle"]')).not.toBeNull()
+    expect(environment.getUserMedia).not.toHaveBeenCalled()
+  })
+
   function readMeter() {
     const meter = container.querySelector('[role="meter"][aria-label="Microphone level"]')
     expect(meter).not.toBeNull()
@@ -275,15 +342,16 @@ describe('production microphone meter demand', () => {
     )
   }
 
-  it('starts the real Sources fallback when attempted standby warming supplies no levels', async () => {
+  it('opens no renderer microphone for a CoreAudio input whose standby supplies no levels', async () => {
+    fixture.microphoneId = 'microphone:coreaudio:42'
+    fixture.microphoneName = 'MacBook microphone'
     fixture.keepWarm = true
     await render(SourcesAudioMixer)
     expect(fixture.arm).toHaveBeenCalled()
     expect(backendAudioLevels.isLive()).toBe(false)
-    expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
     await frames()
-    expect(readMeter()).toBeGreaterThan(-30)
-    expect(container.querySelector('[data-videorc-mic-monitor-state="monitoring"]')).not.toBeNull()
+    expect(environment.getUserMedia).not.toHaveBeenCalled()
+    expect(container.querySelector('[data-videorc-mic-monitor-state="idle"]')).not.toBeNull()
   })
 
   it('cancels a pending old device acquisition and attaches only the newly selected microphone', async () => {
@@ -300,7 +368,7 @@ describe('production microphone meter demand', () => {
     environment.getUserMedia.mockResolvedValueOnce(current)
     await render(SourcesAudioMixer)
     expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
-    fixture.microphoneId = 'microphone:coreaudio:43'
+    fixture.microphoneId = 'microphone:dshow:5265706c6163656d656e74'
     fixture.microphoneName = 'Replacement microphone'
     await render(SourcesAudioMixer)
     expect(environment.getUserMedia).toHaveBeenCalledTimes(2)
@@ -368,7 +436,7 @@ describe('production microphone meter demand', () => {
     }
   )
 
-  it('keeps the session diagnostic reading when analyser acquisition fails', async () => {
+  it('keeps the session diagnostic reading and opens no analyser in a session', async () => {
     fixture.sessionActive = true
     fixture.liveLevel = 0.1
     fixture.livePeak = -18
@@ -378,7 +446,7 @@ describe('production microphone meter demand', () => {
     expect(readMeter()).toBeCloseTo(-18, 1)
     expect(container.querySelector('[data-videorc-mic-monitor-state="live"]')).not.toBeNull()
     expect(container.textContent).not.toContain('Another app is using this microphone')
-    expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
+    expect(environment.getUserMedia).not.toHaveBeenCalled()
   })
 
   // Issue 1064: on Windows the analyser (Chromium) showed a healthy room while
@@ -462,9 +530,9 @@ function installBrowserAudio() {
   const descriptor = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices')
   const contexts: Array<{ close: ReturnType<typeof vi.fn> }> = []
   const stopped = vi.fn()
-  const getUserMedia = vi.fn(
-    async (): Promise<TestStream> => ({ getTracks: () => [{ stop: stopped }] })
-  )
+  const getUserMedia = vi.fn(async (): Promise<TestStream> => ({
+    getTracks: () => [{ stop: stopped }]
+  }))
   const media = new EventTarget()
   Object.defineProperty(navigator, 'mediaDevices', {
     configurable: true,

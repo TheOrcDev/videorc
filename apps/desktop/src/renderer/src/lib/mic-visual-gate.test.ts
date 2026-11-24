@@ -10,19 +10,30 @@ const ON_SCREEN: MicVisualGateInput = {
   workspaceVisible: true,
   documentVisible: true,
   microphoneSelected: true,
+  backendMetered: false,
   muted: false,
   sessionActive: false
 }
 
 describe('micVisualAnalyserEnabled', () => {
-  it('meters an idle mixer, because that is when people check the microphone', () => {
+  it('meters an idle Windows or Linux microphone, because that is when people check it', () => {
     // This used to be false until a session started or a toggle was flipped,
     // so the bars sat at the floor and looked identical to a dead microphone.
     expect(micVisualAnalyserEnabled(ON_SCREEN)).toBe(true)
   })
 
-  it('meters a running session too', () => {
-    expect(micVisualAnalyserEnabled({ ...ON_SCREEN, sessionActive: true })).toBe(true)
+  // Plan 260 S1.3a (owner 2026-11-09): the renderer's microphone is fenced to
+  // the idle meter of a microphone the backend cannot meter yet.
+  it('never opens a CoreAudio microphone: the backend meters it', () => {
+    for (const sessionActive of [false, true]) {
+      expect(micVisualAnalyserEnabled({ ...ON_SCREEN, backendMetered: true, sessionActive })).toBe(
+        false
+      )
+    }
+  })
+
+  it('never runs during a session or a Clips bus (D3)', () => {
+    expect(micVisualAnalyserEnabled({ ...ON_SCREEN, sessionActive: true })).toBe(false)
   })
 
   it.each<[string, Partial<MicVisualGateInput>]>([
@@ -30,12 +41,10 @@ describe('micVisualAnalyserEnabled', () => {
     ['the document is hidden', { documentVisible: false }],
     ['no microphone is selected', { microphoneSelected: false }],
     ['the microphone is muted', { muted: true }]
-  ])('stays closed when %s, session or not', (_label, overrides) => {
+  ])('stays closed when %s', (_label, overrides) => {
     // The microphone is genuinely open while the meter runs, so every one of
     // these must still close it — this is what keeps the OS indicator honest.
-    for (const sessionActive of [false, true]) {
-      expect(micVisualAnalyserEnabled({ ...ON_SCREEN, sessionActive, ...overrides })).toBe(false)
-    }
+    expect(micVisualAnalyserEnabled({ ...ON_SCREEN, ...overrides })).toBe(false)
   })
 })
 
