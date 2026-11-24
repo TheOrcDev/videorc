@@ -42,7 +42,7 @@ fn exact_microphone_id(id: &str) -> bool {
     })
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Settings {
     pub device_id: String,
@@ -52,7 +52,7 @@ pub(crate) struct Settings {
     pub offset_ms: u32,
 }
 impl Settings {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         !self.device_id.is_empty()
             && self.device_id.len() <= 512
             && exact_microphone_id(&self.device_id)
@@ -114,7 +114,7 @@ pub(crate) struct Frame {
     // Never skipped: absent serializes as null, never as 0 or a missing key.
     origin_us: Option<u64>,
     incarnation: Option<u64>,
-    samples: Vec<f32>,
+    pub(crate) samples: Vec<f32>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

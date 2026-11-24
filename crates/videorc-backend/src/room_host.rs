@@ -306,6 +306,15 @@ async fn hold(
                     receipts.clone(),
                     avatar_heard,
                 ));
+                // The host's microphone (S1.8c): it closes its device itself
+                // when `microphone_done` drops with this connection.
+                let (microphone_done, microphone_heard) = oneshot::channel::<()>();
+                tokio::spawn(crate::room_media::run_microphone(
+                    state.clone(),
+                    room.clone(),
+                    show_id.clone().unwrap_or_default(),
+                    microphone_heard,
+                ));
                 let (overlay_queue, overlay_worker) = overlay_sender(
                     state.clone(),
                     room.local_participant(),
@@ -382,6 +391,7 @@ async fn hold(
                 graphics_task.abort();
                 avatar_task.abort();
                 scene_task.abort();
+                drop(microphone_done);
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
                     DisconnectReason::DuplicateIdentity => {
@@ -504,6 +514,7 @@ async fn leave(state: &AppState, room: Option<Arc<Room>>) {
     crate::room_graphics::reset_enabled();
     crate::room_avatar::reset_enabled();
     crate::room_content::clear();
+    crate::room_media::clear();
     HOLDS_SEAT.store(false, Ordering::Release);
 }
 
