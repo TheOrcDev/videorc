@@ -9,6 +9,8 @@ pub mod camera_extension;
 pub mod capture_state;
 pub mod deep_link;
 pub mod grant_watch;
+#[cfg(target_os = "linux")]
+pub mod linux;
 pub mod menu;
 pub mod permission_restart;
 pub mod permissions;
