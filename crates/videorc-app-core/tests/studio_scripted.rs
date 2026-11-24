@@ -3803,3 +3803,95 @@ async fn a_youtube_quota_event_pauses_youtube_until_its_time() {
         .await;
     assert_eq!(studio.platforms_now().youtube_quota_paused_until, None);
 }
+
+// --- S1.6c: Stream details and Discord ---------------------------------
+
+fn draft(title: &str) -> Value {
+    json!({
+        "title": title,
+        "description": "",
+        "defaultPrivacy": "unlisted",
+        "targetOverrides": [],
+    })
+}
+
+#[tokio::test]
+async fn the_bootstrap_reads_the_draft_its_validation_and_discord() {
+    let backend = Scripted::new();
+    answer_livestream(&backend, "streamTargets.metadata.get", draft("Today"));
+    answer_livestream(
+        &backend,
+        "streamTargets.metadata.validate",
+        json!({ "valid": false, "issues": [{ "field": "title", "message": "Too long." }] }),
+    );
+    answer_livestream(&backend, "discord.announce.get", json!({ "enabled": true }));
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+
+    let details = studio.details_now();
+    assert_eq!(
+        details.draft.as_ref().map(|d| d.title.as_str()),
+        Some("Today")
+    );
+    let validation = details.validation.expect("validated");
+    assert!(!validation.valid);
+    assert_eq!(validation.issues.len(), 1);
+    assert!(details.discord.expect("discord").enabled);
+    assert_eq!(details.discord_error, None);
+}
+
+#[tokio::test]
+async fn a_changed_draft_is_taken_and_validated_again() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    assert_eq!(
+        studio.details_now().discord_error.as_deref(),
+        Some(videorc_app_core::livestream::copy::DISCORD_UNREADABLE)
+    );
+
+    answer_livestream(
+        &backend,
+        "streamTargets.metadata.validate",
+        json!({ "valid": true }),
+    );
+    studio
+        .handle_event(BackendEvent::Untyped {
+            event: "streamTargets.metadata.changed".to_string(),
+            payload: draft("Later"),
+        })
+        .await;
+    let details = studio.details_now();
+    assert_eq!(details.draft.map(|d| d.title), Some("Later".to_string()));
+    assert!(details.validation.expect("validated").valid);
+}
+
+#[tokio::test]
+async fn a_category_search_needs_two_characters_and_reads_numeric_ids() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let before = livestream_methods(&backend).len();
+
+    studio.search_categories("twitch", " g ").await;
+    assert_eq!(livestream_methods(&backend).len(), before);
+    assert_eq!(studio.details_now().category_searched, None);
+
+    answer_livestream(
+        &backend,
+        "streamTargets.twitch.searchCategories",
+        json!({ "categories": [{ "id": 509658, "name": "Just Chatting" }] }),
+    );
+    studio.search_categories("twitch", "ju").await;
+    let details = studio.details_now();
+    assert_eq!(
+        details.category_results,
+        [("509658".to_string(), "Just Chatting".to_string())]
+    );
+    assert_eq!(details.category_searched.as_deref(), Some("ju"));
+    assert!(!details.category_pending);
+    let script = backend.script.lock().unwrap();
+    let (_, params) = script.livestream_calls.last().expect("a search");
+    assert_eq!(params["first"], 10);
+    assert_eq!(params["query"], "ju");
+}

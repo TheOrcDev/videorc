@@ -233,6 +233,8 @@ pub const ENVIRONMENT_OVERRIDE: &str = "Environment override";
 /// `SignInPending`.
 pub const WAITING_FOR_BROWSER: &str = "Waiting for your browser…";
 pub const COPY_LINK: &str = "Copy link";
+/// The Discord failure's action (`OPEN_DISCORD_SETTINGS`).
+pub const OPEN_DISCORD_SETTINGS: &str = "Open Discord settings";
 pub const COPIED: &str = "Copied";
 pub const CANCEL: &str = "Cancel";
 pub fn other_browser(platform_name: &str) -> String {

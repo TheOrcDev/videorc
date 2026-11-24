@@ -103,6 +103,7 @@ pub mod sources;
 pub mod sources_audio;
 pub mod sources_page;
 pub mod sources_section;
+mod stream_details;
 pub mod takeover_microphone;
 #[cfg(test)]
 mod test_support;
@@ -114,6 +115,7 @@ pub mod vertical_stream;
 pub mod virtual_camera;
 
 pub use platforms::BROWSER_APPROVAL_TOAST_ID;
+pub use stream_details::{DISCORD_FAILURE_ID, METADATA_CHANGED_EVENT};
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -231,6 +233,9 @@ pub const STUDIO_EVENTS: [&str; 23] = [
     crate::livestream::ACCOUNTS_CHANGED_EVENT,
     crate::livestream::OAUTH_CALLBACK_EVENT,
     crate::livestream::YOUTUBE_QUOTA_EVENT,
+    // S1.6c: Stream details and Discord (`stream_details`).
+    stream_details::METADATA_CHANGED_EVENT,
+    crate::livestream::discord::CHANGED_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -857,6 +862,8 @@ pub struct Studio<B: StudioBackend> {
     output_authorizer: Mutex<Option<OutputAuthorizer>>,
     /// S1.6c: the platform accounts, apart from the snapshot (`platforms`).
     platforms_tx: watch::Sender<crate::livestream::PlatformsState>,
+    /// S1.6c: Stream details and Discord, apart from the snapshot.
+    details_tx: watch::Sender<crate::livestream::DetailsState>,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -913,6 +920,7 @@ impl<B: StudioBackend> Studio<B> {
         let (telemetry, _) = watch::channel(HealthTelemetry::default());
         let (levels, _) = watch::channel(audio_levels::MicLevels::default());
         let (platforms_tx, _) = watch::channel(crate::livestream::PlatformsState::default());
+        let (details_tx, _) = watch::channel(crate::livestream::DetailsState::default());
         Self {
             backend,
             config,
@@ -934,6 +942,7 @@ impl<B: StudioBackend> Studio<B> {
             live_audio_kick: Notify::new(),
             output_authorizer: Mutex::new(None),
             platforms_tx,
+            details_tx,
         }
     }
 
@@ -1206,8 +1215,10 @@ impl<B: StudioBackend> Studio<B> {
                 self.apply_captions_status(payload);
             }
             BackendEvent::Untyped { event, payload } => {
-                // S1.6c: the platform accounts' events are theirs alone.
-                if self.handle_platforms_event(&event, &payload).await {
+                // S1.6c: the live area's events are its own.
+                if self.handle_platforms_event(&event, &payload).await
+                    || self.handle_details_event(&event, &payload).await
+                {
                     return;
                 }
                 // The Health page's telemetry (`stream.targets` feeds both it
@@ -1489,8 +1500,9 @@ impl<B: StudioBackend> Studio<B> {
         self.read_captions_status(generation).await;
         // S1.6a part 6c: the Clips ring's state, and the launch's arming.
         self.read_replay_status(generation).await;
-        // S1.6c: the platform accounts (`platforms`).
+        // S1.6c: the platform accounts, then Stream details and Discord.
         self.read_platforms().await;
+        self.read_details().await;
         // The other areas' first reads (the agents line, takeovers and the
         // soundboard, chat, Sidekick, destinations, chat commands, scheduled
         // streams, the performance check, Hide screen, captions, the working
