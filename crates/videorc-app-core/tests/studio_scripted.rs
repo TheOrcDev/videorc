@@ -11,7 +11,9 @@ use tokio::sync::{Semaphore, broadcast};
 use videorc_app_core::Logger;
 use videorc_app_core::client::methods::RemoteIntentAckParams;
 use videorc_app_core::client::{BackendEvent, RpcError};
+use videorc_app_core::studio::inspector::StartGates;
 use videorc_app_core::studio::session::READY_TO_START_MESSAGE;
+use videorc_app_core::studio::transport::{RecordButtonState, TransportView};
 use videorc_app_core::studio::ui_settings_wire::{
     UI_SETTINGS_CHANGED_EVENT, UiSettingsChange, UiSettingsGetParams, UiSettingsSetParams,
     UiSettingsSnapshot,
@@ -802,6 +804,142 @@ async fn a_second_stop_while_one_runs_gets_its_answer() {
     gate.add_permits(1);
     assert!(studio.stop().await);
     assert_eq!(backend.count("session.stop"), 2);
+}
+
+/// The transport as the Studio tab draws it, with no start gates.
+fn transport(studio: &Studio<Scripted>) -> TransportView {
+    TransportView::from_snapshot(&studio.snapshot(), &StartGates::default(), false)
+}
+
+#[tokio::test]
+async fn a_stop_during_a_record_start_reads_stopping_at_once_then_stops_it() {
+    // Owner decision Q156 (Electron parity): during a Record start, Record's
+    // place holds an enabled "Stop recording". Pressed, it reads "Stopping…"
+    // at once (`setStopRequestPending(true)`), waits for the start
+    // (`sessionStartInFlightRef`), then stops the session the start started.
+    let backend = Scripted::new();
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| script.start_gate = Some(gate.clone()));
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    studio.set_test_pattern(true).await.unwrap();
+
+    let starting = tokio::spawn({
+        let studio = studio.clone();
+        async move { studio.start_recording().await }
+    });
+    eventually("the start is at the backend", || {
+        backend.count("session.start") == 1
+    })
+    .await;
+    let before = transport(&studio);
+    assert_eq!(before.record_state, RecordButtonState::Running);
+    assert_eq!(before.stop_label, "Stop recording");
+    assert!(before.record_enabled);
+
+    let (stopped, ()) = tokio::join!(studio.request_stop(StopOrigin::Button), async {
+        eventually("the stop is marked at the click", || {
+            studio.snapshot().session.stop_pending
+        })
+        .await;
+        let pressed = transport(&studio);
+        assert_eq!(pressed.record_state, RecordButtonState::Stopping);
+        assert_eq!(pressed.stop_label, "Stopping…");
+        assert!(pressed.record_enabled, "busy, never dimmed");
+        assert_eq!(backend.count("session.stop"), 0, "it waits for the start");
+        gate.add_permits(1);
+    });
+    assert_eq!(stopped, StopOutcome::Stopped(true));
+    assert_eq!(starting.await.unwrap(), StartOutcome::Started);
+    assert_eq!(backend.count("session.stop"), 1);
+    let after = studio.snapshot();
+    assert!(!after.session.stop_pending);
+    assert_eq!(after.session.phase, SessionPhase::Stopping);
+}
+
+#[tokio::test]
+async fn cancel_livestream_during_a_go_live_start_reads_stopping_at_once() {
+    // B-16 with Electron's `stopRequestPending`: "Cancel livestream" reads
+    // "Stopping…" from the click, and the livestream the start brings up is
+    // stopped once it answers.
+    let backend = Scripted::new();
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| {
+        script.settings.insert(
+            keys::CAPTURE_CONFIG.to_string(),
+            Value::String(capture_config_with_twitch().to_string()),
+        );
+        script.start_gate = Some(gate.clone());
+        script.start_answers.push_back(Ok(live("s4")));
+        script
+            .stop_answers
+            .push_back(Ok(status(RecordingState::Idle, Some("s4"))));
+    });
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+
+    let starting = tokio::spawn({
+        let studio = studio.clone();
+        async move { studio.start_livestream(None).await }
+    });
+    eventually("the start is at the backend", || {
+        backend.count("session.start") == 1
+    })
+    .await;
+    let before = transport(&studio);
+    assert_eq!(before.stop_label, "Cancel livestream");
+    assert!(before.record_enabled);
+
+    let (stopped, ()) = tokio::join!(studio.request_stop(StopOrigin::Button), async {
+        eventually("the cancel is marked at the click", || {
+            studio.snapshot().session.stop_pending
+        })
+        .await;
+        let pressed = transport(&studio);
+        assert_eq!(pressed.record_state, RecordButtonState::Stopping);
+        assert_eq!(pressed.stop_label, "Stopping…");
+        assert!(pressed.record_enabled, "busy, never dimmed");
+        assert_eq!(backend.count("session.stop"), 0, "it waits for the start");
+        gate.add_permits(1);
+    });
+    assert_eq!(stopped, StopOutcome::Stopped(true));
+    assert_eq!(starting.await.unwrap(), StartOutcome::Started);
+    assert_eq!(backend.count("session.stop"), 1);
+    let after = studio.snapshot();
+    assert!(!after.session.stop_pending);
+    assert_eq!(after.session.phase, SessionPhase::Idle);
+}
+
+#[tokio::test]
+async fn a_stop_dropped_while_it_waits_for_a_start_ends_its_stopping() {
+    // The mark moved ahead of the wait for the start, so its drop guard did
+    // too: a stop dropped there (a dropped task, a timeout around it) leaves
+    // no "Stopping…" behind, and the next Stop is a stop of its own.
+    let backend = Scripted::new();
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| script.start_gate = Some(gate.clone()));
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    studio.set_test_pattern(true).await.unwrap();
+
+    let starting = tokio::spawn({
+        let studio = studio.clone();
+        async move { studio.start_recording().await }
+    });
+    eventually("the start is at the backend", || {
+        backend.count("session.start") == 1
+    })
+    .await;
+    let dropped = tokio::time::timeout(std::time::Duration::from_millis(50), studio.stop()).await;
+    assert!(dropped.is_err(), "the stop was still waiting for the start");
+    assert!(!studio.snapshot().session.stop_pending);
+    assert_eq!(transport(&studio).stop_label, "Stop recording");
+
+    gate.add_permits(1);
+    assert_eq!(starting.await.unwrap(), StartOutcome::Started);
+    assert_eq!(studio.snapshot().session.phase, SessionPhase::Recording);
+    assert!(studio.stop().await);
+    assert_eq!(backend.count("session.stop"), 1);
 }
 
 #[tokio::test]
