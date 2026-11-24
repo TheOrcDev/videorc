@@ -4,8 +4,8 @@
 //! Wayland gives no app a key grab, and Chromium's portal route never worked
 //! ("An app id is required"), so Electron only ever said why the keys could
 //! not fire (`global-shortcut-lifecycle.ts`). The GPUI app binds them itself:
-//! it registers the app id `videorc` with the portal host Registry (the
-//! managed `videorc.desktop`, [`super::desktop_entry`]), creates a session,
+//! it registers its app id with the portal host Registry ([`PORTAL_APP_ID`]),
+//! creates a session,
 //! binds the whole list with descriptions and preferred triggers, and maps
 //! `Activated` back to the action. The desktop shows its own bind dialog and
 //! owns the keys from then on.
@@ -17,8 +17,11 @@
 
 use std::collections::BTreeMap;
 
-/// The app id the portal host Registry knows Videorc by.
-pub const PORTAL_APP_ID: &str = "videorc";
+/// The app id the portal host Registry knows Videorc by: the GPUI app's
+/// Wayland `app_id` (`apps/videorc` `main.rs`). The Registry takes reverse-DNS
+/// ids only (`a.b`, as `g_application_id_is_valid`), so Electron's bare
+/// `videorc` would be refused.
+pub const PORTAL_APP_ID: &str = "com.videorc.desktop";
 
 /// Settings → Shortcuts under a portal: the desktop owns the keys.
 pub const PORTAL_OWNS_KEYS_HINT: &str = "Change in your desktop's settings";
@@ -520,7 +523,7 @@ mod tests {
             shortcuts.portal().calls,
             [
                 "version",
-                "register videorc",
+                "register com.videorc.desktop",
                 "create /session/1",
                 "bind /session/1"
             ]
