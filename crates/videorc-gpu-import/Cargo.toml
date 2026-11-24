@@ -4,6 +4,22 @@ version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 publish = false
-description = "Plan 260: Imports the backend's shared preview surface (IOSurface, NT handle, dma-buf) as a GPU texture with no CPU copy."
+description = "Plan 260 S1.7 (from plan 220 S0.2a): imports the backend's shared preview surface (IOSurface on macOS, an NT handle on Windows, a dma-buf on Linux) as a wgpu texture on a caller-supplied device, with no CPU copy."
 
 [dependencies]
+# wgpu 30 re-exports wgpu-hal as `wgpu::hal`; the raw-texture wrappers live there.
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "metal", "dx12", "vulkan"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6.4" }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
+objc2-io-surface = { version = "0.3.2", default-features = false, features = ["std", "IOSurfaceRef", "IOSurfaceTypes", "libc", "objc2-core-foundation"] }
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLTexture", "MTLPixelFormat", "MTLResource", "MTLTypes", "objc2-io-surface"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi_Common"] }
+
+[dev-dependencies]
+pollster = "0.4"
+# The macOS tests compile a WGSL shader to read the imported texture back.
+wgpu = { version = "30.0.1", default-features = false, features = ["wgsl"] }
