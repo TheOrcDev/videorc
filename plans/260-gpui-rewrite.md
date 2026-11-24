@@ -975,6 +975,11 @@ leases, acknowledgements, references and the status on
 `cohost.pet.animator`. The content builders move to `videorc-app-core` in
 Phase 2/3: the GPUI app builds the same content in Rust and sends it the
 same way.
+The avatar's motion model (`MotionProducer`, `shared/cloud-avatar-motion.ts`)
+stays in the renderer too and hands each message to the backend through
+`cloud.room.avatar.motion`; the backend picks the pages that animate and
+sends it on the motion topic. The model moves to `videorc-app-core` with the
+builders, with parity fixtures generated from its TypeScript tests then.
 
 ### Phase 2: the shell, on all three platforms
 
