@@ -10,7 +10,11 @@
 
 use std::collections::BTreeSet;
 
+use serde_json::{Value, json};
 use videorc_protocol::{NoiseCleanupJob, NoiseCleanupJobStatus, SessionListItem};
+
+use super::LibraryBackend;
+use crate::client::RpcError;
 
 pub const REDUCE_NOISE: &str = "Reduce noise";
 pub const REDUCE_NOISE_PREMIUM: &str = "Reduce noise · Premium";
@@ -297,6 +301,115 @@ pub fn cancellation_notice(job: &NoiseCleanupJob) -> (&'static str, String) {
     }
 }
 
+// ── The jobs (`use-studio.tsx`'s `noiseCleanupJobs`) ─────────────────────
+
+/// Each job's progress and outcome, pushed by the backend.
+pub const STATUS_EVENT: &str = "noiseCleanup.status";
+pub const COMPLETED_TITLE: &str = "Noise cleanup complete";
+pub const COMPLETED_DETAIL: &str = "A separate cleaned copy is ready. The original wasn't changed.";
+
+/// `showNoiseCleanupCompleted`: one entry per job behind the bell, with
+/// Play and Show in Finder on the cleaned copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedNotice {
+    /// `noise-cleanup:<job id>`.
+    pub key: String,
+    pub job_id: String,
+    pub output_session_id: String,
+}
+
+/// What one `noiseCleanup.status` event asks of the window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobEventOutcome {
+    /// A finished cleanup made a new recording: read the sessions again.
+    pub refresh_sessions: bool,
+    /// Its completion, said once per job.
+    pub completed: Option<CompletedNotice>,
+}
+
+/// Every noise cleanup job the window has heard.
+#[derive(Debug, Clone, Default)]
+pub struct NoiseJobs {
+    jobs: Vec<NoiseCleanupJob>,
+    announced: BTreeSet<String>,
+}
+
+impl NoiseJobs {
+    pub fn jobs(&self) -> &[NoiseCleanupJob] {
+        &self.jobs
+    }
+
+    /// `noiseCleanup.list` replaces the jobs outright: a change to a source
+    /// can invalidate a finished copy without an event.
+    pub fn replace(&mut self, jobs: Vec<NoiseCleanupJob>) {
+        self.jobs = jobs;
+    }
+
+    /// A start's or a cancel's answer.
+    pub fn answered(&mut self, job: NoiseCleanupJob) {
+        upsert_job(&mut self.jobs, job);
+    }
+
+    /// One `noiseCleanup.status` event.
+    pub fn event(&mut self, job: NoiseCleanupJob) -> JobEventOutcome {
+        let completed = job.status == NoiseCleanupJobStatus::Completed;
+        let notice = job
+            .output_session_id
+            .clone()
+            .filter(|_| completed && !self.announced.contains(&job.id))
+            .map(|output_session_id| CompletedNotice {
+                key: format!("noise-cleanup:{}", job.id),
+                job_id: job.id.clone(),
+                output_session_id,
+            });
+        if let Some(notice) = &notice {
+            self.announced.insert(notice.job_id.clone());
+        }
+        upsert_job(&mut self.jobs, job);
+        JobEventOutcome {
+            refresh_sessions: completed,
+            completed: notice,
+        }
+    }
+}
+
+fn read_job(method: &str, answer: Value) -> Result<NoiseCleanupJob, RpcError> {
+    serde_json::from_value(answer)
+        .map_err(|error| RpcError::new(method, "invalid_result", error.to_string()))
+}
+
+/// `noiseCleanup.list`, on connect and after the session list's refresh.
+pub async fn list_jobs(backend: &impl LibraryBackend) -> Result<Vec<NoiseCleanupJob>, RpcError> {
+    let answer = backend
+        .library_request("noiseCleanup.list", Value::Null)
+        .await?;
+    serde_json::from_value(answer)
+        .map_err(|error| RpcError::new("noiseCleanup.list", "invalid_result", error.to_string()))
+}
+
+/// `noiseCleanup.start`: a cleaned copy of this recording.
+pub async fn start_job(
+    backend: &impl LibraryBackend,
+    session_id: &str,
+) -> Result<NoiseCleanupJob, RpcError> {
+    let answer = backend
+        .library_request("noiseCleanup.start", json!({ "sessionId": session_id }))
+        .await?;
+    read_job("noiseCleanup.start", answer)
+}
+
+/// `noiseCleanup.cancel`: the answer says whether it stopped yet
+/// ([`cancellation_notice`]).
+pub async fn cancel_job(
+    backend: &impl LibraryBackend,
+    job_id: &str,
+) -> Result<NoiseCleanupJob, RpcError> {
+    let answer = backend
+        .library_request("noiseCleanup.cancel", json!({ "jobId": job_id }))
+        .await?;
+    read_job("noiseCleanup.cancel", answer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,5 +675,48 @@ mod tests {
             missing.is_empty(),
             "not in the renderer any more: {missing:?}"
         );
+    }
+
+    #[test]
+    fn the_jobs_follow_events_and_say_a_completion_once() {
+        let mut jobs = NoiseJobs::default();
+        jobs.replace(vec![job(json!({}))]);
+        let running = jobs.event(job(json!({"status": "processing", "progressPercent": 30,
+            "updatedAt": "2026-07-13T10:00:02.000Z"})));
+        assert_eq!(running, JobEventOutcome::default());
+        assert_eq!(jobs.jobs()[0].progress_percent, 30);
+        let done = job(json!({"status": "completed", "progressPercent": 100,
+            "outputSessionId": "cleaned", "updatedAt": "2026-07-13T10:00:03.000Z"}));
+        let outcome = jobs.event(done.clone());
+        assert!(outcome.refresh_sessions);
+        assert_eq!(
+            outcome.completed,
+            Some(CompletedNotice {
+                key: "noise-cleanup:cleanup-1".into(),
+                job_id: "cleanup-1".into(),
+                output_session_id: "cleaned".into(),
+            })
+        );
+        // The same completion again: the list refreshes, nothing is said.
+        let again = jobs.event(done);
+        assert!(again.refresh_sessions);
+        assert_eq!(again.completed, None);
+        // A start's answer joins the list; the list replaces everything.
+        jobs.answered(job(
+            json!({"id": "cleanup-2", "sourceSessionId": "session-2"}),
+        ));
+        assert_eq!(jobs.jobs().len(), 2);
+        jobs.replace(Vec::new());
+        assert!(jobs.jobs().is_empty());
+    }
+
+    #[test]
+    fn the_completion_words_are_the_renderers() {
+        let recovery = include_str!(
+            "../../../../apps/desktop/src/renderer/src/lib/session-runtime-recovery.ts"
+        );
+        assert!(recovery.contains(&format!("title: '{COMPLETED_TITLE}'")));
+        assert!(recovery.contains(&format!("detail: \"{COMPLETED_DETAIL}\"")));
+        assert!(recovery.contains("key: `noise-cleanup:${jobId}`"));
     }
 }
