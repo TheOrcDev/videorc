@@ -69,7 +69,7 @@ describe('useJoinRequestChime', () => {
     expect(play).not.toHaveBeenCalled()
     expect(rendererPlaysJoinChime('darwin')).toBe(false)
     expect(rendererPlaysJoinChime('win32')).toBe(true)
-    expect(rendererPlaysJoinChime('linux')).toBe(true)
+    expect(rendererPlaysJoinChime('linux')).toBe(false)
   })
 
   it('chimes when someone asks to join an open room', async () => {

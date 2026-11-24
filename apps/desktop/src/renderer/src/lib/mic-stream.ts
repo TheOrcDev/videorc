@@ -6,13 +6,13 @@
 // ("a passive meter must never toast") in a single tested place. The backend
 // stays the capture/health authority; this stream is visual-only.
 //
-// PLAN 260 S1.3a FENCE (owner 2026-11-09, D1): this is the renderer's last
+// PLAN 260 S1.3 FENCE (owner 2026-11-09, D1): this is the renderer's last
 // getUserMedia, and it may only serve the IDLE meter of a microphone the
-// backend cannot meter between sessions yet: a Windows or Linux input (not
-// `microphone:coreaudio:*`). `micVisualAnalyserEnabled` enforces that: never a
-// CoreAudio input (the backend's standing-by microphone meters it), never
-// during a session or a Clips bus (the bus meters what is recorded). S1.3c
-// gives Windows and Linux a backend meter-only capture and deletes this file.
+// backend cannot meter between sessions yet: a Windows input.
+// `micVisualAnalyserEnabled` enforces that: never a CoreAudio or a PipeWire
+// input (`isBackendMeteredMicrophoneId`: the backend's standing-by microphone
+// meters them), never during a session or a Clips bus (the bus meters what is
+// recorded). Windows' backend meter-only capture deletes this file.
 
 import type { MediaAccessStatus } from './backend'
 import { matchStrictAudioInput } from './mic-device-label'
@@ -185,7 +185,7 @@ export function createMicStreamController<S extends MicMediaStreamLike>(
         } else {
           deviceId = matchMicrophoneDeviceId(deviceName, inputs)
         }
-        // S1.3a fence: reached only for a Windows or Linux microphone's idle meter.
+        // S1.3 fence: reached only for a Windows microphone's idle meter.
         const stream = await media.getUserMedia({
           audio: deviceId
             ? { ...MIC_METER_STREAM_PROCESSING, deviceId: { exact: deviceId } }

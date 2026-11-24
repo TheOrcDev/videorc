@@ -8,10 +8,10 @@ import type { MediaAccessStatus } from '@/lib/backend'
 //
 // Plan 260 S1.3a (owner 2026-11-09): the analyser is the last renderer
 // microphone, kept ONLY for the idle meter of a microphone the backend cannot
-// meter between sessions yet: the Windows and Linux inputs (D1; S1.3c moves
-// them to a backend meter-only capture and deletes this). A CoreAudio input is
-// metered by the backend's standing-by microphone, and no session or Clips bus
-// ever meters through Chromium (D3; issue 1064).
+// meter between sessions yet: the Windows inputs (D1; a backend meter-only
+// capture there deletes this). A CoreAudio or PipeWire input is metered by the
+// backend's standing-by microphone (Linux's since S1.3), and no session or
+// Clips bus ever meters through Chromium (D3; issue 1064).
 
 export type MicVisualGateInput = Readonly<{
   /** Studio or Sources tab is the active workspace tab. */
@@ -21,8 +21,8 @@ export type MicVisualGateInput = Readonly<{
   /** A backend microphone is selected. */
   microphoneSelected: boolean
   /**
-   * The selected microphone is a CoreAudio input: the backend's standing-by
-   * microphone meters it, so the renderer never opens it.
+   * The selected microphone is a CoreAudio or PipeWire input: the backend's
+   * standing-by microphone meters it, so the renderer never opens it.
    */
   backendMetered: boolean
   /** Capture config mute — dancing bars under a mute would lie. */
@@ -43,7 +43,7 @@ export type MicVisualGateInput = Readonly<{
  * toggle, so an idle Studio showed bars pinned at the floor — indistinguishable
  * from a dead microphone, which is exactly what people check before they hit
  * record. The meter is live whenever it is being looked at; on Windows and
- * Linux this analyser is what makes it so until S1.3c.
+ * this analyser is what makes it so on Windows.
  *
  * The cost is deliberate and visible: the OS shows its microphone indicator
  * while the mixer is open, because the microphone genuinely is. Leaving the
@@ -66,7 +66,7 @@ export function micVisualAnalyserEnabled(input: MicVisualGateInput): boolean {
  * The meter's state beside the bars, for its data attribute and the probes.
  * `live` = a session is running and the signal path is up; `monitoring` =
  * idle and a level is actually arriving (the backend's standing-by
- * microphone, or the analyser on Windows and Linux); `muted` = the microphone is
+ * microphone, or the analyser on Windows); `muted` = the microphone is
  * muted, so flat bars are the mute and not a dead microphone; `silent` = the
  * running bus reads digital silence from an unmuted microphone (issue 1064:
  * the recording gets nothing, whatever the room sounds like); `idle` = off

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   WARM_MICROPHONE_OPEN_FAILED_RETRY_MS,
   WARM_MICROPHONE_RETRY_MS,
+  isBackendMeteredMicrophoneId,
   isCoreAudioMicrophoneId,
   warmMicrophoneMeterOnly,
   warmMicrophoneRetryDelayMs,
@@ -58,5 +59,19 @@ describe('warmMicrophoneWanted', () => {
     expect(isCoreAudioMicrophoneId('microphone:coreaudio:1')).toBe(true)
     expect(isCoreAudioMicrophoneId('microphone:avfoundation:1')).toBe(false)
     expect(isCoreAudioMicrophoneId(undefined)).toBe(false)
+  })
+
+  // Plan 260 S1.3: a PipeWire source stands by in the backend too, for the
+  // idle meter only; a Windows input still meters in the renderer.
+  it('stands a PipeWire microphone by for the meter, never a Windows one', () => {
+    const pipewire = 'microphone:linux-pulse:616c73615f696e707574'
+    expect(isBackendMeteredMicrophoneId(pipewire)).toBe(true)
+    expect(isBackendMeteredMicrophoneId('microphone:coreaudio:1')).toBe(true)
+    expect(isBackendMeteredMicrophoneId('microphone:windows-dshow:4d6963')).toBe(false)
+    expect(isBackendMeteredMicrophoneId(undefined)).toBe(false)
+    expect(warmMicrophoneWanted({ ...ON_SCREEN, microphoneId: pipewire })).toBe(true)
+    expect(
+      warmMicrophoneWanted({ ...ON_SCREEN, microphoneId: 'microphone:windows-dshow:4d6963' })
+    ).toBe(false)
   })
 })
