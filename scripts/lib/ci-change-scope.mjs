@@ -117,6 +117,7 @@ export const RUST_READS_DESKTOP_FILES = Object.freeze([
   'apps/desktop/src/renderer/src/lib/buddy-library-view.ts',
   'apps/desktop/src/renderer/src/lib/buddy-onboarding-copy.ts',
   'apps/desktop/src/renderer/src/lib/buddy-persona-view.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-report-view.ts',
   'apps/desktop/src/renderer/src/lib/buddy-tab-view.ts',
   'apps/desktop/src/renderer/src/lib/cohost-view.ts',
   // chat::highlight's shared words are checked against it (S1.6e part 1).
