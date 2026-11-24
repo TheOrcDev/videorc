@@ -8,8 +8,8 @@ The pictures live outside the repository; this folder holds their manifest.
   532 PNGs (168 MB) in 38 screen folders.
 - **Manifest:** [baseline-manifest.json](baseline-manifest.json), one entry
   per shot with its size and SHA-256, the looks, and how the shots were
-  taken (`notes`). The GPUI shooter reads it (plan 260 "Verification":
-  `rust-ui-baseline.mjs compare`).
+  taken (`notes`). The diff checker, `scripts/gpui-baseline.mjs`, reads it
+  (plan 260 "Verification"; [below](#compare-a-gpui-screen-against-it)).
 - **App:** the dev build of `main` (app code unchanged since 0.37.1),
   isolated profile, seeded with the test pattern, three saved scenes, fake
   destination keys and two short test recordings. Signed out, except the
@@ -43,6 +43,26 @@ and labels, Electron's localStorage settings
 the Markers dialog. It refuses the signed-in part with a release backend,
 which would ignore the mock account. A run takes about 25 minutes on this
 Mac.
+
+## Compare a GPUI screen against it
+
+```sh
+node scripts/gpui-baseline.mjs screens                  # every screen and its shot count
+node scripts/gpui-baseline.mjs list --screen studio     # the shots a screen slice must take
+node scripts/gpui-baseline.mjs compare --screen studio --shots <dir>
+```
+
+A screen slice shoots its GPUI screen under the baseline's names
+(`<dir>/<screen>/<stem>.png`, for example `studio/idle-1280x800-dark-contrast.png`).
+`compare` writes `<stem>.electron.png`, `<stem>.gpui.png` and
+`<stem>.pair.png` (baseline, GPUI shot and their difference in red, side by
+side) and `report.json` under `~/videorc-gpui-baseline/compare/<slice>/<screen>/`,
+the slice taken from a `gpui/<slice>-<words>` branch. The pixel report is
+information, not a gate: the slice looks at every pair and records the
+owner's looks in `docs/gpui/screens.md`. An entry with no GPUI shot, or a
+baseline that is missing or changed since the manifest, is listed with its
+reason. `shoot` (the GPUI app driven by the UI driver) waits for the app's
+launch path (S2.1, S2.5).
 
 ## What Electron costs (macOS, 2026-11-24)
 
