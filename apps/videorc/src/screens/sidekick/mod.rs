@@ -27,6 +27,7 @@ use videorc_app_core::{BackendClient, BackendEvent, Studio};
 use videorc_kit::dialog::DialogHandle;
 use videorc_kit::page_tabs::PageTabs;
 use videorc_kit::theme::FONT;
+use videorc_protocol::CohostReportPayload;
 use videorc_protocol::cohost::CohostAutoChat;
 
 use chat::{ChatWidgets, render_chat};
@@ -34,7 +35,7 @@ use clean_cut::render_clean_cut;
 use community::{CommunityState, LinkSuggestion, PersonDetail, PersonRow, render_community};
 use live::{LiveInput, LiveView, live_view};
 use overview::{OverviewState, render_overview};
-use reports::render_reports;
+use reports::{ReportsState, render_reports};
 use videorc_app_core::buddy::community::CommunitySummary;
 use voice::render_voice;
 
@@ -115,6 +116,7 @@ pub struct SidekickScreen {
     pending_on: bool,
     chat: Option<ChatWidgets>,
     community: Option<CommunityState>,
+    reports: Option<ReportsState>,
 }
 
 impl SidekickScreen {
@@ -141,6 +143,7 @@ impl SidekickScreen {
             pending_on: false,
             chat: None,
             community: None,
+            reports: None,
         };
         screen.refresh(cx);
         screen.watch(cx);
@@ -153,6 +156,19 @@ impl SidekickScreen {
         }
         if let Some(widgets) = self.chat.as_ref() {
             widgets.sync_cooldowns(self.settings.as_ref(), window, cx);
+        }
+    }
+
+    fn ensure_reports(&mut self, cx: &mut Context<Self>) {
+        if self.reports.is_none() {
+            self.reports = Some(ReportsState::default());
+        }
+        if self.tab == Tab::Reports {
+            if let Some(reports) = self.reports.as_ref() {
+                if !reports.loaded && !reports.loading {
+                    self.refresh_reports(cx);
+                }
+            }
         }
     }
 
@@ -200,6 +216,15 @@ impl SidekickScreen {
                                             cx.notify();
                                         });
                                     }
+                                }
+                                if event == "cohost.report.saved" {
+                                    let _ = this.update(cx, |screen, cx| {
+                                        if screen.tab == Tab::Reports {
+                                            screen.refresh_reports(cx);
+                                        } else if let Some(reports) = screen.reports.as_mut() {
+                                            reports.loaded = false;
+                                        }
+                                    });
                                 }
                                 if event == "cohost.community.changed" {
                                     let summary = serde_json::from_value::<CommunitySummary>(
@@ -290,7 +315,56 @@ impl SidekickScreen {
         if tab == Tab::Community {
             self.refresh_community(cx);
         }
+        if tab == Tab::Reports {
+            self.refresh_reports(cx);
+        }
         cx.notify();
+    }
+
+    pub(crate) fn refresh_reports(&mut self, cx: &mut Context<Self>) {
+        if let Some(reports) = self.reports.as_mut() {
+            reports.loading = true;
+            reports.error = None;
+        }
+        cx.notify();
+        let backend = self.studio.backend().clone();
+        let job = self.runtime.spawn(async move {
+            match backend
+                .request("cohost.report.latest", serde_json::json!({}))
+                .await
+            {
+                Ok(value) => {
+                    if value.is_null() {
+                        Ok(None)
+                    } else {
+                        serde_json::from_value::<CohostReportPayload>(value)
+                            .map(Some)
+                            .map_err(|e| e.to_string())
+                    }
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |screen, cx| {
+                if let Some(reports) = screen.reports.as_mut() {
+                    reports.loading = false;
+                    reports.loaded = true;
+                    match result {
+                        Ok(Ok(payload)) => {
+                            reports.payload = payload;
+                            reports.error = None;
+                        }
+                        Ok(Err(error)) | Err(error) => {
+                            reports.error = Some(error);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn refresh_community(&mut self, cx: &mut Context<Self>) {
@@ -807,6 +881,7 @@ impl Render for SidekickScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_chat(window, cx);
         self.ensure_community(window, cx);
+        self.ensure_reports(cx);
         let view = self.view();
         let listen = self.settings.as_ref().map(|s| s.listen).unwrap_or(false);
         let remember = self
@@ -833,7 +908,11 @@ impl Render for SidekickScreen {
                 render_community(&view, self.entitled, community, remember, window, cx)
             }
             Tab::Voice => render_voice(&view, settings, window, cx),
-            Tab::Reports => render_reports(&view, window, cx),
+            Tab::Reports => {
+                let reports = self.reports.as_ref().expect("reports state");
+                let buddy_on = self.settings.as_ref().map(|s| s.enabled).unwrap_or(false);
+                render_reports(&view, reports, buddy_on, window, cx)
+            }
             Tab::CleanCut => render_clean_cut(&view, self.consented, window, cx),
         };
 
