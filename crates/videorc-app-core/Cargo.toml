@@ -25,3 +25,6 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# Paused-clock tests (`start_paused`): the grant watch's polls advance
+# exactly, never by the machine's load.
+tokio = { version = "1.48", features = ["test-util"] }

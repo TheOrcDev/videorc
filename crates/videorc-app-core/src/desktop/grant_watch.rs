@@ -193,10 +193,10 @@ impl GrantWatcher {
                     reason,
                     status: previous,
                 };
-                // This task's own handle is dropped (detached, not aborted),
-                // so a later `stop` cannot cut the restart short.
+                // The restart runs on its own task, so neither a later `stop`
+                // (which aborts this poll) nor anything else cuts it short.
                 if self.claim(watch_id).is_some() {
-                    self.restart_once(grant, "polled").await;
+                    self.spawn_restart(grant, "polled");
                 }
                 return;
             }
@@ -237,7 +237,10 @@ impl GrantWatcher {
         Some(inner.task.take())
     }
 
-    async fn restart_once(&self, grant: TrackedGrant, how: &str) {
+    /// Asks for the one restart now and lets it finish on its own task: the
+    /// grant was already taken ([`Self::claim`]), so a caller that drops its
+    /// future (a cancelled re-check) must not be able to lose it.
+    fn spawn_restart(&self, grant: TrackedGrant, how: &str) -> JoinHandle<()> {
         self.log(
             Level::Info,
             format!(
@@ -245,20 +248,27 @@ impl GrantWatcher {
                 grant.pane.as_str()
             ),
         );
-        if let Err(error) = (self.restart)(grant.reason.clone()).await {
-            self.log(
-                Level::Warn,
-                format!(
-                    "Could not restart capture backend after {} permission grant: {error}",
-                    grant.pane.as_str()
-                ),
-            );
-        }
+        let restart = (self.restart)(grant.reason.clone());
+        let sink = self.sink.clone();
+        let pane = grant.pane;
+        tokio::spawn(async move {
+            if let Err(error) = restart.await {
+                sink(
+                    Level::Warn,
+                    format!(
+                        "Could not restart capture backend after {} permission grant: {error}",
+                        pane.as_str()
+                    ),
+                );
+            }
+        })
     }
 
     /// Re-reads the watched grant now (window focus, setup open past the
-    /// polling window). True when a real transition restarted capture just
-    /// now; a pane already granted, or never watched, never restarts.
+    /// polling window). True when a real transition asked for the restart
+    /// just now (it runs on its own task); a pane already granted, or never
+    /// watched, never restarts. Nothing in it waits, so dropping the future
+    /// cannot lose a grant it took.
     pub async fn recheck(&self) -> bool {
         let (grant, watch_id) = {
             let inner = self.lock();
@@ -296,7 +306,7 @@ impl GrantWatcher {
         if let Some(poll) = poll {
             poll.abort();
         }
-        self.restart_once(grant, "noticed on re-check").await;
+        self.spawn_restart(grant, "noticed on re-check");
         true
     }
 }
@@ -360,11 +370,13 @@ mod tests {
         }
     }
 
+    /// The clock is paused (`start_paused`): this advances it exactly, so
+    /// the polls run in order however busy the machine is.
     async fn ticks(n: u32) {
         tokio::time::sleep(INTERVAL * n + INTERVAL / 2).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_already_granted_pane_never_restarts() {
         let h = harness(Granted, 2);
         h.watcher
@@ -374,7 +386,7 @@ mod tests {
         assert_eq!(h.watcher.watched(), None);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_grant_after_settings_opened_restarts_once_with_its_reason() {
         let h = harness(Denied, 50);
         h.watcher
@@ -386,7 +398,7 @@ mod tests {
         assert_eq!(h.watcher.watched(), None);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_grant_that_never_comes_never_restarts_and_the_watch_times_out() {
         let h = harness(Denied, 2);
         h.watcher.watch(
@@ -401,7 +413,7 @@ mod tests {
         assert!(!watched.polling);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_newer_watch_replaces_an_older_one() {
         let h = harness(Denied, 50);
         h.watcher
@@ -419,7 +431,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_recheck_restarts_exactly_once_for_a_late_grant() {
         let h = harness(NotDetermined, 2);
         h.watcher.watch(
@@ -440,7 +452,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_recheck_never_restarts_for_granted_unwatched_or_stopped() {
         let h = harness(Granted, 2);
         assert!(!h.watcher.recheck().await);
@@ -461,7 +473,7 @@ mod tests {
         assert!(stopped.restarts().is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_poll_and_a_recheck_for_one_grant_restart_once() {
         let h = harness(Denied, 50);
         h.watcher.watch(
@@ -475,7 +487,56 @@ mod tests {
         assert_eq!(h.restarts().len(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_recheck_still_restarts_for_the_grant_it_took() {
+        // The restart is slow; the re-check's caller gives up at once.
+        let restarts = Arc::new(Mutex::new(Vec::new()));
+        let finished = Arc::new(Mutex::new(0_u32));
+        let status = Arc::new(Mutex::new(Denied));
+        let read = status.clone();
+        let restarted = restarts.clone();
+        let done = finished.clone();
+        let watcher = GrantWatcher::new(
+            Arc::new(move |_| Ok(*read.lock().unwrap())),
+            Arc::new(move |reason| {
+                restarted.lock().unwrap().push(reason);
+                let done = done.clone();
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    *done.lock().unwrap() += 1;
+                    Ok(())
+                })
+            }),
+            Arc::new(|_, _| {}),
+            INTERVAL,
+            2,
+        );
+        watcher.watch(SystemPermissionPane::Camera, "restart after camera grant");
+        ticks(4).await;
+        *status.lock().unwrap() = Granted;
+        let mut recheck = Box::pin(watcher.recheck());
+        // Poll it once, then drop it, as a cancelled caller would.
+        assert!(futures_poll_once(recheck.as_mut()).await);
+        drop(recheck);
+        assert_eq!(*restarts.lock().unwrap(), ["restart after camera grant"]);
+        assert_eq!(watcher.watched(), None);
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        assert_eq!(*finished.lock().unwrap(), 1, "the restart ran to its end");
+    }
+
+    /// Polls a future once; true when it finished with `true`.
+    async fn futures_poll_once(
+        future: std::pin::Pin<&mut impl std::future::Future<Output = bool>>,
+    ) -> bool {
+        let mut future = Some(future);
+        std::future::poll_fn(move |cx| {
+            let polled = future.take().expect("polled once").poll(cx);
+            std::task::Poll::Ready(matches!(polled, std::task::Poll::Ready(true)))
+        })
+        .await
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn privacy_is_never_watched() {
         let h = harness(Denied, 2);
         h.watcher
