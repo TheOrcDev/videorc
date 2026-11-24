@@ -365,28 +365,34 @@ function smokeEnvValue(env, name) {
  *   `prebuildDevBackend` (asynchronously), so the synchronous one is skipped.
  * @returns {Promise<{connections:Record<string,object>, process:import('node:child_process').ChildProcess, stop:()=>Promise<void>}>}
  */
-// API origins the backend honours only in debug builds (`cfg!(debug_assertions)`
-// in discord_announce/client.rs and youtube_quota.rs). A release dev backend
-// logs "refused in packaged builds" and sends the smoke's fixture webhook or
-// token to the real service instead of the local fake.
-export const DEBUG_ONLY_API_ORIGIN_ENV = Object.freeze([
-  'VIDEORC_DISCORD_API_BASE_URL',
-  'VIDEORC_YOUTUBE_API_BASE_URL'
-])
+// Environment the backend honours only in debug builds (`cfg!(debug_assertions)`):
+// the fake API origins (discord_announce/client.rs, youtube_quota.rs,
+// videorc_api.rs) and the mock account (account.rs). A release dev backend
+// ignores them: it sends the smoke's fixture webhook, token or calls to the
+// real service instead of the local fake, or runs signed out.
+export const DEBUG_ONLY_BACKEND_ENV = Object.freeze({
+  VIDEORC_DISCORD_API_BASE_URL: 'calls the real service',
+  VIDEORC_YOUTUBE_API_BASE_URL: 'calls the real service',
+  VIDEORC_API_BASE_URL: 'calls the real Videorc API',
+  VIDEORC_MOCK_ACCOUNT: 'runs signed out'
+})
+export const DEBUG_ONLY_API_ORIGIN_ENV = Object.freeze(Object.keys(DEBUG_ONLY_BACKEND_ENV))
 
 /**
- * Why a dev-app launch must not start, or null: a fake API origin with the
- * release dev backend would reach the real service. Pure for the unit test.
+ * Why a dev-app launch must not start, or null: debug-only backend
+ * environment with the release dev backend would reach the real service or
+ * shoot a signed-out app. Pure for the unit test.
  */
 export function releaseBackendFakeOriginRefusal(env = {}, processEnv = process.env) {
   const profile = env.VIDEORC_DEV_BACKEND_PROFILE ?? processEnv.VIDEORC_DEV_BACKEND_PROFILE
   if (profile !== 'release') return null
   const names = DEBUG_ONLY_API_ORIGIN_ENV.filter((name) => env[name] ?? processEnv[name])
   if (names.length === 0) return null
+  const effects = [...new Set(names.map((name) => DEBUG_ONLY_BACKEND_ENV[name]))].join(' and ')
   return (
     `${names.join(', ')} only works with the debug backend; with ` +
-    'VIDEORC_DEV_BACKEND_PROFILE=release the backend ignores it and calls the real ' +
-    'service. Unset VIDEORC_DEV_BACKEND_PROFILE (or set it to debug) for this smoke.'
+    `VIDEORC_DEV_BACKEND_PROFILE=release the backend ignores it and ${effects}. ` +
+    'Unset VIDEORC_DEV_BACKEND_PROFILE (or set it to debug) for this smoke.'
   )
 }
 
