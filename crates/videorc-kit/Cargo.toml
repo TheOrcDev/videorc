@@ -7,3 +7,8 @@ publish = false
 description = "Plan 260: Videorc's design system on GPUI, synced from the GPUI flavour of videorc-ui (ui."
 
 [dependencies]
+gpui.workspace = true
+gpui_base.workspace = true
+resvg.workspace = true
+image.workspace = true
+smallvec.workspace = true
