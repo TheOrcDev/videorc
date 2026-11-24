@@ -6,7 +6,7 @@
 // ("a passive meter must never toast") in a single tested place. The backend
 // stays the capture/health authority; this stream is visual-only.
 //
-// PLAN 220 S1.3a FENCE (owner 2026-11-09, D1): this is the renderer's last
+// PLAN 260 S1.3a FENCE (owner 2026-11-09, D1): this is the renderer's last
 // getUserMedia, and it may only serve the IDLE meter of a microphone the
 // backend cannot meter between sessions yet: a Windows or Linux input (not
 // `microphone:coreaudio:*`). `micVisualAnalyserEnabled` enforces that: never a
