@@ -201,8 +201,8 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P111 | Space key | Records when idle; stops a recording; asks to end a livestream | `renderer/components/tabs/studio-tab.tsx:137` | [ ] | [ ] | [ ] |
-| P112 | Space yields | Ignored while a dialog, menu, focused control or repeat owns it | `renderer/lib/studio-space-shortcut.ts:1` | [ ] | [ ] | [ ] |
+| P111 | Space key | Records when idle; stops a recording; asks to end a livestream | `renderer/components/tabs/studio-tab.tsx:137` | [x] | [ ] | [ ] |
+| P112 | Space yields | Ignored while a dialog, menu, focused control or repeat owns it | `renderer/lib/studio-space-shortcut.ts:1` | [x] | [ ] | [ ] |
 | P113 | Responsive layout | Inspector sits beside preview from 720 px; narrower, transport leads | `renderer/components/tabs/studio-tab.tsx:185` | [[x] | [ ] | [ ] |
 | P114 | "Session inspector" aside | Holds cloud notice, Session, Chat, Audio, Sources, Takeover | `renderer/components/tabs/studio-tab.tsx:225` | [ ] | [ ] | [ ] |
 | P115 | Retro LCD switch | Settings → General Retro LCD swaps every inspector section to LCD | `renderer/components/tabs/studio-tab.tsx:72` | [ ] | [ ] | [ ] |
@@ -248,13 +248,13 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P148 | "Record" (Space chip) | Starts recording; lit while starting/running | `renderer/components/studio/session-panel.tsx:168` | [ ] | [ ] | [ ] |
-| P149 | Record → "Stop recording"/"Stopping…"/"Force stop"/"Cancel livestream"/"End livestream" | Same button stops session per state | `renderer/lib/studio-session-view.ts:124` | [ ] | [ ] | [ ] |
+| P148 | "Record" (Space chip) | Starts recording; lit while starting/running | `renderer/components/studio/session-panel.tsx:168` | [x] | [ ] | [ ] |
+| P149 | Record → "Stop recording"/"Stopping…"/"Force stop"/"Cancel livestream"/"End livestream" | Same button stops session per state | `renderer/lib/studio-session-view.ts:124` | [x] | [ ] | [ ] |
 | P150 | "Go Live" / "Checking…" | Starts record+stream; preflight checks state | `renderer/components/studio/session-panel.tsx:186` | [ ] | [ ] | [ ] |
 | P151 | Go Live → "End livestream" | While room live, ends talk-show livestream | `renderer/components/go-live-button.tsx:19` | [ ] | [ ] | [ ] |
-| P152 | Hidden Go Live while active | Go Live disappears while a local session runs | `renderer/components/studio/session-panel.tsx:181` | [ ] | [ ] | [ ] |
-| P153 | Disabled-reason tooltips | Hover/focus tells why Record or Go Live is off | `renderer/components/studio/session-panel.tsx:167` | [ ] | [ ] | [ ] |
-| P154 | Stop note "Your recording stops too." | Explains End livestream also stops recording | `renderer/components/studio/session-panel.tsx:200` | [ ] | [ ] | [ ] |
+| P152 | Hidden Go Live while active | Go Live disappears while a local session runs | `renderer/components/studio/session-panel.tsx:181` | [x] | [ ] | [ ] |
+| P153 | Disabled-reason tooltips | Hover/focus tells why Record or Go Live is off | `renderer/components/studio/session-panel.tsx:167` | [x] | [ ] | [ ] |
+| P154 | Stop note "Your recording stops too." | Explains End livestream also stops recording | `renderer/components/studio/session-panel.tsx:200` | [x] | [ ] | [ ] |
 | P155 | Blocked reason line + jump link | One line why start is blocked, link to fix page | `renderer/components/studio/session-panel.tsx:233` | [ ] | [ ] | [ ] |
 | P156 | Alert "Stopping is taking longer than expected" | Explains Force stop when stop overruns | `renderer/components/studio/session-panel.tsx:210` | [ ] | [ ] | [ ] |
 | P157 | "End livestream?" dialog (shell) | Confirms ending livestream; "Keep streaming"/hand-off options | `renderer/components/end-livestream-dialog.tsx:81` | [ ] | [ ] | [ ] |
@@ -273,9 +273,9 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 | P165 | "Guests" row (room open) | "Room open · n backstage"; opens Guests page | `renderer/components/studio/guests-session-row.tsx:22` | [ ] | [ ] | [ ] |
 | P166 | Agents row + "Stop" | "Claude Desktop connected"; Stop cuts all agents | `renderer/components/studio/agents-session-row.tsx:54` | [ ] | [ ] | [ ] |
 | P167 | Watchdog alert cards | One card per open watchdog problem | `renderer/components/studio/session-panel.tsx:401` | [ ] | [ ] | [ ] |
-| P168 | Alert "Couldn't start" + "Retry"/"Dismiss" | Persistent refused-start reason with retry | `renderer/components/studio/session-panel.tsx:417` | [ ] | [ ] | [ ] |
-| P169 | Alert "Camera opened twice" | Camera shared between capture paths warning | `renderer/components/studio/session-panel.tsx:445` | [ ] | [ ] | [ ] |
-| P170 | Session runtime notice | Mid-session failure/degradation alert | `renderer/components/studio/session-panel.tsx:451` | [ ] | [ ] | [ ] |
+| P168 | Alert "Couldn't start" + "Retry"/"Dismiss" | Persistent refused-start reason with retry | `renderer/components/studio/session-panel.tsx:417` | [x] | [ ] | [ ] |
+| P169 | Alert "Camera opened twice" | Camera shared between capture paths warning | `renderer/components/studio/session-panel.tsx:445` | [x] | [ ] | [ ] |
+| P170 | Session runtime notice | Mid-session failure/degradation alert | `renderer/components/studio/session-panel.tsx:451` | [x] | [ ] | [ ] |
 
 ### Session runtime alert (session-runtime-alert.tsx)
 
@@ -283,9 +283,9 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 | --- | --- | --- | --- | :-: | :-: | :-: |
 | P171 | Runtime alert (destructive/warning, role=alert) | Recording failed or degraded, backend message | `renderer/components/studio/session-runtime-alert.tsx:35` | [ ] | [ ] | [ ] |
 | P172 | "Open Audio" | Focuses Studio microphone row (lost/silent mic) | `renderer/components/studio/session-runtime-alert.tsx:50` | [ ] | [ ] | [ ] |
-| P173 | "Open Library" | Opens Library for the saved file | `renderer/components/studio/session-runtime-alert.tsx:60` | [ ] | [ ] | [ ] |
+| P173 | "Open Library" | Opens Library for the saved file | `renderer/components/studio/session-runtime-alert.tsx:60` | [x] | [ ] | [ ] |
 | P174 | Reveal ("Show in Finder"/"Show in Explorer"/"Show in folder") | Reveals saved recording *(label per OS (apps/desktop/src/renderer/src/lib/platform.ts))* | `renderer/components/studio/session-runtime-alert.tsx:65` | [ ] | [ ] | [ ] |
-| P175 | "Dismiss" | Clears notice | `renderer/components/studio/session-runtime-alert.tsx:70` | [ ] | [ ] | [ ] |
+| P175 | "Dismiss" | Clears notice | `renderer/components/studio/session-runtime-alert.tsx:70` | [x] | [ ] | [ ] |
 
 ### Watchdog alert card (watchdog-alert-card.tsx)
 
