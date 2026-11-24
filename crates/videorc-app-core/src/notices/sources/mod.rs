@@ -10,6 +10,7 @@
 
 pub mod devices;
 pub mod health;
+pub mod platforms;
 pub mod stream_targets;
 pub mod watchdog;
 pub mod work;
