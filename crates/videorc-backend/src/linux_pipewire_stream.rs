@@ -27,10 +27,15 @@ pub struct PipewireFrame<'a> {
     pub width: u32,
     pub height: u32,
     pub bgra: &'a mut Vec<u8>,
-    /// When the buffer was dequeued, before its conversion. The portal
-    /// stream carries no capture time here, so this is the latest the frame
-    /// can have been taken (Hide screen's Show edge, plan 210 D8).
+    /// When the buffer was dequeued, before its conversion: the latest the
+    /// frame can have been taken.
     pub dequeued_at: Instant,
+    /// When the producer says it took the frame: its `SPA_META_Header` pts
+    /// on `Instant`'s clock (W79), or `None` when the producer sends no
+    /// header or a pts that can't be the capture time. Hide screen's Show
+    /// edge (plan 210 D8) holds a frame taken before the Show by this time,
+    /// and only an undated one by `dequeued_at`.
+    pub captured_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -39,6 +44,39 @@ struct StreamUserData {
     layout: Option<PortalPixelLayout>,
     scratch: Vec<u8>,
     frames: u64,
+    /// Frames dated by their pts, and the first frame's capture-to-dequeue
+    /// time, for the one diagnostic line per stream.
+    dated_frames: u64,
+    first_dated_latency: Option<Duration>,
+    dating_logged: bool,
+}
+
+/// The `SPA_PARAM_Meta` param asking the producer for a `SPA_META_Header` on
+/// every buffer (its pts is the frame's capture time, W79).
+fn header_meta_param() -> Result<Vec<u8>, String> {
+    let object = spa::pod::Object {
+        type_: spa::sys::SPA_TYPE_OBJECT_ParamMeta,
+        id: spa::sys::SPA_PARAM_Meta,
+        properties: vec![
+            spa::pod::Property {
+                key: spa::sys::SPA_PARAM_META_type,
+                flags: spa::pod::PropertyFlags::empty(),
+                value: spa::pod::Value::Id(spa::utils::Id(spa::sys::SPA_META_Header)),
+            },
+            spa::pod::Property {
+                key: spa::sys::SPA_PARAM_META_size,
+                flags: spa::pod::PropertyFlags::empty(),
+                value: spa::pod::Value::Int(std::mem::size_of::<spa::sys::spa_meta_header>() as i32),
+            },
+        ],
+    };
+    Ok(spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &spa::pod::Value::Object(object),
+    )
+    .map_err(|e| format!("PipeWire meta pod: {e:?}"))?
+    .0
+    .into_inner())
 }
 
 fn layout_for(format: VideoFormat) -> Option<PortalPixelLayout> {
@@ -86,7 +124,7 @@ pub fn run_pipewire_capture<T: 'static>(
 
     let _listener = stream
         .add_local_listener_with_user_data(StreamUserData::default())
-        .param_changed(|_stream, user_data, id, param| {
+        .param_changed(|stream, user_data, id, param| {
             let Some(param) = param else { return };
             if id != spa::param::ParamType::Format.as_raw() {
                 return;
@@ -110,12 +148,31 @@ pub fn run_pipewire_capture<T: 'static>(
                 height = user_data.format.size().height,
                 "portal PipeWire stream negotiated"
             );
+            // W79: ask for a header on every buffer, so each frame carries
+            // its capture time. A producer that can't send one leaves the
+            // frames undated and the Show edge falls back to the dequeue.
+            match header_meta_param() {
+                Ok(bytes) => match Pod::from_bytes(&bytes) {
+                    Some(pod) => {
+                        if let Err(e) = stream.update_params(&mut [pod]) {
+                            tracing::warn!("portal PipeWire stream: header meta refused: {e}");
+                        }
+                    }
+                    None => tracing::warn!("portal PipeWire stream: header meta is not a pod"),
+                },
+                Err(e) => tracing::warn!("portal PipeWire stream: {e}"),
+            }
         })
         .process(move |stream, user_data| {
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
             let dequeued_at = Instant::now();
+            let captured_at = buffer
+                .find_meta::<spa::buffer::meta::MetaHeader>()
+                .and_then(|header| {
+                    crate::screen_privacy::linux_clock::instant_for_pts(header.pts(), dequeued_at)
+                });
             let Some(layout) = user_data.layout else {
                 return;
             };
@@ -153,11 +210,32 @@ pub fn run_pipewire_capture<T: 'static>(
                 &mut scratch,
             ) {
                 user_data.frames = user_data.frames.saturating_add(1);
+                if let Some(captured_at) = captured_at {
+                    user_data.dated_frames = user_data.dated_frames.saturating_add(1);
+                    user_data
+                        .first_dated_latency
+                        .get_or_insert(dequeued_at.saturating_duration_since(captured_at));
+                }
+                // One line per stream, after a few frames: whether the
+                // producer dates its frames, so a field report says which
+                // Show edge this capture had.
+                if !user_data.dating_logged && user_data.frames >= 30 {
+                    user_data.dating_logged = true;
+                    tracing::info!(
+                        frames = user_data.frames,
+                        dated = user_data.dated_frames,
+                        first_capture_to_dequeue_ms = user_data
+                            .first_dated_latency
+                            .map(|latency| latency.as_secs_f64() * 1000.0),
+                        "portal PipeWire stream: frames dated by their SPA_META_Header pts"
+                    );
+                }
                 on_frame(PipewireFrame {
                     width,
                     height,
                     bgra: &mut scratch,
                     dequeued_at,
+                    captured_at,
                 });
             }
             user_data.scratch = scratch;

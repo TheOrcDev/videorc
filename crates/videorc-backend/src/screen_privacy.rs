@@ -214,13 +214,12 @@ pub struct ScreenPrivacyCursor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenFrameTime {
     /// The capture dated the frame: ScreenCaptureKit's PTS, Windows Graphics
-    /// Capture's `SystemRelativeTime`, Desktop Duplication's QPC present time.
-    // The Linux portal stream doesn't date frames; only its tests build this.
-    #[cfg_attr(all(target_os = "linux", not(test)), allow(dead_code))]
+    /// Capture's `SystemRelativeTime`, Desktop Duplication's QPC present time,
+    /// the Linux portal stream's `SPA_META_Header` pts.
     Captured(Instant),
-    /// The capture did not date it (Linux PipeWire, the Windows FFmpeg
-    /// pipe): only when its delivery began (the buffer dequeued, the read
-    /// started). It was taken at or before then, and a frame the capture took
+    /// The capture did not date it (a Linux portal stream whose producer
+    /// sends no `SPA_META_Header`, the Windows FFmpeg pipe): only when its
+    /// delivery began (the buffer dequeued, the read started). It was taken at or before then, and a frame the capture took
     /// before a Show may still be queued behind the one in flight.
     // macOS dates every frame; only its tests build this one.
     #[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
@@ -319,7 +318,7 @@ fn frost_or_hold(
 
 /// How far ahead of the counter's own "now" a frame's time may read and still
 /// be believed (the two readings are a few instructions apart).
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 const COUNTER_FUTURE_SLACK: Duration = Duration::from_millis(5);
 
 /// The `Instant` a monotonic counter reading `ticks` stands for, from one
@@ -327,7 +326,7 @@ const COUNTER_FUTURE_SLACK: Duration = Duration::from_millis(5);
 /// (`now`). `None` for a nonsense reading (zero or negative, an invalid rate,
 /// or later than now beyond a few milliseconds), which a publish point treats
 /// as undated. Pure, so every platform's tests hold it to its word.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 pub fn instant_for_counter(
     ticks: i64,
     ticks_per_second: i64,
@@ -346,6 +345,70 @@ pub fn instant_for_counter(
     } else {
         let ahead = nanos(ticks - now_ticks)?;
         (ahead <= COUNTER_FUTURE_SLACK).then(|| now + ahead)
+    }
+}
+
+/// How long before its delivery a Linux portal frame's pts may say it was
+/// taken and still be believed. A real capture hands a frame over within a
+/// few frame intervals; a pts further back is on some other clock (a
+/// stream-relative counter, a producer's own epoch), and believing it would
+/// hold every frame after a Show as "taken before it" and leave the still up.
+#[cfg(any(target_os = "linux", test))]
+const PTS_MAX_AGE_AT_DELIVERY: Duration = Duration::from_secs(1);
+
+/// The capture time of a Linux portal frame from its `SPA_META_Header` pts,
+/// in nanoseconds of `CLOCK_MONOTONIC` (what the portals' producers stamp:
+/// xdg-desktop-portal-hyprland and -wlr from the compositor's presentation
+/// time, GNOME's from `g_get_monotonic_time`), given one simultaneous reading
+/// of that clock (`now_nanos`) and of `Instant` (`now`), and when the buffer
+/// was dequeued. `None` (undated) for a nonsense pts: zero or negative, later
+/// than the delivery (beyond a few milliseconds of slack), or more than
+/// [`PTS_MAX_AGE_AT_DELIVERY`] before it. Pure, so its tests run anywhere.
+#[cfg(any(target_os = "linux", test))]
+pub fn instant_for_monotonic_pts(
+    pts_nanos: i64,
+    now_nanos: i64,
+    now: Instant,
+    delivered_at: Instant,
+) -> Option<Instant> {
+    let captured_at = instant_for_counter(pts_nanos, 1_000_000_000, now_nanos, now)?;
+    if captured_at > delivered_at + COUNTER_FUTURE_SLACK {
+        return None;
+    }
+    if delivered_at.saturating_duration_since(captured_at) > PTS_MAX_AGE_AT_DELIVERY {
+        return None;
+    }
+    Some(captured_at.min(delivered_at))
+}
+
+/// Linux capture times on `Instant`'s clock: `Instant` is `CLOCK_MONOTONIC`
+/// there, the clock the portal producers stamp their pts on.
+#[cfg(target_os = "linux")]
+pub mod linux_clock {
+    use std::time::Instant;
+
+    /// `CLOCK_MONOTONIC` in nanoseconds and `Instant`, back to back.
+    fn now() -> Option<(i64, Instant)> {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: a valid out pointer for clock_gettime.
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+            return None;
+        }
+        // `time_t` and `c_long` are both i64 on Linux x64 (the only Linux target).
+        let nanos = ts
+            .tv_sec
+            .checked_mul(1_000_000_000)?
+            .checked_add(ts.tv_nsec)?;
+        Some((nanos, Instant::now()))
+    }
+
+    /// A portal frame's `SPA_META_Header` pts, delivered at `delivered_at`.
+    pub fn instant_for_pts(pts_nanos: i64, delivered_at: Instant) -> Option<Instant> {
+        let (now_nanos, now) = now()?;
+        super::instant_for_monotonic_pts(pts_nanos, now_nanos, now, delivered_at)
     }
 }
 
@@ -1120,6 +1183,77 @@ mod tests {
         assert_eq!(instant_for_counter(0, frequency, now_ticks, now), None);
         assert_eq!(instant_for_counter(-5, frequency, now_ticks, now), None);
         assert_eq!(instant_for_counter(5, 0, now_ticks, now), None);
+    }
+
+    /// W79, Linux portal frames: a `SPA_META_Header` pts in nanoseconds of
+    /// `CLOCK_MONOTONIC` becomes the frame's capture time, never later than
+    /// its delivery, and a pts that can't be the capture time is undated.
+    #[test]
+    fn a_portal_pts_is_dated_on_the_instant_clock() {
+        let now = Instant::now();
+        let now_nanos = 5_000_000_000_000; // 5,000 s of uptime
+        let delivered_at = now - Duration::from_millis(2);
+        // Taken 18 ms before now, 16 ms before its delivery.
+        let at = instant_for_monotonic_pts(now_nanos - 18_000_000, now_nanos, now, delivered_at)
+            .unwrap();
+        assert_eq!(now - at, Duration::from_millis(18));
+        assert_eq!(delivered_at - at, Duration::from_millis(16));
+        // A pts a hair after the delivery (the two clock readings) is the
+        // delivery itself; further after it is undated.
+        let at = instant_for_monotonic_pts(now_nanos - 1_000_000, now_nanos, now, delivered_at);
+        assert_eq!(at, Some(delivered_at));
+        assert_eq!(
+            instant_for_monotonic_pts(now_nanos + 50_000_000, now_nanos, now, delivered_at),
+            None
+        );
+        // Older than a second at its delivery: some other clock (a
+        // stream-relative counter), not a capture time.
+        assert_eq!(
+            instant_for_monotonic_pts(now_nanos - 1_500_000_000, now_nanos, now, delivered_at),
+            None
+        );
+        assert_eq!(
+            instant_for_monotonic_pts(33_333_333, now_nanos, now, delivered_at),
+            None
+        );
+        // A wall-clock pts (Unix epoch nanoseconds) is far in the future.
+        assert_eq!(
+            instant_for_monotonic_pts(1_795_000_000_000_000_000, now_nanos, now, delivered_at),
+            None
+        );
+        // Zero and negative (no pts) are undated.
+        assert_eq!(
+            instant_for_monotonic_pts(0, now_nanos, now, delivered_at),
+            None
+        );
+        assert_eq!(
+            instant_for_monotonic_pts(-1, now_nanos, now, delivered_at),
+            None
+        );
+    }
+
+    /// On Linux `CLOCK_MONOTONIC` really is `Instant`'s clock: a pts read
+    /// from it 20 ms before a delivery lands 20 ms before it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_monotonic_pts_lands_on_the_instant_clock() {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: a valid out pointer for clock_gettime.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) },
+            0
+        );
+        let taken = Instant::now();
+        let pts = ts.tv_sec * 1_000_000_000 + ts.tv_nsec;
+        std::thread::sleep(Duration::from_millis(20));
+        let delivered_at = Instant::now();
+        let at = linux_clock::instant_for_pts(pts, delivered_at).unwrap();
+        let error = if at > taken { at - taken } else { taken - at };
+        assert!(error < Duration::from_millis(2), "{error:?}");
+        assert!(delivered_at - at >= Duration::from_millis(19));
     }
 
     /// On Windows the counter really is `Instant`'s clock: a QPC reading and
