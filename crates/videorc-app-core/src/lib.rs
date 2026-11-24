@@ -12,6 +12,7 @@ pub mod chat;
 pub mod client;
 pub mod crash_log;
 pub mod desktop;
+pub mod editor;
 mod encoding;
 pub mod first_run;
 pub mod format;
