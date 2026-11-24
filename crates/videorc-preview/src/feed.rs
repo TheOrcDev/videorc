@@ -2033,6 +2033,19 @@ async fn session_body(
                     if !carried.suspended {
                         create_surface(control, config, &sent_bounds, telemetry).await?;
                         surface_up = true;
+                        {
+                            // Plan 260 S2.3a (found by S0.1): the backend refuses every lease on a
+                            // surface created again until a scene is committed to it, and the
+                            // watchdog's resync-scene step only got there 4.6 to 5.2 s later.
+                            // Commit the scene at once.
+                            let request = scene_rx.borrow().clone();
+                            if let Some(params) = request {
+                                match commit_scene(control, &params, config, telemetry, "the surface was created again").await {
+                                    Ok(_) => policy.committed(params),
+                                    Err(error) => config.logger.log(Level::Warn, &format!("[preview] the scene was not committed to the new surface: {error:#}")),
+                                }
+                            }
+                        }
                     }
                     drain_if_pending(lease, config, telemetry).await;
                     last_presented = None;
@@ -2056,6 +2069,19 @@ async fn session_body(
                         create_surface(control, config, &sent_bounds, telemetry).await?;
                         surface_up = true;
                         last_presented = None;
+                        {
+                            // Plan 260 S2.3a (found by S0.1): the backend refuses every lease on a
+                            // surface created again until a scene is committed to it, and the
+                            // watchdog's resync-scene step only got there 4.6 to 5.2 s later.
+                            // Commit the scene at once.
+                            let request = scene_rx.borrow().clone();
+                            if let Some(params) = request {
+                                match commit_scene(control, &params, config, telemetry, "the surface was created again").await {
+                                    Ok(_) => policy.committed(params),
+                                    Err(error) => config.logger.log(Level::Warn, &format!("[preview] the scene was not committed to the new surface: {error:#}")),
+                                }
+                            }
+                        }
                         config.logger.log(Level::Info, "[preview] resumed: the surface is back");
                     }
                     drain_if_pending(lease, config, telemetry).await;
