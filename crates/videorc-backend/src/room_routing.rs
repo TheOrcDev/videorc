@@ -226,7 +226,11 @@ pub(crate) fn routing_packet(
     })
 }
 
-fn consumers(room: &Room, receipts: &StdMutex<CapabilityReceipts>, now: i64) -> Vec<Consumer> {
+pub(crate) fn consumers(
+    room: &Room,
+    receipts: &StdMutex<CapabilityReceipts>,
+    now: i64,
+) -> Vec<Consumer> {
     let visible: HashMap<String, String> = room
         .remote_participants()
         .values()

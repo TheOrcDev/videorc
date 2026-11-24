@@ -51,12 +51,26 @@ struct PlayerVoice {
     duration_ms: u32,
     looping: bool,
     on_air: bool,
+    /// The press instant and the voice's gain, for the backend room's aux
+    /// mix (plan 260 S1.8c c4d), which renders by the same arithmetic.
+    started: Instant,
+    gain: f32,
     /// Registered, but the bus has not answered yet: whether it is on air
     /// (and so whether the monitor hears it with the monitor off) is unknown.
     placing: bool,
     /// `levelDb + volumeDb` at the press, for the monitor while it has no
     /// board.
     gain_db: f64,
+}
+
+/// A playing voice as the backend room's aux mix needs it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone)]
+pub(crate) struct RoomVoice {
+    pub(crate) pcm: Arc<[i16]>,
+    pub(crate) gain: f32,
+    pub(crate) started: Instant,
+    pub(crate) looping: bool,
 }
 
 impl PlayerVoice {
@@ -196,6 +210,25 @@ impl SoundPlayer {
             voices: inner.voices.iter().map(PlayerVoice::wire).collect(),
             session_without_sounds: inner.unmixed_session.is_some(),
         }
+    }
+
+    /// Every playing voice with its decoded PCM, for the backend room's aux
+    /// mix (plan 260 S1.8c c4d).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn room_voices(&self) -> Vec<RoomVoice> {
+        let inner = self.lock();
+        inner
+            .voices
+            .iter()
+            .filter_map(|voice| {
+                Some(RoomVoice {
+                    pcm: inner.library.get(&voice.sound_id)?.clone(),
+                    gain: voice.gain,
+                    started: voice.started,
+                    looping: voice.looping,
+                })
+            })
+            .collect()
     }
 
     /// A recording or stream published without a session bus (a Linux
@@ -417,6 +450,8 @@ impl SoundPlayer {
                 duration_ms: sound.duration_ms,
                 looping,
                 on_air: false,
+                started: received_at,
+                gain,
                 placing: true,
                 gain_db: sound.level_db + f64::from(sound.volume_db),
             });

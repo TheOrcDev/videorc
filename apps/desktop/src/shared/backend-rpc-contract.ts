@@ -171,6 +171,7 @@ import type {
   CloudRoomAvatarMotionParams,
   CloudRoomAvatarMotionResult,
   CloudRoomMediaSetParams,
+  CloudRoomAuxSetParams,
   CloudRoomSceneCommitParams,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
@@ -744,6 +745,7 @@ export interface BackendRpcMethodMap {
    * switch); asked before the renderer starts a room client. */
   'cloud.room.owner': BackendRpcDefinition<undefined, { backend: boolean }>
   'cloud.room.routing.set': BackendRpcDefinition<ProgramAudioSettings, { held: boolean }>
+  'cloud.room.aux.set': BackendRpcDefinition<CloudRoomAuxSetParams, { held: boolean }>
   'cloud.room.avatar.motion': BackendRpcDefinition<
     CloudRoomAvatarMotionParams,
     CloudRoomAvatarMotionResult
@@ -7317,6 +7319,21 @@ const cloudRoomMicrophoneSetParamsSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRoomMediaSetParams>
+// Plan 260 S1.8c c4d: room sounds and the room's system audio.
+const cloudRoomAuxSetParamsSchema = objectSchema(
+  {
+    sounds: booleanSchema,
+    system: objectSchema(
+      {
+        enabled: booleanSchema,
+        gainDb: numberSchema({ min: -24, max: 12 }),
+        muted: booleanSchema
+      },
+      { allowUnknown: false }
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomAuxSetParams>
 // Plan 260 S1.8c c4c: what the program page plays of the host's speech and
 // auxiliary audio (`ProgramAudioSettings`), for the backend's room to route.
 const programGain = numberSchema({ min: 0, max: 1 })
@@ -7416,6 +7433,21 @@ const cloudRoomPresentationEventSchema = objectSchema(
                 status: enumSchema(['visible', 'hiding', 'observed', 'unconfirmed', 'paused']),
                 observations: recordSchema(nonNegativeInteger, { maxKeys: 256 }),
                 reason: optionalSchema(stringSchema({ maxLength: 512 }))
+              },
+              { allowUnknown: false }
+            )
+          ),
+          aux: optionalSchema(
+            objectSchema(
+              {
+                enabled: booleanSchema,
+                state: enumSchema(['off', 'blocked', 'queued', 'published']),
+                reason: nullableSchema(stringSchema({ maxLength: 512 })),
+                trackSid: nullableSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+                observed: recordSchema(nonNegativeInteger, { maxKeys: 256 }),
+                systemState: enumSchema(['off', 'opening', 'capturing', 'blocked']),
+                systemReason: nullableSchema(stringSchema({ maxLength: 512 })),
+                systemDisarmed: optionalSchema(booleanSchema)
               },
               { allowUnknown: false }
             )
@@ -8405,6 +8437,10 @@ const runtimeContracts = {
   },
   'cloud.room.routing.set': {
     params: cloudRoomRoutingSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.aux.set': {
+    params: cloudRoomAuxSetParamsSchema,
     result: cloudRoomPresentationSetResultSchema
   },
   'cloud.room.avatar.motion': {

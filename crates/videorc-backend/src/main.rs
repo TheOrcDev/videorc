@@ -110,6 +110,8 @@ mod room_camera_source;
 #[cfg(target_os = "macos")]
 mod room_assets;
 #[cfg(target_os = "macos")]
+mod room_aux;
+#[cfg(target_os = "macos")]
 mod room_avatar;
 #[cfg(target_os = "macos")]
 #[allow(
@@ -6572,6 +6574,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.room.screen.set"
         | "cloud.room.owner"
         | "cloud.room.routing.set"
+        | "cloud.room.aux.set"
         | "cloud.recordings.download"
         | "cloud.archive.stop"
         | "cloud.archive.cancel"
@@ -13987,6 +13990,26 @@ async fn handle_text_message_with_role(
                 #[cfg(target_os = "macos")]
                 Ok(params) if room_host::holds_seat() => {
                     room_screen::set_screen(params.screen);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 260 S1.8c: room sounds and the room's system audio, on the
+        // backend room's auxiliary track.
+        "cloud.room.aux.set" => {
+            match serde_json::from_value::<cloud_talk::CloudRoomAuxSetParams>(command.params) {
+                Ok(params) if !params.valid() => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "The system audio gain is out of range.",
+                ),
+                #[cfg(target_os = "macos")]
+                Ok(params) if room_host::holds_seat() => {
+                    room_aux::set_aux(params);
                     ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
                 }
                 Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
