@@ -115,7 +115,19 @@ struct SceneState {
     /// Picture hashes each page holds, by its session.
     assets_sent: HashMap<String, (String, HashSet<String>)>,
     error: Option<String>,
+    /// The committed content cannot be sent (an invalid transition): no
+    /// retry until the next commit.
+    invalid: bool,
+    /// Transport failures in a row, and when the next try may run.
+    failures: u32,
+    retry_at: i64,
     last_status: Option<RoomPresentationStatus>,
+}
+
+/// After a transport failure the scene is sent again after 1 s, doubling to
+/// at most 15 s, as long as it stands.
+pub(crate) fn retry_delay_ms(failures: u32) -> i64 {
+    (1000_i64 << failures.saturating_sub(1).min(4)).min(15_000)
 }
 
 struct ScenePeer {
@@ -174,14 +186,17 @@ impl SceneState {
             .cloned()
     }
 
-    fn commit(&mut self, committed: Option<CloudRoomSceneCommitParams>) {
+    fn commit(&mut self, generation: u64, committed: Option<CloudRoomSceneCommitParams>) {
         self.error = committed
             .as_ref()
             .and_then(|c| c.content.as_ref())
             .filter(|content| !transition_valid(content))
             .map(|_| "Invalid scene transition.".to_string());
+        self.invalid = self.error.is_some();
+        self.failures = 0;
+        self.retry_at = 0;
         self.committed = committed;
-        self.generation += 1;
+        self.generation = generation;
         self.apply_at = now_ms();
         self.sent.clear();
     }
@@ -314,11 +329,17 @@ pub(crate) async fn run(
             _ = tick.tick() => {}
             _ = crate::room_content::CHANGED.notified() => {}
         }
-        let committed = crate::room_content::scene();
-        if committed != scene.committed {
-            scene.commit(committed);
+        let (generation, committed) = match crate::room_content::scene() {
+            Some((generation, committed)) => (generation, Some(committed)),
+            None => (0, None),
+        };
+        if generation != scene.generation {
+            scene.commit(generation, committed);
         }
         if let Err(error) = send_due(&state, &room, &show_id, &receipts, &mut scene).await {
+            // A transport failure: shown, and tried again after a backoff.
+            scene.failures += 1;
+            scene.retry_at = now_ms() + retry_delay_ms(scene.failures);
             scene.error = Some(format!(
                 "Scene delivery failed; the program is unconfirmed. ({error:#})"
             ));
@@ -352,6 +373,7 @@ async fn send_due(
         scene_peers(&receipts, &visible, now)
     };
     if let Some(status) = scene.status(&peers, &local_sid) {
+        crate::room_content::scene_reported(&status);
         state.emit_event(
             CLOUD_ROOM_PRESENTATION_EVENT,
             CloudRoomPresentationEvent {
@@ -362,7 +384,7 @@ async fn send_due(
             },
         );
     }
-    if scene.generation == 0 || scene.error.is_some() {
+    if scene.generation == 0 || scene.invalid || now < scene.retry_at {
         return Ok(());
     }
     let transition = scene
@@ -439,6 +461,8 @@ async fn send_due(
             },
         );
         scene.error = None;
+        scene.failures = 0;
+        scene.retry_at = 0;
     }
     Ok(())
 }
@@ -538,6 +562,15 @@ async fn upload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_send_is_tried_again_with_a_bounded_backoff() {
+        assert_eq!(retry_delay_ms(1), 1000);
+        assert_eq!(retry_delay_ms(2), 2000);
+        assert_eq!(retry_delay_ms(4), 8000);
+        assert_eq!(retry_delay_ms(5), 15_000);
+        assert_eq!(retry_delay_ms(30), 15_000);
+    }
 
     #[test]
     fn the_background_key_is_the_renderers_fnv() {
