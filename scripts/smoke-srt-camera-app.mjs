@@ -137,6 +137,8 @@ try {
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_SMOKE_PREVIEW_MOTION: '1',
+      // The smoke owns the camera: the Studio's own preview at launch would stop it.
+      VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1',
       VIDEORC_SMOKE_STATE_DIR: outputDirectory,
       VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
       VIDEORC_USER_DATA_DIR: userDataDir,
@@ -559,7 +561,9 @@ try {
   assert(bright >= 3, `the recording shows the sender's picture (${bright} of ${lumas.length} s)`)
   assert(dark >= 3, `the recording shows the waiting still (${dark} of ${lumas.length} s)`)
 
-  // D16: no scene uses the camera any more, so the port closes.
+  // D16: no scene uses the camera any more, so the port closes. The smoke
+  // started the camera itself, so it stops it as the Studio would.
+  await request(ws, timeoutMs, 'preview.camera.stop')
   await waitFor('the port closed', async () => (await udpPortIsFree(port)) || null)
   await waitFor('the status saying the port is closed', async () => {
     const state = await request(ws, timeoutMs, 'srtInput.get')
