@@ -4,9 +4,8 @@
 //! `videorc.settings` (`cameraBackgrounds`), and put on the layout only at
 //! the output boundary, so the store never holds it on the layout.
 //!
-//! The rest of plan 258's renderer half (`cameraBackgroundLayout`, the key
-//! taken from the camera once the D4 migration settled, and the migration
-//! itself) lands with the scenes and the camera look (S1.6b).
+//! S1.6b part 4: the output half (`cameraBackgroundLayout`, the key taken
+//! from the camera once the D4 migration settled, `cameraOutputLayout`).
 
 use serde_json::{Map, Value, json};
 
@@ -145,6 +144,114 @@ pub fn normalize_camera_backgrounds(raw: Option<&Value>) -> Option<Value> {
     (!out.is_empty()).then_some(Value::Object(out))
 }
 
+/// `DEFAULT_CAMERA_BACKGROUND`: what a camera has before anything is
+/// picked: Off, with Strong blur ready.
+pub fn default_camera_background() -> Value {
+    json!({"mode": "off", "blurPct": STRONG_BLUR_PCT as i64, "edges": "balanced"})
+}
+
+/// `KEY_HEX`: the two screen colours as the key's hex.
+const KEY_HEX: [(&str, &str); 2] = [("green", "#00FF00"), ("blue", "#0000FF")];
+
+/// `cameraKeyLayout`: the layout's key fields from the camera's choice
+/// (D4): on, with the colour and tuning, for Green or Blue screen; off for
+/// anything else, so a key never runs with a blur or a picture. Only the
+/// switch changes for Off, so the fields a rollback reads keep their last
+/// tuning.
+fn camera_key_layout(
+    mut base: Map<String, Value>,
+    background: Option<&Value>,
+) -> Map<String, Value> {
+    let mode = background.and_then(|background| string(background.get("mode")));
+    let Some(hex) = KEY_HEX
+        .iter()
+        .find(|(screen, _)| Some(*screen) == mode)
+        .map(|(_, hex)| *hex)
+    else {
+        if truthy(base.get("cameraChromaKeyEnabled")) {
+            base.insert("cameraChromaKeyEnabled".into(), json!(false));
+        }
+        return base;
+    };
+    let key = background.and_then(|background| background.get("key"));
+    let tuning = |name: &str| -> Value {
+        key.and_then(|key| key.get(name))
+            .cloned()
+            .unwrap_or_else(|| {
+                let fallback = DEFAULT_KEY
+                    .iter()
+                    .find(|(field, _)| *field == name)
+                    .map_or(0.0, |(_, value)| *value);
+                whole(fallback)
+            })
+    };
+    base.remove("cameraChromaKeyEdges");
+    base.insert("cameraChromaKeyEnabled".into(), json!(true));
+    base.insert("cameraChromaKeyColor".into(), json!(hex));
+    base.insert(
+        "cameraChromaKeySimilarityPct".into(),
+        tuning("similarityPct"),
+    );
+    base.insert(
+        "cameraChromaKeySmoothnessPct".into(),
+        tuning("smoothnessPct"),
+    );
+    base.insert("cameraChromaKeySpillPct".into(), tuning("spillPct"));
+    if let Some(edges) = key.and_then(|key| key.get("hideEdges")) {
+        base.insert("cameraChromaKeyEdges".into(), edges.clone());
+    }
+    base
+}
+
+/// `cameraBackgroundLayout`: the layout an output gets, with the selected
+/// camera's background on it, or none while that camera's is Off (so
+/// layouts from before plan 258 go out as they were). A previous camera's
+/// background never carries over. With `key_from_camera` (the D4 migration
+/// settled) the key fields come from the camera's choice too.
+pub fn camera_background_layout(
+    layout: &Value,
+    camera_id: Option<&str>,
+    backgrounds: Option<&Value>,
+    key_from_camera: bool,
+) -> Value {
+    let mut rest = layout.as_object().cloned().unwrap_or_default();
+    rest.remove("cameraBackground");
+    let background = camera_id
+        .filter(|id| !id.is_empty())
+        .and_then(|id| normalize_camera_background(backgrounds.and_then(|all| all.get(id))));
+    let mut base = if key_from_camera {
+        camera_key_layout(rest, background.as_ref())
+    } else {
+        rest
+    };
+    if let Some(background) = background.filter(|background| background["mode"] != "off") {
+        base.insert("cameraBackground".into(), background);
+    }
+    Value::Object(base)
+}
+
+/// `cameraOutputLayout`: the output boundary. The selected camera's look and
+/// background go on the layout, from the settings that keep them per camera.
+/// Every session start, live layout change and Preview update goes through
+/// here.
+pub fn camera_output_layout(
+    layout: &Value,
+    camera_id: Option<&str>,
+    studio: &super::settings::StudioSettings,
+) -> Value {
+    let mut looked = layout.as_object().cloned().unwrap_or_default();
+    looked.remove("cameraLook");
+    if let Some(look) = studio.camera_look(camera_id) {
+        looked.insert("cameraLook".into(), look);
+    }
+    camera_background_layout(
+        &Value::Object(looked),
+        camera_id,
+        studio.get("cameraBackgrounds"),
+        studio.camera_background_migrated(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +314,131 @@ mod tests {
         assert_eq!(
             normalize_camera_backgrounds(Some(&json!({"cam": {"mode": "blur"}}))),
             Some(json!({"cam": {"mode": "blur", "blurPct": 70, "edges": "balanced"}}))
+        );
+    }
+
+    fn fixture() -> Value {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../protocol-fixtures/camera-background.json");
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn layout() -> Value {
+        crate::studio::capture_config::default_capture_config("2026-11-24T00:00:00.000Z")["layout"]
+            .clone()
+    }
+
+    fn studio(settings: Value) -> crate::studio::settings::StudioSettings {
+        crate::studio::settings::StudioSettings::load(Some(&Value::String(settings.to_string())))
+    }
+
+    #[test]
+    fn the_output_follows_the_selected_camera_and_leaves_off_off_the_wire() {
+        let minimal = fixture()["minimal"].clone();
+        let mut off = minimal.clone();
+        off["mode"] = json!("off");
+        let backgrounds = json!({"camera-a": minimal, "camera-b": off});
+        let with_a =
+            camera_background_layout(&layout(), Some("camera-a"), Some(&backgrounds), false);
+        assert_eq!(with_a["cameraBackground"], minimal);
+        for camera in [Some("camera-b"), Some("camera-c"), None] {
+            let out = camera_background_layout(&with_a, camera, Some(&backgrounds), false);
+            assert!(out.get("cameraBackground").is_none(), "{camera:?}");
+        }
+    }
+
+    #[test]
+    fn the_look_and_the_background_go_on_together_each_per_camera() {
+        let full = fixture()["full"].clone();
+        let look = json!({"brightness": 0.1, "contrast": 1, "saturation": 1});
+        let out = camera_output_layout(
+            &layout(),
+            Some("camera-a"),
+            &studio(json!({"cameraLooks": {"camera-a": look},
+                           "cameraBackgrounds": {"camera-a": full}})),
+        );
+        assert!(out.get("cameraLook").is_some());
+        assert_eq!(out["cameraBackground"], full);
+        // Before the D4 migration the scene's own key goes out as it was.
+        assert_eq!(
+            out["cameraChromaKeyEnabled"],
+            layout()["cameraChromaKeyEnabled"]
+        );
+    }
+
+    #[test]
+    fn once_migrated_the_cameras_choice_is_what_keys() {
+        let mut keyed = layout();
+        keyed["cameraChromaKeyEnabled"] = json!(true);
+        keyed["cameraChromaKeyColor"] = json!("#00FF00");
+        keyed["cameraChromaKeySimilarityPct"] = json!(12);
+        keyed["cameraChromaKeyEdges"] =
+            json!({"leftPct": 9, "topPct": 0, "rightPct": 0, "bottomPct": 0});
+        let edges = json!({"leftPct": 3, "topPct": 1, "rightPct": 0, "bottomPct": 0});
+        let blue = json!({"mode": "blue", "blurPct": 70, "edges": "balanced",
+            "key": {"similarityPct": 44, "smoothnessPct": 5, "spillPct": 21, "hideEdges": edges}});
+        let migrated = |backgrounds: Value| {
+            studio(json!({"cameraBackgrounds": backgrounds, "cameraBackgroundMigration": 1}))
+        };
+        let out = camera_output_layout(
+            &keyed,
+            Some("camera-a"),
+            &migrated(json!({"camera-a": blue})),
+        );
+        assert_eq!(out["cameraChromaKeyEnabled"], true);
+        assert_eq!(out["cameraChromaKeyColor"], "#0000FF");
+        assert_eq!(out["cameraChromaKeySimilarityPct"], 44);
+        assert_eq!(out["cameraChromaKeySmoothnessPct"], 5);
+        assert_eq!(out["cameraChromaKeySpillPct"], 21);
+        assert_eq!(out["cameraChromaKeyEdges"], edges);
+        assert_eq!(out["cameraBackground"], blue);
+        // Without its own Hide edges the scene's are dropped, not kept.
+        let green = json!({"mode": "green", "blurPct": 70, "edges": "balanced"});
+        let plain = camera_output_layout(
+            &keyed,
+            Some("camera-a"),
+            &migrated(json!({"camera-a": green})),
+        );
+        assert_eq!(plain["cameraChromaKeyColor"], "#00FF00");
+        assert_eq!(plain["cameraChromaKeySimilarityPct"], 40);
+        assert!(plain.get("cameraChromaKeyEdges").is_none());
+        // A blur, a picture, Off, another camera's pick or no camera: never a key.
+        let mut off = blue.clone();
+        off["mode"] = json!("off");
+        for (camera, backgrounds) in [
+            (Some("camera-a"), json!({"camera-a": {"mode": "blur"}})),
+            (
+                Some("camera-a"),
+                json!({"camera-a": {"mode": "image", "assetId": "loft"}}),
+            ),
+            (Some("camera-a"), json!({"camera-a": off})),
+            (Some("camera-b"), json!({"camera-a": blue})),
+            (None, json!({"camera-a": blue})),
+        ] {
+            let out = camera_output_layout(&keyed, camera, &migrated(backgrounds.clone()));
+            assert_eq!(out["cameraChromaKeyEnabled"], false, "{backgrounds}");
+            // Off touches only the switch: a rollback still reads the tuning.
+            assert_eq!(out["cameraChromaKeySimilarityPct"], 12);
+        }
+    }
+
+    #[test]
+    fn every_commit_takes_the_background_from_the_settings() {
+        let strong = json!({"mode": "blur", "blurPct": 70, "edges": "balanced"});
+        let stored = studio(json!({"cameraBackgrounds": {"camera-a": strong},
+                                   "cameraBackgroundMigration": 1}));
+        let mut from_scene = layout();
+        from_scene["layoutPreset"] = json!("camera-only");
+        assert!(from_scene.get("cameraBackground").is_none());
+        assert_eq!(
+            camera_output_layout(&from_scene, Some("camera-a"), &stored)["cameraBackground"],
+            strong
+        );
+        let mut stale = from_scene.clone();
+        stale["cameraBackground"] = json!({"mode": "off", "blurPct": 70, "edges": "balanced"});
+        assert_eq!(
+            camera_output_layout(&stale, Some("camera-a"), &stored)["cameraBackground"],
+            strong
         );
     }
 }

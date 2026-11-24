@@ -1088,7 +1088,13 @@ impl<B: StudioBackend> Studio<B> {
             .sources_override
             .clone()
             .unwrap_or_else(|| requested["sources"].clone());
-        let layout = camera_look_on_layout(&layout, string(sources.get("cameraId")), &studio);
+        // Plan 258: the camera's look and background at the output boundary
+        // (`cameraOutputLayout`), so no commit can drop either.
+        let layout = super::camera_background::camera_output_layout(
+            &layout,
+            string(sources.get("cameraId")),
+            &studio,
+        );
 
         // Plan 210 S3: the strict check, against the held devices (one fresh
         // list only for a source missing from it), beside the baseline
@@ -1730,6 +1736,8 @@ impl<B: StudioBackend> Studio<B> {
         };
         self.publish();
         let _ = self.flush_settings().await;
+        // Plan 258 D4: the camera or the scene on stream may have changed.
+        self.settle_camera_background_migration().await;
         if let Some(id) = restore {
             self.spawn_restore(id);
         }
@@ -1913,6 +1921,108 @@ impl<B: StudioBackend> Studio<B> {
             },
         )
         .await
+    }
+
+    /// `applyCameraBackground` (plan 258 S5): the camera's background is a
+    /// per-camera setting (D3), like the look. It is stored under the camera
+    /// that renders, and an explicit pick settles the D4 migration, so a run
+    /// still to come can't replace it with a scene's key. The commit right
+    /// after carries it to the live camera's stage (`cameraOutputLayout`),
+    /// without the pending mark; the stage itself confirms, so no toast.
+    /// False with no camera, a background that isn't one, or a refused
+    /// commit (the next commit carries it).
+    pub async fn apply_camera_background(self: &Arc<Self>, background: &Value) -> bool {
+        let layout = {
+            let mut guard = self.lock();
+            let inner = &mut *guard;
+            inner.capture.sync(inner.settings.get(keys::CAPTURE_CONFIG));
+            let Some(camera) = string(inner.capture.config["sources"].get("cameraId"))
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+            else {
+                return false;
+            };
+            let Some(normalized) =
+                super::camera_background::normalize_camera_background(Some(background))
+            else {
+                return false;
+            };
+            let mut settings = StudioSettings::load(inner.settings.get(keys::SETTINGS));
+            let mut backgrounds = settings
+                .get("cameraBackgrounds")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            backgrounds.insert(camera.clone(), normalized);
+            settings.set("cameraBackgrounds", Value::Object(backgrounds));
+            settings.set("cameraBackgroundMigration", json!(1));
+            let write = SettingWrite::Put {
+                key: keys::SETTINGS.to_string(),
+                value: settings.stored(),
+            };
+            if let Err(error) = inner.stage_writes(&[write], &self.config.logger) {
+                self.config.logger.warn(format!(
+                    "[scenes] the camera's background was not saved: {}",
+                    error.message
+                ));
+                return false;
+            }
+            super::camera_background::camera_output_layout(
+                &inner.capture.config["layout"],
+                Some(&camera),
+                &settings,
+            )
+        };
+        self.publish();
+        let _ = self.flush_settings().await;
+        self.request_layout_transaction(
+            layout,
+            TransactionOptions {
+                quiet: true,
+                ..TransactionOptions::default()
+            },
+        )
+        .await
+    }
+
+    /// Plan 258 D4 (`migratedSettings` in use-studio.tsx): until it settles,
+    /// the scenes' green or blue screen moves to the selected camera. A key
+    /// waits for a camera rather than being lost. Runs when the camera or
+    /// the scenes change; nothing is written once it has settled.
+    pub async fn settle_camera_background_migration(&self) -> bool {
+        let staged = {
+            let mut guard = self.lock();
+            let inner = &mut *guard;
+            let settings = StudioSettings::load(inner.settings.get(keys::SETTINGS));
+            if settings.camera_background_migrated() {
+                return false;
+            }
+            let Some(state) = &inner.scenes.state else {
+                return false;
+            };
+            let scenes: Vec<super::camera_background_migration::MigrationScene> =
+                state.library.scenes.iter().map(Into::into).collect();
+            let camera =
+                string(inner.capture.config["sources"].get("cameraId")).filter(|id| !id.is_empty());
+            let Some(next) = super::camera_background_migration::migrated_settings(
+                &settings,
+                camera,
+                &scenes,
+                inner.scenes.on_stream.as_deref(),
+            ) else {
+                return false;
+            };
+            let write = SettingWrite::Put {
+                key: keys::SETTINGS.to_string(),
+                value: next.stored(),
+            };
+            inner.stage_writes(&[write], &self.config.logger).is_ok()
+        };
+        if staged {
+            self.publish();
+            let _ = self.flush_settings().await;
+        }
+        staged
     }
 
     /// `applyCameraPreset({layoutPreset})`.

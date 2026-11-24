@@ -539,8 +539,9 @@ async fn the_bootstrap_reads_everything_in_one_go() {
     assert_eq!(after.health.tone(), HealthTone::Ok);
     assert!(after.settings.hydrated);
     // S1.6b: a profile with no scene library migrates and stores it once,
-    // with the bootstrap's flush.
-    assert_eq!(after.settings.revision, 10);
+    // with the bootstrap's flush; then plan 258's D4 migration settles (no
+    // scene keys, so it stores only its version).
+    assert_eq!(after.settings.revision, 11);
     assert!(after.scenes.loaded);
     assert_eq!(after.settings.theme.as_deref(), Some("light"));
     assert!(after.settings.studio.keep_original_recording());
@@ -554,6 +555,7 @@ async fn the_bootstrap_reads_everything_in_one_go() {
             "recording.status",
             "scene.get",
             "ui.settings.get",
+            "ui.settings.set",
             "ui.settings.set"
         ]
     );
@@ -1466,9 +1468,10 @@ async fn a_new_profile_gets_the_default_scenes_on_its_display_stored_once() {
         "the settings hold the migrated keys"
     );
     // One launch write; a reconnect reads nothing again.
-    assert_eq!(backend.count("ui.settings.set"), 1);
+    // Plus plan 258's D4 migration settling.
+    assert_eq!(backend.count("ui.settings.set"), 2);
     studio.handle_event(ready()).await;
-    assert_eq!(backend.count("ui.settings.set"), 1);
+    assert_eq!(backend.count("ui.settings.set"), 2);
     assert_eq!(studio.snapshot().scenes, view);
 }
 
@@ -2415,4 +2418,55 @@ async fn the_scene_on_stream_is_modified_by_a_look_it_has_not_taken() {
         .await
         .unwrap();
     assert!(!studio.snapshot().scenes.saved_scene_modified);
+}
+
+// --- S1.6b part 4a: the camera's background (plan 258) ---
+
+#[tokio::test]
+async fn a_background_pick_is_the_cameras_and_every_commit_carries_it() {
+    let (backend, studio) = scenes_studio(capture_config_with_camera()).await;
+    // The D4 migration settled at launch: no scene keys, nothing moved.
+    let settings = stored_json(&backend, keys::SETTINGS).unwrap();
+    assert_eq!(settings["cameraBackgroundMigration"], 1);
+    assert!(settings.get("cameraBackgrounds").is_none());
+
+    let blur = json!({"mode": "blur", "blurPct": 70, "edges": "balanced"});
+    assert!(studio.apply_camera_background(&blur).await);
+    settled(&studio).await;
+    let settings = stored_json(&backend, keys::SETTINGS).unwrap();
+    assert_eq!(settings["cameraBackgrounds"]["camera:1"], blur);
+    assert_eq!(settings["cameraBackgroundMigration"], 1);
+    let commits = layout_commits(&backend);
+    let (_, params) = commits.last().expect("the pick commits");
+    assert_eq!(params["layout"]["cameraBackground"], blur);
+    // Never stored on the capture config.
+    let stored = stored_json(&backend, keys::CAPTURE_CONFIG).unwrap();
+    assert!(stored["layout"].get("cameraBackground").is_none());
+    // A scene switch afterwards carries it too.
+    assert!(apply(&studio, "default-screen-only").await);
+    let commits = layout_commits(&backend);
+    assert_eq!(
+        commits.last().unwrap().1["layout"]["cameraBackground"],
+        blur
+    );
+    // Off leaves it off the wire.
+    let off = json!({"mode": "off", "blurPct": 70, "edges": "balanced"});
+    assert!(studio.apply_camera_background(&off).await);
+    settled(&studio).await;
+    let commits = layout_commits(&backend);
+    assert!(
+        commits.last().unwrap().1["layout"]
+            .get("cameraBackground")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn no_camera_no_background_pick() {
+    let (_backend, studio) = scenes_studio(json!({"recordEnabled": true})).await;
+    assert!(
+        !studio
+            .apply_camera_background(&json!({"mode": "blur"}))
+            .await
+    );
 }
