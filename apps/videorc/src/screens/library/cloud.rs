@@ -30,8 +30,12 @@ impl LibraryScreen {
                 })
             })
     }
-    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+    pub fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.active = active;
+        if !active {
+            self.player
+                .update(cx, |player, cx| player.dismiss(window, cx));
+        }
         self.core.cloud_view_shown(active && self.cloud_shown);
         if active && self.cloud_shown {
             self.refresh_cloud(cx);

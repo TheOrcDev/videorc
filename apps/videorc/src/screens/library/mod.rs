@@ -3,6 +3,7 @@
 mod actions;
 mod cloud;
 pub mod files;
+mod player;
 mod render;
 
 use gpui::{Context, Entity, FocusHandle, Focusable, Window, prelude::*};
@@ -32,6 +33,7 @@ pub struct LibraryScreen {
     studio: Arc<Studio<BackendClient>>,
     pub(crate) runtime: tokio::runtime::Handle,
     ui: LibraryUi,
+    player: Entity<player::Player>,
     search: Entity<InputState>,
     rename_input: Entity<InputState>,
     rename_dialog: DialogHandle,
@@ -60,9 +62,21 @@ impl LibraryScreen {
         files: Arc<files::Files>,
         studio: Arc<Studio<BackendClient>>,
         runtime: tokio::runtime::Handle,
+        logger: videorc_app_core::Logger,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let player = cx.new(|cx| {
+            player::Player::new(
+                core.clone(),
+                files.clone(),
+                studio.clone(),
+                runtime.clone(),
+                logger,
+                window,
+                cx,
+            )
+        });
         let search = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(videorc_app_core::library::copy::SEARCH_PLACEHOLDER)
@@ -136,6 +150,7 @@ impl LibraryScreen {
             studio,
             runtime,
             ui: LibraryUi::default(),
+            player,
             search,
             rename_input,
             rename_dialog: DialogHandle::new(false),

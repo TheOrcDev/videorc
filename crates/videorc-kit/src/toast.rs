@@ -12,6 +12,7 @@
 //! A window hosts one `Toaster` entity as its top layer and calls `show`.
 
 use std::{
+    collections::BTreeSet,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -60,6 +61,9 @@ pub struct ToastData {
     pub timeout: Option<Option<Duration>>,
     /// Only a manual close; expiry and programmatic dismissal do not read news.
     pub on_close: Option<ActionHandler>,
+    /// The timed toast actually left, after its exit animation. Not called
+    /// by replacement, an action or programmatic/manual dismissal.
+    pub on_auto_close: Option<ActionHandler>,
 }
 
 impl ToastData {
@@ -71,6 +75,7 @@ impl ToastData {
             action: None,
             timeout: None,
             on_close: None,
+            on_auto_close: None,
         }
     }
 
@@ -114,6 +119,7 @@ pub struct Toaster {
     stack: ToastStackState,
     focus: FocusHandle,
     ticking: bool,
+    expiring: BTreeSet<SharedString>,
 }
 
 impl Toaster {
@@ -123,6 +129,7 @@ impl Toaster {
             stack: ToastStackState::default(),
             focus: cx.focus_handle(),
             ticking: false,
+            expiring: BTreeSet::new(),
         }
     }
 
@@ -137,7 +144,9 @@ impl Toaster {
         let options = ToastOptions {
             timeout: toast.timeout(),
         };
-        self.toasts.push(id.into(), toast, options, Instant::now());
+        let id = id.into();
+        self.expiring.remove(&id);
+        self.toasts.push(id, toast, options, Instant::now());
         self.tick(window, cx);
         cx.notify();
     }
@@ -150,6 +159,7 @@ impl Toaster {
     }
 
     pub fn dismiss(&mut self, id: &SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        self.expiring.remove(id);
         if self.toasts.dismiss(id, Instant::now()) {
             self.tick(window, cx);
             cx.notify();
@@ -166,9 +176,31 @@ impl Toaster {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(TICK).await;
-                let alive = this.update_in(cx, |this, _, cx| {
-                    let paused = this.stack.is_expanded();
-                    if this.toasts.advance(Instant::now(), paused).changed {
+                let alive = this.update_in(cx, |this, window, cx| {
+                    let paused = this.stack.is_expanded() || !window.is_visible();
+                    let changes = this.toasts.advance(Instant::now(), paused);
+                    this.expiring.extend(changes.ending);
+                    let callbacks = changes
+                        .removed
+                        .into_iter()
+                        .filter_map(|(id, toast)| {
+                            this.expiring
+                                .remove(&id)
+                                .then_some(toast.on_auto_close)
+                                .flatten()
+                        })
+                        .collect::<Vec<_>>();
+                    // Call outside this entity's update, so a callback may
+                    // safely publish another toast. Undo remains usable for
+                    // the whole exit animation, until the toast is removed.
+                    if !callbacks.is_empty() {
+                        window.defer(cx, move |window, cx| {
+                            for callback in callbacks {
+                                callback(window, cx);
+                            }
+                        });
+                    }
+                    if changes.changed {
                         cx.notify();
                     }
                     let alive = !this.toasts.is_empty();

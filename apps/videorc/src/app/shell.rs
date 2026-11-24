@@ -276,7 +276,7 @@ impl Shell {
                 .update(cx, |settings, cx| settings.disarm_shortcut(cx));
             self.page = page;
             self.library.update(cx, |library, cx| {
-                library.set_active(page == PageId::Library, cx)
+                library.set_active(page == PageId::Library, window, cx)
             });
             self.health.update(cx, |health, cx| {
                 health.set_active(page == PageId::Diagnostics, cx)

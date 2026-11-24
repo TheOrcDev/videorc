@@ -39,7 +39,20 @@ impl LibraryScreen {
                 });
             }
             MenuId::Delete => self.ask_delete(vec![id], window, cx),
-            MenuId::Reveal | MenuId::Play => {
+            MenuId::Play => self.external_recording(id, cx),
+            MenuId::Markers => {
+                if let Some(session) = self
+                    .core
+                    .data()
+                    .sessions
+                    .into_iter()
+                    .find(|row| row.id == id)
+                {
+                    self.player
+                        .update(cx, |player, cx| player.open(&session, window, cx));
+                }
+            }
+            MenuId::Reveal => {
                 let files = self.files.clone();
                 let reveal = action == MenuId::Reveal;
                 self.task(
@@ -114,6 +127,20 @@ impl LibraryScreen {
             _ => {}
         }
         cx.notify();
+    }
+    pub(super) fn external_recording(&mut self, id: String, cx: &mut Context<Self>) {
+        if !self.allowed(&id, MenuId::Play) {
+            return;
+        }
+        let files = self.files.clone();
+        self.task(
+            async move { files.path(&id).await },
+            |this, result, cx| match result {
+                Ok(path) => cx.open_with_system(&path),
+                Err(_) => this.message = Some("Couldn't open the recording.".into()),
+            },
+            cx,
+        );
     }
     pub(super) fn ask_delete(
         &mut self,
