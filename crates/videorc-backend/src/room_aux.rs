@@ -46,6 +46,9 @@ const OBSERVED_FOR_MS: i64 = 5_000;
 
 static AUX: StdMutex<Option<CloudRoomAuxSetParams>> = StdMutex::new(None);
 static AUX_CHANGED: Notify = Notify::const_new();
+/// System audio was turned off by a lost connection and waits for the
+/// Studio to turn it on again.
+static SYSTEM_DISARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn settings() -> Option<CloudRoomAuxSetParams> {
     AUX.lock()
@@ -53,15 +56,35 @@ fn settings() -> Option<CloudRoomAuxSetParams> {
         .clone()
 }
 
-/// `cloud.room.aux.set`.
+/// `cloud.room.aux.set`. Turning system audio on is the fresh consent a lost
+/// connection asks for.
 pub(crate) fn set_aux(params: CloudRoomAuxSetParams) {
+    if params.system.enabled {
+        SYSTEM_DISARMED.store(false, std::sync::atomic::Ordering::Release);
+    }
     *AUX.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(params);
+    AUX_CHANGED.notify_waiters();
+}
+
+/// The room connection dropped (a reconnect or an end): system audio stops
+/// and stays off until the Studio turns it on again, as the renderer room's
+/// `RoomAuxPublisher.#lost` did. Room sounds stay as they were.
+pub(crate) fn disarm_system() {
+    let mut aux = AUX.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(params) = aux.as_mut()
+        && params.system.enabled
+    {
+        params.system.enabled = false;
+        SYSTEM_DISARMED.store(true, std::sync::atomic::Ordering::Release);
+    }
+    drop(aux);
     AUX_CHANGED.notify_waiters();
 }
 
 /// A hold ended: room sounds and system audio off again.
 pub(crate) fn clear() {
     *AUX.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    SYSTEM_DISARMED.store(false, std::sync::atomic::Ordering::Release);
 }
 
 /// Why the track cannot go out, or None (`auxiliaryBlockedReason`).
@@ -393,7 +416,15 @@ pub(crate) async fn run(
                 .map(|track| track.sid.as_str().to_string()),
             observed,
             system_state: system.state,
-            system_reason: system.reason.clone(),
+            system_reason: if SYSTEM_DISARMED.load(std::sync::atomic::Ordering::Acquire) {
+                Some(
+                    "System audio turned off when the room connection dropped. Turn it on again."
+                        .to_string(),
+                )
+            } else {
+                system.reason.clone()
+            },
+            system_disarmed: SYSTEM_DISARMED.load(std::sync::atomic::Ordering::Acquire),
         };
         crate::room_media::update_media(&state, &show_id, |media| media.aux = Some(status));
     }

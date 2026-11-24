@@ -1138,6 +1138,10 @@ pub struct RoomAuxStatus {
     pub observed: std::collections::BTreeMap<String, i64>,
     pub system_state: RoomSystemAudioState,
     pub system_reason: Option<String>,
+    /// A lost connection turned system audio off; the Studio turns its own
+    /// switch off too, and only a fresh enable opens it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub system_disarmed: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
