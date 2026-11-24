@@ -77,6 +77,7 @@ pub struct CommandPalette {
     selected: usize,
     scroll: ScrollHandle,
     notifications_available: bool,
+    dialogs: Option<Entity<crate::screens::dialogs::DialogsHost>>,
 }
 impl CommandPalette {
     pub fn new(
@@ -129,10 +130,14 @@ impl CommandPalette {
             selected: 0,
             scroll: ScrollHandle::new(),
             notifications_available: false,
+            dialogs: None,
         }
     }
     pub fn set_notifications_available(&mut self) {
         self.notifications_available = true;
+    }
+    pub fn bind_dialogs(&mut self, dialogs: Entity<crate::screens::dialogs::DialogsHost>) {
+        self.dialogs = Some(dialogs);
     }
     pub fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.handle.is_open() {
@@ -372,11 +377,23 @@ impl CommandPalette {
                 if command == Command::Stop {
                     cx.emit(Command::Page(PageId::Studio));
                 }
+                let dialogs = self.dialogs.clone();
+                if command == Command::Record {
+                    cx.spawn(async move |_, cx| {
+                        let outcome = studio.start_recording().await;
+                        if let videorc_app_core::StartOutcome::Refused { message } = outcome {
+                            if let Some(dialogs) = dialogs {
+                                let _ = dialogs.update(cx, |dialogs, cx| {
+                                    dialogs.queue_start_blocked(message, cx);
+                                });
+                            }
+                        }
+                    })
+                    .detach();
+                    return;
+                }
                 self.runtime.spawn(async move {
                     match command {
-                        Command::Record => {
-                            studio.start_recording().await;
-                        }
                         Command::Stop => {
                             studio.request_stop(StopOrigin::Palette).await;
                         }

@@ -516,6 +516,15 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let dialogs = cx.new(|cx| {
+                    screens::dialogs::DialogsHost::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        controls.clone(),
+                        cx,
+                    )
+                });
+                palette.update(cx, |palette, _| palette.bind_dialogs(dialogs.clone()));
                 cx.new(|cx| {
                     Shell::new(
                         status.clone(),
@@ -531,6 +540,7 @@ fn main() -> Result<()> {
                         health.clone(),
                         library_page,
                         palette,
+                        dialogs,
                         notices.clone(),
                         window,
                         cx,
