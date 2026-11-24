@@ -553,8 +553,25 @@ class StudioBackend {
     partial: false
   }
   private readonly deferredResponses = new Map<string, DeferredBackendResponse[]>()
-  /** Plan 255: `srtInput.get`; null is a backend without the SRT input. */
-  srtInput: SrtInputState | null = null
+  /** Plan 255: `srtInput.get`, by default a backend off macOS answers. */
+  srtInput: SrtInputState = {
+    supported: false,
+    enabled: false,
+    port: 9000,
+    connection: 'wifi',
+    latencyMs: 120,
+    passphrase: '',
+    cameraId: 'camera:srt-input',
+    cameraName: 'SRT Camera (port 9000)',
+    status: {
+      listening: false,
+      senderConnected: false,
+      senderSession: 0,
+      framesDecoded: 0,
+      signal: 'waiting',
+      detail: ''
+    }
+  }
   deviceList: DeviceList = {
     devices: [
       {
@@ -17906,11 +17923,13 @@ describe('real StudioProvider lifecycle', () => {
       return answer(command)
     }
     const completed = () =>
-      backend.sentCommands.filter(
-        (command) =>
-          command.method === 'streamTargets.youtube.transition' &&
-          (command.params as { status?: string }).status === 'complete'
-      ).length
+      backend.sentCommands
+        .filter(
+          (command) =>
+            command.method === 'streamTargets.youtube.transition' &&
+            (command.params as { status?: string }).status === 'complete'
+        )
+        .map((command) => (command.params as { broadcastId?: string }).broadcastId)
     const refusal = 'The SRT Camera has no signal. Pass allowNoSignal: true to go live anyway.'
 
     // The confirm: refused at the start, nothing starts, the prepared
@@ -17919,7 +17938,8 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => ack('go-1') !== undefined)
     expect(ack('go-1')).toMatchObject({ ok: false, message: refusal })
     expect(starts()).toHaveLength(0)
-    await waitForObservation(() => completed() === 1)
+    await waitForObservation(() => completed().length === 1)
+    expect(completed()).toEqual(['youtube-broadcast-1'])
     expect(latest()?.recording.recording.state).toBe('idle')
 
     // The continuation on the ready destinations: X fails its setup, the
@@ -17934,7 +17954,8 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => ack('go-2') !== undefined)
     expect(ack('go-2')).toMatchObject({ ok: false, message: refusal })
     expect(starts()).toHaveLength(0)
-    await waitForObservation(() => completed() === 2)
+    await waitForObservation(() => completed().length === 2)
+    expect(completed()).toEqual(['youtube-broadcast-1', 'youtube-broadcast-2'])
 
     // With allowNoSignal the same start goes ahead.
     await setSrt(srt('holding'))
@@ -18049,7 +18070,7 @@ describe('real StudioProvider lifecycle', () => {
     let flipAtTheStart = false
     const signalAtStart: string[] = []
     backend.response = (command) => {
-      if (command.method === 'session.start') signalAtStart.push(backend.srtInput!.status.signal)
+      if (command.method === 'session.start') signalAtStart.push(backend.srtInput.status.signal)
       if (command.method === 'streamTargets.youtube.prepare') flipAtTheStart = true
       if (flipAtTheStart && command.method === 'platformAccounts.validate') {
         flipAtTheStart = false
@@ -18084,6 +18105,18 @@ describe('real StudioProvider lifecycle', () => {
     expect(starts()).toHaveLength(0)
     expect(latest()?.recording.recording.state).toBe('idle')
 
+    // Cancelled while the confirm loads the gate: nothing starts.
+    await act(async () => {
+      void latest()!.core.confirmGoLive(true)
+      latest()!.core.cancelGoLiveConfirmation()
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(starts()).toHaveLength(0)
+    expect(latest()?.core.goLiveConfirmationOpen).toBe(false)
+    await openGoLive()
+
     // "Go live anyway" in the dialog: the same start goes ahead.
     await setSrt(srt('holding'))
     await act(async () => {
@@ -18100,6 +18133,7 @@ describe('real StudioProvider lifecycle', () => {
     // start asks again, even after "Go live anyway".
     const flipping = backend.response
     backend.response = answer
+    await setSrt(srt('holding'))
     backend.sessionStartError = 'The encoder rejected this start.'
     await openGoLive()
     await act(async () => {

@@ -380,12 +380,24 @@ pub fn run(
             if let Some((caller, peer)) =
                 accept_one(api, listener.socket).map_err(ListenError::stopped)?
             {
-                let acceptance = context
+                // Set up before the gate sees it: a caller gone already (a
+                // pairing check) never replaces the sender.
+                if let Err(error) = set_option(
+                    api,
+                    caller.socket,
+                    &SocketOption::Int(libsrt::SRTO_RCVSYN, 0),
+                ) {
+                    tracing::info!(
+                        "[srt-camera] sender {} left before it was set up: {error}",
+                        caller.socket
+                    );
+                } else if context
                     .gate
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .accepted(caller.socket, peer, Instant::now());
-                if acceptance != Acceptance::Refused {
+                    .accepted(caller.socket, peer, Instant::now())
+                    != Acceptance::Refused
+                {
                     if let Some(previous) = sender.take() {
                         // The sender before it went quiet or redialed.
                         tracing::info!(
@@ -395,31 +407,11 @@ pub fn run(
                         );
                         on_event(ListenerEvent::SenderLeft);
                     }
-                    let setup_error = set_option(
-                        api,
-                        caller.socket,
-                        &SocketOption::Int(libsrt::SRTO_RCVSYN, 0),
-                    )
-                    .err();
-                    if setup_error.is_none() {
-                        let socket = caller.socket;
-                        tracing::info!("[srt-camera] sender {socket} accepted");
-                        sender = Some(caller);
-                        last_data = Instant::now();
-                        on_event(ListenerEvent::SenderAccepted(socket));
-                    } else {
-                        // Gone already (a pairing check): the camera stays free.
-                        tracing::info!(
-                            "[srt-camera] sender {} left before it was set up: {}",
-                            caller.socket,
-                            setup_error.unwrap_or_default()
-                        );
-                        context
-                            .gate
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .left(caller.socket);
-                    }
+                    let socket = caller.socket;
+                    tracing::info!("[srt-camera] sender {socket} accepted");
+                    sender = Some(caller);
+                    last_data = Instant::now();
+                    on_event(ListenerEvent::SenderAccepted(socket));
                 } else {
                     tracing::info!(
                         "[srt-camera] sender {} refused: the camera is busy",

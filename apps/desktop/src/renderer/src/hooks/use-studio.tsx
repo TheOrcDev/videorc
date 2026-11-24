@@ -17322,6 +17322,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // never carries "Go live anyway". Without it, no signal refuses the start,
   // and Go Live opens again to ask.
   // The SRT view loads with the gate, so it stays out of the eager bundle.
+  // A confirm that awaits the gate's chunk stops if Go Live was cancelled meanwhile.
+  const goLiveCancelsRef = useRef(0)
   const dialogSrtStartGate = useCallback(
     async (goLiveAnyway: boolean): Promise<GoLiveStartGate> => {
       const { SRT_NO_SIGNAL_CONFIRM, srtCameraHasNoSignal } = await import('@/lib/srt-input-view')
@@ -18716,6 +18718,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     if (decision.kind === 'ignore') {
       return
     }
+    goLiveCancelsRef.current += 1
     if (decision.cleanupStreaming) {
       void settlePreparedPlatformLifecycle(decision.cleanupStreaming)
     }
@@ -18913,7 +18916,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   )
   const confirmGoLive = useCallback(
     async (goLiveAnyway = false): Promise<void> => {
+      const attempt = goLiveCancelsRef.current
       const gate = await dialogSrtStartGate(goLiveAnyway)
+      if (goLiveCancelsRef.current !== attempt) return
       await runGoLiveConfirmation(undefined, gate)
       askAgainAfterSrtRefusal(gate)
     },
@@ -18980,7 +18985,9 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   )
   const continueGoLiveWithReadyDestinations = useCallback(
     async (goLiveAnyway = false): Promise<void> => {
+      const attempt = goLiveCancelsRef.current
       const gate = await dialogSrtStartGate(goLiveAnyway)
+      if (goLiveCancelsRef.current !== attempt) return
       // "Go live on {ready}" leaves out the destinations whose setup failed;
       // they are not in the list.
       const failed = goLivePartialSetup?.failures.map((failure) => failure.targetId) ?? []

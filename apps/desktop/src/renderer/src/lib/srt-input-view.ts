@@ -145,14 +145,15 @@ export function srtCameraHasNoSignal(
  * no-signal risk as it was (the ask shows it as context).
  */
 export function srtAskFacts(state: SrtInputState | null, going: GoLiveComposition): string | null {
-  if (!state?.enabled || !isSrtCameraId(going.sources.cameraId)) return null
-  const signal = state.status.signal
+  if (state?.enabled === false || !isSrtCameraId(going.sources.cameraId)) return null
+  // Before the first read, the signal is unknown: ask, as for none.
+  const signal = state?.status.signal ?? 'waiting'
   if (signal !== 'waiting' && signal !== 'unsupportedCodec') return null
   const legs = streamedLegs(going)
     .filter((leg) => legShowsCamera(leg.layout, leg.scene))
     .map((leg) => leg.name)
   if (legs.length === 0) return null
-  return JSON.stringify({ signal, legs, port: state.port })
+  return JSON.stringify({ signal, legs, port: state?.port ?? null })
 }
 
 /**

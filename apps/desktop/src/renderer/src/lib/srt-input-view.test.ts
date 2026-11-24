@@ -215,7 +215,8 @@ describe('SRT input view (plan 255)', () => {
       })
     ).toBe(false)
     expect(srtCameraHasNoSignal(state({ enabled: false }), going())).toBe(false)
-    expect(srtCameraHasNoSignal(null, going())).toBe(false)
+    // The state not read yet: no sign of a signal, so it asks.
+    expect(srtCameraHasNoSignal(null, going())).toBe(true)
   })
 
   // D15 is about a scene that goes live using the SRT
