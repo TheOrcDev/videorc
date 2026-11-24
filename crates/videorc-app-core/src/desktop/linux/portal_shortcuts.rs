@@ -17,11 +17,12 @@
 
 use std::collections::BTreeMap;
 
-/// The app id the portal host Registry knows Videorc by: the GPUI app's
-/// Wayland `app_id` (`apps/videorc` `main.rs`). The Registry takes reverse-DNS
-/// ids only (`a.b`, as `g_application_id_is_valid`), so Electron's bare
-/// `videorc` would be refused.
-pub const PORTAL_APP_ID: &str = "com.videorc.desktop";
+/// The app id the portal host Registry knows Videorc by: Electron's `appId`
+/// (`electron-builder.yml`), which the GPUI app keeps on every platform so
+/// the portal permissions and shortcuts carry over (coordinator, plan 260
+/// S5.0). The Registry takes reverse-DNS ids only (`a.b`, as
+/// `g_application_id_is_valid`); a bare `videorc` would be refused.
+pub const PORTAL_APP_ID: &str = "dev.theorcdev.videorc";
 
 /// Settings → Shortcuts under a portal: the desktop owns the keys.
 pub const PORTAL_OWNS_KEYS_HINT: &str = "Change in your desktop's settings";
@@ -523,7 +524,7 @@ mod tests {
             shortcuts.portal().calls,
             [
                 "version",
-                "register com.videorc.desktop",
+                "register dev.theorcdev.videorc",
                 "create /session/1",
                 "bind /session/1"
             ]
