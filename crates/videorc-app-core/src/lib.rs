@@ -8,7 +8,17 @@
 //! `videorc-preview`) compile unchanged.
 
 pub mod crash_log;
+pub mod ledger;
 pub mod log;
+pub mod paths;
+pub mod process;
 pub mod restart;
+pub mod supervisor;
 
 pub use log::{Level, LogFileLimits, Logger, RotatingLogFile};
+pub use paths::AppPaths;
+pub use process::{
+    BackendBootstrap, BackendLaunch, BackendOwnership, BackendProcess, BackendStopReport,
+    Credential, Isolation, process_is_alive,
+};
+pub use supervisor::{BackendState, StopOutcome, Supervisor, SupervisorConfig, Tone};

@@ -10,6 +10,14 @@ description = "Plan 260: The Videorc app without a UI: the typed backend client,
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# The workspace key in a development profile path (`paths::workspace_key`).
+sha2 = "0.10"
+# The backend ownership token and admin request ids.
+uuid = { version = "1.19", features = ["v4"] }
+tokio = { version = "1.48", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -3168,9 +3168,13 @@ name = "videorc-app-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
