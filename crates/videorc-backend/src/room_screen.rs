@@ -32,6 +32,8 @@ use crate::state::AppState;
 
 pub(crate) const PRIVACY_TOPIC: &str = "videorc.screen-privacy.v1";
 pub(crate) const PRIVACY_ACK_TOPIC: &str = "videorc.screen-privacy.ack.v1";
+/// The renderer's bound on one acknowledgement.
+pub(crate) const PRIVACY_ACK_MAX_BYTES: usize = 2048;
 const RECORDER_IDENTITY_PREFIX: &str = "EG_";
 /// The renderer's capture asked for 1920 x 1080 at 30 fps, 4 Mbps, no
 /// simulcast, so shared text stays crisp.
@@ -89,16 +91,42 @@ pub(crate) fn track_name(epoch: &str, generation: u64, hidden: bool) -> String {
 }
 
 /// A receiver's acknowledgement of this publication's frost (the renderer's
-/// `privacyObservationMatches`): who applied it, and when.
-pub(crate) fn observation(payload: &[u8], epoch: &str, generation: u64) -> Option<(String, i64)> {
+/// `privacyObservationMatches`): who applied it, its session, and when.
+pub(crate) fn observation(
+    payload: &[u8],
+    epoch: &str,
+    generation: u64,
+) -> Option<(String, Option<String>, i64)> {
+    if payload.len() > PRIVACY_ACK_MAX_BYTES {
+        return None;
+    }
     let value: Value = serde_json::from_slice(payload).ok()?;
     let matches = value.get("epoch")?.as_str()? == epoch
         && value.get("generation")?.as_u64()? == generation
         && value.get("hidden")?.as_bool()?;
     let receiver = value.get("receiver")?.as_str()?.to_string();
+    let session = value
+        .get("receiverSession")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let applied_at = value.get("appliedAt")?.as_i64()?;
     (matches && applied_at > 0 && applied_at <= 9_007_199_254_740_991)
-        .then_some((receiver, applied_at))
+        .then_some((receiver, session, applied_at))
+}
+
+/// Who may acknowledge, as the renderer's room admits them: a program page
+/// by its receiver name, or a guest in the room now, named with its current
+/// session.
+pub(crate) fn receiver_admitted(
+    receiver: &str,
+    session: Option<&str>,
+    visible: &std::collections::HashMap<String, String>,
+) -> bool {
+    let program = receiver
+        .strip_prefix("program:")
+        .is_some_and(|rest| matches!(rest, "wide" | "tall" | "wide:recording" | "tall:recording"));
+    program
+        || session.is_some_and(|session| visible.get(receiver).is_some_and(|sid| sid == session))
 }
 
 /// A participant left: its acknowledgement goes, and a recorder takes the
@@ -250,9 +278,20 @@ pub(crate) async fn run_screen(
                 match signal {
                     None => break,
                     Some(ScreenSignal::Ack(payload)) => {
+                        let visible: std::collections::HashMap<String, String> = room
+                            .remote_participants()
+                            .values()
+                            .map(|participant| {
+                                (
+                                    participant.identity().as_str().to_string(),
+                                    participant.sid().as_str().to_string(),
+                                )
+                            })
+                            .collect();
                         if let Some(screen) = status.as_mut().filter(|screen| screen.hidden)
-                            && let Some((receiver, applied_at)) =
+                            && let Some((receiver, session, applied_at)) =
                                 observation(&payload, &screen.epoch, screen.generation)
+                            && receiver_admitted(&receiver, session.as_deref(), &visible)
                         {
                             screen.observations.insert(receiver, applied_at);
                             screen.status = RoomScreenPrivacyState::Observed;
@@ -522,7 +561,7 @@ mod tests {
         };
         assert_eq!(
             observation(&ack("e1", 2, true, json!(1700)), "e1", 2),
-            Some(("guest:a".to_string(), 1700))
+            Some(("guest:a".to_string(), None, 1700))
         );
         assert_eq!(observation(&ack("e0", 2, true, json!(1700)), "e1", 2), None);
         assert_eq!(observation(&ack("e1", 1, true, json!(1700)), "e1", 2), None);
@@ -533,6 +572,22 @@ mod tests {
         assert_eq!(observation(&ack("e1", 2, true, json!(0)), "e1", 2), None);
         assert_eq!(observation(&ack("e1", 2, true, json!(1.5)), "e1", 2), None);
         assert_eq!(observation(b"not json", "e1", 2), None);
+    }
+
+    #[test]
+    fn only_program_pages_and_current_guest_sessions_acknowledge() {
+        let visible =
+            std::collections::HashMap::from([("g_ada".to_string(), "PA_ada_now".to_string())]);
+        for program in ["program:wide", "program:tall", "program:wide:recording"] {
+            assert!(receiver_admitted(program, None, &visible), "{program}");
+        }
+        assert!(!receiver_admitted("program:square", None, &visible));
+        assert!(receiver_admitted("g_ada", Some("PA_ada_now"), &visible));
+        assert!(!receiver_admitted("g_ada", Some("PA_ada_before"), &visible));
+        assert!(!receiver_admitted("g_ada", None, &visible));
+        assert!(!receiver_admitted("g_gone", Some("PA_gone"), &visible));
+        let big = vec![b' '; PRIVACY_ACK_MAX_BYTES + 1];
+        assert_eq!(observation(&big, "e1", 2), None);
     }
 
     #[test]
