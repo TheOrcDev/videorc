@@ -396,9 +396,11 @@ describe('start times sent with older time zone rules', () => {
         startOffsetMinutes: -480,
         plannedEndUtc: null,
         plannedEndOffsetMinutes: null,
-        startRepair: {
-          correctedStartUtc: '2026-12-15T17:00:00Z',
-          correctedStartOffsetMinutes: -420
+        repair: {
+          part: 'start',
+          platformUtc: '2026-12-15T18:00:00Z',
+          correctedUtc: '2026-12-15T17:00:00Z',
+          correctedOffsetMinutes: -420
         }
       },
       ...overrides
@@ -418,13 +420,39 @@ describe('start times sent with older time zone rules', () => {
     })
   })
 
+  it('flags an X end that alone is off, after its start was right', () => {
+    const endOnly = stale({
+      provider: 'x',
+      times: {
+        startOffsetMinutes: -420,
+        plannedEndUtc: '2027-11-07T10:30:00Z',
+        plannedEndOffsetMinutes: -420,
+        repair: {
+          part: 'end',
+          platformUtc: '2027-11-07T10:30:00Z',
+          correctedUtc: '2027-11-07T09:30:00Z',
+          correctedOffsetMinutes: -420
+        }
+      }
+    })
+    expect(scheduledStartRepair(endOnly)).toEqual({
+      line: 'End time is an hour off on X',
+      action: 'fix'
+    })
+  })
+
   it('asks for an edit when the typed time no longer exists', () => {
     const gone = stale({
       times: {
         startOffsetMinutes: -480,
         plannedEndUtc: null,
         plannedEndOffsetMinutes: null,
-        startRepair: { correctedStartUtc: null, correctedStartOffsetMinutes: null }
+        repair: {
+          part: 'start',
+          platformUtc: '2026-12-15T18:00:00Z',
+          correctedUtc: null,
+          correctedOffsetMinutes: null
+        }
       }
     })
     expect(scheduledStartRepair(gone)).toEqual({

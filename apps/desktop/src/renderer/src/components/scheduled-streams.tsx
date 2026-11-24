@@ -510,16 +510,20 @@ export function StartRepairLine({
   action,
   line,
   pending,
+  savedError,
   onEdit,
   onFixTime
 }: {
   action: 'fix' | 'edit'
   line: string
   pending: boolean
+  /** The event's own saved error (a refused Fix time), shown here once. */
+  savedError: string | null
   onEdit: (trigger: HTMLElement | null) => void
   onFixTime: () => Promise<string | null>
 }): ReactElement {
-  const [error, setError] = useState<string | null>(null)
+  const [failure, setError] = useState<string | null>(null)
+  const error = failure ?? savedError
   const [fixing, setFixing] = useState(false)
   return (
     <div className="flex flex-col gap-1" data-testid="scheduled-start-repair">
@@ -674,7 +678,7 @@ function EventRow({
           lastSyncedAt={event.lastSyncedAt}
           text={`${event.accountLabel} · ${scheduledWhenLabel(event)}`}
         />
-        {event.error ? (
+        {event.error && !repair ? (
           <Alert variant="destructive">
             <AlertDescription>
               {event.thumbnailState === 'error' ? 'Event created; thumbnail upload failed. ' : ''}
@@ -687,6 +691,7 @@ function EventRow({
             action={repair.action}
             line={repair.line}
             pending={pending}
+            savedError={event.error?.message ?? null}
             onEdit={onEdit}
             onFixTime={onFixTime}
           />

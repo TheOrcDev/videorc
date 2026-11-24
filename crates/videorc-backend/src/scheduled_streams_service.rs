@@ -1141,12 +1141,13 @@ fn x_candidates(
 }
 
 /// The platform's start, as the event's own wall time. An instant the
-/// platform still holds as saved keeps the saved wall time: it is what the
-/// streamer typed, and an event sent with older tz data must keep it until it
-/// is repaired (`misresolved_start`), not take the platform's wrong hour.
+/// platform still holds as last confirmed keeps the saved wall time: it is
+/// what the streamer typed, and an event sent with older tz data (or whose
+/// Fix time was refused) must keep it until it is repaired
+/// (`misresolved_time`), not take the platform's wrong hour. Call it before
+/// `confirmed` replaces the snapshot.
 fn apply_remote_start(event: &mut ScheduledStreamEvent, utc: chrono::DateTime<Utc>) -> Result<()> {
-    let unchanged = chrono::DateTime::parse_from_rfc3339(&event.start_utc)
-        .is_ok_and(|saved| saved.with_timezone(&Utc) == utc);
+    let unchanged = event.platform_start_utc() == Some(utc);
     if !unchanged {
         event.requested.local_start = local_wall_time(utc, &event.requested.time_zone)?;
         event.requested.offset_choice = offset_choice_at(utc, &event.requested.time_zone)?;
@@ -2944,6 +2945,7 @@ mod x_tests {
         schedules: Vec<Value>,
         source_active: bool,
         lose_create: bool,
+        reject_update: bool,
         counter: usize,
     }
 
@@ -3051,6 +3053,9 @@ mod x_tests {
                     Some(schedule) => ok(json!({"data":schedule})),
                     None => (StatusCode::NOT_FOUND, axum::Json(json!({}))).into_response(),
                 }
+            }
+            ("PUT", ["2", "broadcasts", "scheduled", _]) if fixture.reject_update => {
+                problem(StatusCode::BAD_REQUEST, "Rejected by the fixture.")
             }
             ("PUT", ["2", "broadcasts", "scheduled", id]) => {
                 if body["scheduled_end_ms"].is_null() || body["scheduled_broadcast_id"].is_null() {
@@ -3180,13 +3185,13 @@ mod x_tests {
         let remote = json!({"snippet": {"scheduledStartTime": "2026-12-15T18:00:00Z"}});
         hydrate_requested_metadata(&mut youtube, &remote).unwrap();
         assert_eq!(youtube.requested.local_start, "2026-12-15T10:00");
-        assert!(misresolved_start(&youtube).is_some());
+        assert!(misresolved_time(&youtube).is_some());
         // Moved on YouTube: the new instant is read in the bundled tz data.
         let moved = json!({"snippet": {"scheduledStartTime": "2026-12-15T20:00:00Z"}});
         hydrate_requested_metadata(&mut youtube, &moved).unwrap();
         assert_eq!(youtube.requested.local_start, "2026-12-15T13:00");
         assert_eq!(youtube.requested.offset_choice, None);
-        assert!(misresolved_start(&youtube).is_none());
+        assert!(misresolved_time(&youtube).is_none());
 
         let mut x = x_event();
         x.requested.time_zone = "America/Vancouver".into();
@@ -3478,15 +3483,64 @@ mod x_tests {
             .database
             .checkpoint_scheduled_operation(&event, &op, true)
             .unwrap();
-        // Sent with tz 2025b, which still had Vancouver on UTC-8 in January.
+        // Sent with tz 2025b, which still had Vancouver on UTC-8 in January:
+        // X holds 18:00Z to 20:00Z.
         event.start_utc = "2035-01-01T18:00:00+00:00".into();
-        let flagged = event.clone().public().times.unwrap().start_repair.unwrap();
+        {
+            let confirmed = event.confirmed.as_mut().unwrap();
+            confirmed["scheduled_start_ms"] = json!("2051287200000");
+            confirmed["scheduled_end_ms"] = json!("2051294400000");
+            let mut data = fixture.lock().unwrap();
+            data.schedules[0]["scheduled_start_ms"] = json!("2051287200000");
+            data.schedules[0]["scheduled_end_ms"] = json!("2051294400000");
+        }
+        let flagged = event.clone().public().times.unwrap().repair.unwrap();
+        assert_eq!(flagged.part, RepairPart::Start);
         assert_eq!(
-            flagged.corrected_start_utc.as_deref(),
+            flagged.corrected_utc.as_deref(),
             Some("2035-01-01T17:00:00Z")
         );
 
-        // Fix time: the saved metadata, unchanged, through the scheduled update.
+        // X refuses the first Fix time: the flag and the typed time stay,
+        // through a refresh of what X still holds.
+        fixture.lock().unwrap().reject_update = true;
+        let mut fix = x_mutation(&event);
+        fix.metadata = Some(event.requested.clone());
+        let mut attempt = event.clone();
+        attempt.start_utc = attempt.requested.validate_for("x", false).unwrap();
+        let (mut attempt, mut op, _) = state
+            .database
+            .begin_scheduled_operation(attempt, &fix, "update")
+            .unwrap();
+        assert!(
+            execute_x(
+                &state,
+                "update",
+                &fix,
+                &mut attempt,
+                &mut op,
+                &api,
+                |_, _| { Ok(()) }
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            misresolved_time(&attempt).map(|flag| flag.part),
+            Some(RepairPart::Start)
+        );
+        let held = fixture.lock().unwrap().schedules[0].clone();
+        hydrate_x(&mut attempt, &held).unwrap();
+        assert_eq!(attempt.requested.local_start, "2035-01-01T10:00");
+        assert!(misresolved_time(&attempt).is_some());
+        fixture.lock().unwrap().reject_update = false;
+        state
+            .database
+            .checkpoint_scheduled_operation(&attempt, &op, true)
+            .unwrap();
+        let mut event = attempt;
+
+        // Fix time again: the saved metadata, unchanged, through the update.
         let mut fix = x_mutation(&event);
         fix.metadata = Some(event.requested.clone());
         event.start_utc = event.requested.validate_for("x", false).unwrap();
@@ -3511,8 +3565,8 @@ mod x_tests {
             assert_eq!(put.2["scheduled_start_ms"], "2051283600000"); // 17:00Z
             assert_eq!(put.2["scheduled_end_ms"], "2051290800000"); // 19:00Z
         }
-        assert!(misresolved_start(&event).is_none());
-        assert!(event.public().times.unwrap().start_repair.is_none());
+        assert!(misresolved_time(&event).is_none());
+        assert!(event.public().times.unwrap().repair.is_none());
         handle.abort();
     }
 

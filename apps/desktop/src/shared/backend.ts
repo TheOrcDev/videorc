@@ -10179,13 +10179,18 @@ export interface ScheduledStreamTimes {
   plannedEndUtc: string | null
   plannedEndOffsetMinutes: number | null
   /**
-   * Present when the saved start is not what the typed wall time means under
-   * the backend's tz data (sent with older rules): Upcoming offers Fix time.
+   * Present when the platform's start (or X's end) is not what the typed wall
+   * time means under the backend's tz data (sent with older rules, or a Fix
+   * time the platform refused): Upcoming offers Fix time.
    */
-  startRepair?: {
+  repair?: {
+    /** `end`: X only, the start is right but the planned end is not. */
+    part: 'start' | 'end'
+    /** What the platform shows now. */
+    platformUtc: string
     /** `null` when the wall time no longer exists: only an edit can fix it. */
-    correctedStartUtc: string | null
-    correctedStartOffsetMinutes: number | null
+    correctedUtc: string | null
+    correctedOffsetMinutes: number | null
   }
 }
 /** `scheduledStreams.resolveTime`: a form's times in the backend's tz data. */

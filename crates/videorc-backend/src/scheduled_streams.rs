@@ -199,43 +199,89 @@ pub fn zone_offsets(zones: &[String], at: DateTime<Utc>) -> BTreeMap<String, i32
         .collect()
 }
 
-/// A saved schedule whose stored start is not the instant its own wall time
-/// means under the bundled tz data: it was sent with older data (tz 2025b
-/// before Vancouver, Edmonton, Inuvik, Winnipeg, Casablanca and Havana
-/// dropped clock changes) and the platform still shows the old instant.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct MisresolvedStart {
-    pub event_id: String,
-    pub stored_start_utc: String,
-    /// `None` when the wall time no longer resolves (it now falls in a gap or
-    /// a repeated hour without a choice): the streamer has to pick a time.
-    pub resolved_start_utc: Option<String>,
+/// The part of a saved schedule a repair moves.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RepairPart {
+    Start,
+    /// X only: the start is right but the planned end is not.
+    End,
 }
 
-/// A saved event still ahead of its broadcast whose `start_utc` differs from
-/// re-resolving `requested.local_start`. Ended, live and deleted events are
-/// left alone.
-pub fn misresolved_start(event: &ScheduledStreamEvent) -> Option<MisresolvedStart> {
+/// A saved schedule the platform holds at an instant its own wall time no
+/// longer means under the bundled tz data: it was sent with older data (tz
+/// 2025b, before Vancouver, Edmonton, Inuvik, Winnipeg, Casablanca and Havana
+/// dropped clock changes).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MisresolvedTime {
+    pub event_id: String,
+    pub part: RepairPart,
+    /// The instant the platform last confirmed for that part.
+    pub platform_utc: String,
+    /// `None` when the wall time no longer resolves (it now falls in a gap or
+    /// a repeated hour without a choice): the streamer has to pick a time.
+    pub resolved_utc: Option<String>,
+}
+
+fn utc_string(utc: DateTime<Utc>) -> String {
+    utc.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|utc| utc.with_timezone(&Utc))
+}
+
+fn parse_epoch_ms_utc(value: &str) -> Option<DateTime<Utc>> {
+    value
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .and_then(DateTime::<Utc>::from_timestamp_millis)
+}
+
+/// A saved event still ahead of its broadcast whose platform start (or, on X,
+/// planned end) is not what its typed wall time means now. It compares with
+/// what the platform last confirmed, not the saved `start_utc`, so a rejected
+/// Fix time keeps its flag. Ended, live and deleted events are left alone.
+pub fn misresolved_time(event: &ScheduledStreamEvent) -> Option<MisresolvedTime> {
     if matches!(
         event.lifecycle.as_str(),
         "live" | "completed" | "canceled" | "missing"
     ) {
         return None;
     }
-    let stored = DateTime::parse_from_rfc3339(&event.start_utc)
-        .ok()
-        .map(|stored| stored.with_timezone(&Utc));
-    let resolved = resolve_time(
+    let platform_start = event.platform_start_utc();
+    let resolved_start = resolve_time(
         &event.requested.local_start,
         &event.requested.time_zone,
         event.requested.offset_choice.as_deref(),
     )
     .ok();
-    (stored.is_none() || stored != resolved).then(|| MisresolvedStart {
+    if platform_start.is_none() || platform_start != resolved_start {
+        return Some(MisresolvedTime {
+            event_id: event.id.clone(),
+            part: RepairPart::Start,
+            platform_utc: platform_start
+                .map(utc_string)
+                .unwrap_or_else(|| event.start_utc.clone()),
+            resolved_utc: resolved_start.map(utc_string),
+        });
+    }
+    let platform_end = event.platform_end_utc()?;
+    let resolved_end = match event.requested.planned_end_utc() {
+        Ok(Some(end)) => Some(end),
+        Ok(None) => resolved_start
+            .map(|start| start + chrono::Duration::hours(DEFAULT_PLANNED_DURATION_HOURS)),
+        Err(_) => None,
+    };
+    (resolved_end != Some(platform_end)).then(|| MisresolvedTime {
         event_id: event.id.clone(),
-        stored_start_utc: event.start_utc.clone(),
-        resolved_start_utc: resolved.map(|utc| utc.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        part: RepairPart::End,
+        platform_utc: utc_string(platform_end),
+        resolved_utc: resolved_end.map(utc_string),
     })
 }
 
@@ -291,18 +337,22 @@ pub struct ScheduledTimes {
     /// X only: the planned end the broadcast is sent with.
     pub planned_end_utc: Option<String>,
     pub planned_end_offset_minutes: Option<i32>,
-    /// Set when the saved start is not what the typed wall time means under
-    /// the bundled tz data: Upcoming flags the event and offers to fix it.
+    /// Set when the platform's start (or X's end) is not what the typed wall
+    /// time means under the bundled tz data: Upcoming flags the event and
+    /// offers to fix it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub start_repair: Option<StartRepair>,
+    pub repair: Option<TimeRepair>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct StartRepair {
+pub struct TimeRepair {
+    pub part: RepairPart,
+    /// What the platform shows now.
+    pub platform_utc: String,
     /// `None` when the wall time no longer resolves: only an edit can fix it.
-    pub corrected_start_utc: Option<String>,
-    pub corrected_start_offset_minutes: Option<i32>,
+    pub corrected_utc: Option<String>,
+    pub corrected_offset_minutes: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -443,35 +493,64 @@ impl ScheduledStreamEvent {
         self.times = self.times().ok();
         self
     }
+    /// The start the platform last confirmed, else the saved one.
+    pub fn platform_start_utc(&self) -> Option<DateTime<Utc>> {
+        let confirmed = self.confirmed.as_ref().and_then(|remote| {
+            if self.provider == "x" {
+                remote["scheduled_start_ms"]
+                    .as_str()
+                    .and_then(parse_epoch_ms_utc)
+            } else {
+                remote
+                    .pointer("/snippet/scheduledStartTime")
+                    .and_then(Value::as_str)
+                    .and_then(parse_rfc3339_utc)
+            }
+        });
+        confirmed.or_else(|| parse_rfc3339_utc(&self.start_utc))
+    }
+    /// X only: the planned end X last confirmed.
+    pub fn platform_end_utc(&self) -> Option<DateTime<Utc>> {
+        if self.provider != "x" {
+            return None;
+        }
+        self.confirmed.as_ref()?["scheduled_end_ms"]
+            .as_str()
+            .and_then(parse_epoch_ms_utc)
+    }
     fn times(&self) -> Result<ScheduledTimes> {
         let zone = crate::tzdb::zone(&self.requested.time_zone)?;
         let start = DateTime::parse_from_rfc3339(&self.start_utc)?.with_timezone(&Utc);
+        // The end X holds, until a repair moves it: the typed end can mean
+        // another instant under the bundled tz data.
         let end = if self.provider == "x" {
-            self.requested.planned_end_utc()?
+            match self.platform_end_utc() {
+                Some(end) => Some(end),
+                None => self.requested.planned_end_utc()?,
+            }
         } else {
             None
         };
-        let start_repair = misresolved_start(self).map(|_| {
-            let corrected = resolve_time(
-                &self.requested.local_start,
-                &self.requested.time_zone,
-                self.requested.offset_choice.as_deref(),
-            )
-            .ok();
-            StartRepair {
-                corrected_start_utc: corrected
-                    .map(|utc| utc.to_rfc3339_opts(SecondsFormat::Secs, true)),
-                corrected_start_offset_minutes: corrected
+        let repair = misresolved_time(self).map(|misresolved| {
+            let corrected = misresolved
+                .resolved_utc
+                .as_deref()
+                .and_then(parse_rfc3339_utc);
+            TimeRepair {
+                part: misresolved.part,
+                platform_utc: misresolved.platform_utc,
+                corrected_utc: corrected.map(utc_string),
+                corrected_offset_minutes: corrected
                     .and_then(|utc| crate::tzdb::offset_minutes_at(utc, &zone).ok()),
             }
         });
         Ok(ScheduledTimes {
             start_offset_minutes: crate::tzdb::offset_minutes_at(start, &zone)?,
-            planned_end_utc: end.map(|utc| utc.to_rfc3339_opts(SecondsFormat::Secs, true)),
+            planned_end_utc: end.map(utc_string),
             planned_end_offset_minutes: end
                 .map(|utc| crate::tzdb::offset_minutes_at(utc, &zone))
                 .transpose()?,
-            start_repair,
+            repair,
         })
     }
     pub fn editable(&self) -> Result<()> {
@@ -922,7 +1001,7 @@ mod tests {
         .unwrap()
     }
     #[test]
-    fn misresolved_starts_find_events_sent_with_old_tz_data() {
+    fn misresolved_times_find_events_sent_with_old_tz_data() {
         // Sent with tz 2025b: 10:00 in Vancouver went out as 18:00Z.
         let mut stale = scheduled("youtube", "2026-12-15T10:00", "America/Vancouver", None);
         stale.lifecycle = "scheduled".into();
@@ -942,20 +1021,78 @@ mod tests {
         assert_eq!(
             [stale.clone(), current, ended, unreadable.clone(), draft]
                 .iter()
-                .filter_map(misresolved_start)
+                .filter_map(misresolved_time)
                 .collect::<Vec<_>>(),
             [
-                MisresolvedStart {
+                MisresolvedTime {
                     event_id: stale.id,
-                    stored_start_utc: "2026-12-15T18:00:00+00:00".into(),
-                    resolved_start_utc: Some("2026-12-15T17:00:00Z".into()),
+                    part: RepairPart::Start,
+                    platform_utc: "2026-12-15T18:00:00Z".into(),
+                    resolved_utc: Some("2026-12-15T17:00:00Z".into()),
                 },
-                MisresolvedStart {
+                MisresolvedTime {
                     event_id: unreadable.id,
-                    stored_start_utc: "2026-12-15T18:00:00+00:00".into(),
-                    resolved_start_utc: None,
+                    part: RepairPart::Start,
+                    platform_utc: "2026-12-15T18:00:00Z".into(),
+                    resolved_utc: None,
                 },
             ]
+        );
+    }
+    #[test]
+    fn a_rejected_fix_keeps_the_flag_until_the_platform_confirms() {
+        // Fix time set the saved start to the corrected 17:00Z, but YouTube
+        // refused the update and still holds 18:00Z.
+        let mut event = scheduled("youtube", "2026-12-15T10:00", "America/Vancouver", None);
+        event.lifecycle = "scheduled".into();
+        event.start_utc = "2026-12-15T17:00:00Z".into();
+        event.confirmed =
+            Some(serde_json::json!({"snippet": {"scheduledStartTime": "2026-12-15T18:00:00Z"}}));
+        let flagged = misresolved_time(&event).unwrap();
+        assert_eq!(flagged.part, RepairPart::Start);
+        assert_eq!(flagged.platform_utc, "2026-12-15T18:00:00Z");
+        // Once YouTube confirms the corrected start, the flag clears.
+        event.confirmed =
+            Some(serde_json::json!({"snippet": {"scheduledStartTime": "2026-12-15T17:00:00Z"}}));
+        assert_eq!(misresolved_time(&event), None);
+    }
+    #[test]
+    fn an_x_end_across_the_abolished_fall_back_is_flagged_alone() {
+        // 00:30 to 02:30 on 2027-11-07 in Vancouver. tz 2025b fell back at
+        // 02:00, so the start (07:30Z) matches both rules but X ends at
+        // 10:30Z, an hour after the 09:30Z the typed end means now.
+        let mut event = scheduled(
+            "x",
+            "2027-11-07T00:30",
+            "America/Vancouver",
+            Some("2027-11-07T02:30"),
+        );
+        event.lifecycle = "scheduled".into();
+        event.provider_event_id = Some("902".into());
+        event.confirmed = Some(serde_json::json!({
+            "scheduled_start_ms": DateTime::parse_from_rfc3339("2027-11-07T07:30:00Z").unwrap().timestamp_millis().to_string(),
+            "scheduled_end_ms": DateTime::parse_from_rfc3339("2027-11-07T10:30:00Z").unwrap().timestamp_millis().to_string(),
+        }));
+        assert_eq!(
+            misresolved_time(&event),
+            Some(MisresolvedTime {
+                event_id: event.id.clone(),
+                part: RepairPart::End,
+                platform_utc: "2027-11-07T10:30:00Z".into(),
+                resolved_utc: Some("2027-11-07T09:30:00Z".into()),
+            })
+        );
+        // Upcoming shows the end X really holds until the repair.
+        let times = event.public().times.unwrap();
+        assert_eq!(
+            times.planned_end_utc.as_deref(),
+            Some("2027-11-07T10:30:00Z")
+        );
+        assert_eq!(
+            times
+                .repair
+                .map(|repair| (repair.part, repair.corrected_utc)),
+            Some((RepairPart::End, Some("2027-11-07T09:30:00Z".into())))
         );
     }
     #[test]
@@ -973,7 +1110,7 @@ mod tests {
                 start_offset_minutes: -420,
                 planned_end_utc: Some("2026-12-15T19:30:00Z".into()),
                 planned_end_offset_minutes: Some(-420),
-                start_repair: None,
+                repair: None,
             })
         );
         let youtube = scheduled("youtube", "2026-07-01T10:00", "Europe/Madrid", None).public();
@@ -983,7 +1120,7 @@ mod tests {
                 start_offset_minutes: 120,
                 planned_end_utc: None,
                 planned_end_offset_minutes: None,
-                start_repair: None,
+                repair: None,
             })
         );
         // Sent with tz 2025b: flagged, with the instant its wall time means now.
@@ -992,10 +1129,12 @@ mod tests {
         let times = stale.public().times.unwrap();
         assert_eq!(times.start_offset_minutes, -420);
         assert_eq!(
-            times.start_repair,
-            Some(StartRepair {
-                corrected_start_utc: Some("2026-12-15T17:00:00Z".into()),
-                corrected_start_offset_minutes: Some(-420),
+            times.repair,
+            Some(TimeRepair {
+                part: RepairPart::Start,
+                platform_utc: "2026-12-15T18:00:00Z".into(),
+                corrected_utc: Some("2026-12-15T17:00:00Z".into()),
+                corrected_offset_minutes: Some(-420),
             })
         );
         // Derived, never stored: a saved payload's `times` is not read back.

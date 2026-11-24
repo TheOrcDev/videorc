@@ -148,19 +148,26 @@ export interface ScheduledStartRepairView {
 /**
  * The Upcoming flag for a YouTube or X event sent with older time zone rules
  * (Vancouver, Edmonton, Inuvik, Winnipeg, Casablanca and Havana changed in
- * 2026): the platform shows a start that isn't the time the streamer typed.
- * `null` when the start is right, or the event isn't on the platform yet.
+ * 2026), or whose Fix time the platform refused: the platform shows a start
+ * (or, on X, an end) that isn't the time the streamer typed. `null` when the
+ * times are right, or the event isn't on the platform yet.
  */
 export function scheduledStartRepair(event: ScheduledStreamEvent): ScheduledStartRepairView | null {
-  const repair = event.times?.startRepair
+  const repair = event.times?.repair
   if (!repair || !event.providerEventId || !eventCanBeRepaired(event)) return null
   const where = scheduledProviderLabel(event.provider)
-  if (!repair.correctedStartUtc) {
-    const typed = event.requested.localStart.replace('T', ' ')
-    return { line: `Time is off on ${where}, and ${typed} no longer exists there`, action: 'edit' }
+  const which = repair.part === 'end' ? 'End time' : 'Time'
+  if (!repair.correctedUtc) {
+    const typed = (
+      repair.part === 'end' ? (event.requested.plannedEndLocal ?? '') : event.requested.localStart
+    ).replace('T', ' ')
+    return {
+      line: `${which} is off on ${where}, and ${typed} no longer exists there`,
+      action: 'edit'
+    }
   }
-  const off = Math.abs(Date.parse(event.startUtc) - Date.parse(repair.correctedStartUtc))
-  return { line: `Time is ${offBy(off)} off on ${where}`, action: 'fix' }
+  const off = Math.abs(Date.parse(repair.platformUtc) - Date.parse(repair.correctedUtc))
+  return { line: `${which} is ${offBy(off)} off on ${where}`, action: 'fix' }
 }
 
 function offBy(ms: number): string {
