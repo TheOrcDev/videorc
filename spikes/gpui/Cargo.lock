@@ -5216,6 +5216,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "spike-hello"
+version = "0.1.0"
+dependencies = [
+ "gpui-pre",
+ "gpui-pre-platform",
+ "spike-summary",
+]
+
+[[package]]
 name = "spike-linux-preview"
 version = "0.1.0"
 dependencies = [
