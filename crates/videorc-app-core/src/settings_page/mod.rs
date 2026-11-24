@@ -18,9 +18,12 @@
 //! - **Permissions** ([`permissions_view`]): the system access rows S2.6b
 //!   computes, each with its chip, purpose, detail and one action; Change a
 //!   permission; Linux's empty state.
+//! - **Remote** ([`remote`]): Remote control and Phone remote; its Agents
+//!   column is [`agents`].
 
 pub mod about;
 pub mod agents;
+pub mod remote;
 
 /// The events the page follows: the chat rows' backend row
 /// (`liveChat.emotes`, as `useChatEmoteSettings` listens).
