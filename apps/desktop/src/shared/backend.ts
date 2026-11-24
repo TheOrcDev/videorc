@@ -6145,6 +6145,28 @@ export interface RoomMediaStatus {
   camera: boolean
   microphone: boolean
   screen?: RoomScreenStatus
+  /** Plan 260 S1.8c c4d: the auxiliary track (room sounds, system audio). */
+  aux?: RoomMediaAuxStatus
+}
+
+/** The backend room's auxiliary track, as the renderer room's
+ * `RoomAuxStatus`, and its system capture's state. Mirrors Rust
+ * `RoomAuxStatus`. */
+export interface RoomMediaAuxStatus {
+  enabled: boolean
+  state: 'off' | 'blocked' | 'queued' | 'published'
+  reason: string | null
+  trackSid: string | null
+  observed: Record<string, number>
+  systemState: 'off' | 'opening' | 'capturing' | 'blocked'
+  systemReason: string | null
+}
+
+/** `cloud.room.aux.set` (plan 260 S1.8c c4d): room sounds on or off, and the
+ * room's system audio. Mirrors Rust `CloudRoomAuxSetParams`. */
+export interface CloudRoomAuxSetParams {
+  sounds: boolean
+  system: { enabled: boolean; gainDb: number; muted: boolean }
 }
 
 /** The shared screen and its Hide screen state on the wire (plan 249 S2), as

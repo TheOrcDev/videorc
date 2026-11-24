@@ -28,6 +28,7 @@ import type {
   CloudRoomAvatarMotionParams,
   CloudRoomAvatarSetParams,
   CloudRoomMediaSetParams,
+  CloudRoomAuxSetParams,
   CloudRoomPresentationEvent,
   CloudRoomSceneCommitParams,
   CloudRoomRequest,
@@ -374,6 +375,8 @@ interface HighRiskContractFixtures {
     roomCameraSetParams: CloudRoomMediaSetParams
     roomScreenSetParams: CloudRoomMediaSetParams
     roomRoutingSetParams: ProgramAudioSettings
+    roomAuxSetParams: CloudRoomAuxSetParams
+    roomPresentationAuxEvent: CloudRoomPresentationEvent
     roomPresentationMediaEvent: CloudRoomPresentationEvent
     roomSceneCommitParams: CloudRoomSceneCommitParams
     // Plan 243 C1: another device on air, and a show waiting after a hand-off.
@@ -737,6 +740,8 @@ describe('shared high-risk protocol fixture', () => {
       roomCameraSetParams,
       roomScreenSetParams,
       roomRoutingSetParams,
+      roomAuxSetParams,
+      roomPresentationAuxEvent,
       roomPresentationMediaEvent
     } = fixtures.cloud
     expect(jsonShape(validateBackendEventPayload('cloud.state', statusTalk))).toEqual(statusTalk)
@@ -819,6 +824,19 @@ describe('shared high-risk protocol fixture', () => {
     expect(() =>
       validateBackendRpcParams('cloud.room.microphone.set', roomCameraSetParams)
     ).toThrow()
+    // Room sounds and system audio on the backend room's aux track.
+    expect(jsonShape(validateBackendRpcParams('cloud.room.aux.set', roomAuxSetParams))).toEqual(
+      roomAuxSetParams
+    )
+    expect(() =>
+      validateBackendRpcParams('cloud.room.aux.set', {
+        ...roomAuxSetParams,
+        system: { ...roomAuxSetParams.system, gainDb: 13 }
+      })
+    ).toThrow()
+    expect(
+      jsonShape(validateBackendEventPayload('cloud.room.presentation', roomPresentationAuxEvent))
+    ).toEqual(roomPresentationAuxEvent)
     // The program audio routing the backend's room sends its program pages.
     expect(
       jsonShape(validateBackendRpcParams('cloud.room.routing.set', roomRoutingSetParams))

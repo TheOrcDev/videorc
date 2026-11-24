@@ -1118,6 +1118,66 @@ pub struct RoomMediaStatus {
     pub microphone: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<RoomScreenStatus>,
+    /// The auxiliary track (room sounds and system audio), S1.8c c4d.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aux: Option<RoomAuxStatus>,
+}
+
+/// The auxiliary track as the renderer room's `RoomAuxStatus` and its
+/// system capture's state (`roomAudioRouting.status`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomAuxStatus {
+    /// Room sounds are on for this room.
+    pub enabled: bool,
+    pub state: RoomAuxState,
+    pub reason: Option<String>,
+    pub track_sid: Option<String>,
+    /// Consumers that reported hearing the track, with when.
+    pub observed: std::collections::BTreeMap<String, i64>,
+    pub system_state: RoomSystemAudioState,
+    pub system_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RoomAuxState {
+    Off,
+    Blocked,
+    Queued,
+    Published,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RoomSystemAudioState {
+    Off,
+    Opening,
+    Capturing,
+    Blocked,
+}
+
+/// `cloud.room.aux.set` (plan 260 S1.8c c4d): room sounds on or off, and the
+/// room's system audio (the renderer's `roomAudioRouting.system`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CloudRoomAuxSetParams {
+    pub(crate) sounds: bool,
+    pub(crate) system: RoomSystemAudioSettings,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RoomSystemAudioSettings {
+    pub(crate) enabled: bool,
+    pub(crate) gain_db: f64,
+    pub(crate) muted: bool,
+}
+
+impl CloudRoomAuxSetParams {
+    pub(crate) fn valid(&self) -> bool {
+        self.system.gain_db.is_finite() && (-24.0..=12.0).contains(&self.system.gain_db)
+    }
 }
 
 /// The shared screen and its Hide screen state on the wire (plan 249 S2):

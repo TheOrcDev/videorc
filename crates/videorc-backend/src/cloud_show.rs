@@ -8411,6 +8411,18 @@ mod tests {
                 .as_ref()
                 .is_some_and(|settings| settings.valid())
         );
+        // `cloud.room.aux.set` and the aux track's status.
+        let aux: crate::cloud_talk::CloudRoomAuxSetParams =
+            serde_json::from_value(high_risk_fixture("/cloud/roomAuxSetParams")).unwrap();
+        assert!(aux.valid() && aux.sounds && aux.system.enabled);
+        let event = high_risk_fixture("/cloud/roomPresentationAuxEvent");
+        let parsed: crate::cloud_talk::CloudRoomPresentationEvent =
+            serde_json::from_value(event.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), event);
+        assert_eq!(
+            parsed.media.unwrap().aux.unwrap().state,
+            crate::cloud_talk::RoomAuxState::Published
+        );
         // `cloud.room.routing.set`: the program's speech and auxiliary audio.
         let routing = high_risk_fixture("/cloud/roomRoutingSetParams");
         let settings: crate::cloud_talk::ProgramAudioSettings =

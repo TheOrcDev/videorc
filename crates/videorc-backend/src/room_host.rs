@@ -346,6 +346,16 @@ async fn hold(
                     subscriptions_heard,
                     subscriptions_stopped,
                 ));
+                // The auxiliary track (S1.8c c4d): room sounds and system
+                // audio, for current media v2 consumers.
+                let (aux_done, aux_stopped) = oneshot::channel::<()>();
+                tokio::spawn(crate::room_aux::run(
+                    state.clone(),
+                    room.clone(),
+                    show_id.clone().unwrap_or_default(),
+                    receipts.clone(),
+                    aux_stopped,
+                ));
                 // The host's screen behind Hide screen (S1.8c): its
                 // acknowledgements and leaves come from here.
                 let (screen_signals, screen_heard) = mpsc::unbounded_channel();
@@ -468,6 +478,7 @@ async fn hold(
                 drop(camera_done);
                 drop(screen_done);
                 drop(subscriptions_done);
+                drop(aux_done);
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
                     DisconnectReason::DuplicateIdentity => {
@@ -593,6 +604,7 @@ async fn leave(state: &AppState, room: Option<Arc<Room>>) {
     crate::room_media::clear();
     crate::room_screen::clear();
     crate::room_routing::clear();
+    crate::room_aux::clear();
     HOLDS_SEAT.store(false, Ordering::Release);
 }
 
