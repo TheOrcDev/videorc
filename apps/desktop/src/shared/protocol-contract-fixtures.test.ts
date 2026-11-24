@@ -377,6 +377,7 @@ interface HighRiskContractFixtures {
     roomRoutingSetParams: ProgramAudioSettings
     roomAuxSetParams: CloudRoomAuxSetParams
     roomPresentationAuxEvent: CloudRoomPresentationEvent
+    roomPresentationPeopleEvent: CloudRoomPresentationEvent
     roomPresentationMediaEvent: CloudRoomPresentationEvent
     roomSceneCommitParams: CloudRoomSceneCommitParams
     // Plan 243 C1: another device on air, and a show waiting after a hand-off.
@@ -742,6 +743,7 @@ describe('shared high-risk protocol fixture', () => {
       roomRoutingSetParams,
       roomAuxSetParams,
       roomPresentationAuxEvent,
+      roomPresentationPeopleEvent,
       roomPresentationMediaEvent
     } = fixtures.cloud
     expect(jsonShape(validateBackendEventPayload('cloud.state', statusTalk))).toEqual(statusTalk)
@@ -824,6 +826,13 @@ describe('shared high-risk protocol fixture', () => {
     expect(() =>
       validateBackendRpcParams('cloud.room.microphone.set', roomCameraSetParams)
     ).toThrow()
+    // The room's other people and the monitor, from the backend's room.
+    expect(
+      jsonShape(validateBackendEventPayload('cloud.room.presentation', roomPresentationPeopleEvent))
+    ).toEqual(roomPresentationPeopleEvent)
+    expect(validateBackendRpcParams('cloud.room.monitor.set', { enabled: false })).toEqual({
+      enabled: false
+    })
     // Whether the backend's room may publish the HTML layers' sheet.
     expect(validateBackendRpcParams('cloud.room.html.set', { enabled: true })).toEqual({
       enabled: true

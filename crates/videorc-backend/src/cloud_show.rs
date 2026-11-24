@@ -8411,6 +8411,14 @@ mod tests {
                 .as_ref()
                 .is_some_and(|settings| settings.valid())
         );
+        // The room's other people and the monitor (S1.8d).
+        let people = high_risk_fixture("/cloud/roomPresentationPeopleEvent");
+        let parsed: crate::cloud_talk::CloudRoomPresentationEvent =
+            serde_json::from_value(people.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), people);
+        let media = parsed.media.unwrap();
+        assert_eq!(media.people[0].identity, "g_ada");
+        assert!(media.monitor.is_some_and(|monitor| monitor.video));
         // `cloud.room.aux.set` and the aux track's status.
         let aux: crate::cloud_talk::CloudRoomAuxSetParams =
             serde_json::from_value(high_risk_fixture("/cloud/roomAuxSetParams")).unwrap();

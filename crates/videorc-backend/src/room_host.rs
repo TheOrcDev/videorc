@@ -346,6 +346,14 @@ async fn hold(
                     subscriptions_heard,
                     subscriptions_stopped,
                 ));
+                // The room's other people as preview feeds (S1.8d d1).
+                let (remote_done, remote_stopped) = oneshot::channel::<()>();
+                tokio::spawn(crate::room_remote::run(
+                    state.clone(),
+                    room.clone(),
+                    show_id.clone().unwrap_or_default(),
+                    remote_stopped,
+                ));
                 // The HTML layers' sheets (S1.8c c5), for egress pages that
                 // ask for them.
                 let (html_done, html_stopped) = oneshot::channel::<()>();
@@ -493,6 +501,7 @@ async fn hold(
                 drop(subscriptions_done);
                 drop(aux_done);
                 drop(html_done);
+                drop(remote_done);
                 crate::room_aux::disarm_system();
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
@@ -621,6 +630,7 @@ async fn leave(state: &AppState, room: Option<Arc<Room>>) {
     crate::room_routing::clear();
     crate::room_aux::clear();
     crate::room_html::clear();
+    crate::room_remote::clear();
     HOLDS_SEAT.store(false, Ordering::Release);
 }
 
