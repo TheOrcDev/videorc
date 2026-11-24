@@ -7,6 +7,7 @@ mod obs;
 mod permissions;
 mod phone;
 mod remote;
+mod setup;
 mod shortcuts;
 
 use crate::app::permissions::Permissions;
@@ -22,12 +23,13 @@ use videorc_app_core::studio::ui_local::UiLocal;
 use videorc_app_core::{BackendClient, BackendEvent, Studio};
 use videorc_kit::dialog::DialogHandle;
 
-pub const EVENTS: [&str; 5] = [
+pub const EVENTS: [&str; 6] = [
     "liveChat.emotes",
     "remote.control.status",
     "remote.lan.status",
     "agents.status",
     "agents.activity",
+    "account.changed",
 ];
 pub struct Navigate(pub videorc_app_core::nav::PageId);
 impl EventEmitter<Navigate> for SettingsScreen {}
@@ -54,7 +56,7 @@ pub struct SettingsScreen {
     // invalidate only their own field, so an active agent cannot cause
     // endless full-page reads; commands and reconnects invalidate the batch.
     revision: u64,
-    event_revisions: [u64; 5],
+    event_revisions: [u64; 6],
     reading: bool,
     read_again: bool,
     pending_permission: Option<videorc_app_core::desktop::permissions::SystemPermissionPane>,
@@ -69,6 +71,8 @@ pub struct SettingsScreen {
     hotkeys: crate::app::hotkeys::Hotkeys,
     shortcut: shortcuts::Recorder,
     applied_shortcuts: Option<Value>,
+    setup: setup::Replay,
+    account: Option<videorc_app_core::protocol::VideorcAccountSnapshot>,
 }
 
 impl SettingsScreen {
@@ -90,6 +94,7 @@ impl SettingsScreen {
                     state.settings.theme.clone(),
                     state.settings.studio.doc().clone(),
                     state.settings.hydrated,
+                    state.settings.revision,
                     state.sources.devices_revision,
                     state.session.phase,
                     state.connection_generation,
@@ -139,6 +144,12 @@ impl SettingsScreen {
                                     this.event_revisions[index] += 1;
                                 }
                                 match event.as_str() {
+                                    "account.changed" => {
+                                        this.account = payload
+                                            .get("account")
+                                            .cloned()
+                                            .and_then(|v| serde_json::from_value(v).ok());
+                                    }
                                     "liveChat.emotes" => {
                                         this.chat.value = serde_json::from_value(payload).ok();
                                         this.chat.error = this
@@ -183,6 +194,7 @@ impl SettingsScreen {
                             }
                             Ok(BackendEvent::ConnectionClosed { .. }) => {
                                 this.revision += 1;
+                                this.account = None;
                                 this.chat = Loaded::default();
                                 this.usage = Loaded::default();
                                 this.remote = None;
@@ -240,7 +252,7 @@ impl SettingsScreen {
             error: None,
             busy: false,
             revision: 0,
-            event_revisions: [0; 5],
+            event_revisions: [0; 6],
             reading: false,
             read_again: false,
             pending_permission: None,
@@ -252,6 +264,8 @@ impl SettingsScreen {
             hotkeys,
             shortcut: Default::default(),
             applied_shortcuts: None,
+            setup: Default::default(),
+            account: None,
         };
         this.apply_theme(cx);
         this.apply_shortcuts();
@@ -300,7 +314,8 @@ impl SettingsScreen {
                 client.request("remote.control.status", json!({})),
                 client.request("remote.lan.status", json!({})),
                 client.request("agents.status", json!({})),
-                client.request("agents.activity.list", activity_params)
+                client.request("agents.activity.list", activity_params),
+                client.request("account.get", json!({}))
             )
         });
         cx.spawn(async move |entity, cx| {
@@ -308,7 +323,11 @@ impl SettingsScreen {
             let _ = entity.update(cx, |this, cx| {
                 this.reading = false;
                 if revision == this.revision {
-                    if let Ok((chat, usage, remote, phone, agents, activity)) = answer {
+                    if let Ok((chat, usage, remote, phone, agents, activity, account)) = answer {
+                        if event_revisions[5] == this.event_revisions[5] {
+                            this.account =
+                                account.ok().and_then(|v| serde_json::from_value(v).ok());
+                        }
                         if event_revisions[0] == this.event_revisions[0] {
                             this.chat.value =
                                 chat.ok().and_then(|v| serde_json::from_value(v).ok());
@@ -503,5 +522,6 @@ impl Render for SettingsScreen {
             .child(self.confirmation_dialog(cx))
             .child(self.rename_dialog(cx))
             .child(self.obs_dialog(cx))
+            .child(self.setup_dialog(window, cx))
     }
 }
