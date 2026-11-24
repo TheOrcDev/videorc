@@ -34,6 +34,9 @@ use crate::color::{rgb_to_uv_video_range_bt709, rgb_to_y_video_range_bt709};
 use crate::compositor::{CompositorFrameExportHandle, CompositorFrameStore, CompositorPixelFormat};
 use crate::state::AppState;
 
+// Plan 260 S1.1: these wire types live in `videorc-protocol` now.
+pub use videorc_protocol::room_program_camera::RoomProgramSource;
+
 pub const ENABLE_ENV: &str = "VIDEORC_ROOM_PROGRAM_CAMERA";
 pub const FRAME_WIDTH: u32 = 1280;
 pub const FRAME_HEIGHT: u32 = 720;
@@ -53,16 +56,6 @@ pub const VIEW_SOURCE: &str = "program-page-report";
 /// Whether this backend accepts a room program upload at all.
 pub(crate) fn enabled() -> bool {
     cfg!(debug_assertions) && std::env::var(ENABLE_ENV).ok().as_deref() == Some("1")
-}
-
-/// What Videorc Camera shows while a room program upload owns it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum RoomProgramSource {
-    /// The room's Program preview (a reconstruction, not the encoded stream).
-    RoomProgramPreview,
-    /// The upload is open but frames stopped: a black still.
-    RoomProgramPaused,
 }
 
 /// One frame record's header (little endian): magic `VRPC`, version, flags,

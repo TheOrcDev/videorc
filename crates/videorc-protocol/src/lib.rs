@@ -1,3 +1,8015 @@
-//! Every wire type of the backend protocol, serde only, extracted from `crates/videorc-backend/src/protocol.rs`; `ts-rs` generates `backend.ts` from it while Electron ships.
+//! Videorc's wire types (plan 260 S1.1): every command, response, event,
+//! status and settings shape the backend speaks over its WebSocket, plus the
+//! pure data types those shapes embed from the backend's other modules
+//! (`cohost`, `captions`, `streaming`, ...), in modules of the same name.
 //!
-//! Empty until plan 260 S1.1 (L2). Plan 260 S1.0 created it.
+//! Data and its serde shape only. The behaviour that uses these types stays
+//! in `videorc-backend`, which re-exports everything here under its old
+//! paths (`crate::protocol::X`, `crate::cohost::X`, ...), so the backend
+//! behaves exactly as before. The JSON is the contract: field order,
+//! renames, defaults and `skip_serializing_if` rules must not change without
+//! the desktop mirrors in `apps/desktop/src/shared/` and the fixtures under
+//! `protocol-fixtures/`.
+
+pub mod buddy_pet;
+pub mod captions;
+pub mod cohost;
+pub mod community;
+pub mod live_chat_moderation;
+pub mod overlay_layout;
+pub mod repair;
+pub mod room_program_camera;
+pub mod source_registry;
+pub mod source_status;
+pub mod streaming;
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::overlay_layout::OverlayRect;
+use crate::repair::GateStatus;
+use crate::source_registry::SourceRegistrySnapshot;
+use crate::streaming::StreamingSettings;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientCommand {
+    pub id: String,
+    pub method: String,
+    #[serde(default)]
+    pub params: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCompleteSignInParams {
+    pub code: String,
+    pub state: String,
+    pub verifier: String,
+    pub intent_generation: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountAuthIntent {
+    pub intent_generation: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerResponse {
+    pub id: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ResponseError>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponseError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerEvent {
+    pub event: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendConnection {
+    pub host: String,
+    pub port: u16,
+    pub token: String,
+    pub pid: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_pid: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendHealth {
+    pub status: String,
+    pub version: String,
+    pub platform: String,
+    pub ffmpeg: ToolStatus,
+    pub database_path: String,
+    pub secret_store_backend: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolStatus {
+    pub path: String,
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FeatureId {
+    LocalRecording,
+    Livestreaming,
+    Multistreaming,
+    CloudAi,
+    NoiseCleanup,
+    LiveCohost,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum EntitlementState {
+    Enabled,
+    Disabled,
+    DeveloperOverride,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum EntitlementTier {
+    Basic,
+    Premium,
+    Developer,
+}
+
+/// The paid plan behind the Premium tier (plan 185 D2). Max keeps
+/// `tier = premium` everywhere and says `plan = max` beside it, so a rollback
+/// or an older app keeps every Max user at least Premium. Absent for Basic,
+/// for the Developer tier, and for a Premium account on an older web deploy.
+/// Never a new `EntitlementTier` value.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum EntitlementPlan {
+    Premium,
+    Max,
+}
+
+impl EntitlementPlan {
+    /// The web's open `plan.id`. An unknown id reads as "no plan" so a plan
+    /// the shipped app has never heard of cannot break the capabilities load.
+    pub fn parse(id: &str) -> Option<Self> {
+        match id.trim() {
+            "premium" => Some(Self::Premium),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum EntitlementSource {
+    LocalDefault,
+    EnvOverride,
+    Creem,
+    Manual,
+    SignedCache,
+    FutureLicense,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingEntitlementLimits {
+    pub max_width: u32,
+    pub max_height: u32,
+    pub max_fps: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_bitrate_kbps: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamingEntitlementLimits {
+    pub max_width: u32,
+    pub max_height: u32,
+    pub max_fps: u32,
+    pub max_bitrate_kbps: u32,
+    /// TOTAL enabled destinations across both orientation legs (one shared cap).
+    pub max_destinations: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EntitlementLimits {
+    pub recording: RecordingEntitlementLimits,
+    pub streaming: StreamingEntitlementLimits,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EntitlementCapability {
+    pub feature_id: FeatureId,
+    pub state: EntitlementState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EntitlementsSnapshot {
+    pub schema_version: u32,
+    pub tier: EntitlementTier,
+    /// Plan 185 D2: `premium` or `max` while the account is Premium. Optional
+    /// on the wire and never a tier value ([[videorc-serde-null-contract-trap]]:
+    /// a `null` here would fail the strict renderer schema).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<EntitlementPlan>,
+    pub source: EntitlementSource,
+    pub capabilities: Vec<EntitlementCapability>,
+    pub limits: EntitlementLimits,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccountStatus {
+    SignedOut,
+    SignedIn,
+}
+
+// The desktop's Videorc PRODUCT account (not a YouTube/Twitch/X platform
+// account). Signed-out until real web auth + token storage populate it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VideorcAccountSnapshot {
+    pub status: AccountStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// The account avatar URL (Better Auth `user.image`): the web-uploaded
+    /// photo or the Google one. The renderer loads it through main's
+    /// allowlisted avatar cache, never hot-linked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+}
+
+/// Why the desktop's Videorc account changed (plan 215 A5). `SessionExpired`
+/// is the sign-out the server made: a refresh answered 401, so the stored
+/// session was dropped. Mirrored in `shared/backend.ts` (`AccountChangeReason`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccountChangeReason {
+    SignedIn,
+    SignedOut,
+    SessionExpired,
+}
+
+/// The `account.changed` event (plan 215 A5): the account as the backend now
+/// holds it, and why it changed. Mirrored in `shared/backend.ts`
+/// (`AccountChangedEvent`) and the `backend-rpc-contract.ts` event schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountChangedEvent {
+    pub account: VideorcAccountSnapshot,
+    pub reason: AccountChangeReason,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendLogEvent {
+    pub level: String,
+    pub message: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceList {
+    pub devices: Vec<Device>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Device {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<DeviceApp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_title: Option<String>,
+    /// A display's UUID (plan 213 F1), the identity that survives a
+    /// reconnect; macOS can hand the same display a new id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_uuid: Option<String>,
+    pub id: String,
+    pub name: String,
+    pub kind: DeviceKind,
+    pub status: DeviceStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceApp {
+    pub bundle_id: String,
+    pub name: String,
+    pub pid: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolveAppWindowParams {
+    pub bundle_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefer_window_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ResolveAppWindowResult {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // app scenes are macOS-only
+    Found {
+        ok: bool,
+        #[serde(rename = "windowId")]
+        window_id: String,
+        title: String,
+        width: u32,
+        height: u32,
+    },
+    Unavailable {
+        ok: bool,
+        reason: AppWindowUnavailableReason,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppWindowUnavailableReason {
+    NotRunning,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // app scenes are macOS-only
+    NoWindow,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Minimized,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeviceKind {
+    Screen,
+    #[cfg_attr(target_os = "windows", allow(dead_code))] // Windows lists no window sources yet
+    Window,
+    Camera,
+    Microphone,
+    SystemAudio,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeviceStatus {
+    Available,
+    Unavailable,
+    PermissionRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingStatus {
+    pub state: RecordingState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_tracks: Vec<AudioTrack>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<RecordingPipelineStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// The session exists only for the replay buffer (plan 181): it writes
+    /// no file and streams nowhere, so no surface may call it "Recording" or
+    /// "On air", and Record or Go Live hand over to a real session. Absent
+    /// on the wire for every other session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay_only: bool,
+    /// Plan 215 D1: whether a scene edit (a source's position, size or crop)
+    /// committed from now on reaches this session's picture. The compositor
+    /// paths read the installed scene every tick; the legacy FFmpeg graph is
+    /// static, so `scene.source.transform.update`, `.nudge` and `.reset` are
+    /// refused there (`scene-edit-refused`) and the Scene page keeps its
+    /// lock. Absent on the wire while nothing runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepts_live_scene_edits: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordingState {
+    Idle,
+    Starting,
+    Recording,
+    Streaming,
+    Stopping,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingPipelineStatus {
+    pub container: RecordingContainer,
+    pub finalization: RecordingFinalizationState,
+    pub stages: Vec<RecordingPipelineStageStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingPipelineStageStatus {
+    pub stage: RecordingPipelineStage,
+    pub state: RecordingPipelineStageState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordingPipelineStage {
+    Capture,
+    Render,
+    VideoEncoder,
+    AudioEncoder,
+    Muxer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordingPipelineStageState {
+    Pending,
+    Starting,
+    Running,
+    Finalizing,
+    Finished,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordingFinalizationState {
+    None,
+    Finalizing,
+    Finalized,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordingContainer {
+    None,
+    Mkv,
+    Flv,
+    Tee,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioTrack {
+    pub id: String,
+    pub label: String,
+    pub source: AudioTrackSource,
+    /// The sources currently summed into this one mixed track (plan 069: one
+    /// mixed track everywhere). Empty, and omitted on the wire, for a track
+    /// that carries only its `source`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mix_sources: Vec<AudioTrackSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AudioTrackSource {
+    Microphone,
+    TestTone,
+    /// Everything the computer plays, except Videorc itself (plan 069).
+    SystemAudio,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceSelection {
+    pub screen_id: Option<String>,
+    pub window_id: Option<String>,
+    pub camera_id: Option<String>,
+    pub microphone_id: Option<String>,
+    #[serde(default)]
+    pub test_pattern: bool,
+}
+
+/// Visibility belongs to visual roles, independently of selected device IDs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceVisibility {
+    #[serde(default = "default_true")]
+    pub camera: bool,
+    #[serde(default = "default_true")]
+    pub capture: bool,
+}
+
+impl Default for SourceVisibility {
+    fn default() -> Self {
+        Self {
+            camera: true,
+            capture: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraLook {
+    pub brightness: f64,
+    pub contrast: f64,
+    pub saturation: f64,
+}
+
+impl Default for CameraLook {
+    fn default() -> Self {
+        Self {
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+        }
+    }
+}
+
+impl CameraLook {
+    pub fn is_neutral(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Hide edges (plan 227 B): how much of each side of the camera, as the
+/// streamer sees it (mirror applied), the green-screen key makes
+/// see-through. Percent of the camera frame, 0–25 per side
+/// (`scene_geometry::CAMERA_KEY_EDGE_MAX_PCT`); only applies while the key
+/// is on. `scene_geometry::camera_chroma_key` resolves the mirror.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct CameraKeyEdges {
+    pub left_pct: u32,
+    pub top_pct: u32,
+    pub right_pct: u32,
+    pub bottom_pct: u32,
+}
+
+impl CameraKeyEdges {
+    pub fn is_none(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Plan 258 D4/D5: what is behind the person on one camera, as one pick.
+/// Never two at once: `camera_background::camera_background_treatment`
+/// picks exactly one treatment for a frame.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CameraBackgroundMode {
+    Off,
+    Blur,
+    Image,
+    Video,
+    Cutout,
+    Green,
+    Blue,
+}
+
+/// How hard the outline between the person and what's behind them is.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CameraBackgroundEdges {
+    Soft,
+    Balanced,
+    Sharp,
+}
+
+/// The green or blue screen's tuning, kept with the camera (D4). The colour
+/// is the mode; the fields mirror the scene key's.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraBackgroundKey {
+    pub similarity_pct: u32,
+    pub smoothness_pct: u32,
+    pub spill_pct: u32,
+    /// Hide edges; omitted while every side is 0.
+    #[serde(default, skip_serializing_if = "CameraKeyEdges::is_none")]
+    pub hide_edges: CameraKeyEdges,
+}
+
+/// Plan 258 D3: one camera's background, kept in every scene. The renderer
+/// stores it per camera (beside the camera look) and puts it on the layout
+/// at the output boundary; absent while Off.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraBackground {
+    pub mode: CameraBackgroundMode,
+    /// Blur strength (%), 0–100; Slight is 30, Strong 70.
+    pub blur_pct: u32,
+    pub edges: CameraBackgroundEdges,
+    /// The picture or video behind the person: a background asset id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
+    /// The green or blue screen's tuning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<CameraBackgroundKey>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutSettings {
+    #[serde(default, skip_serializing_if = "CameraLook::is_neutral")]
+    pub camera_look: CameraLook,
+    /// Plan 258: the camera's background, injected by the renderer like the
+    /// look. Nothing renders from it until the camera effect stage (S3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_background: Option<CameraBackground>,
+    #[serde(default = "default_layout_preset")]
+    pub layout_preset: LayoutPreset,
+    #[serde(default = "default_camera_transform_mode")]
+    pub camera_transform_mode: CameraTransformMode,
+    #[serde(default)]
+    pub camera_transform: Option<CameraTransform>,
+    pub camera_corner: CameraCorner,
+    pub camera_size: CameraSize,
+    pub camera_shape: CameraShape,
+    /// Corner radius for `CameraShape::Rounded`, as a PERCENT of the camera
+    /// box's shorter side (0 = square corners, 50 = pill). Ignored by the
+    /// other shapes. All three render paths (CPU, Metal, FFmpeg) derive their
+    /// radius from this one number — never re-derive geometry per path.
+    #[serde(default = "default_camera_corner_radius_pct")]
+    pub camera_corner_radius_pct: u32,
+    /// Aspect of the camera box: `source` keeps the per-shape default
+    /// (16:9 rectangle, square circle), `square` forces 1:1, `portrait`
+    /// forces 3:4 — combined with the default Fill fit this center-crops the
+    /// camera like a vertical framing. Circle keeps its square box always.
+    #[serde(default = "default_camera_aspect")]
+    pub camera_aspect: CameraAspect,
+    /// Green-screen chroma key for the camera layer. Off by default; when on,
+    /// all three render paths (CPU, Metal, FFmpeg) key with the ONE spec from
+    /// `scene_geometry::camera_chroma_key` — never re-derive thresholds per path.
+    #[serde(default)]
+    pub camera_chroma_key_enabled: bool,
+    /// Key color as `#RRGGBB`. The UI currently offers green/blue presets; the
+    /// protocol takes any hex so a custom picker needs no wire change. An
+    /// unparseable value keys against green (with a warning), never fails.
+    #[serde(default = "default_camera_chroma_key_color")]
+    pub camera_chroma_key_color: String,
+    /// CbCr distance below which a pixel is fully transparent, as a percent of
+    /// the calibrated range (0-100 → 0-180 distance units).
+    #[serde(default = "default_camera_chroma_key_similarity_pct")]
+    pub camera_chroma_key_similarity_pct: u32,
+    /// Ramp band above the similarity threshold over which alpha rises 0→255
+    /// (percent, same scale as similarity; 0 = hard edge).
+    #[serde(default = "default_camera_chroma_key_smoothness_pct")]
+    pub camera_chroma_key_smoothness_pct: u32,
+    /// Spill suppression strength (percent): clamps the key channel toward the
+    /// other channels' maximum on kept pixels, killing the green/blue fringe.
+    #[serde(default = "default_camera_chroma_key_spill_pct")]
+    pub camera_chroma_key_spill_pct: u32,
+    /// Hide edges for the key (plan 227 B). Omitted while every side is 0,
+    /// so layouts saved before it round-trip unchanged.
+    #[serde(default, skip_serializing_if = "CameraKeyEdges::is_none")]
+    pub camera_chroma_key_edges: CameraKeyEdges,
+    pub camera_margin: u32,
+    #[serde(default = "default_camera_fit")]
+    pub camera_fit: CameraFit,
+    #[serde(default)]
+    pub camera_mirror: bool,
+    #[serde(default = "default_camera_zoom")]
+    pub camera_zoom: u32,
+    #[serde(default)]
+    pub camera_offset_x: i32,
+    #[serde(default)]
+    pub camera_offset_y: i32,
+    #[serde(default = "default_side_by_side_split")]
+    pub side_by_side_split: SideBySideSplit,
+    #[serde(default = "default_side_by_side_camera_side")]
+    pub side_by_side_camera_side: SideBySideCameraSide,
+    /// How the SCREEN is framed inside vertical-mode scenes. Non-optional with
+    /// a default on purpose (never a bare `Option`: a serialized `null` kills
+    /// the renderer contract — serde null trap).
+    #[serde(default)]
+    pub vertical_screen_framing: VerticalScreenFraming,
+    /// How the SCREEN is framed in the landscape screen scenes (Screen +
+    /// camera, Screen only, and Freeform over them), plan 213 G3. Non-optional
+    /// with a default on purpose (serde null trap).
+    #[serde(default)]
+    pub horizontal_screen_framing: HorizontalScreenFraming,
+    /// Preset (default) composes the fixed `layout_preset` arrangement.
+    /// Freeform composes the screen + camera base and applies
+    /// `source_transform_overrides` — the "arrange it yourself" mode.
+    /// `layout_preset` stays meaningful in Freeform (orientation and the
+    /// remembered preset to return to). Non-optional with a default on
+    /// purpose (serde null trap).
+    #[serde(default)]
+    pub arrangement_mode: ArrangementMode,
+    /// Per-source transforms for Freeform, keyed by the stable scene source id
+    /// ("source:base", "source:camera"). Empty means the base arrangement.
+    /// Non-optional with a default on purpose (serde null trap); serializes
+    /// as an empty object, never null.
+    #[serde(default)]
+    pub source_transform_overrides: std::collections::BTreeMap<String, SourceTransformOverride>,
+    /// Legacy layouts show both roles. Hidden roles still keep selected IDs.
+    #[serde(default)]
+    pub source_visibility: SourceVisibility,
+}
+
+/// How the scene's source boxes are arranged on the canvas.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArrangementMode {
+    #[default]
+    Preset,
+    Freeform,
+}
+
+/// Screen framing for vertical-mode scenes.
+///
+/// `Fill` is the short-form law (2026-07-13 fill-crop plan): every band is
+/// filled and centre-cropped, never letterboxed — right for a recorded Short,
+/// wrong for a live screen share, where it throws away 37-68% of the screen.
+/// `Fit` shows the WHOLE screen: stacked presets size the screen band to the
+/// screen's aspect (so nothing is cropped AND nothing is letterboxed) and the
+/// camera covers the rest; full-canvas screen presets contain the screen over
+/// the scene background (vertical simulcast screen framing plan, 2026-09-21).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerticalScreenFraming {
+    #[default]
+    Fill,
+    Fit,
+}
+
+/// Screen framing for the landscape screen scenes (plan 213 G3).
+///
+/// `Fit` (the default) shows the whole screen, with bars when its shape
+/// differs from the frame: nothing on a shared screen is cut. `Fill` fills the
+/// frame and centre-crops what does not fit, which makes a screen of another
+/// shape (an ultrawide through a virtual display) as big as it can be.
+/// Side by side always fills, and the vertical scenes keep their own field.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HorizontalScreenFraming {
+    #[default]
+    Fit,
+    Fill,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraSize {
+    Small,
+    Medium,
+    Large,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraShape {
+    Rectangle,
+    Rounded,
+    Circle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraAspect {
+    Source,
+    Square,
+    Portrait,
+}
+
+fn default_camera_corner_radius_pct() -> u32 {
+    12
+}
+
+fn default_camera_chroma_key_color() -> String {
+    "#00FF00".to_string()
+}
+
+fn default_camera_chroma_key_similarity_pct() -> u32 {
+    40
+}
+
+fn default_camera_chroma_key_smoothness_pct() -> u32 {
+    8
+}
+
+fn default_camera_chroma_key_spill_pct() -> u32 {
+    10
+}
+
+fn default_camera_aspect() -> CameraAspect {
+    CameraAspect::Source
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraFit {
+    Fit,
+    Fill,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LayoutPreset {
+    ScreenCamera,
+    ScreenOnly,
+    CameraOnly,
+    SideBySide,
+    /// The alias covers dev-era configs and session rows written while the
+    /// preset was plain "vertical" (never shipped in a release).
+    #[serde(alias = "vertical")]
+    VerticalCameraTop,
+    VerticalCameraBottom,
+    VerticalSplit,
+    VerticalScreenCamera,
+    VerticalScreenOnly,
+    VerticalCameraOnly,
+}
+
+impl LayoutPreset {
+    /// Orientation class: vertical presets exist only in the Studio's
+    /// vertical mode and imply a portrait canvas. The classes may not be
+    /// crossed while a session runs — the encoder canvas is fixed at start.
+    pub fn is_vertical(&self) -> bool {
+        matches!(
+            self,
+            LayoutPreset::VerticalCameraTop
+                | LayoutPreset::VerticalCameraBottom
+                | LayoutPreset::VerticalSplit
+                | LayoutPreset::VerticalScreenCamera
+                | LayoutPreset::VerticalScreenOnly
+                | LayoutPreset::VerticalCameraOnly
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraTransformMode {
+    Preset,
+    Custom,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraTransform {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// One source's Freeform box. The screen-side source also keeps its crop
+/// (plan 213 G2), as fractions of its own picture; a side that crops nothing
+/// is left out of the wire, so a box saved before crops existed reads and
+/// writes back unchanged. The camera ignores these: its crop is its zoom and
+/// pan.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTransformOverride {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    #[serde(default, skip_serializing_if = "crop_side_is_zero")]
+    pub crop_left: f64,
+    #[serde(default, skip_serializing_if = "crop_side_is_zero")]
+    pub crop_top: f64,
+    #[serde(default, skip_serializing_if = "crop_side_is_zero")]
+    pub crop_right: f64,
+    #[serde(default, skip_serializing_if = "crop_side_is_zero")]
+    pub crop_bottom: f64,
+}
+
+fn crop_side_is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
+impl SourceTransformOverride {
+    /// The box alone, with no crop (the backend's tests build overrides with it).
+    pub fn from_box(transform: CameraTransform) -> Self {
+        Self {
+            x: transform.x,
+            y: transform.y,
+            width: transform.width,
+            height: transform.height,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        }
+    }
+
+    pub fn camera_box(&self) -> CameraTransform {
+        CameraTransform {
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
+/// A live crop for the Scene editor's draft (plan 213 G2): the ⌥-drag on a
+/// screen's edge shows its crop on the Preview before the commit lands.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneCropDraft {
+    pub crop_left: f64,
+    pub crop_top: f64,
+    pub crop_right: f64,
+    pub crop_bottom: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SideBySideSplit {
+    #[serde(rename = "50-50")]
+    Even,
+    #[serde(rename = "60-40")]
+    SixtyForty,
+    #[serde(rename = "70-30")]
+    SeventyThirty,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SideBySideCameraSide {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackgroundFit {
+    Fill,
+    Fit,
+    Stretch,
+}
+
+// Resolved background a scene renders (asset defaults + scene overrides + the
+// managed file path). Mirrors the TS EffectiveSceneBackground; A6 reads it in the
+// compositor. Absent = no digital background, which is always valid.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectiveSceneBackground {
+    pub asset_id: String,
+    pub managed_asset_path: String,
+    pub fit: BackgroundFit,
+    pub scale: f64,
+    pub offset_x: f64,
+    pub offset_y: f64,
+    pub blur_px: f64,
+    pub dim_percent: f64,
+    pub saturation_percent: f64,
+    pub vignette_percent: f64,
+    /// How much of the screen the background ring occupies (0–40): the stage
+    /// margin per side is `visibility_percent / 200`. 0 keeps the recording
+    /// full-canvas (the asset only fills letterbox gaps); 20 is the classic 80%
+    /// stage. Serde-defaulted so older renderers/persisted scenes keep the
+    /// classic look.
+    #[serde(default = "default_background_visibility_percent")]
+    pub visibility_percent: f64,
+    /// Plan 190: the shader a live background runs. The background's
+    /// `asset_id` is then that look's poster (`live-<id>-<look>`), so every
+    /// path that can't animate draws the poster unchanged. Absent for a
+    /// picture, and kept off the wire (`skip_serializing_if`) because the
+    /// renderer's optional contract fields reject `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<LiveBackgroundSpec>,
+}
+
+pub const DEFAULT_BACKGROUND_VISIBILITY_PERCENT: f64 = 20.0;
+
+/// The ten live backgrounds, from React Bits: five from plan 190 and five
+/// more from plan 194.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveBackgroundId {
+    Silk,
+    SideRays,
+    PlasmaWave,
+    LiquidChrome,
+    LineWaves,
+    Beams,
+    ColorBends,
+    Dither,
+    Ferrofluid,
+    GhostFibers,
+}
+
+/// Calm runs at half the React Bits speed, Normal at the React Bits speed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveBackgroundMotion {
+    #[default]
+    Calm,
+    Normal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveBackgroundSpec {
+    pub id: LiveBackgroundId,
+    pub look: String,
+    #[serde(default)]
+    pub motion: LiveBackgroundMotion,
+}
+
+/// How a live background is being drawn right now.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveBackgroundRendering {
+    /// The shader at its full internal size.
+    Shader,
+    /// The shader at half its internal size (the budget guard's first step).
+    Half,
+    /// The poster, with a reason.
+    Still,
+}
+
+/// Why a live background shows its poster instead of the shader.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveBackgroundStillReason {
+    /// `VIDEORC_LIVE_BACKGROUND_FORCE_STILL=1` (debug builds only).
+    Forced,
+    /// The legacy FFmpeg graph (4K60, bridge off) is static.
+    LegacyGraph,
+    /// The CPU compositor fallback has no GPU renderer (Windows, macOS).
+    CpuFallback,
+    /// No usable GPU API (Linux: no EGL/GLES libraries or no render node).
+    NoGpu,
+    /// The only GPU is a software rasteriser (llvmpipe, SwiftShader, WARP).
+    SoftwareGpu,
+    /// Linux: the render node is quarantined (`linux_vaapi.rs`).
+    QuarantinedNode,
+    /// The shader failed to compile or link.
+    ShaderCompileFailed,
+    /// The budget guard stepped down to the poster.
+    GpuBudget,
+}
+
+/// Plan 190: the live background on this compositor run, when one is applied.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveBackgroundStatus {
+    pub id: LiveBackgroundId,
+    /// The look being drawn (the first look when `requested_look` is unknown).
+    pub look: String,
+    pub rendering: LiveBackgroundRendering,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<LiveBackgroundStillReason>,
+    /// The live background's own render time p95 over the guard's last
+    /// window: GPU time where the API reports it, else the render thread's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p95_ms: Option<f64>,
+    /// A look this build doesn't know; the first look renders instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_look: Option<String>,
+}
+
+fn default_background_visibility_percent() -> f64 {
+    DEFAULT_BACKGROUND_VISIBILITY_PERCENT
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Scene {
+    pub id: String,
+    pub name: String,
+    pub sources: Vec<SceneSource>,
+    pub outputs: Vec<SceneOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<EffectiveSceneBackground>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneSource {
+    pub id: String,
+    pub name: String,
+    pub kind: SceneSourceKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    pub transform: SceneTransform,
+    pub default_transform: SceneTransform,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default)]
+    pub locked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SceneSourceKind {
+    Screen,
+    Window,
+    Camera,
+    TestPattern,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneTransform {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    #[serde(default)]
+    pub crop_left: f64,
+    #[serde(default)]
+    pub crop_top: f64,
+    #[serde(default)]
+    pub crop_right: f64,
+    #[serde(default)]
+    pub crop_bottom: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneTransformPatch {
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+    pub crop_left: Option<f64>,
+    pub crop_top: Option<f64>,
+    pub crop_right: Option<f64>,
+    pub crop_bottom: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneOutput {
+    pub id: String,
+    pub kind: SceneOutputKind,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SceneOutputKind {
+    Preview,
+    Recording,
+    Stream,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneConfigParams {
+    pub sources: SourceSelection,
+    pub layout: LayoutSettings,
+    #[serde(default)]
+    pub video: Option<VideoSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<EffectiveSceneBackground>,
+    #[serde(default)]
+    pub protected_overlay_window_ids: Vec<u32>,
+    /// Scene-motion duration in ms for THIS commit (renderer sends it when
+    /// "Animate scene changes" is on). Absent/0 = instant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_ms: Option<u32>,
+}
+
+/// Backend-owned scene layout transaction. Renderer-generated intent ids are
+/// monotonic for the lifetime of a backend connection; callers that predate the
+/// transaction API may omit the id and let the backend allocate the next one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneLayoutApplyParams {
+    #[serde(default)]
+    pub intent_id: Option<u64>,
+    /// Target the vertical SIMULCAST leg of a running dual-orientation
+    /// session explicitly. Such a request never falls through to a program
+    /// commit: one that arrives after the session stopped fails instead of
+    /// turning the idle program into the portrait leg scene.
+    #[serde(default)]
+    pub simulcast_leg: bool,
+    /// Retirement only: keep an existing screen capture; never demand/start it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_retain_screen"
+    )]
+    pub retain_screen: Option<bool>,
+    /// Plan 231 D4: the vertical leg of the running dual-orientation session
+    /// draws the screen this commit selects, while the program draws none.
+    /// The selected screen is then needed as if the program composed it:
+    /// started, or switched to, before the commit, and never retired by it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_vertical_leg_screen"
+    )]
+    pub vertical_leg_screen: Option<bool>,
+    #[serde(flatten)]
+    pub config: SceneConfigParams,
+}
+
+fn deserialize_retain_screen<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    if bool::deserialize(deserializer)? {
+        Ok(Some(true))
+    } else {
+        Err(serde::de::Error::custom(
+            "retainScreen must be true when present",
+        ))
+    }
+}
+
+fn deserialize_vertical_leg_screen<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    if bool::deserialize(deserializer)? {
+        Ok(Some(true))
+    } else {
+        Err(serde::de::Error::custom(
+            "verticalLegScreen must be true when present",
+        ))
+    }
+}
+
+/// How to finish a transform edit after validating its numeric values.
+/// Older callers retain edge/center snapping; precision editors send `none`
+/// because their displayed geometry already includes the chosen snap policy.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SceneTransformSnap {
+    None,
+    #[default]
+    Legacy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneTransformUpdateParams {
+    pub source_id: String,
+    pub transform: SceneTransformPatch,
+    #[serde(default)]
+    pub snap: SceneTransformSnap,
+}
+
+/// Resize handle of the Scene editor's selection frame. Mirrors the
+/// renderer's `StageHandleId` (`components/scene/stage-transform.ts`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EditorHandleId {
+    N,
+    S,
+    E,
+    W,
+    Ne,
+    Nw,
+    Se,
+    Sw,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EditorGuideAxis {
+    X,
+    Y,
+}
+
+/// A snap guide line across the whole canvas; `position` is a canvas
+/// fraction (0..1) along the named axis.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorGuide {
+    pub axis: EditorGuideAxis,
+    pub position: f64,
+}
+
+/// Selection chrome the compositor draws over the preview while the Scene
+/// editor drags a source (plan 058): selection frame, resize handles and snap
+/// guides. Normalised canvas coordinates. `slot_css_width` is the on-screen
+/// width of the canvas slot in CSS pixels: the compositor derives the chrome
+/// thickness from it and the width of the frame it actually draws into, so a
+/// hairline stays a hairline whatever size the preview run composes at.
+/// `scale` (preview output pixels per CSS pixel, as the renderer assumed it)
+/// is the fallback for callers that do not send the slot width.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorChrome {
+    pub selected: CameraTransform,
+    pub handles: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_handle: Option<EditorHandleId>,
+    #[serde(default)]
+    pub guides: Vec<EditorGuide>,
+    pub scale: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_css_width: Option<f64>,
+}
+
+/// One frame of the Scene editor's live drag: the ghost rect of the dragged
+/// source plus the chrome to draw. Applied by the compositor at its snapshot
+/// choke point; never committed, never recorded. Without a `transform` the
+/// draft is chrome-only: the idle selection's frame and handles over the
+/// committed picture (the stage holds one while a source is selected).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneEditorDraftParams {
+    pub source_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<CameraTransform>,
+    /// An ⌥-drag crop's live crop; absent keeps the committed crop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<SceneCropDraft>,
+    pub chrome: EditorChrome,
+}
+
+/// The effective editor draft the compositor is currently applying, reported
+/// in `CompositorStatus.editor_draft` and by the draft RPCs so smokes can
+/// assert the on-screen geometry without screenshots. `transform` is absent
+/// for a chrome-only draft.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneEditorDraftStatus {
+    pub source_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<CameraTransform>,
+    /// Scene revision of the commit that ends this draft: the compositor
+    /// drops the draft once its installed scene revision reaches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_at_revision: Option<u64>,
+}
+
+/// Result of `scene.editor.draft.set` / `scene.editor.draft.clear`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneEditorDraftAck {
+    /// Whether a draft is live after this call.
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_draft: Option<SceneEditorDraftStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneSourceParams {
+    pub source_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneSourceVisibilityParams {
+    pub source_id: String,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneSourceOrderParams {
+    pub source_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneSourceNudgeParams {
+    pub source_id: String,
+    pub direction_x: f64,
+    pub direction_y: f64,
+    #[serde(default)]
+    pub large: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_camera_fit() -> CameraFit {
+    CameraFit::Fill
+}
+
+fn default_camera_zoom() -> u32 {
+    100
+}
+
+fn default_layout_preset() -> LayoutPreset {
+    LayoutPreset::ScreenCamera
+}
+
+fn default_camera_transform_mode() -> CameraTransformMode {
+    CameraTransformMode::Preset
+}
+
+fn default_side_by_side_split() -> SideBySideSplit {
+    SideBySideSplit::SeventyThirty
+}
+
+fn default_side_by_side_camera_side() -> SideBySideCameraSide {
+    SideBySideCameraSide::Right
+}
+
+/// The canonical default layout (screen + camera, medium bottom-right camera). Used
+/// as a starting point for the active scene model and tests.
+pub fn default_layout_settings() -> LayoutSettings {
+    LayoutSettings {
+        layout_preset: default_layout_preset(),
+        camera_transform_mode: default_camera_transform_mode(),
+        camera_transform: None,
+        camera_corner: CameraCorner::BottomRight,
+        camera_size: CameraSize::Medium,
+        camera_shape: CameraShape::Rectangle,
+        camera_corner_radius_pct: default_camera_corner_radius_pct(),
+        camera_aspect: default_camera_aspect(),
+        camera_look: Default::default(),
+        camera_background: None,
+        camera_chroma_key_enabled: false,
+        camera_chroma_key_color: default_camera_chroma_key_color(),
+        camera_chroma_key_similarity_pct: default_camera_chroma_key_similarity_pct(),
+        camera_chroma_key_smoothness_pct: default_camera_chroma_key_smoothness_pct(),
+        camera_chroma_key_spill_pct: default_camera_chroma_key_spill_pct(),
+        camera_chroma_key_edges: CameraKeyEdges::default(),
+        camera_margin: 32,
+        camera_fit: default_camera_fit(),
+        camera_mirror: false,
+        camera_zoom: default_camera_zoom(),
+        camera_offset_x: 0,
+        camera_offset_y: 0,
+        side_by_side_split: default_side_by_side_split(),
+        side_by_side_camera_side: default_side_by_side_camera_side(),
+        vertical_screen_framing: crate::VerticalScreenFraming::Fill,
+        horizontal_screen_framing: crate::HorizontalScreenFraming::Fit,
+        arrangement_mode: ArrangementMode::Preset,
+        source_transform_overrides: std::collections::BTreeMap::new(),
+        source_visibility: Default::default(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputSettings {
+    pub record_enabled: bool,
+    pub stream_enabled: bool,
+    pub output_directory: Option<String>,
+    pub ffmpeg_path: Option<String>,
+    /// Keep the capture MKV (lossless PCM audio) next to the exported MP4
+    /// instead of removing it after a committed export. Off by default.
+    #[serde(default)]
+    pub keep_original_mkv: bool,
+    /// Optional separate Screen (+ system audio) and Camera (+ mic) local
+    /// recordings beside the composed Combined take (Plan 157).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separate_source_recordings: Option<SeparateSourceRecordingsSettings>,
+    pub video: VideoSettings,
+    pub rtmp: RtmpSettings,
+}
+
+/// Opt-in ISO takes from one Record session. Defaults keep Combined on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SeparateSourceRecordingsSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    /// When true (default), also keep the composed Combined master.
+    #[serde(default = "default_true")]
+    pub keep_combined: bool,
+}
+
+impl Default for SeparateSourceRecordingsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            keep_combined: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoSettings {
+    pub preset: VideoPreset,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VideoPreset {
+    /// Floor of the performance-check ladder (plan 090 D1): what a PC that
+    /// cannot hold 720p30 records and streams at.
+    #[serde(rename = "tutorial-540p30")]
+    Tutorial540p30,
+    #[serde(rename = "tutorial-720p30")]
+    Tutorial720p30,
+    #[serde(rename = "tutorial-1080p30")]
+    Tutorial1080p30,
+    #[serde(rename = "tutorial-1440p30")]
+    Tutorial1440p30,
+    #[serde(rename = "record-4k30")]
+    Record4k30,
+    #[serde(rename = "record-4k60-experimental")]
+    Record4k60Experimental,
+    #[serde(rename = "stream-safe-1080p30")]
+    StreamSafe1080p30,
+    #[serde(rename = "stream-safe-1080p60")]
+    StreamSafe1080p60,
+    #[serde(rename = "stream-youtube-1080p30")]
+    StreamYoutube1080p30,
+    #[serde(rename = "stream-youtube-1080p60")]
+    StreamYoutube1080p60,
+    #[serde(rename = "stream-youtube-4k30")]
+    StreamYoutube4k30,
+    #[serde(rename = "stream-1080p60")]
+    Stream1080p60,
+    #[serde(rename = "vertical-1080x1920")]
+    Vertical1080x1920,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RtmpSettings {
+    pub preset: RtmpPreset,
+    pub server_url: String,
+    pub stream_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RtmpPreset {
+    #[serde(rename = "youtube")]
+    YouTube,
+    Twitch,
+    Kick,
+    X,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartSessionParams {
+    pub sources: SourceSelection,
+    pub layout: LayoutSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene: Option<Scene>,
+    pub output: OutputSettings,
+    #[serde(default)]
+    pub audio: AudioSettings,
+    #[serde(default)]
+    pub streaming: Option<StreamingSettings>,
+    #[serde(default)]
+    pub captions: Option<CaptionsSessionParams>,
+    /// Dual-orientation simulcast: a SECOND composed leg with its own scene
+    /// geometry (the saved vertical scene) from the same captured sources.
+    /// Present only when a vertical-bound destination is armed; vertical
+    /// targets consume this leg, horizontal targets the primary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulcast: Option<SimulcastParams>,
+    /// Renderer click timestamp (epoch ms) for latency attribution. Telemetry
+    /// only: never load-bearing for the start itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at_ms: Option<u64>,
+    /// The replay buffer (plan 181): keep the last `seconds` of this
+    /// session's program as a rolling segment ring beside its outputs. A
+    /// session with no file and no stream targets but `replay` is a
+    /// buffer-only session: it composes like a record-only session, creates
+    /// no Library row and reports `replayOnly` on its status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ReplayParams>,
+    /// In-process only: never read from or written to the wire, so a client
+    /// cannot start a hidden session.
+    #[serde(skip)]
+    pub purpose: SessionPurpose,
+}
+
+impl StartSessionParams {
+    /// A session whose only output is the replay ring (plan 181).
+    pub fn replay_only(&self) -> bool {
+        self.replay.is_some() && !self.output.record_enabled && !self.output.stream_enabled
+    }
+}
+
+/// The replay buffer's request (plan 181): how many seconds the ring keeps.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayParams {
+    pub seconds: u32,
+    /// The ring runs by default whenever Videorc is open (owner redesign,
+    /// R2), so a buffer-only start nobody asked for says so: on a software
+    /// encoder path the backend refuses it with `replay-software-encoder`
+    /// and the Output page explains, and while the scene's camera has no
+    /// frame yet with `replay-sources-not-ready` (the renderer waits for the
+    /// camera). A start the user chose carries `false` and runs anywhere.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
+}
+
+/// Where the replay buffer is, for `replay.state` and `replay.status`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplayBufferState {
+    Off,
+    Starting,
+    On,
+    Error,
+}
+
+/// `replay.state`: emitted on every change and once a second while the
+/// buffer is on, with how much it holds.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayStateEvent {
+    pub state: ReplayBufferState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The ring's target length.
+    pub seconds: u32,
+    /// What the ring holds right now, capped at `seconds`.
+    pub buffered_seconds: f64,
+    /// True when the session exists only for the buffer (no file, no stream).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay_only: bool,
+    /// Why the ring is `error`, or `off` when it did not start: a session
+    /// that failed, or the software encoder guard's refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Segment files in the ring after the last prune pass (diagnostics and
+    /// the replay smoke's disk bound: never above `ceil(N/2) + 3`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_files: Option<u32>,
+}
+
+/// `replay.save` answers at once; the save runs on its own task and reports
+/// through `replay.saved` or `replay.saveFailed` (plan 181 S3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySaveAccepted {
+    pub save_id: String,
+    pub session_id: String,
+    /// A save was already running: this press waits behind it, and a third
+    /// press while one is queued is absorbed into the same queued save.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queued: bool,
+    /// The length this save will take (plan 199): the press's 30 or 60 s,
+    /// clamped to the ring, or the longer of the two when the press joined a
+    /// queued save.
+    pub seconds: u32,
+}
+
+/// `replay.save` params (plan 199). Absent or `null` params mean `{}`, and
+/// no `seconds` is today's 30-second clip.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySaveParams {
+    /// 30 or 60; anything else is refused with `invalid-clip-length`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u32>,
+}
+
+/// `clip.mark` params (plan 199): the same shape as [`ReplaySaveParams`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipMarkParams {
+    /// 30 or 60; anything else is refused with `invalid-clip-length`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u32>,
+}
+
+/// `replay.saved`: the MP4 is on disk, probed and in Library.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySavedEvent {
+    pub save_id: String,
+    pub session_id: String,
+    /// The Library row.
+    pub replay_session_id: String,
+    pub path: String,
+    /// The requested length: the press's 30 or 60 s (plan 199), clamped to
+    /// the ring.
+    pub seconds: u32,
+    /// What the file actually holds: shorter than `seconds` while the buffer
+    /// was still filling.
+    pub covered_seconds: f64,
+    /// False when the buffer held less than `seconds`.
+    pub complete: bool,
+    /// What `clip.mark` routed here (plan 181 S8), else `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ClipMarkSource>,
+}
+
+/// `replay.saveFailed`: why a save produced no file. `reason` is a stable
+/// code (`off`, `empty`, `probe`, `ffmpeg`, `disk`, `io`); `message` is
+/// what the toast says.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySaveFailedEvent {
+    pub save_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub reason: String,
+    pub message: String,
+}
+
+/// Why a session exists. `PerformanceCheck` sessions are benchmark runs owned
+/// by `performance_check.rs`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionPurpose {
+    #[default]
+    Capture,
+    PerformanceCheck,
+    /// A capture that feeds the show already live on Videorc Cloud again
+    /// (plan 184 C5b). The runner keeps the platform legs it holds, so the
+    /// start needs no stream key and sets nothing up on a platform.
+    CloudResume,
+}
+
+impl SessionPurpose {
+    pub fn is_performance_check(self) -> bool {
+        self == Self::PerformanceCheck
+    }
+
+    pub fn resumes_cloud_show(self) -> bool {
+        self == Self::CloudResume
+    }
+}
+
+/// The vertical leg of a dual-orientation session. The layout must be a
+/// vertical preset on a portrait canvas — validated per leg at session start,
+/// mirroring the primary's orientation rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimulcastParams {
+    pub layout: LayoutSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene: Option<Scene>,
+    pub video: VideoSettings,
+}
+
+/// Optional `session.stop` params. Older renderers send none.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStopParams {
+    /// Renderer Stop click timestamp (epoch ms) for latency attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at_ms: Option<u64>,
+}
+
+/// Live-caption output intent for this session. Stream selection shapes the
+/// live compositor legs; Recording selection gates a non-destructive aligned
+/// `(captioned)` copy after finalization. The source recording remains clean.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionsSessionParams {
+    /// Persisted explicit consent. Audio is only attached while this capture
+    /// session is active; enabling while idle leaves captions Ready.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Explicit one-capture suppression selected by "Continue without
+    /// captions". Unlike `enabled: false`, this prevents pre-arming a saved
+    /// Stream/Both compositor leg for mid-session activation.
+    #[serde(default)]
+    pub suppressed_for_session: bool,
+    /// Which outputs receive captions: live Stream burn-in, an aligned
+    /// Recording copy, or both. Replaces `burnInEnabled`.
+    #[serde(default)]
+    pub burn_target: crate::captions::CaptionBurnTarget,
+    /// Legacy pre-R1 flag; `true` maps to Stream when burn_target is absent.
+    #[serde(default)]
+    pub burn_in_enabled: bool,
+    #[serde(default)]
+    pub position: crate::captions::CaptionOverlayPosition,
+    #[serde(default)]
+    pub text_size: crate::captions::CaptionTextSize,
+    #[serde(default = "legacy_caption_style_id")]
+    pub style_id: crate::captions::CaptionStyleId,
+    #[serde(default = "default_caption_language")]
+    pub language: String,
+    #[serde(default)]
+    pub style_revision: u64,
+}
+
+impl Default for CaptionsSessionParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            suppressed_for_session: false,
+            burn_target: crate::captions::CaptionBurnTarget::Off,
+            burn_in_enabled: false,
+            position: crate::captions::CaptionOverlayPosition::Bottom,
+            text_size: crate::captions::CaptionTextSize::M,
+            style_id: crate::captions::CaptionStyleId::Classic,
+            language: default_caption_language(),
+            style_revision: 0,
+        }
+    }
+}
+
+fn default_caption_language() -> String {
+    "auto".to_string()
+}
+
+fn legacy_caption_style_id() -> crate::captions::CaptionStyleId {
+    crate::captions::CaptionStyleId::Glass
+}
+
+impl CaptionsSessionParams {
+    pub fn effective_burn_target(&self) -> crate::captions::CaptionBurnTarget {
+        if self.burn_target == crate::captions::CaptionBurnTarget::Off && self.burn_in_enabled {
+            return crate::captions::CaptionBurnTarget::Stream;
+        }
+        self.burn_target
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MicrophoneNoiseSuppression {
+    #[default]
+    Off,
+    Rnnoise,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioSettings {
+    #[serde(default)]
+    pub microphone_noise_suppression: MicrophoneNoiseSuppression,
+    #[serde(default)]
+    pub microphone_gain_db: f32,
+    #[serde(default)]
+    pub microphone_muted: bool,
+    #[serde(default = "default_microphone_sync_offset_ms")]
+    pub microphone_sync_offset_ms: i32,
+    /// System audio On/Off (plan 069). Off, the default, means not captured at
+    /// all. Older clients omit the key and get Off.
+    #[serde(default)]
+    pub system_audio_enabled: bool,
+    /// System audio level in dB, within `SYSTEM_AUDIO_GAIN_DB_MIN..=MAX`.
+    #[serde(default = "default_system_audio_gain_db")]
+    pub system_audio_gain_db: f32,
+    /// Pause System audio when it carries the streamer's own stream back
+    /// into itself (plan 076). On by default; older clients omit the key.
+    #[serde(default = "default_true")]
+    pub system_audio_echo_guard: bool,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            microphone_noise_suppression: Default::default(),
+            microphone_gain_db: 0.0,
+            microphone_muted: false,
+            microphone_sync_offset_ms: default_microphone_sync_offset_ms(),
+            system_audio_enabled: false,
+            system_audio_gain_db: default_system_audio_gain_db(),
+            system_audio_echo_guard: true,
+        }
+    }
+}
+
+/// System audio level range and default (plan 069 decision 7). Games and music
+/// are mastered near 0 dBFS and voice sits around -18, so -6 keeps the voice on
+/// top. Mirrored in `apps/desktop/src/shared/backend.ts`. The range is read by
+/// the session audio bus once it mixes a system source (plan 069 S2/S4).
+#[cfg_attr(not(test), allow(dead_code))]
+pub const SYSTEM_AUDIO_GAIN_DB_MIN: f32 = -24.0;
+#[cfg_attr(not(test), allow(dead_code))]
+pub const SYSTEM_AUDIO_GAIN_DB_MAX: f32 = 12.0;
+pub const SYSTEM_AUDIO_GAIN_DB_DEFAULT: f32 = -6.0;
+
+fn default_system_audio_gain_db() -> f32 {
+    SYSTEM_AUDIO_GAIN_DB_DEFAULT
+}
+
+/// Clamp a system audio level into the supported range. A non-finite value
+/// falls back to the default rather than poisoning the mix.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn clamp_system_audio_gain_db(gain_db: f32) -> f32 {
+    if gain_db.is_finite() {
+        gain_db.clamp(SYSTEM_AUDIO_GAIN_DB_MIN, SYSTEM_AUDIO_GAIN_DB_MAX)
+    } else {
+        SYSTEM_AUDIO_GAIN_DB_DEFAULT
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioProcessingUpdateParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone_noise_suppression: Option<MicrophoneNoiseSuppression>,
+    pub session_id: String,
+    pub microphone_gain_db: f32,
+    pub microphone_muted: bool,
+    /// Live System audio On/Off. Omitted means "unchanged".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_audio_enabled: Option<bool>,
+    /// Live System audio level in dB. Omitted means "unchanged".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_audio_gain_db: Option<f32>,
+    /// Live echo guard On/Off (plan 076). Omitted means "unchanged".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_audio_echo_guard: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioProcessingUpdateResult {
+    pub microphone_noise_suppression: MicrophoneNoiseSuppression,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_microphone_noise_suppression: Option<MicrophoneNoiseSuppression>,
+    pub applied: bool,
+    pub session_id: String,
+    pub microphone_gain_db: f32,
+    pub microphone_muted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_microphone_gain_db: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_microphone_muted: Option<bool>,
+}
+
+fn default_microphone_sync_offset_ms() -> i32 {
+    // Audio/video alignment is structural now: the audio FIFO writer trims to the
+    // encoder bridge's first-frame epoch, so no calibrated constant can (or should)
+    // paper over pipeline startup latency — the old -750ms default under-corrected at
+    // 4K and over-corrected elsewhere. This offset is a pure manual trim for users.
+    0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemuxSessionParams {
+    pub session_id: String,
+    pub ffmpeg_path: Option<String>,
+}
+
+/// Params for the per-recording repair commands (assess / repair). The expectations let
+/// a screen-only capture avoid being flagged for "missing audio".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairFileParams {
+    pub path: String,
+    pub ffmpeg_path: Option<String>,
+    pub expect_audio: Option<bool>,
+    pub intended_fps: Option<f64>,
+}
+
+/// Params for restoring a recording from its hidden backup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairRestoreParams {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairSessionParams {
+    pub session_id: String,
+    pub expect_audio: Option<bool>,
+    pub intended_fps: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairRestoreSessionParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSnapshotParams {
+    pub sources: SourceSelection,
+    pub layout: LayoutSettings,
+    pub ffmpeg_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSnapshot {
+    pub id: String,
+    pub url: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewLiveParams {
+    pub sources: SourceSelection,
+    pub layout: LayoutSettings,
+    pub ffmpeg_path: Option<String>,
+    #[serde(default)]
+    pub video: Option<VideoSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewLiveStatus {
+    pub state: PreviewLiveState,
+    pub source: PreviewLiveSource,
+    pub transport: PreviewTransport,
+    pub backing: PreviewSurfaceBacking,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_fps: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewLiveState {
+    Connecting,
+    Live,
+    Reconnecting,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewLiveSource {
+    IdlePreview,
+    RecordingSession,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewTransport {
+    NativeSurface,
+    D3d11SharedTexture,
+    ElectronProofSurface,
+    LatestJpegPolling,
+    MjpegStream,
+    Unavailable,
+}
+
+impl PreviewTransport {
+    pub fn is_surface(self) -> bool {
+        matches!(
+            self,
+            PreviewTransport::NativeSurface
+                | PreviewTransport::D3d11SharedTexture
+                | PreviewTransport::ElectronProofSurface
+        )
+    }
+}
+
+/// What actually hosts the preview surface. The transport can say "surface", but OBS
+/// parity requires that the host be a real CAMetalLayer rather than the Electron proof
+/// BrowserWindow used for development smoke tests.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewSurfaceBacking {
+    #[serde(rename = "cametal-layer")]
+    CaMetalLayer,
+    #[serde(rename = "directcomposition-swapchain")]
+    DirectcompositionSwapChain,
+    ElectronBrowserWindow,
+    #[default]
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioMeterParams {
+    pub microphone_id: Option<String>,
+    pub ffmpeg_path: Option<String>,
+    #[serde(default)]
+    pub microphone_gain_db: f32,
+    #[serde(default)]
+    pub microphone_muted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioMeterProbeParams {
+    pub ffmpeg_path: Option<String>,
+    #[serde(default)]
+    pub microphone_gain_db: f32,
+    #[serde(default)]
+    pub microphone_muted: bool,
+}
+
+/// `audio.mic.arm` (instant-record P5): keep the selected CoreAudio
+/// microphone open while Studio is visible so `session.start` takes it
+/// warm instead of opening the device and waiting for its first callback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmMicrophoneArmParams {
+    pub microphone_id: Option<String>,
+    #[serde(default)]
+    pub microphone_gain_db: f32,
+    #[serde(default)]
+    pub microphone_muted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmMicrophoneStatus {
+    pub armed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    /// Why the microphone is not armed (`not-coreaudio`, `session-active`,
+    /// `disabled-for-smoke`, `open-failed`, `disarmed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub captured_frames: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub armed_for_ms: Option<u64>,
+}
+
+/// Plan 092 Phase C: the floor of a level reading. JSON cannot carry
+/// -Infinity, so digital silence reads as this many dBFS.
+pub const AUDIO_LEVEL_FLOOR_DB: f32 = -120.0;
+/// Plan 092 Phase C: the top of a level reading. The processed microphone can
+/// pass full scale (up to +24 dB of gain on a hot input); a cap keeps every
+/// reading inside the renderer's schema instead of dropping the event.
+pub const AUDIO_LEVEL_CEILING_DB: f32 = 48.0;
+
+/// Plan 092 Phase C: one level-meter reading over the last `audio.levels`
+/// window, in dBFS, between `AUDIO_LEVEL_FLOOR_DB` and `AUDIO_LEVEL_CEILING_DB`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioLevelReading {
+    /// The loudest sample in the window.
+    pub peak_db: f32,
+    /// The RMS of every sample in the window.
+    pub rms_db: f32,
+}
+
+impl AudioLevelReading {
+    /// A reading from a window's loudest sample and mean square (linear).
+    pub fn from_window(peak: f32, mean_square: f64) -> Self {
+        let peak_db = if peak > 0.0 {
+            20.0 * peak.log10()
+        } else {
+            AUDIO_LEVEL_FLOOR_DB
+        };
+        let rms_db = if mean_square > 0.0 {
+            (10.0 * mean_square.log10()) as f32
+        } else {
+            AUDIO_LEVEL_FLOOR_DB
+        };
+        // The guards above floor zero and NaN windows, so neither value is NaN
+        // here; the clamp floors near-silence and caps a hot input.
+        Self {
+            peak_db: peak_db.clamp(AUDIO_LEVEL_FLOOR_DB, AUDIO_LEVEL_CEILING_DB),
+            rms_db: rms_db.clamp(AUDIO_LEVEL_FLOOR_DB, AUDIO_LEVEL_CEILING_DB),
+        }
+    }
+}
+
+/// Plan 092 Phase C: the `audio.levels` event, about 20 times a second while a
+/// session's audio bus runs, or while the warm microphone stands by between
+/// sessions (microphone only, no session). Readings carry the configured gain
+/// (and the session's mute): what the recording and the stream get. A source
+/// with no samples in the window is omitted (never null).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioLevelsEvent {
+    /// The session whose bus measured the levels; absent for the standby
+    /// microphone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone: Option<AudioLevelReading>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_audio: Option<AudioLevelReading>,
+    /// Plan 189: the soundboard's sounds as mixed (after every gain).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sounds: Option<AudioLevelReading>,
+    /// The mix written to the recording and the stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master: Option<AudioLevelReading>,
+    /// Samples the mix clipped since the previous event.
+    #[serde(default)]
+    pub master_clipped_samples: u64,
+    /// Issue 1064: the session's microphone silence watchdog reports the
+    /// captured microphone as digital silence. Sent only while true, so the
+    /// standby microphone and older readings keep their shape.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub microphone_silent: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioMeterResult {
+    pub status: AudioMeterStatus,
+    pub level: Option<f64>,
+    pub peak_db: Option<f64>,
+    pub mean_db: Option<f64>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioMeterSampleSnapshot {
+    pub microphone_id: Option<String>,
+    pub result: AudioMeterResult,
+    pub sampled_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioMeterDeviceProbe {
+    pub device: Device,
+    pub result: AudioMeterResult,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioMeterDeviceProbeResult {
+    pub sampled_at: String,
+    pub probes: Vec<AudioMeterDeviceProbe>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamHealth {
+    pub session_id: String,
+    pub fps: Option<f64>,
+    pub dropped_frames: Option<u64>,
+    pub speed: Option<f64>,
+    #[serde(default)]
+    pub bitrate_kbps: Option<f64>,
+    #[serde(default)]
+    pub total_bytes: Option<u64>,
+    #[serde(default)]
+    pub duplicated_frames: Option<u64>,
+    pub created_at: String,
+}
+
+/// Plan 218 S2: the live stream's delivery over a rolling window, emitted
+/// with `diagnostics.stats` while a stream runs. `degraded` is true while
+/// more than 10 % of the stream's frames were skipped before encode over the
+/// last 30 s, and clears once the window is back under 5 %; `degraded_since`
+/// is the RFC 3339 time the current degraded span started. The renderer
+/// shows "Your stream is running at {delivered} of {target} fps" while
+/// `degraded` holds and stays quiet otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamDeliveryState {
+    pub target_fps: u32,
+    /// Frames the stream encoder produced per second over the window.
+    pub delivered_fps: f64,
+    /// Share of the window's frames skipped before encode, 0 to 100.
+    pub drop_percent: f64,
+    /// How much history the figures cover; 30 once the window is full.
+    pub window_seconds: f64,
+    pub degraded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_since: Option<String>,
+    /// Plan 218 S3a: the stream encoder's bitrate right now and as chosen,
+    /// when a dedicated stream encoder adapts it (macOS VideoToolbox).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate_kbps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_bitrate_kbps: Option<u32>,
+    /// True while the bitrate sits at its floor (half the chosen bitrate):
+    /// the stream will not go lower; fewer destinations is the next step.
+    #[serde(default)]
+    pub at_floor: bool,
+    /// Fifo overflows FFmpeg reported on the session's legs so far: each one
+    /// skipped seconds of video for that destination's viewers.
+    #[serde(default)]
+    pub uplink_overflows: u64,
+}
+
+/// Plan 218 S2: one destination's fifo overflow count for the support
+/// bundle. Carries the platform and label only; never a URL or a key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamLegOverflowCount {
+    pub target_id: String,
+    pub platform: String,
+    pub label: String,
+    pub overflows: u64,
+}
+
+/// The encoder a recording session actually requested. Hardware encoders may still fall
+/// back internally, so this is the requested backend; the final-file analyzer's
+/// codec/encoder tag is the corroborating output-side signal.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum EncodeBackend {
+    /// libx264 (software). LEGACY: no code path selects this; Linux L1.5 uses
+    /// OpenH264 for its LGPL software fallback. Kept only so historical
+    /// diagnostics payloads still deserialize.
+    SoftwareX264,
+    /// h264_videotoolbox (hardware, sw fallback allowed).
+    HardwareVideotoolbox,
+    /// h264_vaapi on a capability-probed Linux DRM render node.
+    HardwareVaapi,
+    /// h264_mf (MediaFoundation hardware/software hybrid), used by Windows builds.
+    HardwareMediaFoundation,
+    /// h264_mf's software MFT fallback after the exact hardware profile probe failed.
+    SoftwareMediaFoundation,
+    /// libopenh264 (software): the Linux LGPL fallback and the Windows fallback
+    /// after the hardware probe failed (issue #149).
+    SoftwareOpenH264,
+    /// h264_qsv: Intel Quick Sync driven by FFmpeg on the Windows raw path,
+    /// selected only after the Media Foundation bridge was rejected and its
+    /// own probe passed (plan 090 C).
+    HardwareQsv,
+}
+
+/// Which FFmpeg H.264 encoder the Windows raw path may use once the Media
+/// Foundation bridge is unavailable (plan 090 C). `Auto` keeps the OpenH264
+/// fallback; Quick Sync is opt-in until it has run real sessions.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowsH264EncoderPreference {
+    #[default]
+    Auto,
+    QuickSync,
+    Software,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EncoderPreferenceState {
+    pub preference: WindowsH264EncoderPreference,
+    /// Windows with an Intel graphics adapter: the only place the choice
+    /// does anything, and the only place the setting is shown.
+    pub quick_sync_available: bool,
+    /// The tester environment override decided `preference`; the saved
+    /// setting is ignored until it is removed.
+    pub env_override: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EncoderPreferenceSetParams {
+    pub preference: WindowsH264EncoderPreference,
+}
+
+/// One production encoder role represented by an off-air stream topology probe.
+///
+/// `shared` means one encoded video output feeds every enabled output. A separate
+/// recording/stream pair is explicit so preflight probes the same two encoders
+/// that session start will create, even when both use the same video profile.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamOutputTopologyRole {
+    Shared,
+    Recording,
+    Stream,
+}
+
+/// Secret-free input for `stream.output.topology.probe`.
+///
+/// The renderer sends already-normalized effective video profiles, never RTMP
+/// URLs, stream keys, OAuth credentials, or a full `StartSessionParams`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StreamOutputTopologyProbeParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ffmpeg_path: Option<String>,
+    pub stream_profile: VideoSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_profile: Option<VideoSettings>,
+    pub output_roles: Vec<StreamOutputTopologyRole>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StreamOutputBridge {
+    #[serde(rename = "raw-yuv420p")]
+    RawYuv420p,
+    #[serde(rename = "videotoolbox-h264-annex-b")]
+    VideoToolboxH264AnnexB,
+    #[serde(rename = "videotoolbox-h264-mpegts")]
+    VideoToolboxH264MpegTs,
+    #[serde(rename = "windows-media-foundation-h264-mpegts")]
+    WindowsMediaFoundationH264MpegTs,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamOutputTopologyProbeState {
+    NotRequired,
+    Passed,
+    Rejected,
+    Unsupported,
+}
+
+/// Completed output-topology verdict. The capability key is a SHA-256 over the
+/// trusted FFmpeg identity, normalized profiles, roles, and requested bridge;
+/// it deliberately does not expose a local executable path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamOutputTopologyProbeResult {
+    pub capability_key: String,
+    pub stream_profile: VideoSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_profile: Option<VideoSettings>,
+    pub output_roles: Vec<StreamOutputTopologyRole>,
+    pub requested_bridge_output: StreamOutputBridge,
+    pub effective_bridge_output: StreamOutputBridge,
+    pub effective_encode_backend: EncodeBackend,
+    pub probe_state: StreamOutputTopologyProbeState,
+    /// Why the topology fell back: only for a rejected or unsupported probe,
+    /// or when the effective bridge differs from the requested one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    /// Why the raw path uses this encoder (OpenH264 chosen explicitly, VAAPI
+    /// rejected, Quick Sync check failed). Informational in every probe state;
+    /// it never makes a passed or not-required topology a fallback (plan 0015).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_selection_reason: Option<String>,
+}
+
+/// Outcome of the Linux VAAPI render-node policy for one `/dev/dri/renderD*`
+/// node (Plan 052). `quarantined` means a previous probe of that node never
+/// returned (the host hung); `skipped` means another node was pinned.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinuxRenderNodeState {
+    ProbedOk,
+    Rejected,
+    Quarantined,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxRenderNodeDiagnostic {
+    pub node: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    pub state: LinuxRenderNodeState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Which VAAPI argument set the Linux probe accepted (Plan 053). `compat`
+/// is only ever chosen after `standard` was rejected on the same node.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinuxVaapiArgProfile {
+    #[default]
+    Standard,
+    Compat,
+}
+
+impl std::fmt::Display for LinuxVaapiArgProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Standard => "standard",
+            Self::Compat => "compat",
+        })
+    }
+}
+
+/// `performance.check.run` params. The ceiling is the largest output worth
+/// testing on this machine (the renderer sends the larger of the selected
+/// output and the display's native size); the ladder walks down from there.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PerformanceCheckRunParams {
+    pub ceiling_width: u32,
+    pub ceiling_height: u32,
+    pub ceiling_fps: u32,
+    /// Plan 200 D4: the next take would also write the Screen and Camera
+    /// files, so the check counts their encoders in its budget.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub separate_source_recordings: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PerformanceCheckRungVerdict {
+    Passed,
+    Failed,
+    /// Not run: a heavier rung failed so far below realtime that this one was
+    /// ruled out without spending the user's time on it.
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceCheckRung {
+    pub video: VideoSettings,
+    pub verdict: PerformanceCheckRungVerdict,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encode_backend: Option<EncodeBackend>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_backend: Option<CompositorBackend>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_speed: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_fps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_after_stop_ms: Option<u64>,
+    /// Bounded reason codes; empty when the rung passed.
+    #[serde(default)]
+    pub reasons: Vec<String>,
+}
+
+/// A completed check. `capability_key` names the machine the verdict belongs
+/// to (OS, arch, real GPU/driver identity, desktop app version, backend
+/// crate): when it no longer matches, the stored result is stale and the
+/// check runs again.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceCheckResult {
+    pub capability_key: String,
+    pub checked_at: String,
+    pub app_version: String,
+    pub duration_ms: u64,
+    pub recommended: VideoSettings,
+    /// True when nothing passed: the recommendation is the floor, unverified.
+    pub below_floor: bool,
+    pub rungs: Vec<PerformanceCheckRung>,
+}
+
+/// `performance.check.progress` event: which rung is being measured.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceCheckProgress {
+    pub rung_index: u32,
+    pub rung_count: u32,
+    pub video: VideoSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PerformanceCheckNotRecorded {
+    HostBusy,
+}
+
+/// `performance.check.get` result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceCheckState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_not_recorded: Option<PerformanceCheckNotRecorded>,
+    pub running: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<PerformanceCheckResult>,
+    /// The stored result was measured on a different adapter/driver/FFmpeg.
+    pub stale: bool,
+}
+
+/// Which compositor rendered the active shared-compositor frame.
+///
+/// - `Metal`: the GPU path (macOS OBS-parity target).
+/// - `D3d11`: the Windows GPU path when the complete capture/compositor/encoder
+///   capability probe agrees on one adapter and generation.
+/// - `Cpu`: the CPU compositor as the expected path on platforms without a
+///   supported GPU backend, and as the named Windows legacy path before a
+///   D3D11 session starts.
+/// - `CpuFallback`: macOS asked for Metal and could not get it — a real
+///   degradation, or Windows rejected D3D11 before session start. Both stay
+///   honest with a reason and count.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompositorBackend {
+    Metal,
+    D3d11,
+    Cpu,
+    CpuFallback,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowsD3d11MediaState {
+    #[default]
+    Unavailable,
+    Probing,
+    Live,
+    Draining,
+    Fallback,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowsD3d11CaptureBackend {
+    PreviewBgraUpload,
+    DesktopDuplication,
+    WindowsGraphicsCaptureMonitor,
+    LegacyFfmpeg,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowsD3d11CursorMode {
+    Embedded,
+    Separate,
+    ExcludedWgc,
+    /// Windows Graphics Capture draws the cursor into the frame (the route a
+    /// hybrid-graphics laptop takes when Desktop Duplication refuses).
+    EmbeddedWgc,
+    DisabledFallback,
+}
+
+/// One truthful, wire-safe snapshot of the Windows GPU media authority. It
+/// contains scalar diagnostics only: no COM pointer, shared texture handle, or
+/// HWND may cross this boundary.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11MediaDiagnostics {
+    pub state: WindowsD3d11MediaState,
+    #[serde(default)]
+    pub requested: bool,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_encoder_adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auxiliary_encoder_adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_backend: Option<WindowsD3d11CaptureBackend>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_mode: Option<WindowsD3d11CursorMode>,
+    #[serde(default)]
+    pub cursor_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_pixels_source: Option<String>,
+    #[serde(default)]
+    pub cursor_exclusion_guaranteed: bool,
+    #[serde(default)]
+    pub capture_readback_frames: u64,
+    /// Frames where Windows masked protected pixels while the remaining
+    /// desktop pixels continued through the D3D11 media path.
+    #[serde(default)]
+    pub protected_content_masked_frames: u64,
+    #[serde(default)]
+    pub texture_import_frames: u64,
+    #[serde(default)]
+    pub camera_upload_frames: u64,
+    #[serde(default)]
+    pub cursor_shape_uploads: u64,
+    #[serde(default)]
+    pub cursor_composited_frames: u64,
+    #[serde(default)]
+    pub compositor_cpu_fallback_frames: u64,
+    #[serde(default)]
+    pub preview_presents: u64,
+    #[serde(default)]
+    pub preview_drops: u64,
+    #[serde(default)]
+    pub preview_bmp_requests: u64,
+    #[serde(default)]
+    pub preview_bmp_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_pump_lag_p95_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_pump_lag_max_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_command_lag_p95_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_command_lag_max_ms: Option<f64>,
+    #[serde(default)]
+    pub maximum_consecutive_message_batch: u64,
+    #[serde(default)]
+    pub maximum_consecutive_media_batch: u64,
+    #[serde(default)]
+    pub encoder_gpu_samples: u64,
+    #[serde(default)]
+    pub encoder_system_memory_samples: u64,
+    #[serde(default)]
+    pub raw_video_copied_frames: u64,
+    #[serde(default)]
+    pub texture_pool_capacity: u64,
+    #[serde(default)]
+    pub texture_pool_in_use: u64,
+    #[serde(default)]
+    pub texture_pool_pressure_events: u64,
+    #[serde(default)]
+    pub adapter_mismatches: u64,
+    #[serde(default)]
+    pub device_resets: u64,
+    /// Aggregate count of abnormal bounded D3D synchronization waits that
+    /// expired. Normal zero-time capture polls with no new desktop frame are
+    /// deliberately excluded.
+    #[serde(default)]
+    pub synchronization_timeouts: u64,
+    #[serde(default)]
+    pub stale_generation_callbacks: u64,
+    /// Render-loop ticks whose work exceeded the frame interval before pacing.
+    #[serde(default)]
+    pub render_tick_overruns: u64,
+    /// Worst overshoot of any render tick beyond its frame interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_tick_lag_max_ms: Option<f64>,
+    /// Worst observed D3D11 compose_scene stage duration on the render thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_compose_stage_max_ms: Option<f64>,
+    /// Per-stage evidence behind `texture_pool_pressure_events` (#1042).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_pool_pressure: Option<WindowsD3d11TexturePoolPressureDiagnostics>,
+    /// Where the single D3D11 media thread spends its time, per stage, with
+    /// the slowest loop and compose broken down (#1042).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_stage_timings: Option<WindowsD3d11MediaStageTimingDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    /// Why `capture_backend` is not the Desktop Duplication the session asked
+    /// for while the D3D11 path stays live (issue #906: a hybrid-graphics
+    /// laptop whose panel is driven by the other GPU captures through Windows
+    /// Graphics Capture). Absent when the requested backend opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_route_reason: Option<String>,
+}
+
+/// One media-thread stage's wall time over the generation (#1042): how many
+/// times it ran, the p95 of its last 256 runs, and its worst run ever.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11StageTimingDiagnostics {
+    pub samples: u64,
+    pub p95_ms: f64,
+    pub max_ms: f64,
+}
+
+/// The D3D11 media thread's time by stage (#1042). Capture polling, compose,
+/// the camera upload, the encoder and the preview all run on that one
+/// thread, so a stall in any of them delays all of them; these name which.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11MediaStageTimingDiagnostics {
+    /// One loop iteration that did work, start to end.
+    #[serde(default)]
+    pub loop_busy: WindowsD3d11StageTimingDiagnostics,
+    /// Completing capture acquisitions (pointer composite and fence signal).
+    #[serde(default)]
+    pub capture_poll: WindowsD3d11StageTimingDiagnostics,
+    /// One compose command on the media thread, start to end.
+    #[serde(default)]
+    pub compose: WindowsD3d11StageTimingDiagnostics,
+    /// Waiting for the device's multithread lock before composing: time the
+    /// capture worker or the encoder held the shared immediate context.
+    #[serde(default)]
+    pub device_lock_wait: WindowsD3d11StageTimingDiagnostics,
+    /// The camera frame's `UpdateSubresource`.
+    #[serde(default)]
+    pub camera_upload: WindowsD3d11StageTimingDiagnostics,
+    /// Other image `UpdateSubresource` calls (backgrounds, overlays).
+    #[serde(default)]
+    pub image_upload: WindowsD3d11StageTimingDiagnostics,
+    #[serde(default)]
+    pub preview_pass: WindowsD3d11StageTimingDiagnostics,
+    #[serde(default)]
+    pub encoded_pass: WindowsD3d11StageTimingDiagnostics,
+    #[serde(default)]
+    pub nv12_pass: WindowsD3d11StageTimingDiagnostics,
+    #[serde(default)]
+    pub fence_signal: WindowsD3d11StageTimingDiagnostics,
+    /// On each encoder's own worker thread, not the media thread: an input
+    /// the media thread accepted, waiting to be submitted (the inputs ahead
+    /// of it and any wait for the transform's input credit).
+    #[serde(default)]
+    pub encoder_queue_wait: WindowsD3d11StageTimingDiagnostics,
+    /// One submit on the encoder worker, including the events it collects.
+    #[serde(default)]
+    pub encoder_submit: WindowsD3d11StageTimingDiagnostics,
+    /// The transform's `ProcessInput` alone, on the encoder worker.
+    #[serde(default)]
+    pub encoder_process_input: WindowsD3d11StageTimingDiagnostics,
+    /// One encoder worker poll that collected output or input releases.
+    #[serde(default)]
+    pub encoder_poll: WindowsD3d11StageTimingDiagnostics,
+    /// The slowest `ProcessOutput` within one submit or poll.
+    #[serde(default)]
+    pub encoder_process_output: WindowsD3d11StageTimingDiagnostics,
+    /// A successful `ProcessInput` to the transform releasing that input.
+    #[serde(default)]
+    pub encoder_input_hold: WindowsD3d11StageTimingDiagnostics,
+    /// Encoder refusals because the transform had issued no input credit.
+    #[serde(default)]
+    pub encoder_credit_refusals: u64,
+    /// Encoder refusals because Videorc's own in-flight cap (inputs queued
+    /// for the worker plus inputs the transform holds) was full.
+    #[serde(default)]
+    pub encoder_capacity_refusals: u64,
+    #[serde(default)]
+    pub encoder_max_in_flight: u32,
+    /// Accepted inputs an encoder worker released unsubmitted: no input
+    /// credit within its wait, or the transform refused them.
+    #[serde(default)]
+    pub encoder_dropped_inputs: u64,
+    #[serde(default)]
+    pub preview_present: WindowsD3d11StageTimingDiagnostics,
+    /// Loop iterations that opened or closed a capture, encoder or preview,
+    /// kept out of `loop_busy` and `slowest_loop`.
+    #[serde(default)]
+    pub setup_loops: u64,
+    /// The whole breakdown of the single slowest loop iteration.
+    #[serde(default)]
+    pub slowest_loop: WindowsD3d11MediaLoopBreakdownDiagnostics,
+    /// The whole breakdown of the single slowest compose.
+    #[serde(default)]
+    pub slowest_compose: WindowsD3d11ComposeBreakdownDiagnostics,
+    /// GPU durations of the compose passes from timestamp queries. Absent
+    /// when the device refused the queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<WindowsD3d11ComposeGpuTimingDiagnostics>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11MediaLoopBreakdownDiagnostics {
+    pub total_ms: f64,
+    pub capture_poll_ms: f64,
+    pub compose_ms: f64,
+    /// Handing encoder inputs to their workers; the transform calls run there.
+    pub encoder_submit_ms: f64,
+    pub preview_present_ms: f64,
+    pub other_command_ms: f64,
+    pub commands: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11ComposeBreakdownDiagnostics {
+    pub total_ms: f64,
+    pub device_lock_wait_ms: f64,
+    pub fence_refresh_ms: f64,
+    pub camera_upload_ms: f64,
+    pub image_upload_ms: f64,
+    pub preview_pass_ms: f64,
+    pub encoded_pass_ms: f64,
+    pub nv12_pass_ms: f64,
+    pub fence_signal_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11ComposeGpuTimingDiagnostics {
+    pub upload: WindowsD3d11StageTimingDiagnostics,
+    pub preview_pass: WindowsD3d11StageTimingDiagnostics,
+    pub encoded_pass: WindowsD3d11StageTimingDiagnostics,
+    pub nv12_pass: WindowsD3d11StageTimingDiagnostics,
+    pub total: WindowsD3d11StageTimingDiagnostics,
+    /// From issuing a compose to seeing its timestamps resolved; long values
+    /// mean the GPU queue ran far behind the CPU.
+    pub completion_latency: WindowsD3d11StageTimingDiagnostics,
+    pub disjoint: u64,
+    pub skipped: u64,
+}
+
+/// Why the D3D11 texture pool ran short (#1042). `texture_pool_pressure_events`
+/// stays the gate counter: it is the pool's exhaustions plus the render loop's
+/// pressure skips, so one exhausted compose counts in both. These fields split
+/// it apart and name what held the textures.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11TexturePoolPressureDiagnostics {
+    /// Acquires that found no free capture or preview BGRA texture.
+    pub bgra_exhaustions: u64,
+    /// Acquires that found no free encoder NV12 texture.
+    pub nv12_exhaustions: u64,
+    /// Render-loop ticks skipped for pool exhaustion or a full media queue.
+    pub render_pressure_skips: u64,
+    /// Summed over every exhaustion: the exhausted bucket's slots by holder.
+    pub holders: WindowsD3d11TexturePoolHolders,
+    /// Publication-to-release time per consumer role.
+    pub holds: WindowsD3d11TexturePoolRoleHolds,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11TexturePoolHolders {
+    pub writing: u64,
+    pub compositor: u64,
+    pub preview: u64,
+    pub record: u64,
+    pub stream: u64,
+    pub awaiting_fence: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11TexturePoolRoleHolds {
+    pub compositor: WindowsD3d11TextureRoleHold,
+    pub preview: WindowsD3d11TextureRoleHold,
+    pub record: WindowsD3d11TextureRoleHold,
+    pub stream: WindowsD3d11TextureRoleHold,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11TextureRoleHold {
+    pub releases: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_ms: Option<f64>,
+}
+
+/// Cumulative request counts (since backend start) for the HTTP image-polling preview
+/// transports. A native preview never fetches these, so a session in which they climb is
+/// not actually native — the honest signal behind the transport-honesty gate.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewImagePollCounts {
+    pub camera_png: u64,
+    pub screen_png: u64,
+    /// Requests to the PNG routes without the explicit debug opt-in. These are
+    /// rejected before encoding; any nonzero value is a production transport bug.
+    #[serde(default)]
+    pub production_png: u64,
+    /// Uncompressed latest-frame requests used by the Windows proof surface.
+    #[serde(default)]
+    pub camera_bmp: u64,
+    #[serde(default)]
+    pub screen_bmp: u64,
+    pub live_jpeg: u64,
+    pub live_mjpeg: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSocketQueueDiagnosticStats {
+    pub current_depth: u64,
+    pub max_depth: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_age_ms: Option<u64>,
+    pub coalesced_count: u64,
+    pub evicted_or_dropped_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSocketCommandLaneDiagnosticStats {
+    pub queue: WebSocketQueueDiagnosticStats,
+    pub expired_before_dispatch_count: u64,
+    pub rejected_before_dispatch_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSocketTransportDiagnosticStats {
+    pub reliable_response_queue: WebSocketQueueDiagnosticStats,
+    pub incoming_command_queue: WebSocketQueueDiagnosticStats,
+    pub coalesced_telemetry_queue: WebSocketQueueDiagnosticStats,
+    #[serde(default)]
+    pub command_lanes: std::collections::BTreeMap<String, WebSocketCommandLaneDiagnosticStats>,
+    pub slow_pressure_disconnect_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewCameraDropReasonStats {
+    pub frame_was_late: u64,
+    pub out_of_buffers: u64,
+    pub discontinuity: u64,
+    pub unknown: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewScreenFrameStatusStats {
+    pub complete: u64,
+    pub idle: u64,
+    pub blank: u64,
+    pub suspended: u64,
+    pub started: u64,
+    pub stopped: u64,
+    pub unknown: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSourceSurfaceBackingStats {
+    pub live_count: u64,
+    pub peak_count: u64,
+    pub estimated_bytes: u64,
+    pub peak_estimated_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_age_ms: Option<u64>,
+}
+
+/// Authoritative lifecycle for one capture-recovery incident. `Failed` is a
+/// latched terminal state: the backend never loops automatic restarts, and a
+/// new attempt requires the explicit `capture.recovery.retry` command.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureRecoveryPhase {
+    #[default]
+    Idle,
+    Degraded,
+    Restarting,
+    Verifying,
+    Recovered,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureRecoveryStage {
+    CameraDelivery,
+    ScreenDelivery,
+    CompositorRender,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureRecoverySource {
+    Camera,
+    Screen,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureRecoveryTrigger {
+    Automatic,
+    Manual,
+}
+
+/// Renderer-safe capture-recovery truth. Optional values are omitted, never
+/// serialized as `null`, so a healthy/idle backend remains compatible with
+/// strict optional schemas.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureRecoveryStatus {
+    /// Monotonic process-local publication revision. Consumers must ignore a
+    /// status whose revision is older than the newest revision they have
+    /// already accepted.
+    pub revision: u64,
+    pub phase: CaptureRecoveryPhase,
+    pub retryable: bool,
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<CaptureRecoveryStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<CaptureRecoverySource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<CaptureRecoveryTrigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "optional_duration_ms_is_unavailable")]
+    pub last_duration_ms: Option<f64>,
+}
+
+fn optional_duration_ms_is_unavailable(value: &Option<f64>) -> bool {
+    value.is_none_or(|value| !value.is_finite() || value < 0.0)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EncoderBridgeRoleOutputPressureStats {
+    pub output_queue_high_water_frames: u64,
+    pub output_queue_oldest_frame_age_high_water_ms: Option<u64>,
+    pub output_last_progress_age_ms: Option<u64>,
+    pub output_pressure_recovery_events: u64,
+    pub output_pre_encode_skipped_frames: u64,
+    pub video_toolbox_pending_encode_frames: u64,
+    pub video_toolbox_pending_fifo_frames: u64,
+    pub encoded_access_unit_dropped_frames: u64,
+}
+
+/// Last cumulative/high-water backend sample for one split-output encoder.
+/// Kept out of the public diagnostic contract; it exists only so generic
+/// counters and timing high-waters can be merged without depending on which
+/// role reported last.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EncoderBridgeRoleDiagnosticStats {
+    pub metal_target_frames: u64,
+    pub metal_target_copied_frames: u64,
+    pub metal_target_handle_frames: u64,
+    pub zero_copy_frames: u64,
+    pub video_toolbox_probe_frames: u64,
+    pub video_toolbox_probe_bytes: u64,
+    pub video_toolbox_probe_errors: u64,
+    pub video_toolbox_output_encode_ms: Option<u64>,
+    pub compositor_wait_p95_ms: Option<f64>,
+    pub video_toolbox_submit_p95_ms: Option<f64>,
+    pub raw_video_fifo_write_p95_ms: Option<f64>,
+    pub video_toolbox_fifo_write_p95_ms: Option<f64>,
+    pub video_toolbox_fifo_enqueue_p95_ms: Option<f64>,
+    pub video_toolbox_fifo_enqueue_max_ms: Option<f64>,
+    pub writer_loop_p95_ms: Option<f64>,
+    pub writer_sleep_p95_ms: Option<f64>,
+    pub writer_active_p95_ms: Option<f64>,
+    pub deadline_lag_p95_ms: Option<f64>,
+    pub deadline_lag_max_ms: Option<f64>,
+    pub late_deadline_ticks: u64,
+    pub schedule_skipped_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticStats {
+    pub session_id: Option<String>,
+    pub active_output_mode: Option<String>,
+    pub active_scene_revision: Option<u64>,
+    pub target_fps: Option<f64>,
+    pub capture_fps: Option<f64>,
+    pub render_fps: Option<f64>,
+    pub skipped_frames: u64,
+    pub dropped_frames: u64,
+    pub encoder_speed: Option<f64>,
+    pub encoder_bridge_queue_depth: u64,
+    /// Peak combined pending encoder + FIFO depth observed by an output bridge.
+    #[serde(default)]
+    pub encoder_bridge_output_queue_high_water_frames: u64,
+    /// Oldest frame currently waiting for VideoToolbox completion or FIFO output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_output_queue_oldest_frame_age_ms: Option<u64>,
+    /// Peak oldest-frame age retained after a pressured queue recovers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_output_queue_oldest_frame_age_high_water_ms: Option<u64>,
+    /// Milliseconds since the most recent encoder completion or complete FIFO AU write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_output_last_progress_age_ms: Option<u64>,
+    /// Cumulative enqueue attempts that encountered a full bounded output queue.
+    #[serde(default)]
+    pub encoder_bridge_output_queue_capacity_pressure_events: u64,
+    /// Cumulative pressured intervals that returned to the healthy budget.
+    #[serde(default)]
+    pub encoder_bridge_output_pressure_recovery_events: u64,
+    /// Cumulative frames intentionally discarded by output backpressure policy.
+    #[serde(default)]
+    pub encoder_bridge_output_queue_dropped_frames: u64,
+    /// Recording compositor ticks skipped before encode while queued AUs drain.
+    #[serde(default)]
+    pub encoder_bridge_output_pre_encode_skipped_frames: u64,
+    /// Current VideoToolbox callback/in-flight and FIFO-writer stage depths.
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_pending_encode_frames: u64,
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_pending_fifo_frames: u64,
+    /// Encoded H.264 access units rejected after encode; zero is required.
+    #[serde(default)]
+    pub encoder_bridge_encoded_access_unit_dropped_frames: u64,
+    /// Last role-local pressure samples used to build the aggregate fields above.
+    /// These are process-internal because the public diagnostic contract already
+    /// exposes the useful aggregate plus the established per-role queue fields.
+    /// Keeping the samples here prevents a quiet split-output role from erasing
+    /// pressure evidence emitted by the other role.
+    #[serde(skip)]
+    pub encoder_bridge_recording_output_pressure: EncoderBridgeRoleOutputPressureStats,
+    #[serde(skip)]
+    pub encoder_bridge_stream_output_pressure: EncoderBridgeRoleOutputPressureStats,
+    /// Role-local samples used to build generic split-output sums/high-waters.
+    /// Starting diagnostics reset both fields, preventing prior-session state
+    /// from entering a new recording.
+    #[serde(skip)]
+    pub encoder_bridge_recording_role_diagnostics: EncoderBridgeRoleDiagnosticStats,
+    #[serde(skip)]
+    pub encoder_bridge_stream_role_diagnostics: EncoderBridgeRoleDiagnosticStats,
+    pub encoder_bridge_input_fps: Option<f64>,
+    pub encoder_bridge_dropped_frames: u64,
+    /// FFmpeg progress-reported drops attributable to the recording bridge.
+    #[serde(default)]
+    pub encoder_bridge_recording_dropped_frames: u64,
+    /// FFmpeg progress-reported drops attributable to the stream bridge.
+    #[serde(default)]
+    pub encoder_bridge_stream_dropped_frames: u64,
+    /// FFmpeg progress-reported encoder speed for the recording bridge.
+    #[serde(default)]
+    pub encoder_bridge_recording_encoder_speed: Option<f64>,
+    /// FFmpeg progress-reported encoder speed for the stream bridge.
+    #[serde(default)]
+    pub encoder_bridge_stream_encoder_speed: Option<f64>,
+    /// Compositor frames re-fed to the encoder on under-run (duplicate frames in the
+    /// final file). Honest signal for the recording repeated-frame gate.
+    #[serde(default)]
+    pub encoder_bridge_repeated_frames: u64,
+    /// Distinct bridge under-run bursts. Separates isolated phase misses from clustered
+    /// stalls when repeated frames are nonzero.
+    #[serde(default)]
+    pub encoder_bridge_repeated_frame_bursts: u64,
+    /// Longest consecutive duplicate re-feed run observed by the bridge.
+    #[serde(default)]
+    pub encoder_bridge_max_repeated_frame_run: u64,
+    /// Ticks where synthetic filler was fed because no real compositor frame was ready.
+    #[serde(default)]
+    pub encoder_bridge_synthetic_frames: u64,
+    /// Max age (ms) of a compositor frame when it was fed to the encoder.
+    #[serde(default)]
+    pub encoder_bridge_source_age_ms: Option<u64>,
+    /// P95 age (ms) of compositor frames when they were fed to the encoder.
+    #[serde(default)]
+    pub encoder_bridge_source_age_p95_ms: Option<f64>,
+    /// P95 age (ms) of compositor frames that were re-fed as duplicate bridge frames.
+    #[serde(default)]
+    pub encoder_bridge_repeated_frame_age_p95_ms: Option<f64>,
+    /// Max age (ms) of compositor frames that were re-fed as duplicate bridge frames.
+    #[serde(default)]
+    pub encoder_bridge_repeated_frame_age_max_ms: Option<u64>,
+    /// FIFO ticks where the copied compositor frame also exposed an IOSurface-backed
+    /// Metal target. This is a candidate signal for the future zero-copy encoder path.
+    #[serde(default)]
+    pub encoder_bridge_metal_target_frames: u64,
+    /// FIFO frames written through the raw-video FFmpeg bridge. These are copied bytes,
+    /// not zero-copy VideoToolbox submissions.
+    #[serde(default)]
+    pub encoder_bridge_raw_video_copied_frames: u64,
+    /// Raw-video FFmpeg writes attributable to the recording bridge.
+    #[serde(default)]
+    pub encoder_bridge_recording_raw_video_copied_frames: u64,
+    /// Raw-video FFmpeg writes attributable to the stream bridge.
+    #[serde(default)]
+    pub encoder_bridge_stream_raw_video_copied_frames: u64,
+    /// Raw-video FFmpeg writes where the source frame also had an IOSurface-backed Metal
+    /// target. This proves the current Metal-target path is still copied.
+    #[serde(default)]
+    pub encoder_bridge_metal_target_copied_frames: u64,
+    /// Raw-video FFmpeg writes where the encoder bridge also received the retained
+    /// CoreVideo handle for the IOSurface-backed Metal target.
+    #[serde(default)]
+    pub encoder_bridge_metal_target_handle_frames: u64,
+    /// Frames submitted to the encoder without a CPU raw-video copy.
+    #[serde(default)]
+    pub encoder_bridge_zero_copy_frames: u64,
+    /// Retained Metal target frames encoded by the opt-in production-thread
+    /// VideoToolbox probe. This is not counted as zero-copy output until the raw FIFO
+    /// path is removed.
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_probe_frames: u64,
+    /// Encoded byte count copied from the opt-in VideoToolbox probe.
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_probe_bytes: u64,
+    /// Failed attempts by the opt-in VideoToolbox probe.
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_probe_errors: u64,
+    /// Retained Metal target frames written to the production VideoToolbox H.264 output.
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_output_frames: u64,
+    /// Encoded byte count written to the production VideoToolbox H.264 output.
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_output_bytes: u64,
+    /// Max inline VideoToolbox encode latency observed by the bridge writer.
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_output_encode_ms: Option<u64>,
+    /// Generic encoded-output backend selected for this session.
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_backend: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_requested_video_output: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_effective_video_output: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_encoder_identity: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_input_subtype: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_fallback_reason: Option<String>,
+    /// Cross-platform aliases populated by both VideoToolbox and Media Foundation.
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_frames: u64,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_bytes: u64,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_errors: u64,
+    #[serde(default)]
+    pub encoder_bridge_encoded_submit_p95_ms: Option<f64>,
+    #[serde(default)]
+    pub encoder_bridge_encoded_fifo_write_p95_ms: Option<f64>,
+    #[serde(default)]
+    pub encoder_bridge_active_encoded_output_encoders: u64,
+    #[serde(default)]
+    pub encoder_bridge_recording_encoded_output_frames: u64,
+    #[serde(default)]
+    pub encoder_bridge_recording_encoded_output_bytes: u64,
+    #[serde(default)]
+    pub encoder_bridge_stream_encoded_output_frames: u64,
+    #[serde(default)]
+    pub encoder_bridge_stream_encoded_output_bytes: u64,
+    /// Local recording output profile used by split-output sessions.
+    #[serde(default)]
+    pub recording_output_width: Option<u32>,
+    #[serde(default)]
+    pub recording_output_height: Option<u32>,
+    #[serde(default)]
+    pub recording_output_fps: Option<u32>,
+    #[serde(default)]
+    pub recording_output_bitrate_kbps: Option<u32>,
+    /// Livestream output profile used by split-output sessions.
+    #[serde(default)]
+    pub stream_output_width: Option<u32>,
+    #[serde(default)]
+    pub stream_output_height: Option<u32>,
+    #[serde(default)]
+    pub stream_output_fps: Option<u32>,
+    #[serde(default)]
+    pub stream_output_bitrate_kbps: Option<u32>,
+    /// The stream's measured video bitrate over the last encoder window
+    /// (plan 218 S2): the bytes the stream encoder produced, not FFmpeg's
+    /// progress figure. FFmpeg reports its first output only: the recording
+    /// file when one is written (see `recording_measured_bitrate_kbps`), and
+    /// nothing at all when that output is an RTMP leg. Audio is not included;
+    /// the chosen stream bitrate it compares against is the video's too.
+    #[serde(default)]
+    pub stream_measured_bitrate_kbps: Option<f64>,
+    /// Lowest non-zero measured stream video bitrate observed this session.
+    #[serde(default)]
+    pub stream_measured_bitrate_min_kbps: Option<f64>,
+    /// Highest non-zero measured stream video bitrate observed this session.
+    #[serde(default)]
+    pub stream_measured_bitrate_max_kbps: Option<f64>,
+    /// Cumulative encoded video bytes the stream encoder handed to FFmpeg.
+    #[serde(default)]
+    pub stream_output_total_bytes: u64,
+    /// FFmpeg's progress bitrate for the recording file, when one is written
+    /// (plan 218 S2). Video plus audio, as the container sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_measured_bitrate_kbps: Option<f64>,
+    /// FFmpeg's progress `total_size` for the recording file.
+    #[serde(default)]
+    pub recording_output_total_bytes: u64,
+    /// Cumulative frames FFmpeg reports duplicating for this stream process generation.
+    #[serde(default)]
+    pub stream_duplicated_frames: u64,
+    /// Plan 218 S2: how the live stream is delivering, over a rolling 30 s
+    /// window, while a stream runs. Replaces the once-per-session
+    /// `stream-output-pressure` notice. Absent without a stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_delivery: Option<StreamDeliveryState>,
+    /// Plan 218 S2: per-destination fifo overflow counts (no URLs or keys),
+    /// so a support bundle names the leg whose connection fell short.
+    /// Absent until a leg overflows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_leg_overflows: Option<Vec<StreamLegOverflowCount>>,
+    /// Plan 218 S2: the session's destinations, for the support bundle. The
+    /// count of legs FFmpeg streams to, and their platforms in leg order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_destination_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_destination_platforms: Option<Vec<String>>,
+    /// Plan 218 S2: the microphone sync offset the session started with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone_sync_offset_ms: Option<i32>,
+    /// Number of distinct production VideoToolbox output encoders active for the session.
+    #[serde(default)]
+    pub encoder_bridge_active_video_toolbox_output_encoders: u64,
+    /// Frames/bytes produced by the local-recording VideoToolbox output encoder.
+    #[serde(default)]
+    pub encoder_bridge_recording_video_toolbox_output_frames: u64,
+    #[serde(default)]
+    pub encoder_bridge_recording_video_toolbox_output_bytes: u64,
+    /// Frames/bytes produced by the livestream VideoToolbox output encoder.
+    #[serde(default)]
+    pub encoder_bridge_stream_video_toolbox_output_frames: u64,
+    #[serde(default)]
+    pub encoder_bridge_stream_video_toolbox_output_bytes: u64,
+    /// True only when diagnostics prove separate record and stream output encoders.
+    #[serde(default)]
+    pub encoder_bridge_separate_output_encoders_active: bool,
+    /// In split-output sessions the generic timing fields below are the worst
+    /// role-local session high-water. This keeps them truthful and independent
+    /// of report order; established role-specific writer fields remain below.
+    /// P95 time the bridge writer spent waiting for a fresh compositor frame.
+    #[serde(default)]
+    pub encoder_bridge_compositor_wait_p95_ms: Option<f64>,
+    /// P95 time the bridge writer spent submitting a retained target to VideoToolbox.
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_submit_p95_ms: Option<f64>,
+    /// P95 time the raw-video FIFO worker spent writing one frame into FFmpeg.
+    #[serde(default)]
+    pub encoder_bridge_raw_video_fifo_write_p95_ms: Option<f64>,
+    /// P95 time the bridge writer spent writing encoded H.264 bytes into FFmpeg.
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_fifo_write_p95_ms: Option<f64>,
+    /// P95 time spent waiting to enqueue encoded VideoToolbox frames for the FIFO writer.
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_fifo_enqueue_p95_ms: Option<f64>,
+    /// Max time spent waiting to enqueue encoded VideoToolbox frames for the FIFO writer.
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_fifo_enqueue_max_ms: Option<f64>,
+    /// P95 wall time for one bridge writer loop tick, including intentional CFR
+    /// deadline sleep.
+    #[serde(default)]
+    pub encoder_bridge_writer_loop_p95_ms: Option<f64>,
+    /// P95 time a bridge writer tick spent sleeping until its scheduled CFR deadline.
+    #[serde(default)]
+    pub encoder_bridge_writer_sleep_p95_ms: Option<f64>,
+    /// P95 active bridge writer work after deadline sleep, including compositor wait,
+    /// VideoToolbox submission, and encoded-output drain.
+    #[serde(default)]
+    pub encoder_bridge_writer_active_p95_ms: Option<f64>,
+    /// P95 schedule lag for bridge writer ticks that missed their CFR deadline during
+    /// the active session.
+    #[serde(default)]
+    pub encoder_bridge_deadline_lag_p95_ms: Option<f64>,
+    /// Max bridge writer schedule lag observed during the active session.
+    #[serde(default)]
+    pub encoder_bridge_deadline_lag_max_ms: Option<f64>,
+    /// Cumulative bridge writer ticks that started more than the late-deadline threshold
+    /// after their scheduled CFR deadline.
+    #[serde(default)]
+    pub encoder_bridge_late_deadline_ticks: u64,
+    /// Wall-clock milliseconds the bridge schedule explicitly skipped during
+    /// pathological stalls (app nap, display sleep). Healthy sessions: ~0.
+    /// Any nonzero value is honest, bounded loss — never silent compression
+    /// (plan 026).
+    #[serde(default)]
+    pub encoder_bridge_schedule_skipped_ms: u64,
+    /// Recording-leg bridge input FPS for split-output sessions.
+    #[serde(default)]
+    pub encoder_bridge_recording_input_fps: Option<f64>,
+    /// Stream-leg bridge input FPS for split-output sessions.
+    #[serde(default)]
+    pub encoder_bridge_stream_input_fps: Option<f64>,
+    /// Recording-leg output queue state for split-output sessions.
+    #[serde(default)]
+    pub encoder_bridge_recording_queue_depth: u64,
+    #[serde(default)]
+    pub encoder_bridge_recording_queue_oldest_frame_age_ms: Option<u64>,
+    #[serde(default)]
+    pub encoder_bridge_recording_queue_capacity_pressure_events: u64,
+    #[serde(default)]
+    pub encoder_bridge_recording_queue_dropped_frames: u64,
+    /// Streaming-leg output queue state for split-output sessions.
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_depth: u64,
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_oldest_frame_age_ms: Option<u64>,
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_capacity_pressure_events: u64,
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_dropped_frames: u64,
+    /// Recording-leg bridge writer p95 for split-output sessions.
+    #[serde(default)]
+    pub encoder_bridge_recording_writer_loop_p95_ms: Option<f64>,
+    /// Stream-leg bridge writer p95 for split-output sessions.
+    #[serde(default)]
+    pub encoder_bridge_stream_writer_loop_p95_ms: Option<f64>,
+    /// Recording-leg active writer work p95 for split-output sessions.
+    #[serde(default)]
+    pub encoder_bridge_recording_writer_active_p95_ms: Option<f64>,
+    /// Stream-leg active writer work p95 for split-output sessions.
+    #[serde(default)]
+    pub encoder_bridge_stream_writer_active_p95_ms: Option<f64>,
+    /// Recording-leg FIFO enqueue wait p95 for split-output sessions.
+    #[serde(default)]
+    pub encoder_bridge_recording_video_toolbox_fifo_enqueue_p95_ms: Option<f64>,
+    /// Stream-leg FIFO enqueue wait p95 for split-output sessions.
+    #[serde(default)]
+    pub encoder_bridge_stream_video_toolbox_fifo_enqueue_p95_ms: Option<f64>,
+    /// Recording-leg FIFO enqueue max wait for split-output sessions.
+    #[serde(default)]
+    pub encoder_bridge_recording_video_toolbox_fifo_enqueue_max_ms: Option<f64>,
+    /// Stream-leg FIFO enqueue max wait for split-output sessions.
+    #[serde(default)]
+    pub encoder_bridge_stream_video_toolbox_fifo_enqueue_max_ms: Option<f64>,
+    /// Plan 218 S2: the stream writer's own figures, kept apart from the
+    /// recording writer's (the generic fields keep whichever writer reported
+    /// last). P95 time to write one encoded stream access unit into FFmpeg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_stream_video_toolbox_fifo_write_p95_ms: Option<f64>,
+    /// P95 age of the stream queue's oldest frame, sampled every writer tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_stream_queue_age_p95_ms: Option<f64>,
+    /// Stream ticks coalesced because the queue reached its depth limit.
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_depth_trips: u64,
+    /// Stream ticks coalesced because the oldest frame reached the age limit.
+    #[serde(default)]
+    pub encoder_bridge_stream_queue_age_trips: u64,
+    /// Which limit tripped last: `depth` or `age`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_stream_queue_last_trip: Option<String>,
+    pub encoder_bridge_error: Option<String>,
+    /// Which encoder the active session actually requested — proves hardware vs software
+    /// encode (previously unrecorded).
+    #[serde(default)]
+    pub encode_backend: Option<EncodeBackend>,
+    /// Linux only: every render node the VAAPI policy saw and what it did
+    /// with it, so the evidence names the GPU that encoded (Plan 052).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linux_render_nodes: Option<Vec<LinuxRenderNodeDiagnostic>>,
+    /// Linux VAAPI only: the argument profile the session encodes with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linux_vaapi_arg_profile: Option<LinuxVaapiArgProfile>,
+    /// Which compositor backend produced the most recent diagnostic window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_backend: Option<CompositorBackend>,
+    /// Reason the shared compositor had to use CPU fallback.
+    #[serde(default)]
+    pub compositor_fallback_reason: Option<String>,
+    /// Cumulative frames rendered by the CPU compositor as the platform's
+    /// expected path (no GPU compositor exists off macOS). Never a fault.
+    #[serde(default)]
+    pub compositor_cpu_frames: u64,
+    /// Cumulative frames rendered by CPU FALLBACK during the active compositor
+    /// run: a GPU compositor was expected and not reached. Nonzero is a fault.
+    #[serde(default)]
+    pub compositor_cpu_fallback_frames: u64,
+    /// Cumulative render ticks of the active record/stream compositor run
+    /// (not the preview-only compositor). Frame accounting at stop.
+    #[serde(default)]
+    pub compositor_ticks: u64,
+    /// Cumulative frame intervals the record/stream compositor loop missed
+    /// entirely (ticks it was too late to render). Frame accounting at stop.
+    #[serde(default)]
+    pub compositor_tick_skipped: u64,
+    /// Recording-leg bridge writer ticks that fed a fresh compositor frame.
+    #[serde(default)]
+    pub encoder_bridge_fresh_frames: u64,
+    /// Frames the recording-leg bridge submitted to the Media Foundation
+    /// encoder (Windows only; zero elsewhere).
+    #[serde(default)]
+    pub encoder_bridge_mf_submitted_frames: u64,
+    /// Writer-thread Media Foundation input-credit waits that hit the
+    /// two-frame cap and skipped the frame instead of stalling the schedule.
+    #[serde(default)]
+    pub encoder_bridge_mf_input_credit_timeouts: u64,
+    /// P95 wall time the writer thread spent waiting for a Media Foundation
+    /// input credit (Windows only). MUST skip when None: the renderer contract
+    /// validates this key with a finite-number schema, and serde would emit
+    /// `null` — which blocked every macOS session start in 0.9.68–0.9.70.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_mf_input_credit_wait_p95_ms: Option<f64>,
+    /// Scalar-only state for the Windows D3D11 capture/compositor/presenter/MF
+    /// authority. This remains present (with `unavailable`) on other platforms
+    /// so support-bundle and renderer contracts stay deterministic.
+    #[serde(default)]
+    pub windows_d3d11_media: WindowsD3d11MediaDiagnostics,
+    #[serde(default)]
+    pub websocket_transport: WebSocketTransportDiagnosticStats,
+    /// Cumulative HTTP image-poll request counts. The transport-honesty gate fails when
+    /// these climb during a session the UI claims is rendering a native preview.
+    #[serde(default)]
+    pub preview_image_poll_counts: PreviewImagePollCounts,
+    pub preview_target_fps: Option<f64>,
+    pub preview_frame_age_ms: Option<u64>,
+    pub preview_transport: PreviewTransport,
+    #[serde(default)]
+    pub preview_source_fps: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub preview_surface_backing: PreviewSurfaceBacking,
+    /// True while the proof/fallback host has source image polling disabled. This can be
+    /// intentional during recording, but it means a fast preview host is not proving
+    /// visible source pixels.
+    #[serde(default)]
+    pub preview_frame_polling_suppressed: bool,
+    /// True when the host reports at least one live source layer/pixel source presented.
+    /// A native CAMetalLayer activation should eventually make this true without HTTP
+    /// image polling.
+    #[serde(default)]
+    pub preview_source_pixels_present: bool,
+    pub preview_present_fps: Option<f64>,
+    pub preview_input_to_present_latency_ms: Option<u64>,
+    pub preview_input_to_present_latency_p50_ms: Option<u64>,
+    pub preview_input_to_present_latency_p95_ms: Option<u64>,
+    pub preview_input_to_present_latency_p99_ms: Option<u64>,
+    /// Difference between the newest compositor frame observed by the preview host and
+    /// the compositor frame most recently presented. OBS-style preview may skip frames,
+    /// but should not trail the compositor by more than a couple frames.
+    #[serde(default)]
+    pub preview_compositor_frame_lag: Option<u64>,
+    pub preview_render_frame_time_p50_ms: Option<f64>,
+    pub preview_render_frame_time_p95_ms: Option<f64>,
+    pub preview_render_frame_time_p99_ms: Option<f64>,
+    /// P95 time spent fetching the latest live source frame handles for one compositor
+    /// tick. High values point to capture/frame-store contention before Metal work
+    /// begins.
+    #[serde(default)]
+    pub compositor_source_fetch_p95_ms: Option<f64>,
+    /// P95 time spent snapshotting the compositor scene/frame-store handles before
+    /// source frame fetch begins.
+    #[serde(default)]
+    pub compositor_scene_snapshot_p95_ms: Option<f64>,
+    /// P95 wall time spent fetching the latest camera frame handle.
+    #[serde(default)]
+    pub compositor_camera_frame_fetch_p95_ms: Option<f64>,
+    /// P95 wall time spent fetching the latest screen/window frame handle.
+    #[serde(default)]
+    pub compositor_screen_frame_fetch_p95_ms: Option<f64>,
+    /// P95 time spent preparing visible scene sources for the Metal compositor before
+    /// issuing draw work.
+    #[serde(default)]
+    pub compositor_gpu_prepare_p95_ms: Option<f64>,
+    /// P95 time spent allocating/updating per-source Metal textures from live BGRA
+    /// frames. This is the live-source upload pressure signal.
+    #[serde(default)]
+    pub compositor_gpu_source_texture_p95_ms: Option<f64>,
+    /// Cumulative live-source frames imported from IOSurface storage into Metal.
+    #[serde(default)]
+    pub compositor_source_iosurface_import_frames: u64,
+    /// Cumulative live-source frames imported from CVPixelBuffer storage into Metal.
+    #[serde(default)]
+    pub compositor_source_cvpixelbuffer_import_frames: u64,
+    /// Cumulative live-source frames uploaded to Metal from CPU BGRA bytes.
+    #[serde(default)]
+    pub compositor_source_byte_upload_frames: u64,
+    /// Cumulative held capture frames that reused an already imported Metal texture.
+    #[serde(default)]
+    pub compositor_source_capture_texture_reuses: u64,
+    /// Camera subset of held capture texture reuses.
+    #[serde(default)]
+    pub compositor_camera_source_capture_texture_reuses: u64,
+    /// Screen/window subset of held capture texture reuses.
+    #[serde(default)]
+    pub compositor_screen_source_capture_texture_reuses: u64,
+    /// Completed-command boundaries that flushed the CoreVideo Metal texture cache.
+    #[serde(default)]
+    pub compositor_source_texture_cache_flushes: u64,
+    /// Cached capture-source CVMetalTexture/IOSurface imports currently retained.
+    /// Absent off macOS, where the Metal ownership path does not exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_cached_capture_source_imports_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_cached_capture_source_imports_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_cached_capture_source_imports_ceiling: Option<u64>,
+    /// IOSurface-backed Metal compositor target-ring slots retained process-wide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_target_ring_slots_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_target_ring_slots_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_target_ring_slots_ceiling: Option<u64>,
+    /// Encoder completion guards still retaining an IOSurface target frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_metal_target_refs_in_flight_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_metal_target_refs_in_flight_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_metal_target_refs_in_flight_ceiling: Option<u64>,
+    /// Native presenter cache lifetime accounting reported by Electron main.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_ceiling: Option<u64>,
+    /// Cumulative live-source zero-copy import attempts that fell back to byte upload.
+    #[serde(default)]
+    pub compositor_source_import_failures: u64,
+    /// Cumulative camera frames imported from IOSurface storage into Metal.
+    #[serde(default)]
+    pub compositor_camera_source_iosurface_import_frames: u64,
+    /// Cumulative camera frames imported from CVPixelBuffer storage into Metal.
+    #[serde(default)]
+    pub compositor_camera_source_cvpixelbuffer_import_frames: u64,
+    /// Cumulative camera frames uploaded to Metal from CPU BGRA bytes.
+    #[serde(default)]
+    pub compositor_camera_source_byte_upload_frames: u64,
+    /// Cumulative camera zero-copy import attempts that fell back to byte upload.
+    #[serde(default)]
+    pub compositor_camera_source_import_failures: u64,
+    /// Cumulative screen/window frames imported from IOSurface storage into Metal.
+    #[serde(default)]
+    pub compositor_screen_source_iosurface_import_frames: u64,
+    /// Cumulative screen/window frames imported from CVPixelBuffer storage into Metal.
+    #[serde(default)]
+    pub compositor_screen_source_cvpixelbuffer_import_frames: u64,
+    /// Cumulative screen/window frames uploaded to Metal from CPU BGRA bytes.
+    #[serde(default)]
+    pub compositor_screen_source_byte_upload_frames: u64,
+    /// Cumulative screen/window zero-copy import attempts that fell back to byte upload.
+    #[serde(default)]
+    pub compositor_screen_source_import_failures: u64,
+    /// P95 time spent importing/uploading source textures in the latest diagnostics window.
+    #[serde(default)]
+    pub compositor_source_import_p95_ms: Option<f64>,
+    /// P95 time spent waiting for the Metal command buffer to complete.
+    #[serde(default)]
+    pub compositor_gpu_command_wait_p95_ms: Option<f64>,
+    /// P95 total time spent inside the Metal compose call.
+    #[serde(default)]
+    pub compositor_gpu_total_p95_ms: Option<f64>,
+    /// P95 time spent publishing the finished compositor frame into the shared frame
+    /// store.
+    #[serde(default)]
+    pub compositor_frame_store_publish_p95_ms: Option<f64>,
+    /// P95 wall-clock interval between compositor ticks. High values mean the render
+    /// task is waking late even if the measured render work is cheap.
+    #[serde(default)]
+    pub compositor_tick_gap_p95_ms: Option<f64>,
+    /// Max wall-clock interval between compositor ticks in the latest diagnostics
+    /// window.
+    #[serde(default)]
+    pub compositor_tick_gap_max_ms: Option<f64>,
+    /// P95 wall time spent refreshing cached live source handles outside the measured
+    /// render block.
+    #[serde(default)]
+    pub compositor_live_source_refresh_p95_ms: Option<f64>,
+    /// P95 wall time spent updating preview-surface frame progress outside the measured
+    /// render block.
+    #[serde(default)]
+    pub compositor_preview_surface_progress_p95_ms: Option<f64>,
+    /// P95 wall time spent updating/emitting compositor frame progress outside the
+    /// measured render block.
+    #[serde(default)]
+    pub compositor_status_progress_p95_ms: Option<f64>,
+    /// Cumulative compositor ticks that skipped preview-surface progress because the
+    /// UI status lock was busy.
+    #[serde(default)]
+    pub compositor_preview_surface_lock_contentions: u64,
+    /// Cumulative compositor ticks that skipped compositor progress because the status
+    /// lock was busy.
+    #[serde(default)]
+    pub compositor_status_lock_contentions: u64,
+    /// Cumulative compositor ticks where the non-blocking camera source frame lock was
+    /// busy, so the compositor reused the cached camera frame for that tick.
+    #[serde(default)]
+    pub compositor_camera_source_try_lock_misses: u64,
+    /// Cumulative compositor ticks where the non-blocking screen/window source frame
+    /// lock was busy, so the compositor reused the cached screen/window frame for that
+    /// tick.
+    #[serde(default)]
+    pub compositor_screen_source_try_lock_misses: u64,
+    /// Cumulative bounded blocking camera source refreshes after source-store
+    /// contention or a visibly stale cached camera frame.
+    #[serde(default)]
+    pub compositor_camera_source_blocking_refreshes: u64,
+    /// Cumulative bounded blocking screen/window source refreshes after
+    /// source-store contention or a visibly stale cached screen/window frame.
+    #[serde(default)]
+    pub compositor_screen_source_blocking_refreshes: u64,
+    /// Cumulative compositor ticks that served a camera frame the capture
+    /// pipeline had replaced since the previous tick (fresh content).
+    #[serde(default)]
+    pub compositor_camera_source_fresh_serves: u64,
+    /// Cumulative compositor ticks that re-served the identical camera frame
+    /// handle as the previous tick (held content; the producer delivered
+    /// nothing new). Held ≫ fresh during a session is the frozen-recording
+    /// signature of the 0.9.71 second-session lag.
+    #[serde(default)]
+    pub compositor_camera_source_held_serves: u64,
+    /// Oldest capture age (ms) of any camera frame the compositor served.
+    #[serde(default)]
+    pub compositor_camera_source_served_age_max_ms: u64,
+    /// Cumulative compositor ticks that served a fresh screen/window frame.
+    #[serde(default)]
+    pub compositor_screen_source_fresh_serves: u64,
+    /// Cumulative compositor ticks that re-served the identical screen/window
+    /// frame handle as the previous tick.
+    #[serde(default)]
+    pub compositor_screen_source_held_serves: u64,
+    /// Oldest capture age (ms) of any screen/window frame the compositor served.
+    #[serde(default)]
+    pub compositor_screen_source_served_age_max_ms: u64,
+    /// The pipeline stage the capture-health monitor currently declares
+    /// degraded (`camera-delivery` / `compositor-render`), or absent while
+    /// healthy. skip_serializing_if is load-bearing: the renderer contract
+    /// accepts undefined, and a serialized `null` here is the app-killing
+    /// defect class of 0.9.68 and 0.9.79 ([[videorc-serde-null-contract-trap]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_pipeline_degraded_stage: Option<String>,
+    /// Recovery fields are absent while idle. This is intentionally separate
+    /// from `capturePipelineDegradedStage`: health detects the fault, while
+    /// recovery owns restart/verification authority and its failure latch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_recovery_phase: Option<CaptureRecoveryPhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_recovery_source: Option<CaptureRecoverySource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_recovery_attempts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_recovery_last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "optional_duration_ms_is_unavailable")]
+    pub capture_recovery_last_duration_ms: Option<f64>,
+    pub preview_repeated_frames: u64,
+    pub preview_surface_resize_count: u64,
+    pub preview_latency_ms: Option<u64>,
+    pub preview_dropped_frames: u64,
+    pub preview_camera_frame_age_ms: Option<u64>,
+    pub preview_camera_source_fps: Option<f64>,
+    pub preview_camera_dropped_frames: u64,
+    /// AVFoundation didOutput callbacks observed before any FrameStore validation/publication.
+    #[serde(default)]
+    pub preview_camera_capture_callback_count: u64,
+    /// AVFoundation didDrop callbacks, independent of locally rejected didOutput samples.
+    #[serde(default)]
+    pub preview_camera_did_drop_callback_count: u64,
+    /// Camera frames successfully published to the shared FrameStore.
+    #[serde(default)]
+    pub preview_camera_frame_store_publications: u64,
+    /// Age of the latest AVFoundation didOutput callback, even if it did not publish a frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_camera_capture_callback_age_ms: Option<u64>,
+    /// Latest camera FrameStore sequence visible to consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_camera_latest_sequence: Option<u64>,
+    /// FourCC delivered by the latest valid AVFoundation sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_camera_capture_pixel_format: Option<String>,
+    #[serde(default)]
+    pub preview_camera_drop_reasons: PreviewCameraDropReasonStats,
+    #[serde(default)]
+    pub preview_camera_surface_backing: PreviewSourceSurfaceBackingStats,
+    /// Latest native camera state reported by the AVFoundation preview source.
+    #[serde(default)]
+    pub preview_camera_state: Option<PreviewCameraState>,
+    /// Native AVFoundation unique ID for the selected camera.
+    #[serde(default)]
+    pub preview_camera_device_unique_id: Option<String>,
+    /// Latest native camera status message, including permission/device-missing reasons.
+    #[serde(default)]
+    pub preview_camera_status_message: Option<String>,
+    /// Camera capture width requested by layout/output policy.
+    #[serde(default)]
+    pub preview_camera_requested_width: Option<u32>,
+    /// Camera capture height requested by layout/output policy.
+    #[serde(default)]
+    pub preview_camera_requested_height: Option<u32>,
+    /// Latest actual camera frame width received from AVFoundation.
+    #[serde(default)]
+    pub preview_camera_actual_width: Option<u32>,
+    /// Latest actual camera frame height received from AVFoundation.
+    #[serde(default)]
+    pub preview_camera_actual_height: Option<u32>,
+    /// Selected native AVFoundation format width.
+    #[serde(default)]
+    pub preview_camera_selected_format_width: Option<u32>,
+    /// Selected native AVFoundation format height.
+    #[serde(default)]
+    pub preview_camera_selected_format_height: Option<u32>,
+    /// Selected native AVFoundation format minimum FPS.
+    #[serde(default)]
+    pub preview_camera_selected_format_min_fps: Option<f64>,
+    /// Selected native AVFoundation format maximum FPS.
+    #[serde(default)]
+    pub preview_camera_selected_format_max_fps: Option<f64>,
+    /// Native AVFoundation camera whose capability matrix was sampled.
+    #[serde(default)]
+    pub preview_camera_capability_device_id: Option<String>,
+    /// Structured AVFoundation camera format matrix: one entry per resolution/fps range.
+    #[serde(default)]
+    pub preview_camera_capability_formats: Vec<CameraCapabilityFormat>,
+    /// Human-readable reason the camera capability matrix could not be sampled.
+    #[serde(default)]
+    pub preview_camera_capability_error: Option<String>,
+    /// P95 interval between AVFoundation camera sample callbacks.
+    #[serde(default)]
+    pub preview_camera_capture_gap_p95_ms: Option<f64>,
+    /// P99 interval between AVFoundation camera sample callbacks.
+    #[serde(default)]
+    pub preview_camera_capture_gap_p99_ms: Option<f64>,
+    /// Max interval between AVFoundation camera sample callbacks.
+    #[serde(default)]
+    pub preview_camera_capture_gap_max_ms: Option<f64>,
+    /// P95 interval between AVFoundation camera sample presentation timestamps.
+    #[serde(default)]
+    pub preview_camera_sample_pts_gap_p95_ms: Option<f64>,
+    /// P99 interval between AVFoundation camera sample presentation timestamps.
+    #[serde(default)]
+    pub preview_camera_sample_pts_gap_p99_ms: Option<f64>,
+    /// Max interval between AVFoundation camera sample presentation timestamps.
+    #[serde(default)]
+    pub preview_camera_sample_pts_gap_max_ms: Option<f64>,
+    /// P95 time spent locking the AVFoundation camera CVPixelBuffer base address.
+    #[serde(default)]
+    pub preview_camera_pixel_buffer_lock_p95_ms: Option<f64>,
+    /// P95 time spent copying BGRA rows out of the AVFoundation camera sample.
+    #[serde(default)]
+    pub preview_camera_row_copy_p95_ms: Option<f64>,
+    /// P95 wall time spent publishing the copied camera frame to the source frame store.
+    #[serde(default)]
+    pub preview_camera_publish_p95_ms: Option<f64>,
+    /// Bytes copied for the latest native camera capture frame.
+    #[serde(default)]
+    pub preview_camera_frame_bytes: u64,
+    pub preview_screen_frame_age_ms: Option<u64>,
+    pub preview_screen_source_fps: Option<f64>,
+    pub preview_screen_dropped_frames: u64,
+    /// ScreenCaptureKit callbacks observed before status/image validation.
+    #[serde(default)]
+    pub preview_screen_capture_callback_count: u64,
+    /// Screen frames successfully published to the shared FrameStore.
+    #[serde(default)]
+    pub preview_screen_frame_store_publications: u64,
+    /// Age of the latest ScreenCaptureKit callback, including non-complete statuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_screen_capture_callback_age_ms: Option<u64>,
+    /// Latest screen FrameStore sequence visible to consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_screen_latest_sequence: Option<u64>,
+    #[serde(default)]
+    pub preview_screen_frame_statuses: PreviewScreenFrameStatusStats,
+    #[serde(default)]
+    pub preview_screen_surface_backing: PreviewSourceSurfaceBackingStats,
+    /// Latest native ScreenCaptureKit status message, including permission/startup errors.
+    #[serde(default)]
+    pub preview_screen_message: Option<String>,
+    /// Native ScreenCaptureKit source width selected for the live screen/window source.
+    #[serde(default)]
+    pub preview_screen_native_width: Option<u32>,
+    /// Native ScreenCaptureKit source height selected for the live screen/window source.
+    #[serde(default)]
+    pub preview_screen_native_height: Option<u32>,
+    /// Width requested from ScreenCaptureKit after production capture policy selection.
+    #[serde(default)]
+    pub preview_screen_requested_width: Option<u32>,
+    /// Height requested from ScreenCaptureKit after production capture policy selection.
+    #[serde(default)]
+    pub preview_screen_requested_height: Option<u32>,
+    /// Actual latest ScreenCaptureKit frame width received from CoreVideo.
+    #[serde(default)]
+    pub preview_screen_actual_width: Option<u32>,
+    /// Actual latest ScreenCaptureKit frame height received from CoreVideo.
+    #[serde(default)]
+    pub preview_screen_actual_height: Option<u32>,
+    /// Whether the latest ScreenCaptureKit frame retained a zero-copy source handle.
+    #[serde(default)]
+    pub preview_screen_iosurface_available: Option<bool>,
+    /// Whether the latest Windows Graphics Capture frame retained its D3D11 source texture.
+    #[serde(default)]
+    pub preview_screen_d3d11_texture_available: Option<bool>,
+    /// P95 interval between ScreenCaptureKit screen sample callbacks.
+    #[serde(default)]
+    pub preview_screen_capture_gap_p95_ms: Option<f64>,
+    /// Max interval between ScreenCaptureKit screen sample callbacks.
+    #[serde(default)]
+    pub preview_screen_capture_gap_max_ms: Option<f64>,
+    /// P95 time spent locking the ScreenCaptureKit CVPixelBuffer base address.
+    #[serde(default)]
+    pub preview_screen_pixel_buffer_lock_p95_ms: Option<f64>,
+    /// P95 time spent copying BGRA rows out of the ScreenCaptureKit sample.
+    #[serde(default)]
+    pub preview_screen_row_copy_p95_ms: Option<f64>,
+    /// P95 wall time spent publishing the copied screen frame to the source frame store.
+    #[serde(default)]
+    pub preview_screen_publish_p95_ms: Option<f64>,
+    /// Bytes copied for the latest native screen capture frame.
+    #[serde(default)]
+    pub preview_screen_frame_bytes: u64,
+    /// ScreenCaptureKit stream queue depth requested for the live screen source.
+    #[serde(default)]
+    pub preview_screen_capture_queue_depth: u32,
+    /// CPU buffers currently owned by the camera/screen stores and spare pools.
+    pub preview_source_frame_buffer_count: u64,
+    /// CPU bytes currently owned by the camera/screen stores and spare pools.
+    pub preview_source_frame_bytes: u64,
+    pub preview_source_frame_dropped_frames: u64,
+    pub mic_captured_frames: Option<u64>,
+    pub mic_dropped_frames: u64,
+    /// Fraction of expected audio sample-frames actually captured during the run (live).
+    /// Below ~0.95 signals a mic capture gap. `None` until past the coverage warmup.
+    #[serde(default)]
+    pub mic_capture_coverage: Option<f64>,
+    /// Live mic meter level (0-1, dB-scaled) from the frames the active session
+    /// already captures - no extra device open. `None` when no session is live
+    /// (post-0.9.4 fix batch F7: the Studio mixer shows a moving meter).
+    #[serde(default)]
+    pub mic_live_level: Option<f64>,
+    #[serde(default)]
+    pub mic_live_peak_db: Option<f64>,
+    /// System audio live meter level (0-1, dB-scaled), plan 069. Omitted,
+    /// never null, while no system source is attached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_audio_live_level: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_audio_live_peak_db: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_audio_captured_frames: Option<u64>,
+    /// True while a system audio source is attached to the session's audio bus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_audio_active: Option<bool>,
+    /// Samples the mix limiter had to pull under its ceiling this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_mix_clipped_samples: Option<u64>,
+    pub device_disconnected: bool,
+    pub backend_rss_bytes: Option<u64>,
+    pub active_ffmpeg_processes: u64,
+    pub active_ffprobe_processes: u64,
+    pub ffmpeg_capture_active: bool,
+    pub ffmpeg_finalizing_active: bool,
+    pub ffmpeg_maintenance_running: bool,
+    pub ffmpeg_maintenance_cancel_requested: bool,
+    pub ffmpeg_maintenance_deferred_reason: Option<String>,
+    #[serde(default)]
+    pub duplicate_capture_sources: Vec<String>,
+    #[serde(default)]
+    pub source_registry: SourceRegistrySnapshot,
+    pub bottleneck: DiagnosticBottleneck,
+    /// True when an active recording is being compromised by a measured problem (encoder
+    /// behind real-time, duplicate/synthetic frames re-fed, mic drops/gaps, duplicate
+    /// capture). Drives the "Recording at risk" badge so a bad output is never silently
+    /// presented as ready.
+    #[serde(default)]
+    pub recording_at_risk: bool,
+    /// Human-readable reasons backing `recording_at_risk`.
+    #[serde(default)]
+    pub recording_risk_reasons: Vec<String>,
+    /// True when the active recording consumes the shared compositor output through the
+    /// protected encoder-bridge path (paced by the output clock), rather than a separate
+    /// FFmpeg capture. Drives the "Recording protected" badge.
+    #[serde(default)]
+    pub recording_protected: bool,
+    /// Startup barrier state for protected recordings. The encoder bridge must not start
+    /// until the compositor has produced fresh target-resolution real-source frames.
+    #[serde(default)]
+    pub recording_startup_barrier_state: Option<String>,
+    #[serde(default)]
+    pub recording_startup_barrier_wait_ms: Option<u64>,
+    #[serde(default)]
+    pub recording_startup_barrier_timeout_reason: Option<String>,
+    #[serde(default)]
+    pub first_source_frame_ms: Option<u64>,
+    #[serde(default)]
+    pub first_full_resolution_compositor_frame_ms: Option<u64>,
+    #[serde(default)]
+    pub first_encoded_frame_ms: Option<u64>,
+    /// Phase timeline of the most recent `session.start` (instant-record plan).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_start_timeline: Option<RecordingTimelineSnapshot>,
+    /// Phase timeline of the most recent stop, including background finalization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_stop_timeline: Option<RecordingTimelineSnapshot>,
+    pub updated_at: String,
+}
+
+/// One phase boundary of a start/stop timeline, milliseconds since the
+/// timeline origin (backend admission of the request).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingTimelineMark {
+    pub phase: String,
+    pub at_ms: u64,
+}
+
+/// Typed start/stop latency timeline published in `diagnostics.stats`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingTimelineSnapshot {
+    /// `start` | `stop`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// True for the first start in this backend process (start timelines only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cold: Option<bool>,
+    /// Renderer click time (epoch ms) when the renderer supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at_epoch_ms: Option<u64>,
+    /// Renderer click → backend admission, when plausible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click_to_origin_ms: Option<u64>,
+    pub total_ms: u64,
+    pub outcome: String,
+    #[serde(default)]
+    pub marks: Vec<RecordingTimelineMark>,
+}
+
+#[cfg(any(test, debug_assertions))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EncoderBridgeSyntheticParams {
+    pub ffmpeg_path: Option<String>,
+    pub output_path: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub fps: Option<u32>,
+    pub duration_ms: Option<u64>,
+    pub bitrate_kbps: Option<u32>,
+}
+
+#[cfg(any(test, debug_assertions))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EncoderBridgeSyntheticResult {
+    pub output_path: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub duration_ms: u64,
+    pub frames_written: u64,
+    pub queue_depth_max: u64,
+    pub input_fps: Option<f64>,
+    pub dropped_frames: u64,
+    pub encoder_speed: Option<f64>,
+    pub file_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewBaselineParams {
+    pub transport: PreviewTransport,
+    #[serde(default)]
+    pub surface_backing: PreviewSurfaceBacking,
+    pub target_fps: Option<f64>,
+    pub measured_fps: Option<f64>,
+    pub present_fps: Option<f64>,
+    pub frame_age_ms: Option<u64>,
+    pub cadence_p95_ms: Option<f64>,
+    pub interval_jitter_p95_ms: Option<f64>,
+    pub blank_frames: u64,
+    pub long_tasks: u64,
+    pub renderer_long_task_p95_ms: Option<f64>,
+    pub obs_qualified: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSurfaceBounds {
+    pub screen_x: f64,
+    pub screen_y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub scale_factor: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_height: Option<f64>,
+    // Visible intersection of the studio slot with its clipping ancestors and the
+    // window viewport, in the same screen coordinate space as screen_x/screen_y.
+    // Absent means the full rect is visible (legacy callers). The native host crops
+    // the surface to this rect so a half-scrolled preview clips instead of floating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_y: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_height: Option<f64>,
+    // False when the slot is fully scrolled away or the document/window is hidden —
+    // the native host must hide the surface entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    // Detached preview window (cross-process stacking): the global window number
+    // of the Electron preview window the native surface must sit directly above,
+    // and whether the pair floats above other apps (always-on-top). Absent =
+    // legacy embedded overlay behavior (floating level, ordered front).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_above_window_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevated: Option<bool>,
+    // Corner radius in POINTS for the native surface (CALayer works in points;
+    // contentsScale handles pixels). Docked previews pass the panel radius so
+    // the surface clips to the rounded slot instead of poking square corners
+    // past it; absent/0 = square (floating window, legacy callers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_radius: Option<f64>,
+    // Where the in-process CAMetalLayer sits inside its host window (plan 213
+    // D2): the surface's top-left origin in the host's content coordinates and
+    // the host content's height, in points. Mirrors
+    // apps/desktop/src/shared/backend.ts; absent = legacy callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_y: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_height: Option<f64>,
+}
+
+/// Validated opaque HWND identity used only by Electron main and the backend
+/// presenter. The fixed-width string form prevents JavaScript precision loss
+/// and is never embedded in renderer-visible status or events.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OpaqueNativeWindowHandle(String);
+
+impl OpaqueNativeWindowHandle {
+    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        let bytes = value.as_bytes();
+        if bytes.len() != 18
+            || !value.starts_with("0x")
+            || !bytes[2..]
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+            || value == "0x0000000000000000"
+        {
+            return Err(
+                "native window handle must be a nonzero lowercase 0x-prefixed 64-bit value"
+                    .to_string(),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    /// Windows reads the handle as a number; the backend's tests do too.
+    pub fn as_u64(&self) -> u64 {
+        u64::from_str_radix(&self.0[2..], 16)
+            .expect("validated native window handles always contain hexadecimal digits")
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for OpaqueNativeWindowHandle {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for OpaqueNativeWindowHandle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Privileged request-only bounds. Flattening preserves the established
+/// geometry wire shape while keeping the HWND out of `PreviewSurfaceBounds`
+/// and therefore out of renderer-visible `PreviewSurfaceStatus`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MainOwnedPreviewSurfaceBounds {
+    #[serde(flatten)]
+    pub bounds: PreviewSurfaceBounds,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_above_window_handle: Option<OpaqueNativeWindowHandle>,
+    /// Windows: the same geometry in physical screen pixels, converted by
+    /// Electron main (`screen.dipToScreenRect`). The D3D11 presenter is a
+    /// per-monitor-DPI-aware window, so `SetWindowPos` takes physical pixels;
+    /// fed the DIP numbers it sat at 2/3 size, up and left, on a 150% display
+    /// (#1272). Absent = DIPs are pixels (100%), the old behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_placement: Option<PreviewPresenterPhysicalPlacement>,
+}
+
+/// A preview rect and its optional visible clip in physical screen pixels.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewPresenterPhysicalPlacement {
+    pub screen_x: f64,
+    pub screen_y: f64,
+    pub width: f64,
+    pub height: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_y: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_height: Option<f64>,
+}
+
+/// Plan 260 S0.2b: how the backend hands its Windows D3D11 preview to
+/// another process (`preview.handover.open`). The contract is in
+/// `windows_d3d11_preview_handover.rs`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewHandoverRoute {
+    /// Route (a): a DirectComposition surface handle the backend presents
+    /// into; the app shows it as a visual's content. Zero copies.
+    CompositionSurface,
+    /// Route (b): three shared NT-handle BGRA textures with keyed mutexes,
+    /// named through the shared header; the app draws the latest.
+    SharedTexture,
+}
+
+/// `preview.handover.open`. The main-process (admin) credential only; one
+/// hand-over per connection, released when the connection closes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreviewHandoverOpenParams {
+    /// A UUID the app picks; `preview.handover.close` names it.
+    pub lease_id: String,
+    pub route: PreviewHandoverRoute,
+    /// The process the handles are duplicated into (the app's own).
+    pub consumer_pid: u32,
+}
+
+/// `preview.handover.close`; answers whether it closed the named lease.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreviewHandoverCloseParams {
+    pub lease_id: String,
+}
+
+/// What `preview.handover.open` answers. Every handle is already in the
+/// consumer's process (the numbers are its values there), and the consumer
+/// owns and closes each one. Route (b)'s texture handles come through the
+/// shared header, since a new frame size needs new textures.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewHandoverLease {
+    pub lease_id: String,
+    pub route: PreviewHandoverRoute,
+    /// The D3D11 media generation the handles belong to. When it ends (the
+    /// session stops or recovers) the header retires and the app asks again.
+    pub media_generation: u64,
+    /// The adapter the frames live on (`LUID` as `HighPart << 32 | LowPart`);
+    /// route (b) must open the textures on a device of this adapter.
+    pub adapter_luid: u64,
+    pub backend_pid: u32,
+    /// A file mapping of `header_bytes` holding the shared header.
+    pub header_mapping_handle: u64,
+    pub header_bytes: u32,
+    /// The header layout's version.
+    pub header_version: u32,
+    /// An auto-reset event the backend sets after each published frame.
+    pub frame_event_handle: u64,
+    /// Route (a) only: open with `IDCompositionDevice::CreateSurfaceFromHandle`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition_surface_handle: Option<u64>,
+    /// `bgra8`.
+    pub pixel_format: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MainOwnedPreviewSurfaceBoundsParams {
+    pub bounds: MainOwnedPreviewSurfaceBounds,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSurfaceCreateParams {
+    pub bounds: PreviewSurfaceBounds,
+    #[serde(default = "default_preview_surface_target_fps")]
+    pub target_fps: u32,
+    #[serde(default)]
+    pub source: PreviewSurfaceSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSurfaceBoundsParams {
+    pub bounds: PreviewSurfaceBounds,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSurfacePresentParams {
+    #[serde(default)]
+    pub transport: Option<PreviewTransport>,
+    #[serde(default)]
+    pub backing: Option<PreviewSurfaceBacking>,
+    pub presented_frame_id: Option<u64>,
+    pub compositor_frame_lag: Option<u64>,
+    #[serde(default)]
+    pub dropped_frames: u64,
+    pub input_to_present_latency_ms: Option<u64>,
+    pub input_to_present_latency_p50_ms: Option<u64>,
+    pub input_to_present_latency_p95_ms: Option<u64>,
+    pub input_to_present_latency_p99_ms: Option<u64>,
+    pub present_fps: Option<f64>,
+    pub interval_p95_ms: Option<f64>,
+    pub interval_p99_ms: Option<f64>,
+    #[serde(default)]
+    pub native_preview_main_scene_mismatch_count: Option<u64>,
+    #[serde(default)]
+    pub native_preview_main_scene_mismatch_age_ms: Option<u64>,
+    #[serde(default)]
+    pub native_preview_main_last_skipped_scene_revision: Option<u64>,
+    #[serde(default)]
+    pub native_preview_main_last_skipped_frame_scene_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_ceiling: Option<u64>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub frame_polling_suppressed: bool,
+    #[serde(default)]
+    pub source_pixels_present: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11PresenterBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Renderer-safe readback from the backend-owned Windows presenter. Raw HWNDs
+/// and process IDs intentionally never enter this status object.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11PresenterDiagnostics {
+    /// Generation of the backend-owned D3D11 media authority. This remains
+    /// scalar and renderer-safe while allowing Electron to reject a delayed
+    /// status callback from a retired authority deterministically.
+    #[serde(default)]
+    pub media_generation: u64,
+    pub layered: bool,
+    pub transparent: bool,
+    pub no_activate: bool,
+    pub excluded_from_capture: bool,
+    pub window_active: bool,
+    pub window_focused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_generation: Option<u64>,
+    pub generation_matches: bool,
+    pub owner_process_matches: bool,
+    pub same_adapter: bool,
+    pub source_live: bool,
+    pub first_present_succeeded: bool,
+    pub successful_presents: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_presented_sequence: Option<u64>,
+    /// The committed scene revision the last presented frame was composed
+    /// from: the Studio's proof that the Preview shows a scene switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presented_scene_revision: Option<u64>,
+    pub latest_wins_drops: u64,
+    pub hidden_drops: u64,
+    pub busy_drops: u64,
+    pub stale_frame_drops: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_bounds: Option<WindowsD3d11PresenterBounds>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSurfaceStatus {
+    pub state: PreviewSurfaceState,
+    pub source: PreviewSurfaceSource,
+    pub transport: PreviewTransport,
+    #[serde(default)]
+    pub backing: PreviewSurfaceBacking,
+    pub target_fps: u32,
+    pub width: u32,
+    pub height: u32,
+    pub frames_rendered: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presented_frame_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compositor_frame_lag: Option<u64>,
+    #[serde(default)]
+    pub dropped_frames: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_to_present_latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_to_present_latency_p50_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_to_present_latency_p95_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_to_present_latency_p99_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub present_fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interval_p95_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interval_p99_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_preview_main_scene_mismatch_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_preview_main_scene_mismatch_age_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_preview_main_last_skipped_scene_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_preview_main_last_skipped_frame_scene_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_ceiling: Option<u64>,
+    #[serde(default)]
+    pub frame_polling_suppressed: bool,
+    #[serde(default)]
+    pub source_pixels_present: bool,
+    /// Native/AppKit host lifecycle commands waiting for the Electron/native host to
+    /// apply. Nonzero during an active visible-preview run means the host was requested
+    /// but not actually attached.
+    #[serde(default)]
+    pub pending_host_command_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<PreviewSurfaceBounds>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_d3d11_presenter: Option<WindowsD3d11PresenterDiagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewSurfaceState {
+    Unavailable,
+    Starting,
+    Live,
+    Stopped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewSurfaceSource {
+    #[default]
+    Synthetic,
+    Camera,
+    Screen,
+    Window,
+}
+
+fn default_preview_surface_target_fps() -> u32 {
+    60
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositorImageCacheStatus {
+    pub budget_bytes: u64,
+    pub entry_budget: u64,
+    pub entries: u64,
+    pub decoded_bytes: u64,
+    pub preconverted_bgra_bytes: u64,
+    pub resident_bytes: u64,
+    pub pinned_entries: u64,
+    pub pinned_bytes: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositorFramePipelineStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer: Option<String>,
+    pub gpu_readbacks: u64,
+    pub bgra_bytes_copied: u64,
+    pub yuv_frames_converted: u64,
+    pub immutable_texture_uploads: u64,
+    pub immutable_texture_reuses: u64,
+    /// Plan 190: live background shader programs built on this run, and the
+    /// scratch bytes they hold. Both stay 0 while no live background shows
+    /// (the zero-cost-when-off contract), and 0 is left off the wire, so a
+    /// run without one sends exactly what it sent before plan 190.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub live_background_programs: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub live_background_scratch_bytes: u64,
+    /// Plan 205 S6: the Preview presents its own picture, the program leg,
+    /// because the program differs from the primary leg (Clips at idle, or
+    /// a split record + stream, with a stream-only item). False is left off
+    /// the wire, so a run without one sends exactly what it sent before.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub preview_program_leg: bool,
+    /// Plan 212 S2: frames composed from a scene with a test-pattern source
+    /// that the packaged backstop refused to hand the Preview. 0 is left off
+    /// the wire, so a run without one sends exactly what it sent before.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub preview_synthetic_refused: u64,
+    /// Plan 214 A4: what Videorc Camera's output did this process: frames
+    /// pushed to the platform camera, pushes that repeated the previous frame
+    /// (the run was slower than 30 fps), and the slowest CPU fit in
+    /// milliseconds (0 on the zero-copy Metal path). 0 is left off the wire,
+    /// so a run with the camera off sends exactly what it sent before.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub virtual_camera_pushed: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub virtual_camera_repeated: u64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub virtual_camera_convert_ms_max: f64,
+}
+
+fn is_zero_f64(value: &f64) -> bool {
+    *value == 0.0
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+/// Small latest-wins event used by native preview presentation. Full
+/// compositor diagnostics remain on their bounded diagnostic cadence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositorFrameReady {
+    pub target_fps: u32,
+    pub width: u32,
+    pub height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_scene_revision: Option<u64>,
+    pub frames_rendered: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_age_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metal_target_iosurface_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metal_target_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metal_target_height: Option<u32>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositorStatus {
+    pub state: CompositorState,
+    pub target_fps: u32,
+    pub width: u32,
+    pub height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene_revision: Option<u64>,
+    /// Scene revision that produced the latest rendered compositor frame/Metal
+    /// handoff. This can lag behind `scene_revision` immediately after a live
+    /// scene metadata update, before the next compositor frame is published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_scene_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene_layout: Option<LayoutSettings>,
+    /// Persisted `StreamScreen` takeover image layered above the live scene.
+    /// Native screen/window capture authority lives in `scene_sources` and
+    /// `sources`; this field is not the selected capture device id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_screen_id: Option<String>,
+    #[serde(default)]
+    pub scene_sources: Vec<CompositorSceneSourceStatus>,
+    #[serde(default)]
+    pub sources: Vec<CompositorSourceStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub render_fps: Option<f64>,
+    pub frames_rendered: u64,
+    pub repeated_frames: u64,
+    pub dropped_frames: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_age_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_time_p95_ms: Option<f64>,
+    /// IOSurface id for the latest retained Metal compositor target. This is a native
+    /// preview handoff handle, not an OBS-native claim by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metal_target_iosurface_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metal_target_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metal_target_height: Option<u32>,
+    #[serde(default)]
+    pub image_cache: CompositorImageCacheStatus,
+    #[serde(default)]
+    pub frame_pipeline: CompositorFramePipelineStatus,
+    /// The Scene editor draft the compositor is applying to this run, if any
+    /// (plan 058). Absent while no drag is live; never present during a
+    /// session. `skip_serializing_if` keeps `None` off the wire because the
+    /// renderer's optional contract fields reject `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_draft: Option<SceneEditorDraftStatus>,
+    /// Plan 190: the applied live background and how it is drawn. Absent
+    /// while the scene has no live background.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_background: Option<LiveBackgroundStatus>,
+    /// Plan 210 S3: how the last screen or window switch changed the
+    /// capture, and why the in-place change was not used when it wasn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_switch: Option<ScreenSwitchStatus>,
+    /// Plan 212 S2: the Preview is holding its last program frame while a
+    /// performance check runs; not a broken Preview. Left off the wire when
+    /// there is no hold, so the strict renderer contract sees exactly what it
+    /// saw before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_hold: Option<PreviewHoldReason>,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Why the Preview holds its picture (plan 212 S2). `PerformanceCheck` is
+/// the check's hold, with its words in the Preview; `SyntheticRefused` is
+/// the packaged backstop keeping the last program frame instead of a frame
+/// composed from a test-pattern scene, with no words of its own.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewHoldReason {
+    PerformanceCheck,
+    SyntheticRefused,
+}
+
+/// Plan 210 S3: how the last screen or window switch changed the capture.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenSwitchStatus {
+    pub mode: ScreenSwitchMode,
+    /// Why the running stream was not changed in place (`restart` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub source_id: String,
+    pub generation: u64,
+    /// Switch request to the new source's first frame, when it arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_frame_ms: Option<u64>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreenSwitchMode {
+    /// The running ScreenCaptureKit stream changed its target.
+    InPlace,
+    /// The stream was stopped and another started.
+    Restart,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneCommitStatus {
+    pub applied: bool,
+    /// "idle" (no active recording/stream), "hot", or "warm".
+    pub mode: String,
+    pub scene_revision: u64,
+    pub scene: Scene,
+    pub compositor_status: CompositorStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositorSourceStatus {
+    pub kind: CompositorSourceKind,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_age_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompositorSourceKind {
+    Camera,
+    Screen,
+    Window,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositorSceneUpdateParams {
+    pub revision: u64,
+    pub scene: Option<Scene>,
+    pub layout: LayoutSettings,
+    #[serde(default)]
+    pub active_screen: Option<StreamScreen>,
+    /// Scene-motion duration in ms (clamped to 1000): the previous scene's
+    /// transforms glide to this one. Absent/0 = instant switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositorSceneSourceStatus {
+    pub id: String,
+    pub name: String,
+    pub kind: CompositorSceneSourceKind,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    pub visible: bool,
+    pub transform: SceneTransform,
+    pub fit: CompositorSceneSourceFit,
+    pub mirror: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<CameraShape>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompositorSceneSourceKind {
+    Screen,
+    Window,
+    Camera,
+    TestPattern,
+    ScreenImage,
+    BackgroundImage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompositorSceneSourceFit {
+    Contain,
+    Cover,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompositorState {
+    Stopped,
+    Starting,
+    Live,
+    Failed,
+}
+
+/// `camera.lowLight.get` (issue #1066): which camera to describe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraLowLightParams {
+    pub camera_id: String,
+}
+
+/// `camera.lowLight.set` (issue #1066): turn a camera's low-light
+/// compensation on or off. Saved per camera and written to the device now.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CameraLowLightSetParams {
+    pub camera_id: String,
+    pub compensation: bool,
+}
+
+/// A camera's low-light compensation (issue #1066). On, the camera may
+/// lengthen exposure past one frame in low light and drop to half its frame
+/// rate; off (the default), it keeps its frame rate and the picture is
+/// darker. `supported` is false where Videorc cannot set it: off Windows,
+/// and on cameras whose driver has no auto-exposure-priority control.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraLowLightState {
+    pub camera_id: String,
+    pub supported: bool,
+    pub compensation: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewCameraStartParams {
+    pub sources: SourceSelection,
+    pub layout: LayoutSettings,
+    pub video: VideoSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ffmpeg_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewCameraStatus {
+    pub state: PreviewCameraState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camera_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_unique_id: Option<String>,
+    pub target_fps: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_format_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_format_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_format_min_fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_format_max_fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_age_ms: Option<u64>,
+    pub frames_captured: u64,
+    pub dropped_frames: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Plan 216 D2: `Some(true)` while the session has acked Live but has sent
+    /// no frame for longer than `CAMERA_FIRST_FRAME_REUSE_GRACE` (the
+    /// frameless-zombie rule capture recovery uses). Absent otherwise, so
+    /// Sources and Health can name a camera that is on but sends no video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_video: Option<bool>,
+    /// Plan 258 S4 (D12): the operating system's own effects on this camera
+    /// (macOS Video Effects, Windows Studio Effects), read from the device
+    /// Videorc has open. Absent until the camera is live and the system has
+    /// answered, and on a camera or system that has no such effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_effect: Option<CameraSystemEffect>,
+    /// Plan 258 S3: the camera effect stage, while this camera's background
+    /// is an effect (a blur or a picture). Absent while Off or a screen key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_background: Option<CameraBackgroundStatus>,
+}
+
+/// How the camera effect stage is doing (plan 258 S3, D6).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CameraBackgroundStageState {
+    /// Every frame drawn with its own fresh matte.
+    Running,
+    /// The cover: no matte yet, or the newest is 100 ms old or more.
+    Cover,
+    /// No engine here (platform, OS version); the cover stands in.
+    Unavailable,
+}
+
+/// Plan 258 S3: the stage's line for the Studio, Health and the support
+/// bundle. The system's own effect stays on `systemEffect` beside it (S4).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraBackgroundStatus {
+    pub mode: CameraBackgroundMode,
+    pub state: CameraBackgroundStageState,
+    /// The newest matte's age at the last capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_age_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_ms_p95: Option<f64>,
+    /// The effect pass, wall time on the worker (upload, GPU, wait).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_ms_p95: Option<f64>,
+    /// The effect pass's GPU time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_gpu_ms_p95: Option<f64>,
+    pub processed_frames: u64,
+    pub cover_frames: u64,
+    /// How long the cover has stood in (the Studio says so after 2 s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_for_ms: Option<u64>,
+    /// The newest matte's age when the cover last took over from processed
+    /// frames (D6: the first capture past 100 ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_after_mask_age_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Which operating system feature is changing the camera's picture.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CameraSystemEffectProvider {
+    /// macOS Video Effects (Control Center, Video menu).
+    MacosVideoEffects,
+    /// Windows Studio Effects (Quick Settings, Studio effects).
+    WindowsStudioEffects,
+}
+
+/// Plan 258 S4: what the system is doing to the camera Videorc has open.
+/// Every flag is what the device reports now, after anything Videorc
+/// changed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraSystemEffect {
+    pub provider: CameraSystemEffectProvider,
+    /// macOS Portrait, or Windows Studio Effects background blur (standard
+    /// or portrait).
+    pub background_blur: bool,
+    /// macOS 15's background replacement. Never on Windows.
+    pub background_replacement: bool,
+    /// macOS Studio Light. It changes the light on the face, not the
+    /// background, so the Studio says nothing about it.
+    pub studio_light: bool,
+    /// Windows: Videorc turned Studio Effects background blur off at camera
+    /// start because its own background effect runs on this camera (as
+    /// Microsoft asks of apps with their own blur); it is put back when the
+    /// camera stops. Always false on macOS, where apps can't turn it off.
+    pub turned_off_by_videorc: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraCapabilityFormat {
+    pub width: u32,
+    pub height: u32,
+    pub min_fps: f64,
+    pub max_fps: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewCameraState {
+    Disconnected,
+    Starting,
+    Live,
+    PermissionNeeded,
+    DeviceMissing,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewScreenStartParams {
+    pub sources: SourceSelection,
+    pub video: VideoSettings,
+    #[serde(default)]
+    pub protected_overlay_window_ids: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ffmpeg_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewScreenStatus {
+    pub state: PreviewScreenState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<PreviewScreenSourceKind>,
+    pub target_fps: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iosurface_available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub d3d11_texture_available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_age_ms: Option<u64>,
+    pub frames_captured: u64,
+    pub dropped_frames: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
+    pub include_cursor: bool,
+    pub exclude_current_process_windows: bool,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewScreenState {
+    Starting,
+    Live,
+    PermissionNeeded,
+    SourceMissing,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewScreenSourceKind {
+    Screen,
+    Window,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiagnosticBottleneck {
+    None,
+    Capture,
+    Render,
+    Encoder,
+    Preview,
+    Audio,
+    Device,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AudioMeterStatus {
+    Ready,
+    Silent,
+    NoFrames,
+    Unavailable,
+    PermissionRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummary {
+    pub id: String,
+    pub title: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub status: String,
+    pub mode: String,
+    pub output_path: Option<String>,
+    pub mp4_path: Option<String>,
+    pub stream_preset: Option<String>,
+    pub container: Option<String>,
+    pub duration_ms: Option<i64>,
+    /// Size of the visible recording file (mp4 export when present, else the
+    /// original container). Statted live at list time while the file exists;
+    /// last-known when it has gone missing (Library rewrite L1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_size_bytes: Option<i64>,
+    /// Human label for the session's layout preset ("Screen + Camera"); the
+    /// stream preset for stream-only sessions. Upgrades to real scene names
+    /// when named scenes ship (F2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_status: Option<GateStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_diagnostics: Option<DiagnosticStats>,
+    pub layout: LayoutSettings,
+    pub sources: SourceSelection,
+    pub health_events: Vec<HealthEvent>,
+    pub session_logs: Vec<SessionLogEntry>,
+    pub ai_artifacts: Vec<AiArtifact>,
+    pub comment_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_from_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processing_kind: Option<String>,
+    /// Plan 119 S13: present only on a derived row Clean cut rendered, from a
+    /// join on `clean_cut_jobs.output_session_id`. `processing_kind` stays
+    /// absent for these rows (decision 12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut_of_session_id: Option<String>,
+    /// `clean` or `condensed`, next to `clean_cut_of_session_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_state: Option<RecordingFinalizationState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_error: Option<String>,
+}
+
+/// Bounded, renderer-facing Library row. Histories intentionally live behind
+/// their cursor-paginated detail methods so refreshing the Library never
+/// serializes every event, log line, or AI payload for every session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionListItem {
+    pub id: String,
+    pub title: String,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+    pub status: String,
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mp4_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_preset: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_size_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_status: Option<GateStatus>,
+    pub health_event_count: u64,
+    pub session_log_count: u64,
+    pub ai_artifact_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ready_ai_artifact_kinds: Vec<AiArtifactKind>,
+    pub comment_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_from_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processing_kind: Option<String>,
+    /// Plan 119 S13: the source session of a Clean cut output row, from a
+    /// join on `clean_cut_jobs.output_session_id`. Never set together with a
+    /// `processing_kind` (decision 12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut_of_session_id: Option<String>,
+    /// `clean` or `condensed`, next to `clean_cut_of_session_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut_mode: Option<String>,
+    /// Background MP4 finalization (instant-record P2). Absent for rows that
+    /// finished inline (legacy) or never recorded a file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_state: Option<RecordingFinalizationState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_progress_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_error: Option<String>,
+    /// Plan 157: every file of one separate-source take shares the Combined
+    /// session's id here; absent on ordinary rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_id: Option<String>,
+    /// `combined`, `screen` or `camera` (plan 157); absent on ordinary rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_role: Option<String>,
+    /// A take that ended early (a crash, a killed backend, a power loss, or a
+    /// recording that failed mid-take): `recovered` once its MKV was finalized
+    /// to an MP4, `failed` when that did not work. Absent on every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interruption_recovery: Option<String>,
+}
+
+/// Progress of a background recording finalization job.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingFinalizationEvent {
+    pub session_id: String,
+    pub state: RecordingFinalizationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mp4_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Set when this job finished the recovery of an interrupted take
+    /// (`recovered` | `failed`), so the Library row updates without a reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interruption_recovery: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionListPage {
+    pub items: Vec<SessionListItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default = "default_session_list_page_limit")]
+    pub limit: usize,
+}
+
+pub const DEFAULT_SESSION_LIST_PAGE_LIMIT: usize = 50;
+
+fn default_session_list_page_limit() -> usize {
+    DEFAULT_SESSION_LIST_PAGE_LIMIT
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionDetailListParams {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default = "default_session_detail_page_limit")]
+    pub limit: usize,
+}
+
+pub const DEFAULT_SESSION_DETAIL_PAGE_LIMIT: usize = 120;
+
+fn default_session_detail_page_limit() -> usize {
+    DEFAULT_SESSION_DETAIL_PAGE_LIMIT
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionHealthEventsPage {
+    pub events: Vec<HealthEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionLogsPage {
+    pub entries: Vec<SessionLogEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionAiArtifactsPage {
+    pub artifacts: Vec<AiArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum NoiseCleanupJobStatus {
+    Queued,
+    Processing,
+    Validating,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl NoiseCleanupJobStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Processing => "processing",
+            Self::Validating => "validating",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Queued | Self::Processing | Self::Validating)
+    }
+}
+
+impl std::str::FromStr for NoiseCleanupJobStatus {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "processing" => Ok(Self::Processing),
+            "validating" => Ok(Self::Validating),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(format!("Unknown Noise Cleanup job status: {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NoiseCleanupJob {
+    pub id: String,
+    pub source_session_id: String,
+    pub status: NoiseCleanupJobStatus,
+    pub progress_percent: u8,
+    pub preset: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NoiseCleanupStartParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NoiseCleanupCancelParams {
+    pub job_id: String,
+}
+
+// ---------------------------------------------------------------------------
+// Clean cut (plan 119 S12a/S12b): a durable job per (source session, mode)
+// that transcribes a finished recording word for word, finds what to cut and
+// builds a frame-exact cut list (the EDL). S13 renders it into a derived
+// session. Wire shapes are mirrored in `shared/backend.ts` and validated by
+// the closed schemas in `shared/backend-rpc-contract.ts`.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum CleanCutMode {
+    Clean,
+    Condensed,
+}
+
+impl CleanCutMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Condensed => "condensed",
+        }
+    }
+}
+
+impl std::str::FromStr for CleanCutMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "clean" => Ok(Self::Clean),
+            "condensed" => Ok(Self::Condensed),
+            _ => Err(format!("Unknown Clean cut mode: {value}")),
+        }
+    }
+}
+
+/// `queued → transcribing → analyzing → ready` is built here (S12a/S12b);
+/// `ready → rendering → validating → completed` is S13's. `failed` and
+/// `cancelled` are terminal; a failed job is resumed by starting a new one for
+/// the same source and mode, which reuses every chunk already transcribed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CleanCutJobState {
+    Queued,
+    Transcribing,
+    Analyzing,
+    Ready,
+    Rendering,
+    Validating,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl CleanCutJobState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Transcribing => "transcribing",
+            Self::Analyzing => "analyzing",
+            Self::Ready => "ready",
+            Self::Rendering => "rendering",
+            Self::Validating => "validating",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// A worker owns the job: it holds (or waits for) the maintenance slot
+    /// and the source recording must not be mutated underneath it. `ready`
+    /// is neither active nor final: it waits for review or a render.
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Queued
+                | Self::Transcribing
+                | Self::Analyzing
+                | Self::Rendering
+                | Self::Validating
+        )
+    }
+}
+
+impl std::str::FromStr for CleanCutJobState {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "transcribing" => Ok(Self::Transcribing),
+            "analyzing" => Ok(Self::Analyzing),
+            "ready" => Ok(Self::Ready),
+            "rendering" => Ok(Self::Rendering),
+            "validating" => Ok(Self::Validating),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(format!("Unknown Clean cut job state: {value}")),
+        }
+    }
+}
+
+/// Why a span is removed. `false_start` keeps the server's spelling.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanCutRemovalKind {
+    Head,
+    Tail,
+    Silence,
+    Gap,
+    Filler,
+    Retake,
+    FalseStart,
+    Condensed,
+    Manual,
+}
+
+/// The source frame grid (ffprobe `r_frame_rate` as `num/den`). Every cut
+/// boundary is a frame index on it, so audio and video segments have equal
+/// lengths when S13 renders.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutFrameRate {
+    pub num: u32,
+    pub den: u32,
+}
+
+/// Path, size and modification time of the source MP4 the cut list was built
+/// from. S13 refuses to render when the file no longer matches.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutSourceIdentity {
+    pub path: String,
+    pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutRemoval {
+    pub id: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    /// Frame indices on the source grid; `end_frame` is exclusive. These are
+    /// exact where the millisecond values are rounded for display.
+    pub start_frame: u64,
+    pub end_frame: u64,
+    pub kind: CleanCutRemovalKind,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutKindStat {
+    pub kind: CleanCutRemovalKind,
+    pub count: u32,
+    pub ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutEdlStats {
+    /// Enabled removals only, one entry per kind present, in kind order.
+    #[serde(default)]
+    pub by_kind: Vec<CleanCutKindStat>,
+    pub kept_ms: u64,
+}
+
+/// The cut list, version 1. Stored as `clean_cut_jobs.edl_json` and returned
+/// whole by `cleanCut.get` and `cleanCut.updateEdl`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutEdl {
+    pub version: u32,
+    pub source_identity: CleanCutSourceIdentity,
+    pub frame_rate: CleanCutFrameRate,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub removals: Vec<CleanCutRemoval>,
+    pub stats: CleanCutEdlStats,
+}
+
+/// The small part of the cut list that rides on every job snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutEdlSummary {
+    pub duration_ms: u64,
+    pub kept_ms: u64,
+    pub removal_count: u32,
+    #[serde(default)]
+    pub by_kind: Vec<CleanCutKindStat>,
+}
+
+impl CleanCutEdl {
+    /// The snapshot-sized view of a cut list.
+    pub fn summary(&self) -> CleanCutEdlSummary {
+        CleanCutEdlSummary {
+            duration_ms: self.duration_ms,
+            kept_ms: self.stats.kept_ms,
+            removal_count: u32::try_from(self.removals.len()).unwrap_or(u32::MAX),
+            by_kind: self.stats.by_kind.clone(),
+        }
+    }
+}
+
+/// Durable Clean cut job state, also the `cleanCut.status` event payload.
+/// The renderer never infers completion from anything else.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutJob {
+    pub id: String,
+    pub source_session_id: String,
+    pub mode: CleanCutMode,
+    pub state: CleanCutJobState,
+    /// Free-form, bounded: `extract-audio`, `probe`, `upload`, `stitch`,
+    /// `analyze`, `cut-list`. Never a closed enum on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    /// 0..1 across the whole job.
+    pub progress: f64,
+    pub edl_revision: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edl_summary: Option<CleanCutEdlSummary>,
+    /// `<Artifacts>/<sessionId>/clean-cut/transcript.words.json` once stitched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One kept range of a Condensed selection, mapped from the analysis `keeps`
+/// (segment ids) to recording time. S13 adds it to `cleanCut.get` entries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutCondensedKeep {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutJobDetail {
+    pub job: CleanCutJob,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edl: Option<CleanCutEdl>,
+    /// Condensed jobs only, and only once the analysis answered; omitted for
+    /// clean jobs and when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub condensed_keeps: Vec<CleanCutCondensedKeep>,
+}
+
+/// `cleanCut.render`: render the current cut list revision again.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutRenderParams {
+    pub job_id: String,
+}
+
+/// `cleanCut.transcript`: the stitched words and sentence segments of a job.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutTranscriptParams {
+    pub job_id: String,
+}
+
+/// One word of `cleanCut.transcript`. `filler` is written only when true.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutTranscriptWord {
+    pub text: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub filler: bool,
+}
+
+/// One sentence of `cleanCut.transcript`: the analysis job's segment ids.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutTranscriptSegment {
+    pub id: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+/// `cleanCut.transcript` result. `language` is `null` when the provider
+/// reported none: the S13/S14 interface spells it `string | null`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutTranscript {
+    pub job_id: String,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub words: Vec<CleanCutTranscriptWord>,
+    #[serde(default)]
+    pub segments: Vec<CleanCutTranscriptSegment>,
+}
+
+/// `cleanCut.get`: the latest job per mode for one source session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutGetResult {
+    pub session_id: String,
+    #[serde(default)]
+    pub jobs: Vec<CleanCutJobDetail>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutStartParams {
+    pub session_id: String,
+    pub mode: CleanCutMode,
+    /// The Cloud AI consent the renderer holds; `false` is refused.
+    pub consent_to_upload_audio: bool,
+    /// Condensed only: 120..3600 seconds, default 900.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_duration_seconds: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutGetParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutCancelParams {
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutRemovalToggle {
+    pub id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutManualRange {
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+/// `cleanCut.updateEdl`: optimistic on `revision`. Toggles flip `enabled` on
+/// existing removals; `addManual` adds frame-snapped `manual` removals;
+/// `removeManual` deletes manual removals by id. Nothing is re-merged.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutUpdateEdlParams {
+    pub job_id: String,
+    pub revision: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removals: Vec<CleanCutRemovalToggle>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add_manual: Vec<CleanCutManualRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_manual: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStorageTotals {
+    pub count: i64,
+    pub total_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCommentsListParams {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default = "default_session_comments_page_limit")]
+    pub limit: usize,
+}
+
+pub const DEFAULT_SESSION_COMMENTS_PAGE_LIMIT: usize = 200;
+
+fn default_session_comments_page_limit() -> usize {
+    DEFAULT_SESSION_COMMENTS_PAGE_LIMIT
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDeleteParams {
+    pub session_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDeleteCompleteParams {
+    pub operation_id: String,
+    pub failed_paths: Vec<String>,
+}
+
+/// Renderer-safe handle for a durable Library deletion. Paths remain behind
+/// the admin channel and are resolved by Electron main immediately before it
+/// invokes the system Trash API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDeletionHandle {
+    pub operation_id: String,
+    pub session_id: String,
+    pub path_count: usize,
+    pub blocked_path_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamScreenStatus {
+    Ready,
+    Missing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamScreen {
+    pub id: String,
+    pub name: String,
+    pub image_path: String,
+    pub thumbnail_path: Option<String>,
+    pub sort_order: i64,
+    pub status: StreamScreenStatus,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportScreenImageParams {
+    pub path: String,
+    pub ffmpeg_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenIdParams {
+    pub screen_id: String,
+}
+
+/// Who hid the screen (plan 210 D9/D11): the streamer, or the password-manager
+/// list acting on their behalf. Only the streamer's own surfaces show it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreenPrivacyReason {
+    You,
+    PasswordManager,
+}
+
+/// Hide screen state (plan 210 S7), in memory only and cleared at launch.
+/// `screen.privacy.get` returns it, `screen.privacy.changed` carries it on
+/// every hide and show. Absent fields are omitted, never `null`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenPrivacy {
+    pub hidden: bool,
+    /// Process-local transition generation; hide and show have distinct values.
+    #[serde(default)]
+    pub generation: u64,
+    /// RFC 3339, the moment of the hide; present only while hidden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ScreenPrivacyReason>,
+    /// Why `screen.hide` would be refused right now (a legacy FFmpeg session
+    /// reads the display through FFmpeg itself); absent when it would work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenHideParams {
+    pub reason: ScreenPrivacyReason,
+}
+
+/// Videorc Camera (plan 214 A4): where the camera is, as every surface
+/// reads it. `off` is only ever a healthy camera that is off; a platform
+/// report (`needs-approval`, `needs-setup`, a failure) outranks the switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VirtualCameraState {
+    Off,
+    /// The switch is on and the camera is starting (the extension is being
+    /// activated, the sink is connecting).
+    Installing,
+    /// macOS: the user must allow the Camera Extension in System Settings.
+    NeedsApproval,
+    /// Windows: the one-time elevated setup has not run (D8); Linux: the
+    /// v4l2loopback module is missing or not loaded (D9).
+    NeedsSetup,
+    /// On, connected, no app holds the camera yet.
+    Ready,
+    /// On and at least one app holds the camera.
+    Streaming,
+    /// Cannot run here, or the sink lost the device; `message` says why.
+    Unavailable,
+}
+
+/// What main reports about the platform's half of the camera (plan 214 A4):
+/// the macOS extension's activation (B3) or the Windows setup step (C2).
+/// Never guessed by the backend; absent until main reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VirtualCameraPlatformStep {
+    Installing,
+    NeedsApproval,
+    /// The extension replaces after a reboot (`willCompleteAfterReboot`).
+    NeedsReboot,
+    Ready,
+    /// Activation or setup failed; the report's `message` carries the reason.
+    Failed,
+    NeedsSetup,
+    SettingUp,
+    /// The platform cannot host a camera (Windows 10, no Camera Extensions).
+    Unsupported,
+}
+
+/// Videorc Camera's status (plan 214 A4). `virtualCamera.status` returns it,
+/// `virtualCamera.changed` carries it on every change. Absent fields are
+/// omitted, never `null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualCameraStatus {
+    /// The saved switch (D4).
+    pub on: bool,
+    /// Whether the camera can run on this computer at all.
+    pub available: bool,
+    pub state: VirtualCameraState,
+    /// Apps holding the camera, when the platform can count them (D13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewers: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_step: Option<VirtualCameraPlatformStep>,
+    /// Plain copy for the status line, present when there is something to say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Plan 249 S23: present only while a room's Program preview owns the
+    /// camera (never the encoded stream); absent means the Studio program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::room_program_camera::RoomProgramSource>,
+}
+
+impl Default for VirtualCameraStatus {
+    fn default() -> Self {
+        Self {
+            on: false,
+            available: true,
+            state: VirtualCameraState::Off,
+            viewers: None,
+            platform_step: None,
+            message: None,
+            source: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualCameraSetParams {
+    pub on: bool,
+}
+
+/// `virtualCamera.platform.report` (admin socket only): main's report of the
+/// platform step, with a plain reason when it failed or needs the user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualCameraPlatformReportParams {
+    pub platform_step: VirtualCameraPlatformStep,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameScreenParams {
+    pub screen_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReorderScreensParams {
+    pub screen_ids: Vec<String>,
+}
+
+/// A banner on the wire (plan 186, pinned 2026-10-20 in
+/// `protocol-fixtures/high-risk-contracts.json` → `banner`). Only basenames
+/// cross the wire: the renderer builds `videorc-asset://banner/<imageFile>`.
+/// The two timer fields are the only optionals and are omitted when off,
+/// never `null` (the serde null trap).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Banner {
+    pub id: String,
+    pub name: String,
+    /// Plan 232: what the banner's picture is. Omitted on the wire for an
+    /// image, so every older row, fixture and client reads as before.
+    #[serde(default, skip_serializing_if = "BannerKind::is_image")]
+    pub kind: BannerKind,
+    pub image_file: String,
+    pub thumbnail_file: String,
+    pub width: u32,
+    pub height: u32,
+    pub has_alpha: bool,
+    pub sort_order: i64,
+    pub shown: bool,
+    pub horizontal: OverlayRect,
+    pub vertical: OverlayRect,
+    pub show_on_stream: bool,
+    pub show_in_recording: bool,
+    pub opacity: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hide_after_sec: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_every_min: Option<u32>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// What a banner's picture is (plan 232). An image is drawn from a prepared
+/// bitmap; an HTML overlay is a web page main renders offscreen, whose frames
+/// reach the compositor through `html_overlay`. For an HTML overlay `width`
+/// and `height` are the page size in CSS pixels.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BannerKind {
+    #[default]
+    Image,
+    Html,
+}
+
+impl BannerKind {
+    pub fn is_image(&self) -> bool {
+        matches!(self, Self::Image)
+    }
+
+    /// The `banners.kind` column value.
+    pub fn column(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Html => "html",
+        }
+    }
+
+    /// An unknown column value reads as an image: the row then draws nothing
+    /// rather than run a page nobody imported.
+    pub fn from_column(value: &str) -> Self {
+        match value {
+            "html" => Self::Html,
+            _ => Self::Image,
+        }
+    }
+}
+
+/// `banners.importImage` after main's `sourceCapability` has been resolved to
+/// a path (the same exchange `screens.importImage` makes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBannerImageParams {
+    pub path: String,
+}
+
+/// `banners.importHtml` (plan 232) after main's `sourceCapability` has been
+/// resolved: an `.html` file, or a folder with `index.html`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBannerHtmlParams {
+    pub path: String,
+}
+
+/// One HTML overlay main should render now (plan 232 "Targets"): the page
+/// size in CSS pixels, the frame size in device pixels and the rate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlOverlayTarget {
+    pub id: String,
+    pub page_width: u32,
+    pub page_height: u32,
+    pub frame_width: u32,
+    pub frame_height: u32,
+    pub fps: u32,
+}
+
+/// `htmlOverlays.targets` (event) and `htmlOverlays.targets.get` (result).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlOverlayTargets {
+    pub targets: Vec<HtmlOverlayTarget>,
+}
+
+/// What main says about a page it hosts (`htmlOverlays.host.report`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HtmlOverlayHostState {
+    Loading,
+    Live,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HtmlOverlayHostReportParams {
+    pub id: String,
+    pub state: HtmlOverlayHostState,
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// Requests the page made that the network rule cancelled (plan 232 D5).
+    #[serde(default)]
+    pub blocked_requests: Option<u32>,
+}
+
+/// Where a showing HTML overlay stands, for the UI.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HtmlOverlayState {
+    /// The page is loading, or no frame has arrived yet.
+    Loading,
+    /// Frames arrive and the overlay is on the picture.
+    Live,
+    /// The page did not load or its process went away.
+    Failed,
+    /// It cannot be drawn here (the running session, the platform).
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlOverlayStatus {
+    pub id: String,
+    pub state: HtmlOverlayState,
+    /// The one sentence to show when the overlay is not live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The size of the last frame, when one has arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_height: Option<u32>,
+    /// Requests the network rule cancelled (D5); omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_requests: Option<u32>,
+}
+
+/// `htmlOverlays.status` (event) and `htmlOverlays.status.get` (result).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlOverlayStatuses {
+    pub overlays: Vec<HtmlOverlayStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BannerIdParams {
+    pub id: String,
+}
+
+/// `banners.hide`: no `id` hides every banner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HideBannerParams {
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReorderBannersParams {
+    pub ids: Vec<String>,
+}
+
+/// `banners.update`: every field but `id` is optional and leaves the stored
+/// value alone when absent. A timer of `0` turns that timer off.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateBannerParams {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub horizontal: Option<OverlayRect>,
+    #[serde(default)]
+    pub vertical: Option<OverlayRect>,
+    #[serde(default)]
+    pub show_on_stream: Option<bool>,
+    #[serde(default)]
+    pub show_in_recording: Option<bool>,
+    #[serde(default)]
+    pub opacity: Option<f64>,
+    #[serde(default)]
+    pub hide_after_sec: Option<u32>,
+    #[serde(default)]
+    pub repeat_every_min: Option<u32>,
+}
+
+/// How a press plays a sound (plan 189): the audiocn pad modes. Play once
+/// restarts on a second press (D7); Play/stop and Loop stop a playing sound;
+/// While held plays until release.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SoundMode {
+    #[default]
+    OneShot,
+    Toggle,
+    Loop,
+    Hold,
+}
+
+/// A soundboard sound on the wire (plan 189, pinned in
+/// `protocol-fixtures/high-risk-contracts.json` → `sound`). Only the basename
+/// crosses the wire: the monitor builds `videorc-asset://sound/<file>`.
+/// `hotkey` and `starter` are the only optionals and are omitted when absent,
+/// never `null` (the serde null trap).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Sound {
+    pub id: String,
+    pub name: String,
+    /// `<id>.wav` in the managed `Sounds` dir: 48 kHz stereo s16, trimmed.
+    pub file: String,
+    pub duration_ms: u32,
+    /// Integrated loudness measured at import (BS.1770-4).
+    pub loudness_lufs: f64,
+    /// The auto-level gain (D5): toward -18 LUFS, at most +12 dB, peak at or
+    /// under -1 dBFS.
+    pub level_db: f64,
+    /// The streamer's trim, whole dB, -24..+6.
+    pub volume_db: i32,
+    pub mode: SoundMode,
+    /// `"1"`..`"9"`, unique across sounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hotkey: Option<String>,
+    /// The starter slug (`"airhorn"`); absent for the streamer's own sounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starter: Option<String>,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `sounds.list` and `sounds.changed`: the whole soundboard.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundboardState {
+    pub sounds: Vec<Sound>,
+    /// The soundboard's level on Sources, whole dB, -24..+12.
+    pub volume_db: i32,
+    /// "Hear sounds yourself": the main window's monitor plays while
+    /// recording or live.
+    pub monitor: bool,
+    pub starters_seeded: bool,
+}
+
+/// A starter sound being seeded or restored through `sounds.import`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundStarterImport {
+    pub slug: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hotkey: Option<String>,
+}
+
+/// `sounds.import` after main's `sourceCapability` has been resolved to a
+/// path (the same exchange `banners.importImage` makes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSoundParams {
+    pub path: String,
+    #[serde(default)]
+    pub starter: Option<SoundStarterImport>,
+}
+
+/// `sounds.update`: every field but `id` is optional and leaves the stored
+/// value alone when absent. `hotkey: ""` clears the key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSoundParams {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub volume_db: Option<i32>,
+    #[serde(default)]
+    pub mode: Option<SoundMode>,
+    #[serde(default)]
+    pub hotkey: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReorderSoundsParams {
+    pub ids: Vec<String>,
+}
+
+/// `sounds.delete`, `sounds.play` and `sounds.press`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundIdParams {
+    pub id: String,
+}
+
+/// `sounds.stop`: no `id` stops every sound.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopSoundParams {
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// `sounds.settings`: only the fields to change.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundboardSettingsParams {
+    #[serde(default)]
+    pub volume_db: Option<i32>,
+    #[serde(default)]
+    pub monitor: Option<bool>,
+    #[serde(default)]
+    pub starters_seeded: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundPlayResult {
+    pub voice_id: String,
+    /// The sound went into a running session's mix.
+    pub on_air: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundPressResult {
+    /// Omitted when the press stopped the sound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_id: Option<String>,
+    pub on_air: bool,
+}
+
+/// One playing sound.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundVoice {
+    pub voice_id: String,
+    pub sound_id: String,
+    /// Wall clock, epoch ms, when the press arrived.
+    pub started_at_ms: u64,
+    pub duration_ms: u32,
+    pub r#loop: bool,
+    /// In a running session's mix; false means only the monitor plays it.
+    pub on_air: bool,
+}
+
+/// `sounds.playback` and the `sounds.stop` result: every playing sound,
+/// oldest first.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundsPlayback {
+    pub voices: Vec<SoundVoice>,
+    /// A recording or stream is running that sounds can't reach: its audio
+    /// doesn't go through the session bus (a Linux microphone FFmpeg had to
+    /// open directly), so a press is heard only here (release test 147, plan
+    /// 0001). Omitted when false, never `false` or null on the wire.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub session_without_sounds: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PermissionPane {
+    Privacy,
+    ScreenRecording,
+    Camera,
+    Microphone,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthEvent {
+    pub id: String,
+    pub session_id: Option<String>,
+    pub level: HealthLevel,
+    pub code: String,
+    pub message: String,
+    pub permission_pane: Option<PermissionPane>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionLogEntry {
+    pub id: String,
+    pub session_id: String,
+    pub level: HealthLevel,
+    pub code: String,
+    pub message: String,
+    pub source_id: Option<String>,
+    pub permission_pane: Option<PermissionPane>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HealthLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+// --- Live Co-host RPC params (mirrored in shared/backend.ts) ---
+
+/// `cohost.start`. Consent is renderer-owned state (the cloud-AI consent
+/// toggle), so the renderer passes it explicitly on every start; the backend
+/// never assumes it. `streamTitle` is optional context for the model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostStartParams {
+    pub session_id: String,
+    #[serde(default)]
+    pub consent_to_process_chat: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_title: Option<String>,
+}
+
+/// `cohost.question.answered` / `cohost.question.dismiss` /
+/// `cohost.question.restore`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostQuestionParams {
+    pub session_id: String,
+    pub question_id: String,
+}
+
+/// `cohost.flag.dismiss`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostFlagParams {
+    pub session_id: String,
+    pub message_id: String,
+}
+
+/// `cohost.promise.done` / `cohost.promise.dismiss` (plan 068 D8).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostPromiseParams {
+    pub session_id: String,
+    pub promise_id: String,
+}
+
+/// `cohost.recap.dismiss` / `cohost.recap.draft` (plan 068 D8).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostRecapParams {
+    pub session_id: String,
+}
+
+/// `cohost.author.greeted` (plan 068 D9): `authorKey` as `sayHi` carries it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAuthorParams {
+    pub session_id: String,
+    pub author_key: String,
+}
+
+/// `cohost.utterance.approve` / `cohost.utterance.dismiss` (plan 164 S-D2):
+/// a proposed card by its id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostUtteranceParams {
+    pub session_id: String,
+    pub utterance_id: String,
+}
+
+/// `cohost.utterance.say` (plan 164 D7): the streamer's own line for the
+/// Buddy, 1 to 200 characters; `state` defaults to `talk`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSayParams {
+    /// The live-chat session the line may be posted to. Empty or absent:
+    /// no session, so the line is bubble-only (the overlay is free; the Say
+    /// box works while recording without chat).
+    #[serde(default)]
+    pub session_id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::cohost::CohostUtteranceState>,
+}
+
+/// `cohost.settings.set`: every field optional; absent fields are unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSettingsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<crate::cohost::CohostTone>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_highlight: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_highlight: Option<bool>,
+    /// Replaces the whole list; the engine normalises it (trim, <= 10 x 120).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<String>>,
+    /// Buddy hears the microphone while live (plan 068 D2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<bool>,
+    /// Voice commands need "Buddy" first (plan 140 S3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_word_required: Option<bool>,
+    /// How a voice removal is confirmed (plan 140 S3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove_confirm: Option<crate::live_chat_moderation::RemoveConfirmMode>,
+    /// The whole persona (plan 164 S-A2); the engine validates and trims it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<crate::cohost::CohostPersona>,
+    /// The whole automatic chat block (plan 164 S-A2), validated likewise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_chat: Option<crate::cohost::CohostAutoChat>,
+    /// The whole community block (plan 225), clamped by the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community: Option<crate::community::CommunitySettings>,
+}
+
+/// Why a Buddy look picture failed (plan 169), in the web's code and the
+/// tile's words.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarErrorDetail {
+    pub code: String,
+    pub message: String,
+}
+
+impl CohostAvatarErrorDetail {
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+        }
+    }
+
+    pub fn new_owned(code: String, message: String) -> Self {
+        Self { code, message }
+    }
+}
+
+/// `cohost.command.choose` (plan 140 S3): pick one comment from the chooser
+/// the latest voice command opened. `index` is 0 to 2.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostCommandChooseParams {
+    pub command_id: String,
+    pub index: u8,
+}
+
+/// `cohost.command.confirm` / `cohost.command.cancel` (plan 140 S3): answer
+/// the card the latest voice command opened.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostCommandParams {
+    pub command_id: String,
+}
+
+// --- Buddy report (plan 119 S1; mirrored in shared/backend.ts) ---
+
+/// The report format this build writes and reads. A stored report with any
+/// other version reads as unavailable, never as an error.
+pub const COHOST_SESSION_REPORT_VERSION: u32 = 1;
+/// Questions logged per report (first seen first).
+pub const COHOST_REPORT_QUESTIONS_CAP: usize = 200;
+/// Open promises kept at stop.
+pub const COHOST_REPORT_OPEN_PROMISES_CAP: usize = 20;
+/// Asker names kept per logged question.
+pub const COHOST_REPORT_ASKERS_CAP: usize = 5;
+
+/// `cohost.report.get`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportGetParams {
+    pub session_id: String,
+}
+
+/// `cohost.report.saved`: a report for this session was written (or folded
+/// into the one already there).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportSavedEvent {
+    pub session_id: String,
+}
+
+/// What became of a question Buddy caught. The latest outcome wins; a
+/// restore puts it back to `open`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostReportQuestionOutcome {
+    Open,
+    AnsweredOnAir,
+    Replied,
+    MarkedAnswered,
+    Dismissed,
+    /// Still open, but its comment was on stream.
+    Shown,
+}
+
+/// One question in the report's log. Optional lists are omitted while empty,
+/// never null.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportQuestion {
+    pub id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub askers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<crate::streaming::StreamPlatform>,
+    pub priority: crate::cohost::CohostPriority,
+    pub first_seen_at: String,
+    pub outcome: CohostReportQuestionOutcome,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportQuestions {
+    /// Distinct question ids Buddy surfaced.
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub marked_answered: u64,
+    #[serde(default)]
+    pub dismissed: u64,
+    #[serde(default)]
+    pub replied: u64,
+    #[serde(default)]
+    pub answered_on_air: u64,
+    #[serde(default)]
+    pub restored: u64,
+    #[serde(default)]
+    pub shown_on_stream: u64,
+    /// First seen first, at most `COHOST_REPORT_QUESTIONS_CAP`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<CohostReportQuestion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportFlagKindCount {
+    pub kind: crate::cohost::CohostFlagKind,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportFlagSeverityCount {
+    pub severity: crate::cohost::CohostFlagSeverity,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportFlags {
+    /// Each flagged message id counted once.
+    #[serde(default)]
+    pub raised: u64,
+    #[serde(default)]
+    pub dismissed: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_kind: Vec<CohostReportFlagKindCount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_severity: Vec<CohostReportFlagSeverityCount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportOpenPromise {
+    pub text: String,
+    pub first_seen_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportPromises {
+    /// New promise ids heard this session.
+    #[serde(default)]
+    pub heard: u64,
+    /// Marked done, or the transcript showed they were kept.
+    #[serde(default)]
+    pub kept: u64,
+    #[serde(default)]
+    pub dismissed: u64,
+    #[serde(default)]
+    pub reminded: u64,
+    /// Still open when the session ended, oldest first, at most
+    /// `COHOST_REPORT_OPEN_PROMISES_CAP`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open: Vec<CohostReportOpenPromise>,
+}
+
+/// Greeting totals over every chatter of the session (plan 068 D9).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportGreetings {
+    /// Viewers whose first message in the channel landed this session.
+    #[serde(default)]
+    pub first_timers: u64,
+    #[serde(default)]
+    pub first_timers_greeted: u64,
+    #[serde(default)]
+    pub by_voice: u64,
+    #[serde(default)]
+    pub by_chat: u64,
+    /// Their comment went on stream.
+    #[serde(default)]
+    pub on_stream: u64,
+    /// The streamer pressed Greeted.
+    #[serde(default)]
+    pub manual: u64,
+    /// Plan 192 D7: automatic greetings the Buddy did not send, by reason.
+    /// Omitted while every count is zero (and on reports from before it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<CohostReportGreetingsSkipped>,
+}
+
+/// Plan 192 D7: why automatic greetings were not sent this session. Each key
+/// is omitted while zero; the lane writes the counts as they happen, like
+/// posts, so a session without a tick still gets them.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportGreetingsSkipped {
+    /// The kind's line is switched off.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub no_line: u64,
+    /// Automatic chat, or greetings, is off.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub mode_off: u64,
+    /// The row was older than the fresh window (a replay).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub stale: u64,
+    /// The viewer already got this kind of greeting on this destination.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub deduped: u64,
+    /// Waited in a cooldown bucket (sent later, collapsed).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub held: u64,
+    /// No destination could take it, or the send failed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub destination_failed: u64,
+    /// YouTube calls were paused by the quota breaker (plan 094).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub youtube_paused: u64,
+    /// Plan 211 D9: Bubble mode, and Buddy was on no output, so nobody would
+    /// have seen the line.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub no_bubble: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+impl CohostReportGreetingsSkipped {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn merged_with(self, later: Self) -> Self {
+        Self {
+            no_line: self.no_line.saturating_add(later.no_line),
+            mode_off: self.mode_off.saturating_add(later.mode_off),
+            stale: self.stale.saturating_add(later.stale),
+            deduped: self.deduped.saturating_add(later.deduped),
+            held: self.held.saturating_add(later.held),
+            destination_failed: self
+                .destination_failed
+                .saturating_add(later.destination_failed),
+            youtube_paused: self.youtube_paused.saturating_add(later.youtube_paused),
+            no_bubble: self.no_bubble.saturating_add(later.no_bubble),
+        }
+    }
+}
+
+/// One alert kind viewers raised, with the most distinct viewers who said it
+/// Plan 164 D10: one automatic send, written when it lands (or fails), so
+/// the report says what the Buddy posted as the streamer and why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportPost {
+    /// The utterance id.
+    pub id: String,
+    pub at: String,
+    pub trigger: crate::cohost::CohostUtteranceTriggerKind,
+    pub text: String,
+    /// The platforms the send reached, or was meant to.
+    #[serde(default)]
+    pub destinations: Vec<crate::streaming::StreamPlatform>,
+    pub result: CohostReportPostResult,
+    /// Plan 192 S2.2: who wrote a greeting, the AI or the line. Omitted on
+    /// manual, answer and banter posts and on rows from before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<CohostReportPostSource>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostReportPostResult {
+    Sent,
+    Partial,
+    Failed,
+}
+
+/// Plan 192 S2.2: where a greeting's words came from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostReportPostSource {
+    Ai,
+    Line,
+}
+
+/// Posts kept per report, newest kept.
+pub const COHOST_REPORT_POSTS_CAP: usize = 200;
+
+/// Plan 211 D11: one line Buddy said in its bubble on stream, written when
+/// it actually showed (a queued line that was dropped is not "said"). The
+/// streamer's own Say line is recorded too, with trigger `manual`. `posts`
+/// stays chat-only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportSaid {
+    /// The utterance id.
+    pub id: String,
+    /// When it showed.
+    pub at: String,
+    pub trigger: crate::cohost::CohostUtteranceTriggerKind,
+    /// The text as shown (clipped to the bubble's cap).
+    pub text: String,
+    /// Who wrote a greeting, the AI or the line. Omitted on other lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<CohostReportPostSource>,
+}
+
+/// Lines said on stream kept per report, newest kept.
+pub const COHOST_REPORT_SAID_CAP: usize = 200;
+
+/// at once and whether it was ever corroborated (two viewers within 60 s).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportAlert {
+    pub kind: crate::cohost::CohostAlertKind,
+    pub peak_viewers: u32,
+    pub active: bool,
+    pub first_seen_at: String,
+}
+
+/// Recaps are never posted by Buddy, so posting leaves no count.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportRecap {
+    /// The server offered one (viewers asked what they missed).
+    #[serde(default)]
+    pub offered: u64,
+    #[serde(default)]
+    pub drafted: u64,
+    #[serde(default)]
+    pub dismissed: u64,
+}
+
+/// What the streamer's voice commands did in one stream (plan 140 S3).
+/// Counts only. A removal counts once, by its outcome; a card a newer
+/// command replaced is not counted as cancelled (the streamer moved on).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportCommands {
+    #[serde(default)]
+    pub highlighted: u64,
+    /// Cards taken down by voice ("take it down").
+    #[serde(default)]
+    pub cleared: u64,
+    /// The platform removed the message.
+    #[serde(default)]
+    pub removed: u64,
+    /// The platform could not; Videorc hid it locally.
+    #[serde(default)]
+    pub hidden_locally: u64,
+    #[serde(default)]
+    pub cancelled: u64,
+    /// Nobody answered the card in time.
+    #[serde(default)]
+    pub expired: u64,
+    /// A removal that failed or ended unknown, or a refused request.
+    #[serde(default)]
+    pub failed: u64,
+    /// No comment matched, or Buddy didn't catch what was said.
+    #[serde(default)]
+    pub not_found: u64,
+}
+
+impl CohostReportCommands {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn merged_with(mut self, later: Self) -> Self {
+        self.highlighted = self.highlighted.saturating_add(later.highlighted);
+        self.cleared = self.cleared.saturating_add(later.cleared);
+        self.removed = self.removed.saturating_add(later.removed);
+        self.hidden_locally = self.hidden_locally.saturating_add(later.hidden_locally);
+        self.cancelled = self.cancelled.saturating_add(later.cancelled);
+        self.expired = self.expired.saturating_add(later.expired);
+        self.failed = self.failed.saturating_add(later.failed);
+        self.not_found = self.not_found.saturating_add(later.not_found);
+        self
+    }
+}
+
+/// What Buddy caught in one stream, saved on this computer when the session
+/// ends and deleted with the recording (plan 119 decision 6). Counts and the
+/// question log; never raw chat or drafts. Every optional field is omitted,
+/// never null; the blocks always ride and default on read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSessionReport {
+    pub version: u32,
+    pub session_id: String,
+    pub started_at: String,
+    pub ended_at: String,
+    /// Buddy sessions folded into this report: turning Buddy off and on
+    /// mid-stream adds one.
+    #[serde(default)]
+    pub segments: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_title: Option<String>,
+    #[serde(default)]
+    pub messages_seen: u64,
+    /// Distinct comments that went on stream, automatically or by hand.
+    #[serde(default)]
+    pub shown_on_stream: u64,
+    #[serde(default)]
+    pub questions: CohostReportQuestions,
+    #[serde(default)]
+    pub flags: CohostReportFlags,
+    #[serde(default)]
+    pub promises: CohostReportPromises,
+    #[serde(default)]
+    pub greetings: CohostReportGreetings,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alerts: Vec<CohostReportAlert>,
+    #[serde(default)]
+    pub recap: CohostReportRecap,
+    /// Voice commands (plan 140 S3). Omitted when no command was counted, so
+    /// a report from before voice commands reads and writes unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commands: Option<CohostReportCommands>,
+    /// Plan 164 D10: what the Buddy posted as the streamer, oldest first, at
+    /// most 200. Omitted while empty, so older reports read unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub posts: Vec<CohostReportPost>,
+    /// Plan 211 D11: what Buddy said in its bubble on stream (the streamer's
+    /// Say lines too), oldest first, at most 200. Omitted while empty, so
+    /// older reports read unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub said: Vec<CohostReportSaid>,
+    /// Plan 225 D15: who came, from the community store, computed when the
+    /// chat session ends. Omitted while empty, so older reports read
+    /// unchanged and an older app ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community: Option<CohostReportCommunity>,
+}
+
+/// The most regulars a report names (D15).
+pub const COHOST_REPORT_COMMUNITY_NAMES_CAP: usize = 10;
+/// The most milestones a report names.
+pub const COHOST_REPORT_COMMUNITY_MILESTONES_CAP: usize = 20;
+
+/// One regular the report names (D15): the name, where they chatted, and
+/// their linked platforms when they have two or more.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportCommunityPerson {
+    pub name: String,
+    pub platform: crate::streaming::StreamPlatform,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<crate::streaming::StreamPlatform>,
+    /// Streams chatted in, including this one.
+    pub streams: u32,
+}
+
+/// One milestone celebrated this stream (D15).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportCommunityMilestone {
+    pub name: String,
+    pub platform: crate::streaming::StreamPlatform,
+    pub milestone: crate::community::ViewerMilestone,
+}
+
+/// The report's Community block (plan 225 D15). Every count is free and
+/// local; `summary` is the Premium memory pass's two sentences (F3) and is
+/// absent until then. Opt-outs are counted, never named.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportCommunity {
+    /// Regulars who chatted this stream.
+    #[serde(default)]
+    pub regulars_back: u32,
+    /// The regulars by name, most streams first, at most 10.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regulars: Vec<CohostReportCommunityPerson>,
+    /// People who became regulars with this stream.
+    #[serde(default)]
+    pub new_regulars: u32,
+    /// People back after 30 days or more.
+    #[serde(default)]
+    pub comebacks: u32,
+    /// People whose first chat was this stream.
+    #[serde(default)]
+    pub first_timers: u32,
+    /// First-timers whose first and last message were 40 minutes or more apart.
+    #[serde(default)]
+    pub first_timers_stayed: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub milestones: Vec<CohostReportCommunityMilestone>,
+    #[serde(default)]
+    pub links_made: u32,
+    #[serde(default)]
+    pub memories_learned: u32,
+    #[serde(default)]
+    pub opt_outs: u32,
+    /// Premium (F3): at most 280 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+impl CohostReportCommunity {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl CohostSessionReport {
+    /// A stored report, or `None` for anything this build cannot read: another
+    /// version, or a shape that no longer parses. Never an error.
+    pub fn from_stored_json(json: &str) -> Option<Self> {
+        let report: Self = serde_json::from_str(json).ok()?;
+        (report.version == COHOST_SESSION_REPORT_VERSION).then_some(report)
+    }
+
+    /// Fold a later report of the same session into this one (Buddy turned
+    /// off and on mid-stream, or a replacing start): counts add up, questions
+    /// union by id with the later outcome winning, open promises union by
+    /// text, and the span covers both.
+    pub fn merged_with(mut self, later: Self) -> Self {
+        self.version = COHOST_SESSION_REPORT_VERSION;
+        if rfc3339_is_earlier(&later.started_at, &self.started_at) {
+            self.started_at = later.started_at;
+        }
+        if rfc3339_is_earlier(&self.ended_at, &later.ended_at) {
+            self.ended_at = later.ended_at;
+        }
+        self.segments = self.segments.saturating_add(later.segments);
+        if later.stream_title.is_some() {
+            self.stream_title = later.stream_title;
+        }
+        self.messages_seen = self.messages_seen.saturating_add(later.messages_seen);
+        self.shown_on_stream = self.shown_on_stream.saturating_add(later.shown_on_stream);
+
+        let questions = &mut self.questions;
+        questions.total = questions.total.saturating_add(later.questions.total);
+        questions.marked_answered = questions
+            .marked_answered
+            .saturating_add(later.questions.marked_answered);
+        questions.dismissed = questions
+            .dismissed
+            .saturating_add(later.questions.dismissed);
+        questions.replied = questions.replied.saturating_add(later.questions.replied);
+        questions.answered_on_air = questions
+            .answered_on_air
+            .saturating_add(later.questions.answered_on_air);
+        questions.restored = questions.restored.saturating_add(later.questions.restored);
+        questions.shown_on_stream = questions
+            .shown_on_stream
+            .saturating_add(later.questions.shown_on_stream);
+        for item in later.questions.items {
+            if let Some(existing) = questions
+                .items
+                .iter_mut()
+                .find(|existing| existing.id == item.id)
+            {
+                *existing = item;
+            } else if questions.items.len() < COHOST_REPORT_QUESTIONS_CAP {
+                questions.items.push(item);
+            }
+        }
+
+        let flags = &mut self.flags;
+        flags.raised = flags.raised.saturating_add(later.flags.raised);
+        flags.dismissed = flags.dismissed.saturating_add(later.flags.dismissed);
+        for count in later.flags.by_kind {
+            match flags
+                .by_kind
+                .iter_mut()
+                .find(|existing| existing.kind == count.kind)
+            {
+                Some(existing) => existing.count = existing.count.saturating_add(count.count),
+                None => flags.by_kind.push(count),
+            }
+        }
+        for count in later.flags.by_severity {
+            match flags
+                .by_severity
+                .iter_mut()
+                .find(|existing| existing.severity == count.severity)
+            {
+                Some(existing) => existing.count = existing.count.saturating_add(count.count),
+                None => flags.by_severity.push(count),
+            }
+        }
+
+        let promises = &mut self.promises;
+        promises.heard = promises.heard.saturating_add(later.promises.heard);
+        promises.kept = promises.kept.saturating_add(later.promises.kept);
+        promises.dismissed = promises.dismissed.saturating_add(later.promises.dismissed);
+        promises.reminded = promises.reminded.saturating_add(later.promises.reminded);
+        for open in later.promises.open {
+            if promises.open.len() >= COHOST_REPORT_OPEN_PROMISES_CAP {
+                break;
+            }
+            if !promises
+                .open
+                .iter()
+                .any(|existing| existing.text == open.text)
+            {
+                promises.open.push(open);
+            }
+        }
+
+        let greetings = &mut self.greetings;
+        greetings.first_timers = greetings
+            .first_timers
+            .saturating_add(later.greetings.first_timers);
+        greetings.first_timers_greeted = greetings
+            .first_timers_greeted
+            .saturating_add(later.greetings.first_timers_greeted);
+        greetings.by_voice = greetings.by_voice.saturating_add(later.greetings.by_voice);
+        greetings.by_chat = greetings.by_chat.saturating_add(later.greetings.by_chat);
+        greetings.on_stream = greetings
+            .on_stream
+            .saturating_add(later.greetings.on_stream);
+        greetings.manual = greetings.manual.saturating_add(later.greetings.manual);
+        greetings.skipped = match (greetings.skipped.take(), later.greetings.skipped) {
+            (Some(base), Some(later)) => Some(base.merged_with(later)),
+            (base, later) => base.or(later),
+        }
+        .filter(|skipped| !skipped.is_empty());
+
+        for alert in later.alerts {
+            match self
+                .alerts
+                .iter_mut()
+                .find(|existing| existing.kind == alert.kind)
+            {
+                Some(existing) => {
+                    existing.peak_viewers = existing.peak_viewers.max(alert.peak_viewers);
+                    existing.active |= alert.active;
+                    if rfc3339_is_earlier(&alert.first_seen_at, &existing.first_seen_at) {
+                        existing.first_seen_at = alert.first_seen_at;
+                    }
+                }
+                None => self.alerts.push(alert),
+            }
+        }
+
+        self.recap.offered = self.recap.offered.saturating_add(later.recap.offered);
+        self.recap.drafted = self.recap.drafted.saturating_add(later.recap.drafted);
+        self.recap.dismissed = self.recap.dismissed.saturating_add(later.recap.dismissed);
+        self.commands = match (self.commands.take(), later.commands) {
+            (Some(base), Some(later)) => Some(base.merged_with(later)),
+            (base, later) => base.or(later),
+        };
+        for post in later.posts {
+            if self.posts.iter().any(|existing| existing.id == post.id) {
+                continue;
+            }
+            self.posts.push(post);
+        }
+        while self.posts.len() > COHOST_REPORT_POSTS_CAP {
+            self.posts.remove(0);
+        }
+        for said in later.said {
+            if self.said.iter().any(|existing| existing.id == said.id) {
+                continue;
+            }
+            self.said.push(said);
+        }
+        while self.said.len() > COHOST_REPORT_SAID_CAP {
+            self.said.remove(0);
+        }
+        // Plan 225 D15: the block is computed whole from the store, so the
+        // later computation replaces the earlier one.
+        if later.community.is_some() {
+            self.community = later.community;
+        }
+        self
+    }
+
+    /// Plan 225 D15: a report that carries only the Community block, folded
+    /// into the session's report when the chat session ends (like
+    /// `post_only`).
+    pub fn community_only(session_id: &str, community: CohostReportCommunity, at: &str) -> Self {
+        Self {
+            community: Some(community).filter(|community| !community.is_empty()),
+            ..Self::empty(session_id, at)
+        }
+    }
+
+    /// A report that carries nothing but `post` (plan 164 D10): folded into
+    /// the session's report, or kept alone when the tick session never ran
+    /// (greetings are free). `segments: 0` says so.
+    pub fn post_only(session_id: &str, post: CohostReportPost) -> Self {
+        Self {
+            posts: vec![post.clone()],
+            ..Self::empty(session_id, &post.at)
+        }
+    }
+
+    /// Plan 211 D11: a report that carries nothing but one `said` line,
+    /// folded into the session's report as the line shows (like
+    /// `post_only`).
+    pub fn said_only(session_id: &str, said: CohostReportSaid) -> Self {
+        Self {
+            said: vec![said.clone()],
+            ..Self::empty(session_id, &said.at)
+        }
+    }
+
+    /// Plan 192 D7: a report that carries only greeting skip counts, to fold
+    /// into the session's report as they happen (like `post_only`).
+    pub fn greeting_skips_only(
+        session_id: &str,
+        skipped: CohostReportGreetingsSkipped,
+        at: &str,
+    ) -> Self {
+        Self {
+            greetings: CohostReportGreetings {
+                skipped: Some(skipped).filter(|skipped| !skipped.is_empty()),
+                ..CohostReportGreetings::default()
+            },
+            ..Self::empty(session_id, at)
+        }
+    }
+
+    /// A report with nothing in it, spanning one instant: what the merge
+    /// folds a partial write into (`segments` 0, so it never counts as a
+    /// Buddy session of its own).
+    fn empty(session_id: &str, at: &str) -> Self {
+        Self {
+            version: COHOST_SESSION_REPORT_VERSION,
+            session_id: session_id.to_string(),
+            started_at: at.to_string(),
+            ended_at: at.to_string(),
+            segments: 0,
+            stream_title: None,
+            messages_seen: 0,
+            shown_on_stream: 0,
+            questions: CohostReportQuestions::default(),
+            flags: CohostReportFlags::default(),
+            promises: CohostReportPromises::default(),
+            greetings: CohostReportGreetings::default(),
+            alerts: Vec::new(),
+            recap: CohostReportRecap::default(),
+            commands: None,
+            posts: Vec::new(),
+            said: Vec::new(),
+            community: None,
+        }
+    }
+}
+
+/// `a` is strictly before `b`. Both are RFC 3339; when one does not parse the
+/// comparison falls back to the text, which orders same-format UTC stamps.
+fn rfc3339_is_earlier(a: &str, b: &str) -> bool {
+    match (
+        chrono::DateTime::parse_from_rfc3339(a),
+        chrono::DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(a), Ok(b)) => a < b,
+        _ => a < b,
+    }
+}
+
+/// Chat rows of one platform in a session (plan 119 S1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportChatPlatformCount {
+    pub platform: crate::streaming::StreamPlatform,
+    pub messages: u64,
+}
+
+/// Every chat row the session kept, by platform (busiest first).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportChat {
+    pub messages: u64,
+    #[serde(default)]
+    pub by_platform: Vec<CohostReportChatPlatformCount>,
+}
+
+/// `cohost.report.get` / `cohost.report.latest`: the saved report (null when
+/// Buddy left none), the session's moments (computed on read, never stored)
+/// and its chat totals.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportPayload {
+    pub session_id: String,
+    pub report: Option<CohostSessionReport>,
+    #[serde(default)]
+    pub moments: Vec<ClipMoment>,
+    #[serde(default)]
+    pub chat: CohostReportChat,
+}
+
+/// A moment worth a clip: a clip mark or a chat peak, snapped to the
+/// captions. Computed on read for the Buddy report, never stored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipMoment {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub reason: String,
+    pub excerpt: String,
+    /// Where the moment came from (plan 068 D6). Omitted, never null, so an
+    /// older renderer keeps loading the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ClipMomentSource>,
+}
+
+/// What produced a moment: a spoken "clip that", a manual mark, or a chat
+/// spike.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipMomentSource {
+    Voice,
+    Manual,
+    Chat,
+}
+
+/// Who placed a clip mark (plan 068 D6).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipMarkSource {
+    Voice,
+    Manual,
+}
+
+/// One persisted clip mark: a recording-file time the streamer wants clipped.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipMark {
+    pub id: String,
+    pub session_id: String,
+    /// Recording-file time in seconds (capture-relative).
+    pub at_seconds: f64,
+    pub source: ClipMarkSource,
+    /// The spoken phrase for a voice mark ("clip that"). Omitted, never null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phrase: Option<String>,
+    pub created_at: String,
+    /// How far back the moment reaches (plan 199 D8): the press's clip
+    /// length, 30 or 60. `None` for every mark made before plan 199, which
+    /// reads as 30 s. Omitted, never null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookback_seconds: Option<u32>,
+}
+
+/// `clip.marked` event and the `clip.mark` reply: where the mark landed and
+/// whether it was stored. `saved: false` carries a `reason` code
+/// (`recording-off`) so the toast can say why nothing was kept.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipMarkedEvent {
+    pub session_id: String,
+    pub at_seconds: f64,
+    pub source: ClipMarkSource,
+    pub saved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipMarksListParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilities {
+    /// Live-caption transport readiness from videorc-web. Optional so desktop
+    /// remains compatible while older web deployments roll forward; callers
+    /// that opted into captions intentionally fail closed when it is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captions: Option<AiCapabilitiesCaptions>,
+    /// Clean cut readiness (plan 119, contract part B). A server that omits
+    /// the block does not offer Clean cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut: Option<AiCapabilitiesCleanCut>,
+    pub entitlement: AiCapabilitiesEntitlement,
+    /// Ed25519-signed entitlement proof (`v1.<payload>.<sig>`) minted by
+    /// videorc.com. Optional: older web deploys (or an unconfigured signing
+    /// key) omit it and the backend falls back to the unsigned boolean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entitlement_token: Option<String>,
+    pub features: AiCapabilitiesFeatures,
+    /// The Buddy routes (plan 164): the tick contract the web speaks and
+    /// whether avatar generation is on. Older servers omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cohost: Option<AiCapabilitiesCohost>,
+    /// Plan 209 S19, contract part F: Buddy's tool planner. Older servers
+    /// omit it, which reads as off: the old wake-word path stays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buddy: Option<AiCapabilitiesBuddy>,
+    /// The paid plan (plan 185 D2): `{ id: "max", name: "Max" }`. Absent for
+    /// Basic and on older web deploys. `id` is an open string; the desktop
+    /// maps the ids it knows with `EntitlementPlan::parse`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<AiCapabilitiesPlan>,
+    /// Cloud hours and talk-show limits (plan 185 wire shape, plan 184).
+    /// Absent for Basic and on older web deploys, which means no cloud.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<AiCapabilitiesCloud>,
+    /// The stream watchdog's AI chat read (plan 223 B2): `chat` is 1 when
+    /// this user may call `POST /api/ai/watchdog/chat`. Older servers omit
+    /// it: the desktop keeps its free phrase match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchdog: Option<AiCapabilitiesWatchdog>,
+    pub generated_at: String,
+    pub limits: AiCapabilitiesLimits,
+    pub models: AiCapabilitiesModels,
+    pub object_storage: AiCapabilitiesObjectStorage,
+    pub readiness: AiCapabilitiesReadiness,
+    pub transcription: AiCapabilitiesTranscription,
+    pub workflow: AiCapabilitiesWorkflow,
+}
+
+/// `watchdog` from `GET /api/ai/capabilities` (plan 223 B2): `chat` is 1
+/// when this user may call `POST /api/ai/watchdog/chat`, 0 otherwise.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesWatchdog {
+    #[serde(default)]
+    pub chat: u32,
+}
+
+/// `buddy` from `GET /api/ai/capabilities` (plan 209 S19): `act` is 1 when
+/// this user may call `POST /api/ai/buddy/act`, 0 otherwise.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesBuddy {
+    #[serde(default)]
+    pub act: u32,
+}
+
+impl AiCapabilities {
+    /// Whether the planner may be asked: only an explicit `buddy.act: 1`.
+    pub fn buddy_act_enabled(&self) -> bool {
+        self.buddy.as_ref().is_some_and(|buddy| buddy.act == 1)
+    }
+}
+
+/// `plan` from `GET /api/ai/capabilities` (plan 185 D2). Every field defaults
+/// so a partial block never breaks the load.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesPlan {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// `cloud` from `GET /api/ai/capabilities` and the whole answer of
+/// `GET /api/cloud/allowance` (plan 185 wire shape). Every field defaults and
+/// every `Option` skips `null`, so a partial block never breaks the load and
+/// the desktop's own copy never writes a `null` the strict renderer schema
+/// would refuse ([[videorc-serde-null-contract-trap]]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCloud {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub seconds_per_month: u64,
+    #[serde(default)]
+    pub seconds_used: u64,
+    #[serde(default)]
+    pub overage_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
+    #[serde(default)]
+    pub talk_shows: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guests_on_stage: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_retention_days: Option<u32>,
+}
+
+impl AiCapabilitiesCloud {
+    /// Seconds left this month before the allowance is used up (never below
+    /// zero: overage is recorded, not subtracted; plan 185 D6, plan 184 D18).
+    pub fn seconds_remaining(&self) -> u64 {
+        self.seconds_per_month.saturating_sub(self.seconds_used)
+    }
+}
+
+/// `cohost` from `GET /api/ai/capabilities` (plan 164): every field
+/// defaults so a partial block never breaks the load.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCohost {
+    /// The newest tick prompt version the web accepts (4 adds the persona).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick: Option<u32>,
+    /// Plan 192 D4: the greet route (`/api/ai/cohost/greet`) version; 1
+    /// when it is on, 0 when switched off or Buddy is off for the user.
+    /// Older servers omit it: the AI never writes greetings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub greet: Option<u32>,
+    /// Plan 225 D10: the memory route (`/api/ai/cohost/memory`) version; 1
+    /// when it is on, 0 when switched off or Buddy is off for the user.
+    /// Older servers omit it: queued memory passes wait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<AiCapabilitiesAvatar>,
+    /// Pet creation (plan 168, Phase F): on, and this month's creations.
+    /// Older servers omit it: the creator stays off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pet: Option<AiCapabilitiesPet>,
+    /// The account Buddy library (plan 170 D9). Older servers omit it: the
+    /// library is off and the look falls back to the plan 169 route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buddy_library: Option<AiCapabilitiesBuddyLibrary>,
+}
+
+/// `cohost.buddyLibrary` from `GET /api/ai/capabilities` (plan 170 D9):
+/// `enabled` when signed in and the web's library store is configured
+/// (creating still follows `avatar.enabled`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesBuddyLibrary {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub limit: u32,
+    /// Plan 172 D8: alive packs and imports sync (the web's S3 storage is
+    /// configured). Older servers omit it: nothing uploads.
+    #[serde(default)]
+    pub alive: bool,
+}
+
+// --- Buddy pets (plan 168, Phase F) ---
+/// `cohost.pet` from `GET /api/ai/capabilities`. Basic accounts get
+/// `{ enabled: false, creationsRemainingThisMonth: 0, monthlyLimit: 0 }`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesPet {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub creations_remaining_this_month: u32,
+    #[serde(default)]
+    pub monthly_limit: u32,
+}
+// --- end Buddy pets (plan 168, Phase F) ---
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesAvatar {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub remaining_today: u32,
+    #[serde(default)]
+    pub daily_limit: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCaptions {
+    pub available: bool,
+    pub chunked: AiCapabilitiesCaptionsChunked,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_seconds_limit: Option<u64>,
+    pub preferred_transport: Option<AiCapabilitiesCaptionsTransport>,
+    pub realtime: AiCapabilitiesCaptionsRealtime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_seconds: Option<u64>,
+    pub reason_code: AiCapabilitiesCaptionsReasonCode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCaptionsChunked {
+    pub available: bool,
+    pub configured: bool,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCaptionsRealtime {
+    pub available: bool,
+    pub configured: bool,
+    pub disabled: bool,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AiCapabilitiesCaptionsTransport {
+    Chunked,
+    Realtime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AiCapabilitiesCaptionsReasonCode {
+    AiDisabled,
+    AiUserDisabled,
+    CaptionsDisabled,
+    CaptionsInvalidConfig,
+    CaptionsMonthlyQuotaExhausted,
+    CaptionsNotConfigured,
+    CloudAiPremiumRequired,
+    ReadyChunkedRealtimeDisabled,
+    ReadyChunkedRealtimeUnconfigured,
+    ReadyRealtime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesEntitlement {
+    pub checked_at: String,
+    pub cloud_ai: bool,
+    pub expires_at: String,
+    pub is_premium: bool,
+    pub subscription_status: String,
+    pub tier: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesFeatures {
+    /// Clean cut kill switch off and its provider configured (plan 119).
+    /// Older servers omit it.
+    #[serde(default)]
+    pub clean_cut_enabled: bool,
+    pub cloud_ai_enabled: bool,
+    /// The Buddy command route is on and its model configured (plan 140 S8,
+    /// contract part E). Older servers omit it: the parser stays off.
+    #[serde(default)]
+    pub cohost_command_enabled: bool,
+    pub gateway_configured: bool,
+    pub model_testing_enabled: bool,
+    pub multipart_audio_jobs_enabled: bool,
+    pub object_backed_jobs_enabled: bool,
+    pub transcript_jobs_enabled: bool,
+    pub upload_tickets_enabled: bool,
+}
+
+/// `cleanCut` from `GET /api/ai/capabilities` (docs/clean-cut-contract.md,
+/// part B). Every field defaults so a partial block never breaks the load;
+/// `reason_code` is an open string (`disabled`, `blocked`, `premium-required`,
+/// `provider-unconfigured`, `quota-exhausted`, or newer codes).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCleanCut {
+    #[serde(default)]
+    pub supported: bool,
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chunk_seconds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chunk_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_seconds_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesLimits {
+    pub daily_jobs: u32,
+    pub max_audio_bytes: Option<u64>,
+    pub max_audio_megabytes: Option<f64>,
+    pub max_output_tokens: Option<u32>,
+    pub max_transcript_characters: u32,
+    pub monthly_jobs: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesModels {
+    pub allowed_text_model_count: u32,
+    pub allowed_text_models_configured: bool,
+    pub default_text_model: Option<String>,
+    #[serde(default)]
+    pub fallback_text_models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesObjectStorage {
+    pub delete_configured: bool,
+    pub download_configured: bool,
+    pub provider: Option<String>,
+    pub provider_error: Option<String>,
+    pub proof_configured: bool,
+    pub proof_ttl_ms: Option<u64>,
+    pub upload_configured: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesReadiness {
+    pub access: AiCapabilitiesAccessReadiness,
+    pub gateway: AiCapabilitiesServiceReadiness,
+    pub object_storage: AiCapabilitiesObjectStorageReadiness,
+    pub transcription: AiCapabilitiesServiceReadiness,
+    #[serde(default)]
+    pub worker: AiCapabilitiesWorkerReadiness,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesAccessReadiness {
+    pub cloud_ai_entitled: bool,
+    pub globally_disabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesServiceReadiness {
+    pub config_error: Option<String>,
+    pub configured: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesObjectStorageReadiness {
+    pub delete_config_error: Option<String>,
+    pub download_config_error: Option<String>,
+    pub proof_config_error: Option<String>,
+    pub provider_error: Option<String>,
+    pub upload_config_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesWorkerReadiness {
+    pub config_error: Option<String>,
+    pub configured: bool,
+    pub queued_job_delay_ms: u64,
+    pub recently_ran_at: Option<String>,
+    pub running_job_timeout_ms: u64,
+    pub status: String,
+}
+
+impl Default for AiCapabilitiesWorkerReadiness {
+    fn default() -> Self {
+        Self {
+            config_error: None,
+            configured: true,
+            queued_job_delay_ms: 2 * 60 * 1000,
+            recently_ran_at: None,
+            running_job_timeout_ms: 15 * 60 * 1000,
+            status: "unknown".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesTranscription {
+    pub configured: bool,
+    pub config_error: Option<String>,
+    pub max_audio_bytes: Option<u64>,
+    pub max_audio_megabytes: Option<f64>,
+    pub request_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesWorkflow {
+    #[serde(default)]
+    pub input_modes: Vec<AiCapabilitiesInputMode>,
+    pub kind: String,
+    #[serde(default)]
+    pub outputs: Vec<String>,
+    // Per-kind generation contract (videorc-web PR #1). All default false so
+    // an older server simply behaves like the original atomic bundle.
+    #[serde(default)]
+    pub supports_outputs_filter: bool,
+    #[serde(default)]
+    pub supports_tone: bool,
+    #[serde(default)]
+    pub supports_title_variants: bool,
+    #[serde(default)]
+    pub supports_chat_context: bool,
+    #[serde(default)]
+    pub supports_social_posts: bool,
+    #[serde(default)]
+    pub supports_highlight_timestamps: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesInputMode {
+    pub enabled: bool,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiQuotaStatus {
+    pub access: AiQuotaAccess,
+    pub entitlement: AiQuotaEntitlement,
+    pub generated_at: String,
+    pub monthly: AiQuotaWindow,
+    pub today: AiQuotaWindow,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiQuotaAccess {
+    pub allowed: bool,
+    pub code: Option<String>,
+    pub message: Option<String>,
+    pub status: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiQuotaEntitlement {
+    pub cancel_at_period_end: bool,
+    pub checked_at: String,
+    pub cloud_ai: bool,
+    pub current_period_end: Option<String>,
+    pub expires_at: String,
+    pub is_premium: bool,
+    pub subscription_status: String,
+    pub tier: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiQuotaWindow {
+    pub limit: u32,
+    pub remaining: u32,
+    pub reset_at: String,
+    pub used: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiArtifact {
+    pub id: String,
+    pub session_id: String,
+    pub kind: AiArtifactKind,
+    pub status: AiArtifactStatus,
+    pub content: serde_json::Value,
+    pub file_path: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AiArtifactKind {
+    AudioExtract,
+    Transcript,
+    TitleDescription,
+    Summary,
+    Chapters,
+    Highlights,
+    SocialPosts,
+    SmartZoom,
+    NoiseCleanup,
+    SilenceRemoval,
+    HealthAssistant,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AiArtifactStatus {
+    Ready,
+    PendingConsent,
+    Failed,
+}
+
+impl ServerResponse {
+    pub fn ok<T: Serialize>(id: impl Into<String>, payload: T) -> Self {
+        Self {
+            id: id.into(),
+            ok: true,
+            payload: Some(serde_json::to_value(payload).expect("serializable response payload")),
+            error: None,
+        }
+    }
+
+    pub fn error(
+        id: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            ok: false,
+            payload: None,
+            error: Some(ResponseError {
+                code: code.into(),
+                message: message.into(),
+            }),
+        }
+    }
+}
+
+impl ServerEvent {
+    pub fn new<T: Serialize>(event: impl Into<String>, payload: T) -> Self {
+        Self {
+            event: event.into(),
+            payload: serde_json::to_value(payload).expect("serializable event payload"),
+        }
+    }
+}

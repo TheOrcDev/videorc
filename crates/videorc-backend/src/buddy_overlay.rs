@@ -70,16 +70,6 @@ pub fn buddy_bubble_duration(text: &str) -> Duration {
     per_text.max(BUDDY_BUBBLE_MIN).min(BUDDY_BUBBLE_MAX)
 }
 
-impl From<CohostUtteranceState> for CohostAvatarState {
-    fn from(state: CohostUtteranceState) -> Self {
-        match state {
-            CohostUtteranceState::Talk => CohostAvatarState::Talk,
-            CohostUtteranceState::Laugh => CohostAvatarState::Laugh,
-            CohostUtteranceState::Think => CohostAvatarState::Think,
-        }
-    }
-}
-
 /// The bubble on the wire: its text and when it ends (RFC 3339).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -27,6 +27,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// Plan 260 S1.1: these wire types live in `videorc-protocol` now.
+pub use videorc_protocol::buddy_pet::{BuddyAvatar, BuddyMotionSettings, BuddyTrigger};
+
 /// The manifest file of every pack.
 pub const BUDDY_PET_MANIFEST_FILE: &str = "manifest.json";
 /// The Videorc sidecar next to it (D1, D16).
@@ -1307,20 +1310,6 @@ pub fn remove_pack(roots: &[PathBuf], persona_id: &str, pack_id: &str) -> Result
 
 // --- Persona wire (plan 168 Wire shape) -----------------------------------------
 
-/// The Buddy's avatar kind (D2): `still` renders the persona's state images
-/// (as a flat pack, S-A4), `alive` a pet pack by id. A settings row from
-/// before plan 168 loads as Still.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum BuddyAvatar {
-    #[default]
-    Still,
-    Alive {
-        #[serde(rename = "packId")]
-        pack_id: String,
-    },
-}
-
 /// The still pack's reaction ids: the persona's `talk`, `laugh` and `think`
 /// state images (D2, S-A4).
 pub const STILL_REACTION_IDS: [&str; 3] = ["talk", "laugh", "think"];
@@ -1337,73 +1326,11 @@ pub fn validate_avatar(avatar: &BuddyAvatar) -> Result<(), String> {
     }
 }
 
-/// What an event makes the Buddy react to (D14). Closed: an unknown
-/// trigger never deserializes. Moderation flags are never a trigger (they
-/// are private and never on air).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[serde(rename_all = "kebab-case")]
-pub enum BuddyTrigger {
-    Follow,
-    /// Sub, resub, membership.
-    Subscription,
-    /// Sub gift, community gift.
-    Gift,
-    /// Cheer, bits, kicks, Super Chat, Super Sticker, Power-up.
-    Tip,
-    Raid,
-    WatchStreak,
-    Redemption,
-    DestinationFailed,
-    /// Plan 225 D9: a regular's arrival.
-    Regular,
-    /// Plan 225 D9: back after 30 days or more.
-    Comeback,
-    /// Plan 225 D9: the Nth stream, N in a row, or an anniversary.
-    Milestone,
-}
-
-impl BuddyTrigger {
-    #[cfg_attr(not(test), allow(dead_code))] // tests walk every trigger
-    pub const ALL: [BuddyTrigger; 11] = [
-        Self::Follow,
-        Self::Subscription,
-        Self::Gift,
-        Self::Tip,
-        Self::Raid,
-        Self::WatchStreak,
-        Self::Redemption,
-        Self::DestinationFailed,
-        Self::Regular,
-        Self::Comeback,
-        Self::Milestone,
-    ];
-
-    /// D14's default reaction, as a fallback chain: the first id the pack
-    /// has wins, then a motion-only hop. Empty means none (a failed
-    /// destination, owner default 4).
-    pub fn default_reactions(self) -> &'static [&'static str] {
-        match self {
-            Self::Follow => &["wave", "proud"],
-            Self::Subscription | Self::Gift => &["excited"],
-            Self::Tip | Self::Raid => &["surprised"],
-            Self::WatchStreak => &["proud"],
-            Self::Redemption => &["wink"],
-            Self::DestinationFailed => &[],
-            Self::Regular => &["wave", "proud"],
-            Self::Comeback => &["excited", "wave"],
-            Self::Milestone => &["excited", "proud"],
-        }
-    }
-}
-
 /// A reaction override that turns a trigger's reaction off.
 pub const BUDDY_REACTION_NONE: &str = "none";
 /// A reaction id a persona may name (a reaction table entry, a greeting's
 /// `reaction`): 1 to 40 characters of `[a-z0-9-]`.
 pub const BUDDY_REACTION_ID_MAX: usize = 40;
-/// Motion defaults (D10, D13, D15; owner defaults 2 and 3).
-pub const BUDDY_MOTION_INTENSITY_DEFAULT: f64 = 0.45;
-pub const BUDDY_SLEEP_AFTER_DEFAULT_SECONDS: u32 = 180;
 pub const BUDDY_SLEEP_AFTER_MIN_SECONDS: u32 = 30;
 pub const BUDDY_SLEEP_AFTER_MAX_SECONDS: u32 = 1800;
 
@@ -1415,46 +1342,9 @@ pub fn reaction_id_ok(id: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-fn default_motion_intensity() -> f64 {
-    BUDDY_MOTION_INTENSITY_DEFAULT
-}
-
-fn default_sleep_after_seconds() -> u32 {
-    BUDDY_SLEEP_AFTER_DEFAULT_SECONDS
-}
-
-fn default_breathing() -> bool {
-    true
-}
-
-/// How the Buddy moves on air (D10, D13, D15), per persona.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct BuddyMotionSettings {
-    /// 0 to 1; multiplies every transform; 0 keeps frame changes only.
-    #[serde(default = "default_motion_intensity")]
-    pub intensity: f64,
-    /// 0 = never, else 30 to 1800.
-    #[serde(default = "default_sleep_after_seconds")]
-    pub sleep_after_seconds: u32,
-    #[serde(default = "default_breathing")]
-    pub breathing: bool,
-}
-
 // The persona (and the settings around it) compare with `Eq`. JSON cannot
 // carry NaN, and `validate_motion` refuses anything outside 0 to 1, so the
 // one float here is always comparable.
-impl Eq for BuddyMotionSettings {}
-
-impl Default for BuddyMotionSettings {
-    fn default() -> Self {
-        Self {
-            intensity: BUDDY_MOTION_INTENSITY_DEFAULT,
-            sleep_after_seconds: BUDDY_SLEEP_AFTER_DEFAULT_SECONDS,
-            breathing: true,
-        }
-    }
-}
 
 /// The motion settings as the wire may carry them.
 pub fn validate_motion(motion: &BuddyMotionSettings) -> Result<(), String> {

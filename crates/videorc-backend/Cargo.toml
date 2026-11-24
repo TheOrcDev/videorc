@@ -5,6 +5,8 @@ edition = "2024"
 license = "AGPL-3.0-only"
 
 [dependencies]
+# Plan 260 S1.1: the wire types, extracted from src/protocol.rs.
+videorc-protocol = { workspace = true }
 anyhow = "1.0"
 # Plan 190: optional here only for the `live-background-gl-check` feature; the
 # Linux target table below always enables them.

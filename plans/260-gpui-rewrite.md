@@ -879,7 +879,7 @@ contributor's PC (the testing plan's Phase 1 row).
 | # | Slice | Lane | Done when |
 | --- | --- | --- | --- |
 | S1.0 | The workspace scaffold: the root `Cargo.toml` members and `[workspace.dependencies]` for every crate this plan adds (empty crates, each with a README naming its lane), so no later lane edits the root manifest | L2 | CI green on all three platforms; each new crate compiles empty |
-| S1.1 | `videorc-protocol` extracted from `protocol.rs`; `backend.ts` generated | L2 | Contract tests and `protocol-fixtures/` pass on both sides; Windows and Linux CI compile |
+| S1.1 | `videorc-protocol` extracted from `protocol.rs` (moved to L4, approved 2026-11-24, while L2 runs S0.2b: S1.1a the Rust extraction, the backend's behaviour identical and its tests the proof; S1.1b `backend.ts` generated); later protocol changes stay with L2 | L4 | Contract tests and `protocol-fixtures/` pass on both sides; Windows and Linux CI compile |
 | S1.2 | Stream graphics in the backend (captions, chat box, cards, Sidekick bubble) | L2 | Golden images match the renderer's within a threshold and by eye; `smoke:captions-live`, `smoke:comment-highlight-stream` and a record-plus-stream smoke pass on macOS and on a contributor's PC |
 | S1.3 | Meters from `audio.levels`; the monitor, clicks and chime from the backend | L2 | `smoke:soundboard`, `smoke:system-audio` and the mixer tests pass on macOS and on a contributor's PC; the meter, monitor, click and chime paths use no getUserMedia or AudioContext (the room microphone keeps its renderer graph, `lib/room-microphone-source.ts:257`, until S1.8 moves rooms) |
 | S1.4 | UI settings into `app_settings`, with a one-time migration | L2 | `smoke:first-run` and `smoke:scene-presets` pass on a profile from the previous release |
@@ -995,7 +995,7 @@ extra and are not counted.
 | Lane | Owns (only this lane edits these) | Machine | Build weight |
 | --- | --- | --- | --- |
 | L1 Preview | `crates/videorc-preview` (except its Linux files), `-gpu-import`, `-preview-ring`; `apps/videorc/src/preview/`; the screens in L1's row of Phase 3 | This Mac | Heavy once per phase (S0.1's backend build, a cold target), then light |
-| L2 Backend and contracts | `crates/videorc-backend`, `crates/videorc-protocol`, `crates/videorc-updater`, `crates/videorc-page-host`, the generated `backend.ts`, the root `Cargo.toml` and `Cargo.lock` (S1.0 and bumps only), the release scripts | This Mac | Heavy: every slice compiles the backend |
+| L2 Backend and contracts | `crates/videorc-backend`, `crates/videorc-protocol` (its extraction, S1.1, by L4), `crates/videorc-updater`, `crates/videorc-page-host`, the generated `backend.ts`, the root `Cargo.toml` and `Cargo.lock` (S1.0 and bumps only), the release scripts | This Mac | Heavy: every slice compiles the backend |
 | L3 Kit | videorc-ui's `gpui/`, `scripts/build-theme.mjs` and registry files; `crates/videorc-kit`; `scripts/sync-ui.mjs` and `scripts/lib/ui-registry.mjs`; the design skill; L3's screens | This Mac | Light: a warm GPUI target, no backend |
 | L4 Shell and OS | `apps/videorc/src/main.rs`, `app/`, `platform/mod.rs`, `platform/macos/`; `videorc-app-core`'s shell modules (`src/log.rs`, `crash_log.rs`, `restart.rs`, `process.rs`, `paths.rs`, `ledger.rs`, `supervisor.rs`, `client/`, `desktop/`; moved from L7, approved 2026-11-24); L4's screens; macOS packaging | This Mac | Light, except S0.9 and release builds |
 | L5 Linux | `apps/videorc/src/platform/linux/`, `crates/videorc-preview/src/linux*`, Linux packaging; every Linux pass | ogre: one Rust build at a time under `~/linux-beta/ogre-rust.lock`, `cargo -j3` | Its own machine |
@@ -1010,7 +1010,7 @@ extra and are not counted.
 - **L1:** S0.1 → S1.7 (its crates) → [Phase 0 gate] → S2.3a → Studio
   preview and session → the Scene editor (two) → Library (two); reviews
   S2.3b.
-- **L2:** S1.0 → S0.2b → S1.1 → S0.8 → S1.2 → S1.3 → S1.4 → S1.5 → S1.7
+- **L2:** S1.0 → S0.2b → [S1.1, by L4] → S0.8 → S1.2 → S1.3 → S1.4 → S1.5 → S1.7
   (its crates) → S1.8 → backend fixes the screens find → S5.2 → S5.0 on
   macOS.
 - **L3:** S0.4 → [the owner's look, D3] → S2.2a's token output (plain
