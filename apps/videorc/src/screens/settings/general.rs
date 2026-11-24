@@ -329,8 +329,12 @@ impl SettingsScreen {
                                 Button::new("import-obs")
                                     .label(c::IMPORT_FROM_OBS)
                                     .variant(ButtonVariant::Outline)
-                                    .disabled(true)
-                                    .tooltip(view::NOT_IN_THIS_BUILD),
+                                    .disabled(self.disabled() || snapshot.session.phase.is_active())
+                                    .on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.open_obs(window, cx)
+                                        }),
+                                    ),
                             ),
                         )
                         .child(

@@ -365,6 +365,7 @@ fn main() -> Result<()> {
         let settings = cx.new(|cx| {
             screens::settings::SettingsScreen::new(
                 studio.clone(),
+                backend_state.clone(),
                 core_handle.clone(),
                 settings_permissions.clone(),
                 paths.user_data_dir.clone(),

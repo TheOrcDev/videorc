@@ -1095,7 +1095,7 @@ pub fn merge_obs_import_into_config(config: &mut Value, plan: &ObsImportPlan, no
             let Some(target) = target.as_object_mut() else {
                 continue;
             };
-            if target.get("platform").and_then(Value::as_str) != Some(platform) {
+            if target.get("id").and_then(Value::as_str) != Some(platform) {
                 continue;
             }
             target.insert("enabled".into(), json!(true));
@@ -1114,7 +1114,7 @@ pub fn merge_obs_import_into_config(config: &mut Value, plan: &ObsImportPlan, no
     streaming.insert("enabledTargetIds".into(), Value::Array(enabled));
 }
 
-/// The stream cards a fetched key goes to (`target.platform === platform`).
+/// The stream cards a fetched key goes to (`target.id === platform`).
 pub fn key_target_ids(config: &Value, plan: &ObsImportPlan) -> Vec<String> {
     let Some(platform) = plan.stream.as_ref().and_then(StreamPlan::key_platform) else {
         return Vec::new();
@@ -1125,7 +1125,7 @@ pub fn key_target_ids(config: &Value, plan: &ObsImportPlan) -> Vec<String> {
         .map(|targets| {
             targets
                 .iter()
-                .filter(|target| target.get("platform").and_then(Value::as_str) == Some(platform))
+                .filter(|target| target.get("id").and_then(Value::as_str) == Some(platform))
                 .filter_map(|target| target.get("id").and_then(Value::as_str))
                 .map(str::to_string)
                 .collect()

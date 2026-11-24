@@ -3,6 +3,7 @@
 //! is device-local. The kit owns every control and section.
 mod about;
 mod general;
+mod obs;
 mod permissions;
 mod phone;
 mod remote;
@@ -32,6 +33,7 @@ impl EventEmitter<Navigate> for SettingsScreen {}
 
 pub struct SettingsScreen {
     studio: Arc<Studio<BackendClient>>,
+    backend: tokio::sync::watch::Receiver<videorc_app_core::supervisor::BackendState>,
     runtime: tokio::runtime::Handle,
     permissions: Arc<Permissions>,
     local_dir: PathBuf,
@@ -62,11 +64,13 @@ pub struct SettingsScreen {
         gpui::Entity<videorc_kit::input::InputState>,
     )>,
     confirmation: Option<remote::Confirmation>,
+    obs: obs::ObsImport,
 }
 
 impl SettingsScreen {
     pub fn new(
         studio: Arc<Studio<BackendClient>>,
+        backend: tokio::sync::watch::Receiver<videorc_app_core::supervisor::BackendState>,
         runtime: tokio::runtime::Handle,
         permissions: Arc<Permissions>,
         local_dir: PathBuf,
@@ -207,6 +211,7 @@ impl SettingsScreen {
             .map(|s| s.trim().to_string());
         let mut this = Self {
             studio,
+            backend,
             runtime,
             permissions,
             local_dir,
@@ -231,6 +236,7 @@ impl SettingsScreen {
             rename: DialogHandle::new(false),
             phone_edit: None,
             confirmation: None,
+            obs: obs::ObsImport::default(),
         };
         this.apply_theme(cx);
         this.refresh(cx);
@@ -426,6 +432,9 @@ use videorc_kit::{
 };
 impl Render for SettingsScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.obs.state.open && !self.obs.dialog.is_open() && !self.obs.state.applying {
+            self.obs.state.closed();
+        }
         let t = theme::current(window, cx).theme();
         let mut tabs = Tabs::new("settings-tabs").selected(self.tab.index());
         for tab in view::TABS {
@@ -472,5 +481,6 @@ impl Render for SettingsScreen {
             )
             .child(self.confirmation_dialog(cx))
             .child(self.rename_dialog(cx))
+            .child(self.obs_dialog(cx))
     }
 }
