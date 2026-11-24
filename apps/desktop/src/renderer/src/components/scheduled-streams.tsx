@@ -114,7 +114,7 @@ export function ScheduledStreams(): ReactElement {
   }
   const fixTime = async (event: ScheduledStreamEvent): Promise<string | null> => {
     try {
-      await state.mutate('update', scheduledStartRepairParams(event))
+      await state.mutate('update', scheduledStartRepairParams(event), { inline: true })
       return null
     } catch (error) {
       return inlineUserError(error, { action: 'fix', object: 'the time' }, 'scheduled-streams')
