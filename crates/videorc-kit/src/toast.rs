@@ -142,9 +142,11 @@ impl Toaster {
         cx.notify();
     }
 
-    /// Whether a recovery still has a visible/closing toast to replace.
+    /// Whether a recovery still has a visible, active toast to replace.
     pub fn contains(&self, id: &SharedString) -> bool {
-        self.toasts.get(id).is_some()
+        self.toasts.visible(VISIBLE).any(|(shown, _, phase)| {
+            shown == id && phase != gpui_base::ToastTransitionStatus::Ending
+        })
     }
 
     pub fn dismiss(&mut self, id: &SharedString, window: &mut Window, cx: &mut Context<Self>) {
