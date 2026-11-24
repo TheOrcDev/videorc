@@ -443,6 +443,14 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let palette = cx.new(|cx| {
+                    screens::command_palette::CommandPalette::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        window,
+                        cx,
+                    )
+                });
                 cx.new(|cx| {
                     Shell::new(
                         status.clone(),
@@ -452,6 +460,7 @@ fn main() -> Result<()> {
                         sources.clone(),
                         settings.clone(),
                         health.clone(),
+                        palette,
                         window,
                         cx,
                     )

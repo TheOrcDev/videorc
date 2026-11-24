@@ -40,7 +40,7 @@ impl SettingsScreen {
                 .to_string(),
         )
     }
-    pub(super) fn open_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.disabled() || self.studio.snapshot().session.phase.is_active() {
             return;
         }

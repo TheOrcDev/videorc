@@ -8,6 +8,7 @@ pub mod alert;
 pub mod badge;
 pub mod button;
 pub mod chrome;
+pub mod command;
 pub mod context_menu;
 pub mod dialog;
 pub mod dropdown_menu;

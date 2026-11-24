@@ -55,6 +55,7 @@ pub struct Dialog {
     footer: SmallVec<[AnyElement; 2]>,
     size: DialogSize,
     close_button: bool,
+    palette: bool,
     appearance: Option<Appearance>,
 }
 
@@ -73,6 +74,7 @@ impl Dialog {
             footer: SmallVec::new(),
             size: DialogSize::Md,
             close_button: true,
+            palette: false,
             appearance: None,
         }
     }
@@ -96,6 +98,14 @@ impl Dialog {
     /// Hides the close button (an AlertDialog has none).
     pub fn close_button(mut self, shown: bool) -> Self {
         self.close_button = shown;
+        self
+    }
+
+    /// CommandDialog owns its header, rows and footer on this one surface.
+    pub(crate) fn palette(mut self) -> Self {
+        self.palette = true;
+        self.close_button = false;
+        self.size = DialogSize::Lg;
         self
     }
 
@@ -161,7 +171,7 @@ impl RenderOnce for Dialog {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(px(12.0))
+            .gap(px(if self.palette { 0.0 } else { 12.0 }))
             .children(self.body);
         let footer = div()
             .flex()
@@ -198,8 +208,8 @@ impl RenderOnce for Dialog {
                 .min_h(px(0.0))
                 .flex()
                 .flex_col()
-                .gap(px(20.0))
-                .child(header)
+                .gap(px(if self.palette { 0.0 } else { 20.0 }))
+                .when(!self.palette, |surface| surface.child(header))
                 .child(body)
                 .child(footer),
         )
@@ -209,7 +219,7 @@ impl RenderOnce for Dialog {
         .max_h(px(max_height))
         .flex()
         .flex_col()
-        .p(px(20.0))
+        .p(px(if self.palette { 0.0 } else { 20.0 }))
         .font_family(FONT)
         .text_size(px(14.0))
         .text_color(hsla(t.popover_foreground))

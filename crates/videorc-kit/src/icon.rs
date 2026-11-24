@@ -7,6 +7,10 @@ use gpui::{Hsla, IntoElement, Styled, Svg, px, svg};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IconName {
+    /// SearchIcon.
+    MagnifyingGlass,
+    /// NotificationsIcon.
+    Bell,
     /// `SuccessIcon`.
     CheckCircle,
     /// `ErrorIcon`.
@@ -50,6 +54,8 @@ pub enum IconName {
 impl IconName {
     fn bytes(self) -> &'static [u8] {
         match self {
+            IconName::MagnifyingGlass => include_bytes!("../icons/magnifying-glass.svg"),
+            IconName::Bell => include_bytes!("../icons/bell.svg"),
             IconName::CheckCircle => include_bytes!("../icons/check-circle.svg"),
             IconName::XCircle => include_bytes!("../icons/x-circle.svg"),
             IconName::Warning => include_bytes!("../icons/warning.svg"),

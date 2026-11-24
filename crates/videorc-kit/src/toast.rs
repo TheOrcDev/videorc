@@ -56,6 +56,10 @@ pub struct ToastData {
     pub title: SharedString,
     pub description: Option<SharedString>,
     pub action: Option<(SharedString, ActionHandler)>,
+    /// None uses the defaults; Some(None) waits until explicitly dismissed.
+    pub timeout: Option<Option<Duration>>,
+    /// Only a manual close; expiry and programmatic dismissal do not read news.
+    pub on_close: Option<ActionHandler>,
 }
 
 impl ToastData {
@@ -65,6 +69,8 @@ impl ToastData {
             title: title.into(),
             description: None,
             action: None,
+            timeout: None,
+            on_close: None,
         }
     }
 
@@ -85,6 +91,9 @@ impl ToastData {
     /// `defaultToastDuration`: an action waits for the streamer, a
     /// description gets time to be read.
     fn timeout(&self) -> Option<Duration> {
+        if let Some(timeout) = self.timeout {
+            return timeout;
+        }
         if self.action.is_some() {
             None
         } else if self.description.is_some() {
@@ -131,6 +140,11 @@ impl Toaster {
         self.toasts.push(id.into(), toast, options, Instant::now());
         self.tick(window, cx);
         cx.notify();
+    }
+
+    /// Whether a recovery still has a visible/closing toast to replace.
+    pub fn contains(&self, id: &SharedString) -> bool {
+        self.toasts.get(id).is_some()
     }
 
     pub fn dismiss(&mut self, id: &SharedString, window: &mut Window, cx: &mut Context<Self>) {
@@ -261,14 +275,31 @@ impl Render for Toaster {
             .map(|(id, toast, status)| {
                 let close_id = id.clone();
                 let this = this.clone();
+                let closed = toast.on_close.clone();
                 let on_close: ActionHandler = Rc::new(move |window, cx| {
+                    if let Some(closed) = &closed {
+                        closed(window, cx);
+                    }
                     let _ = this.update(cx, |toaster, cx| toaster.dismiss(&close_id, window, cx));
                 });
+                let mut data = toast.clone();
+                if let Some((label, action)) = data.action.take() {
+                    let entity = cx.entity().downgrade();
+                    let action_id = id.clone();
+                    data.action = Some((
+                        label,
+                        Rc::new(move |window, cx| {
+                            let _ = entity
+                                .update(cx, |toaster, cx| toaster.dismiss(&action_id, window, cx));
+                            action(window, cx);
+                        }),
+                    ));
+                }
                 let card = gpui_base::Toast::new(id.clone())
                     .transition_status(status)
                     .occlude()
                     .w_full()
-                    .child(toast_card(t, id.clone(), toast, Some(on_close), None));
+                    .child(toast_card(t, id.clone(), &data, Some(on_close), None));
                 (id.clone(), card.into_any_element())
             })
             .collect();
