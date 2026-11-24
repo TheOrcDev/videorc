@@ -190,6 +190,41 @@ impl LowLightCore {
             }
         }
     }
+
+    /// A save whose future was dropped before its answer (Electron's
+    /// `setCompensation` always reaches its `finally`): the switch is free
+    /// again and the stored state is read back, as after a failed save but
+    /// with no toast. Only the newest save's; true when it applied.
+    pub fn abandon_set(&mut self, revision: u64, camera_id: &str, now: Instant) -> bool {
+        if revision != self.revision || !self.view.pending {
+            return false;
+        }
+        self.set_answered(revision, camera_id, None, now);
+        true
+    }
+}
+
+/// [`Studio::set_camera_low_light`]'s save, ended if its future is dropped
+/// before the answer. Forgotten once the answer is in. Dropped with the
+/// Studio's lock free.
+struct SaveDropped<'a, B: StudioBackend> {
+    studio: &'a Studio<B>,
+    revision: u64,
+    camera_id: &'a str,
+}
+
+impl<B: StudioBackend> Drop for SaveDropped<'_, B> {
+    fn drop(&mut self) {
+        let abandoned =
+            self.studio
+                .lock()
+                .low_light
+                .abandon_set(self.revision, self.camera_id, Instant::now());
+        if abandoned {
+            self.studio.settings_retry.notify_one();
+            self.studio.publish();
+        }
+    }
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -250,11 +285,17 @@ impl<B: StudioBackend> Studio<B> {
             compensation,
         })
         .unwrap_or_else(|_| json!({ "cameraId": camera_id, "compensation": compensation }));
+        let dropped = SaveDropped {
+            studio: self,
+            revision,
+            camera_id: &camera_id,
+        };
         let answer = self
             .backend
             .sources_request(SET_METHOD, params)
             .await
             .and_then(|value| super::backend::read_json::<CameraLowLightState>(SET_METHOD, value));
+        std::mem::forget(dropped);
         if let Err(error) = &answer {
             let context = UserErrorContext {
                 action: if compensation { "turn on" } else { "turn off" },
@@ -343,6 +384,25 @@ mod tests {
         core.read_answered(&read, None, now);
         assert_eq!(core.view.state, None, "the retries are spent");
         assert_eq!(core.due, None);
+    }
+
+    #[test]
+    fn a_dropped_save_frees_the_switch_and_reads_back() {
+        let now = Instant::now();
+        let mut core = LowLightCore::default();
+        let older = core.begin_set();
+        let newest = core.begin_set();
+        assert!(
+            !core.abandon_set(older, "cam:1", now),
+            "only the newest save's"
+        );
+        assert!(core.view.pending);
+        assert!(core.abandon_set(newest, "cam:1", now));
+        assert!(!core.view.pending);
+        let read = core.take_due(now).expect("the stored state is read back");
+        assert_eq!(read.camera_id, "cam:1");
+        assert_eq!(read.revision, newest);
+        assert!(!core.abandon_set(newest, "cam:1", now), "once");
     }
 
     #[test]

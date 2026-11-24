@@ -110,6 +110,42 @@ fn working_sources(inner: &mut Inner) -> Value {
     inner.capture.config["sources"].clone()
 }
 
+/// A live switch's send whose future was dropped before the backend
+/// answered (Electron's `send` always settles). Left alone, `sending` stays
+/// set: Check again does nothing and a read never sends the lost request
+/// again. The answer counts as lost (`send_lost`), the send ends, and a
+/// read is due at once to find what the session did. The answered ways out
+/// forget it. Dropped with the Studio's lock free.
+struct SendDropped<'a, B: StudioBackend> {
+    studio: &'a Studio<B>,
+    epoch: u64,
+    generation: u64,
+}
+
+impl<B: StudioBackend> Drop for SendDropped<'_, B> {
+    fn drop(&mut self) {
+        let abandoned = {
+            let mut guard = self.studio.lock();
+            let inner = &mut *guard;
+            let live = &mut inner.live_sources;
+            let current =
+                live.sending && live.epoch == self.epoch && live.send_generation == self.generation;
+            if current {
+                live.send_lost();
+                live.end_send(self.epoch, self.generation);
+                if inner.live_due.is_none() {
+                    inner.live_due = Some((Instant::now(), self.epoch, false));
+                }
+            }
+            current
+        };
+        if abandoned {
+            self.studio.settings_retry.notify_one();
+            self.studio.publish();
+        }
+    }
+}
+
 impl<B: StudioBackend> Studio<B> {
     // --- why a picker waits ---
 
@@ -426,10 +462,16 @@ impl<B: StudioBackend> Studio<B> {
         // no meter stream of its own (it reads the backend's levels).
         let generation = self.lock().live_sources.begin_send();
         let params = serde_json::to_value(&request).unwrap_or(Value::Null);
+        let dropped = SendDropped {
+            studio: self,
+            epoch,
+            generation,
+        };
         let answer = self
             .backend
             .sources_request(SOURCE_SWITCH_METHOD, params)
             .await;
+        std::mem::forget(dropped);
         let (accepted, failure, refresh) = {
             let mut inner = self.lock();
             if !inner

@@ -448,6 +448,30 @@ impl Inner {
     }
 }
 
+/// ⌘Z's entry while its undo runs, put back if the undo's future is dropped
+/// before it ends (Electron's `undoLayout` always reaches its restore on a
+/// refusal). Back only into an empty slot, as `restoreLayoutUndo` does, so
+/// a commit that landed meanwhile keeps its own entry. Disarmed once the
+/// undo answered. Dropped with the Studio's lock free.
+struct UndoInFlight<'a, B: StudioBackend> {
+    studio: &'a Studio<B>,
+    entry: Option<LayoutUndoEntry>,
+}
+
+impl<B: StudioBackend> UndoInFlight<'_, B> {
+    fn answered(mut self) {
+        self.entry = None;
+    }
+}
+
+impl<B: StudioBackend> Drop for UndoInFlight<'_, B> {
+    fn drop(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            self.studio.restore_layout_undo(entry);
+        }
+    }
+}
+
 impl<B: StudioBackend> Studio<B> {
     fn edit_identity(&self) -> EditIdentity {
         let inner = self.lock();
@@ -738,10 +762,15 @@ impl<B: StudioBackend> Studio<B> {
             .clone()
             .filter(|id| Some(id) != on_stream.as_ref())
         {
+            let in_flight = UndoInFlight {
+                studio: &**self,
+                entry: Some(entry.clone()),
+            };
             let switched = self
                 .apply_saved_scene(&id, None, ApplyOptions::default())
                 .await
                 .ok;
+            in_flight.answered();
             if !switched {
                 self.restore_layout_undo(entry);
             }
@@ -780,6 +809,10 @@ impl<B: StudioBackend> Studio<B> {
                 )
             })
             .flatten();
+        let in_flight = UndoInFlight {
+            studio: &**self,
+            entry: Some(entry.clone()),
+        };
         let committed = self
             .request_layout_transaction(
                 entry.layout.clone(),
@@ -792,6 +825,7 @@ impl<B: StudioBackend> Studio<B> {
                 },
             )
             .await;
+        in_flight.answered();
         if !committed {
             self.restore_layout_undo(entry);
         }

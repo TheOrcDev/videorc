@@ -498,6 +498,65 @@ impl Drop for LiveAudioStartInFlight<'_> {
     }
 }
 
+/// A start's optimistic `starting`, ended when its future is dropped before
+/// the answer or the refusal (a dropped GPUI task, a timeout around the
+/// call). Electron's start promise can't be dropped; here every later
+/// Record or Go Live would be busy for good. Each answered way out clears
+/// `start_pending` first, so this does nothing then. Dropped with the
+/// Studio's lock free.
+struct AbandonStart<'a, B: StudioBackend>(&'a Studio<B>);
+
+impl<B: StudioBackend> Drop for AbandonStart<'_, B> {
+    fn drop(&mut self) {
+        let abandoned = self.0.lock().session.abandon_start();
+        if abandoned {
+            self.0
+                .config
+                .logger
+                .warn("Studio: a start was dropped before its answer; back to Idle.");
+            self.0.publish();
+        }
+    }
+}
+
+/// A stop's `stop_pending`, ended when its future is dropped before
+/// `session.stop` answered: the session would read Stopping for good and
+/// every later stop would answer at once without stopping. The answered
+/// ways out clear it first. Dropped with the Studio's lock free.
+struct AbandonStop<'a, B: StudioBackend>(&'a Studio<B>);
+
+impl<B: StudioBackend> Drop for AbandonStop<'_, B> {
+    fn drop(&mut self) {
+        let abandoned = {
+            let mut inner = self.0.lock();
+            let pending = inner.session.stop_pending();
+            if pending {
+                inner.session.end_stop();
+            }
+            pending
+        };
+        if abandoned {
+            self.0
+                .config
+                .logger
+                .warn("Studio: a stop was dropped before its answer.");
+            self.0.publish();
+        }
+    }
+}
+
+/// A settings batch whose future was dropped before the store answered: the
+/// writes stay in the journal and the retry is scheduled, so they land. The
+/// answered way out forgets it.
+struct FlushDropped<'a, B: StudioBackend>(&'a Studio<B>);
+
+impl<B: StudioBackend> Drop for FlushDropped<'_, B> {
+    fn drop(&mut self) {
+        let mut inner = self.0.lock();
+        self.0.schedule_settings_retry(&mut inner);
+    }
+}
+
 /// What a stop request did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopOutcome {
@@ -1793,6 +1852,9 @@ impl<B: StudioBackend> Studio<B> {
                 view.capture_doc["sources"].clone(),
             )
         };
+        // From here every await may be the last one: a dropped start goes
+        // back to Idle.
+        let _abandon = AbandonStart(self);
         self.publish();
         self.post(attempted);
         let mut params = match params {
@@ -2124,6 +2186,8 @@ impl<B: StudioBackend> Studio<B> {
                 .latency
                 .take_click_epoch_ms(LatencyKind::Stop, Instant::now(), epoch_ms())
         };
+        // A stop dropped before its answer lets the next one run.
+        let _abandon = AbandonStop(self);
         self.publish();
         // X's broadcasts end before the stream does (S1.6c).
         let params = SessionStopParams {
@@ -2339,7 +2403,13 @@ impl<B: StudioBackend> Studio<B> {
                 }
                 inner.journal.batch(&self.config.writer_id)
             };
-            match self.backend.settings_set(params.clone()).await {
+            // A flush dropped while the store answers leaves the batch
+            // pending: the retry is scheduled, as after a failed send, so it
+            // still lands (Electron's `flush()` always settles).
+            let retry = FlushDropped(self);
+            let answer = self.backend.settings_set(params.clone()).await;
+            std::mem::forget(retry);
+            match answer {
                 Ok(change) => {
                     {
                         let mut inner = self.lock();
