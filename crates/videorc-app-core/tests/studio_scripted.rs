@@ -78,6 +78,11 @@ struct Script {
     audio_answers: VecDeque<Option<&'static str>>,
     audio_updates: Vec<AudioProcessingUpdateParams>,
     audio_gate: Option<Arc<Semaphore>>,
+    /// S1.6a part 6c: `replay.status`'s answer (none: not answered, so the
+    /// Clips ring is never armed, as in every test before it), and every
+    /// Clips request made.
+    replay_status: Option<Value>,
+    clips_calls: Vec<(String, Value)>,
 }
 
 struct Scripted {
@@ -320,6 +325,19 @@ impl StudioBackend for Scripted {
                 "sceneId": script.scene_get.as_ref().map(|scene| scene["id"].clone()),
             })),
             "diagnostics.stats" => Ok(json!({"activeSceneRevision": script.scene_revision})),
+            _ => Err(RpcError::not_connected(method)),
+        }
+    }
+
+    /// S1.6a part 6c: `replay.status` as scripted; nothing else answers.
+    async fn clips_request(&self, method: &'static str, params: Value) -> Result<Value, RpcError> {
+        let mut script = self.script.lock().unwrap();
+        script.clips_calls.push((method.to_string(), params));
+        match method {
+            "replay.status" => script
+                .replay_status
+                .clone()
+                .ok_or_else(|| RpcError::not_connected(method)),
             _ => Err(RpcError::not_connected(method)),
         }
     }
@@ -2632,6 +2650,181 @@ async fn a_switch_asked_for_during_a_start_waits_and_goes_to_the_session() {
     assert!(switching.await.unwrap());
     // The start carried the scene as it was; the switch is a change to the
     // session it started.
+    assert_eq!(started_preset(&backend, 0), "screen-camera");
+    let commits = layout_commits(&backend);
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].0, "scene.layout.apply_live");
+    assert_eq!(commits[0].1["layout"]["layoutPreset"], "screen-only");
+    assert_eq!(
+        studio.snapshot().scenes.on_stream_id.as_deref(),
+        Some("default-screen-only")
+    );
+}
+
+// --- S1.6a part 6c: the Clips ring on the Studio, and #1640's ring half ---
+
+use videorc_app_core::desktop::permissions::{MediaAccessSnapshot, MediaAccessStatus};
+use videorc_protocol::ReplayParams;
+
+/// `replay.status` before the ring ever ran.
+fn ring_off() -> Value {
+    json!({"state": "off", "seconds": 60, "bufferedSeconds": 0.0})
+}
+
+/// The buffer-only session's status, as `session.start` answers it.
+fn ring_session() -> RecordingStatus {
+    RecordingStatus {
+        replay_only: true,
+        ..status(RecordingState::Recording, Some("ring"))
+    }
+}
+
+/// A launched Studio over `config` whose backend answers `replay.status`,
+/// with a chosen recordings folder and the app's capability issuer; the
+/// grants given and the previews the app's own (so nothing waits). Returns
+/// the capability the folder's starts carry.
+async fn clips_studio(config: Value) -> (Arc<Scripted>, Arc<Studio<Scripted>>, String) {
+    let backend = Scripted::new();
+    let folder = std::env::temp_dir();
+    backend.with(|script| {
+        script.settings.insert(
+            keys::CAPTURE_CONFIG.to_string(),
+            Value::String(config.to_string()),
+        );
+        script.settings.insert(
+            keys::RECORDINGS_FOLDER.to_string(),
+            Value::String(
+                json!({"path": folder.display().to_string(), "displayName": "Recordings"})
+                    .to_string(),
+            ),
+        );
+        script.replay_status = Some(ring_off());
+        script.start_answers.push_back(Ok(ring_session()));
+    });
+    let studio = new_studio(&backend);
+    let authorize: videorc_app_core::studio::OutputAuthorizer =
+        Arc::new(|path: std::path::PathBuf| {
+            Box::pin(async move { Ok::<String, String>(format!("cap:{}", path.display())) })
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Result<String, String>> + Send>,
+                >
+        });
+    studio.set_output_authorizer(authorize);
+    studio.set_clips_auto_preview(false);
+    studio.set_clips_media_access(Some(MediaAccessSnapshot {
+        camera: MediaAccessStatus::Granted,
+        microphone: MediaAccessStatus::Granted,
+        screen: MediaAccessStatus::Granted,
+    }));
+    studio.handle_event(ready()).await;
+    assert!(studio.snapshot().scenes.loaded);
+    (backend, studio, format!("cap:{}", folder.display()))
+}
+
+#[tokio::test]
+async fn the_launch_arms_the_ring_and_starts_a_buffer_only_session_with_the_scene() {
+    let (backend, studio, capability) = clips_studio(capture_config_with_camera()).await;
+    assert_eq!(
+        backend.script.lock().unwrap().clips_calls[0].0,
+        "replay.status"
+    );
+    let clips = studio.snapshot().clips;
+    assert!(clips.armed && clips.on, "the switch is on by default");
+    assert!(studio.clips_due_at().is_some(), "the arming passes");
+
+    studio.clips_due().await;
+    assert_eq!(backend.count("session.start"), 1);
+    let script = backend.script.lock().unwrap();
+    let started = &script.started_with[0];
+    assert!(!started.output.record_enabled && !started.output.stream_enabled);
+    assert!(started.streaming.is_none() && started.captions.is_none());
+    assert_eq!(
+        started.replay,
+        Some(ReplayParams {
+            seconds: 60,
+            auto: true
+        }),
+        "the minute, as the default nobody chose"
+    );
+    assert_eq!(
+        serde_json::to_value(&started.layout).unwrap()["layoutPreset"],
+        "screen-camera",
+        "the scene on stream"
+    );
+    assert_eq!(started.sources.camera_id.as_deref(), Some("camera:1"));
+    assert_eq!(
+        script.started_into[0].as_deref(),
+        Some(capability.as_str()),
+        "the folder's capability rides the ring's start"
+    );
+    drop(script);
+    assert!(studio.snapshot().session.status.replay_only);
+}
+
+#[tokio::test]
+async fn the_ring_waits_for_a_switch_awaiting_its_proof_and_starts_with_its_scene() {
+    let (backend, studio, _) = clips_studio(capture_config_with_camera()).await;
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| script.apply_gate = Some(gate.clone()));
+
+    let switching = {
+        let studio = studio.clone();
+        tokio::spawn(async move { apply(&studio, "default-camera-only").await })
+    };
+    eventually("the switch is pending", || {
+        studio.snapshot().scenes.pending_scene_id.as_deref() == Some("default-camera-only")
+    })
+    .await;
+    studio.clips_due().await;
+    assert_eq!(
+        backend.count("session.start"),
+        0,
+        "the ring waits for the switch's proof"
+    );
+
+    gate.add_permits(8);
+    assert!(switching.await.unwrap());
+    assert!(
+        studio.clips_due_at().is_some(),
+        "the proof's end passes the ring again"
+    );
+    studio.clips_due().await;
+    assert_eq!(backend.count("session.start"), 1);
+    // It started with the scene the switch went to, never the one it left.
+    assert_eq!(started_preset(&backend, 0), "camera-only");
+    assert_eq!(layout_commits(&backend)[0].0, "scene.layout.apply_preview");
+}
+
+#[tokio::test]
+async fn a_switch_asked_for_during_the_rings_start_waits_and_goes_to_its_session() {
+    let (backend, studio, _) = clips_studio(capture_config_with_camera()).await;
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| script.start_gate = Some(gate.clone()));
+
+    let passing = {
+        let studio = studio.clone();
+        tokio::spawn(async move { studio.clips_due().await })
+    };
+    eventually("the ring's session.start is sent", || {
+        backend.count("session.start") == 1
+    })
+    .await;
+    let switching = {
+        let studio = studio.clone();
+        tokio::spawn(async move { apply(&studio, "default-screen-only").await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        layout_commits(&backend).is_empty(),
+        "the switch waits for the ring's start"
+    );
+    assert!(!studio.snapshot().scenes.transaction_pending);
+
+    gate.add_permits(1);
+    passing.await.unwrap();
+    assert!(switching.await.unwrap());
+    // The ring started with the scene as it was; the switch is a change to
+    // the session it started.
     assert_eq!(started_preset(&backend, 0), "screen-camera");
     let commits = layout_commits(&backend);
     assert_eq!(commits.len(), 1);

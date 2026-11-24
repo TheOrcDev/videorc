@@ -236,6 +236,18 @@ pub trait StudioBackend: Send + Sync + 'static {
         let _ = params;
         async move { Err(RpcError::not_connected(method)) }
     }
+    /// Plan 260 S1.6a part 6c: the Clips ring's and the clip action's
+    /// requests by name (`replay.status`, `clip.mark`), as the backend's
+    /// JSON. A backend without them (a test fake) answers nothing, so the
+    /// ring is never armed (Electron's failed `replay.status` read).
+    fn clips_request(
+        &self,
+        method: &'static str,
+        params: Value,
+    ) -> impl Future<Output = Result<Value, RpcError>> + Send {
+        let _ = params;
+        async move { Err(RpcError::not_connected(method)) }
+    }
 }
 
 impl StudioBackend for BackendClient {
@@ -438,6 +450,10 @@ impl StudioBackend for BackendClient {
         method: &'static str,
         params: Value,
     ) -> Result<Value, RpcError> {
+        self.request(method, params).await
+    }
+
+    async fn clips_request(&self, method: &'static str, params: Value) -> Result<Value, RpcError> {
         self.request(method, params).await
     }
 }
