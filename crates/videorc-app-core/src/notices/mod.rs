@@ -24,6 +24,7 @@
 //! store takes. The sources land in the next parts.
 
 pub mod guard;
+pub mod health_kinds;
 pub mod kinds;
 pub mod policy;
 pub mod sources;
