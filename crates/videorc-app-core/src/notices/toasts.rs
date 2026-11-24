@@ -2383,5 +2383,5 @@ pub fn audio_recovery(code: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "notices_tests.rs"]
+#[path = "toasts_tests.rs"]
 mod tests;
