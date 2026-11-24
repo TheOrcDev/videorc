@@ -20,6 +20,7 @@ use gpui::{
 };
 use videorc_app_core::StopOrigin;
 use videorc_app_core::studio::screen_views::SHOW_HERE_LABEL;
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, hsla};
 use videorc_kit::tokens::size;
 use videorc_kit::{Button, ButtonVariant};
@@ -120,15 +121,22 @@ impl StudioPage {
     /// `preview-stage.tsx`'s dock control under the video: "Pop out" while
     /// docked, "Show here" while the Preview floats. Close, Bring to front
     /// and Keep on top wait for the preview crate's window controls.
-    fn dock_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn dock_row(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let preview = self.preview.read(cx);
         if !preview.can_float() {
             return None;
         }
+        let theme = theme::resolve(None, window, cx);
+        // Secondary's ink (`button.rs`): `secondary_foreground`.
+        let secondary_ink = hsla(theme.secondary_foreground);
         let button = match preview.mode() {
             WindowMode::Docked => Button::new("preview-pop-out")
-                .label("Pop out")
-                .variant(ButtonVariant::Secondary),
+                .variant(ButtonVariant::Secondary)
+                .accessibility_label("Pop out")
+                // Leading ExternalLinkIcon, then the words (label would draw
+                // first, so the icon and the words are both children).
+                .child(icon(IconName::ArrowSquareOut, 16., secondary_ink))
+                .child("Pop out"),
             WindowMode::Floating => Button::new("preview-stick")
                 .label(SHOW_HERE_LABEL)
                 .variant(ButtonVariant::Default),
@@ -177,7 +185,7 @@ impl Render for StudioPage {
                     .min_h_0()
                     .child(Preview::docked_slot(&self.preview, cx)),
             )
-            .children(self.dock_row(cx));
+            .children(self.dock_row(window, cx));
         // "Session inspector" (P114): cloud resume, the session section,
         // chat, audio, quick settings and takeover, in that order.
         let inspector = div()

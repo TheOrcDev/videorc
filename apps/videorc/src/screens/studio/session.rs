@@ -2,16 +2,15 @@
 //! that go to their pages, then the notices under them. It has no title
 //! (plan 235 D3): the rows name themselves.
 //!
-//! The rows' icons wait for the kit's Livestream, Frame and Alert icons.
-//! The runtime alert's Open Audio waits for the Audio
-//! section and its reveal for the reveal command, as Electron leaves out a
-//! door it has no handler for.
+//! The runtime alert's Open Audio waits for the Audio section and its
+//! reveal for the reveal command, as Electron leaves out a door it has no
+//! handler for.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
-use gpui::{Context, EventEmitter, Window, div, prelude::*, px};
+use gpui::{Context, EventEmitter, Hsla, Window, div, prelude::*, px};
 use tokio::sync::watch;
 use videorc_app_core::StudioSnapshot;
 use videorc_app_core::nav::PageId;
@@ -20,6 +19,8 @@ use videorc_app_core::studio::inspector::{
     FactRow, RuntimeAlertView, SessionInputs, SessionSectionView, StartFailureAlert,
     copy::{CAMERA_SHARED_TITLE, DISMISS, OPEN_LIBRARY, RETRY},
 };
+use videorc_kit::icon::{IconName, icon};
+use videorc_kit::theme::{self, hsla};
 use videorc_kit::{
     Alert, AlertVariant, Button, ButtonSize, ButtonVariant, GroupedList, GroupedRow, NavigableRow,
     PanelSection, StatusDot, StatusTone,
@@ -107,7 +108,7 @@ impl SessionSection {
         }
     }
 
-    fn row(&self, fact: &FactRow, cx: &mut Context<Self>) -> NavigableRow {
+    fn row(&self, fact: &FactRow, muted: Hsla, cx: &mut Context<Self>) -> NavigableRow {
         // A toned value is the status dot and its words, at the row's own
         // size and colour (`dotClassName`: `text-sm text-foreground`).
         let mut row = match fact_tone(fact.tone) {
@@ -124,6 +125,10 @@ impl SessionSection {
             ),
             None => NavigableRow::new(fact.id, fact.label.clone(), fact.value.clone()),
         };
+        // Electron's NavigableRow leading icon: 16 px, secondary gray.
+        if let Some(name) = row_icon(fact.id) {
+            row = row.icon(icon(name, 16., muted));
+        }
         if let Some(page) = fact.opens {
             let this = cx.entity().downgrade();
             row = row.on_navigate(move |_, _, cx| {
@@ -204,11 +209,26 @@ fn actions() -> gpui::Div {
     div().flex().flex_wrap().gap(px(4.)).pt(px(8.))
 }
 
+/// The Session row's leading icon (`session-panel.tsx`): Livestream and
+/// Destinations share Broadcast, Output is FrameCorners, Stream is
+/// WarningCircle. Nested destination problems and Sidekick have none here
+/// (Electron's problem rows have no icon; Sidekick waits for Buddy).
+fn row_icon(id: &str) -> Option<IconName> {
+    match id {
+        "livestream" | "destinations" => Some(IconName::Broadcast),
+        "output" => Some(IconName::FrameCorners),
+        "stream" => Some(IconName::WarningCircle),
+        _ => None,
+    }
+}
+
 impl Render for SessionSection {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme::resolve(None, window, cx);
+        let muted = hsla(theme.muted_foreground);
         let mut list = GroupedList::new();
         for (index, fact) in self.view.rows.iter().enumerate() {
-            let row = self.row(fact, cx);
+            let row = self.row(fact, muted, cx);
             list = if fact.nested {
                 // Each problem row needs its own id: several share "destination".
                 list.item(
@@ -257,5 +277,15 @@ mod tests {
         assert_eq!(fact_tone("error"), Some(StatusTone::Error));
         assert_eq!(fact_tone("neutral"), Some(StatusTone::Neutral));
         assert_eq!(fact_tone(""), None);
+    }
+
+    #[test]
+    fn the_session_rows_keep_electron_s_icons() {
+        assert_eq!(row_icon("livestream"), Some(IconName::Broadcast));
+        assert_eq!(row_icon("destinations"), Some(IconName::Broadcast));
+        assert_eq!(row_icon("output"), Some(IconName::FrameCorners));
+        assert_eq!(row_icon("stream"), Some(IconName::WarningCircle));
+        assert_eq!(row_icon("destination"), None);
+        assert_eq!(row_icon("sidekick"), None);
     }
 }
