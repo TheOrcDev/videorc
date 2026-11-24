@@ -18,6 +18,9 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use videorc_protocol::playback::{
+    PlaybackMuteParams, PlaybackOpenParams, PlaybackSeekParams, PlaybackStatus,
+};
 use videorc_protocol::{
     AudioProcessingUpdateParams, AudioProcessingUpdateResult, BackendHealth, CompositorStatus,
     DeviceList, PreviewScreenStartParams, PreviewScreenStatus, PreviewSurfaceBoundsParams,
@@ -98,6 +101,36 @@ method!(
 method!(
     /// Stops the preview surface and its compositor.
     PreviewSurfaceDestroy, "preview.surface.destroy", () => PreviewSurfaceStatus
+);
+method!(
+    /// Plan 260 (from plan 220 S3.7b): opens a recording's playback in the
+    /// backend, paused on its first frame (a refusal is a `failed` status
+    /// with `refusal`). The backend answers the playback family from D9 on.
+    PlaybackOpen, "playback.open", PlaybackOpenParams => PlaybackStatus
+);
+method!(
+    /// Starts the playback's clock (from the top after its end).
+    PlaybackPlay, "playback.play", () => PlaybackStatus
+);
+method!(
+    /// Stops the playback's clock where it stands.
+    PlaybackPause, "playback.pause", () => PlaybackStatus
+);
+method!(
+    /// Moves the playhead; the frame there shows at once.
+    PlaybackSeek, "playback.seek", PlaybackSeekParams => PlaybackStatus
+);
+method!(
+    /// Mutes or unmutes the playback's sound; the clock keeps time.
+    PlaybackMute, "playback.mute", PlaybackMuteParams => PlaybackStatus
+);
+method!(
+    /// Closes the playback: its decoders stop and its ring goes.
+    PlaybackClose, "playback.close", () => PlaybackStatus
+);
+method!(
+    /// The playback's status.
+    PlaybackStatusGet, "playback.status", () => PlaybackStatus
 );
 method!(
     /// The preview surface's status (5 s deadline).
@@ -287,6 +320,9 @@ mod tests {
         assert_eq!(SessionStop::NAME, "session.stop");
         assert_eq!(RecordingStatusGet::NAME, "recording.status");
         assert_eq!(PreviewSurfaceCreate::NAME, "preview.surface.create");
+        assert_eq!(PlaybackOpen::NAME, "playback.open");
+        assert_eq!(PlaybackSeek::NAME, "playback.seek");
+        assert_eq!(PlaybackStatusGet::NAME, "playback.status");
         assert_eq!(PreviewScreenStart::NAME, "preview.screen.start");
         assert_eq!(
             SceneLoadFromCaptureConfig::NAME,
