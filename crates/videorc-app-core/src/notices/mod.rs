@@ -26,6 +26,7 @@
 pub mod guard;
 pub mod kinds;
 pub mod policy;
+pub mod sources;
 pub mod store;
 pub mod types;
 
