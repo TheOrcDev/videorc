@@ -50,6 +50,7 @@ use videorc_app_core::{
 
 use app::args;
 use app::bridge;
+use app::exit::ExitGuard;
 use app::frames::MainFrame;
 use app::hide::HideFromStream;
 use app::permissions::Permissions;
@@ -175,13 +176,18 @@ fn main() -> Result<()> {
     });
 
     // The typed client on the backend's socket. Its event filter grows as
-    // the screens land: `backend.ready` always arrives, the sleep guard and
-    // the permission restarts read `recording.status`, and Videorc Camera's
-    // extension follows `virtualCamera.changed`.
+    // the screens land: `backend.ready` always arrives; the sleep guard, the
+    // permission restarts and the quit while on air read `recording.status`;
+    // the quit also reads the talk show room's `cloud.state`; Videorc
+    // Camera's extension follows `virtualCamera.changed`.
     let (client, events) = BackendClient::start(
         supervisor.state(),
         ClientConfig {
-            filter: EventFilter::include([names::RECORDING_STATUS, camera::VIRTUAL_CAMERA_CHANGED]),
+            filter: EventFilter::include([
+                names::RECORDING_STATUS,
+                camera::VIRTUAL_CAMERA_CHANGED,
+                app::exit::CLOUD_STATE,
+            ]),
             logger: logger.clone(),
             ..ClientConfig::default()
         },
@@ -253,6 +259,9 @@ fn main() -> Result<()> {
     let quit_instance = instance.clone();
     let hotkey_logger = logger.clone();
     let handoff_links = deep_links.clone();
+    // The quit while on air: the guard follows the backend's events.
+    let exit_events = client.subscribe();
+    let exit_runtime = runtime.handle().clone();
 
     let application = gpui_platform::application();
     // Registered before `run`, so a link that starts the app is not lost.
@@ -262,6 +271,7 @@ fn main() -> Result<()> {
     });
     application.run(move |cx: &mut App| {
         // The menu bar from the core's template, and the keys it names.
+        ExitGuard::install(cx, &exit_runtime, exit_events);
         menus::install(cx);
 
         // Hide from stream: content protection and the capture filter's
@@ -323,6 +333,7 @@ fn main() -> Result<()> {
         // soon after, and the quit saves it once more.
         let moved_frame = main_frame.clone();
         let _ = main_window.update(cx, |_, window, cx| {
+            ExitGuard::watch_main_window(window, cx);
             cx.observe_window_activation(window, move |_, window, _| {
                 if window.is_window_active() {
                     focus_permissions.recheck();

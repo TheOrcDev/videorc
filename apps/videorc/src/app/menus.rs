@@ -261,7 +261,8 @@ pub fn install(cx: &mut App) {
     } else {
         cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
     }
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    // Quit and Close Window on the main window ask first while on air.
+    cx.on_action(|_: &Quit, cx| super::exit::ExitGuard::request_quit(cx));
     cx.on_action(|_: &HideApp, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
@@ -271,7 +272,7 @@ pub fn install(cx: &mut App) {
     cx.on_action(|_: &ToggleFullScreen, cx| {
         with_active_window(cx, |window| window.toggle_fullscreen())
     });
-    cx.on_action(|_: &CloseWindow, cx| with_active_window(cx, |window| window.remove_window()));
+    cx.on_action(|_: &CloseWindow, cx| super::exit::ExitGuard::close_active_window(cx));
     cx.on_action(|_: &OpenReleaseNotes, cx| {
         cx.open_url(&release_notes_url(env!("CARGO_PKG_VERSION")))
     });
