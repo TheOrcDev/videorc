@@ -254,6 +254,12 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   const [backendMedia, setBackendMedia] = useState<RoomMediaStatus | null>(null)
   const backendMediaRef = useRef(backendMedia)
   backendMediaRef.current = backendMedia
+  // Plan 260 S1.8: who holds the room, decided before any browser client
+  // starts (`cloud.room.owner`); the backend's own room (its dev switch)
+  // leaves no renderer client, grant or microphone disarm behind.
+  const [backendOwned, setBackendOwned] = useState(false)
+  const backendOwnedRef = useRef(backendOwned)
+  backendOwnedRef.current = backendOwned
   // Plan 260 S1.8b: with the backend in the room, the avatar's motion model
   // runs here on its own and hands each message to the backend, which sends
   // it to the pages that animate (until the model moves to app-core).
@@ -438,6 +444,12 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       try {
         await leavingRef.current
         if (cancelled) return
+        const owner = await client.requestTyped('cloud.room.owner').catch(() => null)
+        if (cancelled) return
+        if (owner?.backend) {
+          setBackendOwned(true)
+          return
+        }
         // Plan 249 S13b: with the processed camera on (main + backend gated, DEV
         // renderer), the native camera stays the one owner: no browser camera grant.
         const processedCamera =
@@ -576,12 +588,23 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         await roomClient.connect()
       } catch (error) {
         if (cancelled) return
+        if ((error as { code?: string } | null)?.code === 'cloud-room-held-by-backend') {
+          // The backend took the seat after all: no browser client stays.
+          const stale = current
+          current = null
+          if (controlsRef?.current === stale) controlsRef.current = null
+          if (clientRef.current === stale) clientRef.current = null
+          void stale?.disconnect().catch(() => {})
+          setBackendOwned(true)
+          return
+        }
         callbacksRef.current.onError(error, ROOM_JOIN_ERROR_ACTION)
         report('disconnected', error instanceof Error ? error.message : String(error))
       }
     })()
     return () => {
       cancelled = true
+      setBackendOwned(false)
       if (controlsRef?.current === current) controlsRef.current = null
       if (clientRef.current === current) clientRef.current = null
       audioHostRef.current?.remove()
@@ -1342,7 +1365,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         const roomClient = clientRef.current
         // Plan 260 S1.8c: the backend's room shares by native id (the
         // scene's own screen, which its preview runs).
-        const backendShare = !roomClient && backendMediaRef.current !== null
+        const backendShare =
+          !roomClient && (backendOwnedRef.current || backendMediaRef.current !== null)
         if (!roomClient && !backendShare) throw new Error('The room is not open.')
         try {
           if (backendShare) {
@@ -1368,7 +1392,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         }
       },
       stopScreenShare: async () => {
-        if (!clientRef.current && backendMediaRef.current !== null)
+        if (!clientRef.current && (backendOwnedRef.current || backendMediaRef.current !== null))
           await client?.requestTyped('cloud.room.screen.set', { screen: null }).catch(() => {})
         await clientRef.current?.stopScreenShare()
         if (stage && hostIdentity && stageScreens(stage).includes(hostIdentity)) {
