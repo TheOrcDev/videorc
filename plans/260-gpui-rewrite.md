@@ -972,6 +972,19 @@ the new surface. Hosting under GPUI: a layer-hosting `NSView` (flipped root
 layer) goes to `NativeView`, the element attaches to that view's handle, and
 its `CAMetalLayer` gets an autoresizing mask and the slot's corner radius.
 
+**S2.3a and D11 autosave (from L7's S1.6b part 3b,
+[#1784](https://github.com/TheOrcDev/videorc/pull/1784)).** The preview
+feed's idle scene reload confirms the working setup, as Electron's
+`loadScene` does (`persistWorkingVisual`). `videorc-preview` stays free of
+the Studio: the call lives in the app's preview glue
+(`apps/videorc/src/preview/`), where the Studio's scene is fed to
+`SceneFeed::following`. It reads `Studio::scene_reload_mark()` when it
+publishes a request, keeps that mark with the request, and from the feed's
+`on_committed` hook (which hands over the committed `SceneConfigParams`)
+calls `Studio::note_scene_reloaded(mark, layout, sources, background)`. A
+reload a scene key or switch overtook saves nothing, because the mark no
+longer matches.
+
 ### Phase 3: screens to parity on all three platforms
 
 One PR per screen, owned by one screen lane, done by the parity bar above
