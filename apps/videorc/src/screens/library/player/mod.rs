@@ -40,10 +40,13 @@ pub struct Player {
     connected: bool,
     error: Option<String>,
     resume: Option<p::Resume>,
+    resume_in_flight: Option<p::Resume>,
+    desired_muted: bool,
     opening_from: Option<String>,
     need_open: bool,
     marker_epoch: u64,
     deleting: std::collections::BTreeMap<String, std::rc::Rc<std::cell::Cell<bool>>>,
+    delete_flushes: std::collections::BTreeMap<String, std::rc::Rc<dyn Fn(&mut gpui::App)>>,
     #[cfg(target_os = "macos")]
     native: Option<native::Native>,
 }
@@ -120,6 +123,7 @@ impl Player {
             }
         })
         .detach();
+        cx.on_release(|this, cx| this.flush_deletes(cx)).detach();
         cx.on_app_quit(move |this, cx| {
             this.stop(cx);
             async {}
@@ -144,10 +148,13 @@ impl Player {
             connected: false,
             error: None,
             resume: None,
+            resume_in_flight: None,
+            desired_muted: false,
             opening_from: None,
             need_open: false,
             marker_epoch: 0,
             deleting: Default::default(),
+            delete_flushes: Default::default(),
             #[cfg(target_os = "macos")]
             native: None,
         }
@@ -166,6 +173,7 @@ impl Player {
             None
         };
         if !same {
+            self.desired_muted = false;
             self.session = Some(p::PlayerSession::new(session.id.clone()));
         }
         self.markers = Some(MarkersState::open(session));
@@ -201,8 +209,10 @@ impl Player {
             return;
         }
         self.active = false;
+        self.flush_deletes(cx);
         self.need_open = false;
         self.resume = None;
+        self.resume_in_flight = None;
         self.scrub = None;
         #[cfg(target_os = "macos")]
         if let Some(native) = &mut self.native {
@@ -253,13 +263,14 @@ impl Player {
             }
         }
     }
-    fn mute(&self) {
+    fn mute(&mut self) {
         if !self.ready() {
             return;
         }
+        self.desired_muted = !self.status.muted;
         #[cfg(target_os = "macos")]
         if let Some(element) = self.native.as_ref().and_then(|n| n.element.as_ref()) {
-            element.set_muted(!self.status.muted);
+            element.set_muted(self.desired_muted);
         }
     }
     fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -281,6 +292,13 @@ impl Player {
         cx.notify();
     }
     fn external(&mut self, reveal: bool, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        if !reveal {
+            if let Some(element) = self.native.as_ref().and_then(|n| n.element.as_ref()) {
+                element.pause();
+            }
+        }
+
         let Some(session) = &self.session else {
             return;
         };

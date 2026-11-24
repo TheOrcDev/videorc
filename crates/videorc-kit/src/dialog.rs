@@ -7,6 +7,8 @@
 //! The screen holds a `DialogHandle` and opens it with
 //! `handle.open(window, cx)`; focus moves into the dialog as it opens.
 
+use std::rc::Rc;
+
 use gpui::{
     AnyElement, App, ElementId, FocusHandle, FontWeight, IntoElement, ParentElement, SharedString,
     Window, WindowControlArea, div, prelude::*, px,
@@ -21,6 +23,8 @@ use crate::{
     theme::{Appearance, FONT, hsla, resolve, with_alpha},
     tokens::{radius, size},
 };
+
+type OpenChange = Rc<dyn Fn(bool, DialogChangeReason, &mut Window, &mut App)>;
 
 /// The four widths: sm 384 px (a rename, one question), md 448 px (the
 /// default: confirmations, short forms), lg 576 px (forms, pickers, setup),
@@ -57,6 +61,7 @@ pub struct Dialog {
     close_button: bool,
     palette: bool,
     appearance: Option<Appearance>,
+    on_open_change: Option<OpenChange>,
 }
 
 impl Dialog {
@@ -76,7 +81,18 @@ impl Dialog {
             close_button: true,
             palette: false,
             appearance: None,
+            on_open_change: None,
         }
+    }
+
+    /// Every real open/close, including Escape, backdrop and the close button.
+    /// The shared focus restoration runs before this owner lifecycle callback.
+    pub fn on_open_change(
+        mut self,
+        handler: impl Fn(bool, DialogChangeReason, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_open_change = Some(Rc::new(handler));
+        self
     }
 
     pub fn description(mut self, description: impl Into<SharedString>) -> Self {
@@ -240,7 +256,7 @@ impl RenderOnce for Dialog {
         if open || !shown.should_render() {
             dialog
                 .handle(self.handle)
-                .on_open_change(move |open, _, window, cx| {
+                .on_open_change(move |open, reason, window, cx| {
                     if open {
                         let before = window.focused(cx);
                         let inside = state.update(cx, |state, _| {
@@ -250,6 +266,9 @@ impl RenderOnce for Dialog {
                         inside.focus(window, cx);
                     } else if let Some(before) = state.update(cx, |state, _| state.before.take()) {
                         before.focus(window, cx);
+                    }
+                    if let Some(handler) = &self.on_open_change {
+                        handler(open, reason, window, cx);
                     }
                 })
         } else {

@@ -130,15 +130,19 @@ impl Player {
         let toast_id = videorc_app_core::library::markers::marker_delete_toast_id(id);
         let undo_toast = toast_id.clone();
         let mut toast = videorc_kit::toast::ToastData::new(
-            videorc_kit::toast::ToastKind::Success,
+            videorc_kit::toast::ToastKind::Plain,
             copy::marker_deleted(&videorc_app_core::library::markers::marker_name(&marker)),
         )
+        .description(videorc_app_core::library::markers::marker_time(
+            marker.at_seconds,
+        ))
         .action(copy::UNDO, move |_, cx| {
             if undo_gate.replace(true) {
                 return;
             }
             let _ = undo_weak.update(cx, |this, cx| {
                 this.deleting.remove(&undo_marker.id);
+                this.delete_flushes.remove(&undo_marker.id);
                 this.restore_marker(epoch, &undo_marker);
                 cx.notify();
             });
@@ -157,7 +161,7 @@ impl Player {
         )));
         let core = self.core.clone();
         let runtime = self.runtime.clone();
-        let finish: videorc_kit::toast::ActionHandler = std::rc::Rc::new(move |_, cx| {
+        let flush: std::rc::Rc<dyn Fn(&mut gpui::App)> = std::rc::Rc::new(move |cx| {
             if gate.replace(true) {
                 return;
             }
@@ -171,6 +175,7 @@ impl Player {
                 let result = job.await;
                 let _ = weak.update(cx, |this, cx| {
                     this.deleting.remove(&item.id);
+                    this.delete_flushes.remove(&item.id);
                     if !matches!(result, Ok(Ok(()))) {
                         this.restore_marker(epoch, &item);
                         this.error = Some(copy::COULDNT_DELETE_MARKER.into());
@@ -183,6 +188,8 @@ impl Player {
             })
             .detach();
         });
+        self.delete_flushes.insert(id.to_owned(), flush.clone());
+        let finish: videorc_kit::toast::ActionHandler = std::rc::Rc::new(move |_, cx| flush(cx));
         toast.on_close = Some(finish.clone());
         toast.on_auto_close = Some(finish);
         let hub = cx
@@ -191,6 +198,20 @@ impl Player {
             .clone();
         hub.update(cx, |hub, cx| hub.press_toast(toast_id, toast, cx));
         cx.notify();
+    }
+    pub(super) fn flush_deletes(&mut self, cx: &mut gpui::App) {
+        let pending = std::mem::take(&mut self.delete_flushes);
+        for (id, flush) in pending {
+            flush(cx);
+            if let Some(shared) = cx.try_global::<crate::screens::notifications::Shared>() {
+                let hub = shared.0.clone();
+                hub.update(cx, |_, cx| {
+                    cx.emit(crate::screens::notifications::Delivery::Dismiss(
+                        videorc_app_core::library::markers::marker_delete_toast_id(&id),
+                    ))
+                });
+            }
+        }
     }
     fn restore_marker(&mut self, epoch: u64, marker: &SessionMarker) {
         if epoch != self.marker_epoch {

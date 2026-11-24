@@ -6,6 +6,7 @@ pub(super) struct Native {
     pub element: Option<PlaybackElement>,
     pub host: HostView,
     pub before_frame: u64,
+    last_status: Option<PlaybackStatus>,
 }
 impl Drop for Native {
     fn drop(&mut self) {
@@ -39,6 +40,7 @@ impl Player {
             element: Some(element),
             host,
             before_frame: 0,
+            last_status: None,
         });
         cx.spawn(async move |entity, cx| {
             loop {
@@ -78,10 +80,19 @@ impl Player {
         element.set_visible(false);
         self.opening_from = view.status.playback_id;
         self.need_open = false;
+        self.resume_in_flight = None;
         self.status = PlaybackStatus::closed(String::new());
         element.open(&session.session_id, Some(1920), Some(1080));
     }
     fn note_playback(&mut self, view: PlaybackView, cx: &mut Context<Self>) {
+        // Frame notifications can repeat an unchanged failure/open reply.
+        // Only a new status may consume the one automatic retry or update
+        // remembered resume state (especially before a queued seek answers).
+        let new_status = self.native.as_mut().is_some_and(|native| {
+            let changed = native.last_status.as_ref() != Some(&view.status);
+            native.last_status = Some(view.status.clone());
+            changed
+        });
         let was_connected = self.connected;
         self.connected = view.connected;
         if !self.active {
@@ -115,8 +126,11 @@ impl Player {
         }
         let resuming = ready && self.resume.is_some();
         if ready {
-            if let Some(resume) = self.resume.take() {
+            if let Some(mut resume) = self.resume.take() {
+                resume.at_ms = resume.at_ms.min(view.status.duration_ms);
+                self.resume_in_flight = Some(resume);
                 if let Some(element) = self.native.as_ref().and_then(|n| n.element.as_ref()) {
+                    element.set_muted(self.desired_muted);
                     if resume.at_ms > 0 {
                         element.seek(resume.at_ms.min(view.status.duration_ms));
                     }
@@ -126,7 +140,21 @@ impl Player {
                 }
             }
         }
+        if let Some(resume) = self.resume_in_flight {
+            let positioned = if resume.playing {
+                view.status.position_ms >= resume.at_ms.saturating_sub(100)
+            } else {
+                view.status.position_ms.abs_diff(resume.at_ms) <= 100
+            };
+            let playing = (view.status.state == PlaybackState::Playing) == resume.playing
+                || view.status.state == PlaybackState::Ended;
+            if ready && positioned && playing && !resuming {
+                self.resume_in_flight = None;
+            }
+        }
         if !resuming
+            && (self.resume_in_flight.is_none() || view.status.state == PlaybackState::Failed)
+            && new_status
             && (fresh
                 || (view.status.state == PlaybackState::Failed
                     && (belongs || view.status.session_id.is_none())))
@@ -145,11 +173,12 @@ impl Player {
             || self.status.muted != view.status.muted
             || self.status.refusal != view.status.refusal
             || self.connected != was_connected;
-        if belongs
-            || matches!(
-                view.status.state,
-                PlaybackState::Failed | PlaybackState::Closed
-            )
+        if fresh
+            || (new_status
+                && matches!(
+                    view.status.state,
+                    PlaybackState::Failed | PlaybackState::Closed
+                ))
         {
             self.status = view.status;
         }

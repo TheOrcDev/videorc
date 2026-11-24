@@ -33,7 +33,8 @@ Still incomplete:
 - P1340/P1341/P1344/P1346: Sidekick report/Clean cut, noise cleanup initiation
   and historical Stream Manager routing need their owning GPUI controllers.
   Uninstalled menu actions are disabled with a reason.
-- P1342/P1352–P1361: native player and markers are the next separate PR.
+- P1342/P1352–P1361 are implemented by the player PR below; their parity
+  checkboxes remain for the visual build pass.
 - P1362/P1363/P1367/P1369/P1371–P1374: cloud markers, grid keyboard navigation,
   row menus, web/download-file reveal, separate files and local archive controls
   still need their dedicated views/controllers wired into this window.
@@ -45,3 +46,31 @@ Still incomplete:
 Only `cargo fmt --check --all` is run under the owner's build-once order.
 Compilation, real file operations, visual parity and playback verification
 belong to the final main build pass.
+
+## Native player and local markers
+
+The Markers dialog now hosts the separate `videorc-preview::playback`
+CAMetalLayer presenter in a GPUI NativeView. The normal Play button, row
+double-click and Play menu still open the system player, matching Electron;
+Markers opens the in-app player. Playback never borrows Studio's surface.
+
+Implemented for the build pass: P1342 and P1352–P1361. Play/Pause, mute,
+the scrubber and slot-focused Space/K/J/L/arrow/Home/End/M keys use app-core's
+player rules. Child controls keep their own key handling. Retry/reconnect
+uses the same session's position/play state; the mute choice is carried before
+resuming sound. The old layer stays hidden until a new playback presents a
+frame. Page-away and every dialog dismissal pause/close and hide it; release
+and app quit also stop the owned presenter/feed.
+
+Saved markers load by pages, refresh on change events, seek from a row or a
+positioned pin (nearby pins share a menu), and rename inline. Delete hides a
+marker while its five-second Undo toast is alive. The shared toaster's real
+expiry/manual close commits exactly once; Undo cancels it. Leaving the dialog
+flushes the remaining deletes and dismisses those Undo buttons, as Electron
+does. Window replies are fenced by the selected recording's revision.
+
+Windows/Linux show the core's unavailable-playback copy and the system-player
+recovery route; native playback on those platforms is still Phase 4. The
+macOS build pass must check NativeView stacking, marker hit areas, focus,
+scrubbing, retry/resume, dismissal during opening and audio exclusion with a
+real recording. No built-app or device evidence is claimed here.
