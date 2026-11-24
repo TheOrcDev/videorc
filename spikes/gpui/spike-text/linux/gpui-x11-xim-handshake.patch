@@ -1,0 +1,27 @@
+--- a/src/linux/x11/client.rs
++++ b/src/linux/x11/client.rs
+@@ -823,6 +823,13 @@
+         let Some((mut ximc, xim_handler)) = state.take_xim() else {
+             return;
+         };
++        // The handshake (Open, then CreateIc) has not finished: the IC it
++        // creates already carries this window. An IC request with no input
++        // method yet gets an error back that ends XIM for the session.
++        if !xim_handler.connected {
++            state.restore_xim(ximc, xim_handler);
++            return;
++        }
+         let mut ic_attributes = ximc
+             .build_ic_attributes()
+             .push(AttributeName::InputStyle, InputStyle::PREEDIT_CALLBACKS)
+@@ -863,7 +870,9 @@
+         state.composing = false;
+         if let Some(mut ximc) = state.ximc.take() {
+             if let Some(xim_handler) = state.xim_handler.as_ref() {
+-                ximc.reset_ic(xim_handler.im_id, xim_handler.ic_id).ok();
++                if xim_handler.connected {
++                    ximc.reset_ic(xim_handler.im_id, xim_handler.ic_id).ok();
++                }
+             } else {
+                 log::error!("bug: xim handler not set in reset_ime");
+             }

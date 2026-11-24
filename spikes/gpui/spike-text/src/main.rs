@@ -348,6 +348,10 @@ impl Render for Selectable {
 #[derive(Default)]
 struct Facts {
     ime_steps: Vec<Value>,
+    /// Every change of (committed, composing) the input showed, as a real
+    /// input method drove it (`--ime-wait`, Windows and Linux).
+    ime_observed: Vec<Value>,
+    ime_last: Option<(String, Option<String>)>,
     selected: Vec<String>,
     scroll: Value,
     numbers: Value,
@@ -357,6 +361,8 @@ struct Facts {
 
 static FACTS: Mutex<Facts> = Mutex::new(Facts {
     ime_steps: Vec::new(),
+    ime_observed: Vec::new(),
+    ime_last: None,
     selected: Vec::new(),
     scroll: Value::Null,
     numbers: Value::Null,
@@ -427,6 +433,20 @@ impl Render for Spike {
         }
 
         let (text, marked) = self.input.read(_cx).state();
+        {
+            let mut facts = FACTS.lock().expect("facts");
+            let now = (text.clone(), marked.clone());
+            if facts.ime_last.as_ref() != Some(&now) {
+                let v = json!({
+                    "t_ms": round(spike_summary::elapsed_ms(), 0),
+                    "text": text,
+                    "marked": marked,
+                });
+                println!("[spike] ime {v}");
+                facts.ime_observed.push(v);
+                facts.ime_last = Some(now);
+            }
+        }
         let samples = [
             ("Colour emoji", "😀 🎉 👍🏽 👩‍💻 🇯🇵 ❤️ 🧑🏿‍🚀"),
             ("Japanese", "配信を開始します・カメラ"),
@@ -643,11 +663,13 @@ mod ime {
 
 /// What an input method sends, one call per step, and what the input should
 /// hold afterwards (committed text, composing text).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the macOS IME script
 enum ImeSend {
     Marked(&'static str),
     Insert(&'static str),
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the macOS IME script
 const IME_SCRIPT: [(&str, ImeSend, &str, Option<&str>); 6] = [
     // Japanese (Kotoeri, Romaji): n-i-h-o-n shows marked, turns to kana,
     // then converts and commits.
@@ -681,6 +703,7 @@ const IME_SCRIPT: [(&str, ImeSend, &str, Option<&str>); 6] = [
     ("emoji picker", ImeSend::Insert("😀"), "日本中文😀", None),
 ];
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the macOS IME script
 fn record_ime(
     name: &str,
     text: String,
@@ -744,7 +767,42 @@ fn measure_numbers(window: &mut Window) -> Value {
 
 // ---------------------------------------------------------------- main
 
+/// GPUI's `log` lines on stderr, when `SPIKE_LOG` is set (`debug` for more).
+struct StderrLog(log::LevelFilter);
+
+impl log::Log for StderrLog {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= self.0
+    }
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!(
+                "[gpui] {} {}: {}",
+                record.level(),
+                record.target(),
+                record.args()
+            );
+        }
+    }
+    fn flush(&self) {}
+}
+
+fn init_log() {
+    let Ok(level) = std::env::var("SPIKE_LOG") else {
+        return;
+    };
+    let filter = if level == "debug" {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
+    if log::set_boxed_logger(Box::new(StderrLog(filter))).is_ok() {
+        log::set_max_level(filter);
+    }
+}
+
 fn main() {
+    init_log();
     let run = Run::start(SPIKE);
     let seconds = run.args.seconds;
     let rows_n: usize = run
@@ -754,6 +812,13 @@ fn main() {
         .unwrap_or(10_000);
     let scroll_test = run.args.flag("--scroll-test");
     let sim_ime = run.args.flag("--simulate-ime");
+    // Windows and Linux: a pause in the script for a driver (or a person)
+    // to type with the real input method; every change is recorded.
+    let ime_wait_ms: u64 = run
+        .args
+        .value("--ime-wait")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let step: f32 = run
         .args
         .value("--step")
@@ -913,6 +978,15 @@ fn main() {
                 let _ = handle.update(cx, |_, _, cx| cx.notify());
                 wait(1200).await;
             }
+            if ime_wait_ms > 0 {
+                let _ = handle.update(cx, |spike, _, cx| {
+                    spike.status = "type with the input method now".into();
+                    cx.notify();
+                });
+                println!("[spike] ime-wait {ime_wait_ms}");
+                wait(ime_wait_ms).await;
+                println!("[spike] ime-wait done");
+            }
             if scroll_test {
                 let _ = handle.update(cx, |spike, _, cx| {
                     spike.scroll = Some(Scroll {
@@ -982,6 +1056,7 @@ fn main() {
             let f = FACTS.lock().expect("facts");
             run.set("scroll", f.scroll.clone());
             run.set("ime_steps", json!(f.ime_steps));
+            run.set("ime_observed", json!(f.ime_observed));
             run.set("numbers", f.numbers.clone());
             run.set("idle_with_emotes", f.idle.clone());
             run.set("selected_text", json!(f.selected));
