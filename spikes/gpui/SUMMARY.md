@@ -103,6 +103,10 @@ which are plan 260's S0.1 lines.
 | `ui_redraws_per_second_live` | number | GPUI frames a second while the video moves (S0.3) | 0 for the native routes |
 | `cpu_copies_per_frame_in_app` | integer | The part of `cpu_copies_per_frame` made in the app's process (S0.3) | 0 for the native routes |
 | `linux` | object | spike-linux-preview's full report: per phase (live, still, resize) the app's, writer's and compositor's CPU, GPUI paints, frames, commit and presentation intervals, ages and lease times (S0.3) | — |
+| `scale_factor` | number | The window's scale factor at the end of the run (1.5 at 150 %) (S0.2a) | — |
+| `scale_factors_seen` | number array | Every scale factor the window had, in order, without repeats; two values mean it moved to a display with another scale (S0.2a) | — |
+| `viewport_px`, `viewport_device_px` | string | The window's content size at the end of the run, `<w>x<h>`, in logical and in device pixels (S0.2a) | — |
+| `viewport_changes` | integer | Times the content size changed between two renders: a resize by its edge, a maximise, a move to another scale (S0.2a) | — |
 
 A spike that needs a number not in this table adds it with a plain
 snake-case name and a unit suffix (`_ms`, `_mb`, `_percent`), and adds a

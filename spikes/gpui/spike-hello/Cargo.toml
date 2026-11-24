@@ -1,0 +1,12 @@
+[package]
+name = "spike-hello"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Plan 260 spike WC-0.1 (S0.2a): GPUI builds and runs on Windows, the frame every other spike starts from"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+spike-summary.workspace = true

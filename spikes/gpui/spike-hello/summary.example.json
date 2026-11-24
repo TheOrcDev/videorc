@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "spike": "spike-hello",
+  "os": "windows",
+  "arch": "x86_64",
+  "gpui_pre": "0.3.14",
+  "build": "release",
+  "args": [
+    "--seconds",
+    "20"
+  ],
+  "started_unix_ms": 1795492587529,
+  "seconds": 20,
+  "elapsed_s": 20.19,
+  "logical_cpus": 8,
+  "process_cpu_seconds": 0.22,
+  "process_cpu_percent_avg": 1.1,
+  "peak_rss_mb": 57.9,
+  "renders": 22,
+  "ui_redraws_per_second_idle": 1.09,
+  "startup_to_first_paint_ms": 395.4,
+  "window_open_to_first_paint_ms": 263.3,
+  "scale_factor": 1.5,
+  "viewport_px": "1100x640",
+  "viewport_device_px": "1650x960",
+  "viewport_changes": 0,
+  "scale_factors_seen": [
+    1.5
+  ],
+  "errors": 0,
+  "error_messages": []
+}
