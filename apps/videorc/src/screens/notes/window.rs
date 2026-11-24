@@ -239,7 +239,7 @@ impl Render for Notes {
         let text_size = scale.px();
 
         self.text.update(cx, |state, cx| {
-            if state.is_disabled() != self.load_failed {
+            if state.presentation().is_disabled() != self.load_failed {
                 state.set_disabled(self.load_failed, cx);
             }
             state.set_editor_style(gpui_base::input::InputEditorStyle {
