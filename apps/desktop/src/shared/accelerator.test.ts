@@ -100,6 +100,44 @@ describe('validateAccelerator', () => {
     expect(validateAccelerator('Alt+F4', 'win32')).toMatchObject({ reason: 'system-reserved' })
     expect(validateAccelerator('Ctrl+M', 'win32')).toEqual({ ok: true })
   })
+
+  it('blocks the same commands on every platform', () => {
+    const reserved = (accelerator: string, platform: string) =>
+      validateAccelerator(accelerator, platform)
+    for (const platform of ['win32', 'linux']) {
+      expect(reserved('Ctrl+W', platform)).toMatchObject({ reason: 'system-reserved' })
+      expect(reserved('Ctrl+Shift+Z', platform)).toMatchObject({ reason: 'system-reserved' })
+    }
+    for (const accelerator of ['Super+L', 'Super+D', 'Super+Tab']) {
+      expect(reserved(accelerator, 'win32')).toMatchObject({ reason: 'system-reserved' })
+    }
+    for (const accelerator of [
+      'Cmd+Shift+3',
+      'Cmd+Shift+4',
+      'Shift+Cmd+5',
+      'Ctrl+Cmd+Q',
+      'Cmd+Option+Esc'
+    ]) {
+      expect(reserved(accelerator, 'darwin')).toMatchObject({ reason: 'system-reserved' })
+    }
+    expect(reserved('Cmd+Shift+6', 'darwin')).toEqual({ ok: true })
+    expect(reserved('Super+K', 'win32')).toEqual({ ok: true })
+  })
+
+  it('blocks Ctrl+Alt+key off macOS, where it is AltGr, but not with Shift (plan 231 D5)', () => {
+    for (const platform of ['win32', 'linux']) {
+      for (const accelerator of ['Ctrl+Alt+Q', 'Control+Alt+7', 'Alt+Ctrl+E', 'Ctrl+Alt+F1']) {
+        expect(validateAccelerator(accelerator, platform)).toEqual({
+          ok: false,
+          reason: 'system-reserved'
+        })
+      }
+      expect(validateAccelerator('Ctrl+Alt+Shift+1', platform)).toEqual({ ok: true })
+      expect(validateAccelerator('Ctrl+Alt+Super+Q', platform)).toEqual({ ok: true })
+    }
+    expect(validateAccelerator('Ctrl+Alt+Q', 'darwin')).toEqual({ ok: true })
+    expect(validateAccelerator('Ctrl+Alt+1', 'darwin')).toEqual({ ok: true })
+  })
 })
 
 describe('normalizeAccelerator', () => {
