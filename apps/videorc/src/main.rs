@@ -418,6 +418,14 @@ fn main() -> Result<()> {
         let destinations =
             cx.new(|cx| DestinationsPanel::new(studio.clone(), core_handle.clone(), cx));
         let guests = cx.new(|cx| GuestsPanel::new(studio.clone(), core_handle.clone(), cx));
+        let sidekick = cx.new(|cx| {
+            screens::sidekick::SidekickScreen::new(
+                studio.clone(),
+                core_handle.clone(),
+                paths.user_data_dir.clone(),
+                cx,
+            )
+        });
         let go_live = cx.new(|cx| GoLiveDialog::new(studio.clone(), core_handle.clone(), cx));
         let settings = cx.new(|cx| {
             screens::settings::SettingsScreen::new(
@@ -535,6 +543,7 @@ fn main() -> Result<()> {
                         output.clone(),
                         destinations.clone(),
                         guests.clone(),
+                        sidekick.clone(),
                         go_live.clone(),
                         settings.clone(),
                         health.clone(),
