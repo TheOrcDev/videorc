@@ -36,7 +36,8 @@
     "command",
     "spinner",
     "toggle-group",
-    "segmented-control"
+    "segmented-control",
+    "pin-window-button"
   ],
   "keepLocal": []
 }

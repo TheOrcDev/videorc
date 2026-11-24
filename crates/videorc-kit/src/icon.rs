@@ -53,6 +53,10 @@ pub enum IconName {
     GearSix,
     /// `ImageIcon` and `AssetsIcon` (Phosphor's ImageSquare).
     ImageSquare,
+    /// `PinIcon` (Phosphor's PushPin): Keep on top, unpinned.
+    PushPin,
+    /// `PinIcon` at Phosphor's fill weight: Keep on top, pinned.
+    PushPinFill,
 }
 
 impl IconName {
@@ -81,6 +85,8 @@ impl IconName {
             IconName::ArrowSquareOut => include_bytes!("../icons/arrow-square-out.svg"),
             IconName::GearSix => include_bytes!("../icons/gear-six.svg"),
             IconName::ImageSquare => include_bytes!("../icons/image-square.svg"),
+            IconName::PushPin => include_bytes!("../icons/push-pin.svg"),
+            IconName::PushPinFill => include_bytes!("../icons/push-pin-fill.svg"),
         }
     }
 }

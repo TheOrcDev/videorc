@@ -22,6 +22,7 @@ pub mod list_row;
 pub mod motion;
 pub mod navigable_row;
 pub mod panel_section;
+pub mod pin_window_button;
 pub mod popover;
 pub mod scroll_area;
 pub mod section_label;
@@ -59,6 +60,7 @@ pub use kebab_menu::{KEBAB_HOST, KebabMenu, KebabMenuItem, KebabReveal, kebab_me
 pub use list_row::{GroupedList, GroupedRow, ListRow};
 pub use navigable_row::NavigableRow;
 pub use panel_section::PanelSection;
+pub use pin_window_button::{PIN_WINDOW_LABEL, PinWindowButton};
 pub use popover::Popover;
 pub use scroll_area::ScrollArea;
 pub use section_label::SectionLabel;
