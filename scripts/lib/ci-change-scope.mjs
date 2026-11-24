@@ -121,7 +121,26 @@ export const RUST_READS_DESKTOP_FILES = Object.freeze([
   'apps/desktop/src/renderer/src/lib/buddy-tab-view.ts',
   'apps/desktop/src/renderer/src/lib/cohost-view.ts',
   // chat::highlight's shared words are checked against it (S1.6e part 1).
-  'apps/desktop/src/renderer/src/lib/studio-actions/studio-context.ts'
+  'apps/desktop/src/renderer/src/lib/studio-actions/studio-context.ts',
+  // The Stream Manager's words are checked against these (S1.6e part 4).
+  'apps/desktop/src/renderer/src/components/cohost-pane.tsx',
+  'apps/desktop/src/renderer/src/components/comment-row.tsx',
+  'apps/desktop/src/renderer/src/components/comments-header.tsx',
+  'apps/desktop/src/renderer/src/components/pin-window-button.tsx',
+  'apps/desktop/src/renderer/src/components/stream-manager/buddy-utterance-cards.tsx',
+  'apps/desktop/src/renderer/src/components/stream-manager/chat-on-stream-switch.tsx',
+  'apps/desktop/src/renderer/src/components/stream-manager/chat-pane.tsx',
+  'apps/desktop/src/renderer/src/components/stream-manager/stats-bar.tsx',
+  'apps/desktop/src/renderer/src/components/stream-manager/stream-manager-status-bar.tsx',
+  'apps/desktop/src/renderer/src/components/stream-manager/stream-manager.tsx',
+  'apps/desktop/src/renderer/src/lib/buddy-auto-chat-view.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-command-view.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-output-notice.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-pet-view.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-tab-view.ts',
+  'apps/desktop/src/renderer/src/lib/cohost-presence.ts',
+  'apps/desktop/src/renderer/src/lib/cohost-view.ts',
+  'apps/desktop/src/renderer/src/lib/x-mark.ts'
 ])
 
 export function isRustReachableDesktopPath(path) {

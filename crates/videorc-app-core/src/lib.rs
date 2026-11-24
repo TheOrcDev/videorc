@@ -22,6 +22,7 @@ pub mod notices;
 pub mod paths;
 pub mod process;
 pub mod restart;
+pub mod stream_manager;
 pub mod studio;
 pub mod supervisor;
 

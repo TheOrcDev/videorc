@@ -3843,6 +3843,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.2",
  "libc",
+ "regex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
