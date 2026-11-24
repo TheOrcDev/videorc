@@ -4,7 +4,6 @@ import ReactDOM from 'react-dom/client'
 import { App } from './App'
 import { AppErrorBoundary } from './components/app-error-boundary'
 import { startLocalTimeSync } from './lib/local-time'
-import { hydrateUiSettingsBeforeFirstRender } from './lib/ui-settings-window'
 import './styles.css'
 
 // React's dev build logs every component render onto the performance timeline
@@ -43,4 +42,7 @@ function render(): void {
 
 // Plan 220 S1.4a: the UI settings store is in before the first render, so
 // every read is synchronous; past its deadline the window renders anyway.
-void hydrateUiSettingsBeforeFirstRender().then(render, render)
+// The store and its transport load as their own chunk, off the eager bundle.
+void import('./lib/ui-settings-window')
+  .then(({ hydrateUiSettingsBeforeFirstRender }) => hydrateUiSettingsBeforeFirstRender())
+  .then(render, render)

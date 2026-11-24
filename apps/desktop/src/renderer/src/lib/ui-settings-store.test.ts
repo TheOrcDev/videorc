@@ -328,24 +328,24 @@ describe('UI settings store (plan 220 S1.4a)', () => {
     notes.subscribe((keys) => heardByNotes.push([...keys].sort()))
 
     main.set('videorc.theme', 'light')
-    main.set('videorc.orcleTab', 'chat')
+    main.set('videorc.notesTab', 'chat')
     main.set('videorc.theme', 'dark')
     await main.flush()
     // One batch, the last write per key.
     expect(engine.sets).toHaveLength(migrationBatches + 1)
     expect(engine.sets[migrationBatches]).toMatchObject({
-      put: { 'videorc.theme': 'dark', 'videorc.orcleTab': 'chat' },
+      put: { 'videorc.theme': 'dark', 'videorc.notesTab': 'chat' },
       writer: 'window-main'
     })
     expect(notes.get('videorc.theme')).toBe('dark')
-    expect(notes.get('videorc.orcleTab')).toBe('chat')
-    expect(heardByNotes).toEqual([['videorc.orcleTab', 'videorc.theme']])
+    expect(notes.get('videorc.notesTab')).toBe('chat')
+    expect(heardByNotes).toEqual([['videorc.notesTab', 'videorc.theme']])
     // The writer heard its own set() calls, never the echo.
-    expect(heardByMain).toEqual([['videorc.theme'], ['videorc.orcleTab'], ['videorc.theme']])
+    expect(heardByMain).toEqual([['videorc.theme'], ['videorc.notesTab'], ['videorc.theme']])
 
-    notes.remove('videorc.orcleTab')
+    notes.remove('videorc.notesTab')
     await notes.flush()
-    expect(main.has('videorc.orcleTab')).toBe(false)
+    expect(main.has('videorc.notesTab')).toBe(false)
     expect(main.status().hydration).toMatchObject({ state: 'hydrated' })
     expect(engine.revision).toBe(revisionAfterHydrate + 2)
   })
@@ -451,7 +451,7 @@ describe('UI settings store (plan 220 S1.4a)', () => {
     // A window that closed with a journal: the next hydrate replays it.
     storage.setItem(
       `${UI_SETTINGS_JOURNAL_PREFIX}window-closed`,
-      JSON.stringify({ put: { 'videorc.orcleTab': 'chat' }, delete: ['videorc.theme'] })
+      JSON.stringify({ put: { 'videorc.notesTab': 'chat' }, delete: ['videorc.theme'] })
     )
     const next = createUiSettingsStore({
       transport: engine.transport(),
@@ -460,7 +460,7 @@ describe('UI settings store (plan 220 S1.4a)', () => {
       log: quiet
     })
     expect(await next.hydrate()).toMatchObject({ state: 'hydrated', replayed: 2 })
-    expect(engine.entries.get('videorc.orcleTab')).toBe('chat')
+    expect(engine.entries.get('videorc.notesTab')).toBe('chat')
     expect(engine.entries.has('videorc.theme')).toBe(false)
     expect(storage.getItem(`${UI_SETTINGS_JOURNAL_PREFIX}window-closed`)).toBeNull()
   })

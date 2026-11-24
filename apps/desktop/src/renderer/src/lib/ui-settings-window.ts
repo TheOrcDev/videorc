@@ -194,7 +194,7 @@ export function windowUiSettingsTransport(
     })
   }
   return createUnavailableUiSettingsTransport(
-    'This window has no engine access for the UI settings store (no backend connection and no relay).'
+    "This window can't reach Videorc's settings. Restart Videorc if this keeps happening."
   )
 }
 

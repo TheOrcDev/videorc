@@ -3441,17 +3441,22 @@ describe('UI settings store wire contract (plan 220 S1.4a)', () => {
       )
     ) as { localStorage: Record<string, string> }
   ).localStorage
-  const wireLines = readFileSync(
-    new URL('../../../../protocol-fixtures/protocol-wire-snapshot.ndjson', import.meta.url),
-    'utf8'
-  )
-    .split('\n')
-    .filter((line) => line.trim())
-    .map((line) => JSON.parse(line) as { case: string; wire?: string })
-  const wireOf = (name: string): unknown => {
-    const line = wireLines.find((entry) => entry.case === name)
-    if (!line?.wire) throw new Error(`no wire case ${name}`)
-    return JSON.parse(line.wire)
+  // What `videorc_protocol::ui_settings` serializes: every field of a full
+  // value, and a default one with its skipped fields left out.
+  const wire = {
+    snapshotFull: {
+      entries: { 'videorc.theme': 'dark', 'videorc.settings': { textSize: 'm' } },
+      revision: 7,
+      localStorageMigrated: true
+    },
+    snapshotDefault: { entries: {}, revision: 0, localStorageMigrated: false },
+    changeFull: {
+      revision: 3,
+      put: { 'videorc.theme': 'dark' },
+      delete: ['videorc.notesTab'],
+      writer: 'window-notes'
+    },
+    changeDefault: { revision: 0, put: {}, delete: [] }
   }
 
   it('accepts a whole-store read, a read by keys, and the snapshot with every migrated key', () => {
@@ -3462,12 +3467,12 @@ describe('UI settings store wire contract (plan 220 S1.4a)', () => {
     })
     const snapshot = { entries: profile, revision: 1, localStorageMigrated: true }
     expect(validateBackendRpcResult('ui.settings.get', snapshot)).toEqual(snapshot)
-    expect(validateBackendRpcResult('ui.settings.get', wireOf('UiSettingsSnapshot::full'))).toEqual(
-      wireOf('UiSettingsSnapshot::full')
+    expect(validateBackendRpcResult('ui.settings.get', wire.snapshotFull)).toEqual(
+      wire.snapshotFull
     )
-    expect(
-      validateBackendRpcResult('ui.settings.get', wireOf('UiSettingsSnapshot::default'))
-    ).toEqual({ entries: {}, revision: 0, localStorageMigrated: false })
+    expect(validateBackendRpcResult('ui.settings.get', wire.snapshotDefault)).toEqual(
+      wire.snapshotDefault
+    )
   })
 
   it('accepts the migration batch, a plain batch, and the change both as the answer and as the event', () => {
@@ -3478,9 +3483,6 @@ describe('UI settings store wire contract (plan 220 S1.4a)', () => {
       writer: 'window-main'
     }
     expect(validateBackendRpcParams('ui.settings.set', migration)).toEqual(migration)
-    expect(
-      validateBackendRpcParams('ui.settings.set', wireOf('UiSettingsSetParams::migration'))
-    ).toEqual(wireOf('UiSettingsSetParams::migration'))
     const batch = {
       put: { 'videorc.settings': { textSize: 'm', nested: [1, null, 'x'] } },
       delete: ['videorc.orcleTab']
@@ -3488,8 +3490,8 @@ describe('UI settings store wire contract (plan 220 S1.4a)', () => {
     expect(validateBackendRpcParams('ui.settings.set', batch)).toEqual(batch)
     expect(validateBackendRpcParams('ui.settings.set', {})).toEqual({})
     for (const change of [
-      wireOf('UiSettingsChange::full'),
-      wireOf('UiSettingsChange::default'),
+      wire.changeFull,
+      wire.changeDefault,
       { revision: 2, put: {}, delete: ['videorc.theme'] }
     ]) {
       expect(validateBackendRpcResult('ui.settings.set', change)).toEqual(change)

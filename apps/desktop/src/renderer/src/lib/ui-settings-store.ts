@@ -32,19 +32,21 @@ import type {
   UiSettingsSnapshot,
   UiSettingsValue
 } from '../../../shared/backend'
+import { UI_SETTINGS_BATCH_MAX_BYTES, UI_SETTINGS_BATCH_MAX_KEYS } from '../../../shared/backend'
 import {
-  UI_SETTINGS_BATCH_MAX_BYTES,
-  UI_SETTINGS_BATCH_MAX_KEYS,
-  UI_SETTINGS_KEY_MAX_CHARS,
-  UI_SETTINGS_VALUE_MAX_BYTES
-} from '../../../shared/backend'
+  UI_SETTINGS_HYDRATE_TIMEOUT_MS,
+  UI_SETTINGS_JOURNAL_PREFIX,
+  UI_SETTINGS_LOCAL_STORAGE_PREFIX,
+  migrationRefusal,
+  utf8Length
+} from './ui-settings-limits'
 
-/** Every migrated key starts with this. */
-export const UI_SETTINGS_LOCAL_STORAGE_PREFIX = 'videorc.'
-/** A window's journal of writes the engine has not confirmed: `<prefix><writer>`. */
-export const UI_SETTINGS_JOURNAL_PREFIX = 'videorc.uiSettings.journal.v1:'
-/** How long a window waits for its first snapshot before rendering without it. */
-export const UI_SETTINGS_HYDRATE_TIMEOUT_MS = 15_000
+export {
+  UI_SETTINGS_HYDRATE_TIMEOUT_MS,
+  UI_SETTINGS_JOURNAL_PREFIX,
+  UI_SETTINGS_LOCAL_STORAGE_PREFIX,
+  migrationRefusal
+} from './ui-settings-limits'
 const RETRY_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const
 const BUFFERED_CHANGES_MAX = 1_000
 const READS_BEFORE_HYDRATION_MAX = 64
@@ -134,27 +136,6 @@ function newWriterId(): string {
       ? crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
   return `window-${random}`
-}
-
-function utf8Length(text: string): number {
-  return typeof TextEncoder === 'undefined'
-    ? text.length
-    : new TextEncoder().encode(text).byteLength
-}
-
-/** Why the store would refuse this key or value, or null: mirrors `ui_settings.rs`. */
-export function migrationRefusal(key: string, value: string): string | null {
-  if (key.length > UI_SETTINGS_KEY_MAX_CHARS) {
-    return `the key is ${key.length} characters; the limit is ${UI_SETTINGS_KEY_MAX_CHARS}`
-  }
-  // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f-\u009f]/.test(key)) return 'the key contains a control character'
-  if (key.trim() !== key) return 'the key starts or ends with whitespace'
-  const bytes = utf8Length(JSON.stringify(value))
-  if (bytes > UI_SETTINGS_VALUE_MAX_BYTES) {
-    return `the value is ${bytes} bytes; the limit is ${UI_SETTINGS_VALUE_MAX_BYTES}`
-  }
-  return null
 }
 
 function storageKeys(storage: UiSettingsStorage): string[] {
