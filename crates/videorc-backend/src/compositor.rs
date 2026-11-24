@@ -6279,13 +6279,34 @@ impl CompositorRuntime {
                 scene
                     .background
                     .as_ref()
-                    .and_then(|background| {
-                        self.image_sources.get(&background_cache_key(background))
-                    })
+                    .and_then(|background| self.scene_background_image(background))
                     .and_then(CompositorImageSource::windows_image)
             })
             .collect();
         (takeover, backgrounds)
+    }
+
+    /// A leg's background picture. Only the primary scene's commit prepares
+    /// pictures, so a vertical scene whose grade changed first misses its
+    /// own key until the primary catches up; it then draws the primary's
+    /// picture of the same file (the previous grade, or the new one) rather
+    /// than none.
+    #[cfg(any(target_os = "windows", test))]
+    fn scene_background_image(
+        &self,
+        background: &EffectiveSceneBackground,
+    ) -> Option<&CompositorImageSource> {
+        self.image_sources
+            .get(&background_cache_key(background))
+            .or_else(|| {
+                let primary = self.scene.as_ref()?.scene.as_ref()?.background.as_ref()?;
+                let same_picture = primary.asset_id == background.asset_id
+                    && primary.managed_asset_path == background.managed_asset_path
+                    && primary.live.is_none() == background.live.is_none();
+                same_picture
+                    .then(|| self.image_sources.get(&background_cache_key(primary)))
+                    .flatten()
+            })
     }
 
     #[cfg(any(target_os = "windows", test))]
@@ -23021,6 +23042,81 @@ mod tests {
         assert_eq!(dimmed.bgra.as_deref().unwrap()[..4], [25, 50, 100, 255]);
         // 0.2126 * 200 + 0.7152 * 100 + 0.0722 * 50 = 117.6
         assert_eq!(grey.bgra.as_deref().unwrap()[..4], [118, 118, 118, 255]);
+    }
+
+    #[tokio::test]
+    async fn vertical_leg_keeps_a_background_while_its_regrade_is_unprepared() {
+        let state = test_state();
+        let layout = crate::protocol::default_layout_settings();
+        let image_path = std::env::temp_dir().join(format!(
+            "videorc-vertical-background-{}.png",
+            Uuid::new_v4()
+        ));
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([200, 100, 50, 255]))
+            .save(&image_path)
+            .unwrap();
+        let scene_with = |dim_percent: f64| {
+            let mut background = graded_test_background(dim_percent);
+            background.managed_asset_path = image_path.to_string_lossy().into_owned();
+            let mut scene = test_scene_snapshot(LayoutPreset::ScreenOnly, None, None)
+                .scene
+                .unwrap();
+            scene.background = Some(background);
+            scene
+        };
+        let params = |revision: u64, scene: Scene| CompositorSceneUpdateParams {
+            transition_ms: None,
+            revision,
+            scene: Some(scene),
+            layout: layout.clone(),
+            active_screen: None,
+        };
+        let vertical_first_pixel = |compositor: &CompositorRuntime| {
+            let background = compositor
+                .simulcast_scene
+                .as_ref()
+                .and_then(|snapshot| snapshot.scene.as_ref())
+                .and_then(|scene| scene.background.as_ref())
+                .unwrap()
+                .clone();
+            compositor
+                .scene_background_image(&background)
+                .and_then(|source| source.bgra.as_deref().map(|bgra| bgra[..4].to_vec()))
+        };
+
+        update_compositor_scene(&state, params(1, scene_with(0.0))).await;
+        update_compositor_simulcast_scene(&state, params(1, scene_with(0.0))).await;
+        assert_eq!(
+            vertical_first_pixel(&*state.compositor.lock().await),
+            Some(vec![50, 100, 200, 255])
+        );
+
+        // The vertical leg's regrade lands before the primary prepares it.
+        update_compositor_simulcast_scene(&state, params(2, scene_with(50.0))).await;
+        assert_eq!(
+            vertical_first_pixel(&*state.compositor.lock().await),
+            Some(vec![50, 100, 200, 255]),
+            "the vertical leg draws the previous grade, never none"
+        );
+        update_compositor_scene(&state, params(2, scene_with(50.0))).await;
+        assert_eq!(
+            vertical_first_pixel(&*state.compositor.lock().await),
+            Some(vec![25, 50, 100, 255])
+        );
+
+        // The primary regrades first while the vertical leg still asks for
+        // the grade it had: still a picture.
+        update_compositor_scene(&state, params(3, scene_with(0.0))).await;
+        assert!(vertical_first_pixel(&*state.compositor.lock().await).is_some());
+
+        // A different picture is never borrowed from the primary.
+        let mut other = scene_with(50.0);
+        if let Some(background) = other.background.as_mut() {
+            background.asset_id = "another-picture".to_string();
+        }
+        update_compositor_simulcast_scene(&state, params(4, other)).await;
+        assert_eq!(vertical_first_pixel(&*state.compositor.lock().await), None);
+        std::fs::remove_file(&image_path).ok();
     }
 
     #[test]
