@@ -216,6 +216,7 @@ mod system_audio_session;
 mod test_alloc;
 #[cfg(test)]
 mod test_temp_dir;
+mod thumbnails;
 mod transcript;
 mod twitch;
 mod twitch_chat;
@@ -711,6 +712,9 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     tokio::spawn(html_overlay::run_html_overlay_targets(state.clone()));
     // Plan 214 D4: Videorc Camera comes back on when it was on.
     virtual_camera_service::start_from_settings(&state).await;
+    // Plan 260 S1.5b: the stored scheduled thumbnails are previewable again
+    // before the first client connects (main's old rehydrate pass).
+    register_stored_scheduled_thumbnails(&state).await;
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/preview/live.mjpeg", get(live_preview_handler))
@@ -6402,7 +6406,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "screens.importImage"
         | "banners.importImage"
         | "banners.importHtml"
-        | "sounds.import" => Some(Mutation {
+        | "sounds.import"
+        // Plan 260 S1.5b: a picked image decoded, fitted and stored.
+        | "scheduledThumbnail.import"
+        | "backgrounds.import" => Some(Mutation {
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
         }),
 
@@ -6726,9 +6733,12 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
     match command.method.as_str() {
         // Plan 186: one image import process-wide, takeovers and banners
         // alike; plan 189: a sound decode shares the lane.
-        "screens.importImage" | "banners.importImage" | "banners.importHtml" | "sounds.import" => {
-            Some(WebSocketIsolatedCommandLaneKind::AssetImport)
-        }
+        "screens.importImage"
+        | "banners.importImage"
+        | "banners.importHtml"
+        | "sounds.import"
+        | "scheduledThumbnail.import"
+        | "backgrounds.import" => Some(WebSocketIsolatedCommandLaneKind::AssetImport),
         "account.refresh"
         | "account.windows_pilot_update_token"
         | "entitlements.refresh"
@@ -10623,6 +10633,61 @@ fn resolve_import_resources(
         resource_authority::ResourceCapabilityKind::OutputDirectory,
         false,
     )
+}
+
+/// Plan 260 S1.5b: decode, fit and store off the async workers, then make
+/// the stored copy previewable (`videorc-asset://scheduled-thumbnail/<id>`).
+async fn import_scheduled_thumbnail(
+    state: &AppState,
+    params: thumbnails::ImportImageParams,
+) -> Result<thumbnails::ScheduledThumbnail> {
+    let root = thumbnails::configured_dir(thumbnails::SCHEDULED_THUMBNAIL_ROOT_ENV)?;
+    let (thumbnail, path) = tokio::task::spawn_blocking(move || {
+        thumbnails::import_scheduled_thumbnail(std::path::Path::new(&params.path), &root)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("Thumbnail import worker failed: {error}"))??;
+    state
+        .resource_authority
+        .register_managed_thumbnail(&thumbnail.id, &path.to_string_lossy())?;
+    Ok(thumbnail)
+}
+
+/// Plan 260 S1.5b: copy into the managed folder and write the Assets tile,
+/// then register the copy as a scene background.
+async fn import_background(
+    state: &AppState,
+    params: thumbnails::ImportImageParams,
+) -> Result<thumbnails::BackgroundImport> {
+    let directory = thumbnails::configured_dir(thumbnails::BACKGROUND_IMPORT_DIR_ENV)?;
+    let asset_directory = directory.clone();
+    let imported = tokio::task::spawn_blocking(move || {
+        thumbnails::import_background(std::path::Path::new(&params.path), &asset_directory)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("Background import worker failed: {error}"))??;
+    let asset_path = directory.join(&imported.asset_file_name);
+    state
+        .resource_authority
+        .register_managed_background(&imported.id, &asset_path.to_string_lossy())?;
+    Ok(imported)
+}
+
+async fn register_stored_scheduled_thumbnails(state: &AppState) {
+    let Ok(root) = thumbnails::configured_dir(thumbnails::SCHEDULED_THUMBNAIL_ROOT_ENV) else {
+        return;
+    };
+    let authority = state.resource_authority.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        for (asset_id, path) in thumbnails::stored_scheduled_thumbnails(&root) {
+            if let Err(error) =
+                authority.register_managed_thumbnail(&asset_id, &path.to_string_lossy())
+            {
+                tracing::warn!(%asset_id, "stored scheduled thumbnail not registered: {error:#}");
+            }
+        }
+    })
+    .await;
 }
 
 fn resolve_screen_import_resource(
@@ -17093,6 +17158,52 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "scheduledThumbnail.import" => {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_screen_import_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value::<thumbnails::ImportImageParams>(params_value) {
+                Ok(params) => match import_scheduled_thumbnail(state, params).await {
+                    Ok(thumbnail) => ServerResponse::ok(command.id, thumbnail),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "thumbnail-import-failed",
+                        format!("{error:#}"),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "backgrounds.import" => {
+            let mut params_value = command.params;
+            if let Err(error) = resolve_screen_import_resource(state, &mut params_value, role) {
+                return ServerResponse::error(
+                    command.id,
+                    "resource-capability-rejected",
+                    error.to_string(),
+                );
+            }
+            match serde_json::from_value::<thumbnails::ImportImageParams>(params_value) {
+                Ok(params) => match import_background(state, params).await {
+                    Ok(imported) => ServerResponse::ok(command.id, imported),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "background-import-failed",
+                        format!("{error:#}"),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "screens.rename" => {
             match serde_json::from_value::<protocol::RenameScreenParams>(command.params) {
                 Ok(params) => match state
@@ -22726,6 +22837,8 @@ mod tests {
             "banners.importImage",
             "banners.importHtml",
             "sounds.import",
+            "scheduledThumbnail.import",
+            "backgrounds.import",
             "sessions.delete",
             "sessions.delete.complete",
         ] {

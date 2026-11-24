@@ -20,8 +20,6 @@ import { runVirtualCameraAction } from './virtual-camera-action'
 import { WatchdogNotifyLedger, watchdogNotifyDecision } from './watchdog-notify'
 import { notificationActRaisesMainWindow } from '../shared/notifications-relay'
 import { runLinuxLoadModule } from './virtual-camera-linux-setup'
-import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
-import { writeBackgroundThumbnail } from './background-thumbnail'
 import {
   BUDDY_ASSETS_FOLDER,
   importBuddyPetFolder,
@@ -93,7 +91,6 @@ import {
   NativePreviewFrameLeaseError
 } from './native-preview-frame-lease'
 import {
-  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -775,7 +772,6 @@ import {
   BUNDLED_BACKGROUND_MANIFEST,
   backgroundAssetNameFromPath,
   isSupportedBackgroundFile,
-  managedBackgroundFileName,
   type BackgroundImportResult
 } from '../shared/background-import'
 import {
@@ -865,7 +861,8 @@ import type {
   RecordingStatus,
   OverlayLayout,
   EffectiveSceneBackground,
-  Scene
+  Scene,
+  ScheduledThumbnail
 } from '../shared/backend'
 import { previewProgramShape } from '../shared/preview-program'
 import {
@@ -11742,6 +11739,7 @@ function startBackendWithRegistryLock(): void {
         : '',
       VIDEORC_MANAGED_BACKGROUND_ROOTS: managedBackgroundRoots().join(delimiter),
       VIDEORC_MANAGED_THUMBNAIL_ROOT: join(app.getPath('userData'), 'scheduled-thumbnails'),
+      VIDEORC_MANAGED_BACKGROUND_IMPORT_DIR: join(app.getPath('userData'), 'background-assets'),
       // Metrics journal and per-session FFmpeg logs land beside backend.log
       // (plan 166 S1/S3); the backend writes them only while the journal is on.
       VIDEORC_LOGS_DIR: join(app.getPath('userData'), 'logs'),
@@ -12245,11 +12243,13 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'room.frame.test.inspect',
   'room.camera.processed.inspect',
   'room.microphone.inspect',
-  'resource.capability.register_thumbnail',
   // Plan 260 S1.5d: OBS import reads OBS's own files in the backend.
   'obs.discover',
   'obs.read',
   'obs.readStreamKey',
+  // Plan 260 S1.5b: the picked image's decode, fit and copy run in the backend.
+  'scheduledThumbnail.import',
+  'backgrounds.import',
   // Plan 232: how an HTML overlay's page stands; only main hosts them.
   'htmlOverlays.host.report',
   ...SMOKE_BACKEND_RPC_METHOD_NAMES,
@@ -12634,7 +12634,6 @@ function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText
         const adminConnection = backendAdminConnection
         backendAuthorityReady = Promise.all([
           rehydrateManagedBackgroundAssets(),
-          rehydrateScheduledThumbnails(),
           migrateCommentsHighlightAnchorPref()
         ])
           .then(() => undefined)
@@ -13007,13 +13006,7 @@ async function runSmokePreviewMotionCommand(
       { kind: 'input-file', path: params.path },
       process.env.VIDEORC_SMOKE_STATE_DIR
     )
-    return importScheduledThumbnail(
-      authorization.path,
-      join(app.getPath('userData'), 'scheduled-thumbnails'),
-      (bytes) => nativeImage.createFromBuffer(bytes).getSize(),
-      (assetId, path) =>
-        requestBackendAdmin('resource.capability.register_thumbnail', { assetId, path })
-    )
+    return importScheduledThumbnailInBackend(authorization.path)
   }
 
   if (command === 'import-smoke-background') {
@@ -17890,17 +17883,17 @@ function resolveScheduledThumbnail(fileName: string): string | null {
   )
 }
 
-async function rehydrateScheduledThumbnails(): Promise<void> {
-  const root = join(app.getPath('userData'), 'scheduled-thumbnails')
-  if (!existsSync(root)) return
-  for (const file of readdirSync(root)) {
-    const path = resolveScheduledThumbnail(file)
-    if (path)
-      await requestBackendAdmin('resource.capability.register_thumbnail', {
-        assetId: file.split('.')[0],
-        path
-      }).catch(() => undefined)
-  }
+/** A picked image's decode, fit and store can outlast the default 15 s. */
+const IMAGE_IMPORT_TIMEOUT_MS = 60_000
+
+// Plan 260 S1.5b: the backend checks, fits under 2 MB, stores and registers
+// the thumbnail, and registers the stored ones again at its own startup.
+function importScheduledThumbnailInBackend(path: string): Promise<ScheduledThumbnail> {
+  return requestBackendAdmin<ScheduledThumbnail>(
+    'scheduledThumbnail.import',
+    { path },
+    IMAGE_IMPORT_TIMEOUT_MS
+  )
 }
 
 async function pickScheduledThumbnail() {
@@ -17913,35 +17906,7 @@ async function pickScheduledThumbnail() {
     ? await dialog.showOpenDialog(mainWindow, options)
     : await dialog.showOpenDialog(options)
   if (result.canceled || !result.filePaths[0]) return null
-  return importScheduledThumbnail(
-    result.filePaths[0],
-    join(app.getPath('userData'), 'scheduled-thumbnails'),
-    (bytes) => nativeImage.createFromBuffer(bytes).getSize(),
-    (assetId, path) =>
-      requestBackendAdmin('resource.capability.register_thumbnail', { assetId, path }),
-    fitScheduledThumbnail
-  )
-}
-
-/**
- * Plan 083: an image over 2 MB becomes a JPEG with a 1280 px long edge
- * (1280 × 720 for 16:9). Capping the long edge, not fitting 1280 × 720, keeps
- * a portrait image above YouTube's 640 px minimum width.
- */
-function fitScheduledThumbnail(bytes: Buffer, quality: number): Buffer {
-  const image = nativeImage.createFromBuffer(bytes)
-  if (image.isEmpty()) throw new Error('Corrupt or unsupported thumbnail image.')
-  const { width, height } = image.getSize()
-  const scale = Math.min(1, 1280 / Math.max(width, height))
-  const fitted =
-    scale < 1
-      ? image.resize({
-          width: Math.max(1, Math.round(width * scale)),
-          height: Math.max(1, Math.round(height * scale)),
-          quality: 'best'
-        })
-      : image
-  return fitted.toJPEG(quality)
+  return importScheduledThumbnailInBackend(result.filePaths[0])
 }
 
 async function importBackgroundImage(): Promise<BackgroundImportResult | null> {
@@ -17975,37 +17940,19 @@ async function importBackgroundImageFromPath(
     return null
   }
 
-  // Copy into app-support storage and reference the managed copy, never the
-  // user's original path (Assets Tab plan locked decision).
-  const id = randomUUID()
-  const directory = join(app.getPath('userData'), 'background-assets')
-  mkdirSync(directory, { recursive: true })
-  const assetPath = join(directory, managedBackgroundFileName(id, sourcePath))
-  copyFileSync(sourcePath, assetPath)
-  // A ~480 px copy for the Assets tile (plan 174 C-40); the full file
-  // otherwise, when this image can't be decoded here.
-  let thumbnailFileName: string | null = null
-  try {
-    thumbnailFileName = writeBackgroundThumbnail({
-      id,
-      sourcePath,
-      directory,
-      image: nativeImage.createFromPath(assetPath),
-      write: (path, bytes) => writeFileSync(path, bytes)
-    })
-  } catch (error) {
-    console.warn('[assets] background thumbnail failed', error)
-  }
-
-  await requestBackendAdmin('resource.capability.register_background', {
-    assetId: id,
-    path: assetPath
-  })
+  // Plan 260 S1.5b: the backend copies it into app-support storage (the
+  // asset references the managed copy, never the user's original path),
+  // writes the ~480 px Assets tile (plan 174 C-40) and registers the copy.
+  const imported = await requestBackendAdmin<{
+    id: string
+    assetFileName: string
+    thumbnailFileName: string | null
+  }>('backgrounds.import', { path: sourcePath }, IMAGE_IMPORT_TIMEOUT_MS)
   return {
-    id,
+    id: imported.id,
     name: backgroundAssetNameFromPath(sourcePath),
-    assetPath: managedBackgroundAssetUrl(basename(assetPath)),
-    thumbnailPath: managedBackgroundAssetUrl(thumbnailFileName ?? basename(assetPath)),
+    assetPath: managedBackgroundAssetUrl(imported.assetFileName),
+    thumbnailPath: managedBackgroundAssetUrl(imported.thumbnailFileName ?? imported.assetFileName),
     fileName: basename(sourcePath)
   }
 }
