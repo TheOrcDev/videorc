@@ -18,12 +18,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::DateTime;
 use videorc_protocol::repair::GateStatus;
 use videorc_protocol::{
-    CleanCutJob, CleanCutJobState, CleanCutMode, RecordingState, RecordingStatus, SessionListItem,
-    SessionLogEntry,
+    CleanCutJob, CleanCutJobState, CleanCutMode, NoiseCleanupJob, RecordingState, RecordingStatus,
+    SessionListItem, SessionLogEntry,
 };
 
 use super::copy;
 use super::markers::{MarkersState, MarkersView};
+use super::noise::{
+    NoiseCleanupInput, NoiseCleanupView, active_source_ids, latest_job_for_session,
+    noise_cleanup_view, with_connection_state,
+};
 use super::view::*;
 
 /// `StatusTone`: the dot's and the badge's colour.
@@ -186,6 +190,11 @@ pub struct ViewInput<'a> {
     pub now: DateTime<chrono::Utc>,
     /// S3.10c: every Clean cut job the Studio has heard.
     pub clean_cuts: &'a [CleanCutJob],
+    /// Every noise cleanup job the Studio has heard.
+    pub noise_jobs: &'a [NoiseCleanupJob],
+    /// Noise cleanup's Premium gate: its reason while locked, `None` when
+    /// allowed (the account's entitlements answer it, L6).
+    pub noise_premium_locked: Option<&'a str>,
 }
 
 // ── The page as one value ───────────────────────────────────────────────
@@ -246,6 +255,8 @@ pub enum MenuId {
     Check,
     Repair,
     Restore,
+    /// Reduce noise, its progress or its cleaned copy.
+    NoiseCleanup,
     Delete,
 }
 
@@ -265,6 +276,7 @@ impl MenuId {
             Self::Check => "check",
             Self::Repair => "repair",
             Self::Restore => "restore",
+            Self::NoiseCleanup => "noise-cleanup",
             Self::Delete => "delete",
         }
     }
@@ -284,6 +296,7 @@ impl MenuId {
             Self::Check,
             Self::Repair,
             Self::Restore,
+            Self::NoiseCleanup,
             Self::Delete,
         ]
         .into_iter()
@@ -334,6 +347,9 @@ pub struct RowView {
     pub can_delete: bool,
     /// S3.10c: the chip while Clean cut works on the recording.
     pub clean_cut: Option<CleanCutChip>,
+    /// The row's noise cleanup button (`NoiseCleanupDirectAction`), when it
+    /// has words to show.
+    pub noise: Option<NoiseCleanupView>,
 }
 
 /// `libraryCleanCutChip`, with its hint.
@@ -489,11 +505,13 @@ pub fn capture_protected(session: &dyn LibrarySession) -> bool {
     is_active_recording_state(&status.state) && !status.replay_only
 }
 
-/// The rows in view and which of them can be picked.
+/// The rows in view and which of them can be picked: not the capture's,
+/// and not one Clean cut or noise cleanup works on (`locked`).
 pub fn visible_rows(
     sessions: &[SessionListItem],
     ui: &LibraryUi,
     session: &dyn LibrarySession,
+    locked: &BTreeSet<String>,
 ) -> VisibleRows {
     let visible = sort_sessions(filter_sessions(sessions, ui.filter, &ui.query), ui.sort);
     let protected = capture_protected(session);
@@ -501,7 +519,9 @@ pub fn visible_rows(
         ordered: visible.iter().map(|row| row.id.clone()).collect(),
         selectable: visible
             .iter()
-            .filter(|row| !protected && !is_live_session(row, session.status()))
+            .filter(|row| {
+                !protected && !is_live_session(row, session.status()) && !locked.contains(&row.id)
+            })
             .map(|row| row.id.clone())
             .collect(),
     }
@@ -520,16 +540,29 @@ fn elapsed_ms(status: &RecordingStatus, now: DateTime<chrono::Utc>) -> Option<i6
         .or(status.duration_ms)
 }
 
-/// What a row's work in flight holds: a duplicate, a Clean cut, and the
-/// mode of its finished cut (Review clean cut).
-#[derive(Debug, Clone, Copy, Default)]
+/// What a row's work in flight holds: a duplicate, a Clean cut, the mode
+/// of its finished cut (Review clean cut), and its noise cleanup.
+#[derive(Debug, Clone, Default)]
 struct RowWork {
     duplicating: bool,
     cutting: bool,
     review: Option<CleanCutMode>,
     /// Clean cut can cut this recording ([`CleanCutRules::is_eligible`]).
     cut_eligible: bool,
+    cleanup: NoiseCleanupView,
 }
+
+/// A cloud stream's row has no local file: these items are not its.
+const CLOUD_STREAM_HIDDEN: [MenuId; 8] = [
+    MenuId::Play,
+    MenuId::Reveal,
+    MenuId::ExportMp4,
+    MenuId::Duplicate,
+    MenuId::Check,
+    MenuId::Repair,
+    MenuId::Restore,
+    MenuId::NoiseCleanup,
+];
 
 /// `useSessionMenu`'s items for one row.
 fn row_menu(
@@ -546,14 +579,20 @@ fn row_menu(
         cutting,
         review,
         cut_eligible,
+        cleanup,
     } = work;
     let busy = matches!(repair.phase, RepairPhase::Checking | RepairPhase::Repairing);
     let finalizing = is_finalizing(session);
     let stopped = separate_file_stopped(session);
     let can_export = can_export_mp4(session);
-    let file_actions_busy = busy || finalizing || cutting;
+    // The backend refuses delete, duplicate, export and repair while Clean
+    // cut or noise cleanup works on the recording (E-4): the menu holds them
+    // first and says why.
+    let file_actions_busy = busy || finalizing || cutting || cleanup.conflicts_with_file_actions;
     let hold: Option<String> = if cutting {
         Some(copy::CLEAN_CUT_HOLD_REASON.to_string())
+    } else if cleanup.conflicts_with_file_actions {
+        Some(copy::NOISE_CLEANUP_HOLD_REASON.to_string())
     } else {
         protected.then(|| copy::CAPTURE_HOLD_REASON.to_string())
     };
@@ -626,6 +665,22 @@ fn row_menu(
             !has_file,
             None,
         ),
+    ]);
+    if let Some(label) = cleanup.menu_label.clone() {
+        let icon = if cleanup.premium_locked {
+            "lock"
+        } else {
+            "waveform-muted"
+        };
+        open.push(item(
+            MenuId::NoiseCleanup,
+            label,
+            icon,
+            cleanup.menu_action.is_none(),
+            None,
+        ));
+    }
+    open.extend([
         item(
             MenuId::ExportMp4,
             if finalization_failed(session) && stopped.is_none() {
@@ -735,6 +790,9 @@ fn row_menu(
         separated: true,
         ..delete
     });
+    if session.mode == "cloud-stream" {
+        items.retain(|item| !CLOUD_STREAM_HIDDEN.contains(&item.id));
+    }
     (items, can_rename, can_delete)
 }
 
@@ -869,6 +927,16 @@ fn row_view(
         .unwrap_or_default();
     let busy = matches!(repair.phase, RepairPhase::Checking | RepairPhase::Repairing);
     let active_cut = active_clean_cuts(input.clean_cuts, input.clean_cut).remove(&session.id);
+    let cleanup = with_connection_state(
+        noise_cleanup_view(NoiseCleanupInput {
+            session,
+            premium_locked: input.noise_premium_locked,
+            job: latest_job_for_session(input.noise_jobs, &session.id),
+            capture_active: protected,
+        }),
+        input.data.online,
+    );
+    let locked = active_cut.is_some() || cleanup.busy;
     let review = clean_cut_reviews(input.clean_cuts, input.data.sessions).remove(&session.id);
     let (menu, can_rename, can_delete) = row_menu(
         session,
@@ -882,6 +950,7 @@ fn row_view(
             cutting: active_cut.is_some(),
             review,
             cut_eligible: input.clean_cut.is_eligible(session),
+            cleanup: cleanup.clone(),
         },
     );
     let capture = CleanCutCapture {
@@ -899,7 +968,7 @@ fn row_view(
         file,
         poster,
         selected: selected.contains(&session.id),
-        selectable: !protected && !live,
+        selectable: !protected && !live && !locked,
         active: active == Some(session.id.as_str()),
         revealed: input.ui.revealed.as_deref() == Some(session.id.as_str()),
         play_reason: if live {
@@ -915,6 +984,7 @@ fn row_view(
         can_rename,
         can_delete,
         clean_cut: active_cut.map(|job| clean_cut_chip(job, capture, input.clean_cut)),
+        noise: cleanup.direct_label.is_some().then_some(cleanup),
     }
 }
 
@@ -927,7 +997,12 @@ pub fn library_view(input: &ViewInput<'_>) -> LibraryView {
         filter_sessions(data.sessions, ui.filter, &ui.query),
         ui.sort,
     );
-    let rows_in_view = visible_rows(data.sessions, ui, input.session);
+    let cutting: BTreeSet<String> = active_clean_cuts(input.clean_cuts, input.clean_cut)
+        .into_keys()
+        .collect();
+    let cleaning = active_source_ids(input.noise_jobs);
+    let locked: BTreeSet<String> = cutting.union(&cleaning).cloned().collect();
+    let rows_in_view = visible_rows(data.sessions, ui, input.session, &locked);
     let in_view: BTreeSet<String> = rows_in_view.ordered.iter().cloned().collect();
     let selected = prune_selection(&ui.selection.selected, &in_view);
     let active = ui
@@ -977,11 +1052,10 @@ pub fn library_view(input: &ViewInput<'_>) -> LibraryView {
         selected_count: selected.len(),
         bulk_hold: if protected {
             Some(copy::CAPTURE_HOLD_REASON)
-        } else if selected
-            .iter()
-            .any(|id| active_clean_cuts(input.clean_cuts, input.clean_cut).contains_key(id))
-        {
+        } else if selected.iter().any(|id| cutting.contains(id)) {
             Some(copy::CLEAN_CUT_HOLD_REASON)
+        } else if selected.iter().any(|id| cleaning.contains(id)) {
+            Some(copy::NOISE_CLEANUP_HOLD_REASON)
         } else {
             None
         },
