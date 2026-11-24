@@ -22,11 +22,20 @@
 //                 Needs System audio (the Screen Recording grant on macOS,
 //                 process loopback on Windows); without it the case SKIPS
 //                 with the reason, never a silent pass.
+//   monitor-only  never doubled, with nothing to hide behind (plan 260
+//                 S1.3b, macOS): System audio on, no recording, only the
+//                 Clips ring running. The press is the monitor's alone (the
+//                 ring never mixes a press), the backend's monitor plays it
+//                 (`sound_monitor.rs` reports it played), a quiet 440 Hz
+//                 afplay control tone follows, and the saved clip must hold
+//                 no 1 kHz at all while it holds the control: the monitor's
+//                 output never reaches the capture. Windows keeps the
+//                 renderer's monitor until S1.3d, so the case SKIPS there.
 //
 // The precise placement gate (one chunk plus 5 ms) is
 // `pnpm smoke:soundboard-fixture`.
 
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -44,15 +53,20 @@ import {
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
+  MONITOR_GATES,
   SOUNDBOARD_GATES,
   evaluateIdlePress,
+  evaluateMonitorOnlyClip,
+  evaluateMonitorPlayed,
   evaluateNotDoubled,
-  evaluatePressedTone
+  evaluatePressedTone,
+  parseMonitorVoiceLine
 } from './lib/soundboard-gates.mjs'
 import {
   analyzeSystemAudioArtifact,
   mixSourcesIncludeSystemAudio,
   startedSessionStatus,
+  toneEnvelope,
   toneWavArgs,
   wallToFileSeconds
 } from './lib/system-audio-gates.mjs'
@@ -62,7 +76,7 @@ import { missingWindowsCaptureWorker } from './lib/windows-capture-worker.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
-const ALL_CASES = ['idle', 'on-air', 'system-audio']
+const ALL_CASES = ['idle', 'on-air', 'system-audio', 'monitor-only']
 const { values: args } = parseArgs({
   options: {
     cases: { type: 'string', default: ALL_CASES.join(',') },
@@ -83,6 +97,12 @@ const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-soundboard-${Date.now()}`)
 )
 const reportPath = resolve(args.report ?? join(outputDirectory, 'soundboard-report.json'))
+// monitor-only's control tone: quiet, short, and far from 1 kHz so the clip's
+// 1 kHz analysis never sees it.
+const controlTone = { hz: 440, seconds: 0.5, amplitude: 0.1 }
+// The backend monitor's "played voice" lines (`sound_monitor.rs`).
+const monitorReports = []
+const players = new Set()
 const bundledFfmpeg = bundledFfmpegPath({ repoRoot })
 const ffmpegPath =
   process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? (existsSync(bundledFfmpeg) ? bundledFfmpeg : 'ffmpeg')
@@ -108,6 +128,37 @@ function runFfmpeg(argsList) {
       else resolveRun()
     })
   })
+}
+
+/** Plays a WAV with afplay (another app). */
+function playControlTone(wavPath) {
+  const child = spawn('afplay', [wavPath], { stdio: 'ignore' })
+  players.add(child)
+  child.on('exit', () => players.delete(child))
+  child.on('error', (error) => log(`afplay failed: ${error.message}`))
+}
+
+/** The backend monitor's report for a voice, once it has played. */
+async function monitorVerdict(voiceId, label) {
+  const deadline = performance.now() + MONITOR_GATES.reportWaitMs
+  while (!monitorReports.some((report) => report.voiceId === voiceId)) {
+    if (performance.now() > deadline) break
+    await sleep(100)
+  }
+  return evaluateMonitorPlayed({ reports: monitorReports, voiceId, label })
+}
+
+/** System audio's device, or the reason a case skips. */
+async function systemAudioSkip(ctx) {
+  const devices = await request(ctx.renderer, timeoutMs, 'devices.list', {})
+  const device = (devices?.devices ?? []).find((entry) => entry.id === 'system-audio:default')
+  return device?.status === 'available'
+    ? null
+    : `System audio device is ${device?.status ?? 'missing'}; ${
+        process.platform === 'win32'
+          ? 'Windows process loopback needs build 20348 or later and an output device.'
+          : 'the dev app needs the Screen Recording grant.'
+      }`
 }
 
 /** Every backend event with its receive time, so no waiter misses one. */
@@ -373,25 +424,98 @@ const cases = {
     return result
   },
   async 'system-audio'(ctx) {
-    const devices = await request(ctx.renderer, timeoutMs, 'devices.list', {})
-    const device = (devices?.devices ?? []).find((entry) => entry.id === 'system-audio:default')
-    if (device?.status !== 'available') {
-      return {
-        pass: true,
-        skipped: `System audio device is ${device?.status ?? 'missing'}; ${
-          process.platform === 'win32'
-            ? 'Windows process loopback needs build 20348 or later and an output device.'
-            : 'the dev app needs the Screen Recording grant.'
-        }`,
-        failures: [],
-        evidence: {}
-      }
-    }
+    const skipped = await systemAudioSkip(ctx)
+    if (skipped) return { pass: true, skipped, failures: [], evidence: {} }
     const reference = ctx.reference ?? (await judgeRecording(ctx, 'on-air (reference)', false))
     const withSystemAudio = await judgeRecording(ctx, 'system-audio', true)
     return {
       ...evaluateNotDoubled({ withSystemAudio, reference }),
       evidence: withSystemAudio.evidence
+    }
+  },
+  async 'monitor-only'(ctx) {
+    if (process.platform !== 'darwin') {
+      return {
+        pass: true,
+        skipped:
+          "the backend's monitor is macOS only (plan 260 S1.3b); Windows keeps the renderer's until S1.3d.",
+        failures: [],
+        evidence: {}
+      }
+    }
+    const skipped = await systemAudioSkip(ctx)
+    if (skipped) return { pass: true, skipped, failures: [], evidence: {} }
+    const since = performance.now()
+    await sendIntent(ctx, { kind: 'systemAudioOn' })
+    // The Clips ring (on by default) with System audio in its mix, and no
+    // recording: a press is the monitor's alone.
+    const ringWithSystemAudio = (record) =>
+      record.event === 'recording.status' &&
+      record.payload?.replayOnly === true &&
+      record.payload?.state === 'recording' &&
+      mixSourcesIncludeSystemAudio(record.payload) &&
+      record.at > ctx.since
+    const ring =
+      ctx.recorder.events.findLast(ringWithSystemAudio) ??
+      (await ctx.recorder.waitFor(
+        'the Clips ring with System audio in its mix',
+        ringWithSystemAudio,
+        20000
+      ))
+    // Let the ring hold some System audio before the press.
+    await sleep(Math.max(0, ring.at + 1500 - performance.now(), since + 1500 - performance.now()))
+    const { sentAt } = await sendIntent(ctx, { kind: 'soundPlay', soundId: ctx.sound.id })
+    const playback = await ctx.recorder.waitFor(
+      'monitor-only sounds.playback',
+      (record) =>
+        record.event === 'sounds.playback' &&
+        record.at >= sentAt &&
+        record.payload?.voices?.some((voice) => voice.soundId === ctx.sound.id)
+    )
+    const voice = playback.payload.voices.find((entry) => entry.soundId === ctx.sound.id)
+    if (voice.onAir !== false) fail('monitor-only: a press with only the Clips ring was on air')
+    await sleep(sentAt + 1500 - performance.now())
+    playControlTone(ctx.controlTonePath)
+    await sleep(sentAt + 3500 - performance.now())
+    const accepted = await request(ctx.renderer, timeoutMs, 'replay.save', { seconds: 30 })
+    const saveAt = performance.now()
+    const saved = await ctx.recorder.waitFor(
+      'the clip save',
+      (record) =>
+        (record.event === 'replay.saved' || record.event === 'replay.saveFailed') &&
+        record.payload?.saveId === accepted?.saveId,
+      60000
+    )
+    if (saved.event === 'replay.saveFailed') {
+      fail(`monitor-only: the clip save failed: ${JSON.stringify(saved.payload)}`)
+    }
+    const monitor = await monitorVerdict(voice.voiceId, 'monitor-only monitor')
+    const analysis = await analyzeSystemAudioArtifact(saved.payload.path, {
+      ffmpegPath,
+      ffprobePath
+    })
+    const verdict = evaluateMonitorOnlyClip({
+      toneEnvelope: analysis.envelope,
+      regions: analysis.regions,
+      controlEnvelope: toneEnvelope(analysis.samples, {
+        frequency: controlTone.hz,
+        timeOffsetSeconds: analysis.timeOffsetSeconds
+      }),
+      clipSeconds: analysis.audioSeconds + analysis.timeOffsetSeconds,
+      coveredSeconds: saved.payload.coveredSeconds,
+      pressAgoSeconds: (saveAt - sentAt) / 1000,
+      toneSeconds: SOUNDBOARD_GATES.toneSeconds
+    })
+    const failures = [...monitor.failures, ...verdict.failures]
+    return {
+      pass: failures.length === 0,
+      failures,
+      evidence: {
+        clip: saved.payload.path,
+        ringSessionId: ring.payload.sessionId,
+        monitor: monitor.report ?? null,
+        ...verdict.evidence
+      }
     }
   }
 }
@@ -414,6 +538,23 @@ try {
         amplitude: SOUNDBOARD_GATES.toneAmplitude
       })
     )
+    const controlTonePath = join(outputDirectory, 'control-440-500ms.wav')
+    await runFfmpeg([
+      '-y',
+      '-nostdin',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      `aevalsrc=${controlTone.amplitude}*sin(${controlTone.hz}*2*PI*t):s=48000:d=${controlTone.seconds}`,
+      '-ac',
+      '2',
+      '-c:a',
+      'pcm_s16le',
+      controlTonePath
+    ])
     const launch = await launchDevApp({
       env: {
         VIDEORC_SMOKE_COMMAND_SERVER: '1',
@@ -425,7 +566,9 @@ try {
       timeoutMs,
       requiredMarkers: ['backend-ready', 'preview-motion-ready'],
       onLine: (line) => {
-        if (debug) console.log('[app]', line)
+        const report = parseMonitorVoiceLine(line)
+        if (report) monitorReports.push(report)
+        if (debug || /Sound monitor/.test(line)) console.log('[app]', line)
       }
     })
     stopApp = launch.stop
@@ -453,7 +596,15 @@ try {
     })
     const acks = new RemoteAcks(remote)
     await waitForRemoteDescribe(remote, { timeoutMs })
-    const ctx = { renderer, smoke, recorder, remote, acks, since: performance.now() }
+    const ctx = {
+      renderer,
+      smoke,
+      recorder,
+      remote,
+      acks,
+      controlTonePath,
+      since: performance.now()
+    }
     ctx.sound = await importFixtureSound(ctx, tonePath)
     log(`app ready; fixture sound ${ctx.sound.id}; running ${selectedCases.join(', ')}`)
 
@@ -484,6 +635,7 @@ try {
   console.error(error instanceof Error ? (error.stack ?? error.message) : String(error))
   process.exitCode = 1
 } finally {
+  for (const child of players) child.kill('SIGTERM')
   try {
     await stopApp()
   } finally {
