@@ -29,7 +29,7 @@ mod ordered_json;
 
 use std::fs::{self, OpenOptions};
 use std::future::Future;
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
@@ -591,6 +591,12 @@ fn make_owner_only(_path: &Path) -> io::Result<()> {
 /// A copy of `file` beside it, never over an earlier backup; owner-only
 /// where modes exist, since it may hold an earlier agent's token.
 fn back_up(file: &Path, now: DateTime<Utc>) -> io::Result<PathBuf> {
+    back_up_from(&mut fs::File::open(file)?, file, now)
+}
+
+/// The backup of `file`, read from `source`. It is created owner-only before
+/// any byte lands, and a copy that fails partway is removed.
+fn back_up_from(source: &mut dyn Read, file: &Path, now: DateTime<Utc>) -> io::Result<PathBuf> {
     let base = format!("{}.videorc-backup-{}", file.display(), backup_stamp(now));
     for attempt in 0..20 {
         let candidate = if attempt == 0 {
@@ -598,14 +604,21 @@ fn back_up(file: &Path, now: DateTime<Utc>) -> io::Result<PathBuf> {
         } else {
             PathBuf::from(format!("{base}-{}", attempt + 1))
         };
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(OWNER_ONLY);
+        }
+        match options.open(&candidate) {
             Ok(mut copy) => {
-                io::copy(&mut fs::File::open(file)?, &mut copy)?;
-                make_owner_only(&candidate)?;
+                let copied = io::copy(source, &mut copy).and_then(|_| copy.sync_all());
+                drop(copy);
+                if let Err(error) = copied {
+                    let _ = fs::remove_file(&candidate);
+                    return Err(error);
+                }
                 return Ok(candidate);
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {}

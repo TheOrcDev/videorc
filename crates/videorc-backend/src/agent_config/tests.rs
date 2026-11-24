@@ -561,6 +561,46 @@ fn two_changes_in_one_second_keep_both_backups() {
     );
 }
 
+/// Hands out `bytes`, then fails; on its first read it records the backup's
+/// mode, which is the mode the copy holds before any byte lands.
+struct FailingSource {
+    dir: PathBuf,
+    bytes: &'static [u8],
+    mode_at_first_read: Option<u32>,
+}
+
+impl io::Read for FailingSource {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.mode_at_first_read.is_none() {
+            let backup = self.dir.join(&backups(&self.dir)[0]);
+            self.mode_at_first_read = Some(file_mode(&backup)?);
+        }
+        if self.bytes.is_empty() {
+            return Err(io::Error::other("the disk went away"));
+        }
+        let length = self.bytes.len().min(buf.len());
+        buf[..length].copy_from_slice(&self.bytes[..length]);
+        self.bytes = &self.bytes[length..];
+        Ok(length)
+    }
+}
+
+#[test]
+fn a_backup_is_owner_only_before_its_first_byte_and_gone_if_the_copy_fails() {
+    let (_guard, root) = root("agent-config-backup-fails");
+    let dir = folder(&root, &[".cursor"]);
+    let file = dir.join("mcp.json");
+    let mut source = FailingSource {
+        dir: dir.clone(),
+        bytes: b"{\"mcpServers\":{\"videorc\":{\"env\":{\"TOKEN\":\"vrc_agent_old\"}}}}",
+        mode_at_first_read: None,
+    };
+    let error = back_up_from(&mut source, &file, now()).unwrap_err();
+    assert_eq!(error.to_string(), "the disk went away");
+    assert_eq!(source.mode_at_first_read, Some(0o600));
+    assert_eq!(backups(&dir), Vec::<String>::new());
+}
+
 #[test]
 fn only_videorcs_newest_backups_stay_and_other_files_are_untouched() {
     let (_guard, root) = root("agent-config-prune");
