@@ -25,6 +25,7 @@
 
 mod app;
 mod platform;
+mod preview;
 // Plan 260 S2.5 (L6): the smoke command server and the UI driver. The shell
 // starts it (`smoke::start`) in a later S2 part; until then nothing calls it.
 #[allow(dead_code)]
@@ -271,6 +272,13 @@ fn main() -> Result<()> {
 
     let backend_state = supervisor.state();
     let connection_state = client.state();
+    // The preview (plan 260 S2.3a, L1): started in the main window, stopped
+    // before the backend at quit.
+    let preview_runtime = runtime.handle().clone();
+    let preview_logger = logger.clone();
+    let preview_slot: Rc<RefCell<Option<gpui::Entity<preview::Preview>>>> =
+        Rc::new(RefCell::new(None));
+    let quit_preview = preview_slot.clone();
     let studio_state = studio.watch();
     // Taken by the quit: the shutdown handshake runs once.
     let supervisor = Rc::new(RefCell::new(Some(supervisor)));
@@ -319,7 +327,12 @@ fn main() -> Result<()> {
         // GPUI gives quit observers a short deadline, so the wait happens
         // here, on the main thread, as Electron's `before-quit` holds the
         // quit until the backend confirms.
-        cx.on_app_quit(move |_| {
+        cx.on_app_quit(move |cx| {
+            // The preview releases its lease and destroys its surface while
+            // the backend still answers.
+            if let Some(preview) = quit_preview.borrow_mut().take() {
+                preview.update(cx, |preview, cx| preview.stop(cx));
+            }
             quit_keys.release_all();
             sleep::release(&quit_guard);
             stop_backend(&quit_supervisor, &runtime_handle);
@@ -348,8 +361,26 @@ fn main() -> Result<()> {
                 app_id: Some(APP_ID.into()),
                 ..Default::default()
             },
-            |_, cx| {
-                cx.new(|cx| Shell::new(status.clone(), connection.clone(), session.clone(), cx))
+            |window, cx| {
+                let preview = preview::Preview::new(
+                    preview::PreviewSetup {
+                        runtime: preview_runtime.clone(),
+                        backend: backend_state.clone(),
+                        logger: preview_logger.clone(),
+                    },
+                    window,
+                    cx,
+                );
+                *preview_slot.borrow_mut() = Some(preview.clone());
+                cx.new(|cx| {
+                    Shell::new(
+                        status.clone(),
+                        connection.clone(),
+                        session.clone(),
+                        preview,
+                        cx,
+                    )
+                })
             },
         );
         let main_window = match opened {

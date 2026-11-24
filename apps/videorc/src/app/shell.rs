@@ -10,6 +10,8 @@ use videorc_app_core::{BackendState, ConnectionState, Tone};
 
 use super::bridge::Mirror;
 use super::session::SessionPanel;
+use crate::preview::Preview;
+use videorc_preview::lifecycle::WindowMode;
 
 /// The status bar's line: the supervisor's words, and whether the typed
 /// client has the backend's `backend.ready`.
@@ -63,6 +65,8 @@ pub struct Shell {
     connection: Entity<Mirror<String>>,
     /// S2.4: Record, the clock, Stop and Go Live, on the Studio page.
     session: Entity<SessionPanel>,
+    /// The preview (plan 260 S2.3a, L1): its slot is the Studio page's.
+    preview: Entity<Preview>,
 }
 
 impl Shell {
@@ -70,15 +74,20 @@ impl Shell {
         backend: Entity<Mirror<StatusLine>>,
         connection: Entity<Mirror<String>>,
         session: Entity<SessionPanel>,
+        preview: Entity<Preview>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&backend, |_, _, cx| cx.notify()).detach();
         cx.observe(&connection, |_, _, cx| cx.notify()).detach();
+        // The preview notifies only when its slot's words or its window
+        // change, never per video frame.
+        cx.observe(&preview, |_, _, cx| cx.notify()).detach();
         Self {
             page: PageId::Studio,
             backend,
             connection,
             session,
+            preview,
         }
     }
 
@@ -90,8 +99,60 @@ impl Shell {
         if self.page != page {
             self.page = page;
             window.set_window_title(&nav::window_title(page));
+            // A docked slot that is not on screen presents nothing.
+            self.preview.update(cx, |preview, _| {
+                preview.set_docked_shown(page == PageId::Studio)
+            });
             cx.notify();
         }
+    }
+
+    /// The Studio page (S2.3a's and S2.4's parts of it): the preview's slot,
+    /// the button that moves the Preview into its own window and back
+    /// (`preview-stage.tsx`'s "Pop out" and "Show here"), and the session
+    /// controls.
+    fn studio_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (floating, can_float) = {
+            let preview = self.preview.read(cx);
+            (preview.mode() == WindowMode::Floating, preview.can_float())
+        };
+        let mut header = div().flex().justify_between().items_center().child(
+            div()
+                .text_size(px(20.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(PageId::Studio.label()),
+        );
+        if can_float {
+            header = header.child(
+                div()
+                    .id("preview-pop-out")
+                    .px(px(10.))
+                    .py(px(4.))
+                    .rounded(px(6.))
+                    .bg(rgb(SELECTED))
+                    .text_size(px(12.))
+                    .cursor_pointer()
+                    .child(if floating { "Show here" } else { "Pop out" })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.preview
+                            .update(cx, |preview, cx| preview.toggle_floating(cx));
+                    })),
+            );
+        }
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .pb(px(16.))
+            .child(header)
+            .child(
+                div()
+                    .flex_1()
+                    .child(Preview::docked_slot(&self.preview, cx)),
+            )
+            // S2.4's session controls, under the preview.
+            .child(self.session.clone())
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -160,7 +221,6 @@ impl Render for Shell {
         let status = self.backend.read(cx).value().clone();
         let connection = self.connection.read(cx).value().clone();
         let page = self.page;
-        let session = self.session.clone();
         div()
             .size_full()
             .flex()
@@ -173,7 +233,15 @@ impl Render for Shell {
                     .flex()
                     .flex_row()
                     .child(self.sidebar(cx))
-                    .child(
+                    .child(if page == PageId::Studio {
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .px(px(24.))
+                            .child(self.studio_page(cx))
+                    } else {
                         div()
                             .flex_1()
                             .flex()
@@ -187,19 +255,13 @@ impl Render for Shell {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(page.label()),
                             )
-                            .map(|content| {
-                                if page == PageId::Studio {
-                                    content.child(session)
-                                } else {
-                                    content.child(
-                                        div()
-                                            .text_size(px(13.))
-                                            .text_color(rgb(MUTED))
-                                            .child("This page comes in plan 260's Phase 3."),
-                                    )
-                                }
-                            }),
-                    ),
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(rgb(MUTED))
+                                    .child("This page comes in plan 260's Phase 3."),
+                            )
+                    }),
             )
             .child(
                 div()
