@@ -4267,6 +4267,69 @@ pub struct PreviewPresenterPhysicalPlacement {
     pub clip_height: Option<f64>,
 }
 
+/// Plan 260 S0.2b: how the backend hands its Windows D3D11 preview to
+/// another process (`preview.handover.open`). The contract is in
+/// `windows_d3d11_preview_handover.rs`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewHandoverRoute {
+    /// Route (a): a DirectComposition surface handle the backend presents
+    /// into; the app shows it as a visual's content. Zero copies.
+    CompositionSurface,
+    /// Route (b): three shared NT-handle BGRA textures with keyed mutexes,
+    /// named through the shared header; the app draws the latest.
+    SharedTexture,
+}
+
+/// `preview.handover.open`. The main-process (admin) credential only; one
+/// hand-over per connection, released when the connection closes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreviewHandoverOpenParams {
+    /// A UUID the app picks; `preview.handover.close` names it.
+    pub lease_id: String,
+    pub route: PreviewHandoverRoute,
+    /// The process the handles are duplicated into (the app's own).
+    pub consumer_pid: u32,
+}
+
+/// `preview.handover.close`; answers whether it closed the named lease.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreviewHandoverCloseParams {
+    pub lease_id: String,
+}
+
+/// What `preview.handover.open` answers. Every handle is already in the
+/// consumer's process (the numbers are its values there), and the consumer
+/// owns and closes each one. Route (b)'s texture handles come through the
+/// shared header, since a new frame size needs new textures.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewHandoverLease {
+    pub lease_id: String,
+    pub route: PreviewHandoverRoute,
+    /// The D3D11 media generation the handles belong to. When it ends (the
+    /// session stops or recovers) the header retires and the app asks again.
+    pub media_generation: u64,
+    /// The adapter the frames live on (`LUID` as `HighPart << 32 | LowPart`);
+    /// route (b) must open the textures on a device of this adapter.
+    pub adapter_luid: u64,
+    pub backend_pid: u32,
+    /// A file mapping of `header_bytes` holding the shared header.
+    pub header_mapping_handle: u64,
+    pub header_bytes: u32,
+    /// The header layout's version.
+    pub header_version: u32,
+    /// An auto-reset event the backend sets after each published frame.
+    pub frame_event_handle: u64,
+    /// Route (a) only: open with `IDCompositionDevice::CreateSurfaceFromHandle`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition_surface_handle: Option<u64>,
+    /// `bgra8`.
+    pub pixel_format: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MainOwnedPreviewSurfaceBoundsParams {

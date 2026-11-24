@@ -160,6 +160,63 @@ read as a model.
 - **Done when:** the testing plan's S0.2c checks are posted for all four
   routes on both contributors' PCs. The owner then picks the route (D12).
 
+#### Taking the hand-over (routes (a) and (b), plan 260 S0.2b)
+
+The backend half of routes (a) and (b) is on `main`
+(`crates/videorc-backend/src/windows_d3d11_preview_handover.rs` is the
+contract; `preview_handover.rs` is the message). Route (d) follows when the
+shared-memory ring lands (S1.7).
+
+- **Which preview.** The hand-over serves the backend's D3D11 media session:
+  the one that runs while a Windows recording or stream captures a display
+  (the session today's presenter shows). Start one first, with the display
+  as the screen source; a test-pattern source takes another path. With no
+  session, the open answers `preview-handover-unavailable`.
+- **The message,** on the backend's WebSocket with the main-process (admin)
+  credential, one per connection:
+
+  ```json
+  {"id": "1", "method": "preview.handover.open",
+   "params": {"leaseId": "<a new UUID>", "route": "composition-surface",
+              "consumerPid": <your process id>}}
+  ```
+
+  `route` is `composition-surface` (a) or `shared-texture` (b). The answer
+  (`PreviewHandoverLease` in `protocol.rs`) carries `headerMappingHandle`,
+  `frameEventHandle`, `compositionSurfaceHandle` (route (a) only),
+  `adapterLuid` and `mediaGeneration`. Every handle is already in your
+  process: use the number as a `HANDLE` and close each one yourself when you
+  are done. `preview.handover.close` with the same `leaseId` ends it; so does
+  closing the connection.
+- **The header.** Map `headerMappingHandle` (`MapViewOfFile`, read and
+  write, 4096 bytes). Its layout is the `HandoverHeader` struct (byte offsets
+  in its comments, checked by a test); `HandoverHeader::read` is the reader
+  to copy. Wait on `frameEventHandle` (auto-reset, set after each frame),
+  then read: `framesPublished` counts frames, `width`/`height` is the latest
+  frame's size, `publishedQpc` is `QueryPerformanceCounter` at publish (for
+  the hand-off latency), `retired` turns nonzero when it ends (1 closed, 2
+  the session stopped or recovered, 3 failed): close every handle, send
+  `preview.handover.close`, and open again (a connection holds one lease at
+  a time).
+- **Route (a):** `IDCompositionDevice::CreateSurfaceFromHandle(compositionSurfaceHandle)`
+  and set the result as the content of WC-0.2's visual. The backend presents
+  into it at the session's rate; nothing in your process runs per frame.
+  The surface is the frame's size: scale the visual to the element from the
+  header's `width`/`height` (a new size keeps the same surface).
+- **Route (b):** when `textureGeneration` changes, open the three
+  `slotHandles` on a device of the adapter `adapterLuid` names
+  (`ID3D11Device1::OpenSharedResource1`), close the previous set's handles,
+  and store the generation in `textureGenerationSeen` (the backend waits for
+  that before it makes another set). To draw: take `latestSlot`, acquire its
+  keyed mutex with key 0, draw, release key 0. Hold it no longer than one
+  draw. **Trap:** `windows-rs`'s `IDXGIKeyedMutex::AcquireSync` returns `Ok`
+  on `WAIT_TIMEOUT` (a success code); call it through the vtable and compare
+  the raw `HRESULT` as `try_acquire` in the backend does.
+- **What to report** (in the S0.2c summary): `frames_published` per second
+  against the session's frame rate, `frames_dropped` from the header, and the
+  hand-off latency (`QueryPerformanceCounter` when you draw minus
+  `publishedQpc`).
+
 ### WC-0.6 The look on Windows (`spike-chrome`). Solo.
 
 - **Goal:** the macOS look spike (plan 260 S0.4) built and run on Windows:

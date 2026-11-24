@@ -235,6 +235,44 @@ the window resizes smoothly when you drag its edge; the summary has
 scale (Settings > System > Display > Scale), and whether the text looks
 sharp at both.
 
+### S0.2b: the backend hands its preview over
+
+The backend's half of routes (a) and (b) (plan 260 S0.2b), checked on your
+GPU before your spike uses it. No spike is needed: these tests make the test
+process its own app. They duplicate every handle into themselves, open the
+shared textures on a second D3D11 device and read the pixels back (route
+(b)), and open the composition surface on a DirectComposition device of
+their own while the backend presents into it at two sizes (route (a)).
+
+1. Get `main` and run the hand-over tests (the first build takes 10 to 30
+   minutes):
+
+   ```powershell
+   cd videorc
+   git switch main
+   git pull
+   New-Item -ItemType Directory -Force "$env:USERPROFILE\videorc-evidence\S0.2b\$(Get-Date -Format yyyy-MM-dd)-run1\logs" | Out-Null
+   cargo test -p videorc-backend --bin videorc-backend preview_handover -- --test-threads=1 2>&1 | Tee-Object "$env:USERPROFILE\videorc-evidence\S0.2b\$(Get-Date -Format yyyy-MM-dd)-run1\logs\tests.txt"
+   ```
+
+**Expected:** the run ends with `test result: ok.` and `0 failed`, and the
+list includes these two, each `ok`:
+
+- `windows_d3d11_preview_handover::runtime::tests::preview_handover_shared_texture_reaches_a_second_device_with_its_pixels`
+- `windows_d3d11_preview_handover::runtime::tests::preview_handover_composition_surface_presents_and_opens_in_the_app`
+
+On a PC with two GPUs (integrated and discrete), run it once more with the
+app's GPU preference set to the other one (Settings > System > Display >
+Graphics), and send both.
+
+**Send:** `tests.txt`, your machine table, and which GPU ran it (Task
+Manager > Performance shows the GPU that was busy).
+
+The cross-process check, a real app taking each route from a running
+backend, is part of S0.2c: your `spike-preview-windows` opens the hand-over
+as the [code plan](260-gpui-rewrite-windows-code.md) describes ("Taking the
+hand-over") and reports its numbers there.
+
 ### S0.2c: the Windows preview routes, measured
 
 Spike `spike-preview-windows` (from code slices WC-0.2 to WC-0.5). It runs

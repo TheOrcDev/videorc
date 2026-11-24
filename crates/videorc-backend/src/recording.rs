@@ -3539,6 +3539,22 @@ fn session_accepts_banners(
     }
 }
 
+/// Plan 260 S0.2b: the running D3D11 media session's monitor and
+/// generation, for the preview hand-over. `None` when no session composes on
+/// D3D11 (nothing runs, the session uses another path, or a recovery holds
+/// the pump for the moment).
+#[cfg(target_os = "windows")]
+pub(crate) async fn windows_d3d11_preview_monitor(
+    state: &AppState,
+) -> Option<WindowsD3d11SessionMonitor> {
+    let recording = state.recording.lock().await;
+    recording
+        .as_ref()?
+        .windows_d3d11_media
+        .as_ref()
+        .map(WindowsD3d11SessionPump::monitor)
+}
+
 /// `Some(accepts)` for the active session, `None` when nothing runs
 /// (`banners.show` refuses a new banner on a session that cannot draw it).
 pub async fn active_session_accepts_banners(state: &AppState) -> Option<bool> {

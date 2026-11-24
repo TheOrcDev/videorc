@@ -1555,6 +1555,22 @@ mod runtime {
             Ok(destroyed)
         }
 
+        /// Plan 260 S0.2b: hands this generation's preview to another process.
+        pub(crate) fn open_preview_handover(
+            &self,
+            route: crate::protocol::PreviewHandoverRoute,
+            consumer_pid: u32,
+        ) -> Result<
+            crate::windows_d3d11_preview_handover::WindowsD3d11PreviewHandoverGrant,
+            WindowsD3d11Error,
+        > {
+            self.client.open_preview_handover(route, consumer_pid)
+        }
+
+        pub(crate) fn close_preview_handover(&self, token: u64) {
+            self.client.close_preview_handover(token);
+        }
+
         pub(crate) fn diagnostics_snapshot(
             &self,
         ) -> Result<WindowsD3d11SessionDiagnosticsSnapshot, WindowsD3d11Error> {
@@ -3366,8 +3382,12 @@ mod runtime {
                 }
             }
             let configured_preview_generation = preview_generation.load(Ordering::Acquire);
+            // Plan 260 S0.2b: a process holding the preview hand-over needs
+            // the preview composed even with no presenter configured.
+            let preview_wanted =
+                configured_preview_generation != 0 || client.preview_handover_active();
             let consumers = WindowsD3d11CompositionConsumers {
-                preview: (configured_preview_generation != 0)
+                preview: preview_wanted
                     .then_some(WindowsD3d11MediaRole::Preview)
                     .into_iter()
                     .collect(),
@@ -3428,7 +3448,7 @@ mod runtime {
                 break;
             }
             let camera_upload_frames = composition.diagnostics.camera_upload_frames;
-            if configured_preview_generation != 0
+            if preview_wanted
                 && let Some(ticket) = clone_ticket_for_role(
                     &composition.textures,
                     WindowsD3d11MediaRole::Preview,
