@@ -1021,6 +1021,20 @@ pub struct CloudRoomPresentationEvent {
     /// (the Studio draws the preview from `cloud.graphics.snapshot` itself).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphics: Option<RoomPresentationStatus>,
+    /// The worn avatar and its bubble (plan 249 S4, S6), with the guest
+    /// pages' count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<RoomPresentationStatus>,
+}
+
+/// Plan 249 S6 (D4): the host's opt-in to show the stream's public avatar
+/// layers to guest pages, how many can draw them, how many applied them.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomPresentationGuests {
+    pub enabled: bool,
+    pub capable: u32,
+    pub applied: u32,
 }
 
 /// One topic's delivery, as the program pages report it.
@@ -1034,6 +1048,9 @@ pub struct RoomPresentationStatus {
     pub revision: u64,
     /// Each program page that applied the view it was sent, by identity.
     pub observed: std::collections::BTreeMap<String, RoomPresentationObservation>,
+    /// The avatar's guest pages (avatar only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guests: Option<RoomPresentationGuests>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

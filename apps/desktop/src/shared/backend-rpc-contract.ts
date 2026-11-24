@@ -7224,12 +7224,22 @@ const roomPresentationStatusSchema = objectSchema(
         { allowUnknown: false }
       ),
       { maxKeys: 32 }
+    ),
+    guests: optionalSchema(
+      objectSchema(
+        {
+          enabled: booleanSchema,
+          capable: numberSchema({ integer: true, min: 0 }),
+          applied: numberSchema({ integer: true, min: 0 })
+        },
+        { allowUnknown: false }
+      )
     )
   },
   { allowUnknown: false }
 )
 const cloudRoomPresentationSetParamsSchema = objectSchema(
-  { graphics: optionalSchema(booleanSchema) },
+  { graphics: optionalSchema(booleanSchema), avatar: optionalSchema(booleanSchema) },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRoomPresentationSetParams>
 const cloudRoomPresentationSetResultSchema = objectSchema(
@@ -7273,7 +7283,8 @@ const cloudRoomSceneCommitParamsSchema = objectSchema(
 const cloudRoomPresentationEventSchema = objectSchema(
   {
     showId: boundedString,
-    graphics: optionalSchema(roomPresentationStatusSchema)
+    graphics: optionalSchema(roomPresentationStatusSchema),
+    avatar: optionalSchema(roomPresentationStatusSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRoomPresentationEvent>

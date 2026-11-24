@@ -245,6 +245,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   // Plan 260 S1.8b: with the backend in the room (its dev switch), what the
   // program pages draw of the graphics comes from it.
   const [backendGraphics, setBackendGraphics] = useState<RoomPresentationStatus | null>(null)
+  const [backendAvatar, setBackendAvatar] = useState<RoomPresentationStatus | null>(null)
   const clientRef = useRef<TalkShowRoomClient | null>(null)
   /** Plan 249 S24: the kept avatar per output view, so it is sent on change only. */
   const keptAvatarRef = useRef(new Map<string, string>())
@@ -881,11 +882,14 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   useEffect(() => {
     if (!client || !roomOpen) {
       setBackendGraphics(null)
+      setBackendAvatar(null)
       return
     }
+    // Each event carries the topics that changed; the others stand.
     return client.on('cloud.room.presentation', (event: CloudRoomPresentationEvent) => {
-      if (event.showId === cloudStatusRef.current?.show?.id)
-        setBackendGraphics(event.graphics ?? null)
+      if (event.showId !== cloudStatusRef.current?.show?.id) return
+      if (event.graphics) setBackendGraphics(event.graphics)
+      if (event.avatar) setBackendAvatar(event.avatar)
     })
   }, [client, roomOpen])
   useEffect(() => {
@@ -1027,9 +1031,15 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
     [client]
   )
 
-  const setAvatarEnabled = useCallback(async (enabled: boolean) => {
-    clientRef.current?.setAvatarEnabled(enabled)
-  }, [])
+  const setAvatarEnabled = useCallback(
+    async (enabled: boolean) => {
+      clientRef.current?.setAvatarEnabled(enabled)
+      // Plan 260 S1.8b: the backend's room takes the switch while it holds
+      // the host seat, and ignores it otherwise.
+      await client?.requestTyped('cloud.room.presentation.set', { avatar: enabled }).catch(() => {})
+    },
+    [client]
+  )
   const avatarMotionProbe = useCallback(() => clientRef.current?.avatarMotionProbe() ?? null, [])
   // Plan 249 S5: one stable source for the Program preview, whichever client is current.
   const avatarMotionSource = useMemo<AvatarMotionSource>(
@@ -1121,13 +1131,22 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   const previewReplaced = roomOpen || previewReplacedOverride
   const value = useMemo<TalkShowContextValue>(
     () => ({
-      room:
-        snapshot.graphics || !backendGraphics
-          ? snapshot
-          : {
-              ...snapshot,
-              graphics: { ...backendGraphics, preview: null, productionQualified: false }
-            },
+      room: {
+        ...snapshot,
+        ...(!snapshot.graphics && backendGraphics
+          ? { graphics: { ...backendGraphics, preview: null, productionQualified: false } }
+          : {}),
+        ...(!snapshot.avatar && backendAvatar
+          ? {
+              avatar: {
+                ...backendAvatar,
+                preview: null,
+                guests: backendAvatar.guests ?? { enabled: false, capable: 0, applied: 0 },
+                productionQualified: false
+              }
+            }
+          : {})
+      },
       previewReplaced,
       twoScreens,
       hostIdentity,
@@ -1312,6 +1331,7 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
       setStage,
       snapshot,
       backendGraphics,
+      backendAvatar,
       stage,
       twoScreens
     ]
