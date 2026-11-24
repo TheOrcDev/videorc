@@ -186,6 +186,8 @@ impl Player {
         let had_error = self.error.is_some();
         if failed {
             self.error = Some(p::media_error_copy(None).into());
+        } else if ready && self.error.as_deref() == Some(p::media_error_copy(None)) {
+            self.error = None;
         }
         if changed || failed != had_error {
             cx.notify();
