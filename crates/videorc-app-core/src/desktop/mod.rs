@@ -5,6 +5,7 @@
 //! GPUI call is in `apps/videorc/src/platform/`. Plan 260 S1.6s (L4), with
 //! the global shortcuts (S1.6f).
 
+pub mod accelerator;
 pub mod camera_extension;
 pub mod capture_state;
 pub mod deep_link;
