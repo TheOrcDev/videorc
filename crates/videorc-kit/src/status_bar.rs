@@ -155,6 +155,8 @@ where
 pub(crate) struct Press {
     pub id: ElementId,
     pub label: SharedString,
+    /// Said after the name by a screen reader (the action's hint).
+    pub description: Option<SharedString>,
     pub pressed: Option<bool>,
     pub disabled: bool,
     /// The menu it opens is open (`aria-expanded`).
@@ -170,6 +172,7 @@ impl Press {
         let Press {
             id,
             label,
+            description,
             pressed,
             disabled,
             expanded,
@@ -182,6 +185,9 @@ impl Press {
                 .pressed(on)
                 .disabled(disabled)
                 .accessibility_label(label);
+            if let Some(description) = description {
+                toggle = toggle.aria_description(description);
+            }
             toggle = action_chip(toggle, t, on, disabled, icon_only);
             if let Some(tooltip) = tooltip {
                 toggle = toggle.tooltip(move |window, cx| tooltip(window, cx));
@@ -195,6 +201,9 @@ impl Press {
             .disabled(disabled)
             .selected(expanded)
             .accessibility_label(label);
+        if let Some(description) = description {
+            button = button.aria_description(description);
+        }
         button = action_chip(button, t, expanded, disabled, icon_only);
         if let Some(tooltip) = tooltip {
             button = button.tooltip(move |window, cx| tooltip(window, cx));
@@ -288,6 +297,7 @@ impl RenderOnce for StatusBarHint {
         Press {
             id: self.id,
             label: self.label,
+            description: None,
             pressed: self.pressed,
             disabled: false,
             expanded: false,

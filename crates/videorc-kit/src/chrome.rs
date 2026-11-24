@@ -23,7 +23,7 @@ use gpui::{
 
 use crate::{
     theme::hsla,
-    tokens::{Color, Shadow, Stop},
+    tokens::{Color, Shadow, Stop, Theme},
 };
 
 // ---------------------------------------------------------------- shadows
@@ -38,6 +38,18 @@ pub fn box_shadow(shadow: &Shadow) -> BoxShadow {
         spread_radius: px(shadow.spread),
         inset: shadow.inset,
     }
+}
+
+/// The inset 2 px focus ring (`ring-2 ring-inset ring-ring`).
+pub fn focus_ring(t: &Theme) -> gpui::BoxShadow {
+    box_shadow(&Shadow {
+        inset: true,
+        x: 0.0,
+        y: 0.0,
+        blur: 0.0,
+        spread: 2.0,
+        color: t.ring,
+    })
 }
 
 /// A token's shadow stack, skipping the fully transparent layers (the
