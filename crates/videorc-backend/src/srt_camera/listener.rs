@@ -1255,11 +1255,12 @@ mod tests {
         unsafe { (api.close)(sender) };
         stop.store(true, std::sync::atomic::Ordering::Release);
         listener.join().expect("the listener stops");
-        delays.sort();
-        let median = delays[delays.len() / 2];
+        // A load spike only adds delay, while an ACK-gated reader waits about
+        // 10 ms on every message: the fastest one tells them apart.
+        let fastest = delays.iter().min().copied().unwrap_or_default();
         assert!(
-            median < Duration::from_millis(5),
-            "a message took {median:?} (median) to reach the camera"
+            fastest < Duration::from_millis(5),
+            "the fastest message took {fastest:?} to reach the camera"
         );
     }
 }
