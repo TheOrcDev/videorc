@@ -10,8 +10,10 @@
 //! Times read as Electron's ICU writes them under en-US (`Intl` with the
 //! system's locale there; the core has none of its own yet).
 
-use chrono::{DateTime, NaiveDateTime, Offset, TimeZone, Utc};
-use chrono_tz::Tz;
+use std::sync::LazyLock;
+
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, Offset, TimeZone, Timelike, Utc};
+use jiff::tz::{AmbiguousOffset, TimeZone as Zone, TimeZoneDatabase};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -233,19 +235,93 @@ pub fn needs_recovery(event: &Event) -> bool {
 
 // --- Times (`lib/schedule-time.ts`) --------------------------------------
 
-fn zone(name: &str) -> Option<Tz> {
-    name.parse::<Tz>().ok()
+/// The IANA data bundled into the binary, as the backend's `tzdb.rs` reads
+/// it: the OS copy and chrono-tz can lag the law by years (tz 2026e moved
+/// Vancouver, Edmonton, Winnipeg, Casablanca and Havana).
+static BUNDLED: LazyLock<TimeZoneDatabase> = LazyLock::new(TimeZoneDatabase::bundled);
+
+fn zone(name: &str) -> Option<Zone> {
+    BUNDLED.get(name).ok()
+}
+
+/// Where a wall time falls in a zone, in seconds east of UTC.
+enum WallOffsets {
+    Once(i32),
+    /// The clocks go back over it: the offsets before and after.
+    Twice(i32, i32),
+    /// The clocks jump over it.
+    Never,
+}
+
+/// A zone that turns wall times into instants and back: a bundled IANA zone,
+/// or this computer's (`chrono::Local`), which JavaScript's `Date` reads.
+trait WallZone {
+    fn offset_at(&self, at: DateTime<Utc>) -> i32;
+    fn wall_offsets(&self, wall: NaiveDateTime) -> WallOffsets;
+}
+
+impl WallZone for Zone {
+    fn offset_at(&self, at: DateTime<Utc>) -> i32 {
+        jiff::Timestamp::from_second(at.timestamp()).map_or(0, |ts| self.to_offset(ts).seconds())
+    }
+
+    fn wall_offsets(&self, wall: NaiveDateTime) -> WallOffsets {
+        let Some(civil) = civil_time(wall) else {
+            return WallOffsets::Never;
+        };
+        match self.to_ambiguous_timestamp(civil).offset() {
+            AmbiguousOffset::Unambiguous { offset } => WallOffsets::Once(offset.seconds()),
+            AmbiguousOffset::Fold { before, after } => {
+                WallOffsets::Twice(before.seconds(), after.seconds())
+            }
+            AmbiguousOffset::Gap { .. } => WallOffsets::Never,
+        }
+    }
+}
+
+impl WallZone for chrono::Local {
+    fn offset_at(&self, at: DateTime<Utc>) -> i32 {
+        self.offset_from_utc_datetime(&at.naive_utc())
+            .fix()
+            .local_minus_utc()
+    }
+
+    fn wall_offsets(&self, wall: NaiveDateTime) -> WallOffsets {
+        match self.from_local_datetime(&wall) {
+            chrono::LocalResult::Single(at) => {
+                WallOffsets::Once(at.offset().fix().local_minus_utc())
+            }
+            chrono::LocalResult::Ambiguous(a, b) => WallOffsets::Twice(
+                a.offset().fix().local_minus_utc(),
+                b.offset().fix().local_minus_utc(),
+            ),
+            chrono::LocalResult::None => WallOffsets::Never,
+        }
+    }
+}
+
+fn civil_time(wall: NaiveDateTime) -> Option<jiff::civil::DateTime> {
+    jiff::civil::DateTime::new(
+        i16::try_from(wall.year()).ok()?,
+        i8::try_from(wall.month()).ok()?,
+        i8::try_from(wall.day()).ok()?,
+        i8::try_from(wall.hour()).ok()?,
+        i8::try_from(wall.minute()).ok()?,
+        0,
+        0,
+    )
+    .ok()
+}
+
+/// The instant as it reads in the zone.
+fn in_zone(at: DateTime<Utc>, zone: &Zone) -> DateTime<FixedOffset> {
+    let offset = FixedOffset::east_opt(zone.offset_at(at)).unwrap_or_else(|| Utc.fix());
+    at.with_timezone(&offset)
 }
 
 /// `zoneOffsetMinutes`: the zone's UTC offset at an instant, in minutes.
 pub fn zone_offset_minutes(at: DateTime<Utc>, time_zone: &str) -> Option<i32> {
-    let tz = zone(time_zone)?;
-    Some(
-        tz.offset_from_utc_datetime(&at.naive_utc())
-            .fix()
-            .local_minus_utc()
-            / 60,
-    )
+    Some(zone(time_zone)?.offset_at(at) / 60)
 }
 
 /// `formatGmtOffset`: "GMT+2", "GMT-5:30", "GMT".
@@ -289,17 +365,14 @@ pub fn local_time_offsets(local_start: &str, time_zone: &str) -> Vec<i32> {
     let (Some(wall), Some(tz)) = (parse_local(local_start), zone(time_zone)) else {
         return Vec::new();
     };
-    match tz.from_local_datetime(&wall) {
-        chrono::LocalResult::Single(at) => vec![at.offset().fix().local_minus_utc() / 60],
-        chrono::LocalResult::Ambiguous(a, b) => {
-            let mut offsets = vec![
-                a.offset().fix().local_minus_utc() / 60,
-                b.offset().fix().local_minus_utc() / 60,
-            ];
+    match tz.wall_offsets(wall) {
+        WallOffsets::Once(offset) => vec![offset / 60],
+        WallOffsets::Twice(a, b) => {
+            let mut offsets = vec![a / 60, b / 60];
             offsets.sort_by(|x, y| y.cmp(x));
             offsets
         }
-        chrono::LocalResult::None => Vec::new(),
+        WallOffsets::Never => Vec::new(),
     }
 }
 
@@ -326,23 +399,22 @@ pub fn resolve_local_time(
 /// A wall time in `zone` as JavaScript's `new Date(local)` reads it: the
 /// earlier instant when the clocks go back over it, and, when they jump over
 /// it, the offset in force before the jump (so 02:30 becomes 03:30).
-fn local_instant<Z: TimeZone>(wall: NaiveDateTime, zone: &Z) -> DateTime<Utc> {
-    match zone.from_local_datetime(&wall) {
-        chrono::LocalResult::Single(at) => at.with_timezone(&Utc),
-        chrono::LocalResult::Ambiguous(a, b) => a.with_timezone(&Utc).min(b.with_timezone(&Utc)),
-        chrono::LocalResult::None => {
-            let before = zone
-                .from_local_datetime(&(wall - chrono::Duration::hours(3)))
-                .earliest()
-                .map_or(0, |at| at.offset().fix().local_minus_utc());
-            wall.and_utc() - chrono::Duration::seconds(i64::from(before))
-        }
-    }
+fn local_instant<Z: WallZone>(wall: NaiveDateTime, zone: &Z) -> DateTime<Utc> {
+    // The larger offset is the earlier instant.
+    let offset = match zone.wall_offsets(wall) {
+        WallOffsets::Once(offset) => offset,
+        WallOffsets::Twice(a, b) => a.max(b),
+        WallOffsets::Never => match zone.wall_offsets(wall - chrono::Duration::hours(3)) {
+            WallOffsets::Once(offset) => offset,
+            WallOffsets::Twice(a, b) => a.max(b),
+            WallOffsets::Never => 0,
+        },
+    };
+    wall.and_utc() - chrono::Duration::seconds(i64::from(offset))
 }
 
-fn wall_time<Z: TimeZone>(at: DateTime<Utc>, zone: &Z) -> String {
-    at.with_timezone(zone)
-        .naive_local()
+fn wall_time<Z: WallZone>(at: DateTime<Utc>, zone: &Z) -> String {
+    (at.naive_utc() + chrono::Duration::seconds(i64::from(zone.offset_at(at))))
         .format("%Y-%m-%dT%H:%M")
         .to_string()
 }
@@ -353,7 +425,7 @@ pub fn default_planned_end(local_start: &str) -> String {
     default_planned_end_in(local_start, &chrono::Local)
 }
 
-fn default_planned_end_in<Z: TimeZone>(local_start: &str, zone: &Z) -> String {
+fn default_planned_end_in<Z: WallZone>(local_start: &str, zone: &Z) -> String {
     let Some(start) = parse_local(local_start) else {
         return String::new();
     };
@@ -365,10 +437,9 @@ fn default_planned_end_in<Z: TimeZone>(local_start: &str, zone: &Z) -> String {
 
 /// `timeZoneName: 'short'` under en-US: "EST" where the zone has a US name,
 /// else "GMT+1".
-fn zone_name(at: &DateTime<Tz>) -> String {
-    let offset = at.offset().fix().local_minus_utc() / 60;
-    let zone = at.timezone().name();
-    super::time_zones::en_us_short_name(zone, offset)
+fn zone_name(at: &DateTime<FixedOffset>, time_zone: &str) -> String {
+    let offset = at.offset().local_minus_utc() / 60;
+    super::time_zones::en_us_short_name(time_zone, offset)
         .map_or_else(|| format_gmt_offset(offset), str::to_string)
 }
 
@@ -378,10 +449,10 @@ pub fn format_scheduled_start(start_utc: &str, time_zone: &str, now: DateTime<Ut
     let (Ok(start), Some(tz)) = (DateTime::parse_from_rfc3339(start_utc), zone(time_zone)) else {
         return String::new();
     };
-    let local = start.with_timezone(&tz);
-    let now_local = now.with_timezone(&tz);
-    let offset = zone_name(&local);
-    let same_year = chrono::Datelike::year(&local) == chrono::Datelike::year(&now_local);
+    let local = in_zone(start.with_timezone(&Utc), &tz);
+    let now_local = in_zone(now, &tz);
+    let offset = zone_name(&local, time_zone);
+    let same_year = local.year() == now_local.year();
     let date = if same_year {
         local.format("%a, %b %-d").to_string()
     } else {
@@ -405,7 +476,7 @@ pub fn when_label(event: &Event) -> String {
         return requested.local_start.replace('T', " ");
     };
     let start = start.with_timezone(&Utc);
-    let local = start.with_timezone(&tz);
+    let local = in_zone(start, &tz);
     let end = (event.provider() == "x")
         .then_some(requested.planned_end_local.as_deref())
         .flatten()
@@ -418,25 +489,26 @@ pub fn when_label(event: &Event) -> String {
             )
         })
         .filter(|end| *end > start);
-    let date = |at: &DateTime<Tz>| at.format("%a, %b %-d, %Y").to_string();
+    let date = |at: &DateTime<FixedOffset>| at.format("%a, %b %-d, %Y").to_string();
+    let name = |at: &DateTime<FixedOffset>| zone_name(at, &requested.time_zone);
     let Some(end) = end else {
         return format!(
             "{}, {} {}",
             date(&local),
             local.format("%I:%M %p"),
-            zone_name(&local)
+            name(&local)
         );
     };
-    let end = end.with_timezone(&tz);
+    let end = in_zone(end, &tz);
     if local.date_naive() != end.date_naive() {
         return format!(
             "{}, {} {}\u{2009}–\u{2009}{}, {} {}",
             date(&local),
             local.format("%-I:%M %p"),
-            zone_name(&local),
+            name(&local),
             date(&end),
             end.format("%-I:%M %p"),
-            zone_name(&end)
+            name(&end)
         );
     }
     let start_time = if local.format("%p").to_string() == end.format("%p").to_string() {
@@ -448,7 +520,7 @@ pub fn when_label(event: &Event) -> String {
         "{}, {start_time}\u{2009}–\u{2009}{} {}",
         date(&local),
         end.format("%-I:%M %p"),
-        zone_name(&end)
+        name(&end)
     )
 }
 
@@ -543,7 +615,7 @@ pub fn fresh_metadata(provider: &str, now: DateTime<Utc>, time_zone: &str) -> Re
     fresh_metadata_in(provider, now, time_zone, &chrono::Local)
 }
 
-fn fresh_metadata_in<Z: TimeZone>(
+fn fresh_metadata_in<Z: WallZone>(
     provider: &str,
     now: DateTime<Utc>,
     time_zone: &str,
@@ -780,6 +852,46 @@ mod tests {
         );
     }
 
+    // tz 2025b (chrono-tz) still falls back on 2026-11-01 and gives each of
+    // these an hour off; the backend resolves them the same way.
+    #[test]
+    fn zones_that_dropped_clock_changes_read_with_tz_2026e() {
+        let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        for (zone, expected) in [
+            ("America/Vancouver", "2026-12-15T17:00:00Z"),
+            ("America/Edmonton", "2026-12-15T16:00:00Z"),
+            ("America/Inuvik", "2026-12-15T16:00:00Z"),
+            ("America/Winnipeg", "2026-12-15T15:00:00Z"),
+            ("Africa/Casablanca", "2026-12-15T10:00:00Z"),
+            ("America/Havana", "2026-12-15T14:00:00Z"),
+            ("America/Los_Angeles", "2026-12-15T18:00:00Z"),
+        ] {
+            assert_eq!(
+                resolve_local_time("2026-12-15T10:00", zone, None),
+                Some(at(expected)),
+                "{zone}"
+            );
+        }
+        assert_eq!(
+            zone_offset_minutes(at("2026-12-15T17:00:00Z"), "America/Vancouver"),
+            Some(-420)
+        );
+        assert_eq!(
+            time_zone_label("America/Vancouver", at("2026-12-15T17:00:00Z")),
+            "Vancouver (GMT-7)"
+        );
+        // The old fall-back hour happens once now.
+        assert_eq!(
+            local_time_offsets("2027-11-07T01:30", "America/Vancouver"),
+            [-420]
+        );
+        let vancouver = zone("America/Vancouver").unwrap();
+        assert_eq!(
+            default_planned_end_in("2027-11-07T00:30", &vancouver),
+            "2027-11-07T02:30"
+        );
+    }
+
     #[test]
     fn a_scheduled_start_names_its_zone_as_en_us_does() {
         let now = "2035-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
@@ -817,7 +929,7 @@ mod tests {
         // New York's clocks go back at 02:00 on 2035-11-04 and forward on
         // 2035-03-11: two real hours, from the earlier 01:30 and from the 02:30
         // that doesn't exist (read as 03:30), as JavaScript's Date does.
-        let ny = chrono_tz::America::New_York;
+        let ny = zone("America/New_York").unwrap();
         assert_eq!(
             default_planned_end_in("2035-11-04T01:30", &ny),
             "2035-11-04T02:30"

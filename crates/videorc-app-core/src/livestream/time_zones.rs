@@ -4,8 +4,8 @@
 //! the id with spaces for underscores, best first).
 //!
 //! The list is ICU's canonical set. It was generated from Node 24 (ICU 78.3,
-//! tz 2026e) and matches what the shipped Electron 39 (ICU 74.2, tz 2025b,
-//! the tz data chrono-tz carries) lists, zone for zone.
+//! tz 2026e) and matches what the shipped Electron 39 (ICU 74.2, tz 2025b)
+//! lists, zone for zone.
 //! A link the IANA data keeps for old names (`Europe/Kyiv` for ICU's
 //! `Europe/Kiev`) is not in it, as it is not in Electron's. The zones' en-US
 //! short names ("EST", "PDT") come from the same ICU.
@@ -441,7 +441,7 @@ pub const SUPPORTED: [&str; 419] = [
 // Generated from Node 24.22.1 (ICU 78.3): the en-US short name of every
 // supported zone on the 15th of January, April, July and October 2026. The
 // names are ICU's; the offsets they pair with come from the tz data, which is
-// 2025b in Electron 39 and in chrono-tz.
+// 2025b in Electron 39.
 pub const EN_US_SHORT_NAMES: [(&str, i32, &str); 145] = [
     ("UTC", 0, "UTC"),
     ("America/Adak", -600, "HAST"),
@@ -633,7 +633,10 @@ mod tests {
     #[test]
     fn every_zone_is_one_the_core_can_read() {
         for zone in SUPPORTED {
-            assert!(zone.parse::<chrono_tz::Tz>().is_ok(), "{zone}");
+            assert!(
+                jiff::tz::TimeZoneDatabase::bundled().get(zone).is_ok(),
+                "{zone}"
+            );
         }
         assert_eq!(SUPPORTED[0], "UTC");
     }
