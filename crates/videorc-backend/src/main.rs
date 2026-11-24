@@ -125,6 +125,8 @@ mod room_overlays;
 mod room_program_camera;
 #[cfg(target_os = "macos")]
 mod room_scene;
+#[cfg(target_os = "macos")]
+mod room_screen;
 mod room_system_audio;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod buddy_pet_build;
@@ -6452,6 +6454,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         // Plan 260 S1.8c: the host's own media in the backend's room.
         | "cloud.room.microphone.set"
         | "cloud.room.camera.set"
+        | "cloud.room.screen.set"
         | "cloud.recordings.download"
         | "cloud.archive.stop"
         | "cloud.archive.cancel"
@@ -13681,6 +13684,33 @@ async fn handle_text_message_with_role(
                 #[cfg(target_os = "macos")]
                 Ok(params) if room_host::holds_seat() => {
                     room_media::set_camera(params.camera);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 260 S1.8c: the screen the room shares (the scene's own, by its
+        // native id), behind Hide screen; `null` stops sharing.
+        "cloud.room.screen.set" => {
+            match serde_json::from_value::<cloud_talk::CloudRoomMediaSetParams>(command.params) {
+                Ok(params)
+                    if !params
+                        .screen
+                        .as_ref()
+                        .is_none_or(|settings| settings.valid()) =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "invalid-params",
+                        "The screen source id is invalid.",
+                    )
+                }
+                #[cfg(target_os = "macos")]
+                Ok(params) if room_host::holds_seat() => {
+                    room_screen::set_screen(params.screen);
                     ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
                 }
                 Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),

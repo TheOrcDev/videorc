@@ -371,6 +371,8 @@ interface HighRiskContractFixtures {
     roomAvatarMotionParams: CloudRoomAvatarMotionParams
     roomMicrophoneSetParams: CloudRoomMediaSetParams
     roomCameraSetParams: CloudRoomMediaSetParams
+    roomScreenSetParams: CloudRoomMediaSetParams
+    roomPresentationMediaEvent: CloudRoomPresentationEvent
     roomSceneCommitParams: CloudRoomSceneCommitParams
     // Plan 243 C1: another device on air, and a show waiting after a hand-off.
     statusOnAirElsewhere: CloudStatus
@@ -730,7 +732,9 @@ describe('shared high-risk protocol fixture', () => {
       roomAvatarMotionParams,
       roomSceneCommitParams,
       roomMicrophoneSetParams,
-      roomCameraSetParams
+      roomCameraSetParams,
+      roomScreenSetParams,
+      roomPresentationMediaEvent
     } = fixtures.cloud
     expect(jsonShape(validateBackendEventPayload('cloud.state', statusTalk))).toEqual(statusTalk)
     expect(jsonShape(validateBackendRpcResult('cloud.room.open', statusTalk))).toEqual(statusTalk)
@@ -811,6 +815,29 @@ describe('shared high-risk protocol fixture', () => {
     ).toThrow()
     expect(() =>
       validateBackendRpcParams('cloud.room.microphone.set', roomCameraSetParams)
+    ).toThrow()
+    // The screen the room shares, by its native id; its privacy on the wire.
+    expect(
+      jsonShape(validateBackendRpcParams('cloud.room.screen.set', roomScreenSetParams))
+    ).toEqual(roomScreenSetParams)
+    expect(validateBackendRpcParams('cloud.room.screen.set', { screen: null })).toEqual({
+      screen: null
+    })
+    expect(() =>
+      validateBackendRpcParams('cloud.room.screen.set', { screen: { sourceId: '' } })
+    ).toThrow()
+    expect(() => validateBackendRpcParams('cloud.room.screen.set', roomCameraSetParams)).toThrow()
+    expect(
+      jsonShape(validateBackendEventPayload('cloud.room.presentation', roomPresentationMediaEvent))
+    ).toEqual(roomPresentationMediaEvent)
+    expect(() =>
+      validateBackendEventPayload('cloud.room.presentation', {
+        ...roomPresentationMediaEvent,
+        media: {
+          ...roomPresentationMediaEvent.media,
+          screen: { ...roomPresentationMediaEvent.media?.screen, status: 'frosted' }
+        }
+      })
     ).toThrow()
     expect(() =>
       validateBackendRpcParams('cloud.room.scene.commit', {
