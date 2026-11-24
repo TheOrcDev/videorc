@@ -6,6 +6,7 @@
 //! global shortcuts follow with the Studio area (L7).
 
 pub mod camera_extension;
+pub mod capture_protection;
 pub mod capture_state;
 pub mod deep_link;
 pub mod grant_watch;
