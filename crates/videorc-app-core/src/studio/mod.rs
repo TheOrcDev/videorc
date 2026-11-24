@@ -56,6 +56,7 @@ pub mod camera_background;
 pub mod camera_background_migration;
 pub mod camera_background_view;
 pub mod camera_frame_rate;
+pub mod camera_low_light;
 pub mod capture_config;
 pub mod families;
 pub mod health;
@@ -73,6 +74,8 @@ pub mod settings;
 pub mod source_actions;
 pub mod source_selection;
 pub mod sources;
+pub mod sources_page;
+pub mod sources_section;
 pub mod timecode;
 pub mod ui_local;
 pub mod ui_settings_wire;
@@ -164,7 +167,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 19] = [
+pub const STUDIO_EVENTS: [&str; 20] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -188,6 +191,8 @@ pub const STUDIO_EVENTS: [&str; 19] = [
     AUDIO_LEVELS_EVENT,
     // S1.6b part 5a: the session's sources changed; read them again.
     live_sources::SOURCES_CHANGED_EVENT,
+    // S1.6b part 5b: the Captions row's word.
+    sources_section::CAPTIONS_STATUS_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -396,6 +401,11 @@ pub struct StudioSnapshot {
     /// S1.6b part 5a: why each picker waits (`sourceSwitchReason`): capture,
     /// camera and microphone.
     pub source_reasons: [Option<String>; 3],
+    /// S1.6b part 5b: the caption service's status (`captions.status`), for
+    /// the Captions row; `None` until it is read.
+    pub captions_status: Option<Value>,
+    /// S1.6b part 5b: the camera's low-light compensation (issue #1066).
+    pub camera_low_light: camera_low_light::CameraLowLightView,
 }
 
 /// What a start did.
@@ -473,6 +483,10 @@ struct Inner {
     live_due: Option<(Instant, u64, bool)>,
     source_reasons: [Option<String>; 3],
     announced_returns: Vec<String>,
+    /// S1.6b part 5b: the caption service's status, and the camera's
+    /// low-light compensation with its reads.
+    captions_status: Option<Value>,
+    low_light: camera_low_light::LowLightCore,
 }
 
 /// S2.6c: the exclusion list's bookkeeping.
@@ -709,6 +723,8 @@ impl<B: StudioBackend> Studio<B> {
             live_due: None,
             source_reasons: [None, None, None],
             announced_returns: Vec::new(),
+            captions_status: None,
+            low_light: camera_low_light::LowLightCore::default(),
         };
         // Writes a previous run journaled wait in the cache until the
         // snapshot is in; then they are sent.
@@ -779,9 +795,13 @@ impl<B: StudioBackend> Studio<B> {
     /// retries when they fall due.
     pub async fn drive(self: Arc<Self>, mut events: broadcast::Receiver<BackendEvent>) {
         loop {
-            let (due, live_due) = {
+            let (due, live_due, low_light_due) = {
                 let inner = self.lock();
-                (inner.settings_retry_due, inner.live_due.map(|(at, ..)| at))
+                (
+                    inner.settings_retry_due,
+                    inner.live_due.map(|(at, ..)| at),
+                    inner.low_light.due.as_ref().map(|read| read.at),
+                )
             };
             let retry = async move {
                 match due {
@@ -797,6 +817,13 @@ impl<B: StudioBackend> Studio<B> {
                     None => std::future::pending().await,
                 }
             };
+            // S1.6b part 5b: the camera's low-light read, and its retries.
+            let low_light_read = async move {
+                match low_light_due {
+                    Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 received = events.recv() => match received {
                     Ok(event) => self.handle_event(event).await,
@@ -808,6 +835,7 @@ impl<B: StudioBackend> Studio<B> {
                 },
                 () = retry => self.retry_settings().await,
                 () = live_read => self.live_sources_due().await,
+                () = low_light_read => self.camera_low_light_due().await,
                 () = self.settings_retry.notified() => {}
             }
         }
@@ -939,6 +967,12 @@ impl<B: StudioBackend> Studio<B> {
             // S1.6b part 5a: the session's whole source authority, read again.
             BackendEvent::Untyped { event, .. } if event == live_sources::SOURCES_CHANGED_EVENT => {
                 self.kick_live_sources_read().await;
+            }
+            // S1.6b part 5b: the Captions row's word.
+            BackendEvent::Untyped { event, payload }
+                if event == sources_section::CAPTIONS_STATUS_EVENT =>
+            {
+                self.apply_captions_status(payload);
             }
             BackendEvent::Untyped { event, payload } => {
                 // The Health page's telemetry (`stream.targets` feeds both it
@@ -1192,6 +1226,8 @@ impl<B: StudioBackend> Studio<B> {
         self.post(commands);
         // Health's reads, as the renderer's bootstrap makes them.
         self.read_telemetry(generation).await;
+        // S1.6b part 5b: the caption service's status, for the Captions row.
+        self.read_captions_status(generation).await;
         // The other areas' first reads (the agents line, takeovers and the
         // soundboard, chat, Sidekick, destinations, chat commands, scheduled
         // streams, the performance check, Hide screen, captions, the working
@@ -2234,6 +2270,17 @@ impl<B: StudioBackend> Studio<B> {
                 .map(|kind| source_actions::source_switch_reason_of(state, kind, start_in_flight))
             };
             inner.source_reasons = reasons;
+            // S1.6b part 5b: the low-light read follows the camera in use and
+            // the connection (`useCameraLowLight`'s effect).
+            inner.capture.sync(inner.settings.get(keys::CAPTURE_CONFIG));
+            let camera_id = inner.capture.view.config.sources.camera_id.clone();
+            let connected = matches!(inner.connection, Connection::Connected { .. });
+            if inner
+                .low_light
+                .follow(camera_id.as_deref(), connected, Instant::now())
+            {
+                self.settings_retry.notify_one();
+            }
             // Every status the Studio applied, through the clock.
             let status = inner.session.status().clone();
             if let Some(sample) = inner.latency.observe(&status, Instant::now()) {
@@ -2313,6 +2360,8 @@ impl<B: StudioBackend> Studio<B> {
             scenes: inner.scenes_view(),
             live_sources: inner.live_sources.view.clone(),
             source_reasons: inner.source_reasons.clone(),
+            captions_status: inner.captions_status.clone(),
+            camera_low_light: inner.low_light.view.clone(),
         }
     }
 }
