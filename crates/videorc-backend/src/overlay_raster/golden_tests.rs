@@ -27,6 +27,10 @@
 //! goldens (`made.macos`): the fonts are the host's. Elsewhere each case is
 //! still drawn (`every_case_draws_on_any_platform`).
 //!
+//! A case's `images` name the files under `images/` its avatar and emotes
+//! are drawn from, by the URL the renderer read them for (an emote's card
+//! URL, Twitch's `/3.0`); both painters get the same bytes.
+//!
 //! `VIDEORC_OVERLAY_RASTER_OUT=<dir>` writes each case's drawing and a
 //! difference image there.
 
@@ -35,7 +39,12 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use tiny_skia::Pixmap;
 
-use super::{OverlayState, caption_bar, render, render_premultiplied};
+use std::collections::HashMap;
+
+use super::{
+    DecodedImages, OverlayImages, OverlayState, WantedImages, caption_bar, render,
+    render_premultiplied, render_with_images,
+};
 
 const MAX_OVER_64: f64 = 0.02;
 const MAX_MEAN: f64 = 12.0;
@@ -78,6 +87,28 @@ fn host_matches_goldens(made: &Made) -> Result<(), String> {
 struct Case {
     id: String,
     request: OverlayState,
+    /// URL → file under `images/`.
+    #[serde(default)]
+    images: HashMap<String, String>,
+}
+
+impl Case {
+    /// The case's images, loaded as production loads them: avatars by their
+    /// URL, emotes by their card URL.
+    fn images(&self) -> OverlayImages {
+        let wanted = self.request.wanted_images();
+        let read = |url: &str| {
+            self.images
+                .get(url)
+                .map(|file| std::fs::read(fixture_dir().join("images").join(file)).expect("image"))
+        };
+        OverlayImages {
+            avatars: DecodedImages::load(wanted.avatars.iter().map(String::as_str), read),
+            emotes: DecodedImages::load(wanted.emotes.iter().map(String::as_str), |url| {
+                read(&WantedImages::emote_file_url(url))
+            }),
+        }
+    }
 }
 
 fn fixture_dir() -> PathBuf {
@@ -190,7 +221,8 @@ fn every_golden_case_is_drawn_within_the_agreed_difference() {
     let mut failures = Vec::new();
     for case in fixture.cases {
         let golden = golden(&case.id);
-        let drawn = render_premultiplied(&case.request)
+        let images = case.images();
+        let drawn = render_premultiplied(&case.request, &images)
             .unwrap_or_else(|| panic!("{}: the backend drew nothing", case.id));
         let difference = compare(&drawn, &golden);
         println!(
@@ -225,7 +257,8 @@ fn every_golden_case_is_drawn_within_the_agreed_difference() {
 #[test]
 fn every_case_draws_on_any_platform() {
     for case in load().cases {
-        let image = render(&case.request).unwrap_or_else(|| panic!("{}: nothing drawn", case.id));
+        let image = render_with_images(&case.request, &case.images())
+            .unwrap_or_else(|| panic!("{}: nothing drawn", case.id));
         assert_eq!(
             image.rgba.len(),
             (image.width * image.height * 4) as usize,
