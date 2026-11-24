@@ -50,6 +50,7 @@ use videorc_app_core::{
 
 use app::args;
 use app::bridge;
+use app::frames::MainFrame;
 use app::permissions::Permissions;
 use app::shell::{Shell, StatusLine, connection_text};
 use app::{camera, capture, hotkeys, links, menus, sleep};
@@ -241,6 +242,8 @@ fn main() -> Result<()> {
     let quit_supervisor = supervisor.clone();
     let runtime_handle = runtime.handle().clone();
     let quit_after = args.quit_after;
+    // The main window's frame, saved in the data directory.
+    let main_frame = MainFrame::new(&paths.user_data_dir, logger.clone());
     let quit_guard = sleep_guard.clone();
     let quit_permissions = permissions.clone();
     let focus_permissions = permissions.clone();
@@ -284,7 +287,9 @@ fn main() -> Result<()> {
 
         let status = bridge::mirror(cx, backend_state.clone(), StatusLine::of);
         let connection = bridge::mirror(cx, connection_state.clone(), connection_text);
-        let window_bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
+        let window_bounds = main_frame
+            .restored(cx)
+            .unwrap_or_else(|| Bounds::centered(None, size(px(1280.), px(800.)), cx));
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(window_bounds)),
@@ -309,7 +314,9 @@ fn main() -> Result<()> {
         cx.activate(true);
 
         // The main window coming to the front re-checks a grant System
-        // Settings may have made meanwhile.
+        // Settings may have made meanwhile; a move or resize saves its frame
+        // soon after, and the quit saves it once more.
+        let moved_frame = main_frame.clone();
         let _ = main_window.update(cx, |_, window, cx| {
             cx.observe_window_activation(window, move |_, window, _| {
                 if window.is_window_active() {
@@ -317,7 +324,17 @@ fn main() -> Result<()> {
                 }
             })
             .detach();
+            cx.observe_window_bounds(window, move |_, window, cx| {
+                moved_frame.moved(window, cx);
+            })
+            .detach();
         });
+        let quit_frame = main_frame.clone();
+        cx.on_app_quit(move |cx| {
+            let _ = main_window.update(cx, |_, window, _| quit_frame.save(window));
+            async {}
+        })
+        .detach();
 
         // Closing the last window quits, as Electron does on Windows and
         // Linux. (On macOS Electron keeps the app in the Dock; the menu bar
