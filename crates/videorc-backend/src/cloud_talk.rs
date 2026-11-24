@@ -1027,6 +1027,7 @@ impl RoomScreenSettings {
 /// screen's privacy as the renderer's room reported it (`screenPrivacy`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct RoomMediaStatus {
     pub camera: bool,
     pub microphone: bool,
@@ -1039,6 +1040,7 @@ pub struct RoomMediaStatus {
 /// source was blocked, and which receivers acknowledged the frost.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct RoomScreenStatus {
     pub source_id: String,
     pub epoch: String,
@@ -1055,6 +1057,7 @@ pub struct RoomScreenStatus {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum RoomScreenPrivacyState {
     Visible,
     Hiding,
