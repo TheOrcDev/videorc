@@ -152,6 +152,7 @@ mod preflight;
 mod preview_bmp;
 mod preview_buddy_layer;
 mod preview_camera;
+mod preview_handover;
 mod preview_screen;
 mod preview_surface;
 mod process_job;
@@ -241,6 +242,8 @@ mod windows_d3d11_device;
 mod windows_d3d11_encoder_contract;
 #[allow(dead_code)]
 mod windows_d3d11_preview;
+#[allow(dead_code)]
+mod windows_d3d11_preview_handover;
 #[allow(dead_code)]
 mod windows_d3d11_session;
 #[allow(dead_code)]
@@ -9850,6 +9853,7 @@ async fn websocket_session_with_handler_role_and_redaction(
         None => (None, None),
     };
     let mut preview_frame_lease = None;
+    let mut preview_handover = preview_handover::HeldPreviewHandover::default();
     let mut room_audio_bridge = room_audio_bridge::Bridge::default();
     let mut room_microphone = room_microphone::Bridge::default();
     let mut room_frame_bridge = room_frame_bridge::Bridge::default();
@@ -10106,6 +10110,27 @@ async fn websocket_session_with_handler_role_and_redaction(
                     continue;
                 }
 
+                if let Some(response) = preview_handover::handle_preview_handover_control(
+                    &state,
+                    role,
+                    &mut preview_handover,
+                    text.as_str(),
+                )
+                .await
+                {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
                 let accepted = accept_websocket_command(&state, text.to_string());
                 if !send_tracked_websocket_item(&command_tx, &command_metrics, accepted).await {
                     break;
@@ -10137,6 +10162,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     // accepted queue so native/source mutations are never canceled halfway.
     // (Remote client count is decremented by RemoteClientCountGuard's Drop.)
     drop(preview_frame_lease);
+    drop(preview_handover);
     drop(studio_socket_guard);
     drop(command_tx);
     drop(command_dispatcher_task);
