@@ -13,9 +13,18 @@
 //!   session). It carries D18/D4's screen flags: `verticalLegScreen` when
 //!   the running vertical leg of the scene draws the selected screen, else
 //!   `retainScreen` when a program with no screen keeps the capture of the
-//!   same target running. The backend's commit is the truth the Studio
-//!   reconciles to at once ([`Studio::request_layout_transaction`]); the
-//!   proof follows on its own and only a missed proof says anything.
+//!   same target running. The commit receipt answers on the backend's
+//!   answer; the Studio takes the commit after its proof, and only while it
+//!   is the latest switch ([`Studio::request_layout_transaction`]). A
+//!   latest switch whose request failed reconciles to the backend's truth,
+//!   or else to the last commit (`crate::scenes::transaction_policy`).
+//! - **The start races (#1643).** A Record or Go Live start waits for a
+//!   switch awaiting its proof, then starts with the scene it left; a switch
+//!   asked for while a start is in flight waits for its answer, then runs as
+//!   a change to the session it started.
+//! - **The progress (#1275).** A switch names what was clicked and the phase
+//!   it waits on (`crate::scenes::switch_progress`); the UI asks for the
+//!   status line at the instant it draws ([`super::scenes::ScenesView`]).
 //! - **The state.** A commit sets the scene, the working background, the
 //!   scene on stream (a scene is always on stream, D2; one the library lost
 //!   is replaced and put on again, D16), the capture config (canvas,
@@ -33,16 +42,16 @@
 //! - **Delete** ([`Studio::delete_scene`]) and **the Screen pick**
 //!   ([`Studio::set_scene_on_stream_shows`]).
 //!
-//! Not here yet: rooms, the Clips ring and the start races (part 3c), the
-//! switch's progress phases (part 3c), the vertical leg's own sends (part
-//! 4), the camera's background on the layout (part 4), the backend-truth
-//! read after a failed switch, and the bell's routing of these toasts.
+//! Not here yet: rooms, the Clips ring's half of the start races, the
+//! vertical leg's own sends (part 4), the camera's background on the layout
+//! (part 4), and the bell's routing of these toasts.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
+use tokio::sync::{broadcast, watch};
 
 use super::capture_config::{self, simulcast_armed};
 use super::js_value::{get, string, truthy};
@@ -58,13 +67,25 @@ use crate::scenes::framing::{
     remember_layout_framing, vertical_orientation_video_patch,
 };
 use crate::scenes::model::{
-    Origin, WorkingScene, normalize_scene_visual, scene_microphone, scene_source_problems,
-    using_visual_sources, visual_sources, with_scene_display, without_scene_app,
+    Origin, WorkingScene, normalize_scene_visual, same_scene_visual, scene_microphone,
+    scene_source_problems, using_visual_sources, visual_sources, with_scene_display,
+    without_scene_app,
 };
 use crate::scenes::preflight::{
     Judgement, judge_scene_sources, preflight_visual, run_saved_scene_preflight,
 };
 use crate::scenes::store::{DeleteRule, EditAutosave, can_delete_scene, scene_edit_autosave};
+use crate::scenes::switch_progress::{
+    SceneSwitchPatch, SceneSwitchPhase, SceneSwitchProgress, advance_scene_switch_progress,
+    start_scene_switch_progress,
+};
+use crate::scenes::transaction_policy::{
+    FailureDisposition, ProofDisposition, ProofMiss, UnprovenSeverity, backend_transaction_scene,
+    latest_layout_transaction_commit, layout_transaction_backend_snapshot_is_stable,
+    layout_transaction_failure_disposition, layout_transaction_failure_reconciliation,
+    layout_transaction_proof_disposition, layout_transaction_sources_from_scene,
+    layout_transaction_unproven_severity, requested_transaction_scene,
+};
 use crate::scenes::v2::{
     GOING_ON_STREAM_REASON, Orientation, Scene, SceneShows, first_scene_with_layout,
     layout_is_freeform, layout_preset, layout_preset_label, layout_shows_screen,
@@ -89,6 +110,8 @@ pub const APPLY_LIVE_METHOD: &str = "scene.layout.apply_live";
 pub const RESOLVE_APP_WINDOW_METHOD: &str = "sources.resolve_app_window";
 /// `compositor.status` and `diagnostics.stats`, for the live proof.
 pub const COMPOSITOR_STATUS_METHOD: &str = "compositor.status";
+/// `scene.get`, for the backend's truth after a failed switch.
+pub const SCENE_GET_METHOD: &str = "scene.get";
 pub const DIAGNOSTICS_STATS_METHOD: &str = "diagnostics.stats";
 
 /// `SCENE_TRANSITION_MS`: "Animate scene changes" glides a commit in.
@@ -204,6 +227,9 @@ pub struct TransactionOptions {
     pub saved_scene_id: Option<Option<String>>,
     pub origin: Option<Origin>,
     pub scene_switch: bool,
+    /// `targetName`: the name the streamer clicked (a saved scene's); the
+    /// layout's label (or "Freeform") when absent (#1275).
+    pub target_name: Option<String>,
 }
 
 /// `SavedSceneApplyOptions` (plan 210 S10, plan 231).
@@ -215,8 +241,9 @@ pub struct ApplyOptions {
     /// The scene goes on with this layout (D11, D18), which it keeps once
     /// the switch lands. Its orientation is the layout's own.
     pub layout: Option<Value>,
-    /// `origin: 'follow'`: the follower's own apply. The follower's
-    /// manual-apply listeners are not ported yet; nothing reads it here.
+    /// `origin: 'follow'`: the follower's own apply. Every other apply is
+    /// heard by the manual-apply listeners ([`Studio::manual_scene_applies`]),
+    /// so a scene the streamer picks holds until the next app change.
     pub origin_follow: bool,
     /// The window to prefer over the scene's own, as the follower's swap in
     /// place (`preferWindowId`).
@@ -273,7 +300,10 @@ pub struct ReloadMark {
 
 /// What the backend committed and the Studio reconciles to
 /// (`LayoutTransactionSnapshot`).
+#[derive(Clone)]
 struct Committed {
+    /// `sceneRevision`: a late older commit never replaces a newer one.
+    revision: u64,
     scene: Value,
     layout: Value,
     capture_patch: Option<(Value, Value)>,
@@ -293,6 +323,31 @@ struct Persisted {
     visual: Option<Value>,
     shows: Option<SceneShows>,
 }
+
+/// The switch's signals: the manual-apply listeners, and a tick each time
+/// a switch's proof or a start's scene hold settles (#1643's waiters).
+pub(super) struct SwitchSignals {
+    manual: broadcast::Sender<String>,
+    tick: watch::Sender<u64>,
+}
+
+impl Default for SwitchSignals {
+    fn default() -> Self {
+        Self {
+            manual: broadcast::channel(MANUAL_APPLY_CAPACITY).0,
+            tick: watch::channel(0).0,
+        }
+    }
+}
+
+impl SwitchSignals {
+    fn tick(&self) {
+        self.tick.send_modify(|tick| *tick = tick.wrapping_add(1));
+    }
+}
+
+/// The manual-apply broadcast's buffer.
+const MANUAL_APPLY_CAPACITY: usize = 16;
 
 /// The switch's memory between events (the renderer's refs).
 #[derive(Default)]
@@ -316,12 +371,22 @@ pub(super) struct SwitchCore {
     persisted: Persisted,
     /// `scenesGoingOnRef` (D16).
     going_on: HashMap<String, usize>,
-    /// `latestLayoutTransactionCommitRef.current.savedSceneId`.
-    last_commit_scene: Option<Option<String>>,
+    /// `latestLayoutTransactionCommitRef`: the newest commit by revision.
+    last_commit: Option<Committed>,
+    /// `sceneSwitchProgress` (#1275).
+    pub(super) progress: Option<SceneSwitchProgress>,
+    /// `confirmedVisualRef`: the look last persisted (`None`: the launch's,
+    /// read from the capture config).
+    confirmed_visual: Option<Value>,
+    /// `sessionStartScenePromiseRef` (#1643): the start in flight, by its
+    /// generation, until its scene is committed.
+    start_scene: Option<u64>,
+    start_scene_generation: u64,
+    signals: SwitchSignals,
     /// `savedSceneResolveGenerationRef`.
     resolve_generation: u64,
     /// `sceneWindowHintsRef` (plan 210 D5).
-    window_hints: HashMap<String, String>,
+    pub(super) window_hints: HashMap<String, String>,
     presentation: Option<PresentationProbe>,
     proof_notices: NotifyOnce,
 }
@@ -486,6 +551,59 @@ impl<B: StudioBackend> Drop for GoingOn<B> {
     }
 }
 
+/// #1643: a start's hold on the scene it carries, released when its
+/// answer is applied (or however the start ends).
+pub(super) struct StartSceneHold<'a, B: StudioBackend> {
+    studio: &'a Studio<B>,
+    generation: u64,
+}
+
+impl<B: StudioBackend> Drop for StartSceneHold<'_, B> {
+    fn drop(&mut self) {
+        let mut inner = self.studio.lock();
+        let switch = &mut inner.scenes.switch;
+        if switch.start_scene == Some(self.generation) {
+            switch.start_scene = None;
+            switch.signals.tick();
+        }
+    }
+}
+
+/// What a transaction found when it was asked for.
+enum Gate {
+    /// A start holds the scene: wait for it, then ask again.
+    WaitStart,
+    /// Refused before minting: the orientation lock (`true`) or the
+    /// reconnect, with the latest intent.
+    Refused {
+        orientation_lock: bool,
+        latest: u64,
+    },
+    Minted(Box<Minted>),
+}
+
+/// A minted transaction: its intent, and what it was built from.
+struct Minted {
+    intent: u64,
+    requested: Value,
+    studio: StudioSettings,
+    background: Option<Value>,
+    leg_scene: Option<Scene>,
+    protected: Vec<u32>,
+    session_active: bool,
+    generation: u64,
+}
+
+/// The switch's name when nothing names it (#1275): "Freeform", or the
+/// layout's label.
+pub fn default_switch_target(layout: &Value) -> String {
+    if layout.get("arrangementMode") == Some(&json!("freeform")) {
+        "Freeform".to_string()
+    } else {
+        layout_preset_label(layout_preset(layout), false)
+    }
+}
+
 fn remember_failed() -> NoticeCommand {
     NoticeCommand::Show(
         ToastRequest::error(copy::REMEMBER_FAILED)
@@ -538,6 +656,7 @@ impl Inner {
                 return;
             }
         };
+        self.scenes.switch.confirmed_visual = Some(visual.clone());
         let persisted = self.scenes.switch.persisted.clone();
         let autosave = (persisted.scene_id.as_deref() != saved_id
             || persisted.visual.as_ref() != Some(&visual))
@@ -593,8 +712,104 @@ impl Inner {
         let switch = &self.scenes.switch;
         switch.going_on.contains_key(id)
             || (switch.awaiting_proof.is_some()
-                && switch.last_commit_scene.as_ref().and_then(Option::as_deref) == Some(id)
+                && switch
+                    .last_commit
+                    .as_ref()
+                    .and_then(|commit| commit.saved_id.as_deref())
+                    == Some(id)
                 && self.scenes.on_stream.as_deref() != Some(id))
+    }
+
+    /// `workingVisual`: the look on stream now (the capture config's layout
+    /// and sources with the working app, and the working background).
+    pub(super) fn working_visual(&self) -> Option<Value> {
+        let mut sources = self.capture.config["sources"].clone();
+        if let Value::Object(map) = &mut sources {
+            match &self.scenes.switch.working_app {
+                Some(app) => map.insert("app".into(), app.clone()),
+                None => map.remove("app"),
+            };
+        }
+        normalize_scene_visual(&json!({
+            "layout": self.capture.config["layout"],
+            "sources": visual_sources(&sources),
+            "background": snapshot_background(self.scenes.switch.working_background.as_ref()),
+        }))
+        .ok()
+    }
+
+    /// `rememberLayoutTransactionSnapshot`: the newest commit by revision.
+    /// (The layout undo's slot, plan 174 S3.9, is not ported.)
+    fn remember_commit(&mut self, committed: Committed) {
+        let current = self.scenes.switch.last_commit.take();
+        self.scenes.switch.last_commit = Some(latest_layout_transaction_commit(
+            current,
+            committed,
+            |commit| commit.revision,
+        ));
+    }
+
+    /// `noteSceneSwitchPhase`: a phase only moves the switch that reached
+    /// it, never a newer one. True when the progress changed.
+    fn note_switch_phase(&mut self, intent: u64, patch: SceneSwitchPatch) -> bool {
+        let switch = &mut self.scenes.switch;
+        match advance_scene_switch_progress(switch.progress.as_ref(), intent, patch) {
+            Some(next) => {
+                switch.progress = Some(next);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The intent, and the pending state (`requestLayoutTransaction`'s
+    /// synchronous part): the pending layout and the progress (#1275) light
+    /// unless the commit is background-only.
+    fn mint_transaction(
+        &mut self,
+        layout: &Value,
+        options: &TransactionOptions,
+        session_active: bool,
+    ) -> Minted {
+        let switch = &mut self.scenes.switch;
+        let now = now_ms();
+        let intent = (switch.intent_id + 1).max(now);
+        switch.intent_id = intent;
+        switch.awaiting_proof = Some(intent);
+        switch.transaction_pending = true;
+        switch.pending_id = options.saved_scene_id.clone().flatten();
+        // Background-only commits keep the same preset: no pending mark.
+        if !options.quiet {
+            switch.pending_layout = Some(LayoutTarget::of(layout));
+            let target = options
+                .target_name
+                .clone()
+                .unwrap_or_else(|| default_switch_target(layout));
+            switch.progress = Some(start_scene_switch_progress(
+                switch.progress.as_ref(),
+                intent,
+                &target,
+                now,
+            ));
+        }
+        let background = match &options.background_override {
+            Some(background) => background.clone(),
+            None => switch.working_background.clone(),
+        };
+        let leg_id = match &options.saved_scene_id {
+            Some(id) => id.clone(),
+            None => self.scenes.on_stream.clone(),
+        };
+        Minted {
+            intent,
+            requested: self.capture.config.clone(),
+            studio: StudioSettings::load(self.settings.get(keys::SETTINGS)),
+            background,
+            leg_scene: leg_id.and_then(|id| self.stored_scene(&id)),
+            protected: self.exclusion.wanted.clone(),
+            session_active,
+            generation: self.bootstrap_generation,
+        }
     }
 
     /// What the capture shows now, with the working app
@@ -670,10 +885,79 @@ impl<B: StudioBackend> Studio<B> {
         self.lock().scene_is_going_on(id)
     }
 
+    /// The manual-apply listeners (`subscribeManualSceneApply`, plan 210
+    /// S10): the id of every saved scene an apply puts on that is not the
+    /// follower's own (a click, a key, a remote, an agent), so Follow the app
+    /// in front holds until the next app change.
+    pub fn manual_scene_applies(&self) -> broadcast::Receiver<String> {
+        self.lock().scenes.switch.signals.manual.subscribe()
+    }
+
+    /// #1643: waits while a Record or Go Live start holds the scene it was
+    /// asked with (`sessionStartScenePromiseRef`).
+    async fn wait_for_start_scene(&self) {
+        loop {
+            let mut tick = {
+                let inner = self.lock();
+                if inner.scenes.switch.start_scene.is_none() {
+                    return;
+                }
+                inner.scenes.switch.signals.tick.subscribe()
+            };
+            let _ = tick.changed().await;
+        }
+    }
+
+    /// #1643: waits while a switch awaits its proof
+    /// (`layoutProofWaitersRef`): a start then reads the scene it left, and
+    /// a newer switch awaiting its proof keeps it waiting for that one.
+    pub(super) async fn wait_for_layout_proof(&self) {
+        loop {
+            let mut tick = {
+                let inner = self.lock();
+                if inner.scenes.switch.awaiting_proof.is_none() {
+                    return;
+                }
+                inner.scenes.switch.signals.tick.subscribe()
+            };
+            let _ = tick.changed().await;
+        }
+    }
+
+    /// #1643: a start that is going to send its `session.start` holds the
+    /// scene it carries until its answer is applied: a switch asked for
+    /// meanwhile waits. `None` when a switch awaits its proof (the start
+    /// waits for it first).
+    pub(super) fn hold_start_scene(&self) -> Option<StartSceneHold<'_, B>> {
+        let mut inner = self.lock();
+        let switch = &mut inner.scenes.switch;
+        if switch.awaiting_proof.is_some() {
+            return None;
+        }
+        switch.start_scene_generation += 1;
+        let generation = switch.start_scene_generation;
+        switch.start_scene = Some(generation);
+        Some(StartSceneHold {
+            studio: self,
+            generation,
+        })
+    }
+
+    /// `releaseStartScene`: the start's scene is committed and its state
+    /// known; a switch held for it now goes to the session it started.
+    pub(super) fn release_start_scene(&self) {
+        let mut inner = self.lock();
+        let switch = &mut inner.scenes.switch;
+        if switch.start_scene.take().is_some() {
+            switch.signals.tick();
+        }
+    }
+
     /// `requestLayoutTransaction` (plan 231): answers the commit receipt
-    /// (the backend committed this intent), which is what a deck's ack
-    /// waits for. The Studio follows the commit at once; the proof and its
-    /// notices follow on their own.
+    /// (the backend committed this intent, or a failed request's backend
+    /// truth is the requested scene), which is what a deck's ack waits for.
+    /// The Studio takes the commit after its proof, and only while it is the
+    /// latest switch; the proof's notices follow.
     pub async fn request_layout_transaction(
         self: &Arc<Self>,
         layout: Value,
@@ -690,73 +974,75 @@ impl<B: StudioBackend> Studio<B> {
         options: TransactionOptions,
         hold: Option<GoingOn<B>>,
     ) -> TransactionOutcome {
-        let (session_active, crosses, connected, generation, latest) = {
-            let mut guard = self.lock();
-            let inner = &mut *guard;
-            inner.capture.sync(inner.settings.get(keys::CAPTURE_CONFIG));
-            (
-                inner.session.is_active(),
-                Orientation::of_layout(&layout)
-                    != Orientation::of_layout(&inner.capture.config["layout"]),
-                matches!(inner.connection, Connection::Connected { .. }),
-                inner.bootstrap_generation,
-                inner.scenes.switch.intent_id,
-            )
-        };
-        let refused = TransactionOutcome {
-            committed: false,
-            intent: latest,
-        };
-        if session_active && crosses {
-            self.post(vec![warning(
-                copy::ORIENTATION_LOCK,
-                copy::ORIENTATION_LOCK_ID,
-                None,
-            )]);
-            return refused;
-        }
-        if !connected {
-            self.post(vec![warning(
-                copy::RECONNECTING,
-                OFFLINE_TOAST_ID,
-                Some(copy::SCENE_DID_NOT_CHANGE),
-            )]);
-            return refused;
-        }
-
-        // The intent, and the pending state.
-        let (intent, requested, studio, background, leg_scene, protected) = {
-            let mut guard = self.lock();
-            let inner = &mut *guard;
-            let switch = &mut inner.scenes.switch;
-            let intent = (switch.intent_id + 1).max(now_ms());
-            switch.intent_id = intent;
-            switch.awaiting_proof = Some(intent);
-            switch.transaction_pending = true;
-            switch.pending_id = options.saved_scene_id.clone().flatten();
-            // Background-only commits keep the same preset: no pending mark.
-            if !options.quiet {
-                switch.pending_layout = Some(LayoutTarget::of(&layout));
+        // #1643: a Record or Go Live start in flight carries the scene as it
+        // was, and the backend commits it as the session starts. This change
+        // runs once that start answers, as a change to the session it
+        // started, so the start's scene never lands over it.
+        let minted = loop {
+            self.wait_for_start_scene().await;
+            let gate = {
+                let mut guard = self.lock();
+                let inner = &mut *guard;
+                inner.capture.sync(inner.settings.get(keys::CAPTURE_CONFIG));
+                let session_active = inner.session.is_active();
+                let crosses = Orientation::of_layout(&layout)
+                    != Orientation::of_layout(&inner.capture.config["layout"]);
+                let latest = inner.scenes.switch.intent_id;
+                if inner.scenes.switch.start_scene.is_some() {
+                    Gate::WaitStart
+                } else if session_active && crosses {
+                    Gate::Refused {
+                        orientation_lock: true,
+                        latest,
+                    }
+                } else if !matches!(inner.connection, Connection::Connected { .. }) {
+                    Gate::Refused {
+                        orientation_lock: false,
+                        latest,
+                    }
+                } else {
+                    Gate::Minted(Box::new(inner.mint_transaction(
+                        &layout,
+                        &options,
+                        session_active,
+                    )))
+                }
+            };
+            match gate {
+                Gate::WaitStart => continue,
+                Gate::Refused {
+                    orientation_lock,
+                    latest,
+                } => {
+                    let notice = if orientation_lock {
+                        warning(copy::ORIENTATION_LOCK, copy::ORIENTATION_LOCK_ID, None)
+                    } else {
+                        warning(
+                            copy::RECONNECTING,
+                            OFFLINE_TOAST_ID,
+                            Some(copy::SCENE_DID_NOT_CHANGE),
+                        )
+                    };
+                    self.post(vec![notice]);
+                    return TransactionOutcome {
+                        committed: false,
+                        intent: latest,
+                    };
+                }
+                Gate::Minted(minted) => break *minted,
             }
-            let background = match &options.background_override {
-                Some(background) => background.clone(),
-                None => switch.working_background.clone(),
-            };
-            let leg_id = match &options.saved_scene_id {
-                Some(id) => id.clone(),
-                None => inner.scenes.on_stream.clone(),
-            };
-            let leg_scene = leg_id.and_then(|id| inner.stored_scene(&id));
-            (
-                intent,
-                inner.capture.config.clone(),
-                StudioSettings::load(inner.settings.get(keys::SETTINGS)),
-                background,
-                leg_scene,
-                inner.exclusion.wanted.clone(),
-            )
         };
         self.publish();
+        let Minted {
+            intent,
+            requested,
+            studio,
+            background,
+            leg_scene,
+            protected,
+            session_active,
+            generation,
+        } = minted;
 
         let sources = options
             .sources_override
@@ -765,43 +1051,54 @@ impl<B: StudioBackend> Studio<B> {
         let layout = camera_look_on_layout(&layout, string(sources.get("cameraId")), &studio);
 
         // Plan 210 S3: the strict check, against the held devices (one fresh
-        // list only for a source missing from it).
-        if options.strict_sources {
+        // list only for a source missing from it), beside the baseline
+        // revision a failed request is judged by.
+        let preflight = async {
+            if !options.strict_sources {
+                return None;
+            }
             let devices = self.lock().sources.devices.devices.clone();
             let scene_app = options.scene_app.clone().flatten();
             let visual = preflight_visual(&layout, &sources, background.as_ref());
             let backend = self.backend.clone();
             // The managed background's file check is the app's (S1.6c); a
             // saved background is taken as there.
-            let result = run_saved_scene_preflight(
-                &visual,
-                scene_app.as_ref(),
-                &devices,
-                async move { backend.devices().await.ok().map(|list| list.devices) },
-                None::<std::future::Ready<bool>>,
+            Some(
+                run_saved_scene_preflight(
+                    &visual,
+                    scene_app.as_ref(),
+                    &devices,
+                    async move { backend.devices().await.ok().map(|list| list.devices) },
+                    None::<std::future::Ready<bool>>,
+                )
+                .await,
             )
-            .await;
-            if !result.issues.is_empty() {
-                self.config.logger.warn(format!(
-                    "[scenes] the switch was refused before it was sent: {}",
-                    result.issues.join(" ")
-                ));
-                if self.lock().scenes.switch.intent_id == intent {
-                    // A plain `Error` in the renderer: its words go to the
-                    // log, never to the toast.
-                    let error = RpcError::new(
-                        "scene.preflight",
-                        "scene-preflight-refused",
-                        result.issues.join(" "),
-                    );
-                    self.report_switch_error(&error);
-                }
-                self.end_transaction(intent);
-                return TransactionOutcome {
-                    committed: false,
-                    intent,
-                };
+        };
+        let (baseline, preflight) = tokio::join!(
+            self.backend
+                .scene_request(COMPOSITOR_STATUS_METHOD, Value::Null),
+            preflight
+        );
+        if let Some(result) = preflight.filter(|result| !result.issues.is_empty()) {
+            self.config.logger.warn(format!(
+                "[scenes] the switch was refused before it was sent: {}",
+                result.issues.join(" ")
+            ));
+            if self.lock().scenes.switch.intent_id == intent {
+                // A plain `Error` in the renderer: its words go to the log,
+                // never to the toast.
+                let error = RpcError::new(
+                    "scene.preflight",
+                    "scene-preflight-refused",
+                    result.issues.join(" "),
+                );
+                self.report_switch_error(&error);
             }
+            self.end_transaction(intent);
+            return TransactionOutcome {
+                committed: false,
+                intent,
+            };
         }
 
         let method = if session_active || options.camera_look_only {
@@ -826,7 +1123,7 @@ impl<B: StudioBackend> Studio<B> {
             "intentId": intent,
             "sources": sources.clone(),
             "layout": layout.clone(),
-            "video": video,
+            "video": video.clone(),
             "protectedOverlayWindowIds": protected,
         });
         if let Some(background) = &background {
@@ -840,23 +1137,50 @@ impl<B: StudioBackend> Studio<B> {
         if studio.animate_scene_changes() && !options.camera_look_only {
             params["transitionMs"] = json!(SCENE_TRANSITION_MS);
         }
+        // #1275: what the scene shows decides which first frame it waits on.
+        let requested_scene =
+            requested_transaction_scene(&layout, &sources, &video, background.as_ref());
+        let shown = |kinds: &[&str]| {
+            requested_scene["sources"]
+                .as_array()
+                .is_some_and(|sources| {
+                    sources.iter().any(|source| {
+                        source["visible"] != Value::Bool(false)
+                            && kinds.contains(&source["kind"].as_str().unwrap_or_default())
+                    })
+                })
+        };
+        let starting = SceneSwitchPatch {
+            phase: Some(SceneSwitchPhase::Starting),
+            shows_camera: Some(shown(&["camera"])),
+            shows_screen: Some(shown(&["screen", "window"])),
+        };
+        if self.lock().note_switch_phase(intent, starting) {
+            self.publish();
+        }
+        let revision_before = baseline
+            .ok()
+            .and_then(|status| status.get("sceneRevision").and_then(Value::as_u64));
+
         let status = match self.backend.scene_request(method, params).await {
             Ok(status) => status,
             Err(error) => {
-                // The last commit stays: the renderer reads the backend's
-                // truth here first (`readLayoutTransactionBackendTruth`).
                 self.config.logger.warn(format!(
                     "[scenes] {method} failed: {} ({})",
                     error.message, error.code
                 ));
-                if self.lock().scenes.switch.intent_id == intent {
-                    self.report_switch_error(&error);
-                }
+                let committed = self
+                    .reconcile_failed_transaction(
+                        intent,
+                        &error,
+                        revision_before,
+                        &requested_scene,
+                        &options,
+                    )
+                    .await;
                 self.end_transaction(intent);
-                return TransactionOutcome {
-                    committed: false,
-                    intent,
-                };
+                drop(hold);
+                return TransactionOutcome { committed, intent };
             }
         };
         let revision = status.get("sceneRevision").and_then(Value::as_u64);
@@ -864,16 +1188,11 @@ impl<B: StudioBackend> Studio<B> {
             .filter(|layout| layout.is_object())
             .cloned()
             .unwrap_or(layout);
-        let latest = {
+        let committed = {
             let mut guard = self.lock();
             let inner = &mut *guard;
-            let saved_id = match &options.saved_scene_id {
-                Some(id) => id.clone(),
-                None => inner.scenes.on_stream.clone(),
-            };
-            // `rememberLayoutTransactionSnapshot`.
-            inner.scenes.switch.last_commit_scene = Some(saved_id.clone());
             let committed = Committed {
+                revision: revision.unwrap_or(0),
                 scene: status.get("scene").cloned().unwrap_or(Value::Null),
                 layout: committed_layout,
                 capture_patch: options.capture_patch.clone(),
@@ -882,23 +1201,27 @@ impl<B: StudioBackend> Studio<B> {
                     Some(app) => app.clone(),
                     None => inner.scenes.switch.working_app.clone(),
                 },
-                saved_id,
+                saved_id: match &options.saved_scene_id {
+                    Some(id) => id.clone(),
+                    None => inner.scenes.on_stream.clone(),
+                },
                 origin: options.origin.unwrap_or(inner.scenes.switch.origin),
                 scene_switch: options.scene_switch,
             };
-            (inner.scenes.switch.intent_id == intent).then_some(committed)
+            // Intent freshness and commit freshness are apart: this commit
+            // is remembered before its proof, so a newer switch that fails
+            // reconciles to it.
+            inner.remember_commit(committed.clone());
+            inner.note_switch_phase(intent, SceneSwitchPatch::phase(SceneSwitchPhase::Drawing));
+            committed
         };
-        // The backend's commit is authoritative: the controls follow it now,
-        // and the proof below only says when the picture lags.
-        if let Some(committed) = latest {
-            self.apply_transaction_state(committed).await;
-        }
+        self.publish();
+        // The receipt answers now; the proof and the Studio's state follow.
         let studio = self.clone();
         tokio::spawn(async move {
             studio
-                .prove_commit(intent, revision, session_active, generation)
+                .settle_commit(intent, committed, revision, session_active, generation)
                 .await;
-            studio.end_transaction(intent);
             drop(hold);
         });
         TransactionOutcome {
@@ -907,19 +1230,213 @@ impl<B: StudioBackend> Studio<B> {
         }
     }
 
-    /// The transaction's `finally`: the pending state goes once it is the
-    /// latest.
+    /// After the receipt: the proof, then the commit applied while it is
+    /// the latest switch (proven or not: the backend's commit is the
+    /// truth), then what a missed proof says, then the transaction's
+    /// `finally`.
+    async fn settle_commit(
+        self: &Arc<Self>,
+        intent: u64,
+        committed: Committed,
+        revision: Option<u64>,
+        session_active: bool,
+        generation: u64,
+    ) {
+        let proof = self.prove_commit(intent, revision, session_active).await;
+        let latest = self.lock().scenes.switch.intent_id;
+        let disposition =
+            layout_transaction_proof_disposition(latest, intent, matches!(proof, Ok(true)));
+        if disposition != ProofDisposition::IgnoreStale {
+            self.apply_transaction_state(committed).await;
+            if disposition == ProofDisposition::ApplyUnproven {
+                self.say_unproven(proof.err(), revision.unwrap_or(0), generation);
+            }
+        }
+        self.end_transaction(intent);
+    }
+
+    /// A latest switch whose request failed: the backend's truth (or the
+    /// last commit) is applied, and only a request whose scene the backend
+    /// shows counts as committed. Anything else says the switch failed; a
+    /// switch a newer one took over says nothing.
+    async fn reconcile_failed_transaction(
+        self: &Arc<Self>,
+        intent: u64,
+        error: &RpcError,
+        revision_before: Option<u64>,
+        requested_scene: &Value,
+        options: &TransactionOptions,
+    ) -> bool {
+        if self.lock().scenes.switch.intent_id != intent {
+            return false;
+        }
+        let truth = self.read_backend_truth().await;
+        let backend_scene = truth
+            .as_ref()
+            .map(|truth| backend_transaction_scene(&truth.layout, &truth.scene));
+        let disposition = layout_transaction_failure_disposition(
+            Some(&error.code),
+            revision_before,
+            requested_scene,
+            truth
+                .as_ref()
+                .zip(backend_scene.as_ref())
+                .map(|(truth, scene)| (truth.revision, scene)),
+        );
+        let applied = disposition == FailureDisposition::RequestedSceneApplied;
+        let reconciliation = {
+            let inner = self.lock();
+            // The request's own choices go with a truth that is its scene.
+            let truth = truth.map(|truth| {
+                if !applied {
+                    return truth;
+                }
+                let switch = &inner.scenes.switch;
+                Committed {
+                    capture_patch: options.capture_patch.clone(),
+                    sources: options
+                        .sources_override
+                        .clone()
+                        .unwrap_or_else(|| inner.capture.config["sources"].clone()),
+                    scene_app: match &options.scene_app {
+                        Some(app) => app.clone(),
+                        None => switch.working_app.clone(),
+                    },
+                    saved_id: match &options.saved_scene_id {
+                        Some(id) => id.clone(),
+                        None => inner.scenes.on_stream.clone(),
+                    },
+                    origin: options.origin.unwrap_or(switch.origin),
+                    scene_switch: options.scene_switch,
+                    ..truth
+                }
+            });
+            layout_transaction_failure_reconciliation(
+                inner.scenes.switch.intent_id,
+                intent,
+                truth,
+                inner.scenes.switch.last_commit.clone(),
+            )
+        };
+        match reconciliation {
+            Some((source, snapshot)) => {
+                self.config.logger.warn(format!(
+                    "[scenes] the failed switch reconciled to {source:?} at revision {}",
+                    snapshot.revision
+                ));
+                self.lock().remember_commit(snapshot.clone());
+                self.apply_transaction_state(snapshot).await;
+                if !applied {
+                    self.report_switch_error(error);
+                }
+                applied
+            }
+            None => {
+                if self.lock().scenes.switch.intent_id == intent {
+                    self.report_switch_error(error);
+                }
+                false
+            }
+        }
+    }
+
+    /// `readLayoutTransactionBackendTruth`: `scene.get` (a barrier for
+    /// accepted overlapping commands), `compositor.status`, then `scene.get`
+    /// again, which must show the same scene. The scene on stream stays
+    /// (D2); a look that is not the working one is no edit of it.
+    async fn read_backend_truth(&self) -> Option<Committed> {
+        let before = self
+            .backend
+            .scene_request(SCENE_GET_METHOD, Value::Null)
+            .await
+            .ok()?;
+        let compositor = self
+            .backend
+            .scene_request(COMPOSITOR_STATUS_METHOD, Value::Null)
+            .await
+            .ok()?;
+        let after = self
+            .backend
+            .scene_request(SCENE_GET_METHOD, Value::Null)
+            .await
+            .ok()?;
+        let revision = compositor.get("sceneRevision").and_then(Value::as_u64)?;
+        let layout = compositor
+            .get("sceneLayout")
+            .filter(|layout| truthy(Some(layout)))?
+            .clone();
+        if !layout_transaction_backend_snapshot_is_stable(
+            &before,
+            string(compositor.get("sceneId")),
+            &after,
+        ) {
+            return None;
+        }
+        let inner = self.lock();
+        let switch = &inner.scenes.switch;
+        // Plan 212 S2: a packaged build never adopts a test-pattern source.
+        let scene_sources = after
+            .get("sources")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let sources = layout_transaction_sources_from_scene(
+            &inner.capture.config["sources"],
+            &scene_sources,
+            !cfg!(debug_assertions),
+        );
+        let mut with_app = sources.clone();
+        if let (Value::Object(map), Some(app)) = (&mut with_app, &switch.working_app) {
+            map.insert("app".into(), app.clone());
+        }
+        let visual = normalize_scene_visual(&json!({
+            "layout": layout,
+            "sources": visual_sources(&with_app),
+            "background": snapshot_background(after.get("background")),
+        }))
+        .ok()?;
+        let confirmed = switch
+            .confirmed_visual
+            .clone()
+            .or_else(|| inner.working_visual());
+        let matches_working =
+            confirmed.is_some_and(|confirmed| same_scene_visual(&visual, &confirmed));
+        Some(Committed {
+            revision,
+            scene: after,
+            layout,
+            capture_patch: None,
+            sources,
+            scene_app: if matches_working {
+                switch.working_app.clone()
+            } else {
+                None
+            },
+            saved_id: inner.scenes.on_stream.clone(),
+            origin: if matches_working {
+                switch.origin
+            } else {
+                Origin::Saved
+            },
+            scene_switch: !matches_working,
+        })
+    }
+
+    /// The transaction's `finally`: the proof wait ends (a start held for it
+    /// runs now), and the pending state goes once it is the latest.
     fn end_transaction(&self, intent: u64) {
         {
             let mut inner = self.lock();
             let switch = &mut inner.scenes.switch;
             if switch.awaiting_proof == Some(intent) {
                 switch.awaiting_proof = None;
+                switch.signals.tick();
             }
             if switch.intent_id != intent {
                 return;
             }
             switch.pending_layout = None;
+            switch.progress = None;
             switch.pending_id = None;
             switch.transaction_pending = false;
         }
@@ -928,92 +1445,101 @@ impl<B: StudioBackend> Studio<B> {
 
     /// `rememberLayoutCommit`: a session's output shows the revision
     /// (`waitForLiveLayoutProof`), then the preview presents it when it can
-    /// (`waitForNativePreviewSurfaceSceneRevision`). A missed output proof
-    /// is an error, unless the connection went away meanwhile (#1674: the
-    /// status says so, and the reconnect reads the scene again); a missed
-    /// preview proof only says the preview may be behind.
+    /// (`waitForNativePreviewSurfaceSceneRevision`). `Ok(false)` when a newer
+    /// switch took over meanwhile; a miss says which proof missed.
     async fn prove_commit(
         &self,
         intent: u64,
         revision: Option<u64>,
         session_active: bool,
-        generation: u64,
-    ) {
+    ) -> Result<bool, ProofMiss> {
+        let latest = |studio: &Self| studio.lock().scenes.switch.intent_id == intent;
         let Some(revision) = revision else {
-            return;
+            return Ok(latest(self));
         };
+        let presentation = self.lock().scenes.switch.presentation.clone();
+        let can_present = presentation
+            .as_ref()
+            .is_some_and(|probe| probe().can_present);
         if session_active && !self.wait_live_proof(revision).await {
-            let (latest, gone) = {
-                let inner = self.lock();
-                (
-                    inner.scenes.switch.intent_id == intent,
-                    !matches!(inner.connection, Connection::Connected { .. })
-                        || inner.bootstrap_generation != generation,
-                )
-            };
-            if !latest {
-                return;
-            }
-            if gone {
-                self.config.logger.warn(format!(
-                    "[scenes] Layout committed at revision {revision}, but preview proof was not observed before its engine connection closed."
-                ));
-                return;
-            }
-            self.config.logger.warn(format!(
-                "[scenes] Layout committed at revision {revision}, but preview proof was not observed. The controls were reconciled to the backend commit."
-            ));
-            if let Some(command) = toast_user_error(
-                Failure::Sentence {
-                    text: copy::CHECK_THE_PREVIEW,
-                    warning: false,
-                },
-                copy::CONFIRM_THE_SCENE_CHANGE,
-                "layout-proof",
+            return Err(ProofMiss::Output);
+        }
+        if !latest(self) {
+            return Ok(false);
+        }
+        if let Some(presentation) = presentation.filter(|_| can_present) {
+            if self.lock().note_switch_phase(
+                intent,
+                SceneSwitchPatch::phase(SceneSwitchPhase::Presenting),
             ) {
-                self.post(vec![command]);
+                self.publish();
             }
+            let deadline = Instant::now() + PREVIEW_PROOF_WAIT;
+            loop {
+                let now = presentation();
+                if !now.can_present
+                    || now
+                        .presented_revision
+                        .is_some_and(|shown| shown >= revision)
+                {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(ProofMiss::Presentation);
+                }
+                tokio::time::sleep(PREVIEW_PROOF_EVERY).await;
+            }
+        }
+        Ok(latest(self))
+    }
+
+    /// What a missed proof says once its commit is applied: a preview-only
+    /// miss says the preview may be behind; a missed output proof is an
+    /// error, unless the connection went away meanwhile (#1674: the status
+    /// says so, and the reconnect reads the scene again).
+    fn say_unproven(&self, miss: Option<ProofMiss>, revision: u64, generation: u64) {
+        if layout_transaction_unproven_severity(miss) == UnprovenSeverity::PresentationWarning {
+            self.config.logger.warn(format!(
+                "[scenes] Layout committed at revision {revision}; native preview presentation proof was not observed."
+            ));
+            let id = self
+                .lock()
+                .scenes
+                .switch
+                .proof_notices
+                .id(copy::PROOF_LAG_KEY, Instant::now());
+            self.post(vec![NoticeCommand::Show(
+                ToastRequest::info(copy::PROOF_LAG_TITLE)
+                    .id(id)
+                    .description(copy::PROOF_LAG_BODY)
+                    .finish(),
+            )]);
             return;
         }
-        let Some(presentation) = self.lock().scenes.switch.presentation.clone() else {
-            return;
+        let gone = {
+            let inner = self.lock();
+            !matches!(inner.connection, Connection::Connected { .. })
+                || inner.bootstrap_generation != generation
         };
-        if !presentation().can_present {
-            return;
-        }
-        let deadline = Instant::now() + PREVIEW_PROOF_WAIT;
-        loop {
-            let now = presentation();
-            if !now.can_present
-                || now
-                    .presented_revision
-                    .is_some_and(|shown| shown >= revision)
-            {
-                return;
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(PREVIEW_PROOF_EVERY).await;
-        }
-        if self.lock().scenes.switch.intent_id != intent {
+        if gone {
+            self.config.logger.warn(format!(
+                "[scenes] Layout committed at revision {revision}, but preview proof was not observed before its engine connection closed."
+            ));
             return;
         }
         self.config.logger.warn(format!(
-            "[scenes] Layout committed at revision {revision}; native preview presentation proof was not observed."
+            "[scenes] Layout committed at revision {revision}, but preview proof was not observed. The controls were reconciled to the backend commit."
         ));
-        let id = self
-            .lock()
-            .scenes
-            .switch
-            .proof_notices
-            .id(copy::PROOF_LAG_KEY, Instant::now());
-        self.post(vec![NoticeCommand::Show(
-            ToastRequest::info(copy::PROOF_LAG_TITLE)
-                .id(id)
-                .description(copy::PROOF_LAG_BODY)
-                .finish(),
-        )]);
+        if let Some(command) = toast_user_error(
+            Failure::Sentence {
+                text: copy::CHECK_THE_PREVIEW,
+                warning: false,
+            },
+            copy::CONFIRM_THE_SCENE_CHANGE,
+            "layout-proof",
+        ) {
+            self.post(vec![command]);
+        }
     }
 
     /// `waitForLiveLayoutProof`: the compositor drew the revision and the
@@ -1462,6 +1988,16 @@ impl<B: StudioBackend> Studio<B> {
             target.set_layout(orientation, layout.clone());
         }
         let saved = saved_scene_view(&target, orientation, &config["sources"]);
+        // Plan 210 S10: the follower hears every apply that is not its own.
+        if !options.origin_follow {
+            let _ = self
+                .lock()
+                .scenes
+                .switch
+                .signals
+                .manual
+                .send(id.to_string());
+        }
         let generation = {
             let mut inner = self.lock();
             inner.scenes.switch.resolve_generation += 1;
@@ -1615,6 +2151,7 @@ impl<B: StudioBackend> Studio<B> {
                         origin: Some(Origin::Saved),
                         scene_switch: true,
                         strict_sources: true,
+                        target_name: Some(saved.name.clone()),
                         video_override: coupling.as_ref().map(|(video, _)| video.clone()),
                         capture_patch: coupling,
                         ..TransactionOptions::default()

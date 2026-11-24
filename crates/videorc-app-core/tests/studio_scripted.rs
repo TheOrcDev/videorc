@@ -61,6 +61,16 @@ struct Script {
     /// params, and the revision the backend's scene is on.
     layout_commits: Vec<(String, Value)>,
     scene_revision: u64,
+    /// S1.6b part 3c: `scene.layout.apply_*` waits for a permit here when
+    /// set.
+    apply_gate: Option<Arc<Semaphore>>,
+    /// The next commits fail with this error; `true` lands the scene anyway
+    /// (an answer lost on its way back).
+    apply_failures: VecDeque<(RpcError, bool)>,
+    /// `scene.get`'s answer as raw JSON (none: not answered), and the layout
+    /// `compositor.status` says it draws.
+    scene_get: Option<Value>,
+    backend_layout: Option<Value>,
 }
 
 struct Scripted {
@@ -238,13 +248,30 @@ impl StudioBackend for Scripted {
     /// S1.6b part 3b: a scene commit answers the committed scene at the next
     /// revision; the live proof's reads say it is drawn and on air.
     async fn scene_request(&self, method: &'static str, params: Value) -> Result<Value, RpcError> {
+        let applying = matches!(
+            method,
+            "scene.layout.apply_preview" | "scene.layout.apply_live"
+        );
+        let gate = self.script.lock().unwrap().apply_gate.clone();
+        if let (true, Some(gate)) = (applying, gate) {
+            gate.acquire().await.unwrap().forget();
+        }
         let mut script = self.script.lock().unwrap();
         match method {
             "scene.layout.apply_preview" | "scene.layout.apply_live" => {
-                script.scene_revision += 1;
                 script
                     .layout_commits
                     .push((method.to_string(), params.clone()));
+                if let Some((error, landed)) = script.apply_failures.pop_front() {
+                    if landed {
+                        script.scene_revision += 1;
+                        script.backend_layout = Some(params["layout"].clone());
+                        script.scene_get = Some(landed_scene(&params));
+                    }
+                    return Err(error);
+                }
+                script.scene_revision += 1;
+                script.backend_layout = Some(params["layout"].clone());
                 Ok(json!({
                     "intentId": params["intentId"],
                     "sceneRevision": script.scene_revision,
@@ -252,9 +279,15 @@ impl StudioBackend for Scripted {
                     "compositorStatus": {"sceneLayout": params["layout"]},
                 }))
             }
+            "scene.get" => script
+                .scene_get
+                .clone()
+                .ok_or_else(|| RpcError::not_connected(method)),
             "compositor.status" => Ok(json!({
                 "sceneRevision": script.scene_revision,
                 "frameSceneRevision": script.scene_revision,
+                "sceneLayout": script.backend_layout,
+                "sceneId": script.scene_get.as_ref().map(|scene| scene["id"].clone()),
             })),
             "diagnostics.stats" => Ok(json!({"activeSceneRevision": script.scene_revision})),
             _ => Err(RpcError::not_connected(method)),
@@ -278,6 +311,47 @@ impl StudioBackend for Scripted {
         script.screen_starts.push(params);
         Ok(screen_status(reused))
     }
+}
+
+/// The backend's scene once a commit landed: the sources its layout draws,
+/// its recording canvas and background, as `scene.get` answers.
+fn landed_scene(params: &Value) -> Value {
+    let evidence = videorc_app_core::scenes::transaction_policy::requested_transaction_scene(
+        &params["layout"],
+        &params["sources"],
+        &params["video"],
+        params.get("background"),
+    );
+    let sources: Vec<Value> = evidence["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            json!({
+                "id": format!("source-{index}"),
+                "name": source["kind"],
+                "kind": source["kind"],
+                "deviceId": source["deviceId"],
+                "visible": source["visible"],
+            })
+        })
+        .collect();
+    let mut scene = json!({
+        "id": "program",
+        "name": "Program",
+        "sources": sources,
+        "outputs": [{
+            "kind": "recording",
+            "width": params["video"]["width"],
+            "height": params["video"]["height"],
+            "fps": params["video"]["fps"],
+        }],
+    });
+    if let Some(background) = params.get("background") {
+        scene["background"] = background.clone();
+    }
+    scene
 }
 
 fn screen_status(reused: bool) -> PreviewScreenStatus {
@@ -1583,7 +1657,11 @@ async fn the_library_edits_write_the_whole_library_and_a_taken_name_is_said() {
     copy.name = "Screen + camera 2".to_string();
     assert!(
         studio
-            .insert_scenes(std::slice::from_ref(&copy), Some("default-screen-camera"))
+            .insert_scenes(
+                std::slice::from_ref(&copy),
+                Some("default-screen-camera"),
+                &Default::default(),
+            )
             .await
     );
     let ids = scene_ids(&studio.snapshot().scenes);
@@ -1799,7 +1877,11 @@ async fn a_vertical_leg_that_draws_the_scenes_screen_asks_for_it() {
         videorc_app_core::scenes::v2::layout_shows_screen(&talk.vertical),
         "the 9:16 layout draws a screen"
     );
-    assert!(studio.insert_scenes(&[talk], None).await);
+    assert!(
+        studio
+            .insert_scenes(&[talk], None, &Default::default())
+            .await
+    );
     assert_eq!(studio.start_recording().await, StartOutcome::Started);
 
     assert!(apply(&studio, "talk").await);
@@ -1906,6 +1988,9 @@ async fn deleting_the_scene_on_stream_off_air_switches_to_the_one_before_first()
         .unwrap();
 
     assert!(studio.delete_scene("default-camera-only").await);
+    // Part 3c: the delete waits for the switch's commit receipt, as
+    // Electron's does; the Studio takes the commit after its proof.
+    settled(&studio).await;
     // The scene before it went on first.
     let (_, params) = layout_commits(&backend).pop().unwrap();
     assert_eq!(params["layout"]["layoutPreset"], "screen-only");
@@ -1967,4 +2052,337 @@ async fn a_screen_pick_changes_the_screen_of_the_scene_on_stream() {
         studio.snapshot().settings.capture_doc["sources"]["screenId"],
         "screen:screencapturekit:2"
     );
+}
+
+// S1.6b part 3c: the start races (#1643), apply-after-proof and the failure
+// reconciliation, the switch's progress (#1275), the manual-apply
+// listeners.
+
+/// Waits until `check` holds on the Studio (or the fake).
+async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
+    for _ in 0..400 {
+        if check() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("never: {what}");
+}
+
+fn listed_name(studio: &Studio<Scripted>, id: &str) -> String {
+    studio
+        .snapshot()
+        .scenes
+        .scenes
+        .iter()
+        .find(|scene| scene.id == id)
+        .unwrap()
+        .name
+        .clone()
+}
+
+fn started_preset(backend: &Scripted, index: usize) -> Value {
+    let started = &backend.script.lock().unwrap().started_with[index];
+    serde_json::to_value(&started.layout).unwrap()["layoutPreset"].clone()
+}
+
+#[tokio::test]
+async fn a_start_waits_for_the_switch_awaiting_its_proof_and_starts_with_its_scene() {
+    let (backend, studio) = scenes_studio(capture_config_with_camera()).await;
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| script.apply_gate = Some(gate.clone()));
+
+    let switching = {
+        let studio = studio.clone();
+        tokio::spawn(async move { apply(&studio, "default-camera-only").await })
+    };
+    eventually("the switch is pending", || {
+        studio.snapshot().scenes.pending_scene_id.as_deref() == Some("default-camera-only")
+    })
+    .await;
+    let starting = {
+        let studio = studio.clone();
+        tokio::spawn(async move { studio.start_recording().await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        backend.count("session.start"),
+        0,
+        "the start waits for the switch's proof"
+    );
+
+    gate.add_permits(8);
+    assert!(switching.await.unwrap());
+    assert_eq!(starting.await.unwrap(), StartOutcome::Started);
+    // It started with the scene the switch left, never the one it left.
+    assert_eq!(started_preset(&backend, 0), "camera-only");
+    assert_eq!(layout_commits(&backend)[0].0, "scene.layout.apply_preview");
+}
+
+#[tokio::test]
+async fn a_switch_asked_for_during_a_start_waits_and_goes_to_the_session() {
+    let (backend, studio) = scenes_studio(capture_config_with_camera()).await;
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| script.start_gate = Some(gate.clone()));
+
+    let starting = {
+        let studio = studio.clone();
+        tokio::spawn(async move { studio.start_recording().await })
+    };
+    eventually("session.start is sent", || {
+        backend.count("session.start") == 1
+    })
+    .await;
+    let switching = {
+        let studio = studio.clone();
+        tokio::spawn(async move { apply(&studio, "default-screen-only").await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        layout_commits(&backend).is_empty(),
+        "the switch waits for the start's answer"
+    );
+    assert!(!studio.snapshot().scenes.transaction_pending);
+
+    gate.add_permits(1);
+    assert_eq!(starting.await.unwrap(), StartOutcome::Started);
+    assert!(switching.await.unwrap());
+    // The start carried the scene as it was; the switch is a change to the
+    // session it started.
+    assert_eq!(started_preset(&backend, 0), "screen-camera");
+    let commits = layout_commits(&backend);
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].0, "scene.layout.apply_live");
+    assert_eq!(commits[0].1["layout"]["layoutPreset"], "screen-only");
+    assert_eq!(
+        studio.snapshot().scenes.on_stream_id.as_deref(),
+        Some("default-screen-only")
+    );
+}
+
+#[tokio::test]
+async fn a_superseded_commit_never_reaches_the_controls_and_the_progress_says_so() {
+    let (backend, studio) = scenes_studio(capture_config_with_camera()).await;
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| script.apply_gate = Some(gate.clone()));
+    let first = listed_name(&studio, "default-screen-only");
+    let second = listed_name(&studio, "default-camera-only");
+
+    let a = {
+        let studio = studio.clone();
+        tokio::spawn(async move {
+            studio
+                .apply_saved_scene("default-screen-only", None, ApplyOptions::default())
+                .await
+        })
+    };
+    let starting = |studio: &Studio<Scripted>, id: &str| {
+        let scenes = studio.snapshot().scenes;
+        scenes.pending_scene_id.as_deref() == Some(id)
+            && scenes.switch_progress.is_some_and(|progress| {
+                progress.phase
+                    == videorc_app_core::scenes::switch_progress::SceneSwitchPhase::Starting
+            })
+    };
+    eventually("A is starting", || starting(&studio, "default-screen-only")).await;
+    let scenes = studio.snapshot().scenes;
+    let progress = scenes.switch_progress.clone().unwrap();
+    assert_eq!(progress.target, first, "a saved scene's name");
+    assert_eq!(progress.replaced, None);
+    assert!(progress.shows_screen && !progress.shows_camera);
+    // Not shown in its first moment; shown once 1.5 s have passed.
+    assert_eq!(scenes.progress_line(progress.started_at_ms, None), None);
+    assert_eq!(
+        scenes.progress_line_at(),
+        Some(progress.started_at_ms + 1_500)
+    );
+    let line = scenes
+        .progress_line(progress.started_at_ms + 1_500, None)
+        .unwrap();
+    assert_eq!(
+        line.title,
+        format!("{first} · Waiting for the screen's first frame…")
+    );
+    assert_eq!(line.detail, None);
+
+    let b = {
+        let studio = studio.clone();
+        tokio::spawn(async move {
+            studio
+                .apply_saved_scene("default-camera-only", None, ApplyOptions::default())
+                .await
+        })
+    };
+    eventually("B is starting", || starting(&studio, "default-camera-only")).await;
+    let scenes = studio.snapshot().scenes;
+    let progress = scenes.switch_progress.clone().unwrap();
+    assert_eq!(progress.target, second);
+    assert_eq!(progress.replaced.as_deref(), Some(first.as_str()));
+    assert!(progress.shows_camera, "Camera only waits on the camera");
+    // A takeover shows at once.
+    let line = scenes.progress_line(progress.started_at_ms, None).unwrap();
+    assert_eq!(
+        line.title,
+        format!("{second} · Waiting for the camera's first frame…")
+    );
+    assert_eq!(
+        line.detail,
+        Some(format!("Replaces the switch to {first}."))
+    );
+
+    // A commits first, but B was asked for since: A's receipt is true, and
+    // its state never reaches the controls.
+    gate.add_permits(1);
+    eventually("A committed", || layout_commits(&backend).len() == 1).await;
+    assert!(a.await.unwrap().ok);
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    let snapshot = studio.snapshot();
+    assert_eq!(
+        snapshot.settings.capture_doc["layout"]["layoutPreset"],
+        "screen-camera"
+    );
+    assert_eq!(
+        snapshot.scenes.on_stream_id.as_deref(),
+        Some("default-screen-camera")
+    );
+    assert!(snapshot.scenes.transaction_pending, "B still runs");
+
+    gate.add_permits(8);
+    assert!(b.await.unwrap().ok);
+    settled(&studio).await;
+    let snapshot = studio.snapshot();
+    assert_eq!(
+        snapshot.settings.capture_doc["layout"]["layoutPreset"],
+        "camera-only"
+    );
+    assert_eq!(
+        snapshot.scenes.on_stream_id.as_deref(),
+        Some("default-camera-only")
+    );
+    // The finally: the pending state and the progress go.
+    assert!(snapshot.scenes.switch_progress.is_none());
+    assert!(snapshot.scenes.pending_layout.is_none());
+}
+
+#[tokio::test]
+async fn a_failed_switch_reconciles_to_the_backends_truth_or_the_last_commit() {
+    let (backend, studio) = scenes_studio(capture_config_with_camera()).await;
+    let mut notices = studio.notices();
+    assert!(apply(&studio, "default-screen-only").await);
+    let _ = said(&mut notices);
+    let outcome_unknown = || {
+        RpcError::new(
+            "scene.layout.apply_preview",
+            "request-outcome-unknown",
+            "Videorc's engine connection closed before it answered.",
+        )
+    };
+
+    // No backend truth (scene.get unanswered): the last commit stays, and
+    // the failure is said.
+    backend.with(|script| script.apply_failures.push_back((outcome_unknown(), false)));
+    assert!(!studio.apply_layout_preset("screen-camera").await);
+    settled(&studio).await;
+    assert_eq!(
+        studio.snapshot().settings.capture_doc["layout"]["layoutPreset"],
+        "screen-only"
+    );
+    assert!(!said(&mut notices).is_empty(), "the failure is said");
+
+    // A stable backend truth that is not the requested scene: the Studio
+    // takes it, and the failure is still said. It is no edit of the scene
+    // on stream.
+    backend.with(|script| {
+        script.apply_failures.push_back((outcome_unknown(), false));
+        script.scene_get =
+            Some(json!({"id": "program", "name": "Program", "sources": [], "outputs": []}));
+        script.backend_layout = Some(json!({"layoutPreset": "side-by-side"}));
+    });
+    assert!(!studio.apply_layout_preset("screen-camera").await);
+    settled(&studio).await;
+    let snapshot = studio.snapshot();
+    assert_eq!(
+        snapshot.settings.capture_doc["layout"]["layoutPreset"],
+        "side-by-side"
+    );
+    assert_eq!(
+        snapshot.scenes.on_stream_id.as_deref(),
+        Some("default-screen-only")
+    );
+    assert_eq!(
+        stored_scene(&backend, "default-screen-only").unwrap()["layouts"]["horizontal"]["layoutPreset"],
+        "screen-only"
+    );
+    assert!(!said(&mut notices).is_empty());
+
+    // The answer was lost but the backend shows the requested scene at a
+    // newer revision: it counts as committed, and nothing is said.
+    backend.with(|script| script.apply_failures.push_back((outcome_unknown(), true)));
+    assert!(studio.apply_layout_preset("screen-camera").await);
+    settled(&studio).await;
+    assert_eq!(
+        studio.snapshot().settings.capture_doc["layout"]["layoutPreset"],
+        "screen-camera"
+    );
+    assert!(said(&mut notices).is_empty());
+
+    // A failure that never reached the backend's scene is never success,
+    // whatever the backend shows.
+    backend.with(|script| {
+        script.apply_failures.push_back((
+            RpcError::new("scene.layout.apply_preview", "scene-commit-failed", "no"),
+            true,
+        ))
+    });
+    assert!(!studio.apply_layout_preset("side-by-side").await);
+    settled(&studio).await;
+    assert!(!said(&mut notices).is_empty());
+}
+
+#[tokio::test]
+async fn every_apply_but_the_followers_is_heard_by_the_manual_apply_listeners() {
+    let (_backend, studio) = scenes_studio(capture_config_with_camera()).await;
+    let mut heard = studio.manual_scene_applies();
+    assert!(apply(&studio, "default-screen-only").await);
+    assert_eq!(heard.try_recv().unwrap(), "default-screen-only");
+
+    assert!(
+        studio
+            .apply_saved_scene(
+                "default-camera-only",
+                None,
+                ApplyOptions {
+                    origin_follow: true,
+                    ..ApplyOptions::default()
+                },
+            )
+            .await
+            .ok
+    );
+    settled(&studio).await;
+    assert!(heard.try_recv().is_err(), "the follower's own apply");
+}
+
+#[tokio::test]
+async fn the_scene_on_stream_is_modified_by_a_look_it_has_not_taken() {
+    let (_backend, studio) = scenes_studio(capture_config_with_camera()).await;
+    assert!(apply(&studio, "default-screen-only").await);
+    assert!(!studio.snapshot().scenes.saved_scene_modified);
+    // A layout written without a transaction (no D11 save into the scene).
+    studio
+        .update_capture_config(|config| {
+            config["layout"]["layoutPreset"] = json!("side-by-side");
+        })
+        .await
+        .unwrap();
+    assert!(studio.snapshot().scenes.saved_scene_modified);
+    // Another screen is not part of it (D18).
+    studio
+        .update_capture_config(|config| {
+            config["layout"]["layoutPreset"] = json!("screen-only");
+            config["sources"]["screenId"] = json!("screen:screencapturekit:2");
+        })
+        .await
+        .unwrap();
+    assert!(!studio.snapshot().scenes.saved_scene_modified);
 }
