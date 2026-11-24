@@ -11961,7 +11961,23 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
               screenPublished: Boolean(snapshot.local.screen),
               screenSourceId: controls.screenSourceId,
               stage: status.room.stage,
-              commitScene: (content, assets) => controls.commitScene(content, assets)
+              commitScene: async (content, assets) => {
+                // Plan 260 S1.8b: the backend's room takes the commit when it
+                // holds the host seat; the room client commits otherwise.
+                const backendClient = clientRef.current
+                const showId = status.show?.id
+                if (backendClient && showId) {
+                  const { commitSceneToBackend } = await import('@/lib/room-scene-backend')
+                  const answered = await commitSceneToBackend(
+                    backendClient,
+                    showId,
+                    content,
+                    assets ?? []
+                  ).catch(() => null)
+                  if (answered) return answered
+                }
+                return controls.commitScene(content, assets)
+              }
             }
           },
           // Plan 249 S14: the scene's own screen or window, through main's
