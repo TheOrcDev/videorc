@@ -3544,3 +3544,124 @@ async fn an_idle_pick_in_the_scene_editor_loads_the_scene() {
     studio.set_scene_edit_mode(false);
     assert!(!studio.snapshot().scene_edit_mode);
 }
+
+// --- S1.6c: the platform accounts --------------------------------------
+
+/// Queues one answer for a livestream method.
+fn answer_livestream(backend: &Scripted, method: &str, value: Value) {
+    backend
+        .script
+        .lock()
+        .unwrap()
+        .livestream
+        .entry(method.to_string())
+        .or_default()
+        .push_back(Ok(value));
+}
+
+fn livestream_methods(backend: &Scripted) -> Vec<String> {
+    backend
+        .script
+        .lock()
+        .unwrap()
+        .livestream_calls
+        .iter()
+        .map(|(method, _)| method.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_bootstrap_reads_the_accounts_and_an_announcement_closes_the_browser_toast() {
+    let backend = Scripted::new();
+    answer_livestream(
+        &backend,
+        "platformAccounts.list",
+        json!([{ "platform": "x", "accountId": "x1" }]),
+    );
+    let studio = new_studio(&backend);
+    let mut notices = studio.notices();
+    studio.handle_event(ready()).await;
+
+    let platforms = studio.platforms_now();
+    assert!(platforms.loaded);
+    assert_eq!(platforms.accounts.len(), 1);
+    assert_eq!(platforms.accounts[0].account_id, "x1");
+    let methods = livestream_methods(&backend);
+    for method in [
+        "youtube.quota.status",
+        "platformAccounts.list",
+        "platformAccounts.oauth.providerCredentials",
+        "platformAccounts.validate",
+        "streamTargets.x.capability",
+    ] {
+        assert!(methods.iter().any(|m| m == method), "{method}: {methods:?}");
+    }
+
+    while notices.try_recv().is_ok() {}
+    studio
+        .handle_event(BackendEvent::Untyped {
+            event: "platformAccounts.changed".to_string(),
+            payload: json!([]),
+        })
+        .await;
+    assert!(studio.platforms_now().accounts.is_empty());
+    let mut dismissed = Vec::new();
+    while let Ok(command) = notices.try_recv() {
+        if let videorc_app_core::notices::NoticeCommand::Dismiss(id) = command {
+            dismissed.push(id);
+        }
+    }
+    assert_eq!(
+        dismissed,
+        [videorc_app_core::studio::BROWSER_APPROVAL_TOAST_ID]
+    );
+}
+
+#[tokio::test]
+async fn disconnecting_says_so_and_offline_asks_nothing() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    let mut notices = studio.notices();
+
+    assert!(!studio.disconnect_platform("twitch").await);
+    assert!(livestream_methods(&backend).is_empty());
+
+    studio.handle_event(ready()).await;
+    while notices.try_recv().is_ok() {}
+    answer_livestream(&backend, "platformAccounts.disconnect", json!({}));
+    assert!(studio.disconnect_platform("twitch").await);
+    let mut titles = Vec::new();
+    while let Ok(command) = notices.try_recv() {
+        if let videorc_app_core::notices::NoticeCommand::Show(notice) = command {
+            titles.push(notice.title.clone());
+        }
+    }
+    assert!(
+        titles.iter().any(|t| t == "Disconnected Twitch"),
+        "{titles:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_youtube_quota_event_pauses_youtube_until_its_time() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    studio
+        .handle_event(BackendEvent::Untyped {
+            event: "youtube.quota".to_string(),
+            payload: json!({ "pausedUntil": "2035-01-01T08:00:00.000Z" }),
+        })
+        .await;
+    assert_eq!(
+        studio.platforms_now().youtube_quota_paused_until.as_deref(),
+        Some("2035-01-01T08:00:00.000Z")
+    );
+    studio
+        .handle_event(BackendEvent::Untyped {
+            event: "youtube.quota".to_string(),
+            payload: json!({ "pausedUntil": "soon" }),
+        })
+        .await;
+    assert_eq!(studio.platforms_now().youtube_quota_paused_until, None);
+}
