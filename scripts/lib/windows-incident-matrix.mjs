@@ -222,9 +222,8 @@ export function incidentSessionParams(scenario, targets, microphoneId) {
 }
 
 /**
- * Exact one-frame-over repeated-frame failure seen on GitHub-hosted Windows
- * runners under OpenH264 on short controlled clips:
- * `repeated-frame burst of 3 consecutive identical frames exceeds 2 (1 burst(s))`.
+ * Exact one-frame-over repeated-frame analyzer failure seen on GitHub-hosted
+ * Windows runners under OpenH264 on short controlled clips.
  *
  * Evidence (main, 2026-11-24):
  * - Run 45349657229: 1080p30-single-controlled-restart #2 only (reps 1+3 PASS)
@@ -232,15 +231,78 @@ export function incidentSessionParams(scenario, targets, microphoneId) {
  * Adjacent full-matrix greens kept maxRepeatedFrameRun ≤ 2. Real freezes are
  * multi-frame (≫3) or multi-burst; those stay hard failures.
  *
- * Product analyzer gates remain maxRepeatedFrameRun: 2. This matcher is only
- * for a CI-aware majority policy in the incident aggregate.
+ * Product analyzer gates remain maxRepeatedFrameRun: 2. CI may tolerate this
+ * burst only when structured artifact predicates (dimensions, audio, packet
+ * tail) and every non-artifact gate still pass — never when analyzer failures
+ * are joined with a tail/audio/dimension miss (review r4682135380).
  */
-export const INCIDENT_CI_REPEATED_FRAME_NOISE =
-  /analyzed A\/V artifact missing or failed: repeated-frame burst of 3 consecutive identical frames exceeds 2 \(1 burst\(s\)\)/
+export const INCIDENT_CI_REPEATED_FRAME_BURST_ONLY =
+  'repeated-frame burst of 3 consecutive identical frames exceeds 2 (1 burst(s))'
 
-export function isIncidentCiRepeatedFrameNoise(failures) {
-  if (!Array.isArray(failures) || failures.length === 0) return false
-  return failures.every((failure) => INCIDENT_CI_REPEATED_FRAME_NOISE.test(String(failure)))
+const INCIDENT_CI_REPEATED_FRAME_FAILURE_LINE = new RegExp(
+  `^\\S+ analyzed A/V artifact missing or failed: ${INCIDENT_CI_REPEATED_FRAME_BURST_ONLY.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    '\\$&'
+  )}$`
+)
+
+export function incidentScenarioById(id) {
+  return buildWindowsIncidentMatrix().find((scenario) => scenario.id === id) ?? null
+}
+
+/** Analyzer failures array must be exactly the known single 3-frame burst. */
+export function isExactCiRepeatedFrameAnalyzerFailure(failures) {
+  return (
+    Array.isArray(failures) &&
+    failures.length === 1 &&
+    failures[0] === INCIDENT_CI_REPEATED_FRAME_BURST_ONLY
+  )
+}
+
+/**
+ * True only when a failed run's sole defect is that exact analyzer burst on
+ * otherwise gate-clean artifacts. Joined analyzer strings, wrong dimensions,
+ * missing audio, packet-tail misses, and non-artifact failures all return false.
+ */
+export function isIncidentCiRepeatedFrameNoise(
+  run,
+  scenario = incidentScenarioById(run?.scenario)
+) {
+  if (!run || run.verdict?.pass || run.state === 'BLOCKED' || !scenario) return false
+  const failures = run.verdict?.failures ?? []
+  if (failures.length === 0) return false
+  if (failures.some((failure) => !INCIDENT_CI_REPEATED_FRAME_FAILURE_LINE.test(String(failure)))) {
+    return false
+  }
+  if (run.startOutcome !== 'running') return false
+  if (!run.cleanup?.receiversReaped || !run.cleanup?.sessionIdle) return false
+  if (run.failure || (Array.isArray(run.errors) && run.errors.length > 0)) return false
+
+  const expectedRoles = [
+    ...(scenario.recordEnabled ? ['recording'] : []),
+    ...Array.from({ length: scenario.receivers }, (_, index) => `receiver-${index + 1}`)
+  ]
+  let sawNoise = false
+  for (const role of expectedRoles) {
+    const artifact = run.artifacts?.find((item) => item.role === role)
+    if (!artifact) return false
+    if (
+      artifact.width !== scenario.width ||
+      artifact.height !== scenario.height ||
+      artifact.hasAudio !== true ||
+      artifact.packetTail?.pass !== true ||
+      !Number.isFinite(artifact.packetTail?.tailMismatchMs) ||
+      artifact.packetTail.tailMismatchMs > 100
+    ) {
+      return false
+    }
+    if (artifact.verdict === 'PASS') continue
+    if (artifact.reason || !isExactCiRepeatedFrameAnalyzerFailure(artifact.failures)) {
+      return false
+    }
+    sawNoise = true
+  }
+  return sawNoise
 }
 
 /**
@@ -255,7 +317,7 @@ export function incidentScenarioSurvivesCiNoise(runs) {
   const blocked = runs.filter((run) => run?.state === 'BLOCKED')
   if (blocked.length > 0) return { pass: false, reason: 'blocked' }
   if (failed.length === 0) return { pass: true, tolerated: [] }
-  if (failed.length === 1 && isIncidentCiRepeatedFrameNoise(failed[0]?.verdict?.failures)) {
+  if (failed.length === 1 && isIncidentCiRepeatedFrameNoise(failed[0])) {
     if (passed.length >= 2) {
       return {
         pass: true,
@@ -264,7 +326,7 @@ export function incidentScenarioSurvivesCiNoise(runs) {
             scenario: failed[0].scenario,
             repetition: failed[0].repetition,
             reason:
-              'CI runner noise: one retained repetition had a single 3-frame exact-duplicate burst (threshold 2); the other two repetitions passed. Product gates stay at maxRepeatedFrameRun 2.'
+              'CI runner noise: one retained repetition had a single 3-frame exact-duplicate burst (threshold 2) with dimensions, audio and packet-tail gates still green; the other two repetitions passed. Product gates stay at maxRepeatedFrameRun 2.'
           }
         ]
       }
