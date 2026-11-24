@@ -63,6 +63,7 @@ use app::{camera, capture, hotkeys, links, menus, sleep};
 use screens::destinations::DestinationsPanel;
 use screens::go_live::GoLiveDialog;
 use screens::guests::GuestsPanel;
+use screens::notes::frame::NotesFrame;
 use screens::output::OutputPanel;
 use screens::sources::SourcesPanel;
 use screens::stream_manager::frame::StreamManagerFrame;
@@ -320,6 +321,7 @@ fn main() -> Result<()> {
     // The main window's frame, saved in the data directory.
     let main_frame = MainFrame::new(&paths.user_data_dir, logger.clone());
     let stream_manager_frame = StreamManagerFrame::new(&paths.user_data_dir, logger.clone());
+    let notes_frame = NotesFrame::new(&paths.user_data_dir, logger.clone());
     let quit_guard = sleep_guard.clone();
     let quit_permissions = permissions.clone();
     let focus_permissions = permissions.clone();
@@ -416,6 +418,14 @@ fn main() -> Result<()> {
         let destinations =
             cx.new(|cx| DestinationsPanel::new(studio.clone(), core_handle.clone(), cx));
         let guests = cx.new(|cx| GuestsPanel::new(studio.clone(), core_handle.clone(), cx));
+        let sidekick = cx.new(|cx| {
+            screens::sidekick::SidekickScreen::new(
+                studio.clone(),
+                core_handle.clone(),
+                paths.user_data_dir.clone(),
+                cx,
+            )
+        });
         let go_live = cx.new(|cx| GoLiveDialog::new(studio.clone(), core_handle.clone(), cx));
         let settings = cx.new(|cx| {
             screens::settings::SettingsScreen::new(
@@ -515,6 +525,15 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let dialogs = cx.new(|cx| {
+                    screens::dialogs::DialogsHost::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        controls.clone(),
+                        cx,
+                    )
+                });
+                palette.update(cx, |palette, _| palette.bind_dialogs(dialogs.clone()));
                 cx.new(|cx| {
                     Shell::new(
                         status.clone(),
@@ -525,11 +544,13 @@ fn main() -> Result<()> {
                         output.clone(),
                         destinations.clone(),
                         guests.clone(),
+                        sidekick.clone(),
                         go_live.clone(),
                         settings.clone(),
                         health.clone(),
                         library_page,
                         palette,
+                        dialogs,
                         notices.clone(),
                         window,
                         cx,
@@ -549,6 +570,7 @@ fn main() -> Result<()> {
         // The Stream Manager's menu command and keys, and the window when it
         // was open at the last quit.
         screens::stream_manager::window::install(cx, stream_manager_frame, APP_ID);
+        screens::notes::window::install(cx, notes_frame, APP_ID);
         cx.on_action(move |_: &menus::ShowSettings, cx| {
             let _ = main_window.update(cx, |shell, window, cx| {
                 shell.open_settings(None, window, cx)

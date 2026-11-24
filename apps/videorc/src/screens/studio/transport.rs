@@ -12,7 +12,7 @@
 //!
 //! No state word or clock here (plan 235 D1): those are the status bar's.
 //! Go Live opens the confirmation dialog (`studio::go_live::open_go_live`);
-//! End livestream asks inline until the shell's dialog (P157) does.
+//! End livestream is the shell's dialog (`screens::dialogs`, P1436–P1439).
 
 use std::sync::Arc;
 
@@ -23,10 +23,7 @@ use videorc_app_core::studio::inspector::StartGates;
 use videorc_app_core::studio::screen_views::{
     STOP_CLOUD_RECORDING_UNAVAILABLE, TalkShowOutputs, TalkShowRoomView, talk_show_room,
 };
-use videorc_app_core::studio::session::{
-    END_LIVESTREAM_LABEL, KEEP_STREAMING_LABEL, StopConfirmation, end_livestream_body,
-    end_livestream_confirm_label, end_livestream_title,
-};
+use videorc_app_core::studio::session::{END_LIVESTREAM_LABEL, StopConfirmation};
 use videorc_app_core::studio::transport::{RecordButtonState, TransportView, stop_overrun_copy};
 use videorc_app_core::{BackendClient, StopOrigin, Studio, StudioSnapshot};
 use videorc_kit::icon::{IconName, icon};
@@ -251,18 +248,6 @@ impl Transport {
     fn stop_cloud_recording(&self) {
         eprintln!("[videorc-app] Stop cloud recording: {STOP_CLOUD_RECORDING_UNAVAILABLE}");
     }
-
-    fn end_livestream(&self) {
-        let studio = self.studio.clone();
-        self.runtime.spawn(async move {
-            let (answered, _) = studio.confirm_stop().await;
-            eprintln!("[videorc-app] End livestream: answered {answered}");
-        });
-    }
-
-    fn keep_streaming(&self) {
-        self.studio.cancel_stop();
-    }
 }
 
 impl Render for Transport {
@@ -371,55 +356,13 @@ impl Render for Transport {
                 },
             )
             // B-16: a stop that drags on says what is happening and what
-            // Force stop does.
+            // Force stop does. End livestream is screens::dialogs.
             .when(view.stop_overrun, |section| {
                 section.child(
                     Alert::new("session-stop-overrun")
                         .variant(AlertVariant::Warning)
                         .title(stop_overrun_copy::TITLE)
                         .description(stop_overrun_copy::DESCRIPTION),
-                )
-            })
-            .when_some(controls.stop_question, |section, question| {
-                section.child(
-                    div()
-                        .id("session-end-livestream")
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .type_scale(text::SECTION)
-                                .child(end_livestream_title(question.origin)),
-                        )
-                        .child(
-                            div()
-                                .type_scale(text::META)
-                                .text_color(muted)
-                                .child(end_livestream_body(&question)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap(px(8.))
-                                .child(
-                                    Button::new("session-keep-streaming")
-                                        .variant(ButtonVariant::Outline)
-                                        .label(KEEP_STREAMING_LABEL)
-                                        .on_click(
-                                            cx.listener(|this, _, _, _| this.keep_streaming()),
-                                        ),
-                                )
-                                .child(
-                                    Button::new("session-confirm-end-livestream")
-                                        .variant(ButtonVariant::Destructive)
-                                        .label(end_livestream_confirm_label(question.origin))
-                                        .on_click(
-                                            cx.listener(|this, _, _, _| this.end_livestream()),
-                                        ),
-                                ),
-                        ),
                 )
             })
     }

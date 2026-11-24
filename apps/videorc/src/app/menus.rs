@@ -257,7 +257,7 @@ pub fn menu_bar(cx: &App, windows: &[WindowId]) -> Option<MenuBar> {
 
 /// The windows that exist; each handles its own command
 /// (`screens::stream_manager::window::install`).
-const WINDOWS: &[WindowId] = &[WindowId::StreamManager];
+const WINDOWS: &[WindowId] = &[WindowId::StreamManager, WindowId::Notes];
 
 /// The roles' handlers, and the commands that work now. Pages and windows
 /// get theirs as they are ported.

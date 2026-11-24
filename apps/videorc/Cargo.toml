@@ -19,6 +19,9 @@ anyhow = "1.0"
 # once the runner has the toolchain).
 gpui = { workspace = true }
 gpui_platform = { workspace = true, features = ["font-kit", "runtime_shaders", "wayland", "x11"] }
+# Textarea behaviour for Notes (kit Input is single-line; Textarea twin is
+# G5283's). Look stays on kit tokens around gpui-base's Textarea.
+gpui_base = { workspace = true }
 # The design system (plan 260 Phase 3): the kit synced from videorc-ui's
 # GPUI flavour, which every screen draws with.
 videorc-kit = { workspace = true }
