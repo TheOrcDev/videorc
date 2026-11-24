@@ -21,13 +21,10 @@ const toast = vi.hoisted(() => ({
 vi.mock('@/lib/toast', () => ({ toast }))
 const toastUserError = vi.hoisted(() => vi.fn())
 vi.mock('@/lib/user-error', () => ({ toastUserError }))
-const openNotificationSettings = vi.hoisted(() => vi.fn())
-vi.mock('@/lib/section-doors', () => ({ openNotificationSettings }))
 
 import type { NotificationKindId } from '@/lib/notifications/kinds'
 import {
   applyNotificationAct,
-  notificationsSnapshot,
   relayedPopUpDoor,
   startNotificationRelay
 } from '@/lib/notifications/relay'
@@ -94,7 +91,7 @@ describe("the main window's notification relay (plan 250 S8)", () => {
   })
 
   it('pushes the list as plain entries the contract accepts, once per change', async () => {
-    const stop = startNotificationRelay(store, api, () => true)
+    const stop = startNotificationRelay(store, api)
     await flush()
     // A Stream Manager that is already open learns the (empty) list at once.
     expect(pushed).toHaveLength(1)
@@ -106,7 +103,6 @@ describe("the main window's notification relay (plan 250 S8)", () => {
     const last = pushed.at(-1)!
     expect(notificationsSnapshotSchema.parse(last, 'snapshot')).toEqual(last)
     expect(last.count).toEqual({ unread: 2, urgent: 1, tone: 'urgent' })
-    expect(last.quiet).toBe(true)
     expect(last.entries[0]).toMatchObject({
       key: 'microphone',
       actions: [
@@ -119,20 +115,13 @@ describe("the main window's notification relay (plan 250 S8)", () => {
     expect(act).toBeNull()
   })
 
-  it('says what the quiet rule is doing, for the footer', () => {
-    expect(notificationsSnapshot(store, false).quiet).toBe(false)
-  })
-
   it('runs what the Stream Manager presses on the store', async () => {
-    startNotificationRelay(store, api, () => true)
+    startNotificationRelay(store, api)
     publishUrgent()
     act?.({ type: 'run', key: 'microphone', actionId: 'unmute', door: false })
     await flush()
     expect(unmute).toHaveBeenCalledTimes(1)
     expect(store.snapshot()[0].read).toBe(true)
-
-    act?.({ type: 'open-settings' })
-    expect(openNotificationSettings).toHaveBeenCalledTimes(1)
 
     act?.({ type: 'clear', key: 'microphone' })
     expect(store.snapshot()).toEqual([])
@@ -150,7 +139,7 @@ describe("the main window's notification relay (plan 250 S8)", () => {
   })
 
   it("nothing pops up while the Stream Manager's list is open, whatever the main window's is", async () => {
-    startNotificationRelay(store, api, () => true)
+    startNotificationRelay(store, api)
     act?.({ type: 'list-open', open: true })
     // The main window's own list closing must not hide that one is still open.
     store.setListOpen(true)
@@ -169,7 +158,7 @@ describe("the main window's notification relay (plan 250 S8)", () => {
   describe('an urgent pop-up shows in the window the streamer is in', () => {
     it('in the Stream Manager when it is in front, and not in the main window', async () => {
       streamManagerInFront = true
-      startNotificationRelay(store, api, () => true)
+      startNotificationRelay(store, api)
       publishUrgent()
       await flush()
       expect(popUps).toEqual([
@@ -194,7 +183,7 @@ describe("the main window's notification relay (plan 250 S8)", () => {
     })
 
     it('in the main window otherwise', async () => {
-      startNotificationRelay(store, api, () => true)
+      startNotificationRelay(store, api)
       publishUrgent()
       await flush()
       expect(popUps).toEqual([])
@@ -208,14 +197,14 @@ describe("the main window's notification relay (plan 250 S8)", () => {
 
     it('in the main window when main cannot be asked', async () => {
       api.pushNotificationPopUp.mockRejectedValueOnce(new Error('no main'))
-      startNotificationRelay(store, api, () => true)
+      startNotificationRelay(store, api)
       publishUrgent()
       await flush()
       expect(toast.problem).toHaveBeenCalledTimes(1)
     })
 
     it('a problem that cleared while main was being asked shows nothing', async () => {
-      startNotificationRelay(store, api, () => true)
+      startNotificationRelay(store, api)
       publishUrgent()
       // Resolved before main has answered where the toast should go.
       store.resolve('microphone', { title: 'Microphone is back' })
@@ -226,7 +215,7 @@ describe("the main window's notification relay (plan 250 S8)", () => {
 
     it('a toast that reached the Stream Manager after its problem cleared is taken back', async () => {
       streamManagerInFront = true
-      startNotificationRelay(store, api, () => true)
+      startNotificationRelay(store, api)
       publishUrgent()
       store.clear('microphone')
       await flush()
@@ -301,7 +290,7 @@ describe("the main window's notification relay (plan 250 S8)", () => {
 
     it('a toast showing in the Stream Manager is dismissed there on Clear', async () => {
       streamManagerInFront = true
-      startNotificationRelay(store, api, () => true)
+      startNotificationRelay(store, api)
       publishUrgent()
       await flush()
       store.clear('microphone')

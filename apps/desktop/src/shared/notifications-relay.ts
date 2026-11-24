@@ -51,8 +51,6 @@ export interface RelayedNotification {
 export interface NotificationsSnapshot {
   entries: RelayedNotification[]
   count: { unread: number; tone: 'urgent' | 'warning' | null; urgent: number }
-  /** "Quiet while recording or live" is on (the list's footer says so). */
-  quiet: boolean
 }
 
 /** What the Stream Manager asks the main window's store to do. */
@@ -63,8 +61,6 @@ export type NotificationActRequest =
   | { type: 'mark-read'; key: string }
   | { type: 'mark-all-read' }
   | { type: 'list-open'; open: boolean }
-  /** The footer's link: Settings, General, at the quiet switch. */
-  | { type: 'open-settings' }
 
 /** An urgent entry popping up in the Stream Manager, when that window is in front. */
 export type NotificationPopUp =
@@ -128,8 +124,7 @@ export const notificationsSnapshotSchema = nullableSchema(
           urgent: numberSchema({ integer: true, min: 0 })
         },
         strict
-      ),
-      quiet: booleanSchema
+      )
     },
     strict
   )
@@ -149,8 +144,7 @@ export const notificationActRequestSchema = unionSchema([
   objectSchema({ type: literalSchema('clear-all') }, strict),
   objectSchema({ type: literalSchema('mark-read'), key }, strict),
   objectSchema({ type: literalSchema('mark-all-read') }, strict),
-  objectSchema({ type: literalSchema('list-open'), open: booleanSchema }, strict),
-  objectSchema({ type: literalSchema('open-settings') }, strict)
+  objectSchema({ type: literalSchema('list-open'), open: booleanSchema }, strict)
 ])
 
 export const notificationPopUpSchema = unionSchema([
@@ -169,5 +163,5 @@ export const notificationPopUpSchema = unionSchema([
 
 /** A request that brings the main window forward first: it opens a page there. */
 export function notificationActRaisesMainWindow(request: NotificationActRequest): boolean {
-  return request.type === 'open-settings' || (request.type === 'run' && request.door)
+  return request.type === 'run' && request.door
 }

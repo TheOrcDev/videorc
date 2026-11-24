@@ -85,15 +85,6 @@ export function useStreamManagerNotificationCount(): NotificationBellCount {
   )
 }
 
-/** "Quiet while recording or live" is on, as the main window last said. */
-export function useStreamManagerQuiet(): boolean {
-  return useSyncExternalStore(
-    subscribe,
-    () => snapshot?.quiet ?? true,
-    () => true
-  )
-}
-
 /** An urgent entry popping up here, because this window is the one in front. */
 export function showRelayedPopUp(popUp: NotificationPopUp): void {
   if (popUp.type === 'dismiss') {

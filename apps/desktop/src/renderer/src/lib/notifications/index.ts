@@ -23,22 +23,18 @@ export const notifications = createNotificationStore({
 
 installNotificationPopUps(notifications)
 
-/** "Quiet while recording or live", as the Studio last said (the relay's footer line). */
-let relayedQuiet: () => boolean = () => true
-
 /**
  * Plan 250 S8: the Stream Manager's bell reads a copy of this list. The
  * relay starts where the bridge to main exists (the app, never a unit test
  * that does not ask for it), and replaces the pop-up door with one that
  * offers each pop-up to the Stream Manager first.
  */
-export function startMainNotificationRelay(quiet: () => boolean): void {
-  relayedQuiet = quiet
+export function startMainNotificationRelay(): void {
   if (relayStarted) return
   const api = typeof window === 'undefined' ? undefined : window.videorc
   if (!api?.pushNotifications || !api.pushNotificationPopUp || !api.onNotificationActRequest) return
   relayStarted = true
-  startNotificationRelay(notifications, api, () => relayedQuiet())
+  startNotificationRelay(notifications, api)
 }
 let relayStarted = false
 

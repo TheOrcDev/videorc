@@ -33,8 +33,7 @@ describe("the Stream Manager's notification relay (plan 250 S8)", () => {
   it('carries the list as plain entries, and refuses anything else', () => {
     const snapshot: NotificationsSnapshot = {
       entries: [entry],
-      count: { unread: 1, urgent: 1, tone: 'urgent' },
-      quiet: true
+      count: { unread: 1, urgent: 1, tone: 'urgent' }
     }
     expect(notificationsSnapshotSchema.parse(snapshot, 'snapshot')).toEqual(snapshot)
     expect(notificationsSnapshotSchema.parse(null, 'snapshot')).toBeNull()
@@ -69,8 +68,7 @@ describe("the Stream Manager's notification relay (plan 250 S8)", () => {
       { type: 'clear-all' },
       { type: 'mark-read', key: 'microphone' },
       { type: 'mark-all-read' },
-      { type: 'list-open', open: true },
-      { type: 'open-settings' }
+      { type: 'list-open', open: true }
     ] as const) {
       expect(notificationActRequestSchema.parse(request, 'act')).toEqual(request)
     }
@@ -99,7 +97,6 @@ describe("the Stream Manager's notification relay (plan 250 S8)", () => {
     expect(
       notificationActRaisesMainWindow({ type: 'run', key: 'k', actionId: 'a', door: true })
     ).toBe(true)
-    expect(notificationActRaisesMainWindow({ type: 'open-settings' })).toBe(true)
     expect(
       notificationActRaisesMainWindow({ type: 'run', key: 'k', actionId: 'a', door: false })
     ).toBe(false)

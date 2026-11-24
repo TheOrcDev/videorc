@@ -213,7 +213,6 @@ import {
   revealInFileManagerLabel,
   trashName
 } from '@/lib/platform'
-import { quietWhileLiveOn } from '@/lib/quiet-while-live'
 import {
   nextPortalShareGrant,
   replayStartWaitsForGrant,
@@ -326,6 +325,7 @@ import {
   verticalOrientationVideoPatch,
   videoProfileCompatibility,
   videoPresets,
+  withoutRetiredSettings,
   HORIZONTAL_LAYOUT_PRESETS,
   VERTICAL_LAYOUT_PRESETS,
   type CaptureConfig,
@@ -3427,7 +3427,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.visual.sources.app
   )
   const [settings, setSettings] = useState<SettingsState>(() =>
-    loadJson(STORAGE_KEYS.settings, defaultSettings)
+    withoutRetiredSettings(loadJson(STORAGE_KEYS.settings, defaultSettings))
   )
   const [storedCaptureConfig, setCaptureConfig] = useState<CaptureConfig>(() => {
     const config = loadCaptureConfig()
@@ -4757,11 +4757,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         // live all the same (as for the watchdog, plan 249 S26).
         live: () =>
           sessionOwnsTransport(recordingRef.current) ||
-          cloudRoomActivityFromCloudStatus(cloudStatusRef.current) !== null,
-        quiet: () => quietWhileLiveOn(settingsRef.current)
+          cloudRoomActivityFromCloudStatus(cloudStatusRef.current) !== null
       })
       // S8: the Stream Manager's bell reads a copy of the list through main.
-      startMainNotificationRelay(() => quietWhileLiveOn(settingsRef.current))
+      startMainNotificationRelay()
     })
   }, [])
   // Stable handle for callbacks that only need to READ the config (labels,
