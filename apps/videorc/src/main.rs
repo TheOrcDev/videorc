@@ -38,7 +38,9 @@ use gpui::{
 use videorc_app_core::client::events::names;
 use videorc_app_core::desktop::deep_link::{DeepLinks, LinkSource};
 use videorc_app_core::desktop::global_shortcuts::GlobalShortcutsConfig;
-use videorc_app_core::desktop::single_instance::{self, Acquired, HANDOFF_WAIT};
+use videorc_app_core::desktop::single_instance::{
+    self, Acquired, HANDOFF_WAIT, RELAUNCH_LOCK_WAIT,
+};
 use videorc_app_core::nav::{self, PageId};
 use videorc_app_core::supervisor::STOP_GRACE;
 use videorc_app_core::{
@@ -48,8 +50,9 @@ use videorc_app_core::{
 
 use app::args;
 use app::bridge;
+use app::permissions::Permissions;
 use app::shell::{Shell, StatusLine, connection_text};
-use app::{hotkeys, links, menus, sleep};
+use app::{capture, hotkeys, links, menus, sleep};
 
 /// Electron's app id (`electron-builder.yml`), kept on every platform: the
 /// macOS bundle id, Videorc Camera's host, Linux's desktop entry and the
@@ -67,8 +70,14 @@ fn main() -> Result<()> {
 
     // One instance per data directory, before any window: a second launch
     // hands its links to the first (which brings its window up) and exits,
-    // as Electron's `second-instance`.
-    let mut instance = match single_instance::acquire(&paths.user_data_dir) {
+    // as Electron's `second-instance`. A launch Reopen Videorc started waits
+    // for the old instance to let go instead.
+    let acquired = if args.relaunched {
+        single_instance::acquire_after_relaunch(&paths.user_data_dir, RELAUNCH_LOCK_WAIT)
+    } else {
+        single_instance::acquire(&paths.user_data_dir)
+    };
+    let mut instance = match acquired {
         Ok(Acquired::Primary(primary)) => Some(primary),
         Ok(Acquired::Secondary(second)) => match second.hand_off(&args.links, HANDOFF_WAIT) {
             Ok(pid) => {
@@ -203,9 +212,17 @@ fn main() -> Result<()> {
         }
     });
 
-    // S2.6a: the display stays awake while a session runs, and links reach
-    // the core from the command line, the Apple Event and a second launch.
-    let sleep_guard = sleep::follow(runtime.handle(), events, logger.clone());
+    // S2.6a: the display stays awake while a session runs, a permission
+    // grant restarts the backend once capture is idle, and links reach the
+    // core from the command line, the Apple Event and a second launch.
+    let capture_state = capture::follow(runtime.handle(), events);
+    let sleep_guard = sleep::follow(runtime.handle(), capture_state.clone(), logger.clone());
+    let permissions = Permissions::install(
+        runtime.handle(),
+        supervisor.restarter(),
+        capture_state,
+        logger.clone(),
+    );
     let deep_links: links::Links = Arc::new(DeepLinks::new(client.clone(), logger.clone()));
     links::receive(&deep_links, &args.links, LinkSource::CommandLine);
 
@@ -217,6 +234,11 @@ fn main() -> Result<()> {
     let runtime_handle = runtime.handle().clone();
     let quit_after = args.quit_after;
     let quit_guard = sleep_guard.clone();
+    let quit_permissions = permissions.clone();
+    let focus_permissions = permissions.clone();
+    // The single-instance lock goes before a relaunch starts the new app.
+    let instance = Rc::new(RefCell::new(instance));
+    let quit_instance = instance.clone();
     let hotkey_logger = logger.clone();
     let handoff_links = deep_links.clone();
 
@@ -246,6 +268,8 @@ fn main() -> Result<()> {
             quit_keys.release_all();
             sleep::release(&quit_guard);
             stop_backend(&quit_supervisor, &runtime_handle);
+            quit_instance.borrow_mut().take();
+            quit_permissions.relaunch_if_requested();
             async {}
         })
         .detach();
@@ -275,6 +299,17 @@ fn main() -> Result<()> {
             }
         };
         cx.activate(true);
+
+        // The main window coming to the front re-checks a grant System
+        // Settings may have made meanwhile.
+        let _ = main_window.update(cx, |_, window, cx| {
+            cx.observe_window_activation(window, move |_, window, _| {
+                if window.is_window_active() {
+                    focus_permissions.recheck();
+                }
+            })
+            .detach();
+        });
 
         // Closing the last window quits, as Electron does on Windows and
         // Linux. (On macOS Electron keeps the app in the Dock; the menu bar
@@ -326,7 +361,8 @@ fn main() -> Result<()> {
     // `terminate:`), stop the backend if the quit hook didn't.
     sleep::release(&sleep_guard);
     stop_backend(&supervisor, runtime.handle());
-    drop(instance);
+    instance.borrow_mut().take();
+    permissions.relaunch_if_requested();
     Ok(())
 }
 
