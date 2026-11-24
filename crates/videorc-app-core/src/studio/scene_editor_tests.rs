@@ -193,3 +193,54 @@ fn a_banner_refusal_is_said_as_it_is() {
     );
     assert_eq!(banner_refusal("connection reset"), None);
 }
+
+/// `updateBanner`'s words: a name renames, a rect moves, anything else
+/// changes; a reorder moves the banner too (`reorderBanners`).
+#[test]
+fn a_banner_patch_says_rename_move_or_change() {
+    let patch = |value: Value| value.as_object().unwrap().clone();
+    assert_eq!(
+        banner_update_context(&patch(json!({"name": "Promo", "horizontal": {"x": 0}}))),
+        RENAME_THE_BANNER
+    );
+    assert_eq!(
+        banner_update_context(&patch(
+            json!({"vertical": {"x": 0, "y": 0, "w": 1, "h": 1}})
+        )),
+        MOVE_THE_BANNER
+    );
+    assert_eq!(
+        banner_update_context(&patch(json!({"opacity": 0.5, "horizontal": null}))),
+        CHANGE_THE_BANNER
+    );
+}
+
+/// `sceneVisibilityIdentity`: the edited source's own `visible` is left
+/// out, so its echo keeps the request; any other change retires it.
+#[test]
+fn the_visibility_identity_ignores_only_the_edited_sources_visible() {
+    let shown = scene(json!([
+        source("source:screen", "screen", 0.2, 0.0),
+        source("source:camera", "camera", 0.6, 0.0),
+    ]));
+    let mut hidden = shown.clone();
+    hidden.sources[1].visible = false;
+    assert_eq!(
+        scene_visibility_identity(Some(&shown), "source:camera"),
+        scene_visibility_identity(Some(&hidden), "source:camera")
+    );
+    assert_ne!(
+        scene_visibility_identity(Some(&shown), "source:screen"),
+        scene_visibility_identity(Some(&hidden), "source:screen")
+    );
+    let mut moved = shown.clone();
+    moved.sources[0].transform.x = 0.4;
+    assert_ne!(
+        scene_visibility_identity(Some(&shown), "source:camera"),
+        scene_visibility_identity(Some(&moved), "source:camera")
+    );
+    assert_eq!(
+        scene_visibility_identity(None, "source:camera"),
+        Value::Null
+    );
+}

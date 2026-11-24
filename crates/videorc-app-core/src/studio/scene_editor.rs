@@ -79,10 +79,27 @@ pub const CHANGE_THE_BANNER: UserErrorContext = UserErrorContext {
     action: "change",
     object: "the banner",
 };
-pub const REORDER_THE_BANNERS: UserErrorContext = UserErrorContext {
-    action: "reorder",
-    object: "the banners",
+pub const RENAME_THE_BANNER: UserErrorContext = UserErrorContext {
+    action: "rename",
+    object: "the banner",
 };
+
+/// `updateBanner`'s words: a patch with a name renames, one with a rect
+/// moves, any other changes the banner.
+pub fn banner_update_context(patch: &Map<String, Value>) -> UserErrorContext {
+    let truthy = |key: &str| {
+        patch
+            .get(key)
+            .is_some_and(|value| !value.is_null() && value != &Value::Bool(false))
+    };
+    if patch.contains_key("name") {
+        RENAME_THE_BANNER
+    } else if truthy("horizontal") || truthy("vertical") {
+        MOVE_THE_BANNER
+    } else {
+        CHANGE_THE_BANNER
+    }
+}
 const SCENE_EDIT_TOAST_ID: &str = "scene-edit";
 const BANNER_REFUSAL_TOAST_ID: &str = "banner-refusal";
 /// `commitSceneTransform`'s own sentences.
@@ -226,6 +243,48 @@ fn source_identity(scene: Option<&Scene>) -> Vec<(String, String, Option<String>
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// `sceneVisibilityIdentity`: the scene as JSON with the edited source's
+/// `visible` left out, so the request's own echo doesn't retire it but any
+/// other edit of the scene does.
+pub fn scene_visibility_identity(scene: Option<&Scene>, source_id: &str) -> Value {
+    let Some(mut value) = scene.and_then(|scene| serde_json::to_value(scene).ok()) else {
+        return Value::Null;
+    };
+    if let Some(Value::Array(sources)) = value.get_mut("sources") {
+        for source in sources {
+            if source.get("id").and_then(Value::as_str) == Some(source_id)
+                && let Value::Object(source) = source
+            {
+                source.remove("visible");
+            }
+        }
+    }
+    value
+}
+
+/// What a Show or Hide was checked against when its answer came
+/// (`setSceneSourceVisible`'s guards): the request, the layout intent, the
+/// scene without the source's `visible`, and the layout's transform intent.
+#[derive(Debug, Clone, PartialEq)]
+struct VisibilityIdentity {
+    request: u64,
+    intent: u64,
+    scene: Value,
+    layout_intent: Value,
+}
+
+impl VisibilityIdentity {
+    /// Read with the capture config synced.
+    fn of(inner: &Inner, source_id: &str) -> Self {
+        Self {
+            request: inner.scenes.switch.visibility_request,
+            intent: inner.scenes.switch.intent(),
+            scene: scene_visibility_identity(inner.sources.scene.as_ref(), source_id),
+            layout_intent: transform_layout_intent(&inner.capture.config["layout"]),
+        }
+    }
 }
 
 /// `transformLayoutIntent`: the layout without the committed boxes' echo.
@@ -402,6 +461,14 @@ impl<B: StudioBackend> Studio<B> {
         }
     }
 
+    /// Electron reports a failed Show or Hide only while it is still the
+    /// latest request under the same layout intent.
+    fn visibility_request_current(&self, before: &VisibilityIdentity) -> bool {
+        let inner = self.lock();
+        inner.scenes.switch.visibility_request == before.request
+            && inner.scenes.switch.intent() == before.intent
+    }
+
     fn report_scene_error(&self, failure: Failure<'_>) {
         if let Some(command) = toast_user_error(failure, CHANGE_THE_SCENE, SCENE_EDIT_TOAST_ID) {
             self.post(vec![command]);
@@ -516,8 +583,10 @@ impl<B: StudioBackend> Studio<B> {
             self.config
                 .logger
                 .warn(format!("[scenes] the scene edit wasn't applied: {message}"));
+            // `status.message ?? "Scene transform wasn't applied."`: the
+            // backend's reason is what the streamer reads.
             self.report_scene_error(Failure::Sentence {
-                text: NOT_APPLIED,
+                text: &message,
                 warning: false,
             });
             return None;
@@ -841,17 +910,26 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     /// `setSceneSourceVisible`: the backend shows or hides the source; the
-    /// layout's `sourceVisibility` and the working setup keep it.
+    /// layout's `sourceVisibility` and the working setup keep it. An answer
+    /// that lands after a newer Show or Hide, a layout intent, another edit
+    /// of the scene or a newer committed scene is dropped quietly; one that
+    /// doesn't show the request is reported, unless it was overtaken.
     pub async fn set_source_visible(&self, source_id: &str, visible: bool) -> bool {
-        let known = self
-            .lock()
-            .sources
-            .scene
-            .as_ref()
-            .is_some_and(|scene| scene.sources.iter().any(|source| source.id == source_id));
-        if !known {
-            return false;
-        }
+        let before = {
+            let mut guard = self.lock();
+            let inner = &mut *guard;
+            let known = inner
+                .sources
+                .scene
+                .as_ref()
+                .is_some_and(|scene| scene.sources.iter().any(|source| source.id == source_id));
+            if !known {
+                return false;
+            }
+            inner.capture.sync(inner.settings.get(keys::CAPTURE_CONFIG));
+            inner.scenes.switch.visibility_request += 1;
+            VisibilityIdentity::of(inner, source_id)
+        };
         let answer = self
             .backend
             .scene_request(
@@ -862,14 +940,30 @@ impl<B: StudioBackend> Studio<B> {
         let status = match answer {
             Ok(status) => status,
             Err(error) => {
-                self.report_scene_error(Failure::Rpc(&error));
+                if self.visibility_request_current(&before) {
+                    self.report_scene_error(Failure::Rpc(&error));
+                }
                 return false;
             }
         };
+        let revision = status
+            .get("sceneRevision")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        {
+            let mut guard = self.lock();
+            let inner = &mut *guard;
+            inner.capture.sync(inner.settings.get(keys::CAPTURE_CONFIG));
+            let now = VisibilityIdentity::of(inner, source_id);
+            if now != before || inner.scenes.switch.committed_revision() > revision {
+                return false;
+            }
+        }
         let applied = status.get("applied").and_then(Value::as_bool) == Some(true);
         let scene = serde_json::from_value::<Scene>(status["scene"].clone()).ok();
         let Some(scene) = scene.filter(|scene| {
             applied
+                && scene_visibility_identity(Some(scene), source_id) == before.scene
                 && scene
                     .sources
                     .iter()
@@ -1013,22 +1107,24 @@ impl<B: StudioBackend> Studio<B> {
             .await
     }
 
-    /// `reorderBanners`: the drawing order (later is on top).
+    /// `reorderBanners`: the drawing order (later is on top). Electron says
+    /// it as moving the banner.
     pub async fn reorder_banners(&self, ids: Vec<String>) -> bool {
         self.banner_call(
             BANNERS_REORDER_METHOD,
             json!({ "ids": ids }),
-            REORDER_THE_BANNERS,
+            MOVE_THE_BANNER,
         )
         .await
     }
 
     /// `updateBanner` with the inspector's own fields (opacity, the two
-    /// switches, the timer, a snapped rect).
+    /// switches, the timer, a snapped rect, the name).
     pub async fn patch_banner(&self, id: &str, patch: Map<String, Value>) -> bool {
+        let context = banner_update_context(&patch);
         let mut params = Value::Object(patch);
         params["id"] = json!(id);
-        self.banner_call(BANNERS_UPDATE_METHOD, params, CHANGE_THE_BANNER)
+        self.banner_call(BANNERS_UPDATE_METHOD, params, context)
             .await
     }
 

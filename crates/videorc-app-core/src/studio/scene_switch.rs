@@ -394,6 +394,9 @@ pub(super) struct SwitchCore {
     /// S1.6b part 4b: the Freeform arrangements presets replaced, for the
     /// app's lifetime (`freeform-memory.ts`' window memory, plan 174 C-4).
     pub(super) freeform_memory: super::scene_editor::FreeformMemory,
+    /// `sceneVisibilityRequestIdRef`: the latest Show or Hide, so an older
+    /// answer never lands over a newer one.
+    pub(super) visibility_request: u64,
 }
 
 impl SwitchCore {
@@ -402,9 +405,12 @@ impl SwitchCore {
         self.intent_id
     }
 
-    /// `workingOriginRef`.
-    pub(super) fn origin(&self) -> Origin {
-        self.origin
+    /// `nativePreviewCommittedSceneRef.sceneRevision`: the newest committed
+    /// layout transaction's revision (0 before any).
+    pub(super) fn committed_revision(&self) -> u64 {
+        self.last_commit
+            .as_ref()
+            .map_or(0, |commit| commit.revision)
     }
 
     /// The working setup's app, background and origin at launch
