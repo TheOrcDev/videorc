@@ -53,3 +53,11 @@ pub use tabs::{Tabs, TabsVariant};
 pub use theme::{Appearance, FONT, IncreaseContrast, ReduceMotion, TypeScale, faded_over, hsla};
 pub use toast::{ToastData, ToastKind, Toaster, toast_card};
 pub use tooltip::{tooltip, tooltip_with_shortcut};
+
+/// Install the kit's keyboard, focus and overlay behaviour once, before
+/// opening a window. This is the entrypoint from videorc-ui's kit lib.rs;
+/// the registry sync owns the modules, while this file wires the crate.
+pub fn init(cx: &mut gpui::App) {
+    gpui_base::LayoutDirection::Ltr.set_global(cx);
+    gpui_base::init(cx);
+}

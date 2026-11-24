@@ -179,7 +179,14 @@ impl SettingsScreen {
                                 | BackendEvent::EventsLagged(_)
                                 | BackendEvent::ClientLagged { .. },
                             )
-                            | Err(_) => this.refresh(cx),
+                            | Err(_) => {
+                                this.revision += 1;
+                                this.remote = None;
+                                this.phone = None;
+                                this.agents = None;
+                                this.activity = None;
+                                this.refresh(cx);
+                            }
                             _ => {}
                         }
                         cx.notify();

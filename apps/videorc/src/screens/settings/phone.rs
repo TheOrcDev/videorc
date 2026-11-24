@@ -17,7 +17,8 @@ impl SettingsScreen {
         cx: &mut Context<Self>,
     ) {
         let input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx);
+            let mut input = InputState::new(window, cx)
+                .validate(|value, _| value.chars().count() <= PHONE_NAME_MAX_CHARS);
             input.set_value(phone.name.clone(), window, cx);
             input
         });
