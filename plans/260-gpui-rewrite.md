@@ -1040,6 +1040,14 @@ land, the switch `VIDEORC_BACKEND_ROOM` stays a dev switch):
   dependency): the guest mix as the far end, every room microphone frame
   (own tap or session tap) through it before it is published. Without it a
   host on speakers echoes the guests back; today's room has the browser's.
+- Every live guest page sends media-v2 receipts. The backend's room grants
+  a participant nothing until its receipt is current for the session it is
+  in (review option D, #1895), so a page that never sends one gets no host
+  media. Checked 2026-11-24 on web main `f084d2ae`: the guest page
+  (`components/guest/use-guest-connection.ts`) sends a v2 capability on
+  connect and with every 10 s heartbeat. Before the switch, confirm again on
+  the web's main and that no older guest page can still be served (a
+  deploy's cached chunk).
 
 ### Phase 2: the shell, on all three platforms
 
