@@ -12,13 +12,16 @@
 //!   call) and handed to the UI thread as the same `TextureFrame` the macOS
 //!   texture route binds to Slint's image; the UI's bind answers;
 //! - the Linux presenter (S4.2c, `crate::linux`): the leased slot's index
-//!   goes to the presenter thread, which attaches the slot's `wl_buffer` (or
-//!   puts the MIT-SHM segment) and answers once the server has released it;
-//!   the lease is held until then, so the writer never touches a slot the
-//!   compositor reads.
+//!   goes to the presenter thread, which copies the slot into a buffer of
+//!   its own (Wayland) or puts it from the MIT-SHM segment (X11) and answers
+//!   once the ring's slot is no longer read: after the copy, or after the X
+//!   server's completion. The lease is held until that answer, with no
+//!   deadline, so the writer never touches a slot the display server reads.
 //!
-//! Either way the frame counts as presented in the feed's telemetry, which
-//! the first-frame and presenting contracts read unchanged.
+//! Either way a frame that was shown counts as presented in the feed's
+//! telemetry, which the first-frame and presenting contracts read
+//! unchanged; a frame the hidden or unplaced presenter only acknowledged
+//! does not.
 //!
 //! A retired ring (the backend made a new one for a new frame size, or went
 //! away) sends `CpuRequest::Reopen` to the session, which asks the backend
@@ -40,8 +43,9 @@ use crate::feed::{Telemetry, TextureFrame, TextureSink};
 const FRAME_WAIT: Duration = Duration::from_millis(250);
 /// How long the UI may take to bind a frame (the macOS route's deadline).
 const BIND_DEADLINE: Duration = Duration::from_millis(250);
-/// How long the presenter may hold a slot before the lease goes back anyway
-/// (its own release wait, plus the hop).
+/// How long the presenter should take to answer (its buffer wait, plus the
+/// hop). A late answer is waited for all the same: only the answer says the
+/// slot is no longer read.
 #[cfg(target_os = "linux")]
 const PRESENT_DEADLINE: Duration = Duration::from_millis(400);
 /// Textures in rotation: the one bound, the one being drawn, one to write.
@@ -51,6 +55,16 @@ const TEXTURE_POOL: usize = 3;
 const REOPEN_SPACING: Duration = Duration::from_millis(100);
 /// With no sink on, the thread looks at its orders this often.
 const NO_SINK_WAIT: Duration = Duration::from_millis(50);
+
+/// What became of a frame handed to the Linux presenter.
+#[cfg(target_os = "linux")]
+enum NativeAnswer {
+    Report(crate::linux::PresentReport),
+    /// The presenter's thread ended without answering.
+    Gone,
+    /// The source stopped while the presenter still had the frame.
+    Stopped,
+}
 
 /// What the thread asks the session for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -531,9 +545,9 @@ impl Reader {
             }
             #[cfg(target_os = "linux")]
             if let Some(native) = native {
-                match native.recv_timeout(PRESENT_DEADLINE) {
-                    Ok(report) => match (report.committed_at, report.error) {
-                        (Some(at), None) => {
+                match self.await_native(&native, leased_id) {
+                    NativeAnswer::Report(report) => match (report.committed_at, report.error) {
+                        (Some(at), None) if report.shown => {
                             shown = true;
                             commit_at = commit_at.or(Some(at));
                             if let Ok(mut t) = self.telemetry.lock() {
@@ -542,6 +556,10 @@ impl Reader {
                                     report.released.then(|| at.elapsed().as_secs_f64() * 1000.0);
                             }
                         }
+                        // Hidden or unplaced: acknowledged, not drawn.
+                        // Neither a present nor a drop; a frame the texture
+                        // route bound still counts.
+                        (Some(_), None) => {}
                         (_, error) => {
                             if let Ok(mut t) = self.telemetry.lock() {
                                 t.dropped += 1;
@@ -551,19 +569,26 @@ impl Reader {
                             }
                         }
                     },
-                    Err(_) => {
+                    NativeAnswer::Gone => {
                         if let Ok(mut t) = self.telemetry.lock() {
                             t.dropped += 1;
                             t.last_error = Some(format!(
-                                "the presenter did not answer for frame {leased_id} within {PRESENT_DEADLINE:?}"
+                                "the presenter ended before it answered for frame {leased_id}"
                             ));
                         }
                     }
+                    NativeAnswer::Stopped => {
+                        // The display server may still read the slot: the
+                        // lease stays in the ring's header (the writer keeps
+                        // off that slot) instead of going back with the
+                        // guard. Only the stop gets here.
+                        std::mem::forget(leased);
+                        return;
+                    }
                 }
             }
-            // The upload's staging copy is done and the server has released
-            // the slot (or its wait ran out): the slot goes back to the
-            // writer.
+            // The upload's staging copy is done and the presenter no longer
+            // reads the slot: it goes back to the writer.
             drop(leased);
             if shown && let Ok(mut t) = self.telemetry.lock() {
                 let age_ms = videorc_preview_ring::now_micros().saturating_sub(captured_at_micros)
@@ -582,6 +607,40 @@ impl Reader {
                 t.cpu_last_source_sequence = Some(source_sequence);
             }
             last_id = leased_id;
+        }
+    }
+
+    /// The presenter's answer for one frame, however late: only the answer
+    /// (or the presenter's thread ending, which takes its child down) says
+    /// the slot is no longer read. The stop ends the wait.
+    #[cfg(target_os = "linux")]
+    fn await_native(
+        &self,
+        native: &std::sync::mpsc::Receiver<crate::linux::PresentReport>,
+        frame_id: u64,
+    ) -> NativeAnswer {
+        let mut wait = PRESENT_DEADLINE;
+        let mut late = false;
+        loop {
+            match native.recv_timeout(wait) {
+                Ok(report) => return NativeAnswer::Report(report),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return NativeAnswer::Gone,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if self.stopped() {
+                        return NativeAnswer::Stopped;
+                    }
+                    if !late {
+                        late = true;
+                        self.logger.log(
+                            Level::Warn,
+                            &format!(
+                                "[preview] the presenter has not answered for frame {frame_id} within {PRESENT_DEADLINE:?}; the slot stays leased until it does"
+                            ),
+                        );
+                    }
+                    wait = FRAME_WAIT;
+                }
+            }
         }
     }
 
