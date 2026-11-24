@@ -9,6 +9,7 @@ use videorc_app_core::nav::{self, PageId, ZONES};
 use videorc_app_core::{BackendState, ConnectionState, Tone};
 
 use super::bridge::Mirror;
+use super::session::SessionPanel;
 use crate::preview::Preview;
 use videorc_preview::lifecycle::WindowMode;
 
@@ -62,6 +63,8 @@ pub struct Shell {
     page: PageId,
     backend: Entity<Mirror<StatusLine>>,
     connection: Entity<Mirror<String>>,
+    /// S2.4: Record, the clock, Stop and Go Live, on the Studio page.
+    session: Entity<SessionPanel>,
     /// The preview (plan 260 S2.3a, L1): its slot is the Studio page's.
     preview: Entity<Preview>,
 }
@@ -70,6 +73,7 @@ impl Shell {
     pub fn new(
         backend: Entity<Mirror<StatusLine>>,
         connection: Entity<Mirror<String>>,
+        session: Entity<SessionPanel>,
         preview: Entity<Preview>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -82,6 +86,7 @@ impl Shell {
             page: PageId::Studio,
             backend,
             connection,
+            session,
             preview,
         }
     }
@@ -102,9 +107,10 @@ impl Shell {
         }
     }
 
-    /// The Studio page (S2.3a's part of it): the preview's slot, and the
-    /// button that moves the Preview into its own window and back
-    /// (`preview-stage.tsx`'s "Pop out" and "Show here").
+    /// The Studio page (S2.3a's and S2.4's parts of it): the preview's slot,
+    /// the button that moves the Preview into its own window and back
+    /// (`preview-stage.tsx`'s "Pop out" and "Show here"), and the session
+    /// controls.
     fn studio_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (floating, can_float) = {
             let preview = self.preview.read(cx);
@@ -145,6 +151,8 @@ impl Shell {
                     .flex_1()
                     .child(Preview::docked_slot(&self.preview, cx)),
             )
+            // S2.4's session controls, under the preview.
+            .child(self.session.clone())
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {

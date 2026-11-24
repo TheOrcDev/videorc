@@ -96,6 +96,7 @@ mod recordings_folder_actions;
 pub mod scene_editor;
 pub mod scene_switch;
 pub mod scenes;
+pub mod scheduled;
 pub mod session;
 pub mod settings;
 pub mod source_actions;
@@ -122,6 +123,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use futures_util::FutureExt;
+use futures_util::future::BoxFuture;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, broadcast, watch};
@@ -204,7 +207,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 25] = [
+pub const STUDIO_EVENTS: [&str; 26] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -240,6 +243,8 @@ pub const STUDIO_EVENTS: [&str; 25] = [
     // S1.6c: plan 226's chat commands (`chat_commands_store`).
     crate::livestream::chat_commands::CHANGED_EVENT,
     crate::livestream::chat_commands::REPLY_FAILED_EVENT,
+    // S1.6c: Upcoming (`scheduled`).
+    scheduled::CHANGED_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -864,12 +869,17 @@ pub struct Studio<B: StudioBackend> {
     live_audio_kick: Notify,
     /// S1.6a part 6b: the app's recordings folder capability issuer.
     output_authorizer: Mutex<Option<OutputAuthorizer>>,
+    /// S1.6c: the bootstrap read Upcoming; the driver asks the platforms
+    /// beside the event receiver.
+    provider_refresh: Notify,
     /// S1.6c: the platform accounts, apart from the snapshot (`platforms`).
     platforms_tx: watch::Sender<crate::livestream::PlatformsState>,
     /// S1.6c: Stream details and Discord, apart from the snapshot.
     details_tx: watch::Sender<crate::livestream::DetailsState>,
     /// S1.6c: the chat commands, apart from the snapshot.
     chat_commands_tx: watch::Sender<chat_commands_store::ChatCommandsStore>,
+    /// S1.6c: Upcoming, apart from the snapshot.
+    scheduled_tx: watch::Sender<scheduled::ScheduledState>,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -929,6 +939,7 @@ impl<B: StudioBackend> Studio<B> {
         let (details_tx, _) = watch::channel(crate::livestream::DetailsState::default());
         let (chat_commands_tx, _) =
             watch::channel(chat_commands_store::ChatCommandsStore::default());
+        let (scheduled_tx, _) = watch::channel(scheduled::ScheduledState::default());
         Self {
             backend,
             config,
@@ -949,9 +960,11 @@ impl<B: StudioBackend> Studio<B> {
             live_read_done: Notify::new(),
             live_audio_kick: Notify::new(),
             output_authorizer: Mutex::new(None),
+            provider_refresh: Notify::new(),
             platforms_tx,
             details_tx,
             chat_commands_tx,
+            scheduled_tx,
         }
     }
 
@@ -1006,6 +1019,10 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     async fn drive_events(self: &Arc<Self>, mut events: broadcast::Receiver<BackendEvent>) {
+        // Upcoming's provider check runs here beside the receiver, never
+        // inside an event's handling; a reconnect's check replaces (drops)
+        // the last one.
+        let mut providers: Option<BoxFuture<'_, ()>> = None;
         loop {
             let (due, live_due, low_light_due, clips_due) = {
                 let inner = self.lock();
@@ -1044,6 +1061,12 @@ impl<B: StudioBackend> Studio<B> {
                     None => std::future::pending().await,
                 }
             };
+            let asking = async {
+                match providers.as_mut() {
+                    Some(asking) => asking.await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 received = events.recv() => match received {
                     Ok(event) => self.handle_event(event).await,
@@ -1053,6 +1076,11 @@ impl<B: StudioBackend> Studio<B> {
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
+                () = asking => providers = None,
+                () = self.provider_refresh.notified() => {
+                    let generation = self.lock().bootstrap_generation;
+                    providers = Some(self.refresh_upcoming_providers(generation).boxed());
+                }
                 () = retry => self.retry_settings().await,
                 () = live_read => self.live_sources_due().await,
                 () = low_light_read => self.camera_low_light_due().await,
@@ -1228,6 +1256,7 @@ impl<B: StudioBackend> Studio<B> {
                 if self.handle_chat_commands_event(&event, &payload)
                     || self.handle_platforms_event(&event, &payload).await
                     || self.handle_details_event(&event, &payload).await
+                    || self.handle_scheduled_event(&event).await
                 {
                     return;
                 }
@@ -1510,11 +1539,12 @@ impl<B: StudioBackend> Studio<B> {
         self.read_captions_status(generation).await;
         // S1.6a part 6c: the Clips ring's state, and the launch's arming.
         self.read_replay_status(generation).await;
-        // S1.6c: the platform accounts, Stream details and Discord, and the
-        // chat commands.
+        // S1.6c: the platform accounts, Stream details and Discord, the chat
+        // commands, and Upcoming.
         self.read_platforms().await;
         self.read_details().await;
         self.read_chat_commands().await;
+        self.read_scheduled().await;
         // The other areas' first reads (the agents line, takeovers and the
         // soundboard, chat, Sidekick, destinations, chat commands, scheduled
         // streams, the performance check, Hide screen, captions, the working

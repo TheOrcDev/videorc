@@ -11,6 +11,10 @@
 //! is (`[videorc-app] backend: …`, `[videorc-app] backend.ready …`) so a
 //! script reads what the window says.
 //!
+//! Plan 260 S2.4 (lane L7): the Studio driver runs on the client, and the
+//! Studio page records, shows the clock, stops, and goes live to the saved
+//! destinations through it.
+//!
 //! ```text
 //! cargo run -p videorc-app -- --profile /tmp/videorc-profile
 //! ```
@@ -36,17 +40,17 @@ use anyhow::{Context as _, Result, bail};
 use gpui::{
     App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
 };
-use videorc_app_core::client::events::names;
 use videorc_app_core::desktop::deep_link::{DeepLinks, LinkSource};
 use videorc_app_core::desktop::global_shortcuts::GlobalShortcutsConfig;
 use videorc_app_core::desktop::single_instance::{
     self, Acquired, HANDOFF_WAIT, RELAUNCH_LOCK_WAIT,
 };
 use videorc_app_core::nav::{self, PageId};
+use videorc_app_core::studio::STUDIO_EVENTS;
 use videorc_app_core::supervisor::STOP_GRACE;
 use videorc_app_core::{
     BackendClient, BackendLaunch, ClientConfig, ConnectionState, EventFilter, Isolation, Level,
-    LogFileLimits, Logger, RotatingLogFile, Supervisor, SupervisorConfig,
+    LogFileLimits, Logger, RotatingLogFile, Studio, StudioConfig, Supervisor, SupervisorConfig,
 };
 
 use app::args;
@@ -55,6 +59,7 @@ use app::exit::ExitGuard;
 use app::frames::MainFrame;
 use app::hide::HideFromStream;
 use app::permissions::Permissions;
+use app::session::{SessionControls, SessionPanel};
 use app::shell::{Shell, StatusLine, connection_text};
 use app::{camera, capture, hotkeys, links, menus, sleep};
 
@@ -177,23 +182,45 @@ fn main() -> Result<()> {
     });
 
     // The typed client on the backend's socket. Its event filter grows as
-    // the screens land: `backend.ready` always arrives; the sleep guard, the
-    // permission restarts and the quit while on air read `recording.status`;
-    // the quit also reads the talk show room's `cloud.state`; Videorc
-    // Camera's extension follows `virtualCamera.changed`.
+    // the screens land: `backend.ready` always arrives; S2.4 reads the
+    // Studio's events; the sleep guard, the permission restarts and the quit
+    // while on air read `recording.status` (one of them); the quit also reads
+    // the talk show room's `cloud.state`; Videorc Camera's extension follows
+    // `virtualCamera.changed`.
     let (client, events) = BackendClient::start(
         supervisor.state(),
         ClientConfig {
-            filter: EventFilter::include([
-                names::RECORDING_STATUS,
-                camera::VIRTUAL_CAMERA_CHANGED,
-                app::exit::CLOUD_STATE,
-            ]),
+            filter: EventFilter::include(
+                STUDIO_EVENTS
+                    .into_iter()
+                    .chain([camera::VIRTUAL_CAMERA_CHANGED, app::exit::CLOUD_STATE]),
+            ),
             logger: logger.clone(),
             ..ClientConfig::default()
         },
     );
     let client = Arc::new(client);
+    // The capture state's own receiver, taken before the runtime runs
+    // anything, so the Studio keeps the first one (it must see
+    // `backend.ready`).
+    let capture_events = client.subscribe();
+
+    // S2.4: the Studio driver on the client (the session, the settings, the
+    // sources), fed by the client's events on the core's runtime. The views
+    // read its snapshot through the store bridge and call it there.
+    let studio = Arc::new(Studio::new(
+        client.clone(),
+        StudioConfig {
+            logger: logger.clone(),
+            settings_journal: Some(paths.ui_settings_journal_file()),
+            app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            // The app picks a first device for a slot nobody chose, as
+            // Electron does (the smoke command server, S2's, keeps it off).
+            withhold_device_defaults: false,
+            ..StudioConfig::default()
+        },
+    ));
+    runtime.spawn(studio.clone().drive(events));
 
     // What the window says, on stderr too, for scripts and the build pass.
     let mut backend_lines = supervisor.state();
@@ -225,7 +252,7 @@ fn main() -> Result<()> {
     // S2.6a: the display stays awake while a session runs, a permission
     // grant restarts the backend once capture is idle, and links reach the
     // core from the command line, the Apple Event and a second launch.
-    let capture_state = capture::follow(runtime.handle(), events);
+    let capture_state = capture::follow(runtime.handle(), capture_events);
     let sleep_guard = sleep::follow(runtime.handle(), capture_state.clone(), logger.clone());
     let permissions = Permissions::install(
         runtime.handle(),
@@ -252,10 +279,12 @@ fn main() -> Result<()> {
     let preview_slot: Rc<RefCell<Option<gpui::Entity<preview::Preview>>>> =
         Rc::new(RefCell::new(None));
     let quit_preview = preview_slot.clone();
+    let studio_state = studio.watch();
     // Taken by the quit: the shutdown handshake runs once.
     let supervisor = Rc::new(RefCell::new(Some(supervisor)));
     let quit_supervisor = supervisor.clone();
     let runtime_handle = runtime.handle().clone();
+    let core_handle = runtime.handle().clone();
     let quit_after = args.quit_after;
     // The main window's frame, saved in the data directory.
     let main_frame = MainFrame::new(&paths.user_data_dir, logger.clone());
@@ -315,6 +344,9 @@ fn main() -> Result<()> {
 
         let status = bridge::mirror(cx, backend_state.clone(), StatusLine::of);
         let connection = bridge::mirror(cx, connection_state.clone(), connection_text);
+        let controls = bridge::mirror(cx, studio_state.clone(), SessionControls::of);
+        let session = cx
+            .new(|cx| SessionPanel::new(studio.clone(), core_handle.clone(), controls.clone(), cx));
         let window_bounds = main_frame
             .restored(cx)
             .unwrap_or_else(|| Bounds::centered(None, size(px(1280.), px(800.)), cx));
@@ -340,7 +372,15 @@ fn main() -> Result<()> {
                     cx,
                 );
                 *preview_slot.borrow_mut() = Some(preview.clone());
-                cx.new(|cx| Shell::new(status.clone(), connection.clone(), preview, cx))
+                cx.new(|cx| {
+                    Shell::new(
+                        status.clone(),
+                        connection.clone(),
+                        session.clone(),
+                        preview,
+                        cx,
+                    )
+                })
             },
         );
         let main_window = match opened {
