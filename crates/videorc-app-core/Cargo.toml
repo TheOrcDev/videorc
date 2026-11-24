@@ -13,6 +13,11 @@ tokio-tungstenite = "0.29"
 # The wire types (plan 260 S1.1).
 videorc-protocol = { workspace = true }
 anyhow = "1.0"
+# The session clock parses the backend's RFC 3339 `startedAt`, and Health
+# formats its timestamps. Already in the tree through videorc-protocol.
+chrono = "0.4"
+# The toast guard's patterns (`guardToastText`). Already in the tree.
+regex = "1.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # The workspace key in a development profile path (`paths::workspace_key`).

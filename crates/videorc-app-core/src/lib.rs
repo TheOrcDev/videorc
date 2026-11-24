@@ -14,12 +14,14 @@ mod http;
 pub mod interruption;
 pub mod ledger;
 pub mod log;
+pub mod nav;
 pub mod notices;
 pub mod paths;
 pub mod process;
 pub mod restart;
 pub mod studio;
 pub mod supervisor;
+pub mod user_error;
 
 pub use client::{BackendClient, BackendEvent, ClientConfig, ConnectionState, EventFilter};
 pub use log::{Level, LogFileLimits, Logger, RotatingLogFile};
