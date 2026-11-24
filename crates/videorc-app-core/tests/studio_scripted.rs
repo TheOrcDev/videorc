@@ -4036,3 +4036,74 @@ async fn a_save_refusal_goes_under_its_field_and_a_saved_state_is_taken() {
     let state = studio.chat_commands_now().state.expect("saved");
     assert_eq!(state.commands.len(), 1);
 }
+
+// --- S1.6c: Upcoming -----------------------------------------------------
+
+#[test]
+fn a_focus_asks_the_platforms_again_after_five_minutes() {
+    use videorc_app_core::studio::scheduled::focus_refreshes_providers;
+    assert!(focus_refreshes_providers(0, 300_000));
+    assert!(!focus_refreshes_providers(1, 300_000));
+    assert!(focus_refreshes_providers(1_000, 301_000));
+}
+
+#[tokio::test]
+async fn the_bootstrap_reads_upcoming_and_a_failed_read_says_why_with_a_period() {
+    let backend = Scripted::new();
+    answer_livestream(
+        &backend,
+        "scheduledStreams.list",
+        json!([{ "id": "e1", "lifecycle": "scheduled" }]),
+    );
+    answer_livestream(
+        &backend,
+        "scheduledStreams.capabilities",
+        json!({ "available": false }),
+    );
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let state = studio.scheduled_now();
+    assert!(state.loaded);
+    assert_eq!(state.events.len(), 1);
+    assert_eq!(state.error, None);
+    assert_eq!(state.last_checked_at, None);
+
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let error = studio.scheduled_now().error.expect("a load error");
+    assert!(
+        error.starts_with("Couldn't load upcoming streams. "),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_change_names_its_verb_drops_the_code_and_clears_pending() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+
+    let offline = studio
+        .scheduled_mutate("cancel", json!({ "eventId": "e1" }))
+        .await
+        .expect_err("offline");
+    assert_eq!(offline.message, "Videorc is reconnecting.");
+    assert_eq!(studio.scheduled_now().error, None);
+
+    studio.handle_event(ready()).await;
+    answer_livestream(
+        &backend,
+        "scheduledStreams.cancel",
+        json!({ "state": "failed", "error": { "code": "youtube-quota", "message": "YouTube said no." } }),
+    );
+    let error = studio
+        .scheduled_mutate("cancel", json!({ "eventId": "e1" }))
+        .await
+        .expect_err("refused");
+    assert_eq!(error.code, "scheduled-operation");
+    assert_eq!(error.message, "YouTube said no.");
+    let state = studio.scheduled_now();
+    assert!(state.pending.is_empty());
+    let line = state.error.expect("the line");
+    assert!(line.starts_with("Couldn't cancel the event. "), "{line}");
+}

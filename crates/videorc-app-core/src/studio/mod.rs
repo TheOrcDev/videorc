@@ -96,6 +96,7 @@ mod recordings_folder_actions;
 pub mod scene_editor;
 pub mod scene_switch;
 pub mod scenes;
+pub mod scheduled;
 pub mod session;
 pub mod settings;
 pub mod source_actions;
@@ -204,7 +205,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 25] = [
+pub const STUDIO_EVENTS: [&str; 26] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -240,6 +241,8 @@ pub const STUDIO_EVENTS: [&str; 25] = [
     // S1.6c: plan 226's chat commands (`chat_commands_store`).
     crate::livestream::chat_commands::CHANGED_EVENT,
     crate::livestream::chat_commands::REPLY_FAILED_EVENT,
+    // S1.6c: Upcoming (`scheduled`).
+    scheduled::CHANGED_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -870,6 +873,8 @@ pub struct Studio<B: StudioBackend> {
     details_tx: watch::Sender<crate::livestream::DetailsState>,
     /// S1.6c: the chat commands, apart from the snapshot.
     chat_commands_tx: watch::Sender<chat_commands_store::ChatCommandsStore>,
+    /// S1.6c: Upcoming, apart from the snapshot.
+    scheduled_tx: watch::Sender<scheduled::ScheduledState>,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -929,6 +934,7 @@ impl<B: StudioBackend> Studio<B> {
         let (details_tx, _) = watch::channel(crate::livestream::DetailsState::default());
         let (chat_commands_tx, _) =
             watch::channel(chat_commands_store::ChatCommandsStore::default());
+        let (scheduled_tx, _) = watch::channel(scheduled::ScheduledState::default());
         Self {
             backend,
             config,
@@ -952,6 +958,7 @@ impl<B: StudioBackend> Studio<B> {
             platforms_tx,
             details_tx,
             chat_commands_tx,
+            scheduled_tx,
         }
     }
 
@@ -1228,6 +1235,7 @@ impl<B: StudioBackend> Studio<B> {
                 if self.handle_chat_commands_event(&event, &payload)
                     || self.handle_platforms_event(&event, &payload).await
                     || self.handle_details_event(&event, &payload).await
+                    || self.handle_scheduled_event(&event).await
                 {
                     return;
                 }
@@ -1510,11 +1518,12 @@ impl<B: StudioBackend> Studio<B> {
         self.read_captions_status(generation).await;
         // S1.6a part 6c: the Clips ring's state, and the launch's arming.
         self.read_replay_status(generation).await;
-        // S1.6c: the platform accounts, Stream details and Discord, and the
-        // chat commands.
+        // S1.6c: the platform accounts, Stream details and Discord, the chat
+        // commands, and Upcoming.
         self.read_platforms().await;
         self.read_details().await;
         self.read_chat_commands().await;
+        self.read_scheduled().await;
         // The other areas' first reads (the agents line, takeovers and the
         // soundboard, chat, Sidekick, destinations, chat commands, scheduled
         // streams, the performance check, Hide screen, captions, the working
