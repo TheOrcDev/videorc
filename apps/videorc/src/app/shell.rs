@@ -22,6 +22,7 @@ use videorc_kit::{
 
 use super::bridge::Mirror;
 use crate::preview::Preview;
+use crate::screens::destinations::DestinationsPanel;
 use crate::screens::output::OutputPanel;
 use crate::screens::sources::SourcesPanel;
 use crate::screens::studio::{StudioPage, transport::OpenPage};
@@ -77,6 +78,8 @@ pub struct Shell {
     sources: Entity<SourcesPanel>,
     /// Phase 3: Output ⌘5.
     output: Entity<OutputPanel>,
+    /// Phase 3: Destinations ⌘6.
+    destinations: Entity<DestinationsPanel>,
     settings: Entity<SettingsScreen>,
     health: Entity<crate::screens::health::HealthScreen>,
     palette: Entity<CommandPalette>,
@@ -92,6 +95,7 @@ impl Shell {
         preview: Entity<Preview>,
         sources: Entity<SourcesPanel>,
         output: Entity<OutputPanel>,
+        destinations: Entity<DestinationsPanel>,
         settings: Entity<SettingsScreen>,
         health: Entity<crate::screens::health::HealthScreen>,
         palette: Entity<CommandPalette>,
@@ -129,6 +133,7 @@ impl Shell {
         cx.observe(&preview, |_, _, cx| cx.notify()).detach();
         cx.observe(&sources, |_, _, cx| cx.notify()).detach();
         cx.observe(&output, |_, _, cx| cx.notify()).detach();
+        cx.observe(&destinations, |_, _, cx| cx.notify()).detach();
         // Both routes use the same lifecycle, title and focus updates.
         cx.subscribe_in(&studio, window, |this, _, open: &OpenPage, window, cx| {
             this.open_page(open.0, window, cx);
@@ -168,6 +173,7 @@ impl Shell {
             preview,
             sources,
             output,
+            destinations,
             settings,
             health,
             palette,
@@ -299,6 +305,7 @@ impl Render for Shell {
         let page = self.page;
         let sources = self.sources.clone();
         let output = self.output.clone();
+        let destinations = self.destinations.clone();
         div()
             .size_full()
             .on_mouse_down(
@@ -359,6 +366,18 @@ impl Render for Shell {
                             .gap(px(8.))
                             .child(div().type_scale(text::SECTION).child(page.label()))
                             .child(output)
+                    } else if page == PageId::Live {
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .px(px(24.))
+                            .gap(px(8.))
+                            .child(div().type_scale(text::SECTION).child(page.label()))
+                            .child(destinations)
                     } else {
                         div()
                             .flex_1()
