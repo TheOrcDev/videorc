@@ -532,11 +532,19 @@ async fn refresh_content(state: &AppState, show_id: &str, graphics: &mut Graphic
                 return;
             }
             let content = answer.get("content").filter(|c| !c.is_null());
+            // S1.8c c5: the HTML banners' placements, for the room's sheet.
+            crate::room_html::set_placements(
+                content
+                    .filter(|_| enabled)
+                    .and_then(|content| content.get("html"))
+                    .cloned(),
+            );
             graphics.set(room_graphics_content(content, enabled));
         }
         Err(error) => {
             if graphics.content.is_some() {
                 tracing::warn!("The room's graphics could not be read: {error:#}");
+                crate::room_html::set_placements(None);
                 graphics.set(None);
                 graphics.error =
                     Some("Graphics assets unavailable. Nothing was published.".to_string());

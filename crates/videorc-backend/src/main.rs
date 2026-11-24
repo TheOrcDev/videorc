@@ -121,6 +121,8 @@ mod room_graphics;
 #[cfg(target_os = "macos")]
 mod room_host;
 #[cfg(target_os = "macos")]
+mod room_html;
+#[cfg(target_os = "macos")]
 mod room_media;
 #[cfg(target_os = "macos")]
 mod room_overlays;
@@ -6462,6 +6464,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.room.owner"
         | "cloud.room.routing.set"
         | "cloud.room.aux.set"
+        | "cloud.room.html.set"
         | "cloud.recordings.download"
         | "cloud.archive.stop"
         | "cloud.archive.cancel"
@@ -13734,6 +13737,26 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }
+        // Plan 260 S1.8c c5: whether the backend's room may publish the HTML
+        // layers' sheet (this computer controls the show, devices on).
+        "cloud.room.html.set" => {
+            let Some(enabled) = command
+                .params
+                .get("enabled")
+                .and_then(serde_json::Value::as_bool)
+            else {
+                return ServerResponse::error(command.id, "invalid-params", "Send enabled.");
+            };
+            #[cfg(target_os = "macos")]
+            {
+                if room_host::holds_seat() {
+                    room_html::set_enabled(enabled);
+                    return ServerResponse::ok(command.id, serde_json::json!({ "held": true }));
+                }
+            }
+            let _ = enabled;
+            ServerResponse::ok(command.id, serde_json::json!({ "held": false }))
         }
         // Plan 260 S1.8c: room sounds and the room's system audio, on the
         // backend room's auxiliary track.

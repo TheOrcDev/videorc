@@ -710,6 +710,8 @@ export interface BackendRpcMethodMap {
   'cloud.room.owner': BackendRpcDefinition<undefined, { backend: boolean }>
   'cloud.room.routing.set': BackendRpcDefinition<ProgramAudioSettings, { held: boolean }>
   'cloud.room.aux.set': BackendRpcDefinition<CloudRoomAuxSetParams, { held: boolean }>
+  /** Plan 260 S1.8c c5: this computer controls the show with its devices on. */
+  'cloud.room.html.set': BackendRpcDefinition<{ enabled: boolean }, { held: boolean }>
   'cloud.room.avatar.motion': BackendRpcDefinition<
     CloudRoomAvatarMotionParams,
     CloudRoomAvatarMotionResult
@@ -7094,6 +7096,11 @@ const cloudRoomMicrophoneSetParamsSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRoomMediaSetParams>
+// Plan 260 S1.8c c5: whether the backend's room may publish the HTML sheet.
+const cloudRoomHtmlSetParamsSchema = objectSchema(
+  { enabled: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<{ enabled: boolean }>
 // Plan 260 S1.8c c4d: room sounds and the room's system audio.
 const cloudRoomAuxSetParamsSchema = objectSchema(
   {
@@ -8144,6 +8151,10 @@ const runtimeContracts = {
   },
   'cloud.room.aux.set': {
     params: cloudRoomAuxSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.html.set': {
+    params: cloudRoomHtmlSetParamsSchema,
     result: cloudRoomPresentationSetResultSchema
   },
   'cloud.room.avatar.motion': {
