@@ -143,6 +143,11 @@ mod noise_cleanup;
 mod oauth;
 mod oauth_callback_page;
 mod overlay_layout;
+#[allow(
+    dead_code,
+    reason = "plan 260 S1.2a: switched on overlay by overlay in S1.2b to S1.2e"
+)]
+mod overlay_raster;
 mod panic_hook;
 mod performance_check;
 mod pipeline;

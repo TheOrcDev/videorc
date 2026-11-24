@@ -27,6 +27,13 @@ if-addrs = "0.15"
 # importer accepts PNG/JPG/WebP, so the backend must decode all three (pure-Rust
 # decoders; no native deps, Windows cross-check safe).
 image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg"] }
+# Plan 260 S1.2 (plan 220 S1.2a): the overlay rasteriser (`overlay_raster/`).
+# parley lays text out over fontique's system fonts (fallback, colour emoji),
+# swash rasterises the glyphs (outlines, sbix/CBDT bitmaps, COLR), tiny-skia
+# draws the shapes. Pure Rust, no system library at build time.
+parley = "0.11.1"
+swash = "0.2.10"
+tiny-skia = "0.12.0"
 libc = "0.2"
 rayon = "1"
 rnnoise = { package = "rnnoise-rs", git = "https://github.com/TheOrcDev/rnnoise-rs", rev = "c915940e94e2ec1ca07a1af22c769a33c3fb1ce6", default-features = false }
@@ -62,13 +69,16 @@ dispatch2 = "0.3.1"
 objc2 = { version = "0.6.4", features = ["exception"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSColor", "NSGraphics", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow", "objc2-quartz-core"] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession", "AVCaptureSessionPreset", "AVCaptureVideoDataOutput", "AVMediaFormat", "AVVideoSettings", "dispatch2", "objc2-core-media", "objc2-core-video"] }
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes", "CFDate", "CFNumber", "CFRunLoop", "CFUUID"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes", "CFDate", "CFNumber", "CFRunLoop", "CFString", "CFUUID"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGDirectDisplay", "CGDisplayConfiguration", "CGError", "CGWindow", "CGImage"] }
 # The device UID (`kAudioDevicePropertyDeviceUID`): what a saved microphone
 # is found by once CoreAudio hands it a new id (plan 254 S7).
 objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-audio-types", "AudioHardware"] }
 objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 # `CMSimpleQueue` and `CMSync`: Videorc Camera's sink queue and host-clock PTS (plan 214 B4).
+# Plan 260 S1.2: the overlay rasteriser asks CoreText for the system UI font's
+# per-script fallback, as Chromium does (`overlay_raster/text.rs`).
+objc2-core-text = { version = "0.3.2", default-features = false, features = ["std", "CTFont"] }
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMSimpleQueue", "CMSync", "CMTime", "objc2", "objc2-core-audio-types", "objc2-core-video"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVMetalTexture", "CVMetalTextureCache", "CVReturn", "objc2-metal", "objc2-io-surface"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSObject", "NSString", "NSValue", "NSNotification", "NSOperation", "block2"] }
@@ -81,6 +91,9 @@ objc2-screen-capture-kit = { version = "0.3.2", default-features = false, featur
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTCompressionProperties", "VTCompressionSession", "VTErrors", "VTSession", "block2", "objc2", "objc2-core-media", "objc2-core-video"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Plan 260 S1.2: fontique (through parley) loads fontconfig with dlopen, so the
+# overlay rasteriser links no system library.
+fontique = { version = "0.11.1", default-features = false, features = ["fontconfig-dlopen"] }
 # L4 portal screen capture (Plan 0006): org.freedesktop.portal.ScreenCast over
 # zbus, and the PipeWire stream the portal grants.
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
