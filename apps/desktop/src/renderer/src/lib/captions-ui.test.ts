@@ -8,38 +8,14 @@ import {
   captionOverlayKey,
   captionOverlayTargetPlan,
   captionSessionFloor,
-  CaptionCueRenderGuard,
   captionStripLines,
   captionsBarRunning,
   captionsStatusIsActive,
   decideCaptionsRuntimeIntent,
   decideOverlayPush,
   LatestWinsScheduler,
-  latestFinalCaptionText,
-  shouldCancelCaptionCueRender
+  latestFinalCaptionText
 } from './captions-ui'
-
-describe('CaptionCueRenderGuard', () => {
-  it('invalidates queued cue renders on supersession and authoritative clear', () => {
-    const guard = new CaptionCueRenderGuard()
-    const first = guard.begin()
-    expect(guard.isCurrent(first)).toBe(true)
-
-    const replacement = guard.begin()
-    expect(guard.isCurrent(first)).toBe(false)
-    expect(guard.isCurrent(replacement)).toBe(true)
-
-    guard.cancel()
-    expect(guard.isCurrent(replacement)).toBe(false)
-  })
-
-  it('purges on sign-out without cancelling normal final-copy boundaries', () => {
-    expect(shouldCancelCaptionCueRender('signed-out')).toBe(true)
-    expect(shouldCancelCaptionCueRender('capture-ended')).toBe(false)
-    expect(shouldCancelCaptionCueRender('blocked')).toBe(false)
-    expect(shouldCancelCaptionCueRender(undefined)).toBe(false)
-  })
-})
 
 const update = (seq: number, overrides: Partial<CaptionsUpdate> = {}): CaptionsUpdate => ({
   sessionClientId: 'captions-session-a',

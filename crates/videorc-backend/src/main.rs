@@ -6496,6 +6496,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.status"
         | "cohost.settings.get"
         | "cohost.buddy.status"
+        // Plan 260 S1.2e: pure drawings for the Captions and Sidekick pages.
+        | "captions.preview.render"
+        | "buddy.bubble.render"
         | "cohost.pet.list"
         | "cohost.pet.creation.status"
         | "cohost.avatar.draft.get"
@@ -12359,6 +12362,23 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 260 S1.2e: the Sidekick page's samples, drawn by the live
+        // bubble's painter; no state is read or changed.
+        "buddy.bubble.render" => {
+            match serde_json::from_value::<buddy_overlay::BuddyBubbleRenderParams>(command.params) {
+                Ok(params) => match buddy_overlay::render_buddy_bubble(params).await {
+                    Ok(png) => ServerResponse::ok(command.id, png),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "buddy-bubble-invalid",
+                        format!("{error:#}"),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         // Plan 260 S1.2d: the backend draws the bubble from the line that is
         // up; a `pngBase64` bubble (the previous release's path) is still
         // installed.
@@ -12717,6 +12737,25 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 260 S1.2e: the Captions page's preview, drawn by the captioned
+        // copy's cue-frame painter.
+        "captions.preview.render" => {
+            match serde_json::from_value::<captions::CaptionPreviewRenderParams>(command.params) {
+                Ok(params) => match captions::render_caption_preview(params).await {
+                    Ok(png) => ServerResponse::ok(command.id, png),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "captions-preview-invalid",
+                        format!("{error:#}"),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // The renderer's cue frames, the path before plan 260 S1.2e: taken for
+        // one release (the backend draws them itself now).
         "captions.cues.submit" => {
             let request_id = command
                 .params

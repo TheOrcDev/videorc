@@ -20,7 +20,11 @@
 //! and the platforms' own marks in `marks`), held to the renderer's PNGs
 //! like the caption; the switch of those overlays comes after. S1.2d switched
 //! the Sidekick bubble: `buddy.overlay.set` with the bubble's text and style
-//! draws it here for the target's canvas (`buddy_bubble`).
+//! draws it here for the target's canvas (`buddy_bubble`). S1.2e moved the
+//! captioned copy's cue frames here (`caption_frame`, no round trip to a UI),
+//! and the Captions page's preview and the Sidekick page's samples ask for
+//! theirs (`captions.preview.render`, `buddy.bubble.render`), PNGs from
+//! `encode_png`.
 //!
 //! The goldens (`tests/fixtures/overlay-raster/`) are the renderer's own PNGs
 //! (`node scripts/overlay-raster-goldens.mjs`); `golden_tests` holds the
@@ -41,7 +45,7 @@ mod text;
 #[cfg(test)]
 mod golden_tests;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tiny_skia::Pixmap;
 
 pub(crate) use buddy::BuddyBubbleState;
@@ -219,6 +223,61 @@ pub(crate) fn caption_frame(
         text_size,
         style_id,
     }
+}
+
+/// A drawn overlay as an 8-bit RGBA PNG: what the renderer's
+/// `canvasToBase64Png` sent, for the cue frames on disk and the pages'
+/// samples. The fast deflate: a cue frame is a mostly empty 4K canvas.
+pub(crate) fn encode_png(image: &OverlayImage) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context as _;
+    use image::ImageEncoder as _;
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut bytes,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::Adaptive,
+    )
+    .write_image(
+        &image.rgba,
+        image.width,
+        image.height,
+        image::ExtendedColorType::Rgba8,
+    )
+    .context("The overlay could not be encoded as a PNG")?;
+    Ok(bytes)
+}
+
+/// A drawn overlay a page shows (plan 260 S1.2e): the PNG as base64, no
+/// `data:` prefix, and its size. The answer of `captions.preview.render` and
+/// `buddy.bubble.render`.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OverlayPng {
+    pub png_base64: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The longest canvas side a page's sample is drawn for: the Sidekick page's
+/// zoomed sample and stream demo draw on a 4K canvas.
+pub(crate) const PAGE_SAMPLE_MAX_SIDE: u32 = 4096;
+
+/// Draws one overlay for a page off the async runtime, as a PNG; None where
+/// the renderer drew nothing (empty text, no room).
+pub(crate) async fn render_png(state: OverlayState) -> anyhow::Result<Option<OverlayPng>> {
+    use base64::Engine as _;
+    tokio::task::spawn_blocking(move || {
+        let Some(image) = render(&state) else {
+            return Ok(None);
+        };
+        let bytes = encode_png(&image)?;
+        Ok(Some(OverlayPng {
+            png_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            width: image.width,
+            height: image.height,
+        }))
+    })
+    .await?
 }
 
 /// The Sidekick's bubble for one line on a target's canvas: what the

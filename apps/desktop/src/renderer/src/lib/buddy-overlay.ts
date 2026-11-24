@@ -9,15 +9,20 @@ import { canvasToBase64Png } from '@/lib/canvas-png'
 
 // The Buddy's comic bubble (plan 164 Phase C, D17), rasterized per output
 // canvas like the highlight card (`lib/comment-highlight.ts`). On stream the
-// backend draws the pet itself (plan 168 S-B1) and this module pushes the
-// bubble alone to the `buddy_overlay` slot through `buddy.overlay.set`
-// (`renderBuddyBubblePng`): its tail tip sits on the bitmap's bottom-centre,
-// which the backend puts on the pet's head (D16). The settings sample still
-// draws plan 164's composite, the avatar under its bubble
-// (`renderBuddyOverlayPng`). The avatar box is the placed rect's width (a
-// square), the bubble wraps to at most four lines at that width. The stream
-// is not themed: the bubble is always the light variant, primary ink on
-// porcelain with a hairline ring.
+// backend draws the pet itself (plan 168 S-B1) and, since plan 260 S1.2d, the
+// bubble too (`overlay_raster/buddy.rs`, this same layout) from the line
+// `buddy.overlay.set` carries: its tail tip sits on the bitmap's
+// bottom-centre, which the backend puts on the pet's head (D16). Since S1.2e
+// the Sidekick page's samples (the stream demo, the test dialog, the settings
+// sample) are drawn there too (`buddy.bubble.render`), and the settings
+// sample sets the persona's picture under the backend's bubble with
+// `buddyOverlayMetrics`. This painter (`renderBuddyBubblePng`) stays the
+// golden reference (`overlay-golden.ts`); plan 164's composite, the avatar
+// under its bubble (`renderBuddyOverlayPng`), stays with its paint-log
+// snapshots. The avatar box is the placed rect's width (a square), the bubble
+// wraps to at most four lines at that width. The stream is not themed: the
+// bubble is always the light variant, primary ink on porcelain with a
+// hairline ring.
 //
 // Pure layout lives here (unit-tested with a fake measurer and snapshotted
 // paint logs); the OffscreenCanvas painter is a thin shell. This module rides

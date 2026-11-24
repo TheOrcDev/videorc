@@ -15,8 +15,8 @@ import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { FieldError } from '@/components/ui/field'
+import { useBuddyLookClient } from '@/hooks/use-buddy-look'
 import type { CohostPersona } from '@/lib/backend'
-import { renderBuddyBubblePng } from '@/lib/buddy-overlay'
 import { buddyReactionLabel } from '@/lib/buddy-pet-view'
 import {
   BUDDY_TEST_BUBBLE_CANVAS,
@@ -57,8 +57,9 @@ interface BubbleRaster {
  * living preview big on a neutral stage, a States row that holds each state
  * as the stream shows it (1 to 4), a Reactions row with every reaction the
  * pack has plus Hop, and the comic bubble with a sample line while Talking.
- * A sandbox: it plays in this window only and never calls the backend, the
- * stream, chat or the settings. Its own chunk: the Avatar section loads it
+ * A sandbox: it plays in this window only and changes nothing in the
+ * backend, the stream, chat or the settings; the backend only draws its
+ * sample bubble (plan 260 S1.2e). Its own chunk: the Avatar section loads it
  * on first open.
  */
 export function BuddyTestDialog({
@@ -93,28 +94,33 @@ export function BuddyTestDialog({
     if (stateReaction) previewRef.current?.react(stateReaction)
   }, [selection, stateReaction])
 
-  // The sample bubble, drawn once by the stream's rasterizer.
+  // The sample bubble, drawn once by the stream's own bubble painter in the
+  // backend (plan 260 S1.2e).
+  const client = useBuddyLookClient()
   const style = persona.bubbleStyle
   useEffect(() => {
-    if (!open || !showBubble) return
+    if (!open || !showBubble || !client) return
     let cancelled = false
-    renderBuddyBubblePng({
-      bubble: BUDDY_TEST_BUBBLE_LINE,
-      style,
-      canvas: BUDDY_TEST_BUBBLE_CANVAS,
-      rect: BUBBLE_RECT
-    }).then(
-      (png) => {
-        if (!cancelled) setBubbleSrc(png ? `data:image/png;base64,${png}` : null)
-      },
-      () => {
-        if (!cancelled) setBubbleSrc(null)
-      }
-    )
+    client
+      .requestTyped('buddy.bubble.render', {
+        text: BUDDY_TEST_BUBBLE_LINE,
+        style,
+        canvasWidth: BUDDY_TEST_BUBBLE_CANVAS.width,
+        canvasHeight: BUDDY_TEST_BUBBLE_CANVAS.height,
+        rect: BUBBLE_RECT
+      })
+      .then(
+        (png) => {
+          if (!cancelled) setBubbleSrc(`data:image/png;base64,${png.pngBase64}`)
+        },
+        () => {
+          if (!cancelled) setBubbleSrc(null)
+        }
+      )
     return () => {
       cancelled = true
     }
-  }, [open, showBubble, style])
+  }, [client, open, showBubble, style])
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (event.metaKey || event.ctrlKey || event.altKey) return

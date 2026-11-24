@@ -44,11 +44,19 @@ const mocked = vi.hoisted(() => ({
   log: [] as string[],
   infos: new Map<string, BuddyPetPreviewInfo>(),
   react: vi.fn((_reaction: string) => true),
-  renderBubble: vi.fn(async (_params: unknown) => 'QUJD' as string | null)
+  /** The backend's bubble painter (plan 260 S1.2e): the Buddy tab's client. */
+  drawBubble: vi.fn(async (_method: string, _params: unknown) => ({
+    pngBase64: 'QUJD',
+    width: 1382,
+    height: 300
+  }))
 }))
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
 vi.mock('@/lib/buddy-pet-creator-nav', () => ({ openBuddyPetCreator: vi.fn() }))
-vi.mock('@/lib/buddy-overlay', () => ({ renderBuddyBubblePng: mocked.renderBubble }))
+vi.mock('@/hooks/use-buddy-look', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/use-buddy-look')>()),
+  useBuddyLookClient: () => ({ requestTyped: mocked.drawBubble })
+}))
 // The canvas has its own tests; here the preview is a stub with the same
 // handle that logs its pose changes and the reactions it is asked for.
 vi.mock('@/components/buddy-pet-preview-lazy', () => ({
@@ -113,7 +121,7 @@ function pets(): BuddyPets {
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   for (const spy of [request, requestTyped, patchCohostSettings, mocked.react]) spy.mockClear()
-  mocked.renderBubble.mockClear()
+  mocked.drawBubble.mockClear()
   mocked.previews.clear()
   mocked.log.length = 0
   mocked.infos = new Map([
@@ -353,10 +361,11 @@ describe('Test your avatar (plan 169 D14, plan 239)', () => {
   it("draws the stream's bubble over the head while Talking, and only then", async () => {
     await render()
     await openTest()
-    expect(mocked.renderBubble).toHaveBeenCalledWith({
-      bubble: 'Welcome to the horde! Grab a seat.',
+    expect(mocked.drawBubble).toHaveBeenCalledWith('buddy.bubble.render', {
+      text: 'Welcome to the horde! Grab a seat.',
       style: 'shout',
-      canvas: { width: 3840, height: 2160 },
+      canvasWidth: 3840,
+      canvasHeight: 2160,
       rect: DEFAULT_OVERLAY_LAYOUT.buddy.horizontal
     })
     const image = bubble()!
@@ -382,7 +391,7 @@ describe('Test your avatar (plan 169 D14, plan 239)', () => {
     expect(bubble()?.classList.contains('hidden') ?? true).toBe(true)
   })
 
-  it('is a sandbox: no backend, settings or bridge call while every control is used', async () => {
+  it('is a sandbox: no settings, bridge or backend call but the bubble drawing', async () => {
     for (const view of ['still', 'alive'] as const) {
       await render(view)
       await openTest()
@@ -402,6 +411,11 @@ describe('Test your avatar (plan 169 D14, plan 239)', () => {
     }
     expect(request).not.toHaveBeenCalled()
     expect(requestTyped).not.toHaveBeenCalled()
+    // The backend only draws the sample bubble (plan 260 S1.2e); it changes nothing.
+    expect(mocked.drawBubble).toHaveBeenCalled()
+    expect(mocked.drawBubble.mock.calls.every(([method]) => method === 'buddy.bubble.render')).toBe(
+      true
+    )
     expect(patchCohostSettings).not.toHaveBeenCalled()
     expect(bridgeCalls).toEqual([])
     expect(mocked.react).toHaveBeenCalled()

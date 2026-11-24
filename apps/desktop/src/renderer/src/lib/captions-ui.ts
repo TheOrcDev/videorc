@@ -11,31 +11,19 @@ import { overlayOrientationForCanvas } from './overlay-layout'
 /** Lines kept for the captions strip / detached window. */
 export const MAX_CAPTION_LINES = 50
 
-/**
- * Generation guard for renderer-owned caption cue raster work. Privacy
- * boundaries and client teardown invalidate older async renders before they
- * can retain or submit more transcript pixels.
- */
-export class CaptionCueRenderGuard {
-  private generation = 0
+/** What the Captions page's preview shows before a caption has arrived. */
+export const CAPTION_PREVIEW_SAMPLE = 'Your words become clear, live captions.'
 
-  begin(): number {
-    this.generation += 1
-    return this.generation
-  }
-
-  cancel(): void {
-    this.generation += 1
-  }
-
-  isCurrent(generation: number): boolean {
-    return generation === this.generation
-  }
-}
-
-/** Final-copy work survives ordinary capture boundaries; sign-out purges it. */
-export function shouldCancelCaptionCueRender(reason: string | undefined): boolean {
-  return reason === 'signed-out'
+/** The canvas the Captions page's preview is drawn on (plan 260 S1.2e: by the
+ * backend's cue-frame painter): 960 px wide at the video's aspect ratio, at
+ * least 360 px tall. */
+export function captionPreviewCanvas(video: { width: number; height: number }): {
+  width: number
+  height: number
+} {
+  const width = 960
+  const aspect = video.width / Math.max(1, video.height)
+  return { width, height: Math.max(360, Math.round(width / aspect)) }
 }
 
 /**
