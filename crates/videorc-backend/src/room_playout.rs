@@ -42,6 +42,19 @@ const STREAM_DELAY_MS: i32 = 60;
 type Apm = Arc<StdMutex<AudioProcessingModule>>;
 
 static APM: StdMutex<Option<Apm>> = StdMutex::new(None);
+/// The Program monitor's Listen toggle (S1.8d d5): the runner's return is
+/// played too while it is on (and the monitor takes the runner at all).
+static LISTEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `cloud.room.monitor.set`'s `listen`.
+pub(crate) fn set_listen(listen: bool) {
+    LISTEN.store(listen, std::sync::atomic::Ordering::Release);
+}
+
+/// A hold ended.
+pub(crate) fn clear() {
+    set_listen(false);
+}
 
 fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
@@ -63,10 +76,14 @@ pub(crate) fn cancel_echo(frame: &mut [i16]) {
     }
 }
 
-/// Whether a participant's audio is played: a guest's, never the runner's
-/// (the Program monitor's, d5) or an egress page's.
-pub(crate) fn plays(identity: &str) -> bool {
-    !identity.starts_with("runner:") && !identity.starts_with("EG_")
+/// Whether a participant's audio is played: a guest's; the runner's (the
+/// Program monitor's return) only while its Listen toggle is on; never an
+/// egress page's.
+pub(crate) fn plays(identity: &str, listen: bool) -> bool {
+    if identity.starts_with("runner:") {
+        return listen;
+    }
+    !identity.starts_with("EG_")
 }
 
 /// One 10 ms mono chunk of the guests: each buffer's next samples summed (a
@@ -131,7 +148,10 @@ pub(crate) async fn run(_state: AppState, room: Arc<Room>, mut done: oneshot::Re
         // Every subscribed guest audio track: microphones and screen audio.
         let mut wanted: HashMap<String, livekit::prelude::RemoteAudioTrack> = HashMap::new();
         for participant in room.remote_participants().values() {
-            if !plays(participant.identity().as_str()) {
+            if !plays(
+                participant.identity().as_str(),
+                LISTEN.load(std::sync::atomic::Ordering::Acquire),
+            ) {
                 continue;
             }
             for publication in participant.track_publications().values() {
@@ -216,10 +236,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn guests_are_played_never_the_runner_or_an_egress_page() {
-        assert!(plays("g_ada"));
-        assert!(!plays("runner:show"));
-        assert!(!plays("EG_program"));
+    fn guests_are_played_the_runner_only_with_listen_never_an_egress_page() {
+        assert!(plays("g_ada", false));
+        assert!(!plays("runner:show", false));
+        assert!(plays("runner:show", true));
+        assert!(!plays("EG_program", true));
     }
 
     #[test]

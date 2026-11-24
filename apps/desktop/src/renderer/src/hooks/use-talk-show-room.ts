@@ -381,6 +381,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
   // drew the room client's. One feed per picture coming in.
   const [backendFeeds, setBackendFeeds] = useState<Record<string, MediaStreamTrack>>({})
   const [backendMonitor, setBackendMonitor] = useState(false)
+  const backendMonitorRef = useRef(false)
+  const backendListeningRef = useRef(false)
   const feedsRef = useRef(new Map<string, import('@/lib/room-remote-feed').RemoteFeed>())
   useEffect(() => {
     const feeds = feedsRef.current
@@ -1433,7 +1435,8 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
               monitor: {
                 enabled: backendMonitor,
                 video: backendFeeds['monitor|monitor'] ?? null,
-                audio: null
+                audio: null,
+                backendAudio: backendMedia.monitor?.audio === true
               }
             }
           : {})
@@ -1580,13 +1583,29 @@ export function useTalkShowRoomController(deps: TalkShowRoomControllerDeps): Tal
         // Plan 260 S1.8d: the backend's room takes the runner's return.
         if (!roomClient && backendMediaRef.current) {
           setBackendMonitor(enabled)
-          await client?.requestTyped('cloud.room.monitor.set', { enabled }).catch(() => {})
+          backendMonitorRef.current = enabled
+          await client
+            ?.requestTyped('cloud.room.monitor.set', {
+              enabled,
+              listen: enabled && backendListeningRef.current
+            })
+            .catch(() => {})
         }
         await call(
           'cloud.return.set',
           { open: enabled },
           'show the Program monitor to the room'
         ).catch(() => {})
+      },
+      setMonitorListening: async (listening) => {
+        backendListeningRef.current = listening
+        if (clientRef.current || !backendMediaRef.current) return
+        await client
+          ?.requestTyped('cloud.room.monitor.set', {
+            enabled: backendMonitorRef.current,
+            listen: listening
+          })
+          .catch(() => {})
       },
       setMicrophoneMuted: async (muted) => {
         if (!clientRef.current) throw new Error('The room is not connected.')
