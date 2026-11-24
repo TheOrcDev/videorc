@@ -191,6 +191,7 @@ mod session_token;
 mod seventv;
 mod sound_loudness;
 mod sound_mix;
+mod sound_monitor;
 mod sound_player;
 mod sound_store;
 mod source_audio_tap;
