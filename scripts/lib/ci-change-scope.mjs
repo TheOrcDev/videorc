@@ -90,6 +90,12 @@ export const RUST_READS_DESKTOP_FILES = Object.freeze([
   'apps/desktop/src/main/runtime-info.ts',
   // The typed client's deadline table is checked against it (S1.6s part 4).
   'apps/desktop/src/renderer/src/backendClient.ts',
+  // desktop::system_access and desktop::camera_extension check their tables
+  // against these (S1.6s part 5).
+  'apps/desktop/src/renderer/src/lib/system-access.ts',
+  'apps/desktop/src/renderer/src/lib/system-access-view.ts',
+  'apps/desktop/src/renderer/src/lib/system-permission-orchestration.ts',
+  'apps/desktop/src/main/camera-extension.ts',
   // videorc-app-core's nav tests read these (plan 260 S1.6f).
   'apps/desktop/src/renderer/src/lib/settings-tabs.ts',
   'apps/desktop/src/renderer/src/lib/buddy-tabs.ts',
