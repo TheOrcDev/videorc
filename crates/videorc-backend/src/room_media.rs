@@ -10,7 +10,9 @@
 //! the device while it holds the seat; nothing is lent to a browser room),
 //! through the compositor's own camera processing (`camera_role_rgba`: the
 //! key, speck cleanup, despill and look of the app's scene layout), keyed
-//! onto the video ground as the renderer's room does (VP8 has no alpha), and
+//! onto the scene background picture as the program draws it (c2b: the
+//! compositor's own image cache and placement), or onto the video ground
+//! without one (VP8 has no alpha), and
 //! published as VP8 at up to 720p with simulcast 180p/360p. The Studio turns
 //! it on and off with `cloud.room.camera.set`; the effects are the backend's
 //! own scene layout, never sent twice. A background effect (blur, picture,
@@ -288,6 +290,22 @@ pub(crate) fn background_is_effect(layout: &LayoutSettings) -> bool {
     })
 }
 
+/// Straight-alpha RGBA keyed onto `behind` (opaque RGBA of the same size:
+/// the scene background as the program draws it), opaque.
+pub(crate) fn over_picture(rgba: &mut [u8], behind: &[u8]) {
+    for (pixel, under) in rgba.chunks_exact_mut(4).zip(behind.chunks_exact(4)) {
+        let alpha = u16::from(pixel[3]);
+        if alpha == 255 {
+            continue;
+        }
+        for (channel, value) in pixel[..3].iter_mut().zip(&under[..3]) {
+            *channel = ((u16::from(*channel) * alpha + u16::from(*value) * (255 - alpha) + 127)
+                / 255) as u8;
+        }
+        pixel[3] = 255;
+    }
+}
+
 /// Straight-alpha RGBA keyed onto the video ground, opaque.
 pub(crate) fn over_ground(rgba: &mut [u8]) {
     for pixel in rgba.chunks_exact_mut(4) {
@@ -304,18 +322,22 @@ pub(crate) fn over_ground(rgba: &mut [u8]) {
 }
 
 /// One camera frame for the room: processed as the compositor processes
-/// this camera, keyed onto the ground, as I420.
+/// this camera, keyed onto the scene background (or the ground), as I420.
 fn camera_frame(
     bytes: &[u8],
     width: u32,
     height: u32,
     layout: &LayoutSettings,
     (out_width, out_height): (u32, u32),
+    behind: Option<&[u8]>,
 ) -> Option<I420Buffer> {
     let mut rgba = crate::compositor::camera_role_rgba(
         bytes, width, height, true, layout, out_width, out_height,
     )?;
-    over_ground(&mut rgba);
+    match behind {
+        Some(behind) if behind.len() == rgba.len() => over_picture(&mut rgba, behind),
+        _ => over_ground(&mut rgba),
+    }
     let mut buffer = I420Buffer::new(out_width, out_height);
     let (stride_y, stride_u, stride_v) = buffer.strides();
     let (y, u, v) = buffer.data_mut();
@@ -333,6 +355,14 @@ fn camera_frame(
         out_height as i32,
     );
     Some(buffer)
+}
+
+/// What the drawn background behind the key was drawn from.
+#[derive(PartialEq)]
+struct BehindKey {
+    background: crate::protocol::EffectiveSceneBackground,
+    pixels: usize,
+    size: (u32, u32),
 }
 
 /// The camera as it is published now.
@@ -385,6 +415,9 @@ pub(crate) async fn run_camera(state: AppState, room: Arc<Room>, mut done: onesh
     let started = std::time::Instant::now();
     let mut published: Option<PublishedCamera> = None;
     let mut last: Option<(u64, u64)> = None;
+    // The scene background behind the key, drawn once per picture, placement
+    // and camera size.
+    let mut behind_drawn: Option<(BehindKey, Arc<Vec<u8>>)> = None;
     let mut pulse = tokio::time::interval(Duration::from_secs_f64(1.0 / CAMERA_FPS));
     pulse.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -400,16 +433,23 @@ pub(crate) async fn run_camera(state: AppState, room: Arc<Room>, mut done: onesh
             unpublish_camera(&room, &mut published).await;
             continue;
         }
-        // The app's scene layout: the key and look the compositor applies to
-        // this camera.
-        let layout = state
-            .compositor
-            .lock()
-            .await
-            .status
-            .scene_layout
-            .clone()
-            .unwrap_or_else(crate::protocol::default_layout_settings);
+        // The app's scene layout (the key and look the compositor applies to
+        // this camera) and, with the key on, the scene background picture the
+        // program draws under it.
+        let (layout, room_background) = {
+            let compositor = state.compositor.lock().await;
+            let layout = compositor
+                .status
+                .scene_layout
+                .clone()
+                .unwrap_or_else(crate::protocol::default_layout_settings);
+            let background = if layout.camera_chroma_key_enabled {
+                compositor.room_background()
+            } else {
+                None
+            };
+            (layout, background)
+        };
         if background_is_effect(&layout) {
             unpublish_camera(&room, &mut published).await;
             continue;
@@ -439,9 +479,44 @@ pub(crate) async fn run_camera(state: AppState, room: Arc<Room>, mut done: onesh
         let Some(size) = camera_size(width, height) else {
             continue;
         };
-        let Ok(Some(buffer)) =
-            tokio::task::spawn_blocking(move || camera_frame(&bytes, width, height, &layout, size))
-                .await
+        let behind = match room_background {
+            None => None,
+            Some(room) => {
+                let key = BehindKey {
+                    background: room.background.clone(),
+                    pixels: Arc::as_ptr(&room.pixels) as usize,
+                    size,
+                };
+                let kept = behind_drawn
+                    .as_ref()
+                    .filter(|(drawn, _)| *drawn == key)
+                    .map(|(_, picture)| picture.clone());
+                if kept.is_some() {
+                    kept
+                } else {
+                    let picture = tokio::task::spawn_blocking(move || {
+                        crate::compositor::room_background_rgba(&room, size.0, size.1, GROUND)
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(Arc::new);
+                    behind_drawn = picture.clone().map(|picture| (key, picture));
+                    picture
+                }
+            }
+        };
+        let Ok(Some(buffer)) = tokio::task::spawn_blocking(move || {
+            camera_frame(
+                &bytes,
+                width,
+                height,
+                &layout,
+                size,
+                behind.as_deref().map(Vec::as_slice),
+            )
+        })
+        .await
         else {
             continue;
         };
@@ -502,6 +577,55 @@ mod tests {
         assert_eq!(camera_size(640, 480), Some((640, 480)));
         assert_eq!(camera_size(1080, 1920), Some((404, 720)));
         assert_eq!(camera_size(0, 720), None);
+    }
+
+    fn picture(fit: &str) -> crate::compositor::RoomBackground {
+        // 4 x 2: the left half red, the right half blue.
+        let mut pixels = Vec::new();
+        for _row in 0..2 {
+            pixels.extend_from_slice(&[
+                255, 0, 0, 255, 255, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+            ]);
+        }
+        crate::compositor::RoomBackground {
+            background: serde_json::from_value(serde_json::json!({
+                "assetId": "a", "managedAssetPath": "/tmp/a.webp", "fit": fit,
+                "scale": 100.0, "offsetX": 0.0, "offsetY": 0.0, "blurPx": 0.0,
+                "dimPercent": 0.0, "saturationPercent": 100.0, "vignettePercent": 0.0
+            }))
+            .unwrap(),
+            pixels: Arc::new(pixels),
+            size: (4, 2),
+            bgra: false,
+        }
+    }
+
+    #[test]
+    fn the_scene_picture_is_placed_as_the_program_places_it() {
+        // Fill covers a square from the middle: red left, blue right.
+        let filled =
+            crate::compositor::room_background_rgba(&picture("fill"), 2, 2, GROUND).unwrap();
+        assert_eq!(filled.len(), 2 * 2 * 4);
+        assert!(filled[0] > 200 && filled[2] < 50, "{filled:?}");
+        assert!(filled[4] < 50 && filled[6] > 200, "{filled:?}");
+        // Fit keeps the whole picture with bars of ground above and below.
+        let fitted =
+            crate::compositor::room_background_rgba(&picture("fit"), 4, 4, GROUND).unwrap();
+        assert_eq!(&fitted[..16], &[GROUND, GROUND, GROUND, 255].repeat(4)[..]);
+        assert_eq!(&fitted[48..], &[GROUND, GROUND, GROUND, 255].repeat(4)[..]);
+        assert!(fitted[16] > 200 && fitted[28 + 2] > 200, "{fitted:?}");
+        assert!(fitted.chunks_exact(4).all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
+    fn a_key_lands_on_the_scene_picture() {
+        let mut rgba = vec![200, 100, 50, 255, 200, 100, 50, 0, 255, 255, 255, 128];
+        let behind = vec![1, 2, 3, 255, 40, 80, 120, 255, 0, 0, 0, 255];
+        over_picture(&mut rgba, &behind);
+        assert_eq!(
+            rgba,
+            vec![200, 100, 50, 255, 40, 80, 120, 255, 128, 128, 128, 255]
+        );
     }
 
     #[test]
