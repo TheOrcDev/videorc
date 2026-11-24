@@ -43,6 +43,13 @@ pub trait Platform: Send + Sync {
     /// platform has one, which the backend's capture filter can also exclude.
     fn set_hidden_from_capture(&self, window: &Window, hidden: bool) -> OsResult<Option<u64>>;
 
+    /// The window's number in the OS's capture APIs (macOS's
+    /// `windowNumber`, which ScreenCaptureKit's filter excludes by), or
+    /// `None` where captures don't name windows by it (the default).
+    fn capture_window_id(&self, _window: &Window) -> Option<u32> {
+        None
+    }
+
     /// Keep on top: the window above other apps' windows, or back to normal.
     fn set_keep_on_top(&self, window: &Window, on_top: bool) -> OsResult<()>;
 

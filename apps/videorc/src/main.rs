@@ -51,6 +51,7 @@ use videorc_app_core::{
 use app::args;
 use app::bridge;
 use app::frames::MainFrame;
+use app::hide::HideFromStream;
 use app::permissions::Permissions;
 use app::shell::{Shell, StatusLine, connection_text};
 use app::{camera, capture, hotkeys, links, menus, sleep};
@@ -262,6 +263,10 @@ fn main() -> Result<()> {
     application.run(move |cx: &mut App| {
         // The menu bar from the core's template, and the keys it names.
         menus::install(cx);
+
+        // Hide from stream: content protection and the capture filter's
+        // list, which the Studio sends with the screen capture when it lands.
+        let _capture_filter_ids = HideFromStream::install(cx);
 
         // Global shortcuts: the registry behind the core's gate. The app runs
         // no shortcut action until the Studio lands, so every key is named in

@@ -116,6 +116,27 @@ pub fn window_requires_capture_protection(
     }
 }
 
+/// Plan 260 S2.6a: whether Videorc's own ScreenCaptureKit filter leaves the
+/// open window out (its id in `protectedOverlayWindowIds`), as the Studio
+/// renderer lists them (`protected-overlay-windows.ts`, `use-studio.tsx`):
+/// Notes always, the Stream Manager while Hide from stream is on
+/// (`streamManagerProtectedOverlayWindow`). The filter is macOS's only; a
+/// window id means nothing to another platform's capture.
+pub fn window_in_capture_filter(
+    role: WindowRole,
+    platform: &str,
+    hidden_from_stream: bool,
+) -> bool {
+    if stream_manager_hide_method(platform) != HideMethod::CaptureFilter {
+        return false;
+    }
+    match role {
+        WindowRole::Notes => true,
+        WindowRole::Comments => hidden_from_stream,
+        _ => false,
+    }
+}
+
 /// `platformSupportsCaptureProtection`: macOS and Windows only. A window
 /// that says "Hidden from recordings and streams" must be hidden, so a
 /// platform without it reports the window as visible (plan 174 I-2).
@@ -430,5 +451,41 @@ mod tests {
                 "{method:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_capture_filter_lists_notes_and_a_hidden_stream_manager_on_macos_only() {
+        for role in WindowRole::ALL {
+            let always = role == WindowRole::Notes;
+            assert_eq!(
+                window_in_capture_filter(role, "darwin", false),
+                always,
+                "{role:?}"
+            );
+            let hidden = always || role == WindowRole::Comments;
+            assert_eq!(
+                window_in_capture_filter(role, "darwin", true),
+                hidden,
+                "{role:?}"
+            );
+            for other in ["win32", "linux"] {
+                assert!(
+                    !window_in_capture_filter(role, other, true),
+                    "{role:?} {other}"
+                );
+            }
+        }
+        // The two routes never overlap for the Stream Manager: the filter on
+        // macOS, content protection on Windows.
+        assert!(!window_requires_capture_protection(
+            WindowRole::Comments,
+            "darwin",
+            true
+        ));
+        assert!(window_requires_capture_protection(
+            WindowRole::Comments,
+            "win32",
+            true
+        ));
     }
 }
