@@ -31,10 +31,11 @@ use videorc_protocol::cohost::CohostAutoChat;
 
 use chat::{ChatWidgets, render_chat};
 use clean_cut::render_clean_cut;
-use community::render_community;
+use community::{CommunityState, LinkSuggestion, PersonDetail, PersonRow, render_community};
 use live::{LiveInput, LiveView, live_view};
 use overview::{OverviewState, render_overview};
 use reports::render_reports;
+use videorc_app_core::buddy::community::CommunitySummary;
 use voice::render_voice;
 
 pub type AppStudio = Studio<BackendClient>;
@@ -113,6 +114,7 @@ pub struct SidekickScreen {
     consent: DialogHandle,
     pending_on: bool,
     chat: Option<ChatWidgets>,
+    community: Option<CommunityState>,
 }
 
 impl SidekickScreen {
@@ -138,6 +140,7 @@ impl SidekickScreen {
             consent: DialogHandle::new(false),
             pending_on: false,
             chat: None,
+            community: None,
         };
         screen.refresh(cx);
         screen.watch(cx);
@@ -150,6 +153,19 @@ impl SidekickScreen {
         }
         if let Some(widgets) = self.chat.as_ref() {
             widgets.sync_cooldowns(self.settings.as_ref(), window, cx);
+        }
+    }
+
+    fn ensure_community(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.community.is_none() {
+            self.community = Some(CommunityState::new(window, cx));
+        }
+        if self.tab == Tab::Community {
+            if let Some(community) = self.community.as_ref() {
+                if !community.loaded {
+                    self.refresh_community(cx);
+                }
+            }
         }
     }
 
@@ -177,13 +193,28 @@ impl SidekickScreen {
                                 );
                                 if event == "cohost.state" {
                                     if let Ok(state) =
-                                        serde_json::from_value::<CohostState>(payload)
+                                        serde_json::from_value::<CohostState>(payload.clone())
                                     {
                                         let _ = this.update(cx, |screen, cx| {
                                             screen.state = state;
                                             cx.notify();
                                         });
                                     }
+                                }
+                                if event == "cohost.community.changed" {
+                                    let summary = serde_json::from_value::<CommunitySummary>(
+                                        payload.clone(),
+                                    )
+                                    .ok();
+                                    let _ = this.update(cx, |screen, cx| {
+                                        if let Some(community) = screen.community.as_mut() {
+                                            if let Some(summary) = summary {
+                                                community.summary = Some(summary);
+                                            }
+                                            community.loaded = false;
+                                        }
+                                        screen.refresh_community(cx);
+                                    });
                                 }
                                 if refresh {
                                     let _ = this.update(cx, |screen, cx| screen.refresh(cx));
@@ -256,7 +287,310 @@ impl SidekickScreen {
         }
         self.tab = tab;
         let _ = UiLocal::in_dir(&self.local_dir).set_buddy_tab(tab.id());
+        if tab == Tab::Community {
+            self.refresh_community(cx);
+        }
         cx.notify();
+    }
+
+    pub(crate) fn refresh_community(&mut self, cx: &mut Context<Self>) {
+        let backend = self.studio.backend().clone();
+        let query = self
+            .community
+            .as_ref()
+            .map(|c| c.search.read(cx).value().to_string())
+            .unwrap_or_default();
+        let query = query.trim().to_string();
+        let job = self.runtime.spawn(async move {
+            let summary = backend
+                .request("cohost.community.summary", json!({}))
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<CommunitySummary>(value).ok());
+            let mut list_params = json!({ "filter": "everyone", "sort": "streams", "limit": 100 });
+            if !query.is_empty() {
+                list_params["query"] = json!(query);
+            }
+            let people = backend
+                .request("cohost.community.list", list_params)
+                .await
+                .ok()
+                .and_then(|value| value.get("people").cloned())
+                .and_then(|value| serde_json::from_value::<Vec<PersonRow>>(value).ok())
+                .unwrap_or_default();
+            let suggestions = backend
+                .request("cohost.community.suggestions", json!({}))
+                .await
+                .ok()
+                .and_then(|value| value.get("suggestions").cloned().or(Some(value)))
+                .and_then(|value| serde_json::from_value::<Vec<LinkSuggestion>>(value).ok())
+                .unwrap_or_default();
+            (summary, people, suggestions)
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok((summary, people, suggestions)) = job.await else {
+                return;
+            };
+            let _ = this.update(cx, |screen, cx| {
+                if let Some(community) = screen.community.as_mut() {
+                    community.summary = summary;
+                    community.people = people;
+                    community.suggestions = suggestions;
+                    community.loaded = true;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn refresh_community_list(&mut self, cx: &mut Context<Self>) {
+        self.refresh_community(cx);
+    }
+
+    pub(crate) fn refresh_community_link_hits(&mut self, cx: &mut Context<Self>) {
+        let Some(community) = self.community.as_ref() else {
+            return;
+        };
+        if !community.linking {
+            return;
+        }
+        let backend = self.studio.backend().clone();
+        let query = community.link_search.read(cx).value().to_string();
+        let query = query.trim().to_string();
+        if query.is_empty() {
+            if let Some(community) = self.community.as_mut() {
+                community.link_hits.clear();
+            }
+            cx.notify();
+            return;
+        }
+        let job = self.runtime.spawn(async move {
+            backend
+                .request(
+                    "cohost.community.list",
+                    json!({ "query": query, "filter": "everyone", "sort": "name", "limit": 20 }),
+                )
+                .await
+                .ok()
+                .and_then(|value| value.get("people").cloned())
+                .and_then(|value| serde_json::from_value::<Vec<PersonRow>>(value).ok())
+                .unwrap_or_default()
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(hits) = job.await else {
+                return;
+            };
+            let _ = this.update(cx, |screen, cx| {
+                if let Some(community) = screen.community.as_mut() {
+                    community.link_hits = hits;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn select_community_person(&mut self, person_id: String, cx: &mut Context<Self>) {
+        let backend = self.studio.backend().clone();
+        let job = self.runtime.spawn(async move {
+            backend
+                .request("cohost.community.person", json!({ "personId": person_id }))
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<PersonDetail>(value).ok())
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(person) = job.await else {
+                return;
+            };
+            let _ = this.update(cx, |screen, cx| {
+                if let Some(community) = screen.community.as_mut() {
+                    community.selected = person;
+                    community.linking = false;
+                    community.link_hits.clear();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn community_toggle_bot(
+        &mut self,
+        person_id: String,
+        is_bot: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let status = if is_bot { "normal" } else { "bot" };
+        let backend = self.studio.backend().clone();
+        let job = self.runtime.spawn(async move {
+            backend
+                .request(
+                    "cohost.community.update",
+                    json!({ "personId": person_id, "status": status }),
+                )
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<PersonDetail>(value).ok())
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(person) = job.await else {
+                return;
+            };
+            let _ = this.update(cx, |screen, cx| {
+                if let Some(community) = screen.community.as_mut() {
+                    if let Some(person) = person {
+                        community.selected = Some(person);
+                    }
+                }
+                screen.refresh_community(cx);
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn ask_forget_person(
+        &mut self,
+        person_id: String,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(community) = self.community.as_mut() {
+            community.forget_id = Some(person_id);
+            community.forget_name = name;
+            community.forget.open(window, cx);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_forget_person(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(person_id) = self.community.as_ref().and_then(|c| c.forget_id.clone()) else {
+            return;
+        };
+        if let Some(community) = self.community.as_mut() {
+            community.forget.close(window, cx);
+            community.forget_id = None;
+        }
+        let backend = self.studio.backend().clone();
+        let job = self.runtime.spawn(async move {
+            backend
+                .request("cohost.community.forget", json!({ "personId": person_id }))
+                .await
+        });
+        cx.spawn(async move |this, cx| {
+            let _ = job.await;
+            let _ = this.update(cx, |screen, cx| {
+                if let Some(community) = screen.community.as_mut() {
+                    community.selected = None;
+                }
+                screen.refresh_community(cx);
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn community_forget_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(community) = self.community.as_mut() {
+            community.forget_everyone.close(window, cx);
+        }
+        let backend = self.studio.backend().clone();
+        let job = self.runtime.spawn(async move {
+            backend
+                .request("cohost.community.forgetAll", json!({}))
+                .await
+        });
+        cx.spawn(async move |this, cx| {
+            let _ = job.await;
+            let _ = this.update(cx, |screen, cx| {
+                if let Some(community) = screen.community.as_mut() {
+                    community.selected = None;
+                    community.people.clear();
+                }
+                screen.refresh_community(cx);
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn community_link(
+        &mut self,
+        person_id: String,
+        other_person_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let backend = self.studio.backend().clone();
+        let job = self.runtime.spawn(async move {
+            backend
+                .request(
+                    "cohost.community.link",
+                    json!({ "personId": person_id, "otherPersonId": other_person_id }),
+                )
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<PersonDetail>(value).ok())
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(person) = job.await else {
+                return;
+            };
+            let _ = this.update(cx, |screen, cx| {
+                if let Some(community) = screen.community.as_mut() {
+                    community.linking = false;
+                    community.link_hits.clear();
+                    if let Some(person) = person {
+                        community.selected = Some(person);
+                    }
+                }
+                screen.refresh_community(cx);
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn community_accept_suggestion(
+        &mut self,
+        account_a: String,
+        account_b: String,
+        cx: &mut Context<Self>,
+    ) {
+        let backend = self.studio.backend().clone();
+        let job = self.runtime.spawn(async move {
+            backend
+                .request(
+                    "cohost.community.suggestion.accept",
+                    json!({ "accountA": account_a, "accountB": account_b }),
+                )
+                .await
+        });
+        cx.spawn(async move |this, cx| {
+            let _ = job.await;
+            let _ = this.update(cx, |screen, cx| screen.refresh_community(cx));
+        })
+        .detach();
+    }
+
+    pub(crate) fn community_dismiss_suggestion(
+        &mut self,
+        account_a: String,
+        account_b: String,
+        cx: &mut Context<Self>,
+    ) {
+        let backend = self.studio.backend().clone();
+        let job = self.runtime.spawn(async move {
+            backend
+                .request(
+                    "cohost.community.suggestion.dismiss",
+                    json!({ "accountA": account_a, "accountB": account_b }),
+                )
+                .await
+        });
+        cx.spawn(async move |this, cx| {
+            let _ = job.await;
+            let _ = this.update(cx, |screen, cx| screen.refresh_community(cx));
+        })
+        .detach();
     }
 
     pub(crate) fn set_live(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -472,8 +806,16 @@ impl SidekickScreen {
 impl Render for SidekickScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_chat(window, cx);
+        self.ensure_community(window, cx);
         let view = self.view();
         let listen = self.settings.as_ref().map(|s| s.listen).unwrap_or(false);
+        let remember = self
+            .settings
+            .as_ref()
+            .and_then(|s| s.raw.get("community"))
+            .and_then(|c| c.get("remember"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let overview = OverviewState {
             view: &view,
             listen,
@@ -483,10 +825,13 @@ impl Render for SidekickScreen {
         };
         let settings = self.settings.as_ref();
         let widgets = self.chat.as_ref().expect("chat widgets");
+        let community = self.community.as_ref().expect("community state");
         let body = match self.tab {
             Tab::Overview => render_overview(overview, window, cx),
             Tab::Chat => render_chat(&view, settings, widgets, window, cx),
-            Tab::Community => render_community(&view, self.entitled, window, cx),
+            Tab::Community => {
+                render_community(&view, self.entitled, community, remember, window, cx)
+            }
             Tab::Voice => render_voice(&view, settings, window, cx),
             Tab::Reports => render_reports(&view, window, cx),
             Tab::CleanCut => render_clean_cut(&view, self.consented, window, cx),
