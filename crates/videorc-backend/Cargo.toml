@@ -34,6 +34,8 @@ image = { version = "0.25", default-features = false, features = ["png", "webp",
 parley = "0.11.1"
 swash = "0.2.10"
 tiny-skia = "0.12.0"
+# The platforms' own marks on the highlight and milestone cards (SVG files).
+resvg = { version = "0.48.1", default-features = false }
 libc = "0.2"
 rayon = "1"
 rnnoise = { package = "rnnoise-rs", git = "https://github.com/TheOrcDev/rnnoise-rs", rev = "c915940e94e2ec1ca07a1af22c769a33c3fb1ce6", default-features = false }

@@ -1,10 +1,10 @@
 {
-  "note": "Plan 260 S1.2a. Each case is a request the renderer's caption painter (renderer/src/lib/caption-overlay.ts) drew; <id>.png is its PNG. These were made by plan 220's goldens script in videorc-rust at rendererCommit, whose caption painter is line for line the shipping one (only comments differ), on the same macOS and Electron (39.8.10) as this repo; scripts/overlay-raster-goldens.mjs remakes them here.",
+  "note": "Plan 260 S1.2. Each case is a request the renderer's own painter drew (caption-overlay.ts through renderer/src/lib/overlay-golden.ts); <id>.png is its PNG, remade by scripts/overlay-raster-goldens.mjs at made.rendererCommit. Four are kept from plan 220's goldens in videorc-rust (rendererCommit 942c50c34, painters line for line the same, same macOS 26.5.1 and Electron 39.8.10): caption-lower-third-s-wrap, highlight-twitch-720p, highlight-kick-long-rect and highlight-youtube-avatar-emotes. Remade here, their 26 px semibold and 24/28 px regular text came out in San Francisco's smallest optical size: Chromium 142 reuses a system-font instance from the UI's small text (canvas measureText 600 26px = 279.41, CoreText at opsz 17 = 278.77, at opsz 26 = 253.89), so those sizes depend on what the page drew before. The backend draws each size at its own optical size, as CoreText does, and the kept goldens are the renderer doing the same.",
   "made": {
-    "date": "2026-11-12T20:19:52.581Z",
+    "date": "2026-11-24T07:22:54.201Z",
     "macos": "26.5.1",
-    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Videorc/0.20.1 Chrome/142.0.7444.265 Electron/39.8.10 Safari/537.36",
-    "rendererCommit": "942c50c341d81793c682883ca1907ae8a33c83db"
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Videorc/0.37.1 Chrome/142.0.7444.265 Electron/39.8.10 Safari/537.36",
+    "rendererCommit": "e0ca29d3187593d75e0899ed91873f4bb3b8ae60"
   },
   "cases": [
     {
@@ -182,6 +182,298 @@
         "textSize": "m",
         "styleId": "classic"
       }
+    },
+    {
+      "id": "highlight-twitch-720p",
+      "request": {
+        "overlay": "highlight",
+        "authorName": "NightOwl_42",
+        "text": "That clutch was unreal 🔥 how?",
+        "platform": "twitch",
+        "canvasWidth": 1280,
+        "canvasHeight": 720
+      }
+    },
+    {
+      "id": "highlight-kick-long-rect",
+      "request": {
+        "overlay": "highlight",
+        "authorName": "a_really_long_username_that_never_ends_2026",
+        "text": "Okay so hear me out: take the left door first, grab the key, then double back past the guards while they swap shifts and you skip the whole floor",
+        "platform": "kick",
+        "canvasWidth": 1280,
+        "canvasHeight": 720,
+        "rect": {
+          "x": 0.02,
+          "y": 0.6,
+          "w": 0.3,
+          "h": 0.3
+        }
+      }
+    },
+    {
+      "id": "highlight-custom-vertical",
+      "request": {
+        "overlay": "highlight",
+        "authorName": "Mira",
+        "text": "Watching from the train",
+        "platform": "custom",
+        "canvasWidth": 1080,
+        "canvasHeight": 1920,
+        "rect": {
+          "x": 0.04,
+          "y": 0.6,
+          "w": 0.5,
+          "h": 0.2
+        }
+      }
+    },
+    {
+      "id": "chat-box-720p",
+      "request": {
+        "overlay": "chat",
+        "messages": [
+          {
+            "authorName": "pixel_pam",
+            "platform": "twitch",
+            "text": "gg that was clean"
+          },
+          {
+            "authorName": "ZedRuns",
+            "platform": "kick",
+            "text": "first time catching the stream live 👋 the new layout looks great"
+          },
+          {
+            "authorName": "Mod Team",
+            "platform": "custom",
+            "text": "Reminder: be kind in chat ❤️"
+          }
+        ],
+        "canvasWidth": 1280,
+        "canvasHeight": 720,
+        "rect": {
+          "x": 0.68,
+          "y": 0.04,
+          "w": 0.3,
+          "h": 0.44
+        }
+      }
+    },
+    {
+      "id": "highlight-youtube-avatar-emotes",
+      "request": {
+        "overlay": "highlight",
+        "authorName": "Lena Park",
+        "text": "GG smokeHYPE that was orcPog clean",
+        "fragments": [
+          {
+            "type": "text",
+            "text": "GG "
+          },
+          {
+            "type": "emote",
+            "text": "smokeHYPE",
+            "imageUrl": "https://files.kick.com/emotes/golden-wide/fullsize"
+          },
+          {
+            "type": "text",
+            "text": " that was "
+          },
+          {
+            "type": "emote",
+            "text": "orcPog",
+            "imageUrl": "https://yt3.ggpht.com/golden/emote-square.png"
+          },
+          {
+            "type": "text",
+            "text": " clean"
+          }
+        ],
+        "platform": "youtube",
+        "avatarUrl": "https://yt3.ggpht.com/golden/avatar.png",
+        "canvasWidth": 1280,
+        "canvasHeight": 720
+      },
+      "images": {
+        "https://yt3.ggpht.com/golden/avatar.png": "avatar-gradient.png",
+        "https://files.kick.com/emotes/golden-wide/fullsize": "emote-wide-128x64.png",
+        "https://yt3.ggpht.com/golden/emote-square.png": "emote-square-112.png"
+      }
+    },
+    {
+      "id": "highlight-x-verified-1080p",
+      "request": {
+        "overlay": "highlight",
+        "authorName": "Nova Labs",
+        "text": "Shipping the new build live 🚀",
+        "platform": "x",
+        "avatarUrl": "https://pbs.twimg.com/profile_images/golden/avatar.png",
+        "authorVerified": "business",
+        "canvasWidth": 1920,
+        "canvasHeight": 1080
+      },
+      "images": {
+        "https://pbs.twimg.com/profile_images/golden/avatar.png": "avatar-gradient.png"
+      }
+    },
+    {
+      "id": "highlight-twitch-emotes-vertical",
+      "request": {
+        "overlay": "highlight",
+        "authorName": "pixel_witch",
+        "text": "Kappa rain incoming catJAM RainTime and MissingEmote",
+        "fragments": [
+          {
+            "type": "emote",
+            "text": "Kappa",
+            "imageUrl": "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0"
+          },
+          {
+            "type": "text",
+            "text": " rain incoming "
+          },
+          {
+            "type": "emote",
+            "text": "catJAM",
+            "imageUrl": "https://cdn.7tv.app/emote/golden-cat/2x.webp"
+          },
+          {
+            "type": "text",
+            "text": " "
+          },
+          {
+            "type": "emote",
+            "text": "RainTime",
+            "imageUrl": "https://cdn.7tv.app/emote/golden-rain/2x.webp",
+            "zeroWidth": true
+          },
+          {
+            "type": "text",
+            "text": " and "
+          },
+          {
+            "type": "emote",
+            "text": "MissingEmote",
+            "imageUrl": "https://cdn.7tv.app/emote/golden-missing/2x.webp"
+          }
+        ],
+        "platform": "twitch",
+        "canvasWidth": 1080,
+        "canvasHeight": 1920,
+        "rect": {
+          "x": 0.04,
+          "y": 0.55,
+          "w": 0.7,
+          "h": 0.25
+        }
+      },
+      "images": {
+        "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/3.0": "emote-square-112.png",
+        "https://cdn.7tv.app/emote/golden-cat/2x.webp": "emote-wide-128x64.png",
+        "https://cdn.7tv.app/emote/golden-rain/2x.webp": "overlay-drops-64.png"
+      }
+    },
+    {
+      "id": "chat-box-marks-emotes",
+      "request": {
+        "overlay": "chat",
+        "messages": [
+          {
+            "authorName": "Lena Park",
+            "platform": "youtube",
+            "text": "hi from YouTube"
+          },
+          {
+            "authorName": "Nova Labs",
+            "platform": "x",
+            "text": "and hello from X"
+          },
+          {
+            "authorName": "pixel_witch",
+            "platform": "twitch",
+            "text": "Kappa nice catJAM",
+            "fragments": [
+              {
+                "type": "emote",
+                "text": "Kappa",
+                "imageUrl": "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0"
+              },
+              {
+                "type": "text",
+                "text": " nice "
+              },
+              {
+                "type": "emote",
+                "text": "catJAM",
+                "imageUrl": "https://cdn.7tv.app/emote/golden-cat/2x.webp"
+              }
+            ]
+          }
+        ],
+        "canvasWidth": 1280,
+        "canvasHeight": 720,
+        "rect": {
+          "x": 0.02,
+          "y": 0.02,
+          "w": 0.32,
+          "h": 0.6
+        }
+      },
+      "images": {
+        "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/3.0": "emote-square-112.png",
+        "https://cdn.7tv.app/emote/golden-cat/2x.webp": "emote-wide-128x64.png"
+      }
+    },
+    {
+      "id": "milestone-twitch-1080p",
+      "request": {
+        "overlay": "milestone",
+        "name": "Ada",
+        "label": "10th stream",
+        "personaName": "Buddy",
+        "platform": "twitch",
+        "canvasWidth": 1920,
+        "canvasHeight": 1080
+      }
+    },
+    {
+      "id": "milestone-youtube-avatar-vertical",
+      "request": {
+        "overlay": "milestone",
+        "name": "Night Owl Gaming With A Really Long Channel Name",
+        "label": "One year",
+        "personaName": "Orc",
+        "platform": "youtube",
+        "avatarUrl": "https://yt3.ggpht.com/golden/avatar.png",
+        "canvasWidth": 1080,
+        "canvasHeight": 1920
+      },
+      "images": {
+        "https://yt3.ggpht.com/golden/avatar.png": "avatar-gradient.png"
+      }
+    },
+    {
+      "id": "milestone-x-720p-rect",
+      "request": {
+        "overlay": "milestone",
+        "name": "grace",
+        "label": "5 in a row",
+        "platform": "x",
+        "canvasWidth": 1280,
+        "canvasHeight": 720,
+        "rect": {
+          "x": 0.02,
+          "y": 0.6,
+          "w": 0.3,
+          "h": 0.3
+        }
+      }
     }
+  ],
+  "keptFromVideorcRust": [
+    "caption-lower-third-s-wrap",
+    "highlight-twitch-720p",
+    "highlight-kick-long-rect",
+    "highlight-youtube-avatar-emotes"
   ]
 }

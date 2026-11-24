@@ -13,10 +13,13 @@
 //! shadows) on tiny-skia. Its output is the straight-alpha RGBA the PNG path
 //! decodes to.
 //!
-//! S1.2a lands the painter for the caption bar and the captioned copy's cue
-//! frames, held to the renderer's own PNGs (`golden_tests`); no production
-//! path uses it yet. The later S1.2 slices switch each overlay over and add
-//! the card, chat box and Sidekick painters.
+//! S1.2a landed the painter for the caption bar and the captioned copy's cue
+//! frames, and S1.2b switched the live caption bar to it. S1.2c adds the
+//! chat highlight card, the milestone card and the chat box (`highlight`,
+//! `milestone`, `chat`, with their avatars and emotes decoded by `images`
+//! and the platforms' own marks in `marks`), held to the renderer's PNGs
+//! like the caption; the switch of those overlays comes after. The Sidekick
+//! bubble lands in S1.2d.
 //!
 //! The goldens (`tests/fixtures/overlay-raster/`) are the renderer's own PNGs
 //! (`node scripts/overlay-raster-goldens.mjs`); `golden_tests` holds the
@@ -24,6 +27,13 @@
 
 mod canvas;
 mod caption;
+mod card;
+mod card_text;
+mod chat;
+mod highlight;
+mod images;
+mod marks;
+mod milestone;
 mod text;
 
 #[cfg(test)]
@@ -35,7 +45,12 @@ use tiny_skia::Pixmap;
 use canvas::Rgba;
 pub(crate) use caption::CaptionFrameState;
 use caption::{CaptionBarState, CaptionOverlayPosition, CaptionStyleId, CaptionTextSize};
+pub(crate) use chat::{ChatBoxMessage, ChatBoxState};
+pub(crate) use highlight::HighlightCardState;
+pub(crate) use images::DecodedImages;
+pub(crate) use milestone::MilestoneCardState;
 
+use crate::live_chat::LiveChatMessage;
 pub(crate) use crate::overlay_layout::OverlayRect;
 
 /// One overlay to draw, tagged as the golden cases are.
@@ -46,6 +61,9 @@ pub(crate) enum OverlayState {
     /// A captioned copy's cue frame, or the Captions page's preview.
     #[serde(rename = "captionFrame")]
     CaptionFrame(CaptionFrameState),
+    Highlight(HighlightCardState),
+    Milestone(MilestoneCardState),
+    Chat(ChatBoxState),
 }
 
 /// A drawn overlay: straight-alpha RGBA rows, as a decoded PNG.
@@ -66,16 +84,95 @@ impl OverlayImage {
     }
 }
 
-/// Draws one overlay the way the renderer would, or None where the renderer
-/// sends nothing (empty text, no room).
-pub(crate) fn render(state: &OverlayState) -> Option<OverlayImage> {
-    render_premultiplied(state).map(OverlayImage::from_pixmap)
+/// The image files an overlay draws, decoded: viewers' avatars by their URL,
+/// emotes by the URL their fragment carries (the bytes are the card's own
+/// size, `wanted_images`).
+#[derive(Debug, Default)]
+pub(crate) struct OverlayImages {
+    pub avatars: DecodedImages,
+    pub emotes: DecodedImages,
 }
 
-fn render_premultiplied(state: &OverlayState) -> Option<Pixmap> {
+/// Which image files an overlay draws.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct WantedImages {
+    /// Avatar URLs, fetched and read as they are.
+    pub avatars: Vec<String>,
+    /// Emote URLs as their fragments carry them, at most 20 distinct.
+    pub emotes: Vec<String>,
+}
+
+impl WantedImages {
+    /// The URL whose bytes an emote is drawn from: Twitch's 112 px `/3.0`
+    /// rather than the chat row's 28 px one (`highlightEmoteImageUrl`).
+    pub(crate) fn emote_file_url(url: &str) -> String {
+        card::emote_image_url(url)
+    }
+}
+
+impl OverlayState {
+    /// The image files this overlay draws.
+    pub(crate) fn wanted_images(&self) -> WantedImages {
+        match self {
+            Self::Highlight(state) => WantedImages {
+                avatars: state.avatar_url.iter().cloned().collect(),
+                emotes: card::emote_urls(&state.tokens()),
+            },
+            Self::Milestone(state) => WantedImages {
+                avatars: state.avatar_url.iter().cloned().collect(),
+                emotes: Vec::new(),
+            },
+            Self::Chat(state) => WantedImages {
+                avatars: state.avatar_urls(),
+                emotes: card::emote_urls(&state.tokens()),
+            },
+            Self::Caption(_) | Self::CaptionFrame(_) => WantedImages::default(),
+        }
+    }
+}
+
+/// Draws one overlay that needs no image files the way the renderer would,
+/// or None where the renderer sends nothing (empty text, no room).
+pub(crate) fn render(state: &OverlayState) -> Option<OverlayImage> {
+    render_with_images(state, &OverlayImages::default())
+}
+
+/// Draws one overlay with its decoded avatars and emotes; a missing one
+/// draws the monogram, or the emote's name, as the renderer's fallback did.
+pub(crate) fn render_with_images(
+    state: &OverlayState,
+    images: &OverlayImages,
+) -> Option<OverlayImage> {
+    render_premultiplied(state, images).map(OverlayImage::from_pixmap)
+}
+
+fn render_premultiplied(state: &OverlayState, images: &OverlayImages) -> Option<Pixmap> {
     match state {
         OverlayState::Caption(state) => caption::render(state),
         OverlayState::CaptionFrame(state) => caption::render_frame(state),
+        OverlayState::Highlight(state) => highlight::render(state, &images.avatars, &images.emotes),
+        OverlayState::Milestone(state) => milestone::render(state, &images.avatars),
+        OverlayState::Chat(state) => chat::render(state, &images.avatars, &images.emotes),
+    }
+}
+
+/// The highlight card for one chat message on a canvas: what
+/// `renderCommentHighlightCards` drew for it.
+pub(crate) fn highlight_card(
+    message: &LiveChatMessage,
+    canvas: (u32, u32),
+    rect: Option<OverlayRect>,
+) -> HighlightCardState {
+    HighlightCardState {
+        author_name: message.author_name.clone(),
+        text: card_text::card_text(message),
+        fragments: card_text::card_fragments(message).map(<[_]>::to_vec),
+        platform: message.platform,
+        avatar_url: message.author_avatar_url.clone(),
+        author_verified: message.author_verified,
+        canvas_width: canvas.0,
+        canvas_height: canvas.1,
+        rect,
     }
 }
 
@@ -116,6 +213,33 @@ pub(crate) fn caption_frame(
         position,
         text_size,
         style_id,
+    }
+}
+
+/// The chat box shows this many messages at most (`CHAT_OVERLAY_MAX_MESSAGES`).
+pub(crate) const CHAT_BOX_MAX_MESSAGES: usize = 5;
+
+/// The chat box for these messages (oldest first) on a canvas: what
+/// `renderChatOverlayCards` drew for them.
+pub(crate) fn chat_box(
+    messages: &[LiveChatMessage],
+    canvas: (u32, u32),
+    rect: OverlayRect,
+) -> ChatBoxState {
+    ChatBoxState {
+        messages: messages
+            .iter()
+            .map(|message| ChatBoxMessage {
+                author_name: message.author_name.clone(),
+                platform: message.platform,
+                text: message.message_text.clone(),
+                fragments: Some(message.fragments.clone()),
+                author_avatar_url: message.author_avatar_url.clone(),
+            })
+            .collect(),
+        canvas_width: canvas.0,
+        canvas_height: canvas.1,
+        rect,
     }
 }
 
