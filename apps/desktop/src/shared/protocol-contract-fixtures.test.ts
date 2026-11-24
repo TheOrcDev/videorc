@@ -1471,6 +1471,30 @@ describe('shared high-risk protocol fixture', () => {
       auxiliary: { active: false, width: 0, height: 0, revision: 0, styleRevision: 0 }
     }
     expect(validateBackendRpcResult('buddy.overlay.set', info)).toStrictEqual(info)
+    // Plan 260 S1.2d: the backend draws the bubble from the line that is up,
+    // its style and the target's canvas; no pixels ride along.
+    const line = {
+      target: 'primary',
+      text: 'Welcome in, everyone.',
+      style: 'thought',
+      canvasWidth: 1920,
+      canvasHeight: 1080,
+      rect: { x: 0.7975, y: 0.64, w: 0.18, h: 0.32 }
+    }
+    expect(validateBackendRpcParams('buddy.overlay.set', line)).toStrictEqual(line)
+    expect(() => validateBackendRpcParams('buddy.overlay.set', { ...line, text: '' })).toThrow()
+    expect(() =>
+      validateBackendRpcParams('buddy.overlay.set', { ...line, style: 'whisper' })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('buddy.overlay.set', { ...line, canvasWidth: 0 })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('buddy.overlay.set', { ...line, canvasHeight: 9000 })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('buddy.overlay.set', { ...line, canvas: { width: 1 } })
+    ).toThrow()
     // Plan 168 S-B1: the bubble's raster is cleared when it ends, one target
     // or both; nothing else rides along.
     expect(validateBackendRpcParams('buddy.overlay.clear', {})).toStrictEqual({})

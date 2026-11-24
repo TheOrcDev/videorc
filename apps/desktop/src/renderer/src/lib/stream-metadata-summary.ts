@@ -119,6 +119,10 @@ export function metadataOverrideSummary(
       break
     }
     case 'x': {
+      const category = override.xCategoryName?.trim()
+      if (category) {
+        parts.push(category)
+      }
       parts.push(override.xAnnounce === false ? 'No announcement' : 'Announces')
       break
     }

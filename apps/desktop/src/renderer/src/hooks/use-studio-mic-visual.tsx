@@ -12,7 +12,12 @@ import { subscribeVisualMicrophoneEpoch, visualMicrophoneEpoch } from '@/lib/mic
 import { useDocumentVisible } from '@/hooks/use-document-visible'
 import { useStudioCore, useStudioCloud } from '@/hooks/use-studio'
 import { micVisualAnalyserEnabled, microphoneAccessOpen } from '@/lib/mic-visual-gate'
-import { warmMicrophoneWanted } from '@/lib/warm-microphone-gate'
+import {
+  isCoreAudioMicrophoneId,
+  warmMicrophoneMeterOnly,
+  warmMicrophoneRetryDelayMs,
+  warmMicrophoneWanted
+} from '@/lib/warm-microphone-gate'
 import type {
   MicVisualLifecycleSnapshot,
   MicVisualPipeline,
@@ -53,11 +58,17 @@ const IDLE_PIPELINE: MicVisualPipeline = Object.freeze({
 })
 
 /**
- * Workspace-scoped owner for renderer microphone visuals. The backend remains
- * the recording/health authority; this provider opens one visual-only browser
- * stream whenever Studio/Sources is visible with OS access granted and an
- * unmuted microphone selected — session or not, so the meter can answer "is
- * my microphone working?" before anything is recorded.
+ * Workspace-scoped owner of the idle microphone meter's feed, so the meter
+ * can answer "is my microphone working?" before anything is recorded, while
+ * Studio/Sources is visible with OS access granted and an unmuted microphone
+ * selected.
+ *
+ * Plan 260 S1.3a (owner 2026-11-09): a CoreAudio microphone is metered by the
+ * backend's standing-by microphone (`audio.mic.arm`, its `audio.levels`), and
+ * the renderer opens nothing. Only a Windows or Linux input still gets the
+ * visual-only browser stream below, and only between sessions (D1: S1.3c
+ * replaces it with a backend meter-only capture). During a session or a Clips
+ * bus every meter reads the bus.
  */
 export function StudioMicVisualProvider({
   enabled,
@@ -72,9 +83,11 @@ export function StudioMicVisualProvider({
     sourceSelectionState,
     mediaAccess,
     isSessionActive,
+    audioBusActive,
     settings,
     armWarmMicrophone,
-    disarmWarmMicrophone
+    disarmWarmMicrophone,
+    warmMicrophone
   } = useStudioCore()
   const roomOpen = useStudioCloud().cloudStatus?.room?.phase === 'open'
   const documentVisible = useDocumentVisible()
@@ -96,30 +109,49 @@ export function StudioMicVisualProvider({
   // launch; on a never-asked Mac that raised the microphone prompt cold. It
   // waits for the same exact grant the analyser waits for (granted, or an OS
   // with no grant to give). Record still opens the microphone itself.
+  // Plan 260 S1.3a: it stands by whatever Keep microphone ready says, since
+  // it is the idle meter's feed; the setting only decides whether Record
+  // takes it (D2: off arms it meter-only). A running bus (a session or the
+  // Clips ring) owns the microphone and meters it, so nothing is armed then.
   const warmWanted =
     !roomOpen &&
     microphoneAccessOpen(permissionStatus) &&
     warmMicrophoneWanted({
-      keepWarm: settings.keepMicrophoneWarm !== false,
       workspaceVisible: enabled,
       documentVisible,
       microphoneId: selectionKey,
       muted: captureConfig.audio.microphoneMuted
     })
+  const meterOnly = warmMicrophoneMeterOnly(settings.keepMicrophoneWarm)
   const microphoneGainDb = captureConfig.audio.microphoneGainDb
+  const busOwnsMicrophone = isSessionActive || audioBusActive
+  // A refusal that says nothing lasting (a session's cleanup, a racing open)
+  // or a failed open is tried again: no renderer meter stands behind it now.
+  const [warmRetry, setWarmRetry] = useState(0)
+  const warmRetryDelayMs =
+    warmWanted && !busOwnsMicrophone && warmMicrophone && !warmMicrophone.armed
+      ? warmMicrophoneRetryDelayMs(warmMicrophone.reason)
+      : null
+  useEffect(() => {
+    if (warmRetryDelayMs === null) return
+    const timer = setTimeout(() => setWarmRetry((count) => count + 1), warmRetryDelayMs)
+    return () => clearTimeout(timer)
+  }, [warmMicrophone, warmRetryDelayMs])
   useEffect(() => {
     if (!warmWanted) {
       void disarmWarmMicrophone()
       return
     }
-    if (isSessionActive) return
-    void armWarmMicrophone()
+    if (busOwnsMicrophone) return
+    void armWarmMicrophone(meterOnly ? { meterOnly } : undefined)
   }, [
     armWarmMicrophone,
+    busOwnsMicrophone,
     disarmWarmMicrophone,
-    isSessionActive,
+    meterOnly,
     microphoneGainDb,
     selectionKey,
+    warmRetry,
     warmWanted
   ])
   useEffect(() => () => void disarmWarmMicrophone(), [disarmWarmMicrophone])
@@ -137,8 +169,9 @@ export function StudioMicVisualProvider({
         workspaceVisible: enabled,
         documentVisible,
         microphoneSelected: Boolean(selectionKey),
+        backendMetered: isCoreAudioMicrophoneId(selectionKey),
         muted: captureConfig.audio.microphoneMuted,
-        sessionActive: isSessionActive
+        sessionActive: busOwnsMicrophone
       })
   }
   useEffect(() => {

@@ -1,10 +1,13 @@
 //! The Buddy on stream (plan 164, Phase C): the avatar's state machine and its
 //! comic bubble, and the per-target bubble slot the compositor blits.
 //!
-//! Since plan 168 Phase B the backend draws the pet itself (`buddy_sprite`);
-//! the renderer rasterizes the bubble only, per output canvas, and pushes it
-//! through `buddy.overlay.set` (`buddy.overlay.clear` when it ends). The
-//! compositor anchors the bubble above the pet's head (D16). The backend owns
+//! Since plan 168 Phase B the backend draws the pet itself (`buddy_sprite`).
+//! Since plan 260 S1.2d it draws the bubble too: the UI names, per output
+//! canvas, the line that is up and the persona's bubble style through
+//! `buddy.overlay.set` (`buddy.overlay.clear` when it ends), and the backend
+//! rasterizes it (`overlay_raster`) into that target's slot, but only while
+//! that line is still the bubble that is up. The compositor anchors the
+//! bubble above the pet's head (D16). The backend owns
 //! WHICH state shows and for how long. Every bubble, manual (the Say box through
 //! `cohost.utterance.say`) or automatic (Phase D's greetings, answers and
 //! banter), enters through [`show_bubble`], which is the one way a bubble
@@ -42,8 +45,8 @@ use crate::captions::{
     OverlayPlacement,
 };
 use crate::cohost::{
-    CohostAvatarState, CohostUtterance, CohostUtteranceState, CohostUtteranceStatus,
-    CohostUtteranceTriggerKind,
+    CohostAvatarState, CohostBubbleStyle, CohostUtterance, CohostUtteranceState,
+    CohostUtteranceStatus, CohostUtteranceTriggerKind,
 };
 use crate::overlay_layout::{OverlayItem, OverlayRect, OverlaySnap, load_overlay_layout};
 use crate::protocol::CohostReportPostSource;
@@ -822,12 +825,14 @@ pub async fn clear(app: &AppState) -> BuddyOverlaySnapshot {
 
 // --- The bubble slot ----------------------------------------------------------------
 
-/// `buddy.overlay.set { target, pngBase64, rect }`: the renderer's raster of
-/// the bubble for one output canvas (plan 168 D16: the bubble only, its tail
-/// tip on the bitmap's bottom-centre). `rect` is the Buddy's rect the bubble
-/// was wrapped for; the compositor anchors the bitmap above the pet's head,
-/// or, where no pet frame exists (tests, older callers), inside `rect` (a push
-/// without one lands on the Buddy's default corner).
+/// A bubble raster to install: the renderer's (`buddy.overlay.set` before
+/// plan 260 S1.2d, still accepted for one release, see
+/// [`BuddyOverlaySetRequest`]) or a test's. One output canvas's bubble (plan
+/// 168 D16: the bubble only, its tail tip on the bitmap's bottom-centre).
+/// `rect` is the Buddy's rect the bubble was wrapped for; the compositor
+/// anchors the bitmap above the pet's head, or, where no pet frame exists
+/// (tests, older callers), inside `rect` (a push without one lands on the
+/// Buddy's default corner).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetBuddyOverlayParams {
@@ -837,6 +842,61 @@ pub struct SetBuddyOverlayParams {
     #[serde(default)]
     pub rect: Option<OverlayRect>,
 }
+
+/// `buddy.overlay.set` (plan 260 S1.2d): the bubble the backend draws for one
+/// output canvas, from the line that is up (`text`, as `cohost.buddy.state`
+/// carries it) and the persona's bubble `style`, at `canvasWidth` x
+/// `canvasHeight` and wrapped to `rect`'s width there. Or, for one release,
+/// the renderer's own raster (`pngBase64`, the path before S1.2d), installed
+/// as it was.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyOverlaySetRequest {
+    /// The renderer's raster (before plan 260 S1.2d). Accepted for one
+    /// release; when present, the state fields are ignored.
+    #[serde(default)]
+    pub png_base64: Option<String>,
+    /// The bubble's line. Required without `pngBase64`, and it must be the
+    /// line that is up: a line that ended or was replaced is not drawn.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Missing: speech, the persona's default.
+    #[serde(default)]
+    pub style: Option<CohostBubbleStyle>,
+    /// The target's canvas, required with `text`.
+    #[serde(default)]
+    pub canvas_width: Option<u32>,
+    #[serde(default)]
+    pub canvas_height: Option<u32>,
+    /// Missing: both targets get this raster, as for a PNG.
+    #[serde(default)]
+    pub target: Option<CaptionOverlayTarget>,
+    /// The Buddy's placed rect for this canvas's orientation: the bubble wraps
+    /// to its width. Missing: the Buddy's default corner.
+    #[serde(default)]
+    pub rect: Option<OverlayRect>,
+}
+
+/// Why a bubble line was not drawn.
+#[derive(Debug, thiserror::Error)]
+pub enum BuddyOverlayRefusal {
+    #[error(
+        "That line is not the bubble that is up (it ended or was replaced); nothing was drawn."
+    )]
+    Stale,
+}
+
+/// The error code a `buddy.overlay.set` refusal answers with.
+pub fn buddy_overlay_error_code(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<BuddyOverlayRefusal>().is_some() {
+        "buddy-overlay-stale"
+    } else {
+        "buddy-overlay-invalid"
+    }
+}
+
+/// The longest canvas side a bubble is drawn for (an 8K leg).
+const BUDDY_CANVAS_MAX_SIDE: u32 = 8192;
 
 /// `buddy.overlay.clear { target? }`: the bubble ended; both targets without
 /// one.
@@ -870,9 +930,108 @@ pub fn install_buddy_overlay(
     )
 }
 
-/// `buddy.overlay.set`: decode the bubble off the async runtime (like the
-/// highlight card), then one bounded swap into the slot.
+/// `buddy.overlay.set`. With the bubble's line (plan 260 S1.2d) the backend
+/// draws it at the named canvas, off the async runtime, and installs it only
+/// while that line is still the bubble that is up: an expiry or a newer line
+/// changes the state machine before the UI hears of it, so a draw that
+/// crossed either is dropped rather than left on stream. With `pngBase64`
+/// (the previous release's path) the renderer's raster is installed as
+/// before.
 pub async fn set_buddy_overlay(
+    app: &AppState,
+    request: BuddyOverlaySetRequest,
+) -> anyhow::Result<CaptionOverlayTargetsInfo> {
+    let BuddyOverlaySetRequest {
+        png_base64,
+        text,
+        style,
+        canvas_width,
+        canvas_height,
+        target,
+        rect,
+    } = request;
+    if let Some(png_base64) = png_base64.filter(|png| !png.trim().is_empty()) {
+        return set_buddy_overlay_png(
+            &app.buddy_overlay,
+            SetBuddyOverlayParams {
+                png_base64,
+                target,
+                rect,
+            },
+        )
+        .await;
+    }
+    let Some(text) = text.filter(|text| !text.trim().is_empty()) else {
+        anyhow::bail!(
+            "buddy.overlay.set needs the bubble's text (or, for one release, pngBase64)."
+        );
+    };
+    let (Some(width), Some(height)) = (canvas_width, canvas_height) else {
+        anyhow::bail!(
+            "buddy.overlay.set needs canvasWidth and canvasHeight with the bubble's text."
+        );
+    };
+    let side = 1..=BUDDY_CANVAS_MAX_SIDE;
+    if !side.contains(&width) || !side.contains(&height) {
+        anyhow::bail!("The bubble's canvas is out of range ({width}x{height}).");
+    }
+    let placement = buddy_overlay_placement(rect);
+    let wrap_rect = placement.rect_for_canvas(width, height);
+    let style = style.unwrap_or_default();
+    let is_up = |buddy: &BuddyOverlayState| {
+        buddy
+            .bubble
+            .as_ref()
+            .is_some_and(|bubble| bubble.text == text)
+    };
+    if !is_up(&*app.buddy_overlay_state.lock().await) {
+        return Err(BuddyOverlayRefusal::Stale.into());
+    }
+    let line = text.clone();
+    let drawn = tokio::task::spawn_blocking(move || {
+        draw_buddy_bubble(&line, style, (width, height), wrap_rect)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("The Sidekick bubble drawing task stopped: {error}"))??;
+    let buddy = app.buddy_overlay_state.lock().await;
+    if !is_up(&buddy) {
+        return Err(BuddyOverlayRefusal::Stale.into());
+    }
+    let info = crate::captions::install_prepared_overlay_targets(
+        &app.buddy_overlay,
+        drawn,
+        target,
+        placement,
+    );
+    drop(buddy);
+    Ok(info)
+}
+
+/// Blocking: the bubble `renderBuddyBubblePng` drew for this canvas, in the
+/// compositor's layout (`overlay_raster`).
+fn draw_buddy_bubble(
+    text: &str,
+    style: CohostBubbleStyle,
+    canvas: (u32, u32),
+    rect: OverlayRect,
+) -> anyhow::Result<crate::captions::PreparedCaptionOverlay> {
+    use crate::overlay_raster::{self, OverlayState};
+
+    let bubble = overlay_raster::buddy_bubble(text, style, canvas, rect);
+    let drawn = overlay_raster::render(&OverlayState::Buddy(bubble)).ok_or_else(|| {
+        anyhow::anyhow!(
+            "The bubble has no room on a {}x{} canvas in a rect {:.3} wide.",
+            canvas.0,
+            canvas.1,
+            rect.w
+        )
+    })?;
+    crate::captions::prepare_rgba_caption_overlay(drawn.width, drawn.height, drawn.rgba)
+}
+
+/// The previous release's path: decode the renderer's bubble off the async
+/// runtime (like the highlight card), then one bounded swap into the slot.
+async fn set_buddy_overlay_png(
     slots: &CaptionOverlaySlots,
     params: SetBuddyOverlayParams,
 ) -> anyhow::Result<CaptionOverlayTargetsInfo> {
@@ -1132,7 +1291,7 @@ mod tests {
     #[tokio::test]
     async fn the_bubble_is_set_off_the_runtime_and_cleared_per_target() {
         let slots = crate::captions::new_caption_overlay_slots();
-        let info = set_buddy_overlay(
+        let info = set_buddy_overlay_png(
             &slots,
             SetBuddyOverlayParams {
                 png_base64: bubble_png(40, 20),
@@ -1145,7 +1304,7 @@ mod tests {
         assert!(info.primary.active && info.auxiliary.active);
         assert_eq!((info.primary.width, info.primary.height), (40, 20));
         assert!(
-            set_buddy_overlay(
+            set_buddy_overlay_png(
                 &slots,
                 SetBuddyOverlayParams {
                     png_base64: "AAAA".to_string(),
@@ -1174,6 +1333,225 @@ mod tests {
             serde_json::from_value::<ClearBuddyOverlayParams>(serde_json::json!({ "x": 1 }))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn bubble_request_carries_the_line_or_the_previous_releases_png() {
+        let line: BuddyOverlaySetRequest = serde_json::from_value(serde_json::json!({
+            "target": "auxiliary",
+            "text": "Welcome in",
+            "style": "thought",
+            "canvasWidth": 1080,
+            "canvasHeight": 1920,
+            "rect": { "x": 0.608889, "y": 0.6, "w": 0.32, "h": 0.18 }
+        }))
+        .unwrap();
+        assert_eq!(line.png_base64, None);
+        assert_eq!(line.text.as_deref(), Some("Welcome in"));
+        assert_eq!(line.style, Some(CohostBubbleStyle::Thought));
+        assert_eq!(
+            (line.canvas_width, line.canvas_height),
+            (Some(1080), Some(1920))
+        );
+        assert_eq!(line.target, Some(CaptionOverlayTarget::Auxiliary));
+        assert_eq!(line.rect.map(|rect| rect.w), Some(0.32));
+
+        let png: BuddyOverlaySetRequest = serde_json::from_value(serde_json::json!({
+            "target": "primary",
+            "pngBase64": "payload",
+            "rect": { "x": 0.7, "y": 0.6, "w": 0.2, "h": 0.3 }
+        }))
+        .unwrap();
+        assert_eq!(png.png_base64.as_deref(), Some("payload"));
+        assert_eq!((png.text, png.style, png.canvas_width), (None, None, None));
+    }
+
+    fn bubble_line(
+        text: &str,
+        target: CaptionOverlayTarget,
+        canvas: (u32, u32),
+        rect: Option<OverlayRect>,
+    ) -> BuddyOverlaySetRequest {
+        BuddyOverlaySetRequest {
+            png_base64: None,
+            text: Some(text.to_string()),
+            style: Some(CohostBubbleStyle::Speech),
+            canvas_width: Some(canvas.0),
+            canvas_height: Some(canvas.1),
+            target: Some(target),
+            rect,
+        }
+    }
+
+    /// Plan 220 S1.2d: the line that is up is drawn at each target's own
+    /// canvas, wrapped to the Buddy's rect there, and lands in that target's
+    /// slot only: the recording's landscape canvas and the vertical leg's
+    /// portrait one, as the renderer rasterized one bubble per canvas.
+    #[tokio::test]
+    async fn the_bubble_that_is_up_is_drawn_at_each_targets_canvas() {
+        let (app, _rx) = test_app();
+        let line = "Welcome in, everyone. Grab a seat and stay a while!";
+        show_bubble(&app, line, CohostUtteranceState::Talk)
+            .await
+            .unwrap();
+        let landscape = OverlayRect::new(0.7, 0.3, 0.2, 0.62);
+        let info = set_buddy_overlay(
+            &app,
+            bubble_line(
+                line,
+                CaptionOverlayTarget::Primary,
+                (1280, 720),
+                Some(landscape),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(info.primary.active && !info.auxiliary.active, "{info:?}");
+        // The bitmap is the avatar box (the rect's 256 px) plus 8 px of
+        // shadow room each side at 14 px type.
+        assert_eq!(info.primary.width, 256 + 2 * 8);
+        let portrait = crate::overlay_layout::overlay_snap_rect(
+            OverlayItem::Buddy,
+            crate::overlay_layout::OverlayOrientation::Vertical,
+            OverlaySnap::BottomRight,
+        );
+        let mut thought = bubble_line(line, CaptionOverlayTarget::Auxiliary, (1080, 1920), None);
+        thought.style = Some(CohostBubbleStyle::Thought);
+        let info = set_buddy_overlay(&app, thought).await.unwrap();
+        // No rect: the Buddy's default corner, 0.32 of the portrait width
+        // (345 px), and 18 px type (11 px of room) by the long edge.
+        assert_eq!(info.auxiliary.width, 345 + 2 * 11);
+        let overlays = crate::captions::current_caption_overlays(&app.buddy_overlay);
+        let (primary, auxiliary) = (overlays.primary.unwrap(), overlays.auxiliary.unwrap());
+        assert_eq!(primary.placement.rect, Some(landscape));
+        assert_eq!(
+            auxiliary.placement.rect_for_canvas(1080, 1920),
+            portrait,
+            "a push without a rect keeps the default corner"
+        );
+        // The porcelain body (#FAFAFB), opaque, under the ink.
+        let porcelain = |rgba: &[u8]| {
+            rgba.chunks_exact(4)
+                .filter(|pixel| pixel == &[250, 250, 251, 255])
+                .count()
+        };
+        assert!(
+            porcelain(&primary.rgba) > 5_000,
+            "{}",
+            porcelain(&primary.rgba)
+        );
+        assert!(porcelain(&auxiliary.rgba) > 5_000);
+        assert!(
+            primary.height < auxiliary.height,
+            "{} {}",
+            primary.height,
+            auxiliary.height
+        );
+    }
+
+    /// Only the line that is up is ever drawn: a line from before a newer
+    /// one, or after its bubble ended, is refused as stale and leaves the
+    /// slot as it was (the UI's `buddy.overlay.clear` removes an ended one).
+    #[tokio::test]
+    async fn a_line_that_is_not_up_is_refused_as_stale() {
+        let (app, _rx) = test_app();
+        let canvas = (1920, 1080);
+        let error = set_buddy_overlay(
+            &app,
+            bubble_line(
+                "Nobody said this",
+                CaptionOverlayTarget::Primary,
+                canvas,
+                None,
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(buddy_overlay_error_code(&error), "buddy-overlay-stale");
+        assert!(!crate::captions::caption_overlay_targets_metadata(&app.buddy_overlay).active);
+
+        show_bubble(&app, "First line", CohostUtteranceState::Talk)
+            .await
+            .unwrap();
+        let shown = set_buddy_overlay(
+            &app,
+            bubble_line("First line", CaptionOverlayTarget::Primary, canvas, None),
+        )
+        .await
+        .unwrap();
+        show_bubble(&app, "Second line", CohostUtteranceState::Laugh)
+            .await
+            .unwrap();
+        let error = set_buddy_overlay(
+            &app,
+            bubble_line("First line", CaptionOverlayTarget::Primary, canvas, None),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(buddy_overlay_error_code(&error), "buddy-overlay-stale");
+        clear(&app).await;
+        let error = set_buddy_overlay(
+            &app,
+            bubble_line("Second line", CaptionOverlayTarget::Primary, canvas, None),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(buddy_overlay_error_code(&error), "buddy-overlay-stale");
+        let primary = crate::captions::current_caption_overlays(&app.buddy_overlay)
+            .primary
+            .unwrap();
+        assert_eq!(
+            (primary.width, primary.revision),
+            (shown.primary.width, shown.primary.revision)
+        );
+    }
+
+    /// A request without a line or a canvas, a canvas out of range or a rect
+    /// with no room for a word is invalid; the previous release's PNG is
+    /// still installed as it was.
+    #[tokio::test]
+    async fn bubble_requests_without_a_line_or_a_canvas_are_invalid() {
+        let (app, _rx) = test_app();
+        show_bubble(&app, "Hello horde", CohostUtteranceState::Talk)
+            .await
+            .unwrap();
+        let line = |canvas| bubble_line("Hello horde", CaptionOverlayTarget::Primary, canvas, None);
+        let mut blank = line((1280, 720));
+        blank.text = Some("   ".to_string());
+        let mut sizeless = line((1280, 720));
+        sizeless.canvas_height = None;
+        let narrow = bubble_line(
+            "Hello horde",
+            CaptionOverlayTarget::Primary,
+            (1280, 720),
+            Some(OverlayRect::new(0.9, 0.6, 0.01, 0.3)),
+        );
+        for request in [blank, sizeless, line((0, 720)), line((9000, 720)), narrow] {
+            let error = set_buddy_overlay(&app, request).await.unwrap_err();
+            assert_eq!(
+                buddy_overlay_error_code(&error),
+                "buddy-overlay-invalid",
+                "{error:#}"
+            );
+        }
+        assert!(!crate::captions::caption_overlay_targets_metadata(&app.buddy_overlay).active);
+
+        let info = set_buddy_overlay(
+            &app,
+            BuddyOverlaySetRequest {
+                png_base64: Some(bubble_png(40, 20)),
+                text: None,
+                style: None,
+                canvas_width: None,
+                canvas_height: None,
+                target: Some(CaptionOverlayTarget::Auxiliary),
+                rect: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!info.primary.active && info.auxiliary.active);
+        assert_eq!((info.auxiliary.width, info.auxiliary.height), (40, 20));
     }
 
     /// Plan 249 S5: each state change also streams the avatar animator's

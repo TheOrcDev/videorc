@@ -13,15 +13,18 @@
 //! - [`images`]: a chat image's bytes through the backend's loopback route,
 //!   for the rows' avatars.
 //!
-//! Still to land in S1.6e: the Studio's Chat section view and
-//! the driver that feeds this from the Studio's events (it needs the Studio,
+//! - [`view`]: the Studio's Chat section.
+//!
+//! Still to land in S1.6e: the driver that feeds this from the Studio's events (it needs the Studio,
 //! S1.6a, behind a trait).
 
+pub mod arrival;
 pub mod highlight;
 pub mod images;
 pub mod model;
 pub mod overlay;
 pub mod store;
+pub mod view;
 
 pub use highlight::{HighlightFailure, RowHighlight, RowPhase};
 pub use model::{

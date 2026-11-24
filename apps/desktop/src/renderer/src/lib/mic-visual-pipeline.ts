@@ -191,6 +191,8 @@ export function advanceBandLevelsInto(
  * Owns the renderer's visual-only microphone resources. Calling configure
  * repeatedly for the same selected device is idempotent, so any number of UI
  * consumers share one MediaStream, one AudioContext, and one animation clock.
+ * Plan 260 S1.3a: configured only for a Windows or Linux microphone's idle
+ * meter (see the fence in mic-stream.ts); S1.3c deletes it.
  */
 export function createMicVisualPipeline<S extends MicMediaStreamLike>(
   dependencies: MicVisualPipelineDependencies<S>

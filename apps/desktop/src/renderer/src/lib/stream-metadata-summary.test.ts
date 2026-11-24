@@ -147,6 +147,12 @@ describe('metadataOverrideSummary', () => {
     expect(
       metadataOverrideSummary(draft, override('x', { customize: true, xAnnounce: true }))
     ).toBe('Own title · Announces')
+    expect(
+      metadataOverrideSummary(
+        draft,
+        override('x', { xCategoryId: 'gaming', xCategoryName: 'Gaming', xAnnounce: false })
+      )
+    ).toBe('Shared title · Gaming · No announcement')
   })
 })
 

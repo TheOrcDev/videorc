@@ -14,6 +14,10 @@
 // version field, a rename that also deletes a non-allow-listed path, an
 // empty or unreadable diff, or workflow_dispatch, is treated as code.
 
+import { readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 export const CI_SCOPE_KINDS = Object.freeze({
   CODE: 'code',
   VERSION_RELEASE: 'version-release',
@@ -74,63 +78,165 @@ const JS_TEST_SCOPE = Object.freeze({
   js: true
 })
 
-// Plan 242 S15: desktop app files the Rust crates include or read at build or
+// Plan 242 S15: desktop app paths the Rust crates include or read at build or
 // test time. A change to any of them can change a Rust result, so it is code.
-// scripts/lib/ci-change-scope-rust-reads.test.mjs fails when a Rust file
-// starts reading a desktop path this list does not cover.
+//
+// These two directories are read as a whole (the shared contract mirrors and
+// the assets the backend compiles in), so every file under them counts.
 export const RUST_READS_DESKTOP_PREFIXES = Object.freeze([
   'apps/desktop/src/shared/',
   'apps/desktop/src/renderer/src/assets/'
 ])
-export const RUST_READS_DESKTOP_FILES = Object.freeze([
-  'apps/desktop/src/renderer/src/styles.css',
-  'apps/desktop/src/main/window-palette.ts',
-  // videorc-app-core's desktop::permissions tests read these (plan 260 S1.6s).
-  'apps/desktop/src/main/media-access.ts',
-  'apps/desktop/src/main/runtime-info.ts',
-  // The typed client's deadline table is checked against it (S1.6s part 4).
-  'apps/desktop/src/renderer/src/backendClient.ts',
-  // desktop::system_access and desktop::camera_extension check their tables
-  // against these (S1.6s part 5).
-  'apps/desktop/src/renderer/src/lib/system-access.ts',
-  'apps/desktop/src/renderer/src/lib/system-access-view.ts',
-  'apps/desktop/src/renderer/src/lib/system-permission-orchestration.ts',
-  'apps/desktop/src/main/camera-extension.ts',
-  // videorc-app-core's nav tests read these (plan 260 S1.6f).
-  'apps/desktop/src/renderer/src/lib/settings-tabs.ts',
-  'apps/desktop/src/renderer/src/lib/buddy-tabs.ts',
-  'apps/desktop/src/renderer/src/lib/avatar-tabs.ts',
-  'apps/desktop/src/renderer/src/lib/livestream-tabs.ts',
-  // buddy::copy's words are checked against these (S1.6e part 2).
-  'apps/desktop/src/renderer/src/components/buddy-avatar-section.tsx',
-  'apps/desktop/src/renderer/src/components/buddy-consent-dialog.tsx',
-  'apps/desktop/src/renderer/src/components/buddy-library-section.tsx',
-  'apps/desktop/src/renderer/src/components/buddy-look-section.tsx',
-  'apps/desktop/src/renderer/src/components/buddy-motion-section.tsx',
-  'apps/desktop/src/renderer/src/components/buddy-persona-section.tsx',
-  'apps/desktop/src/renderer/src/components/cohost-settings-section.tsx',
-  'apps/desktop/src/renderer/src/components/cohost-status.tsx',
-  'apps/desktop/src/renderer/src/components/tabs/avatar-tab.tsx',
-  'apps/desktop/src/renderer/src/components/tabs/buddy-tab.tsx',
-  'apps/desktop/src/renderer/src/lib/buddy-auto-chat-view.ts',
-  'apps/desktop/src/renderer/src/lib/buddy-create-gate.ts',
-  'apps/desktop/src/renderer/src/lib/buddy-library-view.ts',
-  'apps/desktop/src/renderer/src/lib/buddy-onboarding-copy.ts',
-  'apps/desktop/src/renderer/src/lib/buddy-persona-view.ts',
-  'apps/desktop/src/renderer/src/lib/buddy-report-view.ts',
-  'apps/desktop/src/renderer/src/lib/buddy-tab-view.ts',
-  'apps/desktop/src/renderer/src/lib/cohost-view.ts',
-  // chat::highlight's shared words are checked against it (S1.6e part 1).
-  'apps/desktop/src/renderer/src/lib/studio-actions/studio-context.ts',
-  // videorc-preview's words are checked against the Preview card's copy
-  // byte for byte (plan 260 S1.7b).
-  'apps/desktop/src/renderer/src/components/preview-stage.tsx'
-])
 
-export function isRustReachableDesktopPath(path) {
+// Plan 260: every other path is found at run time, not kept by hand. Every
+// string literal in a crate's Rust code (comments skipped) that names an
+// apps/desktop path, from include_str!, include_bytes!, read_to_string or a
+// fixture path, is a Rust read. A templated path ("…/{name}.ts") counts as
+// its whole directory. A scan that finds nothing is broken, and then every
+// desktop path counts as Rust (fail closed).
+const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
+const SKIPPED_DIRS = new Set(['target', 'node_modules'])
+const PATH_TEMPLATE_RE = /[{}*%$]/
+
+function isIdentChar(char) {
+  return char !== undefined && /[A-Za-z0-9_]/.test(char)
+}
+
+/** The string literals in Rust source, in order, with comments skipped. */
+export function rustStringLiterals(source) {
+  const literals = []
+  const length = source.length
+  let i = 0
+  while (i < length) {
+    const char = source[i]
+    const next = source[i + 1]
+    if (char === '/' && next === '/') {
+      const end = source.indexOf('\n', i)
+      i = end < 0 ? length : end + 1
+      continue
+    }
+    if (char === '/' && next === '*') {
+      // Rust block comments nest.
+      let depth = 1
+      i += 2
+      while (i < length && depth > 0) {
+        if (source[i] === '/' && source[i + 1] === '*') {
+          depth++
+          i += 2
+        } else if (source[i] === '*' && source[i + 1] === '/') {
+          depth--
+          i += 2
+        } else {
+          i++
+        }
+      }
+      continue
+    }
+    const rawStart =
+      char === 'r' &&
+      (next === '"' || next === '#') &&
+      (!isIdentChar(source[i - 1]) || (source[i - 1] === 'b' && !isIdentChar(source[i - 2])))
+    if (rawStart) {
+      let j = i + 1
+      let hashes = 0
+      while (source[j] === '#') {
+        hashes++
+        j++
+      }
+      if (source[j] === '"') {
+        const close = `"${'#'.repeat(hashes)}`
+        const end = source.indexOf(close, j + 1)
+        literals.push(source.slice(j + 1, end < 0 ? length : end))
+        i = end < 0 ? length : end + close.length
+        continue
+      }
+      // A raw identifier (r#type): not a string.
+      i = j
+      continue
+    }
+    if (char === '"') {
+      let j = i + 1
+      let value = ''
+      while (j < length && source[j] !== '"') {
+        if (source[j] === '\\') {
+          value += source.slice(j, j + 2)
+          j += 2
+        } else {
+          value += source[j]
+          j++
+        }
+      }
+      literals.push(value)
+      i = j + 1
+      continue
+    }
+    if (char === "'") {
+      // A char literal ('"', '\'', '\u{..}'), or a lifetime or label.
+      if (next === '\\') {
+        const end = source.indexOf("'", i + 3)
+        i = end < 0 ? length : end + 1
+        continue
+      }
+      const codePoint = source.codePointAt(i + 1)
+      const width = codePoint !== undefined && codePoint > 0xffff ? 2 : 1
+      i += source[i + 1 + width] === "'" ? 2 + width : 1
+      continue
+    }
+    i++
+  }
+  return literals
+}
+
+/** The apps/desktop paths a Rust source names in its code. */
+export function desktopPathsInRust(source) {
+  const paths = []
+  for (const literal of rustStringLiterals(source)) {
+    const at = literal.indexOf('apps/desktop')
+    if (at < 0) continue
+    let path = literal.slice(at)
+    const template = path.search(PATH_TEMPLATE_RE)
+    if (template >= 0) path = path.slice(0, path.lastIndexOf('/', template))
+    path = path.replace(/\/+$/, '')
+    if (path) paths.push(path)
+  }
+  return paths
+}
+
+function rustFiles(dir, files) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.') || SKIPPED_DIRS.has(entry.name)) continue
+    const path = join(dir, entry.name)
+    if (entry.isDirectory()) rustFiles(path, files)
+    else if (entry.isFile() && entry.name.endsWith('.rs')) files.push(path)
+  }
+  return files
+}
+
+/** Every apps/desktop path the crates under `root` name, sorted, once each. */
+export function scanRustReadDesktopPaths(root = REPO_ROOT) {
+  const found = new Set()
+  try {
+    for (const file of rustFiles(join(root, 'crates'), [])) {
+      for (const path of desktopPathsInRust(readFileSync(file, 'utf8'))) found.add(path)
+    }
+  } catch {
+    return []
+  }
+  return [...found].sort()
+}
+
+let scanned = null
+/** This checkout's Rust-read desktop paths, scanned once per run. */
+export function rustReadDesktopPaths() {
+  scanned ??= Object.freeze(scanRustReadDesktopPaths())
+  return scanned
+}
+
+export function isRustReachableDesktopPath(path, reads = rustReadDesktopPaths()) {
+  if (reads.length === 0) return true
   return (
-    RUST_READS_DESKTOP_FILES.includes(path) ||
-    RUST_READS_DESKTOP_PREFIXES.some((prefix) => path.startsWith(prefix))
+    RUST_READS_DESKTOP_PREFIXES.some((prefix) => path.startsWith(prefix)) ||
+    reads.some((read) => path === read || path.startsWith(`${read}/`))
   )
 }
 

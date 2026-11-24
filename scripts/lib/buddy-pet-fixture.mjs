@@ -341,6 +341,54 @@ export function buddyPetTalkAlternates(timeline, minSteps = 4, pauseFrames = 8) 
   return lines.flat().length >= minSteps && alternates
 }
 
+// --- The bubble on a frame (plan 260 S1.2d) ------------------------------------------
+
+/** The bubble's porcelain (#FAFAFB, plan 164 D17) after an encode: every
+ * channel at least this bright, and the channels this close. The test
+ * pattern's brightest stripe is 235 grey and every fixture tag is saturated,
+ * so nothing else on the smoke's canvas qualifies. */
+export const BUDDY_BUBBLE_MIN_CHANNEL = 240
+export const BUDDY_BUBBLE_MAX_SPREAD = 12
+
+/** The porcelain's bounding box `[left, top, right, bottom]` and its pixel
+ * count in a frame or a crop (`channels` 3 for rgb24; 4 for RGBA, where only
+ * opaque pixels count), or `null` with fewer than `minPixels`. */
+export function buddyBubbleBox(pixels, width, height, { channels = 3, minPixels = 400 } = {}) {
+  let left = Infinity
+  let top = Infinity
+  let right = -Infinity
+  let bottom = -Infinity
+  let count = 0
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * channels
+      if (channels === 4 && pixels[offset + 3] !== 255) continue
+      const low = Math.min(pixels[offset], pixels[offset + 1], pixels[offset + 2])
+      const high = Math.max(pixels[offset], pixels[offset + 1], pixels[offset + 2])
+      if (low < BUDDY_BUBBLE_MIN_CHANNEL || high - low > BUDDY_BUBBLE_MAX_SPREAD) continue
+      count += 1
+      left = Math.min(left, x)
+      top = Math.min(top, y)
+      right = Math.max(right, x)
+      bottom = Math.max(bottom, y)
+    }
+  }
+  return count >= minPixels ? { box: [left, top, right, bottom], pixels: count } : null
+}
+
+/** Where the bubble can sit on a canvas: above the pet's box (its tail
+ * points at the pet's head, D16), the box's columns widened by a fifth each
+ * side, from a box's height above its top down to its middle. */
+export function buddyBubbleRegion(box, canvasWidth, canvasHeight) {
+  const [boxX, boxY, side] = box
+  const margin = Math.round(side * 0.2)
+  const x = clamp(boxX - margin, 0, canvasWidth - 1)
+  const y = clamp(boxY - side, 0, canvasHeight - 1)
+  const right = clamp(boxX + side + margin, x + 1, canvasWidth)
+  const bottom = clamp(boxY + Math.round(side / 2), y + 1, canvasHeight)
+  return { x, y, width: right - x, height: bottom - y }
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value))
 }

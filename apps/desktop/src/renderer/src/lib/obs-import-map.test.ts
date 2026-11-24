@@ -3,17 +3,20 @@ import { join } from 'path'
 
 import { describe, expect, it } from 'vitest'
 
-import { parseSceneCollection } from '../../../main/obs-import'
-import type { Device, ObsSetup } from '@/lib/backend'
+import type { Device, ObsScene, ObsSetup, ObsSource } from '@/lib/backend'
 import { mapObsSetup, type ObsImportPlanResult } from './obs-import-map'
 
 // O2 (OBS import plan): every mapping-table row is a test, and the owner's
 // real (scrubbed) collection must produce a report a human can read aloud.
 
-const collectionJson = readFileSync(
-  join(__dirname, '../../../main/obs-fixtures/collection.json'),
-  'utf8'
-)
+// The backend's parse of the real collection (plan 260 S1.5d), pinned by
+// `obs_import` tests in crates/videorc-backend.
+const parsed = JSON.parse(
+  readFileSync(
+    join(__dirname, '../../../../../../protocol-fixtures/obs/collection.parsed.json'),
+    'utf8'
+  )
+) as { name: string; sources: ObsSource[]; scenes: ObsScene[]; hasDesktopAudio: boolean }
 
 function device(kind: Device['kind'], id: string, name: string): Device {
   return { id, name, kind, status: 'available' }
@@ -48,7 +51,6 @@ function reportNotes(result: ObsImportPlanResult, verdict?: string): string[] {
 }
 
 describe('mapObsSetup on the real fixture', () => {
-  const parsed = parseSceneCollection(collectionJson)
   const setup = setupFrom({
     collectionName: parsed.name,
     canvasWidth: 3840,
@@ -391,16 +393,6 @@ describe('mapping table rows', () => {
     expect(JSON.stringify(on.report)).not.toContain('roadmap')
   })
 
-  it('reads an unmuted OBS Desktop Audio as on and a muted one as off', () => {
-    const collection = (desktop: unknown): string =>
-      JSON.stringify({ name: 'C', sources: [], DesktopAudioDevice1: desktop })
-    expect(parseSceneCollection(collection({ name: 'Desktop Audio' })).hasDesktopAudio).toBe(true)
-    expect(
-      parseSceneCollection(collection({ name: 'Desktop Audio', muted: true })).hasDesktopAudio
-    ).toBe(false)
-    expect(parseSceneCollection(collection(undefined)).hasDesktopAudio).toBe(false)
-  })
-
   it('an image source becomes the background; extra images are skipped', () => {
     const bg = {
       name: 'BG',
@@ -499,7 +491,6 @@ describe('mapping table rows', () => {
   })
 
   it('writes every note as a sentence', () => {
-    const parsed = parseSceneCollection(collectionJson)
     const result = mapObsSetup(
       setupFrom({
         sources: parsed.sources,

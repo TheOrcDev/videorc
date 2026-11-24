@@ -273,6 +273,11 @@ fn admin_only_method(method: &str) -> bool {
                 // Plan 168 S-A3: only main, which copied and sized the
                 // folder, registers a pet pack.
                 | "cohost.pet.import"
+                // Plan 260 S1.5d: OBS's setup, its recording folder and the
+                // stream key; main hands the renderer what it may see.
+                | "obs.discover"
+                | "obs.read"
+                | "obs.readStreamKey"
         )
 }
 

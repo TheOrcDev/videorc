@@ -6,6 +6,8 @@ const providerState = vi.hoisted(() => ({
   roomOpen: false,
   microphoneMuted: false,
   sessionActive: false,
+  audioBusActive: false,
+  warmMicrophone: null as { armed: boolean; reason?: string; capturedFrames: number } | null,
   sourcePending: null as 'microphone' | null,
   sourceChecking: false,
   microphoneId: 'backend-mic-1',
@@ -26,6 +28,8 @@ vi.mock('@/hooks/use-studio', () => ({
     mediaAccess: { microphone: 'granted' },
     selectedMicrophone: { id: providerState.microphoneId, name: 'Studio microphone' },
     isSessionActive: providerState.sessionActive,
+    audioBusActive: providerState.audioBusActive,
+    warmMicrophone: providerState.warmMicrophone,
     sourceSelectionState: {
       pending: providerState.sourcePending,
       checking: providerState.sourceChecking
@@ -37,11 +41,12 @@ vi.mock('@/hooks/use-studio', () => ({
 }))
 
 import { useFrameSource } from './use-frame-source'
-import { useStudioMicVisualSource } from './use-studio-mic-sources'
+import { useStudioMicMeterSource } from './use-studio-mic-sources'
 import { StudioMicVisualProvider, useStudioMicVisualLifecycle } from './use-studio-mic-visual'
 
+/** The analyser's one consumer kind: a Windows or Linux idle meter (plan 260 S1.3a). */
 function VisualConsumer({ onLifecycle }: { onLifecycle: (active: boolean) => void }): null {
-  useFrameSource(useStudioMicVisualSource(), () => undefined)
+  useFrameSource(useStudioMicMeterSource({ gainDb: 0, muted: false }), () => undefined)
   onLifecycle(useStudioMicVisualLifecycle().active)
   return null
 }
@@ -65,6 +70,8 @@ describe('StudioMicVisualProvider', () => {
     providerState.roomOpen = false
     providerState.microphoneMuted = false
     providerState.sessionActive = false
+    providerState.audioBusActive = false
+    providerState.warmMicrophone = null
     providerState.sourcePending = null
     providerState.sourceChecking = false
     providerState.microphoneId = 'backend-mic-1'
@@ -154,13 +161,12 @@ describe('StudioMicVisualProvider', () => {
       expect(armedLast()).toBe(true)
     })
 
-    it('releases the microphone when muted, when the setting is off, or for a non-CoreAudio input', async () => {
+    it('releases the microphone when muted or for a non-CoreAudio input', async () => {
       const environment = installBrowserAudioEnvironment()
       restoreEnvironment = environment.restore
 
       for (const mutate of [
         () => (providerState.microphoneMuted = true),
-        () => (providerState.keepMicrophoneWarm = false),
         () => (providerState.microphoneId = 'microphone:avfoundation:0')
       ]) {
         providerState.roomOpen = false
@@ -178,6 +184,102 @@ describe('StudioMicVisualProvider', () => {
       }
     })
 
+    // Plan 260 S1.3a (D2, owner 2026-11-09): the standing-by microphone is
+    // the idle meter's only feed for a CoreAudio input, so Keep microphone
+    // ready off arms it meter-only (Record opens the device fresh) instead of
+    // releasing it, and the renderer opens no microphone of its own.
+    it('stands by meter-only with Keep microphone ready off, and never opens a renderer microphone', async () => {
+      const environment = installBrowserAudioEnvironment()
+      restoreEnvironment = environment.restore
+      providerState.microphoneId = 'microphone:coreaudio:42'
+      providerState.keepMicrophoneWarm = false
+
+      await act(async () => {
+        root ??= createRoot(environment.container)
+        root.render(
+          createElement(
+            StrictMode,
+            null,
+            createElement(StudioMicVisualProvider, {
+              enabled: true,
+              children: createElement(VisualConsumer, { onLifecycle: () => undefined })
+            })
+          )
+        )
+        await Promise.resolve()
+      })
+      expect(armedLast()).toBe(true)
+      expect(providerState.armWarmMicrophone).toHaveBeenLastCalledWith({ meterOnly: true })
+      expect(environment.getUserMedia).not.toHaveBeenCalled()
+      expect(environment.contexts).toHaveLength(0)
+
+      providerState.keepMicrophoneWarm = true
+      await renderProvider(environment, true)
+      expect(armedLast()).toBe(true)
+      expect(providerState.armWarmMicrophone).toHaveBeenLastCalledWith(undefined)
+      expect(environment.getUserMedia).not.toHaveBeenCalled()
+    })
+
+    it('leaves a running Clips bus alone and arms once it stops', async () => {
+      const environment = installBrowserAudioEnvironment()
+      restoreEnvironment = environment.restore
+      providerState.microphoneId = 'microphone:coreaudio:42'
+      providerState.audioBusActive = true
+      await renderProvider(environment, true)
+      expect(providerState.armWarmMicrophone).not.toHaveBeenCalled()
+      providerState.audioBusActive = false
+      await renderProvider(environment, true)
+      expect(armedLast()).toBe(true)
+    })
+
+    it('arms again after a transient refusal or a failed open, and not after a lasting one', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        const environment = installBrowserAudioEnvironment()
+        restoreEnvironment = environment.restore
+        providerState.microphoneId = 'microphone:coreaudio:42'
+        await renderProvider(environment, true)
+        const settle = async (ms: number): Promise<number> => {
+          const before = providerState.armWarmMicrophone.mock.calls.length
+          await act(async () => {
+            vi.advanceTimersByTime(ms)
+            await Promise.resolve()
+          })
+          return providerState.armWarmMicrophone.mock.calls.length - before
+        }
+
+        providerState.warmMicrophone = {
+          armed: false,
+          reason: 'cleanup-pending',
+          capturedFrames: 0
+        }
+        await renderProvider(environment, true)
+        expect(await settle(2_999)).toBe(0)
+        expect(await settle(1)).toBe(1)
+
+        providerState.warmMicrophone = { armed: false, reason: 'open-failed', capturedFrames: 0 }
+        await renderProvider(environment, true)
+        expect(await settle(14_999)).toBe(0)
+        expect(await settle(1)).toBe(1)
+
+        providerState.warmMicrophone = {
+          armed: false,
+          reason: 'disabled-for-smoke',
+          capturedFrames: 0
+        }
+        await renderProvider(environment, true)
+        expect(await settle(60_000)).toBe(0)
+
+        // A running bus owns the microphone: nothing to retry.
+        providerState.warmMicrophone = { armed: false, reason: 'session-active', capturedFrames: 0 }
+        providerState.sessionActive = true
+        await renderProvider(environment, true)
+        expect(await settle(60_000)).toBe(0)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('releases the microphone on unmount', async () => {
       const environment = installBrowserAudioEnvironment()
       restoreEnvironment = environment.restore
@@ -190,7 +292,7 @@ describe('StudioMicVisualProvider', () => {
     })
   })
 
-  it('meters an idle mixer and releases the microphone when the mixer leaves', async () => {
+  it('meters an idle Windows or Linux mixer and releases the microphone when the mixer leaves', async () => {
     const environment = installBrowserAudioEnvironment()
     restoreEnvironment = environment.restore
     const lifecycleStates: boolean[] = []
@@ -235,7 +337,6 @@ describe('StudioMicVisualProvider', () => {
   it('closes visual capture while preparing or reconciling and resumes the confirmed microphone', async () => {
     const environment = installBrowserAudioEnvironment()
     restoreEnvironment = environment.restore
-    providerState.sessionActive = true
     const lifecycleStates: boolean[] = []
     root = createRoot(environment.container)
     const render = async () => {
@@ -271,6 +372,45 @@ describe('StudioMicVisualProvider', () => {
         audio: expect.objectContaining({ deviceId: { exact: 'mic-1' } })
       })
     )
+  })
+
+  // D3 (owner 2026-11-09): no Chromium microphone during a session or a Clips
+  // bus, whatever the platform; the bus meters what is recorded.
+  it('closes the analyser while a session or a Clips bus runs and reopens it after', async () => {
+    const environment = installBrowserAudioEnvironment()
+    restoreEnvironment = environment.restore
+    const lifecycleStates: boolean[] = []
+    root = createRoot(environment.container)
+    const render = async () => {
+      await act(async () => {
+        root?.render(
+          createElement(StudioMicVisualProvider, {
+            enabled: true,
+            children: createElement(VisualConsumer, {
+              onLifecycle: (active) => lifecycleStates.push(active)
+            })
+          })
+        )
+        await import('../lib/browser-mic-visual-pipeline')
+        await Promise.resolve()
+      })
+    }
+    await render()
+    await vi.waitFor(() => expect(environment.contexts).toHaveLength(1))
+    for (const busy of [
+      () => (providerState.sessionActive = true),
+      () => (providerState.audioBusActive = true)
+    ]) {
+      busy()
+      await render()
+      await vi.waitFor(() => expect(lifecycleStates.at(-1)).toBe(false))
+      providerState.sessionActive = false
+      providerState.audioBusActive = false
+      await render()
+      await vi.waitFor(() => expect(lifecycleStates.at(-1)).toBe(true))
+    }
+    expect(environment.getUserMedia).toHaveBeenCalledTimes(3)
+    expect(environment.stopTrack).toHaveBeenCalledTimes(2)
   })
 
   it('tears down visual microphone resources and stops reporting live when muted', async () => {

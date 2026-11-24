@@ -1420,6 +1420,13 @@ export interface StreamTargetMetadataDraft {
    * the announcement post. Undefined means announce (the platform default).
    */
   xAnnounce?: boolean
+  /**
+   * X live category (`GET /2/broadcasts/categories`): the permanent id Go
+   * Live sends as `live_category_id`, and the name the picker shows. Sticky:
+   * the last pick stays for the next stream.
+   */
+  xCategoryId?: string
+  xCategoryName?: string
   updatedAt: string
 }
 
@@ -1736,7 +1743,50 @@ export interface XPublishResult {
   tweetId?: string
   /** X answered 200: the source already had a live broadcast, returned unchanged. */
   alreadyLive?: boolean
+  /** The live category X answered with; absent when the broadcast has none. */
+  liveCategoryId?: string
   message: string
+}
+
+/** One X live category, in X's order: store the `id`, show the `name`. */
+export interface XLiveCategory {
+  id: string
+  name: string
+}
+
+/** `streamTargets.x.liveCategories`: read once a session; `refresh` reads X again. */
+export interface XLiveCategoriesParams {
+  accountId?: string
+  refresh?: boolean
+}
+
+export interface XLiveCategoriesResult {
+  categories: XLiveCategory[]
+}
+
+/**
+ * `streamTargets.x.updateBroadcast`: the live broadcast's title or category,
+ * changed while it runs (`PUT /2/broadcasts/:id`). `liveCategoryId: ''`
+ * clears the category. Send only what changes.
+ */
+export interface XUpdateBroadcastParams {
+  accountId?: string
+  broadcastId: string
+  title?: string
+  liveCategoryId?: string
+  sessionId?: string
+}
+
+/** X's answer to the update: the result (a read right after can lag). */
+export interface XBroadcastUpdated {
+  broadcastId: string
+  state: string
+  shareUrl: string
+  title?: string
+  liveCategoryId?: string
+  /** The category's name from the session's list, when it has it. */
+  liveCategoryName?: string
+  chatOption?: number
 }
 
 /**
@@ -3454,13 +3504,21 @@ export type WarmMicrophoneArmParams = {
   microphoneId?: string
   microphoneGainDb?: number
   microphoneMuted?: boolean
+  /**
+   * Plan 260 S1.3a (D2): for the idle meter only (Keep microphone ready off).
+   * Record never takes it: the backend drops it and opens the device fresh.
+   */
+  meterOnly?: boolean
 }
 
 export type WarmMicrophoneStatus = {
   armed: boolean
   deviceId?: number
   deviceName?: string
-  /** `not-coreaudio` | `session-active` | `disabled-for-smoke` | `open-failed` | `disarmed`. */
+  /**
+   * `not-coreaudio` | `session-active` | `disabled-for-smoke` | `open-failed` |
+   * `cleanup-pending` | `opening` | `superseded` | `disarmed`.
+   */
   reason?: string
   capturedFrames: number
   armedForMs?: number
@@ -8437,14 +8495,23 @@ export interface SetCaptionOverlayParams {
   styleRevision: number
 }
 
-/** `buddy.overlay.set`: the renderer's raster of the bubble for one output
- * canvas (plan 168 D16: the bubble only, its tail tip on the bitmap's
- * bottom-centre; the backend draws the pet and anchors the bubble above its
- * head). `rect` is the Buddy's placed rect for that canvas orientation, the
- * width the bubble wraps to. Mirrors `captions.overlay.set`. */
+/** `buddy.overlay.set` (plan 260 S1.2d): the bubble the backend draws for
+ * one output canvas (plan 168 D16: the bubble only, its tail tip on the
+ * bitmap's bottom-centre, anchored above the pet's head). `text` must be the
+ * line that is up (`cohost.buddy.state`), or the backend refuses it as stale
+ * (`buddy-overlay-stale`). `rect` is the Buddy's placed rect for that
+ * canvas's orientation, the width the bubble wraps to. Mirrors Rust
+ * `BuddyOverlaySetRequest`, which still accepts the previous release's
+ * `pngBase64` raster for one release. */
 export interface SetBuddyOverlayParams {
   target: OverlayTarget
-  pngBase64: string
+  text?: string
+  style?: CohostBubbleStyle
+  canvasWidth?: number
+  canvasHeight?: number
+  /** The renderer's own raster, the path before plan 260 S1.2d, accepted for
+   *  one release. With it the backend ignores the other fields but `rect`. */
+  pngBase64?: string
   rect: OverlayRect
 }
 

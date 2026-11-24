@@ -15,6 +15,8 @@ videorc-protocol = { workspace = true }
 anyhow = "1.0"
 # Chat timestamps and the highlight's expiry (`chat::highlight`).
 chrono = "0.4"
+# The Stream Manager's link finder (`stream_manager::links`).
+regex = "1.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # The workspace key in a development profile path (`paths::workspace_key`).
