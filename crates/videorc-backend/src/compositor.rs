@@ -11087,6 +11087,160 @@ fn publish_compositor_frame(
                     || frame.metadata.has_d3d11_texture()
                     || metadata_only_preview)
         });
+    // The separate-source legs render before the stream leg (#1631): the
+    // Combined recording takes its frame from the completed batch, which is
+    // published only after these legs, so every leg drawn ahead of the
+    // publish delays Combined toward its CFR deadline and shows up as
+    // repeated frames. The stream leg reads its own store and is not in the
+    // batch.
+    if let (Some(iso_output), Some(iso_stores)) = (source_iso_output, source_iso_frame_stores) {
+        let batch_store = iso_stores.batches.clone();
+        let membership = batch_store.membership();
+        let batch_frames = [
+            frame_store.clone(),
+            iso_stores.screen.clone(),
+            iso_stores.camera.clone(),
+        ];
+        // Plan 200 D2: the Camera leg at the camera's own size fills it
+        // exactly (no bars from rounding to even). A camera whose format
+        // changed mid-take keeps the arm-time size and fits, as before.
+        let iso_camera_snapshot = iso_camera_snapshot.map(|mut leg| {
+            if let Some((frame, _)) = camera_frame.as_ref()
+                && source_iso_camera_fills(
+                    (frame.width, frame.height),
+                    (iso_output.camera_width, iso_output.camera_height),
+                )
+            {
+                leg.layout.camera_fit = crate::protocol::CameraFit::Fill;
+            }
+            leg
+        });
+        // Screen leg: the Screen/Window source alone (image stand-ins apply,
+        // they are screen-like). Camera leg: the camera alone. A committed
+        // source removal is handled by the role supervisor; never publish
+        // black filler as if its selected source were still present.
+        let legs: [SourceIsoLeg<'_>; 2] = [
+            SourceIsoLeg {
+                snapshot: iso_screen_snapshot.as_ref(),
+                store: iso_stores.screen,
+                gpu: iso_screen_gpu,
+                image_source: active_image_source.as_ref(),
+                size: (iso_output.width, iso_output.height),
+            },
+            SourceIsoLeg {
+                snapshot: iso_camera_snapshot.as_ref(),
+                store: iso_stores.camera,
+                gpu: iso_camera_gpu,
+                image_source: None,
+                size: (iso_output.camera_width, iso_output.camera_height),
+            },
+        ];
+        for (
+            leg_index,
+            SourceIsoLeg {
+                snapshot: leg_snapshot,
+                store,
+                gpu,
+                image_source,
+                size: (leg_width, leg_height),
+            },
+        ) in legs.into_iter().enumerate()
+        {
+            // A leg whose file ended (shed under encoder pressure, its source
+            // removed, or Stop) no longer renders: after a shed the GPU work
+            // goes back to the Combined recording (plan 200 D1).
+            if leg_snapshot.is_none() || !membership.active[leg_index + 1] {
+                continue;
+            }
+            let leg_camera_frame = camera_frame
+                .as_ref()
+                .filter(|_| scene_accepts_source(leg_snapshot, camera_key))
+                .map(|(frame, _)| frame);
+            // The ISO legs derive from the program's scene, so they share
+            // its hold.
+            let leg_screen_frame = leg_screen_frame(
+                screen_frame.as_ref(),
+                screen_frame_current,
+                leg_screen_holds.primary.frame.as_ref(),
+                leg_snapshot,
+                screen_key,
+            );
+            // A contended capture authority cannot prove current source pixels.
+            // Keep the last published ISO frame instead of encoding a black
+            // frame; the supervisor owns committed removal/terminal failure.
+            if (scene_needs_live_camera_frame(leg_snapshot, image_source)
+                && leg_camera_frame.is_none())
+                || (scene_needs_live_screen_frame(leg_snapshot, image_source)
+                    && leg_screen_frame.is_none())
+            {
+                continue;
+            }
+            // Each ISO frame is stamped with ITS source's capture time (the
+            // bridge seeds the shared recording epoch from it); a leg with no
+            // live frame this tick is a continuity frame dated at publish.
+            let leg_captured_at = compositor_frame_content_captured_at(
+                leg_camera_frame,
+                leg_screen_frame,
+                published_at,
+            );
+            let inputs = CompositorRenderInputs {
+                sequence,
+                width: leg_width.max(1),
+                height: leg_height.max(1),
+                snapshot: leg_snapshot,
+                active_image_source: image_source,
+                background_image_source: None,
+                camera_frame: leg_camera_frame,
+                screen_frame: leg_screen_frame,
+                caption_overlay: None,
+                highlight_overlay: None,
+                chat_overlay: None,
+                // A source take is the source alone: no Buddy and no banners
+                // either (plan 157), whatever the Combined legs carry.
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
+                live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
+            };
+            #[cfg(test)]
+            let trace_role = leg_index + 1;
+            let iso_leg_started_at = Instant::now();
+            let iso_timings = publish_auxiliary_compositor_frame(
+                sequence,
+                leg_captured_at,
+                published_at,
+                store,
+                inputs,
+                gpu,
+                iso_output.frame_consumer,
+                &[],
+                #[cfg(test)]
+                trace_role,
+            );
+            timings.record_auxiliary_leg(
+                if leg_index == 0 {
+                    CompositorLeg::IsoScreen
+                } else {
+                    CompositorLeg::IsoCamera
+                },
+                iso_leg_started_at,
+                iso_timings,
+            );
+        }
+        let frames = std::array::from_fn(|role| {
+            membership.active[role]
+                .then(|| {
+                    batch_frames[role]
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .latest()
+                })
+                .flatten()
+        });
+        batch_store.publish(membership, sequence, frames);
+    }
     let auxiliary_required = stream_output.is_some();
     let mut auxiliary_proof = None;
     if let (Some(stream_output), Some(stream_frame_store)) = (stream_output, stream_frame_store) {
@@ -11249,154 +11403,6 @@ fn publish_compositor_frame(
                         || frame.metadata.has_d3d11_texture())
             });
         auxiliary_proof = Some((aux_snapshot, published));
-    }
-    if let (Some(iso_output), Some(iso_stores)) = (source_iso_output, source_iso_frame_stores) {
-        let batch_store = iso_stores.batches.clone();
-        let membership = batch_store.membership();
-        let batch_frames = [
-            frame_store.clone(),
-            iso_stores.screen.clone(),
-            iso_stores.camera.clone(),
-        ];
-        // Plan 200 D2: the Camera leg at the camera's own size fills it
-        // exactly (no bars from rounding to even). A camera whose format
-        // changed mid-take keeps the arm-time size and fits, as before.
-        let iso_camera_snapshot = iso_camera_snapshot.map(|mut leg| {
-            if let Some((frame, _)) = camera_frame.as_ref()
-                && source_iso_camera_fills(
-                    (frame.width, frame.height),
-                    (iso_output.camera_width, iso_output.camera_height),
-                )
-            {
-                leg.layout.camera_fit = crate::protocol::CameraFit::Fill;
-            }
-            leg
-        });
-        // Screen leg: the Screen/Window source alone (image stand-ins apply,
-        // they are screen-like). Camera leg: the camera alone. A committed
-        // source removal is handled by the role supervisor; never publish
-        // black filler as if its selected source were still present.
-        let legs: [SourceIsoLeg<'_>; 2] = [
-            SourceIsoLeg {
-                snapshot: iso_screen_snapshot.as_ref(),
-                store: iso_stores.screen,
-                gpu: iso_screen_gpu,
-                image_source: active_image_source.as_ref(),
-                size: (iso_output.width, iso_output.height),
-            },
-            SourceIsoLeg {
-                snapshot: iso_camera_snapshot.as_ref(),
-                store: iso_stores.camera,
-                gpu: iso_camera_gpu,
-                image_source: None,
-                size: (iso_output.camera_width, iso_output.camera_height),
-            },
-        ];
-        for (
-            leg_index,
-            SourceIsoLeg {
-                snapshot: leg_snapshot,
-                store,
-                gpu,
-                image_source,
-                size: (leg_width, leg_height),
-            },
-        ) in legs.into_iter().enumerate()
-        {
-            // A leg whose file ended (shed under encoder pressure, its source
-            // removed, or Stop) no longer renders: after a shed the GPU work
-            // goes back to the Combined recording (plan 200 D1).
-            if leg_snapshot.is_none() || !membership.active[leg_index + 1] {
-                continue;
-            }
-            let leg_camera_frame = camera_frame
-                .as_ref()
-                .filter(|_| scene_accepts_source(leg_snapshot, camera_key))
-                .map(|(frame, _)| frame);
-            // The ISO legs derive from the program's scene, so they share
-            // its hold.
-            let leg_screen_frame = leg_screen_frame(
-                screen_frame.as_ref(),
-                screen_frame_current,
-                leg_screen_holds.primary.frame.as_ref(),
-                leg_snapshot,
-                screen_key,
-            );
-            // A contended capture authority cannot prove current source pixels.
-            // Keep the last published ISO frame instead of encoding a black
-            // frame; the supervisor owns committed removal/terminal failure.
-            if (scene_needs_live_camera_frame(leg_snapshot, image_source)
-                && leg_camera_frame.is_none())
-                || (scene_needs_live_screen_frame(leg_snapshot, image_source)
-                    && leg_screen_frame.is_none())
-            {
-                continue;
-            }
-            // Each ISO frame is stamped with ITS source's capture time (the
-            // bridge seeds the shared recording epoch from it); a leg with no
-            // live frame this tick is a continuity frame dated at publish.
-            let leg_captured_at = compositor_frame_content_captured_at(
-                leg_camera_frame,
-                leg_screen_frame,
-                published_at,
-            );
-            let inputs = CompositorRenderInputs {
-                sequence,
-                width: leg_width.max(1),
-                height: leg_height.max(1),
-                snapshot: leg_snapshot,
-                active_image_source: image_source,
-                background_image_source: None,
-                camera_frame: leg_camera_frame,
-                screen_frame: leg_screen_frame,
-                caption_overlay: None,
-                highlight_overlay: None,
-                chat_overlay: None,
-                // A source take is the source alone: no Buddy and no banners
-                // either (plan 157), whatever the Combined legs carry.
-                buddy_overlay: None,
-                buddy_leg: None,
-                banners: &[],
-                live_background: None,
-                shared_live_frame: None,
-                shared_live_output: None,
-            };
-            #[cfg(test)]
-            let trace_role = leg_index + 1;
-            let iso_leg_started_at = Instant::now();
-            let iso_timings = publish_auxiliary_compositor_frame(
-                sequence,
-                leg_captured_at,
-                published_at,
-                store,
-                inputs,
-                gpu,
-                iso_output.frame_consumer,
-                &[],
-                #[cfg(test)]
-                trace_role,
-            );
-            timings.record_auxiliary_leg(
-                if leg_index == 0 {
-                    CompositorLeg::IsoScreen
-                } else {
-                    CompositorLeg::IsoCamera
-                },
-                iso_leg_started_at,
-                iso_timings,
-            );
-        }
-        let frames = std::array::from_fn(|role| {
-            membership.active[role]
-                .then(|| {
-                    batch_frames[role]
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .latest()
-                })
-                .flatten()
-        });
-        batch_store.publish(membership, sequence, frames);
     }
     // Plan 205 S6: the Preview's own picture, the program leg ("twin"),
     // decided last, after every encoded leg. Since PH-01 it composes only
