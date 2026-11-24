@@ -33,7 +33,10 @@
     "context-menu",
     "kebab-menu",
     "kebab-context-menu",
-    "command"
+    "command",
+    "spinner",
+    "toggle-group",
+    "segmented-control"
   ],
   "keepLocal": []
 }
