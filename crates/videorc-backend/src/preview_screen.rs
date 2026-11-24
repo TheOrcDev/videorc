@@ -6447,6 +6447,7 @@ mod linux {
                     frame.height,
                     frame.bgra,
                     frame.dequeued_at,
+                    frame.captured_at,
                 );
                 if let Some(tx) = startup.borrow_mut().take() {
                     let _ = tx.send(NativeScreenStartup::Live {
@@ -6522,6 +6523,7 @@ mod linux {
         height: u32,
         bgra: &mut Vec<u8>,
         dequeued_at: Instant,
+        captured_at: Option<Instant>,
     ) {
         let callback_started_at = Instant::now();
         let mut guard = shared
@@ -6546,19 +6548,17 @@ mod linux {
         // Plan 191: publish the converted frame itself and hand the stream the
         // store's checked-out buffer as its next conversion target, instead of
         // copying every frame into that buffer under this lock. Plan 210 S7:
-        // through the Hide screen gate. D8: the portal stream does not date
-        // its frames here, so the gate gets when this buffer was dequeued.
+        // through the Hide screen gate. D8 and W79: a frame the producer
+        // dated (its SPA_META_Header pts) is held at the Show edge by when it
+        // was taken, as on macOS and Windows; an undated one by when this
+        // buffer was dequeued.
+        let time = match captured_at {
+            Some(captured_at) => ScreenFrameTime::Captured(captured_at),
+            None => ScreenFrameTime::DeliveredFrom(dequeued_at),
+        };
         let buffer = std::mem::take(bgra);
         let publish_started_at = Instant::now();
-        *bgra = publish_gated_bgra_frame_at(
-            &mut guard,
-            sequence,
-            width,
-            height,
-            buffer,
-            now,
-            ScreenFrameTime::DeliveredFrom(dequeued_at),
-        );
+        *bgra = publish_gated_bgra_frame_at(&mut guard, sequence, width, height, buffer, now, time);
         let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
         guard
             .capture_timings
@@ -6573,18 +6573,19 @@ mod linux_show_edge_tests {
     const W: u32 = 8;
     const H: u32 = 4;
 
-    /// Plan 210 D8 on the Linux PipeWire publish point: the portal stream
-    /// doesn't date its frames, so after a Show the still stays through the
-    /// buffer dequeued before it and the first one dequeued after it.
+    /// Plan 210 D8 on the Linux PipeWire publish point, for a producer that
+    /// sends no `SPA_META_Header`: an undated frame, so after a Show the
+    /// still stays through the buffer dequeued before it and the first one
+    /// dequeued after it.
     #[test]
-    fn pipewire_holds_its_first_delivery_after_the_show() {
+    fn pipewire_holds_its_first_undated_delivery_after_the_show() {
         let gate = Arc::new(ScreenPrivacyGate::default());
         let shared = Arc::new(StdMutex::new(PreviewScreenShared::with_privacy(
             Arc::clone(&gate),
         )));
         let deliver = |value: u8, dequeued_at| {
             let mut bgra = vec![value; (W * H * 4) as usize];
-            linux::publish_bgra_frame(&shared, W, H, &mut bgra, dequeued_at);
+            linux::publish_bgra_frame(&shared, W, H, &mut bgra, dequeued_at, None);
         };
         let on_air = || shared.lock().unwrap().frame_store.latest().unwrap();
         deliver(10, Instant::now());
@@ -6601,6 +6602,42 @@ mod linux_show_edge_tests {
             still.storage_identity(),
             "a buffer queued before the show was published"
         );
+        deliver(30, Instant::now());
+        assert_eq!(on_air().bytes, vec![30; (W * H * 4) as usize]);
+    }
+
+    /// W79: a frame the producer dated (its pts) is judged by when it was
+    /// taken, as on macOS and Windows. One taken before the Show holds however
+    /// late it is dequeued; the first one taken after the Show goes out at
+    /// once, so a screen that changes once and then stays still is not left
+    /// behind the still (an undated capture holds that one frame).
+    #[test]
+    fn pipewire_judges_a_dated_frame_by_its_capture_time() {
+        let gate = Arc::new(ScreenPrivacyGate::default());
+        let shared = Arc::new(StdMutex::new(PreviewScreenShared::with_privacy(
+            Arc::clone(&gate),
+        )));
+        let deliver = |value: u8, captured_at: Instant| {
+            let mut bgra = vec![value; (W * H * 4) as usize];
+            linux::publish_bgra_frame(&shared, W, H, &mut bgra, Instant::now(), Some(captured_at));
+        };
+        let on_air = || shared.lock().unwrap().frame_store.latest().unwrap();
+        deliver(10, Instant::now());
+        gate.hide(crate::protocol::ScreenPrivacyReason::You, "t".into());
+        assert!(frost_cpu_store_now(&mut shared.lock().unwrap()));
+        let still = on_air();
+        let taken_while_hidden = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        gate.show();
+        std::thread::sleep(Duration::from_millis(2));
+        // Taken while hidden, dequeued after the Show: never on air.
+        deliver(20, taken_while_hidden);
+        assert_eq!(
+            on_air().storage_identity(),
+            still.storage_identity(),
+            "a frame taken while hidden was published after the show"
+        );
+        // The first frame taken after the Show is trusted at once.
         deliver(30, Instant::now());
         assert_eq!(on_air().bytes, vec![30; (W * H * 4) as usize]);
     }
