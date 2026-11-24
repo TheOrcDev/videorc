@@ -4281,7 +4281,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(published().at(-1)?.state?.streamManager?.screenId).toBe('2')
   })
 
-  it('sends a second card for the vertical leg only when the backend reports one', async () => {
+  it('asks the backend to draw the card for the stream canvas and the vertical rect, never sending pixels', async () => {
     const backend = new StudioBackend()
     backend.liveChatSnapshot = {
       sessionId: highlightMessage.sessionId,
@@ -4314,22 +4314,22 @@ describe('real StudioProvider lifecycle', () => {
     const highlightSets = (): BackendCommand[] =>
       backend.commands.filter((command) => command.method === 'comments.highlight.set')
 
-    // Horizontal-only session: one card, no vertical raster on the wire.
+    // Plan 260 S1.2: the backend draws the card (and the vertical leg's,
+    // when the session has one) from the message it holds; the renderer
+    // names the stream canvas and both rects, never its pixels.
     await act(async () => latest()!.core.toggleCommentHighlight(highlightMessage))
     await waitForObservation(() => highlightSets().length === 1)
-    expect(highlightSets()[0]!.params).not.toHaveProperty('verticalPngBase64')
-
-    // Dual-orientation session (plan 074): the vertical leg gets its own card.
-    await act(async () => latest()!.core.toggleCommentHighlight(highlightMessage))
-    await waitForObservation(() => latest()?.core.commentHighlightState.phase === 'idle')
-    backend.commentHighlightCanvases = { vertical: { width: 1080, height: 1920 } }
-    await act(async () => latest()!.core.toggleCommentHighlight(highlightMessage))
-    await waitForObservation(() => highlightSets().length === 2)
-    expect(highlightSets()[1]!.params).toMatchObject({
+    const params = highlightSets()[0]!.params as Record<string, unknown>
+    expect(params).toMatchObject({
+      sessionId: highlightMessage.sessionId,
       messageId: highlightMessage.id,
-      pngBase64: 'cG5n',
-      verticalPngBase64: 'cG5n'
+      canvasWidth: expect.any(Number),
+      canvasHeight: expect.any(Number)
     })
+    expect(params).toHaveProperty('verticalRect')
+    expect(params).not.toHaveProperty('pngBase64')
+    expect(params).not.toHaveProperty('verticalPngBase64')
+    expect(params).not.toHaveProperty('milestone')
   })
 
   // Plan 260 S1.2b: the backend draws the caption bar from the line's text at

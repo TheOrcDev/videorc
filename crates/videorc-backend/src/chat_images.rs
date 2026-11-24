@@ -989,10 +989,6 @@ impl ChatImages {
     /// None for a URL off the avatar allowlist, a file not cached yet, not a
     /// regular file, empty, over the avatar cap, or not an image by its magic
     /// bytes. Blocking: call it off the runtime.
-    #[allow(
-        dead_code,
-        reason = "plan 260: the highlight card and the chat box read it once they switch (after S1.5a)"
-    )]
     pub(crate) fn read_cached_avatar(&self, raw: &str) -> Option<Vec<u8>> {
         url_decision(ChatImageKind::Avatar, raw).ok()?;
         let path = self.dir.join(cache_file_name(raw));

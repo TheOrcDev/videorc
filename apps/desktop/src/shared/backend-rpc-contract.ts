@@ -4344,7 +4344,15 @@ const migrateHighlightAnchorParamsSchema = objectSchema(
 // rects are the overlay layout's, optional like the highlight's.
 const setChatOverlayParamsSchema = objectSchema(
   {
-    pngBase64: stringSchema({ minLength: 4, maxLength: 5_600_000 }),
+    // Plan 260 S1.2: the backend draws the box from the messages named (at
+    // most five shown) for the canvas given; the PNG is the previous
+    // release's path.
+    pngBase64: optionalSchema(stringSchema({ minLength: 4, maxLength: 5_600_000 })),
+    messageIds: optionalSchema(
+      arraySchema(stringSchema({ minLength: 1, maxLength: 512 }), { maxLength: 50 })
+    ),
+    canvasWidth: optionalSchema(numberSchema({ integer: true, min: 1, max: 8192 })),
+    canvasHeight: optionalSchema(numberSchema({ integer: true, min: 1, max: 8192 })),
     rect: optionalSchema(overlayRectSchema),
     verticalPngBase64: optionalSchema(stringSchema({ minLength: 4, maxLength: 5_600_000 })),
     verticalRect: optionalSchema(overlayRectSchema)

@@ -387,13 +387,9 @@ export interface ChatOverlayDeps {
   set: (params: SetChatOverlayParams) => Promise<unknown>
   clear: () => Promise<unknown>
   canvases: () => Promise<ChatOverlayCanvases | null>
-  /** Paints the box for the stream canvas and, when there is one, the
-   * vertical leg's; null when it could not be painted. */
-  paint: (
-    messages: readonly LiveChatMessage[],
-    stream: ChatOverlayCanvas,
-    vertical?: ChatOverlayCanvas
-  ) => Promise<{ pngBase64: string; verticalPngBase64?: string } | null>
+  /** Caches the box's avatar and emote files before the backend draws it
+   * from its chat image cache (plan 260 S1.2). Never throws. */
+  warm?: (messages: readonly LiveChatMessage[]) => Promise<void>
   warn?: (line: string) => void
   clock?: ChatOverlayClock
   intervalMs?: number
@@ -450,17 +446,16 @@ export function createChatOverlayDriver(deps: ChatOverlayDeps): ChatOverlayDrive
     const signature = chatOverlaySignature(messages, stream, vertical)
     if (signature === painted) return
     try {
-      const cards = await deps.paint(messages, stream, vertical)
-      if (!cards) {
-        warn('Chat on stream: the box could not be painted.')
-        return
-      }
+      await deps.warm?.(messages).catch(() => {})
+      // The backend draws the box from these messages for the canvas the
+      // renderer chose, and for the vertical leg when the session has one
+      // (plan 260 S1.2).
       await deps.set({
-        pngBase64: cards.pngBase64,
+        messageIds: messages.map((message) => message.id),
+        canvasWidth: stream.width,
+        canvasHeight: stream.height,
         rect: stream.rect,
-        ...(cards.verticalPngBase64 && vertical
-          ? { verticalPngBase64: cards.verticalPngBase64, verticalRect: vertical.rect }
-          : {})
+        ...(vertical ? { verticalRect: vertical.rect } : {})
       })
       installed = true
       painted = signature

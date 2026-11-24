@@ -496,7 +496,6 @@ import type {
   CloudTestOutput,
   BuddyOverlaySnapshot,
   CommentHighlightAnchor,
-  CommentHighlightCanvases,
   CommentHighlightCommand,
   CohostUtteranceMilestone,
   CommentHighlightState,
@@ -889,16 +888,29 @@ const loadCloudNotices = () => import('@/lib/cloud-notices')
 // Plan 224 C-G4: the room controller mounts lazily under the provider.
 const TalkShowRoomHost = lazy(() => import('@/components/studio/talk-show-room-host'))
 
+// The files the backend draws a highlight card or the chat box from (plan
+// 260 S1.2), cached before the request: the backend reads its chat image
+// cache and never fetches. Bounded by the highlight's avatar slice; a file
+// that is not cached in time draws the monogram or the emote's name.
+async function warmChatImages(urls: readonly string[]): Promise<void> {
+  const cache = window.videorc?.cacheChatAvatar
+  if (!cache || urls.length === 0) return
+  await Promise.race([
+    Promise.allSettled(urls.map((url) => cache(url))),
+    new Promise((resolve) => setTimeout(resolve, COMMENTS_HIGHLIGHT_TIMING_CONTRACT.avatarFetchMs))
+  ])
+}
+
 async function loadChatOverlayDriver(client: BackendClient): Promise<ChatOverlayDriver> {
-  const [{ createChatOverlayDriver }, { renderChatOverlayCards }] = await Promise.all([
+  const [{ createChatOverlayDriver }, { chatOverlayImageUrls }] = await Promise.all([
     import('@/lib/chat-overlay'),
-    loadCaptionOverlay()
+    import('@/lib/comment-highlight-layout')
   ])
   return createChatOverlayDriver({
     set: (params) => client.requestTyped('chat.overlay.set', params),
     clear: () => client.requestTyped('chat.overlay.clear'),
     canvases: () => client.requestTyped('chat.overlay.canvases'),
-    paint: renderChatOverlayCards
+    warm: (messages) => warmChatImages(chatOverlayImageUrls(messages))
   })
 }
 
@@ -3980,13 +3992,18 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
                 captureConfig.video,
                 captureConfig.streamEnabled ? captureConfig.streaming : undefined
               )
-        const avatarSource = options?.milestone?.avatarUrl ?? message.authorAvatarUrl
-        const [avatarUrl, canvases] = await Promise.all([
-          avatarSource ? window.videorc?.cacheChatAvatar?.(avatarSource).catch(() => null) : null,
-          client.request<CommentHighlightCanvases>('comments.highlight.canvases').catch(() => null)
-        ])
-        if (commentHighlightIntentRef.current !== intent) return null
-        const { renderCommentHighlightCards, renderMilestoneCards } = await loadCaptionOverlay()
+        // Plan 260 S1.2: the backend draws the card (or the milestone card)
+        // from the message it holds; the renderer caches the files it reads
+        // first and names the canvas it sized the card for.
+        const milestone = options?.milestone
+        const { commentHighlightImageUrls } = await import('@/lib/comment-highlight-layout')
+        await warmChatImages(
+          milestone
+            ? milestone.avatarUrl
+              ? [milestone.avatarUrl]
+              : []
+            : commentHighlightImageUrls(message)
+        )
         if (commentHighlightIntentRef.current !== intent) return null
         // The streamer's placement (plan 164): the card wraps to the rect's
         // width on each canvas and the backend blits it inside that rect.
@@ -3994,22 +4011,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         const rect =
           highlightLayout[overlayOrientationForCanvas(streamVideo.width, streamVideo.height)]
         const verticalRect = highlightLayout.vertical
-        const cards = options?.milestone
-          ? await renderMilestoneCards(
-              options.milestone,
-              avatarUrl ?? null,
-              cohostSettingsRef.current?.persona.name ?? null,
-              { ...streamVideo, rect },
-              canvases?.vertical ? { ...canvases.vertical, rect: verticalRect } : undefined
-            )
-          : await renderCommentHighlightCards(
-              message,
-              avatarUrl ?? null,
-              { ...streamVideo, rect },
-              canvases?.vertical ? { ...canvases.vertical, rect: verticalRect } : undefined
-            )
-        if (!cards) throw new Error("Couldn't render this message for the stream.")
-        if (commentHighlightIntentRef.current !== intent) return null
+        const personaName = cohostSettingsRef.current?.persona.name ?? null
         let state: CommentHighlightState
         try {
           state = await client.request<CommentHighlightState>('comments.highlight.set', {
@@ -4017,8 +4019,20 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
             messageId: message.id,
             anchor: commentHighlightAnchorRef.current,
             rect,
-            ...(cards.verticalPngBase64 ? { verticalRect } : {}),
-            ...cards
+            verticalRect,
+            canvasWidth: streamVideo.width,
+            canvasHeight: streamVideo.height,
+            ...(milestone
+              ? {
+                  milestone: {
+                    name: milestone.name,
+                    label: milestone.label,
+                    platform: milestone.platform,
+                    ...(milestone.avatarUrl ? { avatarUrl: milestone.avatarUrl } : {}),
+                    ...(personaName ? { personaName } : {})
+                  }
+                }
+              : {})
           } satisfies SetCommentHighlightParams)
         } catch (error) {
           const failurePolicy = await loadCommandFailurePolicy()

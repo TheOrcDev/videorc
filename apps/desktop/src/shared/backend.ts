@@ -5499,7 +5499,15 @@ export function normalizeCommentHighlightAnchor(value: unknown): CommentHighligh
 export interface SetCommentHighlightParams {
   sessionId: string
   messageId: string
-  pngBase64: string
+  /** The renderer's card, the path before plan 260 S1.2, accepted for one
+   *  release. Without it the backend draws the card from the message it
+   *  holds, for `canvasWidth` x `canvasHeight` and the vertical leg. */
+  pngBase64?: string
+  /** The stream canvas the card is drawn for (plan 260 S1.2). */
+  canvasWidth?: number
+  canvasHeight?: number
+  /** Plan 225 B6: the milestone card for this arrival row instead. */
+  milestone?: CommentHighlightMilestone
   anchor: CommentHighlightAnchor
   /** The placed highlight rect for the horizontal canvas (plan 164); omitted
    *  keeps the `anchor` corner. */
@@ -5509,6 +5517,16 @@ export interface SetCommentHighlightParams {
   verticalPngBase64?: string
   /** The placed highlight rect for the vertical leg (plan 164). */
   verticalRect?: OverlayRect
+}
+
+/** The milestone card the backend draws for an arrival row (plan 225 B6,
+ * plan 260 S1.2). Mirrors Rust `CommentHighlightMilestone`. */
+export interface CommentHighlightMilestone {
+  name: string
+  label: string
+  avatarUrl?: string
+  platform: StreamPlatform
+  personaName?: string
 }
 
 /** `comments.highlight.canvases`: extra canvases the running session burns
@@ -5524,7 +5542,14 @@ export interface CommentHighlightCanvases {
 
 /** `chat.overlay.set`: mirrors Rust `SetChatOverlayParams`. */
 export interface SetChatOverlayParams {
-  pngBase64: string
+  /** The renderer's box, the path before plan 260 S1.2, accepted for one
+   *  release. Without it the backend draws the box from `messageIds`. */
+  pngBase64?: string
+  /** The messages the box shows, oldest first (plan 260 S1.2). */
+  messageIds?: string[]
+  /** The landscape canvas the box is drawn for. */
+  canvasWidth?: number
+  canvasHeight?: number
   /** The placed chat rect for the horizontal canvas; omitted keeps the
    *  default corner. */
   rect?: OverlayRect
