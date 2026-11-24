@@ -9,16 +9,24 @@
 // `pnpm ui:check [item…] [--local [url-template]]` (this script with --check)
 // formats each manifest item's registry files the same way and fails when a
 // local copy differs: synced files are edited in videorc-ui, never here.
+//
+// Two flavours (plan 260 S2.2b). `--flavour react` (the default for ui:sync)
+// is the above, into apps/desktop. `--flavour gpui` takes the GPUI items
+// (ui.videorc.com/r/gpui, crates/videorc-kit/ui-registry.json) into
+// crates/videorc-kit, formatted with rustfmt, and checks them the same way,
+// plus GPUI's pin and patches: the app's must be the registry's. ui:check
+// with no --flavour checks both.
 
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join, relative, resolve, sep } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 
 import * as prettier from 'prettier'
 
 import {
   UI_APP_DIR,
+  UI_LOCAL_TEMPLATE,
   UI_MANIFEST_PATH,
   UI_NAMESPACE,
   changedPaths,
@@ -41,6 +49,22 @@ import {
   shadcnAddArgs,
   syncedFileForms
 } from './lib/ui-registry.mjs'
+import {
+  GPUI_CRATE_DIR,
+  GPUI_LOCAL_TEMPLATE,
+  GPUI_MANIFEST_PATH,
+  GPUI_NAMESPACE,
+  cargoLine,
+  cargoTable,
+  describePin,
+  gpuiItemFiles,
+  parseFlavourArgs,
+  parseGpuiManifest,
+  pinDifferences,
+  describePatch,
+  missingPatches,
+  undeclaredModules
+} from './lib/ui-registry-gpui.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..')
 const APP = join(ROOT, UI_APP_DIR)
@@ -79,26 +103,28 @@ function loadContext() {
   return { manifest, componentsJson, layout }
 }
 
-function itemLoader(template) {
+function itemLoader(template, namespace = UI_NAMESPACE) {
   const cache = new Map()
   return (name) => {
-    if (!cache.has(name)) cache.set(name, fetchItem(registryItemUrl(template, name), name))
+    if (!cache.has(name)) {
+      cache.set(name, fetchItem(registryItemUrl(template, name), name, namespace))
+    }
     return cache.get(name)
   }
 }
 
-async function fetchItem(url, name) {
+async function fetchItem(url, name, namespace = UI_NAMESPACE) {
   let response
   try {
     response = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
   } catch (error) {
     const reason = error?.cause?.code ?? error?.cause?.message ?? error?.message ?? String(error)
     throw new RegistryUnreachable(
-      `Could not reach the ${UI_NAMESPACE} registry at ${url} (${reason}). The check and the sync need it: retry online, or use --local [url-template] with a local videorc-ui build.`
+      `Could not reach the ${namespace} registry at ${url} (${reason}). The check and the sync need it: retry online, or use --local [url-template] with a local videorc-ui build.`
     )
   }
   if (response.status === 404) {
-    throw new Error(`${UI_NAMESPACE}/${name} is not in the registry (${url} answered 404).`)
+    throw new Error(`${namespace}/${name} is not in the registry (${url} answered 404).`)
   }
   if (!response.ok) {
     throw new RegistryUnreachable(`The registry answered ${response.status} for ${url}.`)
@@ -336,13 +362,237 @@ async function check(names, template) {
   )
 }
 
+// --- The GPUI flavour (plan 260 S2.2b) ---
+
+const CRATE = join(ROOT, GPUI_CRATE_DIR)
+const cratePath = (path) => join(CRATE, ...path.split('/'))
+
+function loadGpuiContext() {
+  const manifestText = readText(join(ROOT, GPUI_MANIFEST_PATH))
+  if (manifestText === null) throw new Error(`${GPUI_MANIFEST_PATH} is missing.`)
+  const manifest = parseGpuiManifest(manifestText)
+  const crateToml = readText(join(CRATE, 'Cargo.toml')) ?? ''
+  const edition = /^edition\s*=\s*"(\d{4})"/m.exec(crateToml)?.[1] ?? '2024'
+  return { manifest, crateToml, edition }
+}
+
+/** Rust source as rustfmt prints it, with the repo's config. */
+function rustfmt(text, edition, path) {
+  const result = spawnSync('rustfmt', ['--edition', edition], {
+    cwd: ROOT,
+    input: text,
+    encoding: 'utf8'
+  })
+  if (result.error) {
+    throw new Error(`rustfmt is needed for the GPUI flavour (${result.error.message}).`)
+  }
+  if (result.status !== 0) {
+    throw new Error(`rustfmt failed on ${path}:\n${result.stderr}`)
+  }
+  return result.stdout
+}
+
+/** A synced file as it should read in the crate: Rust through rustfmt. */
+function gpuiForm(file, edition) {
+  return file.path.endsWith('.rs') ? rustfmt(file.content, edition, file.path) : file.content
+}
+
+async function gpuiClosure(names, template) {
+  return resolveItemClosure(names, itemLoader(template, GPUI_NAMESPACE), GPUI_NAMESPACE)
+}
+
+async function syncGpui(names, template) {
+  const { manifest, crateToml, edition } = loadGpuiContext()
+  const requested = names.length > 0 ? names : manifest.items
+  if (requested.length === 0) {
+    throw new Error(
+      `${GPUI_MANIFEST_PATH} lists no items to sync: name them (pnpm ui:sync --flavour gpui button).`
+    )
+  }
+  const source = template ?? manifest.registry
+  const { items, external } = await gpuiClosure(requested, source)
+  if (external.length > 0) {
+    throw new Error(
+      `GPUI items depend on other registries (${external.join(', ')}); the sync cannot install them.`
+    )
+  }
+  const kept = new Set(manifest.keepLocal)
+  // Format everything before writing anything: a rustfmt failure leaves the
+  // crate as it was.
+  const { files, conflicts } = mergeItemFiles([...items.values()].flatMap(gpuiItemFiles))
+  if (conflicts.length > 0) {
+    throw new Error(
+      conflicts
+        .map((c) => `${c.path} is shipped differently by ${c.items.join(' and ')}.`)
+        .join('\n')
+    )
+  }
+  const writes = files
+    .filter((file) => !kept.has(file.path))
+    .map((file) => ({ ...file, text: gpuiForm(file, edition) }))
+
+  console.log(
+    `ui:sync --flavour gpui: ${requested.map((name) => `${GPUI_NAMESPACE}/${name}`).join(' ')}`
+  )
+  console.log(`  from ${source}`)
+  for (const file of writes) {
+    const path = cratePath(file.path)
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, file.text)
+  }
+
+  const nextManifest = manifestWithItems(manifest, [...requested, ...items.keys()])
+  if (nextManifest.items.length !== manifest.items.length) {
+    const manifestFile = join(ROOT, GPUI_MANIFEST_PATH)
+    const options = (await prettier.resolveConfig(manifestFile, { editorconfig: true })) ?? {}
+    writeFileSync(
+      manifestFile,
+      await prettier.format(serializeUiManifest(nextManifest), {
+        ...options,
+        filepath: manifestFile
+      })
+    )
+    console.log(
+      `\nAdded to ${GPUI_MANIFEST_PATH}: ${nextManifest.items.filter((name) => !manifest.items.includes(name)).join(', ')}`
+    )
+  }
+
+  console.log(
+    `\nWrote ${writes.length} files from ${items.size} ${GPUI_NAMESPACE} items (${[...items.keys()].join(', ')}).`
+  )
+  console.log(`Kept local: ${manifest.keepLocal.join(', ') || 'nothing'}.`)
+  reportGpuiCrate([...items.values()], files, crateToml)
+
+  console.log('\ngit status:')
+  process.stdout.write(git(['status', '--short', '--', GPUI_CRATE_DIR]))
+  console.log('\ngit diff --stat:')
+  process.stdout.write(git(['diff', '--stat', '--', GPUI_CRATE_DIR]))
+  console.log(
+    '\nReview the diff, then build the crate and run the gates (AGENTS.md). Never edit a synced file here.'
+  )
+}
+
+/** What the crate still needs by hand: pins, dependencies, module lines, patches. */
+function reportGpuiCrate(items, files, crateToml) {
+  const workspace = cargoTable(readText(join(ROOT, 'Cargo.toml')) ?? '', 'workspace.dependencies')
+  const { mismatched, missing } = pinDifferences(items, workspace)
+  if (mismatched.length > 0) {
+    console.log(
+      '\nThe app pins these crates differently from the registry; ui:check fails until they match:'
+    )
+    for (const pin of mismatched) console.log(`  ${describePin(pin)}`)
+  }
+  if (missing.length > 0) {
+    console.log("\nAdd to the root Cargo.toml's [workspace.dependencies]:")
+    for (const { name, spec } of missing) console.log(`  ${cargoLine(name, spec)}`)
+  }
+  const crateDependencies = cargoTable(crateToml, 'dependencies')
+  const needed = [...new Set(items.flatMap((item) => Object.keys(item.meta?.crates ?? {})))]
+    .filter((name) => !crateDependencies[name])
+    .sort()
+  if (needed.length > 0) {
+    console.log(`\nAdd to ${GPUI_CRATE_DIR}/Cargo.toml's [dependencies]:`)
+    for (const name of needed) console.log(`  ${name} = { workspace = true }`)
+  }
+  const modules = undeclaredModules(files, readText(cratePath('src/lib.rs')))
+  if (modules.length > 0) {
+    console.log(`\nDeclare in ${GPUI_CRATE_DIR}/src/lib.rs (the crate's own, never synced):`)
+    for (const module of modules) console.log(`  pub mod ${module};`)
+  }
+  const unpatched = missingPatches(items, readText(join(ROOT, 'Cargo.toml')) ?? '')
+  if (unpatched.length > 0) {
+    console.log("\nui:check fails until the root Cargo.toml carries the kit's patches:")
+    for (const patch of unpatched) console.log(`  ${describePatch(patch)}`)
+  }
+}
+
+async function checkGpui(names, template) {
+  const started = Date.now()
+  const { manifest, edition } = loadGpuiContext()
+  const unknown = names.filter((name) => !manifest.items.includes(name))
+  if (unknown.length > 0) throw new Error(`Not in ${GPUI_MANIFEST_PATH}: ${unknown.join(', ')}.`)
+  const checked = names.length > 0 ? names : manifest.items
+  if (checked.length === 0) {
+    console.log(`ui:check (gpui) OK: ${GPUI_MANIFEST_PATH} lists no items yet.`)
+    return
+  }
+  const source = template ?? manifest.registry
+  const { items } = await gpuiClosure(checked, source)
+  const failures = []
+  for (const name of items.keys()) {
+    if (!manifest.items.includes(name)) {
+      failures.push(
+        `${GPUI_NAMESPACE}/${name} is installed as a dependency but missing from ${GPUI_MANIFEST_PATH}'s items.`
+      )
+    }
+  }
+  const { files, conflicts } = mergeItemFiles([...items.values()].flatMap(gpuiItemFiles))
+  for (const conflict of conflicts) {
+    failures.push(`${conflict.path} is shipped differently by ${conflict.items.join(' and ')}.`)
+  }
+  const kept = new Set(manifest.keepLocal)
+  const compared = files.filter((file) => !kept.has(file.path))
+  const expected = compared.map((file) => ({ ...file, forms: [gpuiForm(file, edition)] }))
+  for (const drift of findDrift(expected, (path) => readText(cratePath(path)))) {
+    const where = `${GPUI_CRATE_DIR}/${drift.path} (${GPUI_NAMESPACE}/${drift.item})`
+    failures.push(
+      drift.kind === 'missing'
+        ? `${where} is missing.`
+        : `${where} differs from the registry; ${drift.detail}`
+    )
+  }
+  const workspace = cargoTable(readText(join(ROOT, 'Cargo.toml')) ?? '', 'workspace.dependencies')
+  for (const patch of missingPatches(
+    [...items.values()],
+    readText(join(ROOT, 'Cargo.toml')) ?? ''
+  )) {
+    failures.push(describePatch(patch))
+  }
+  for (const pin of pinDifferences([...items.values()], workspace).mismatched) {
+    failures.push(
+      `Cargo.toml: ${describePin(pin)}. One pin for the kit and the app (plan 260 D1): bump videorc-ui first, then here.`
+    )
+  }
+
+  if (failures.length > 0) {
+    console.error(`ui:check (gpui) failed against ${source}:\n`)
+    for (const failure of failures) console.error(`${failure}\n`)
+    console.error(
+      `Synced files are edited in videorc-ui, never here. Move the change upstream, or take the registry's version with pnpm ui:sync --flavour gpui <item>.`
+    )
+    process.exitCode = 1
+    return
+  }
+  const skipped = files.length - compared.length
+  console.log(
+    `ui:check (gpui) OK: ${compared.length} files from ${checked.length} ${GPUI_NAMESPACE} items match ${source}` +
+      `${skipped > 0 ? ` (${skipped} kept local)` : ''}, and the app's pins and patches are the registry's, in ${Date.now() - started} ms.`
+  )
+}
+
 const argv = process.argv.slice(2)
 const checking = argv.includes('--check')
+let command = checking ? 'check' : 'sync'
 try {
-  const { names, template } = parseUiArgs(argv.filter((arg) => arg !== '--check'))
-  if (checking) await check(names, template)
-  else await sync(names, template)
+  const { flavour, rest } = parseFlavourArgs(argv.filter((arg) => arg !== '--check'))
+  const { names, template } = parseUiArgs(rest)
+  // `--local` with no URL means videorc-ui's dev server, at each flavour's path.
+  const localFor = (gpui) =>
+    template === UI_LOCAL_TEMPLATE && gpui ? GPUI_LOCAL_TEMPLATE : template
+  if (checking) {
+    if (flavour !== 'gpui') await check(names, localFor(false))
+    if (flavour !== 'react') {
+      command = 'check --flavour gpui'
+      // Without --flavour, the names are React's: the GPUI check takes all of its own.
+      await checkGpui(flavour === 'gpui' ? names : [], localFor(true))
+    }
+  } else if (flavour === 'gpui') {
+    command = 'sync --flavour gpui'
+    await syncGpui(names, localFor(true))
+  } else {
+    await sync(names, localFor(false))
+  }
 } catch (error) {
-  console.error(`ui:${checking ? 'check' : 'sync'}: ${error.message}`)
+  console.error(`ui:${command}: ${error.message}`)
   process.exitCode = error instanceof RegistryUnreachable ? 2 : 1
 }
