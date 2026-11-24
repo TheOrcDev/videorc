@@ -296,9 +296,80 @@ impl Bridge {
     }
 }
 
+/// Plan 260 S1.8c c4a: the recording session's processed microphone for the
+/// backend's room. While native capture owns the device, the room
+/// microphone cannot open its own (the bridge refuses), so it takes what the
+/// session writes: the processed microphone chunk the caption tap sees
+/// (gain, mute, noise suppression, offset; never system audio or sounds),
+/// downmixed to mono. Off unless the room asks; a full queue drops.
+pub(crate) mod session_tap {
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use tokio::sync::mpsc;
+
+    static ACTIVE: AtomicBool = AtomicBool::new(false);
+    static TAP: StdMutex<Option<mpsc::Sender<Vec<f32>>>> = StdMutex::new(None);
+    /// About 320 ms of 10 ms chunks.
+    const QUEUE: usize = 32;
+
+    /// From the session bus, beside the caption tap (hot path: one atomic
+    /// load while off). Test buses never feed it, as they never feed the
+    /// caption tap.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn offer(frame: &crate::audio::AudioFrame) {
+        if !ACTIVE.load(Ordering::Acquire) || frame.sample_rate != 48_000 {
+            return;
+        }
+        let Ok(tap) = TAP.try_lock() else {
+            return;
+        };
+        if let Some(sender) = tap.as_ref() {
+            let _ = sender.try_send(mono(&frame.samples, frame.channels));
+        }
+    }
+
+    /// The room microphone takes the session's frames from now on.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn open() -> mpsc::Receiver<Vec<f32>> {
+        let (sender, receiver) = mpsc::channel(QUEUE);
+        *TAP.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sender);
+        ACTIVE.store(true, Ordering::Release);
+        receiver
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn close() {
+        ACTIVE.store(false, Ordering::Release);
+        *TAP.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    /// Interleaved samples to mono: the channels' mean.
+    pub(crate) fn mono(samples: &[f32], channels: u16) -> Vec<f32> {
+        let channels = usize::from(channels.max(1));
+        if channels == 1 {
+            return samples.to_vec();
+        }
+        samples
+            .chunks_exact(channels)
+            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_session_tap_downmixes_to_mono() {
+        let mono = session_tap::mono(&[0.2, 0.4, -1.0, 1.0, 0.5, 0.5], 2);
+        assert_eq!(mono.len(), 3);
+        for (sample, expected) in mono.iter().zip([0.3, 0.0, 0.5]) {
+            assert!((sample - expected).abs() < 1e-6, "{mono:?}");
+        }
+        assert_eq!(session_tap::mono(&[0.1, 0.2], 1), vec![0.1, 0.2]);
+    }
+
     #[test]
     fn refuses_default_aliases_and_speaker_monitor_identities() {
         assert!(!exact_microphone_id("microphone:coreaudio:0"));
