@@ -252,10 +252,14 @@ pub fn menu_bar(cx: &App, windows: &[WindowId]) -> Option<MenuBar> {
     Some(MenuBar { menus, bindings })
 }
 
+/// The windows that exist; each handles its own command
+/// (`screens::stream_manager::window::install`).
+const WINDOWS: &[WindowId] = &[WindowId::StreamManager];
+
 /// The roles' handlers, and the commands that work now. Pages and windows
 /// get theirs as they are ported.
 pub fn install(cx: &mut App) {
-    if let Some(bar) = menu_bar(cx, &[]) {
+    if let Some(bar) = menu_bar(cx, WINDOWS) {
         cx.bind_keys(bar.bindings);
         cx.set_menus(bar.menus);
     } else {

@@ -104,7 +104,7 @@ impl MainFrame {
 
 /// Every display's bounds and work area (without the menu bar and the
 /// Dock), in the same coordinates as a window's frame.
-fn displays(cx: &App) -> Vec<Display> {
+pub(crate) fn displays(cx: &App) -> Vec<Display> {
     cx.displays()
         .iter()
         .map(|display| Display {
@@ -114,7 +114,7 @@ fn displays(cx: &App) -> Vec<Display> {
         .collect()
 }
 
-fn rect_of(bounds: Bounds<Pixels>) -> Rect {
+pub(crate) fn rect_of(bounds: Bounds<Pixels>) -> Rect {
     Rect::new(
         f64::from(f32::from(bounds.origin.x)),
         f64::from(f32::from(bounds.origin.y)),
@@ -123,7 +123,7 @@ fn rect_of(bounds: Bounds<Pixels>) -> Rect {
     )
 }
 
-fn bounds_of(frame: Rect) -> Bounds<Pixels> {
+pub(crate) fn bounds_of(frame: Rect) -> Bounds<Pixels> {
     Bounds {
         origin: point(px(frame.x as f32), px(frame.y as f32)),
         size: size(px(frame.width as f32), px(frame.height as f32)),

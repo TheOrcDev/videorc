@@ -62,6 +62,7 @@ use app::hide::HideFromStream;
 use app::permissions::Permissions;
 use app::shell::{Shell, StatusLine, connection_text};
 use app::{camera, capture, hotkeys, links, menus, sleep};
+use screens::stream_manager::frame::StreamManagerFrame;
 use screens::studio::{
     self as studio_screen, StudioPage,
     transport::{SessionControls, Transport},
@@ -292,6 +293,7 @@ fn main() -> Result<()> {
     let quit_after = args.quit_after;
     // The main window's frame, saved in the data directory.
     let main_frame = MainFrame::new(&paths.user_data_dir, logger.clone());
+    let stream_manager_frame = StreamManagerFrame::new(&paths.user_data_dir, logger.clone());
     let quit_guard = sleep_guard.clone();
     let quit_permissions = permissions.clone();
     let focus_permissions = permissions.clone();
@@ -394,6 +396,9 @@ fn main() -> Result<()> {
             }
         };
         cx.activate(true);
+        // The Stream Manager's menu command and keys, and the window when it
+        // was open at the last quit.
+        screens::stream_manager::window::install(cx, stream_manager_frame, APP_ID);
 
         // The main window coming to the front re-checks a grant System
         // Settings may have made meanwhile; a move or resize saves its frame
