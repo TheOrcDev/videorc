@@ -82,6 +82,7 @@ pub struct Shell {
     destinations: Entity<DestinationsPanel>,
     settings: Entity<SettingsScreen>,
     health: Entity<crate::screens::health::HealthScreen>,
+    library: Entity<crate::screens::library::LibraryScreen>,
     palette: Entity<CommandPalette>,
     notices: Entity<Centre>,
     notice_hub: Entity<Hub>,
@@ -98,6 +99,7 @@ impl Shell {
         destinations: Entity<DestinationsPanel>,
         settings: Entity<SettingsScreen>,
         health: Entity<crate::screens::health::HealthScreen>,
+        library: Entity<crate::screens::library::LibraryScreen>,
         palette: Entity<CommandPalette>,
         notice_hub: Entity<Hub>,
         window: &mut Window,
@@ -110,6 +112,13 @@ impl Shell {
             window,
             |this, _, navigation: &NoticeNavigate, window, cx| match navigation {
                 NoticeNavigate::Settings(tab) => this.open_settings(Some(*tab), window, cx),
+                NoticeNavigate::Action(NoticeAction::OpenLibrary { session_id }) => {
+                    this.open_page(PageId::Library, window, cx);
+                    this.library.update(cx, |library, cx| {
+                        library.focus_session(session_id.as_deref(), window, cx)
+                    });
+                    window.activate_window();
+                }
                 NoticeNavigate::Action(NoticeAction::OpenHealth) => {
                     this.open_page(PageId::Diagnostics, window, cx);
                     window.activate_window();
@@ -123,6 +132,14 @@ impl Shell {
                 }
                 NoticeNavigate::Action(NoticeAction::OpenUrl { url }) => cx.open_url(url),
                 _ => {}
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &library,
+            window,
+            |this, _, navigation: &crate::screens::library::Navigate, window, cx| {
+                this.open_page(navigation.0, window, cx)
             },
         )
         .detach();
@@ -176,6 +193,7 @@ impl Shell {
             destinations,
             settings,
             health,
+            library,
             palette,
             notices,
             notice_hub,
@@ -216,12 +234,19 @@ impl Shell {
             self.settings
                 .update(cx, |settings, cx| settings.disarm_shortcut(cx));
             self.page = page;
+            self.library.update(cx, |library, cx| {
+                library.set_active(page == PageId::Library, cx)
+            });
             self.health.update(cx, |health, cx| {
                 health.set_active(page == PageId::Diagnostics, cx)
             });
             self.output.update(cx, |output, cx| {
                 output.set_active(page == PageId::Recording, cx)
             });
+            if page == PageId::Library {
+                self.library
+                    .update(cx, |library, cx| library.focus_session(None, window, cx));
+            }
             if page == PageId::Settings {
                 self.settings
                     .update(cx, |settings, cx| settings.refresh(cx));
@@ -344,6 +369,13 @@ impl Render for Shell {
                             .flex_col()
                             .pt(px(40.))
                             .child(self.studio.clone())
+                    } else if page == PageId::Library {
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .pt(px(40.))
+                            .child(self.library.clone())
                     } else if page == PageId::Sources {
                         div()
                             .flex_1()
@@ -390,6 +422,11 @@ impl Render for Shell {
                             .gap(px(8.))
                             .child(div().type_scale(text::SECTION).child(page.label()))
                             .map(|body| {
+                                if page == PageId::Library {
+                                    self.library.update(cx, |library, cx| {
+                                        library.focus_session(None, window, cx)
+                                    });
+                                }
                                 if page == PageId::Settings {
                                     body.child(self.settings.clone())
                                 } else if page == PageId::Diagnostics {
