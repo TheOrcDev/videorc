@@ -152,11 +152,28 @@ async fn follow(state: AppState) {
     // A hold that ended by itself (a take-over, a deleted room) is not
     // retried until the room closes once: the seat is someone else's.
     let mut ended_while_open = false;
+    // The last `cloud.state`, so a change in the guest captions re-sends the
+    // stage with it (S1.8d d4).
+    let mut last_state: Option<Value> = None;
     loop {
-        let event = match events.recv().await {
-            Ok(event) => event,
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => break,
+        let event = tokio::select! {
+            received = events.recv() => match received {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            _ = crate::room_guest_speech::CAPTIONING_CHANGED.notified() => {
+                if let Some(payload) = last_state.as_ref() {
+                    let message =
+                        stage_message(payload, crate::room_guest_speech::captioning());
+                    stage.send_if_modified(|current| {
+                        let changed = *current != message;
+                        *current = message;
+                        changed
+                    });
+                }
+                continue;
+            }
         };
         if event.event == crate::cloud_talk::CLOUD_ROOM_OVERLAY_EVENT {
             if let Some(overlays) = overlays.as_ref() {
@@ -168,9 +185,10 @@ async fn follow(state: AppState) {
             continue;
         }
         let open = room_open(&event.payload);
-        // Guest captions are not in `cloud.state` yet: the guest page's
-        // "Live captions are on" line waits for S1.8d's in-process mix.
-        let message = stage_message(&event.payload, false);
+        // The guest page's "Live captions are on" line: the backend's own
+        // guest captions mix (S1.8d d4).
+        last_state = Some(event.payload.clone());
+        let message = stage_message(&event.payload, crate::room_guest_speech::captioning());
         stage.send_if_modified(|current| {
             let changed = *current != message;
             *current = message;
@@ -346,6 +364,14 @@ async fn hold(
                     subscriptions_heard,
                     subscriptions_stopped,
                 ));
+                // The guest captions mix, in-process (S1.8d d4).
+                let (guest_speech_done, guest_speech_stopped) = oneshot::channel::<()>();
+                tokio::spawn(crate::room_guest_speech::run(
+                    state.clone(),
+                    room.clone(),
+                    show_id.clone().unwrap_or_default(),
+                    guest_speech_stopped,
+                ));
                 // The room's other people as preview feeds (S1.8d d1).
                 let (remote_done, remote_stopped) = oneshot::channel::<()>();
                 tokio::spawn(crate::room_remote::run(
@@ -502,6 +528,7 @@ async fn hold(
                 drop(aux_done);
                 drop(html_done);
                 drop(remote_done);
+                drop(guest_speech_done);
                 crate::room_aux::disarm_system();
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
@@ -631,6 +658,7 @@ async fn leave(state: &AppState, room: Option<Arc<Room>>) {
     crate::room_aux::clear();
     crate::room_html::clear();
     crate::room_remote::clear();
+    crate::room_guest_speech::clear();
     HOLDS_SEAT.store(false, Ordering::Release);
 }
 

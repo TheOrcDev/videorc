@@ -124,6 +124,8 @@ mod room_content;
 #[cfg(target_os = "macos")]
 mod room_graphics;
 #[cfg(target_os = "macos")]
+mod room_guest_speech;
+#[cfg(target_os = "macos")]
 mod room_host;
 #[cfg(target_os = "macos")]
 mod room_html;
