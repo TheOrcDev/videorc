@@ -389,9 +389,30 @@ pub(super) struct SwitchCore {
     pub(super) window_hints: HashMap<String, String>,
     presentation: Option<PresentationProbe>,
     proof_notices: NotifyOnce,
+    /// S1.6b part 4b: the layout undo's one slot (plan 174 S3.9, D15).
+    pub(super) undo: Option<super::scene_editor::LayoutUndoEntry>,
+    /// S1.6b part 4b: the Freeform arrangements presets replaced, for the
+    /// app's lifetime (`freeform-memory.ts`' window memory, plan 174 C-4).
+    pub(super) freeform_memory: super::scene_editor::FreeformMemory,
+    /// `sceneVisibilityRequestIdRef`: the latest Show or Hide, so an older
+    /// answer never lands over a newer one.
+    pub(super) visibility_request: u64,
 }
 
 impl SwitchCore {
+    /// `layoutIntentIdRef`: the latest layout intent.
+    pub(super) fn intent(&self) -> u64 {
+        self.intent_id
+    }
+
+    /// `nativePreviewCommittedSceneRef.sceneRevision`: the newest committed
+    /// layout transaction's revision (0 before any).
+    pub(super) fn committed_revision(&self) -> u64 {
+        self.last_commit
+            .as_ref()
+            .map_or(0, |commit| commit.revision)
+    }
+
     /// The working setup's app, background and origin at launch
     /// (`workingAppRef`, `workingBackground`, `workingOriginRef`).
     pub(super) fn launch(&mut self, working: Option<&WorkingScene>) {
@@ -774,9 +795,34 @@ impl Inner {
     }
 
     /// `rememberLayoutTransactionSnapshot`: the newest commit by revision.
-    /// (The layout undo's slot, plan 174 S3.9, is not ported.)
+    /// The layout undo (plan 174 S3.9, D15) remembers the committed layout
+    /// this commit replaced: the last commit's, or before any commit this
+    /// launch, the layout the Studio started from. A commit that changes no
+    /// layout field (a background edit, a reconciliation) leaves the slot.
     fn remember_commit(&mut self, committed: Committed) {
         let current = self.scenes.switch.last_commit.take();
+        let newest = current
+            .as_ref()
+            .is_none_or(|previous| previous.revision <= committed.revision);
+        if newest {
+            let replaced = match &current {
+                Some(previous) => super::scene_editor::LayoutUndoEntry {
+                    layout: previous.layout.clone(),
+                    saved_id: previous.saved_id.clone(),
+                    origin: previous.origin,
+                },
+                None => super::scene_editor::LayoutUndoEntry {
+                    layout: self.capture.config["layout"].clone(),
+                    saved_id: self.scenes.on_stream.clone(),
+                    origin: self.scenes.switch.origin,
+                },
+            };
+            self.scenes.switch.undo = super::scene_editor::layout_undo_after_commit(
+                self.scenes.switch.undo.take(),
+                Some(replaced),
+                &committed.layout,
+            );
+        }
         self.scenes.switch.last_commit = Some(latest_layout_transaction_commit(
             current,
             committed,
@@ -1882,6 +1928,9 @@ impl<B: StudioBackend> Studio<B> {
                 return false;
             }
             if scene_capture_is_borrowed(scene, &working) && options.background_override.is_none() {
+                if leaves_arrangement {
+                    self.note_layout_leaving_freeform(current_layout);
+                }
                 return self
                     .apply_saved_scene(
                         &scene.id,
@@ -1894,6 +1943,9 @@ impl<B: StudioBackend> Studio<B> {
                     .await
                     .ok;
             }
+        }
+        if leaves_arrangement {
+            self.note_layout_leaving_freeform(current_layout);
         }
         self.request_layout_transaction(
             next_layout,
