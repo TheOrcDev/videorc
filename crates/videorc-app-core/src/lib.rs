@@ -7,6 +7,7 @@
 //! `videorc-rust`, so the crates that move from there (L1's
 //! `videorc-preview`) compile unchanged.
 
+pub mod client;
 pub mod crash_log;
 pub mod desktop;
 mod http;
@@ -18,6 +19,7 @@ pub mod process;
 pub mod restart;
 pub mod supervisor;
 
+pub use client::{BackendClient, BackendEvent, ClientConfig, ConnectionState, EventFilter};
 pub use log::{Level, LogFileLimits, Logger, RotatingLogFile};
 pub use paths::AppPaths;
 pub use process::{
@@ -25,3 +27,4 @@ pub use process::{
     Credential, Isolation, process_is_alive,
 };
 pub use supervisor::{BackendState, StopOutcome, Supervisor, SupervisorConfig, Tone};
+pub use videorc_protocol as protocol;
