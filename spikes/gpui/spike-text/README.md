@@ -18,7 +18,7 @@ build, load average 3 to 5 from other agents' builds and GUI runs.
 
 | Check | Line | Result | Verdict |
 | --- | --- | --- | --- |
-| IME, Japanese and Chinese | Commits correctly | All 6 steps right: romaji `nihon` marked → kana `にほん` marked → `日本` committed; pinyin `zhong wen` marked → `中文` committed; an emoji-picker insert. `hasMarkedText` is true while composing, and the candidate rect sits at the input | **PASS** (the input method's calls, sent to GPUI's `NSTextInputClient` view; a session with the real Kotoeri and Pinyin needs those input sources, which this Mac doesn't have enabled) |
+| IME, Japanese and Chinese | Commits correctly | Simulated path (2026-11-23): all 6 `NSTextInputClient` steps right, including emoji-picker insert. **Real Kotoeri + Pinyin (2026-11-24, owner-approved):** Japanese – Romaji typed `nihon` → marked `にほn` → Space marked `日本` with the candidate window on the input → Enter committed `日本` (`ime_observed` ended `text:"日本", marked:null`); Pinyin – Simplified typed `zhongwen` → marked `zhong wen` with candidates `1. 中文`… → Space committed `中文`. Screenshots under `~/.local/share/ghostex/i/gpui-s05-ime-*.png` | **PASS** (real input methods). **D13 gap:** Apple's Pinyin candidate panel drew near the Dock, not clearly at the caret (Japanese candidates sat on the input). GPUI still reported the marked range; caret-rect wiring for SCIM may need a follow-up |)
 | Colour emoji | Draw in colour | Skin tones, ZWJ sequences (👩‍💻, 🧑🏿‍🚀), flags, ❤️ | **PASS** |
 | Font fallback | No missing glyphs | Japanese, both Chinese scripts, Korean, Arabic and Hebrew (right to left, joined), Thai, Hindi, Greek and Cyrillic, from the system's fallbacks | **PASS, one gap:** Devanagari is measured narrower than it draws, so a shrink-to-fit box wraps it one word early |
 | Selectable text | Select and copy | GPUI has none. The spike's `Selectable` (`StyledText` plus `TextLayout::index_for_position`, about 90 lines) selected across a wrapped line and over whole CJK characters, and ⌘C copied exactly the selection | **PASS** with our own element |
@@ -64,7 +64,7 @@ text, and screen-reader names on all three platforms (spellcheck waits):
 
 | D13 item | macOS state | Needs |
 | --- | --- | --- |
-| IME | GPUI's input path is right for Japanese and Chinese composition | A session with the real input methods (owner, or a contributor); Windows (WC-0.7: IMM32). Linux: Wayland passes; X11 needs the XIM patch (see Linux) |
+| IME | Real Kotoeri (Romaji) and Pinyin commit correctly on macOS (2026-11-24). Pinyin candidates were not clearly at the caret | Confirm SCIM uses GPUI's caret rect (or accept system placement). Windows (WC-0.7: IMM32). Linux: Wayland passes; X11 needs the XIM patch (see Linux) |
 | Colour emoji | Pass | Windows shots; Linux passes but for `❤️` (VS16) |
 | Inline emotes | They draw and wrap inline; animation is wasteful | The kit's timer-driven animated image (small, no GPUI patch) |
 | Selectable chat and Notes text | One block works (spike) | Chat rows as one `StyledText` each; Notes on the kit's input/editor (gpui-component, D3) |
@@ -197,6 +197,12 @@ cargo run --release -p spike-text -- --seconds 15 --rows 0    # the memory basel
 minus it is the chat's cost. Keep the window in front during the scroll
 test (`frames_with_window_active` in the summary says whether it was), or
 pass `--no-inactive-cap`.
+
+**Real IME on macOS:** enable Japanese – Romaji and Pinyin – Simplified,
+then `cargo run --release -p spike-text -- --seconds 180 --ime-wait 120000
+--rows 100` and type while the status says `type with the input method now`.
+`--ime-wait` records every committed/marked change in `ime_observed`.
+Remove those input sources afterwards and switch back to the owner's layout.
 
 **On Windows (WC-0.7) and Linux (L5)** `--simulate-ime` is macOS only:
 type into the input with the real IME instead (Microsoft IME Japanese and
