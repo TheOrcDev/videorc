@@ -158,7 +158,11 @@ impl Shell {
         cx.observe(&go_live, |_, _, cx| cx.notify()).detach();
         // Both routes use the same lifecycle, title and focus updates.
         cx.subscribe_in(&studio, window, |this, _, open: &OpenPage, window, cx| {
-            this.open_page(open.0, window, cx);
+            if let Some(tab) = open.settings_tab {
+                this.open_settings(Some(tab), window, cx);
+            } else {
+                this.open_page(open.page, window, cx);
+            }
         })
         .detach();
         cx.subscribe_in(&settings, window, |this, _, Navigate(page), window, cx| {

@@ -163,9 +163,28 @@ impl GoLiveFace {
 }
 
 /// A row of the transport asks the shell to open a page (the blocked line's
-/// jump).
+/// jump). `settings_tab` opens Settings on that tab (Permissions, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OpenPage(pub PageId);
+pub struct OpenPage {
+    pub page: PageId,
+    pub settings_tab: Option<&'static str>,
+}
+
+impl OpenPage {
+    pub const fn of(page: PageId) -> Self {
+        Self {
+            page,
+            settings_tab: None,
+        }
+    }
+
+    pub const fn settings(tab: &'static str) -> Self {
+        Self {
+            page: PageId::Settings,
+            settings_tab: Some(tab),
+        }
+    }
+}
 
 pub struct Transport {
     studio: Arc<AppStudio>,
@@ -344,7 +363,7 @@ impl Render for Transport {
                                         .size(ButtonSize::Xs)
                                         .label(jump.label)
                                         .on_click(cx.listener(move |_, _, _, cx| {
-                                            cx.emit(OpenPage(jump.page))
+                                            cx.emit(OpenPage::of(jump.page))
                                         })),
                                 )
                             }),

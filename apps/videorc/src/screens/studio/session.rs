@@ -132,7 +132,7 @@ impl SessionSection {
         if let Some(page) = fact.opens {
             let this = cx.entity().downgrade();
             row = row.on_navigate(move |_, _, cx| {
-                this.update(cx, |_, cx| cx.emit(OpenPage(page))).ok();
+                this.update(cx, |_, cx| cx.emit(OpenPage::of(page))).ok();
             });
         }
         row
@@ -176,7 +176,7 @@ impl SessionSection {
                     .label(OPEN_LIBRARY)
                     .variant(ButtonVariant::Ghost)
                     .size(ButtonSize::Xs)
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage(PageId::Library)))),
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Library)))),
             );
         }
         row = row.child(

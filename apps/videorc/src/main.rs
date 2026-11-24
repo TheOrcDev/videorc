@@ -465,6 +465,16 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let audio = cx.new(|cx| {
+                    screens::studio::audio::AudioSection::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        studio_state.clone(),
+                        studio.mic_levels(),
+                        studio.cloud(),
+                        cx,
+                    )
+                });
                 let takeover = cx.new(|cx| {
                     TakeoverSection::new(
                         studio.backend().clone(),
@@ -478,6 +488,7 @@ fn main() -> Result<()> {
                         transport.clone(),
                         preview.clone(),
                         session,
+                        audio,
                         takeover,
                         window,
                         cx,
