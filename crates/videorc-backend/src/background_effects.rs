@@ -11,6 +11,11 @@ use crate::protocol::EffectiveSceneBackground;
 const MAX_BLUR_PX: f32 = 64.0;
 const BOX_BLUR_PASSES: usize = 3;
 const LUMA_WEIGHTS: [f32; 3] = [0.2126, 0.7152, 0.0722];
+/// Steps per unit the controls are quantized to: hundredths of a blur pixel,
+/// ten-thousandths of the saturation, dim and vignette factors. The cache
+/// key prints exactly these digits.
+const BLUR_STEPS: f32 = 100.0;
+const GRADE_STEPS: f32 = 10_000.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct BackgroundPictureEffects {
@@ -29,11 +34,24 @@ impl BackgroundPictureEffects {
         if background.live.is_some() {
             return None;
         }
+        // Quantized once, so the cache key and the grade read the same values.
         let effects = Self {
-            blur_px: control(background.blur_px, 0.0, 0.0, f64::from(MAX_BLUR_PX)),
-            saturation: control(background.saturation_percent, 100.0, 0.0, 200.0) / 100.0,
-            dim: control(background.dim_percent, 0.0, 0.0, 100.0) / 100.0,
-            vignette: control(background.vignette_percent, 0.0, 0.0, 100.0) / 100.0,
+            blur_px: quantize(
+                control(background.blur_px, 0.0, 0.0, f64::from(MAX_BLUR_PX)),
+                BLUR_STEPS,
+            ),
+            saturation: quantize(
+                control(background.saturation_percent, 100.0, 0.0, 200.0) / 100.0,
+                GRADE_STEPS,
+            ),
+            dim: quantize(
+                control(background.dim_percent, 0.0, 0.0, 100.0) / 100.0,
+                GRADE_STEPS,
+            ),
+            vignette: quantize(
+                control(background.vignette_percent, 0.0, 0.0, 100.0) / 100.0,
+                GRADE_STEPS,
+            ),
         };
         (!effects.is_neutral()).then_some(effects)
     }
@@ -55,6 +73,10 @@ impl BackgroundPictureEffects {
 fn control(value: f64, neutral: f64, min: f64, max: f64) -> f32 {
     let value = if value.is_finite() { value } else { neutral };
     value.clamp(min, max) as f32
+}
+
+fn quantize(value: f32, steps: f32) -> f32 {
+    (value * steps).round() / steps
 }
 
 /// Grade a straight RGBA picture in place: blur, then saturation, dim and
@@ -243,6 +265,24 @@ mod tests {
         broken.saturation_percent = f64::INFINITY;
         broken.dim_percent = f64::NAN;
         assert_eq!(BackgroundPictureEffects::for_background(&broken), None);
+    }
+
+    #[test]
+    fn values_that_share_a_cache_key_share_the_blur_kernel() {
+        let with_blur = |blur_px: f64| {
+            let mut graded = background();
+            graded.blur_px = blur_px;
+            BackgroundPictureEffects::for_background(&graded).unwrap()
+        };
+        let (low, high) = (with_blur(0.576), with_blur(0.579));
+        assert_eq!(low.cache_key_suffix(), high.cache_key_suffix());
+        assert_eq!(low, high);
+        assert_eq!(low.blur_px, 0.58);
+        assert_eq!(box_blur_widths(low.blur_px), box_blur_widths(high.blur_px));
+        let mut faint = background();
+        faint.blur_px = 0.004;
+        faint.dim_percent = 0.004;
+        assert_eq!(BackgroundPictureEffects::for_background(&faint), None);
     }
 
     #[test]

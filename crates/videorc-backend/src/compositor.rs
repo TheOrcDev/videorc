@@ -6290,23 +6290,26 @@ impl CompositorRuntime {
     /// pictures, so a vertical scene whose grade changed first misses its
     /// own key until the primary catches up; it then draws the primary's
     /// picture of the same file (the previous grade, or the new one) rather
-    /// than none.
+    /// than none. A cached entry without pixels (a failed read) is no hit.
     #[cfg(any(target_os = "windows", test))]
     fn scene_background_image(
         &self,
         background: &EffectiveSceneBackground,
     ) -> Option<&CompositorImageSource> {
-        self.image_sources
-            .get(&background_cache_key(background))
-            .or_else(|| {
-                let primary = self.scene.as_ref()?.scene.as_ref()?.background.as_ref()?;
-                let same_picture = primary.asset_id == background.asset_id
-                    && primary.managed_asset_path == background.managed_asset_path
-                    && primary.live.is_none() == background.live.is_none();
-                same_picture
-                    .then(|| self.image_sources.get(&background_cache_key(primary)))
-                    .flatten()
+        let drawable = |key: String| {
+            self.image_sources.get(&key).filter(|source| {
+                source.bgra.is_some() && source.width.is_some() && source.height.is_some()
             })
+        };
+        drawable(background_cache_key(background)).or_else(|| {
+            let primary = self.scene.as_ref()?.scene.as_ref()?.background.as_ref()?;
+            let same_picture = primary.asset_id == background.asset_id
+                && primary.managed_asset_path == background.managed_asset_path
+                && primary.live.is_none() == background.live.is_none();
+            same_picture
+                .then(|| drawable(background_cache_key(primary)))
+                .flatten()
+        })
     }
 
     #[cfg(any(target_os = "windows", test))]
@@ -23109,12 +23112,40 @@ mod tests {
         update_compositor_scene(&state, params(3, scene_with(0.0))).await;
         assert!(vertical_first_pixel(&*state.compositor.lock().await).is_some());
 
+        // A grade whose read failed while the file was gone stays cached
+        // without pixels; it must not hide the primary's restored picture.
+        let mut failed = scene_with(50.0);
+        if let Some(background) = failed.background.as_mut() {
+            background.vignette_percent = 30.0;
+            let mut compositor = state.compositor.lock().await;
+            compositor.image_sources.insert(
+                background_cache_key(background),
+                CompositorImageSource {
+                    image_path: background.managed_asset_path.clone(),
+                    file_revision: None,
+                    width: None,
+                    height: None,
+                    rgba: None,
+                    bgra: None,
+                    content_revision: 0,
+                    state: "source-missing".to_string(),
+                    message: Some("Background image file is missing.".to_string()),
+                },
+            );
+        }
+        update_compositor_simulcast_scene(&state, params(4, failed)).await;
+        assert_eq!(
+            vertical_first_pixel(&*state.compositor.lock().await),
+            Some(vec![50, 100, 200, 255]),
+            "a failed exact entry falls back to the primary's picture"
+        );
+
         // A different picture is never borrowed from the primary.
         let mut other = scene_with(50.0);
         if let Some(background) = other.background.as_mut() {
             background.asset_id = "another-picture".to_string();
         }
-        update_compositor_simulcast_scene(&state, params(4, other)).await;
+        update_compositor_simulcast_scene(&state, params(5, other)).await;
         assert_eq!(vertical_first_pixel(&*state.compositor.lock().await), None);
         std::fs::remove_file(&image_path).ok();
     }
