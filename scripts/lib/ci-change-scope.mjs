@@ -117,10 +117,14 @@ export const RUST_READS_DESKTOP_FILES = Object.freeze([
   'apps/desktop/src/renderer/src/lib/buddy-library-view.ts',
   'apps/desktop/src/renderer/src/lib/buddy-onboarding-copy.ts',
   'apps/desktop/src/renderer/src/lib/buddy-persona-view.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-report-view.ts',
   'apps/desktop/src/renderer/src/lib/buddy-tab-view.ts',
   'apps/desktop/src/renderer/src/lib/cohost-view.ts',
   // chat::highlight's shared words are checked against it (S1.6e part 1).
-  'apps/desktop/src/renderer/src/lib/studio-actions/studio-context.ts'
+  'apps/desktop/src/renderer/src/lib/studio-actions/studio-context.ts',
+  // videorc-preview's words are checked against the Preview card's copy
+  // byte for byte (plan 260 S1.7b).
+  'apps/desktop/src/renderer/src/components/preview-stage.tsx'
 ])
 
 export function isRustReachableDesktopPath(path) {
