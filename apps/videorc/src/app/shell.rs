@@ -26,6 +26,7 @@ use crate::preview::Preview;
 use crate::screens::destinations::DestinationsPanel;
 use crate::screens::go_live::GoLiveDialog;
 use crate::screens::guests::GuestsPanel;
+use crate::screens::images_sounds::{ImagesPanel, SoundsPanel};
 use crate::screens::output::OutputPanel;
 use crate::screens::sidekick::SidekickScreen;
 use crate::screens::sources::SourcesPanel;
@@ -88,6 +89,10 @@ pub struct Shell {
     guests: Entity<GuestsPanel>,
     /// Phase 3: Sidekick ⌘9.
     sidekick: Entity<SidekickScreen>,
+    /// Phase 3: Images ⇧⌘G.
+    images: Entity<ImagesPanel>,
+    /// Phase 3: Sounds ⇧⌘S.
+    sounds: Entity<SoundsPanel>,
     /// Phase 3: Go Live confirmation (over any page).
     go_live: Entity<GoLiveDialog>,
     settings: Entity<SettingsScreen>,
@@ -111,6 +116,8 @@ impl Shell {
         destinations: Entity<DestinationsPanel>,
         guests: Entity<GuestsPanel>,
         sidekick: Entity<SidekickScreen>,
+        images: Entity<ImagesPanel>,
+        sounds: Entity<SoundsPanel>,
         go_live: Entity<GoLiveDialog>,
         settings: Entity<SettingsScreen>,
         health: Entity<crate::screens::health::HealthScreen>,
@@ -178,6 +185,8 @@ impl Shell {
         cx.observe(&destinations, |_, _, cx| cx.notify()).detach();
         cx.observe(&guests, |_, _, cx| cx.notify()).detach();
         cx.observe(&sidekick, |_, _, cx| cx.notify()).detach();
+        cx.observe(&images, |_, _, cx| cx.notify()).detach();
+        cx.observe(&sounds, |_, _, cx| cx.notify()).detach();
         cx.observe(&go_live, |_, _, cx| cx.notify()).detach();
         // Both routes use the same lifecycle, title and focus updates.
         cx.subscribe_in(&studio, window, |this, _, open: &OpenPage, window, cx| {
@@ -226,6 +235,8 @@ impl Shell {
             destinations,
             guests,
             sidekick,
+            images,
+            sounds,
             go_live,
             settings,
             health,
@@ -374,6 +385,8 @@ impl Render for Shell {
         let destinations = self.destinations.clone();
         let guests = self.guests.clone();
         let sidekick = self.sidekick.clone();
+        let images = self.images.clone();
+        let sounds = self.sounds.clone();
         div()
             .size_full()
             .on_mouse_down(
@@ -474,6 +487,24 @@ impl Render for Shell {
                             .flex_col()
                             .pt(px(40.))
                             .child(sidekick)
+                    } else if page == PageId::Assets {
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .child(images)
+                    } else if page == PageId::Sounds {
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .child(sounds)
                     } else {
                         div()
                             .flex_1()

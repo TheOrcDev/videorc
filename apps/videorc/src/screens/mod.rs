@@ -6,6 +6,7 @@ pub mod dialogs;
 pub mod go_live;
 pub mod guests;
 pub mod health;
+pub mod images_sounds;
 pub mod library;
 pub mod notes;
 pub mod notifications;

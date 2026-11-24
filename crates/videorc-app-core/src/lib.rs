@@ -8,6 +8,7 @@
 //! `videorc-preview`) compile unchanged.
 
 pub mod account;
+pub mod assets;
 pub mod buddy;
 pub mod chat;
 pub mod client;
@@ -35,6 +36,7 @@ pub mod scenes;
 pub mod settings_page;
 pub mod shortcuts;
 pub mod smoke;
+pub mod soundboard;
 pub mod stream_manager;
 pub mod studio;
 pub mod supervisor;
