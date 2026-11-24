@@ -5184,6 +5184,117 @@ fn should_exclude_protected_overlay_window(window_id: u32, protected_ids: &[u32]
     protected_ids.binary_search(&window_id).is_ok()
 }
 
+/// Plan 260 S1.8c c4b: a screen or window the host picked on the stage for
+/// the backend's room that is not the one the preview runs. Its own native
+/// capture (the preview's ScreenCaptureKit path) into its own store, which
+/// publishes through the same process-wide Hide screen gate as every capture
+/// store, so a hidden screen holds its still here too. At 1080p30, with the
+/// preview's protected Videorc windows left out. Nothing else reads it: not
+/// the preview, the compositor or a recording. Dropping it stops the stream.
+#[cfg(target_os = "macos")]
+pub(crate) struct RoomScreenCapture {
+    stop_tx: std_mpsc::Sender<NativeScreenCommand>,
+    source: PreviewScreenFrameSource,
+}
+
+#[cfg(target_os = "macos")]
+impl RoomScreenCapture {
+    pub(crate) async fn start(state: &AppState, source_id: &str) -> Result<Self, String> {
+        let (source_kind, display_id, window_id) =
+            if let Some(window_id) = parse_screencapturekit_window_id(source_id) {
+                (PreviewScreenSourceKind::Window, None, Some(window_id))
+            } else if let Some(display_id) = parse_screencapturekit_display_id(source_id) {
+                (PreviewScreenSourceKind::Screen, Some(display_id), None)
+            } else {
+                return Err("This screen can't be shared into the room here.".to_string());
+            };
+        let protected_overlay_window_ids = normalized_protected_overlay_window_ids(
+            state
+                .preview_screen
+                .lock()
+                .await
+                .protected_overlay_window_ids
+                .clone(),
+        );
+        if window_id.is_some_and(|id| protected_overlay_window_ids.contains(&id)) {
+            return Err(
+                "This Videorc window is hidden from capture and cannot be shared.".to_string(),
+            );
+        }
+        let shared = Arc::new(StdMutex::new(PreviewScreenShared::new_capture(
+            SurfaceBackingTrackerHandle::default(),
+            Arc::clone(&state.screen_privacy),
+            1,
+        )));
+        let (stop_tx, stop_rx) = std_mpsc::channel();
+        let (startup_tx, startup_rx) = std_mpsc::channel();
+        let config = NativeScreenPreviewConfig {
+            source_id: source_id.to_string(),
+            source_kind: source_kind.clone(),
+            display_id,
+            window_id,
+            ffmpeg_path: crate::ffmpeg::default_ffmpeg_path(),
+            video: VideoSettings {
+                preset: crate::protocol::VideoPreset::Tutorial1080p30,
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                bitrate_kbps: 6000,
+            },
+            include_cursor: true,
+            exclude_current_process_windows: false,
+            protected_overlay_window_ids,
+            consent_cancel: Arc::new(AtomicBool::new(false)),
+        };
+        let thread_shared = Arc::clone(&shared);
+        thread::Builder::new()
+            .name("videorc-room-screen".to_string())
+            .spawn(move || run_native_screen_preview(config, thread_shared, stop_rx, startup_tx))
+            .map_err(|error| format!("Could not start the room's screen: {error}"))?;
+        let startup = tokio::task::spawn_blocking(move || {
+            startup_rx.recv_timeout(SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT)
+        })
+        .await
+        .map_err(|error| format!("Could not start the room's screen: {error}"))?;
+        let failed = match startup {
+            Ok(NativeScreenStartup::Live { .. }) => None,
+            Ok(
+                NativeScreenStartup::PermissionNeeded(message)
+                | NativeScreenStartup::SourceMissing(message)
+                | NativeScreenStartup::Failed(message),
+            ) => Some(message),
+            Ok(_) | Err(_) => Some("The room's screen did not start.".to_string()),
+        };
+        if let Some(message) = failed {
+            let _ = stop_tx.send(NativeScreenCommand::Stop);
+            return Err(message);
+        }
+        let source_key = match source_kind {
+            PreviewScreenSourceKind::Window => SourceKey::window(source_id),
+            _ => SourceKey::screen(source_id),
+        };
+        Ok(Self {
+            stop_tx,
+            source: PreviewScreenFrameSource {
+                shared,
+                source_key: Some(source_key),
+                generation: 1,
+            },
+        })
+    }
+
+    pub(crate) fn frame_source(&self) -> &PreviewScreenFrameSource {
+        &self.source
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for RoomScreenCapture {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(NativeScreenCommand::Stop);
+    }
+}
+
 fn selected_screen_source(params: &PreviewScreenStartParams) -> Option<SelectedScreenSource> {
     if let Some(window_id) = params.sources.window_id.clone() {
         // Linux portal window: the portal's picker names the window, so the
