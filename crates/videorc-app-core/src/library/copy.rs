@@ -313,8 +313,15 @@ pub fn repair_available(first: Option<&str>) -> String {
     format!("{first}Repair is available from this menu.")
 }
 
+/// `separateFileFailedToast`'s names and sentences.
+pub const CAMERA_FILE: &str = "Camera file";
+pub const SCREEN_FILE: &str = "Screen file";
+pub const SEPARATE_FILE: &str = "Separate file";
+pub const FILE_NOT_FINISHED: &str = "Videorc couldn't finish this file.";
+pub const COMBINED_KEEPS_GOING: &str = "Your Combined recording keeps going.";
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     /// The renderer files these words come from. Listed in
     /// `scripts/lib/ci-change-scope.mjs`, so a change to one runs this test.
     const SOURCES: [&str; 7] = [
@@ -353,22 +360,26 @@ mod tests {
             .join(" ")
     }
 
-    /// Every `pub const …: &str` in this file is still the renderer's.
-    #[test]
-    fn every_constant_is_still_in_the_renderer() {
-        let renderer = words(&code(&SOURCES.join("\n")));
-        let this = include_str!("copy.rs");
-        let this = &this[..this.find("#[cfg(test)]").unwrap()];
+    /// The `pub const …: &str` values of `source` (a module's text before
+    /// its tests), one-line or wrapped by rustfmt, and the names whose words
+    /// none of `renderer` has any more: (checked, missing).
+    pub(crate) fn unseen_constants(source: &str, renderer: &[&str]) -> (usize, Vec<String>) {
+        let renderer = words(&code(&renderer.join("\n")));
+        let source = source.replace("&str =\n", "&str = ");
         let mut checked = 0;
         let mut missing = Vec::new();
-        for line in this.lines() {
+        for line in source.lines() {
             let Some(rest) = line.trim().strip_prefix("pub const ") else {
                 continue;
             };
-            let Some((name, value)) = rest.split_once(": &str = \"") else {
+            let Some((name, value)) = rest.split_once(": &str = ") else {
                 continue;
             };
-            let Some(value) = value.strip_suffix("\";") else {
+            let Some(value) = value
+                .trim()
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix("\";"))
+            else {
                 continue;
             };
             checked += 1;
@@ -376,6 +387,15 @@ mod tests {
                 missing.push(name.to_string());
             }
         }
+        (checked, missing)
+    }
+
+    /// Every `pub const …: &str` in this file is still the renderer's.
+    #[test]
+    fn every_constant_is_still_in_the_renderer() {
+        let this = include_str!("copy.rs");
+        let this = &this[..this.find("#[cfg(test)]").unwrap()];
+        let (checked, missing) = unseen_constants(this, &SOURCES);
         assert!(
             checked > 40,
             "found {checked} constants; the scan is broken"
