@@ -60,8 +60,8 @@ impl SettingsScreen {
             chat: &self.chat,
             usage: &self.usage,
             session_active: snapshot.session.phase.is_active(),
-            first_run_ported: false,
-            account_name: None,
+            first_run_ported: true,
+            account_name: self.account_name(),
         });
         let entity = cx.entity();
         let theme = Tabs::new("settings-theme")
@@ -304,8 +304,11 @@ impl SettingsScreen {
                                 Button::new("replay-setup")
                                     .label(c::RUN_SETUP_AGAIN)
                                     .variant(ButtonVariant::Outline)
-                                    .disabled(true)
-                                    .tooltip(model.setup_held.unwrap_or(view::NOT_IN_THIS_BUILD)),
+                                    .disabled(self.disabled() || model.setup_held.is_some())
+                                    .tooltip(model.setup_held.unwrap_or(c::RUN_SETUP_AGAIN))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_setup(window, cx)
+                                    })),
                             ),
                         )
                         .child(
@@ -350,14 +353,19 @@ impl SettingsScreen {
         let mut elsewhere = GroupedList::new();
         for row in model.elsewhere {
             let page = PageId::parse(row.id);
+            let account = row.id == "account";
+            let can_open_account = account && self.account_name().is_some();
             elsewhere = elsewhere.item(
                 ListRow::new(row.id, row.label).child(
                     Button::new(gpui::SharedString::from(format!("navigate-{}", row.id)))
                         .label(row.value)
                         .variant(ButtonVariant::Ghost)
-                        .disabled(page.is_none() || !row.enabled)
+                        .disabled((page.is_none() && !can_open_account) || !row.enabled)
                         .tooltip(view::NOT_IN_THIS_BUILD)
                         .on_click(cx.listener(move |_, _, _, cx| {
+                            if can_open_account {
+                                cx.open_url("https://videorc.com/account");
+                            }
                             if let Some(page) = page {
                                 cx.emit(Navigate(page));
                             }

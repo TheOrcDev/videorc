@@ -57,3 +57,19 @@ Implementation coverage to exercise in that build:
 | P1430–P1431, P1555         | The native updater is Phase 5. About uses core's explicit unsupported-build message and downloads link.                                                                                                                                                                           |
 | All Remote actions         | Listener settings and device management work through the backend; end-to-end remote/agent Studio actions also require the app's intent executor, outside this screen.                                                                                                             |
 | All rows                   | Runtime/visual/accessibility evidence, native Increase Contrast wiring, and Windows/Linux passes remain outstanding.                                                                                                                                                              |
+
+## Settings follow-ups
+
+The setup replay uses core's step order and goal-dependent navigation, with
+permission actions, saved-scene selection, microphone selection and System
+audio. It never writes first-run completion markers or starts a performance
+capture. The full first-run screen still owns the preview/background chooser,
+live sound-level calibration and destination sign-in; the replay is not a
+claim of their visual parity. Its destination link becomes available with the
+Destinations route.
+
+Account changes are read and pushed from the backend. A fully signed-in
+account opens the same account webpage as Electron. Signed-out Sign in stays
+disabled: `account/mod.rs` only exposes entitlements, and the deep-link service
+has no account PKCE/state transaction owner installed. A plain web login is
+not a substitute for desktop sign-in. Account secrets never enter the screen.
