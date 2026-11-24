@@ -72,7 +72,7 @@ the dialog open.
 | The list | **PASS** | Six `AXGroup` items in an `AXList`, each named, pressable (one pressed: "Interview" selected); GPUI's tree carries `position_in_set`, `size_of_set` and `selected` |
 | The dialog | **PASS** | An `AXWindow` "Delete Interview?" with the description as its help, a heading, the text, and `AXButton` Cancel and Delete; Cancel pressed through the API closed it |
 | A headless test clicks Record | **PASS** | `clicking_record_starts_and_stops`: `TestAppContext`, `simulate_click` on the button's bounds, on and off (34 s build on the warm target, 0.00 s run) |
-| VoiceOver speaks it | **OWED** | Not run: turning VoiceOver on speaks aloud and takes over the owner's Mac. Needs the owner (two minutes) or a quiet machine |
+| VoiceOver speaks it | **OWED** | Still owed. A 2026-11-24 attempt was stopped: the owner said not to turn VoiceOver on. The tree/driver/headless passes above still stand. Needs a quiet machine or an explicit owner VoiceOver window (two minutes) |
 | Tab order | **NOT RUN** | GPUI reports 8 tab stops; the driver could not keep the window key on this shared screen (each foreground action hands focus back) |
 
 ## Found

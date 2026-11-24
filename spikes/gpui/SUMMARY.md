@@ -92,7 +92,7 @@ which are plan 260's S0.1 lines.
 | `ime_steps` | object array | Each IME step: `step`, `text`, `marked`, `want_text`, `want_marked`, `ok`; then the candidate rect (S0.5) | every `ok` true |
 | `numbers` | object | Digit-run widths with and without `tnum`: `tabular_equal`, `proportional_differs` (S0.5) | `tabular_equal` true |
 | `selected_text` | string array | Text selected with the mouse (S0.5) | — |
-| `ime_observed` | object array | Every change of the input's committed `text` and composing `marked` text while a real input method typed (`--ime-wait`, Windows and Linux; S0.5) | the composed text commits |
+| `ime_observed` | object array | Every change of the input's committed `text` and composing `marked` text while a real input method typed (`--ime-wait` on macOS, Windows and Linux; S0.5) | the composed text commits |
 | `a11y_tree_available`, `a11y_nodes` | boolean, integer | Whether GPUI built an accessibility tree (an assistive technology asked for it) and how many nodes it had (S0.6) | true once a screen reader or driver is attached |
 | `recording_at_end`, `deleted_scenes`, `events` | boolean, string array, string array | What the controls did, in order (S0.6) | — |
 | `backing` | string | The surface that shows the video, in words (S0.3) | — |
@@ -113,3 +113,10 @@ row here in the same PR.
 From `spike-native-preview` on the owner's M4 MacBook Pro (2026-11-23),
 `cargo run --release -p spike-native-preview -- --seconds 40`: see
 [spike-native-preview/summary.example.json](spike-native-preview/summary.example.json).
+
+## Phase 0 macOS owner checks (2026-11-24)
+
+| Check | Spike | Verdict | Notes |
+| --- | --- | --- | --- |
+| Real IME (Kotoeri Romaji + Pinyin) | [spike-text](spike-text/README.md) | **PASS** (one D13 gap) | `日本` and `中文` committed under `--ime-wait`. Pinyin candidates drew near the Dock, not clearly at the caret |
+| VoiceOver speaks list + dialog | [spike-a11y](spike-a11y/README.md) | **OWED** | Owner said not to turn VoiceOver on; tree/driver/headless already pass |
