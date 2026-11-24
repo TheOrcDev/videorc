@@ -11,9 +11,8 @@
 //! cloud recording is stubbed until L7 adds it.
 //!
 //! No state word or clock here (plan 235 D1): those are the status bar's.
-//! Go Live starts the livestream to the saved destinations until S1.6c's
-//! Go Live dialog lands, and End livestream asks inline until the shell's
-//! dialog (P157) does.
+//! Go Live opens the confirmation dialog (`studio::go_live::open_go_live`);
+//! End livestream asks inline until the shell's dialog (P157) does.
 
 use std::sync::Arc;
 
@@ -214,9 +213,8 @@ impl Transport {
     fn go_live(&self) {
         let studio = self.studio.clone();
         self.runtime.spawn(async move {
-            // The saved destinations; the Go Live dialog is S1.6c's.
-            let outcome = studio.start_livestream(None).await;
-            eprintln!("[videorc-app] Go Live: {outcome:?}");
+            studio.open_go_live().await;
+            eprintln!("[videorc-app] Go Live: open confirmation");
         });
     }
 
