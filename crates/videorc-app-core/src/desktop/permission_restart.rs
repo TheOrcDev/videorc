@@ -8,6 +8,10 @@
 //! unknown ([`DeferredPermissionRestart`]) and runs once capture is idle;
 //! it runs only after the backend admits it (the interruption lease), and a
 //! refusal keeps it waiting. Reopen Videorc takes the same admission.
+//!
+//! Both guards read the guarded capture state (`guardedCaptureState`): a
+//! cloud room this computer has on air or recording counts as live activity
+//! while the local session is idle, so a grant never cuts the room.
 
 use std::sync::{Arc, Mutex};
 
@@ -18,7 +22,7 @@ use crate::interruption::{
 use crate::log::Level;
 use crate::supervisor::{BackendState, SupervisorRestart};
 
-use super::capture_state::MainCaptureState;
+use super::capture_state::{CloudRoomActivity, MainCaptureState, guard_capture_state};
 use super::grant_watch::WatchLog;
 use super::permissions::{
     BackendRestartBoundary, DeferredPermissionRestart, MediaAccessRestartResult, PermissionFuture,
@@ -46,58 +50,100 @@ pub trait BackendRestarter: Send + Sync {
 /// `Reopening Videorc after a permission grant.`
 pub const RELAUNCH_REASON: &str = "Reopening Videorc after a permission grant.";
 
-/// The restarts and the relaunch, with main's capture state.
+/// The restarts and the relaunch, with main's capture state and the cloud
+/// room's activity.
 pub struct PermissionRestarts {
     restarter: Arc<dyn BackendRestarter>,
-    state: Mutex<(DeferredPermissionRestart, MainCaptureState)>,
+    state: Mutex<GuardState>,
     log: WatchLog,
+}
+
+struct GuardState {
+    deferred: DeferredPermissionRestart,
+    capture: MainCaptureState,
+    room: Option<CloudRoomActivity>,
+}
+
+impl GuardState {
+    /// `guardedCaptureState()`.
+    fn guarded(&self) -> MainCaptureState {
+        guard_capture_state(self.capture, self.room)
+    }
+
+    /// `applyGuardedCaptureState`'s flush.
+    fn flush(&mut self) -> Option<String> {
+        let guarded = self.guarded();
+        self.deferred.flush(guarded)
+    }
 }
 
 impl PermissionRestarts {
     pub fn new(restarter: Arc<dyn BackendRestarter>, log: WatchLog) -> Self {
         Self {
             restarter,
-            state: Mutex::new((
-                DeferredPermissionRestart::default(),
-                MainCaptureState::Unknown,
-            )),
+            state: Mutex::new(GuardState {
+                deferred: DeferredPermissionRestart::default(),
+                capture: MainCaptureState::Unknown,
+                room: None,
+            }),
             log,
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, (DeferredPermissionRestart, MainCaptureState)> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, GuardState> {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// The local session's state, as the backend last reported it.
     pub fn capture(&self) -> MainCaptureState {
-        self.lock().1
+        self.lock().capture
+    }
+
+    /// What the guards read: the local state, or the cloud room's activity
+    /// while the local session is idle.
+    pub fn guarded_capture(&self) -> MainCaptureState {
+        self.lock().guarded()
     }
 
     pub fn pending_reason(&self) -> Option<String> {
-        self.lock().0.pending_reason().map(str::to_string)
+        self.lock().deferred.pending_reason().map(str::to_string)
     }
 
     /// `updateMainCaptureState`'s flush: the waiting restart's reason when
-    /// capture just became idle. The caller runs it ([`Self::run`]).
+    /// the guarded state just became idle. The caller runs it ([`Self::run`]).
     pub fn capture_changed(&self, capture: MainCaptureState) -> Option<String> {
         let mut state = self.lock();
-        state.1 = capture;
-        state.0.flush(capture)
+        state.capture = capture;
+        state.flush()
+    }
+
+    /// `observeCloudRoomActivity`: the room went on or off air (or its
+    /// recording started or ended). Its end can be the idle a waiting
+    /// restart needs; the caller runs the returned reason ([`Self::run`]).
+    pub fn room_changed(&self, room: Option<CloudRoomActivity>) -> Option<String> {
+        let mut state = self.lock();
+        if state.room == room {
+            return None;
+        }
+        state.room = room;
+        state.flush()
     }
 
     /// `retainDeferredPermissionRestart`.
     fn retain(&self, reason: &str) {
-        self.lock().0.request(MainCaptureState::Unknown, reason);
+        self.lock()
+            .deferred
+            .request(MainCaptureState::Unknown, reason);
     }
 
     /// `requestPermissionBackendRestart`: runs now, or waits for idle.
     pub async fn request(&self, reason: String) -> Result<MediaAccessRestartResult, String> {
         let run = {
             let mut state = self.lock();
-            let capture = state.1;
-            state.0.request(capture, &reason)
+            let guarded = state.guarded();
+            state.deferred.request(guarded, &reason)
         };
         let Some(reason) = run else {
             (self.log)(
@@ -167,7 +213,7 @@ impl PermissionRestarts {
         relaunch: impl FnOnce(),
     ) -> Result<RelaunchForPermissionResult, String> {
         let connected = self.restarter.backend_connected();
-        let blocked = self.capture().blocks_interruption(connected);
+        let blocked = self.guarded_capture().blocks_interruption(connected);
         let restarter = self.restarter.clone();
         relaunch_for_permission_with_interruption_lease(
             blocked,
@@ -390,6 +436,37 @@ mod tests {
             flow.capture_changed(MainCaptureState::Idle).as_deref(),
             Some("microphone granted")
         );
+    }
+
+    #[tokio::test]
+    async fn a_live_cloud_room_defers_a_grant_and_blocks_reopen_until_it_ends() {
+        let fake = Fake::new(true);
+        let (flow, logs) = flow(fake.clone());
+        flow.capture_changed(MainCaptureState::Idle);
+        assert_eq!(flow.room_changed(Some(CloudRoomActivity::Live)), None);
+        assert_eq!(flow.guarded_capture(), MainCaptureState::Streaming);
+        let result = flow.request("camera granted".to_string()).await.unwrap();
+        assert!(!result.restarted, "a grant must not cut the room");
+        assert_eq!(fake.acquired.load(Ordering::SeqCst), 0);
+        assert!(logs.lock().unwrap().contains(
+            &"Permission restart deferred until the active capture is idle.".to_string()
+        ));
+        let relaunched = AtomicUsize::new(0);
+        let refused = flow
+            .relaunch(|| {
+                relaunched.fetch_add(1, Ordering::SeqCst);
+            })
+            .await
+            .unwrap();
+        assert!(!refused.relaunched);
+        // The local session going idle again does not flush it: the room is
+        // still on air.
+        assert_eq!(flow.capture_changed(MainCaptureState::Idle), None);
+        // A cloud recording alone still counts.
+        assert_eq!(flow.room_changed(Some(CloudRoomActivity::Recording)), None);
+        // The room ending is the idle the restart waited for.
+        assert_eq!(flow.room_changed(None).as_deref(), Some("camera granted"));
+        assert_eq!(relaunched.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
