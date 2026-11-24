@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use super::activity::activity_pane;
-use super::chat::chat_pane;
+use super::chat::ChatPane;
 use super::frame::{DEFAULT_HEIGHT, DEFAULT_WIDTH, StreamManagerFrame};
 use super::layout::{MIN_HEIGHT, MIN_WIDTH, Pane, Slot, Tier, right_pane_width, slot};
 use super::panes::{PaneKey, Panes, composer_available, key_runs};
@@ -149,6 +149,7 @@ impl Facts {
 pub struct StreamManager {
     frame: StreamManagerFrame,
     notices: gpui::Entity<crate::screens::notifications::Centre>,
+    chat: gpui::Entity<ChatPane>,
     panes: Panes,
     facts: Facts,
     chip: SessionChip,
@@ -168,6 +169,7 @@ impl StreamManager {
         let notices = cx.new(|cx| {
             crate::screens::notifications::Centre::new(hub, "stream-manager", window, cx)
         });
+        let chat = cx.new(|cx| ChatPane::new(window, cx));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         frame.moved(window);
@@ -185,8 +187,14 @@ impl StreamManager {
         Self {
             frame,
             notices,
+            chat,
             panes: Panes::default(),
-            facts: Facts::default(),
+            // Shell: local commands keep ⌘L alive until the send driver lands.
+            facts: Facts {
+                can_send: true,
+                marker: true,
+                ..Facts::default()
+            },
             chip: SessionChip::OffAir,
             pinned,
             hidden,
@@ -213,7 +221,7 @@ impl StreamManager {
         cx.notify();
     }
 
-    fn run(&mut self, key: PaneKey, cx: &mut Context<Self>) {
+    fn run(&mut self, key: PaneKey, window: &mut Window, cx: &mut Context<Self>) {
         if !key_runs(
             key,
             self.facts.sidekick_present,
@@ -223,6 +231,17 @@ impl StreamManager {
             return;
         }
         let _focus = self.panes.key(key);
+        match key {
+            PaneKey::SearchChat => {
+                self.chat
+                    .update(cx, |chat, cx| chat.focus_search(window, cx));
+            }
+            PaneKey::WriteInChat => {
+                self.chat
+                    .update(cx, |chat, cx| chat.focus_composer(window, cx));
+            }
+            PaneKey::ShowSidekick => {}
+        }
         cx.notify();
     }
 
@@ -234,7 +253,7 @@ impl StreamManager {
         border: gpui::Hsla,
     ) -> Option<gpui::AnyElement> {
         let body = match pane {
-            Pane::Chat => chat_pane(),
+            Pane::Chat => self.chat.clone().into_any_element(),
             Pane::Activity => activity_pane(),
             Pane::Sidekick => sidekick_pane(),
         };
@@ -280,17 +299,15 @@ impl Render for StreamManager {
                         this.notices.update(cx, |centre, cx| centre.toggle(cx))
                     },
                 ))
-                .on_action(
-                    cx.listener(|this, _: &ShowSidekick, _, cx| {
-                        this.run(PaneKey::ShowSidekick, cx)
-                    }),
-                )
-                .on_action(
-                    cx.listener(|this, _: &SearchChat, _, cx| this.run(PaneKey::SearchChat, cx)),
-                )
-                .on_action(
-                    cx.listener(|this, _: &WriteInChat, _, cx| this.run(PaneKey::WriteInChat, cx)),
-                )
+                .on_action(cx.listener(|this, _: &ShowSidekick, window, cx| {
+                    this.run(PaneKey::ShowSidekick, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &SearchChat, window, cx| {
+                    this.run(PaneKey::SearchChat, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &WriteInChat, window, cx| {
+                    this.run(PaneKey::WriteInChat, window, cx)
+                }))
                 .child(WindowHeader::new(TITLE).mac(mac))
                 .child(stats_bar(t, self.chip))
                 .child(
