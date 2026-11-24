@@ -1022,6 +1022,38 @@ impl RoomScreenSettings {
     }
 }
 
+/// `cloud.room.routing.set` (plan 260 S1.8c c4c): what the program page
+/// plays of the host's speech and auxiliary audio (`ProgramAudioSettings`,
+/// plan 249 S8), sent to routing-capable program pages on
+/// `videorc.audio-routing.v1`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ProgramAudioSettings {
+    pub(crate) speech_gain: f64,
+    pub(crate) auxiliary_gain: f64,
+    pub(crate) speech_muted: bool,
+    pub(crate) auxiliary_muted: bool,
+}
+
+impl Default for ProgramAudioSettings {
+    fn default() -> Self {
+        Self {
+            speech_gain: 1.0,
+            auxiliary_gain: 1.0,
+            speech_muted: false,
+            auxiliary_muted: false,
+        }
+    }
+}
+
+impl ProgramAudioSettings {
+    pub(crate) fn valid(&self) -> bool {
+        [self.speech_gain, self.auxiliary_gain]
+            .iter()
+            .all(|gain| gain.is_finite() && (0.0..=1.0).contains(gain))
+    }
+}
+
 /// The host's own media in the backend's room (plan 260 S1.8c), on
 /// `cloud.room.presentation`'s `media` entry: what is published, and the
 /// screen's privacy as the renderer's room reported it (`screenPrivacy`).

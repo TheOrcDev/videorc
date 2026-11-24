@@ -344,6 +344,7 @@ import {
   type ChatCommandsState
 } from './chat-commands'
 import type { CohostActAnswer, CohostActParams } from './buddy-act'
+import type { ProgramAudioSettings } from './program-audio-routing'
 import { LIVE_BACKGROUND_IDS, type LiveBackgroundId } from './live-background-ids'
 import { isSoundFileName, isSoundStarterSlug } from './sound-assets'
 import { TWITCH_GIF_MODES } from './chat-gif'
@@ -706,6 +707,8 @@ export interface BackendRpcMethodMap {
   /** Plan 260 S1.8: whether the backend holds the room's host seat (its dev
    * switch); asked before the renderer starts a room client. */
   'cloud.room.owner': BackendRpcDefinition<undefined, { backend: boolean }>
+  },
+  'cloud.room.routing.set': BackendRpcDefinition<ProgramAudioSettings, { held: boolean }>
   'cloud.room.avatar.motion': BackendRpcDefinition<
     CloudRoomAvatarMotionParams,
     CloudRoomAvatarMotionResult
@@ -7090,6 +7093,18 @@ const cloudRoomMicrophoneSetParamsSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRoomMediaSetParams>
+// Plan 260 S1.8c c4c: what the program page plays of the host's speech and
+// auxiliary audio (`ProgramAudioSettings`), for the backend's room to route.
+const programGain = numberSchema({ min: 0, max: 1 })
+const cloudRoomRoutingSetParamsSchema = objectSchema(
+  {
+    speechGain: programGain,
+    auxiliaryGain: programGain,
+    speechMuted: booleanSchema,
+    auxiliaryMuted: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ProgramAudioSettings>
 // Plan 260 S1.8c: the screen the room shares, by its native source id.
 const cloudRoomScreenSetParamsSchema = objectSchema(
   {
@@ -8091,6 +8106,10 @@ const runtimeContracts = {
     result: objectSchema({ backend: booleanSchema }, { allowUnknown: false }) as RuntimeSchema<{
       backend: boolean
     }>
+  },
+  'cloud.room.routing.set': {
+    params: cloudRoomRoutingSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
   },
   'cloud.room.avatar.motion': {
     params: cloudRoomAvatarMotionParamsSchema,

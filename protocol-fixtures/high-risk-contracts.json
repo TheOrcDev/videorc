@@ -2908,6 +2908,12 @@
         }
       }
     },
+    "roomRoutingSetParams": {
+      "speechGain": 0.5,
+      "auxiliaryGain": 1,
+      "speechMuted": false,
+      "auxiliaryMuted": true
+    },
     "roomAvatarMotionParams": {
       "message": {
         "v": 1,

@@ -324,6 +324,18 @@ async fn hold(
                     show_id.clone().unwrap_or_default(),
                     camera_heard,
                 ));
+                // Who may take the host's tracks, and the audio routing
+                // (S1.8c c4c): told when a receipt, a participant or a
+                // local track changes.
+                let (subscriptions_changed, subscriptions_heard) = mpsc::unbounded_channel();
+                let (subscriptions_done, subscriptions_stopped) = oneshot::channel::<()>();
+                tokio::spawn(crate::room_routing::run(
+                    state.clone(),
+                    room.clone(),
+                    receipts.clone(),
+                    subscriptions_heard,
+                    subscriptions_stopped,
+                ));
                 // The host's screen behind Hide screen (S1.8c): its
                 // acknowledgements and leaves come from here.
                 let (screen_signals, screen_heard) = mpsc::unbounded_channel();
@@ -366,8 +378,12 @@ async fn hold(
                             Some(RoomEvent::ParticipantConnected(participant))
                                 if needs_stage(participant.identity().as_str()) =>
                             {
+                                let _ = subscriptions_changed.send(());
                                 let message = stage.borrow().clone();
                                 publish_stage(&room, message).await;
+                            }
+                            Some(RoomEvent::ParticipantConnected(_)) => {
+                                let _ = subscriptions_changed.send(());
                             }
                             Some(RoomEvent::DataReceived { payload, topic, participant, .. })
                                 if topic.as_deref() == Some(crate::room_capability::CAPABILITY_TOPIC) =>
@@ -377,6 +393,9 @@ async fn hold(
                                     .lock()
                                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                                     .received(&payload, participant.is_some(), now);
+                                if taken.is_some() {
+                                    let _ = subscriptions_changed.send(());
+                                }
                                 if let Some(capability) = taken {
                                     let _ = graphics_signals.send(
                                         crate::room_graphics::GraphicsSignal::Heard(
@@ -407,7 +426,14 @@ async fn hold(
                                 let _ = screen_signals
                                     .send(crate::room_screen::ScreenSignal::Ack(payload.to_vec()));
                             }
+                            Some(
+                                RoomEvent::LocalTrackPublished { .. }
+                                | RoomEvent::LocalTrackUnpublished { .. },
+                            ) => {
+                                let _ = subscriptions_changed.send(());
+                            }
                             Some(RoomEvent::ParticipantDisconnected(participant)) => {
+                                let _ = subscriptions_changed.send(());
                                 let left = participant.identity().as_str().to_string();
                                 let _ = screen_signals
                                     .send(crate::room_screen::ScreenSignal::Left(left.clone()));
@@ -431,6 +457,7 @@ async fn hold(
                 drop(microphone_done);
                 drop(camera_done);
                 drop(screen_done);
+                drop(subscriptions_done);
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
                     DisconnectReason::DuplicateIdentity => {
@@ -555,6 +582,7 @@ async fn leave(state: &AppState, room: Option<Arc<Room>>) {
     crate::room_content::clear();
     crate::room_media::clear();
     crate::room_screen::clear();
+    crate::room_routing::clear();
     HOLDS_SEAT.store(false, Ordering::Release);
 }
 
