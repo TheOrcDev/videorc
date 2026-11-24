@@ -303,19 +303,19 @@ impl TransportView {
         let starting_livestream = session.intent.is_some_and(|intent| intent.stream);
         // `startsBusy`: a start in flight or Go Live's checks.
         let starts_busy = session.start_pending || go_live_pending;
-        // Record answers its own click and is lit from it: while its start
-        // runs the button stays "Record", lit and busy (videorc-rust's S2.2b
-        // owner rule, kept ahead of the stop button). This is a deliberate
-        // deviation from Electron, not parity: Electron tests `recordActive`
-        // first and applies an optimistic `starting` status, so it shows an
-        // enabled "Stop recording" during the start (`session-panel.tsx`
-        // ~136-141, `canStop` includes `starting`). Here a Record start that
-        // hangs can't be cancelled from the button: it ends with the start's
-        // own answer, or at `session.start`'s 120 s deadline
-        // (`client::timeouts`). A Go Live start, its checks included, is Go
-        // Live's to answer: Record shows the stop button, which cancels the
-        // livestream (B-16).
-        let record_starting = session.start_pending && !go_live_pending && !starting_livestream;
+        // As Electron (`session-panel.tsx` ~136-143): a session that holds
+        // the transport is tested first, so the optimistic `starting` status
+        // of a Record start shows an enabled "Stop recording" in Record's
+        // place (owner decision Q156, 2026-11-24, replacing videorc-rust's
+        // S2.2b rule that kept Record lit and busy). That Stop joins the start
+        // and stops what it started once `session.start` answers, or at its
+        // 120 s deadline (`client::timeouts`), as Electron's `stopSession`
+        // joins `sessionStartInFlightRef`. Record's own "starting" is left for
+        // a start no session shows yet. A Go Live start, its checks included,
+        // is Go Live's to answer: the same stop button cancels the livestream
+        // (B-16).
+        let record_starting =
+            !active && session.start_pending && !go_live_pending && !starting_livestream;
         let record_state = if record_starting {
             RecordButtonState::Starting
         } else if active {
@@ -601,13 +601,17 @@ mod tests {
         assert_eq!(checking.go_live_label, "Checking…");
         assert!(!checking.record_enabled && !checking.go_live_enabled);
 
-        // A Record start in flight: Record is lit and busy, Go Live off.
+        // A Record start in flight (owner Q156, as Electron): Record's place
+        // holds an enabled "Stop recording" that stops what the start
+        // starts; Go Live is gone.
         let mut starting = snapshot_with(status(RecordingState::Starting, false));
         starting.session.start_pending = true;
         starting.session.intent = Some(SessionStartIntent::RECORD);
         let starting = TransportView::from_snapshot(&starting, &gates, false);
-        assert_eq!(starting.record_state, RecordButtonState::Starting);
-        assert!(!starting.record_enabled && !starting.go_live_enabled);
+        assert!(starting.active && !starting.go_live_shown);
+        assert_eq!(starting.record_state, RecordButtonState::Running);
+        assert_eq!(starting.stop_label, "Stop recording");
+        assert!(starting.record_enabled && !starting.go_live_enabled);
 
         // A Go Live start in flight: Record's place holds the stop button
         // that cancels the livestream (B-16).
