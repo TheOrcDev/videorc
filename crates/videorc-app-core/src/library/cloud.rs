@@ -1063,6 +1063,199 @@ pub async fn cancel_cloud_download(
     Ok(())
 }
 
+// ── The tab (`LibraryCloudRecordings`) ──────────────────────────────────
+
+/// `LoadState`: the list's own read.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum CloudLoad {
+    #[default]
+    Idle,
+    Loading,
+    /// A failed read the streamer asked for, in words.
+    Failed(String),
+}
+
+/// The Cloud tab's state while it is open: the list, its read, the stop it
+/// waits for, and the row with the list's one Tab stop.
+#[derive(Debug, Clone, Default)]
+pub struct CloudTab {
+    /// `None` until the first answer.
+    pub recordings: Option<Vec<CloudRecordingItem>>,
+    pub load: CloudLoad,
+    pub active: Option<String>,
+    /// The stop the list was last told about, and the ids it listed then: a
+    /// take from a minute before, listed already, is not the stopped take.
+    stop: Option<CloudRecordingStop>,
+    listed_at_stop: Option<BTreeSet<String>>,
+}
+
+impl CloudTab {
+    /// A read starts; a quiet one (the poll after Stop) keeps the screen.
+    pub fn begin_refresh(&mut self, quiet: bool) {
+        if !quiet {
+            self.load = CloudLoad::Loading;
+        }
+    }
+
+    /// `cloud.recordings.list` answered: newest first.
+    pub fn refreshed(&mut self, recordings: &[CloudRecordingItem]) {
+        self.recordings = Some(sort_cloud_recordings(recordings));
+        self.load = CloudLoad::Idle;
+    }
+
+    /// The read failed. A quiet poll keeps the list it has (the next one
+    /// tries again); a read the streamer asked for says why.
+    pub fn refresh_failed(&mut self, quiet: bool, text: &str) {
+        if !quiet {
+            self.load = CloudLoad::Failed(text.to_string());
+        }
+    }
+
+    /// The last stop the window watched (`lastCloudRecordingStop`). A new
+    /// one remembers what the list showed when it came; a stop from before
+    /// the tab opened has nothing, so any take then counts.
+    pub fn note_stop(&mut self, stop: Option<CloudRecordingStop>) {
+        if stop == self.stop {
+            return;
+        }
+        self.stop = stop;
+        self.listed_at_stop = self.recordings.as_ref().map(|recordings| {
+            recordings
+                .iter()
+                .map(|recording| recording.id.clone())
+                .collect()
+        });
+    }
+
+    /// The take that stopped is not listed yet: a Processing row shows, and
+    /// the list is read again every [`CLOUD_RECORDING_POLL_MS`].
+    pub fn processing(&self, now_ms: i64) -> bool {
+        awaiting_cloud_recording(
+            self.stop,
+            self.recordings.as_deref(),
+            now_ms,
+            self.listed_at_stop.as_ref(),
+        )
+    }
+
+    /// Whether to read the list again quietly now (the poll after Stop).
+    pub fn should_poll(&self, signed_in: bool, online: bool, now_ms: i64) -> bool {
+        signed_in && online && self.processing(now_ms)
+    }
+
+    /// ↑/↓, Home and End between rows, as in the Local tab.
+    pub fn move_active(&mut self, key: &str) -> Option<String> {
+        let ids: Vec<String> = self
+            .recordings
+            .iter()
+            .flatten()
+            .map(|recording| recording.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return None;
+        }
+        let current = self
+            .active
+            .as_deref()
+            .and_then(|active| ids.iter().position(|id| id == active))
+            .unwrap_or(0);
+        let next = match key {
+            "ArrowDown" => (current + 1).min(ids.len() - 1),
+            "ArrowUp" => current.saturating_sub(1),
+            "Home" => 0,
+            "End" => ids.len() - 1,
+            _ => return None,
+        };
+        self.active = Some(ids[next].clone());
+        self.active.clone()
+    }
+}
+
+/// What the tab shows below its header, one state at a time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudBody {
+    /// Signed out: the lock with Sign in.
+    SignIn,
+    /// The read failed: the line and Try again.
+    Failed(String),
+    /// Online with no answer yet.
+    Loading,
+    /// Offline before the first answer: nothing under the offline alert.
+    Nothing,
+    Empty,
+    /// The table: a Processing row first while the take is saved.
+    Rows {
+        processing: bool,
+    },
+}
+
+/// The tab as one value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CloudTabView {
+    /// Signed in: the header's Refresh (and the markers button for the open
+    /// show).
+    pub header_actions: bool,
+    pub refresh_label: &'static str,
+    pub refresh_enabled: bool,
+    pub markers_show: Option<String>,
+    /// Signed in and offline.
+    pub offline_alert: bool,
+    pub body: CloudBody,
+    pub rows: Vec<(CloudRecordingItem, CloudRowView)>,
+    pub active: Option<String>,
+    pub footer: Option<String>,
+    /// The local program archive, under the list while signed in.
+    pub archive: bool,
+}
+
+/// `LibraryCloudRecordings`, rendered as a value.
+pub fn cloud_tab_view(
+    tab: &CloudTab,
+    downloads: &CloudDownloads,
+    signed_in: bool,
+    online: bool,
+    current_show_id: Option<&str>,
+    now_ms: i64,
+) -> CloudTabView {
+    let busy = tab.load == CloudLoad::Loading;
+    let processing = tab.processing(now_ms);
+    let body = if !signed_in {
+        CloudBody::SignIn
+    } else if let CloudLoad::Failed(text) = &tab.load {
+        CloudBody::Failed(text.clone())
+    } else {
+        match &tab.recordings {
+            None if online => CloudBody::Loading,
+            None => CloudBody::Nothing,
+            Some(rows) if rows.is_empty() && !processing => CloudBody::Empty,
+            Some(_) => CloudBody::Rows { processing },
+        }
+    };
+    let listed = matches!(body, CloudBody::Rows { .. });
+    let recordings: &[CloudRecordingItem] = match (&tab.recordings, listed) {
+        (Some(rows), true) => rows,
+        _ => &[],
+    };
+    CloudTabView {
+        header_actions: signed_in,
+        refresh_label: if busy { REFRESHING } else { REFRESH },
+        refresh_enabled: online && !busy,
+        markers_show: current_show_id.filter(|_| signed_in).map(str::to_string),
+        offline_alert: signed_in && !online,
+        rows: recordings
+            .iter()
+            .map(|recording| {
+                let view = cloud_row_view(recording, downloads.get(&recording.id), now_ms);
+                (recording.clone(), view)
+            })
+            .collect(),
+        active: active_cloud_row(recordings, tab.active.as_deref()).map(str::to_string),
+        footer: listed.then(|| cloud_footer(recordings)),
+        archive: signed_in,
+        body,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1697,5 +1890,69 @@ mod tests {
             missing.is_empty(),
             "not in the renderer any more: {missing:?}"
         );
+    }
+
+    #[test]
+    fn the_tab_reads_waits_for_the_take_and_says_each_state() {
+        let now = ms("2026-11-24T12:00:00Z");
+        let mut tab = CloudTab::default();
+        let none = CloudDownloads::new();
+        let view = |tab: &CloudTab, signed_in, online| {
+            cloud_tab_view(tab, &none, signed_in, online, Some("show_1"), now)
+        };
+        assert_eq!(view(&tab, false, true).body, CloudBody::SignIn);
+        assert!(!view(&tab, false, true).archive);
+        assert_eq!(view(&tab, false, true).markers_show, None);
+        assert_eq!(view(&tab, true, true).body, CloudBody::Loading);
+        assert_eq!(view(&tab, true, false).body, CloudBody::Nothing);
+        assert!(view(&tab, true, false).offline_alert);
+
+        tab.begin_refresh(false);
+        let loading = view(&tab, true, true);
+        assert_eq!(
+            (loading.refresh_label, loading.refresh_enabled),
+            (REFRESHING, false)
+        );
+        tab.refresh_failed(false, "Couldn't load your cloud recordings.");
+        assert_eq!(
+            view(&tab, true, true).body,
+            CloudBody::Failed("Couldn't load your cloud recordings.".into())
+        );
+        tab.refreshed(&[]);
+        assert_eq!(view(&tab, true, true).body, CloudBody::Empty);
+
+        // A take stops while the tab shows an earlier one.
+        let earlier = with("earlier", |r| r.started_at = "2026-11-24T11:59:30Z".into());
+        tab.refreshed(std::slice::from_ref(&earlier));
+        tab.note_stop(Some(CloudRecordingStop {
+            since_ms: ms("2026-11-24T11:59:50Z"),
+            stopped_at_ms: now - 1_000,
+        }));
+        assert!(tab.processing(now));
+        assert!(tab.should_poll(true, true, now));
+        assert!(!tab.should_poll(true, false, now));
+        let waiting = view(&tab, true, true);
+        assert_eq!(waiting.body, CloudBody::Rows { processing: true });
+        assert_eq!(
+            waiting.footer.as_deref(),
+            Some("1 cloud recording · 977 KB")
+        );
+        // A quiet poll that fails keeps the list.
+        tab.begin_refresh(true);
+        tab.refresh_failed(true, "x");
+        assert_eq!(tab.load, CloudLoad::Idle);
+        let take = with("take", |r| r.started_at = "2026-11-24T12:00:00Z".into());
+        tab.refreshed(&[earlier, take]);
+        assert!(!tab.processing(now));
+        let listed = view(&tab, true, true);
+        assert_eq!(listed.body, CloudBody::Rows { processing: false });
+        assert_eq!(listed.rows[0].0.id, "take");
+        assert_eq!(listed.active.as_deref(), Some("take"));
+        assert_eq!(listed.markers_show.as_deref(), Some("show_1"));
+
+        assert_eq!(tab.move_active("ArrowDown").as_deref(), Some("earlier"));
+        assert_eq!(tab.move_active("ArrowDown").as_deref(), Some("earlier"));
+        assert_eq!(tab.move_active("Home").as_deref(), Some("take"));
+        assert_eq!(tab.move_active("x"), None);
     }
 }
