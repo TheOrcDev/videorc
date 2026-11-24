@@ -228,7 +228,7 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 | P130 | "Bring to front" | Raises the floating Preview window | `renderer/components/preview-stage.tsx:593` | [ ] | [ ] | [ ] |
 | P131 | "Close Preview" | Closes the floating Preview window | `renderer/components/preview-stage.tsx:596` | [ ] | [ ] | [ ] |
 | P132 | "Keep on top of other apps" switch | Floating Preview always-on-top | `renderer/components/preview-stage.tsx:605` | [ ] | [ ] | [ ] |
-| P133 | Permission fix button ("Allow access…"/"Open System Settings…"/"Open Permissions") | Fixes missing camera/screen grant blocking preview *(wording per OS (apps/desktop/src/renderer/src/lib/system-access-view.ts))* | `renderer/components/preview-stage.tsx:599` | [ ] | [ ] | [ ] |
+| P133 | Permission fix button ("Allow…"/"Reopen Videorc"/"Open System Settings…"/"Open Permissions") | Fixes missing camera/screen grant blocking preview *(wording per OS (apps/desktop/src/renderer/src/lib/system-access-view.ts))* | `renderer/components/preview-stage.tsx:599` | [ ] | [ ] | [ ] |
 | P134 | Docked surface slot | Native preview glued over slot, true canvas aspect *(macOS CAMetalLayer in-window; child window elsewhere (preview-stage.tsx:287))* | `renderer/components/preview-stage.tsx:362` | [ ] | [ ] | [ ] |
 | P135 | Docked startup card ("Step n of N", "Open Sources") | Shows startup step until first frame; opens Sources | `renderer/components/preview-startup-card.tsx:22` | [ ] | [ ] | [ ] |
 | P136 | Docked hidden-reason text | "Placing preview…", hidden under window/scrolled/fullscreen messages | `renderer/components/preview-stage.tsx:449` | [ ] | [ ] | [ ] |
@@ -267,7 +267,7 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 | P159 | "Livestream" row | Destinations summary; opens Destinations | `renderer/components/studio/session-panel.tsx:296` | [ ] | [ ] | [ ] |
 | P160 | "Output" row | Recording/encode summary; opens Recording settings panel | `renderer/components/studio/session-panel.tsx:302` | [ ] | [ ] | [ ] |
 | P161 | "Destinations" row (live) | "n of n on air" status dot; opens Destinations | `renderer/components/studio/session-panel.tsx:532` | [ ] | [ ] | [ ] |
-| P162 | Per-destination problem rows | "Twitch · Stopped" style rows, open Destinations | `renderer/components/studio/session-panel.tsx:547` | [ ] | [ ] | [ ] |
+| P162 | Per-destination problem rows | One row per problem: the destination's name, then its word ("Ended", "Failed", "Reconnecting…", "Not receiving"); opens Destinations | `renderer/components/studio/session-panel.tsx:547` | [ ] | [ ] | [ ] |
 | P163 | "Stream" health row (live) | Healthy or failing stage; opens Health | `renderer/components/studio/session-panel.tsx:597` | [ ] | [ ] | [ ] |
 | P164 | "Sidekick" (co-host) row (live) | Buddy presence/alerts; hint lines; opens Stream Manager | `renderer/components/studio/session-panel.tsx:639` | [ ] | [ ] | [ ] |
 | P165 | "Guests" row (room open) | "Room open · n backstage"; opens Guests page | `renderer/components/studio/guests-session-row.tsx:22` | [ ] | [ ] | [ ] |
@@ -284,7 +284,7 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 | P171 | Runtime alert (destructive/warning, role=alert) | Recording failed or degraded, backend message | `renderer/components/studio/session-runtime-alert.tsx:35` | [ ] | [ ] | [ ] |
 | P172 | "Open Audio" | Focuses Studio microphone row (lost/silent mic) | `renderer/components/studio/session-runtime-alert.tsx:50` | [ ] | [ ] | [ ] |
 | P173 | "Open Library" | Opens Library for the saved file | `renderer/components/studio/session-runtime-alert.tsx:60` | [ ] | [ ] | [ ] |
-| P174 | Reveal ("Show in Finder"/Explorer/file manager) | Reveals saved recording *(label per OS (apps/desktop/src/renderer/src/lib/platform.ts))* | `renderer/components/studio/session-runtime-alert.tsx:65` | [ ] | [ ] | [ ] |
+| P174 | Reveal ("Show in Finder"/"Show in Explorer"/"Show in folder") | Reveals saved recording *(label per OS (apps/desktop/src/renderer/src/lib/platform.ts))* | `renderer/components/studio/session-runtime-alert.tsx:65` | [ ] | [ ] | [ ] |
 | P175 | "Dismiss" | Clears notice | `renderer/components/studio/session-runtime-alert.tsx:70` | [ ] | [ ] | [ ] |
 
 ### Watchdog alert card (watchdog-alert-card.tsx)
