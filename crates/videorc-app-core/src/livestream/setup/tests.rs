@@ -443,3 +443,48 @@ fn initials_fall_back_like_the_avatar() {
     assert_eq!(initials("The Orc Dev"), "TD");
     assert_eq!(initials(""), "");
 }
+
+#[test]
+fn cancelling_a_scheduled_stream_asks_as_upcoming_asks() {
+    use crate::livestream::scheduled::Event;
+    let x = Event {
+        provider: Some("x".into()),
+        provider_event_id: Some("1ynKO".into()),
+        ..Event::default()
+    };
+    let view = question_view(
+        &Question::CancelScheduled {
+            event: Box::new(x.clone()),
+        },
+        &[],
+    )
+    .unwrap();
+    assert_eq!(view.title, "Cancel this X broadcast?");
+    assert_eq!(
+        view.description,
+        "The upcoming broadcast will be deleted from X and its link will stop working."
+    );
+    assert_eq!(view.confirm, "Cancel event");
+    assert_eq!(view.cancel.as_deref(), Some("Keep event"));
+    assert!(view.destructive);
+
+    let draft = Event {
+        provider_event_id: None,
+        ..x
+    };
+    let view = question_view(
+        &Question::CancelScheduled {
+            event: Box::new(draft),
+        },
+        &[],
+    )
+    .unwrap();
+    assert_eq!(view.title, "Move draft to Past?");
+    assert_eq!(
+        view.description,
+        "The draft moves to Past. Nothing on X is deleted."
+    );
+    assert_eq!(view.confirm, "Move to Past");
+    assert_eq!(view.cancel.as_deref(), Some("Keep draft"));
+    assert!(view.destructive);
+}

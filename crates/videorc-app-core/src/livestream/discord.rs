@@ -326,37 +326,10 @@ pub struct DiscordView {
     pub links: Vec<LinkView>,
 }
 
-/// `formatRelativeTime(at, now)` for "Last post …": "now", "5m", "3h", "2d",
-/// then "Oct 2" ("Oct 2, 2025" outside this year) in local time.
+/// `formatRelativeTime(at, now)` for "Last post …": "now", "5m", "3h".
 pub fn relative(at: &str, now_ms: i64) -> String {
-    use chrono::{Datelike, Local, Utc};
-    let Ok(at) = chrono::DateTime::parse_from_rfc3339(at) else {
-        return String::new();
-    };
-    let at = at.with_timezone(&Utc);
     let now = chrono::DateTime::from_timestamp_millis(now_ms).unwrap_or_default();
-    const MINUTE: i64 = 60_000;
-    const HOUR: i64 = 60 * MINUTE;
-    const DAY: i64 = 24 * HOUR;
-    let elapsed = (now - at).num_milliseconds().max(0);
-    if elapsed < 45_000 {
-        return "now".into();
-    }
-    if elapsed < HOUR {
-        return format!("{}m", (elapsed / MINUTE).max(1));
-    }
-    if elapsed < DAY {
-        return format!("{}h", elapsed / HOUR);
-    }
-    if elapsed < 7 * DAY {
-        return format!("{}d", elapsed / DAY);
-    }
-    let local = at.with_timezone(&Local);
-    if local.year() == now.with_timezone(&Local).year() {
-        local.format("%b %-d").to_string()
-    } else {
-        local.format("%b %-d, %Y").to_string()
-    }
+    super::format::format_relative_time(at, now)
 }
 
 pub fn discord_view(

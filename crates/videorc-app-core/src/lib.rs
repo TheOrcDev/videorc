@@ -11,6 +11,7 @@ pub mod account;
 pub mod buddy;
 pub mod chat;
 pub mod client;
+pub mod command_score;
 pub mod crash_log;
 pub mod desktop;
 pub mod editor;
