@@ -929,7 +929,7 @@ contributor's PC (the testing plan's Phase 1 row).
 | S1.4 | UI settings into `app_settings`, with a one-time migration | L2 | `smoke:first-run` and `smoke:scene-presets` pass on a profile from the previous release |
 | S1.5 | Main's side jobs to the backend: avatar/emote/GIF cache, comments history, thumbnails, agent config writes, OBS import | L2 | Their tests move with them; main owns none of them |
 | S1.6s | `videorc-app-core`'s shell lands from `videorc-rust` (moved to L4, approved 2026-11-24): the app log, crash log and restart policy; then the process launch, paths, the ledger and the supervisor; then the typed client (after S1.1); then `desktop/` (one instance, deep links, permissions, global shortcuts, the menu model, the sleep guard, Videorc Camera). Module paths stay as in `videorc-rust`, so L1's `videorc-preview` (S1.7) compiles unchanged; L1's S1.7b waits on the logger, the supervisor and the client | L4 | Each part's tests pass; its drift against Electron main (`backend-log-file.ts`, `backend-crash-log.ts`, the supervisor in `index.ts`, `backend-bootstrap.ts`, `backend-isolation.ts`) is checked and listed in its PR |
-| S1.6a–f | `videorc-app-core` lands and catches up, one area per slice: session and Studio; scenes, sources and the editor; live, destinations, Go Live, cloud; guests and rooms; Sidekick, Avatar, chat, notifications; Library, Settings, first run (S1.6f moved to L4, 2026-11-24: `nav` first, then Settings, then Library, stubbing what it needs from S1.6a–e behind small traits) | L7 (S1.6f: L4) | Each area's drift list is empty, its core tests pass, and the smokes it can run headless pass |
+| S1.6a–f | `videorc-app-core` lands and catches up, one area per slice: session and Studio; scenes, sources and the editor; live, destinations, Go Live, cloud; guests and rooms; Sidekick, Avatar, chat, notifications; Library, Settings, first run (S1.6f moved to L4, 2026-11-24: `nav` first, then Settings, then Library, stubbing what it needs from S1.6a–e behind small traits) | L7 (S1.6e: L6, 2026-11-24; S1.6f: L4) | Each area's drift list is empty, its core tests pass, and the smokes it can run headless pass |
 | S1.7 | `videorc-preview`, `-gpu-import` and `-preview-ring` land (L1); `-updater` and `-page-host` land (L2) | L1, L2 | Their tests pass on all three CI platforms |
 | S1.8 | Rooms in the backend (D9) | L2 | The room spike's checks pass from Electron with the backend publishing; `livekit-client` leaves the renderer |
 
@@ -1079,9 +1079,9 @@ extra and are not counted.
 - **L5:** S0.3 → the Linux halves of S0.4 to S0.7, S0.9 and S0.10 → [gate]
   → S2.3c → S2.6c → each screen's Linux pass → Phase 4's Linux slices →
   S5.0 and S5.1c on Linux.
-- **L6:** S0.12 → S0.11 → S0.10 → [S2.1] S2.5 → each screen's smokes →
-  S5.0's parity file.
-- **L7:** [S1.1] S1.6a → b → c → d → e (f by L4) → [S2.1] S2.4 → L7's screens.
+- **L6:** S0.12 → S0.11 → S0.10 → S1.6e (from L7) → [S2.1] S2.5 → each
+  screen's smokes → S5.0's parity file.
+- **L7:** [S1.1] S1.6a → b → c → d → [S2.1] S2.4 → L7's screens. (S1.6e, Sidekick, Avatar, chat and notifications, moved to L6 on 2026-11-24, in `crates/videorc-app-core`'s `chat`, `buddy`, `stream_manager` and `notices` modules; S1.6f, Library, Settings and first run, to L4. Where they need the Studio, they use a small trait that S1.6a's Studio implements.)
 - **W:** WC-0.1 → WC-0.2 to WC-0.4 and WC-0.5's route (c) → [S0.2b] WC-0.5
   → the owner takes D12 → [S2.1, S2.3a] WC-2.x → WC-3.x → WC-4.x → WC-5.1.
 

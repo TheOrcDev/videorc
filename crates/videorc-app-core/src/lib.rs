@@ -8,6 +8,7 @@
 //! `videorc-preview`) compile unchanged.
 
 pub mod buddy;
+pub mod chat;
 pub mod client;
 pub mod crash_log;
 pub mod desktop;
@@ -17,6 +18,7 @@ pub mod interruption;
 pub mod ledger;
 pub mod log;
 pub mod nav;
+pub mod notices;
 pub mod paths;
 pub mod process;
 pub mod restart;

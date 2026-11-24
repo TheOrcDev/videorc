@@ -178,3 +178,48 @@ camera on) are not the Preview's to cut. What is left is mostly bytes: 41 MB/s
 of I420 through Chromium's network service, the page and the GPU process.
 The H.264 leg (b) is the measured way to take most of that out (an encode of
 11 % at 720p against roughly 40 points of transport); it is not in S3.
+
+## Follow-up (W86, 2026-11-24): the H.264 leg measured, not built
+
+The ~40 points above were an estimate: the decode side was priced with a
+one-thread FFmpeg decoder as a stand-in for Chromium's. Measured end to end
+on ogre (Electron 39.8.10, the app's Electron, in a nested Hyprland on the lab
+output), the leg costs more than it saves.
+
+**The Chromium side, paired.** One Electron window shown the same 720p30 clip
+(S3's noisy 1280x720 test content), alternating three times each in one
+sitting at 3.9 GHz, both at 30.0 fps with no errors, CPU of the Electron
+process tree from `/proc` over 30 s after 10 s of settling:
+
+| Path                                                                           | Electron tree          | Server |
+| ------------------------------------------------------------------------------ | ---------------------- | ------ |
+| Today's: I420 over the long-poll, WebGL upload of the three planes             | **26.5 %** (26.3–26.7) | 1.8 %  |
+| The leg: H.264 access units over the same long-poll, WebCodecs decode, 2D draw | **23.5 %** (22.8–24.4) | 1.0 %  |
+
+Electron's WebCodecs on Linux decodes H.264 in software (`isConfigSupported`
+is true for baseline, main and high), and decode plus the `VideoFrame` draw
+costs nearly what the 41 MB/s of I420 cost: the leg saves about 3 points in
+Chromium and 0.8 in serving.
+
+**The backend side.** OpenH264 for the same frames (`libopenh264`,
+constrained baseline, 3 Mbps, GOP 60, no B-frames, the bundled FFmpeg):
+**11.0 %** of a core at 720p30 (three runs, 3.9 GHz, CPU time per frame
+times 30), as S3 measured.
+
+**So the leg would add about 7 points at 720p30** (11.0 − 3.0 − 0.8), more at
+1080p (encode +22 %), plus an encoder's frame of latency. Not built. Hardware
+decode in Chromium (VAAPI) was not tried: it needs Chromium's VAAPI flags,
+and ogre's AMD render node is quarantined. A box whose encoder and decoder
+are both hardware is the only case where the leg might pay.
+
+**The 183 % was a clock reading.** ogre's T2 firmware pins every core at
+800 MHz after heavy work, and S3 did not log the clock. On today's `main`
+(`2a6789bc6`), the production renderer, same scene and Preview, the same
+harness gives 129.6 % (real camera) and 54.1 % (real camera again) at a
+sampled 3.9 GHz, and 211 % (fixture camera) at 800 MHz. The figures moved
+together: in every run the Chromium side (proof page renderer plus Chromium's
+other processes) was 46–53 % of the app's CPU. On this box an absolute CPU
+figure is only comparable inside a paired run.
+
+Evidence on ogre: `~/linux-beta/w86/` (runs, the bench page, server and runner
+under `bench/`).
