@@ -100,6 +100,8 @@ mod room_microphone;
 mod room_clock;
 mod room_frame_bridge;
 // Plan 249 S13b: the processed camera role's native producer.
+#[cfg(target_os = "macos")]
+mod room_assets;
 mod room_camera_source;
 #[cfg(target_os = "macos")]
 #[allow(
@@ -107,6 +109,8 @@ mod room_camera_source;
     reason = "plan 260 S1.8b: the presentation publishers (graphics, avatar, scene, HTML layers) read the receipts in its next parts"
 )]
 mod room_capability;
+#[cfg(target_os = "macos")]
+mod room_graphics;
 #[cfg(target_os = "macos")]
 mod room_host;
 #[cfg(target_os = "macos")]
@@ -6430,6 +6434,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "watchdog.idle.report"
         | "cloud.show.check"
         | "cloud.room.client.report"
+        // Plan 260 S1.8b: the room's presentation switches (in memory).
+        | "cloud.room.presentation.set"
         | "cloud.recordings.download"
         | "cloud.archive.stop"
         | "cloud.archive.cancel"
@@ -13601,6 +13607,24 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }
+        // Plan 260 S1.8b: the room's presentation switches (Graphics first),
+        // for the topics the backend sends while it holds the host seat.
+        "cloud.room.presentation.set" => {
+            #[cfg(target_os = "macos")]
+            {
+                if room_host::holds_seat() {
+                    if let Some(enabled) = command
+                        .params
+                        .get("graphics")
+                        .and_then(serde_json::Value::as_bool)
+                    {
+                        room_graphics::set_enabled(enabled);
+                    }
+                    return ServerResponse::ok(command.id, serde_json::json!({ "held": true }));
+                }
+            }
+            ServerResponse::ok(command.id, serde_json::json!({ "held": false }))
         }
         "cloud.room.client.report" => {
             match serde_json::from_value::<cloud_talk::RoomClientReportParams>(command.params) {

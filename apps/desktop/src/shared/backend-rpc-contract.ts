@@ -160,6 +160,7 @@ import type {
   CloudRecordingStatus,
   CloudRoomOverlayEvent,
   CloudRoomPresentationEvent,
+  CloudRoomPresentationSetParams,
   CloudRoomClientReportParams,
   CloudRoomOpenParams,
   CloudRoomRequest,
@@ -692,6 +693,10 @@ export interface BackendRpcMethodMap {
   'cloud.presentation.restore': BackendRpcDefinition<{ showId: string }, CloudPresentationRestore>
   /** The renderer's own room connection, for the status copy. */
   'cloud.room.client.report': BackendRpcDefinition<CloudRoomClientReportParams, CloudStatus>
+  'cloud.room.presentation.set': BackendRpcDefinition<
+    CloudRoomPresentationSetParams,
+    { held: boolean }
+  >
   'cloud.guest.decide': BackendRpcDefinition<CloudGuestDecideParams, CloudStatus>
   'cloud.guest.act': BackendRpcDefinition<CloudGuestActParams, CloudStatus>
   /** The whole stage in one frame (D8). */
@@ -6994,6 +6999,14 @@ const roomPresentationStatusSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+const cloudRoomPresentationSetParamsSchema = objectSchema(
+  { graphics: optionalSchema(booleanSchema) },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomPresentationSetParams>
+const cloudRoomPresentationSetResultSchema = objectSchema(
+  { held: booleanSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<{ held: boolean }>
 const cloudRoomPresentationEventSchema = objectSchema(
   {
     showId: boundedString,
@@ -7883,6 +7896,10 @@ const runtimeContracts = {
     ),
     result: presentationValueSchema as RuntimeSchema<CloudPresentationRestore>
   },
+  'cloud.room.presentation.set': {
+    params: cloudRoomPresentationSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
   'cloud.room.client.report': {
     params: cloudRoomClientReportParamsSchema,
     result: cloudStatusSchema
@@ -8462,13 +8479,15 @@ export function isTypedBackendRpcMethod(method: string): method is BackendRpcMet
 
 export function validateBackendRpcParams(method: string, params: unknown): unknown {
   const contract = runtimeContracts[method as keyof typeof runtimeContracts] as
-    RuntimeBackendRpcContract | undefined
+    | RuntimeBackendRpcContract
+    | undefined
   return (contract?.params ?? boundedBackendParamsSchema).parse(params, `backend.${method}.params`)
 }
 
 export function validateBackendRpcResult(method: string, result: unknown): unknown {
   const contract = runtimeContracts[method as keyof typeof runtimeContracts] as
-    RuntimeBackendRpcContract | undefined
+    | RuntimeBackendRpcContract
+    | undefined
   return (contract?.result ?? boundedBackendPayloadSchema).parse(result, `backend.${method}.result`)
 }
 
@@ -8594,7 +8613,8 @@ const runtimeEventSchemas = {
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {
   const schema = runtimeEventSchemas[event as keyof typeof runtimeEventSchemas] as
-    RuntimeSchema<unknown> | undefined
+    | RuntimeSchema<unknown>
+    | undefined
   return (schema ?? boundedBackendPayloadSchema).parse(payload, `backend.event.${event}`)
 }
 
