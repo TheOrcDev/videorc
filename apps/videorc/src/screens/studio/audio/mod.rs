@@ -17,6 +17,7 @@ use gpui::{
     SharedString, Window, actions, div, prelude::*, px,
 };
 use tokio::sync::watch;
+use videorc_app_core::settings_page::SettingsTab;
 use videorc_app_core::studio::audio_levels::MicLevels;
 use videorc_app_core::studio::audio_mixer::{
     self, MICROPHONE_GAIN_DEFAULT, MICROPHONE_GAIN_RANGE, SYSTEM_AUDIO_GAIN_DEFAULT,
@@ -38,7 +39,7 @@ use videorc_kit::panel_section::PanelSection;
 use videorc_kit::select::Select;
 use videorc_kit::slider::{Slider, SliderEvent, SliderState};
 use videorc_kit::switch::Switch;
-use videorc_kit::theme::{self, hsla};
+use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
 
 use super::transport::{AppStudio, OpenPage};
@@ -633,7 +634,7 @@ impl AudioSection {
                         .size(ButtonSize::Xs)
                         .label(words::OPEN_PERMISSIONS)
                         .on_click(cx.listener(|_, _, _, cx| {
-                            cx.emit(OpenPage::settings("permissions"));
+                            cx.emit(OpenPage::settings(SettingsTab::Permissions));
                         })),
                 ),
                 Some(IssueAction::Resume) => Some(
@@ -824,7 +825,7 @@ impl AudioSection {
                         .size(ButtonSize::Xs)
                         .label(words::OPEN_PERMISSIONS)
                         .on_click(cx.listener(|_, _, _, cx| {
-                            cx.emit(OpenPage::settings("permissions"));
+                            cx.emit(OpenPage::settings(SettingsTab::Permissions));
                         })),
                 ),
                 Some(IssueAction::Resume) => Some(
