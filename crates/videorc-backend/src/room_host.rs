@@ -351,18 +351,59 @@ fn overlay_sender(
 ) -> (mpsc::UnboundedSender<Value>, tokio::task::JoinHandle<()>) {
     let (queue, mut pending) = mpsc::unbounded_channel::<Value>();
     let worker = tokio::spawn(async move {
+        // One send in flight per slot and orientation, as the renderer's
+        // `sendOverlay`: a newer set or a clear aborts the older upload first
+        // (an unfinished byte stream is never drawn), so a clear never waits
+        // behind the set it cancels and other slots never wait at all.
+        let mut sending = OverlaySends::default();
         while let Some(event) = pending.recv().await {
             if !crate::room_overlays::overlay_is_for_show(&event, &show_id) {
                 continue;
             }
-            match crate::room_overlays::send_overlay(&state, &local, &event).await {
-                Ok(crate::room_overlays::OverlaySent::Sent) => {}
-                Ok(outcome) => tracing::info!("An overlay was not sent to the room: {outcome:?}"),
-                Err(error) => tracing::warn!("An overlay did not reach the room: {error:#}"),
+            sending.0.retain(|_, task| !task.is_finished());
+            let key = overlay_key(&event);
+            if let Some(older) = sending.0.remove(&key) {
+                older.abort();
+                // Fenced: the older send has stopped before this one starts.
+                let _ = older.await;
             }
+            let (state, local) = (state.clone(), local.clone());
+            sending.0.insert(
+                key,
+                tokio::spawn(async move {
+                    match crate::room_overlays::send_overlay(&state, &local, &event).await {
+                        Ok(crate::room_overlays::OverlaySent::Sent) => {}
+                        Ok(outcome) => {
+                            tracing::info!("An overlay was not sent to the room: {outcome:?}")
+                        }
+                        Err(error) => {
+                            tracing::warn!("An overlay did not reach the room: {error:#}")
+                        }
+                    }
+                }),
+            );
         }
     });
     (queue, worker)
+}
+
+/// The overlay sends in flight by slot; aborted with the worker (the
+/// connection ended), so none outlives it.
+#[derive(Default)]
+struct OverlaySends(std::collections::HashMap<String, tokio::task::JoinHandle<()>>);
+
+impl Drop for OverlaySends {
+    fn drop(&mut self) {
+        for task in self.0.values() {
+            task.abort();
+        }
+    }
+}
+
+/// An overlay's slot and orientation: one send at a time each.
+fn overlay_key(event: &Value) -> String {
+    let text = |key: &str| event.get(key).and_then(Value::as_str).unwrap_or_default();
+    format!("{}:{}", text("slot"), text("orientation"))
 }
 
 async fn publish_stage(room: &Room, message: Option<Vec<u8>>) {
@@ -394,6 +435,15 @@ async fn leave(state: &AppState, room: Option<Room>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlays_queue_by_slot_and_orientation() {
+        let card_h = serde_json::json!({ "op": "set", "slot": "card", "orientation": "h" });
+        let card_h_clear = serde_json::json!({ "op": "clear", "slot": "card", "orientation": "h" });
+        let card_v = serde_json::json!({ "op": "set", "slot": "card", "orientation": "v" });
+        assert_eq!(overlay_key(&card_h), overlay_key(&card_h_clear));
+        assert_ne!(overlay_key(&card_h), overlay_key(&card_v));
+    }
 
     #[test]
     fn the_room_is_open_only_in_the_open_phase() {
