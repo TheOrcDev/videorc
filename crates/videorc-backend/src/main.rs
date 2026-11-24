@@ -204,6 +204,7 @@ mod preflight;
 mod preview_bmp;
 mod preview_buddy_layer;
 mod preview_camera;
+mod preview_cpu_ring;
 mod preview_handover;
 mod preview_screen;
 mod preview_surface;
@@ -6736,6 +6737,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "diagnostics.linuxDesktop"
         | "capture.recovery.status"
         | "preview.surface.status"
+        | "preview.cpu.status"
         | "remote.control.status"
         | "remote.lan.status"
         | "remote.chat.snapshot"
@@ -10131,6 +10133,10 @@ async fn websocket_session_with_handler_role_and_redaction(
     };
     let mut preview_frame_lease = None;
     let mut preview_handover = preview_handover::HeldPreviewHandover::default();
+    // Plan 260 S1.7: the CPU preview ring this socket opened; dropping it
+    // (the socket closed) closes the ring.
+    let preview_cpu_ring_tag = preview_cpu_ring::next_owner_tag();
+    let mut preview_cpu_ring_owner: Option<preview_cpu_ring::PreviewCpuRingOwner> = None;
     let mut room_audio_bridge = room_audio_bridge::Bridge::default();
     let mut room_microphone = room_microphone::Bridge::default();
     let mut room_frame_bridge = room_frame_bridge::Bridge::default();
@@ -10408,6 +10414,28 @@ async fn websocket_session_with_handler_role_and_redaction(
                     continue;
                 }
 
+                if let Some(response) = preview_cpu_ring::handle_preview_cpu_ring_control(
+                    &state,
+                    role,
+                    preview_cpu_ring_tag,
+                    &mut preview_cpu_ring_owner,
+                    text.as_str(),
+                )
+                .await
+                {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
                 let accepted = accept_websocket_command(&state, text.to_string());
                 if !send_tracked_websocket_item(&command_tx, &command_metrics, accepted).await {
                     break;
@@ -10440,6 +10468,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     // (Remote client count is decremented by RemoteClientCountGuard's Drop.)
     drop(preview_frame_lease);
     drop(preview_handover);
+    drop(preview_cpu_ring_owner);
     drop(studio_socket_guard);
     drop(command_tx);
     drop(command_dispatcher_task);
@@ -13404,6 +13433,7 @@ async fn handle_text_message_with_role(
             let status = preview_surface_status(state).await;
             ServerResponse::ok(command.id, status)
         }
+        "preview.cpu.status" => ServerResponse::ok(command.id, state.preview_cpu_ring.status()),
         "preview.surface.take_native_host_commands" => {
             let commands = take_native_preview_host_commands(state).await;
             ServerResponse::ok(command.id, commands)

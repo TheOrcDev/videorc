@@ -7778,6 +7778,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-segmentation",
  "uuid",
+ "videorc-preview-ring",
  "videorc-protocol",
  "videorc-wer-helper",
  "webpki-root-certs",
