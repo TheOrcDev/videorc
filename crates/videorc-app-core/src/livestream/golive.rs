@@ -299,6 +299,8 @@ pub enum CaptionsStatus {
     Skipped { description: String },
     /// The "Captions" row: "Ready", good only when ready.
     Row { good: bool, description: String },
+    /// Captions are off: the dialog draws nothing.
+    Hidden,
 }
 
 pub fn captions_status(readiness: &Readiness) -> CaptionsStatus {
@@ -306,6 +308,7 @@ pub fn captions_status(readiness: &Readiness) -> CaptionsStatus {
     match readiness.kind {
         ReadinessKind::Blocked => CaptionsStatus::Blocked { description },
         ReadinessKind::Skipped => CaptionsStatus::Skipped { description },
+        ReadinessKind::Disabled => CaptionsStatus::Hidden,
         kind => CaptionsStatus::Row {
             good: kind == ReadinessKind::Ready,
             description,
@@ -565,10 +568,7 @@ mod tests {
             CaptionsStatus::Skipped { .. }
         ));
         let off = go_live_readiness(false, false, None, None, None);
-        assert!(matches!(
-            captions_status(&off),
-            CaptionsStatus::Row { good: false, .. }
-        ));
+        assert_eq!(captions_status(&off), CaptionsStatus::Hidden);
         assert_eq!(captions_block(&off, false), None);
     }
 }

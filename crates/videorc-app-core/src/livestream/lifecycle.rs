@@ -323,7 +323,10 @@ pub fn scheduled_event_ids(streaming: &Value) -> Value {
     let mut ids = Map::new();
     for target in raw_targets(streaming) {
         if target.get("enabled").and_then(Value::as_bool) == Some(true)
-            && let Some(event) = target.get("scheduledEventId").and_then(Value::as_str)
+            && let Some(event) = target
+                .get("scheduledEventId")
+                .and_then(Value::as_str)
+                .filter(|event| !event.is_empty())
         {
             ids.insert(id_of(target), Value::String(event.to_string()));
         }
@@ -441,6 +444,9 @@ mod tests {
         assert_eq!(sent["mode"], json!("single"));
         assert_eq!(streaming["targets"][0]["enabled"], json!(true));
         assert_eq!(scheduled_event_ids(&sent), json!({ "b": "evt" }));
+        let mut empty = sent.clone();
+        empty["targets"][1]["scheduledEventId"] = json!("");
+        assert_eq!(scheduled_event_ids(&empty), json!({}));
         let decision = decide_prepared_setup(PartialSetup {
             streaming: sent.clone(),
             failures: vec![SetupFailure {

@@ -144,7 +144,13 @@ fn provider_safe_shared(video: &Video) -> Video {
 
 /// `canonicalStreamPresetForProfile`.
 fn canonical_preset(video: &Video) -> String {
-    for name in ["stream-safe-1080p30", "stream-safe-1080p60"] {
+    for name in [
+        "stream-safe-1080p30",
+        "stream-safe-1080p60",
+        "stream-youtube-1080p30",
+        "stream-youtube-1080p60",
+        "stream-youtube-4k30",
+    ] {
         if let Some(preset) = Video::preset(name)
             && preset.same_profile(video)
         {
@@ -547,6 +553,26 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn two_youtube_qualities_share_a_youtube_preset() {
+        let shared = strictest_shared(&[
+            Video::preset("stream-youtube-4k30").unwrap(),
+            Video::preset("stream-youtube-1080p30").unwrap(),
+        ]);
+        assert_eq!(shared.preset, "stream-youtube-1080p30");
+        assert_eq!(shared.bitrate_kbps, 10000);
+        let shared = strictest_shared(&[
+            Video::preset("stream-youtube-1080p60").unwrap(),
+            Video::preset("stream-youtube-1080p30").unwrap(),
+        ]);
+        assert_eq!(shared.preset, "stream-youtube-1080p30");
+        let odd = strictest_shared(&[
+            Video::preset("stream-youtube-4k30").unwrap(),
+            Video::preset("tutorial-720p30").unwrap(),
+        ]);
+        assert_eq!(odd.preset, "custom");
+    }
+
+    #[test]
     fn mixed_destinations_share_the_strictest_profile_until_a_separate_role_is_proven() {
         let capture = json!({
             "recordEnabled": true,
@@ -600,6 +626,13 @@ mod tests {
     }
 
     fn one_destination(fps: u32, captions: bool, record: bool) -> serde_json::Value {
+        // A `custom` destination streams the custom profile (1080p30), as in
+        // Electron, so the frame rate comes from a named preset.
+        let preset = if fps > 30 {
+            "stream-safe-1080p60"
+        } else {
+            "stream-safe-1080p30"
+        };
         json!({
             "recordEnabled": record,
             "video": { "preset": "custom", "width": 1920, "height": 1080, "fps": fps, "bitrateKbps": 6000 },
@@ -613,7 +646,7 @@ mod tests {
                     "id": "custom", "platform": "custom", "label": "Custom", "enabled": true,
                     "authMode": "manual-rtmp", "serverUrl": "rtmp://example.com/live",
                     "streamKey": "key", "streamKeyPresent": true,
-                    "outputPreset": "custom", "width": 1920, "height": 1080, "fps": fps, "bitrateKbps": 6000
+                    "outputPreset": preset, "outputBitrateKbps": 6000
                 }],
             },
         })

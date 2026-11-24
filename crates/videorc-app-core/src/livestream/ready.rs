@@ -369,11 +369,15 @@ pub fn ready_view(input: &ReadyInput<'_>) -> ReadyView {
         rows.push(row(copy::RECORDING, recording.quality(), RowState::Info));
     }
     if !enabled.is_empty() {
-        let total: u64 = plan
-            .targets
-            .iter()
-            .map(|(.., video)| u64::from(video.bitrate_kbps) + 128)
-            .sum();
+        // `streamOutputs`: the planned destinations, or the one stream profile.
+        let total: u64 = if plan.targets.is_empty() {
+            u64::from(plan.stream_video.bitrate_kbps) + 128
+        } else {
+            plan.targets
+                .iter()
+                .map(|(.., video)| u64::from(video.bitrate_kbps) + 128)
+                .sum()
+        };
         let mbps = ((total as f64) * 1.1 / 100.0).round() / 10.0;
         rows.push(row(
             copy::UPLOAD_NEEDED,
@@ -497,6 +501,32 @@ mod tests {
         assert_eq!(
             probe_params(&plan, &recording, true, false)["outputRoles"],
             json!(["shared"])
+        );
+
+        // No planned destination: the upload is the one stream profile's.
+        let unplanned = Plan {
+            targets: Vec::new(),
+            ..plan.clone()
+        };
+        let view = ready_view(&ReadyInput {
+            targets: &targets,
+            platforms: &PlatformsState::default(),
+            plan: &unplanned,
+            record_enabled: true,
+            stream_enabled: true,
+            recording: &recording,
+            ffmpeg_ready: true,
+            topology: &Topology::NotRequested,
+            profile_blocking: None,
+            captions: None,
+            recording_matches_stream: false,
+            live: None,
+            cloud: None,
+        });
+        assert!(
+            view.rows
+                .iter()
+                .any(|r| r.label == "Upload needed" && r.detail == "About 6.7 Mbps")
         );
     }
 
