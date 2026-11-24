@@ -39,9 +39,12 @@ use inhibit::DbusInhibit;
 use secrets::SecretService;
 use shortcuts::PortalShortcutsHandle;
 
-/// The app's id on Linux: the Wayland `app_id` its windows carry (`main.rs`),
-/// which the portal host Registry and the `.desktop` entry must match.
-pub const APP_ID: &str = "com.videorc.desktop";
+/// The app's id on Linux: Electron's `appId`, which the GPUI app keeps on
+/// every platform (coordinator, plan 260 S5.0), so the portal permissions,
+/// the shortcuts and the `videorc://` handler carry over. The Wayland
+/// `app_id` its windows carry (`main.rs`) and the portal host Registry use it;
+/// the `.desktop` entry keeps Electron's `videorc.desktop`.
+pub const APP_ID: &str = "dev.theorcdev.videorc";
 
 /// `CAPTURE_PROTECTION_UNSUPPORTED_REASON` (`shared/capture-protection.ts`):
 /// neither Wayland nor X11 lets an app keep its window out of a capture.
