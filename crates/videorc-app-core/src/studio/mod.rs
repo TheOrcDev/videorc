@@ -677,6 +677,10 @@ pub struct Studio<B: StudioBackend> {
     settings_flush: tokio::sync::Mutex<()>,
     /// The settings retry's deadline moved; the driver looks again.
     settings_retry: Notify,
+    /// A live source read ended (or was dropped): a refresh that found it
+    /// running waits for it, as Electron's `refresh()` returns the read in
+    /// flight.
+    live_read_done: Notify,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -734,6 +738,7 @@ impl<B: StudioBackend> Studio<B> {
             exclusion_lock: tokio::sync::Mutex::new(()),
             settings_flush: tokio::sync::Mutex::new(()),
             settings_retry: Notify::new(),
+            live_read_done: Notify::new(),
         }
     }
 
@@ -825,15 +830,26 @@ impl<B: StudioBackend> Studio<B> {
                 self.bootstrap(generation).await;
             }
             BackendEvent::RecordingStatus(status) => {
-                let effects = {
+                let (effects, state_changed) = {
                     let mut inner = self.lock();
-                    inner.session.apply_reported_status(*status, Instant::now())
+                    let before = std::mem::discriminant(&inner.session.status().state);
+                    let effects = inner.session.apply_reported_status(*status, Instant::now());
+                    let after = std::mem::discriminant(&inner.session.status().state);
+                    (effects, before != after)
                 };
                 self.publish();
                 self.emit_all(effects);
                 // S1.6b part 5a: a returned pick is offered only while a
                 // session runs.
                 self.announce_returning_sources().await;
+                // The working sources follow the session's state, as
+                // Electron's reconcile effect depends on `recording.state`:
+                // a camera or screen that went missing while a session ran
+                // is reconciled once it ends (the reconcile's own guard
+                // skips an active session or a start on its way).
+                if state_changed {
+                    self.reconcile_working_sources().await;
+                }
             }
             BackendEvent::SceneChanged(scene) => {
                 self.lock().sources.set_scene(*scene);
@@ -922,7 +938,7 @@ impl<B: StudioBackend> Studio<B> {
             BackendEvent::Untyped { event, .. } if event == AUDIO_LEVELS_EVENT => {}
             // S1.6b part 5a: the session's whole source authority, read again.
             BackendEvent::Untyped { event, .. } if event == live_sources::SOURCES_CHANGED_EVENT => {
-                self.refresh_live_sources().await;
+                self.kick_live_sources_read().await;
             }
             BackendEvent::Untyped { event, payload } => {
                 // The Health page's telemetry (`stream.targets` feeds both it
@@ -1385,7 +1401,7 @@ impl<B: StudioBackend> Studio<B> {
         // S1.6b part 5a: the session's sources, and the working sources. The
         // chat (`recoverLiveChatSnapshot`) is read again with its area
         // (S1.6e).
-        self.refresh_live_sources().await;
+        self.kick_live_sources_read().await;
         self.reconcile_working_sources().await;
     }
 

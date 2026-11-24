@@ -201,7 +201,10 @@ pub struct LiveSources {
     pub proof_reads: u32,
     pub sending: bool,
     pub send_generation: u64,
+    /// A read is in flight (Electron's `read !== null`); `read_owner` is its
+    /// generation, so only that read clears it (`if (this.read === read)`).
     pub reading: bool,
+    pub read_owner: u64,
     pub read_dirty: bool,
     pub read_generation: u64,
     last_failure_request: Option<String>,
