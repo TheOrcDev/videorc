@@ -3470,6 +3470,7 @@ name = "videorc-app-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures-util",
  "getrandom 0.4.2",
  "libc",
  "serde",
@@ -3477,8 +3478,10 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "url",
  "uuid",
+ "videorc-protocol",
 ]
 
 [[package]]

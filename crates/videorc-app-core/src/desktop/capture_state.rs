@@ -10,6 +10,8 @@
 //! connected, or has not finished its bootstrap reads on this connection, is
 //! `unknown`.
 
+use videorc_protocol::{RecordingState, RecordingStatus};
+
 /// `MainCaptureState`: the backend's six states, or `unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainCaptureState {
@@ -23,9 +25,22 @@ pub enum MainCaptureState {
 }
 
 impl MainCaptureState {
-    // `from_status` (a `RecordingStatus`) and `from_snapshot` (the
-    // Studio's view) arrive with the typed client (S1.1) and the Studio area
-    // (S1.6a); until then the shell is told the state directly.
+    /// `captureStateAfterStatusPayload`: a buffer-only session (plan 181)
+    /// writes nothing permanent, so main reads it as idle. (`from_snapshot`,
+    /// the Studio's view, comes with the Studio area, S1.6a.)
+    pub fn from_status(status: &RecordingStatus) -> Self {
+        if status.replay_only {
+            return MainCaptureState::Idle;
+        }
+        match status.state {
+            RecordingState::Idle => MainCaptureState::Idle,
+            RecordingState::Starting => MainCaptureState::Starting,
+            RecordingState::Recording => MainCaptureState::Recording,
+            RecordingState::Streaming => MainCaptureState::Streaming,
+            RecordingState::Stopping => MainCaptureState::Stopping,
+            RecordingState::Failed => MainCaptureState::Failed,
+        }
+    }
 
     /// `isActiveRecordingState`: starting, recording, streaming or stopping.
     pub fn is_active(self) -> bool {
@@ -183,6 +198,37 @@ mod tests {
             json!("open"),
         ] {
             assert_eq!(read(value.clone()), None, "{value}");
+        }
+    }
+
+    fn status(state: RecordingState, replay_only: bool) -> RecordingStatus {
+        let mut status: RecordingStatus = serde_json::from_value(serde_json::json!({
+            "state": "idle",
+            "replayOnly": replay_only,
+        }))
+        .unwrap();
+        status.state = state;
+        status
+    }
+
+    #[test]
+    fn a_clips_buffer_reads_as_idle_and_the_rest_by_name() {
+        assert_eq!(
+            MainCaptureState::from_status(&status(RecordingState::Recording, true)),
+            MainCaptureState::Idle
+        );
+        for (state, expected) in [
+            (RecordingState::Idle, MainCaptureState::Idle),
+            (RecordingState::Starting, MainCaptureState::Starting),
+            (RecordingState::Recording, MainCaptureState::Recording),
+            (RecordingState::Streaming, MainCaptureState::Streaming),
+            (RecordingState::Stopping, MainCaptureState::Stopping),
+            (RecordingState::Failed, MainCaptureState::Failed),
+        ] {
+            assert_eq!(
+                MainCaptureState::from_status(&status(state, false)),
+                expected
+            );
         }
     }
 

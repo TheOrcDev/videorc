@@ -87,7 +87,9 @@ export const RUST_READS_DESKTOP_FILES = Object.freeze([
   'apps/desktop/src/main/window-palette.ts',
   // videorc-app-core's desktop::permissions tests read these (plan 260 S1.6s).
   'apps/desktop/src/main/media-access.ts',
-  'apps/desktop/src/main/runtime-info.ts'
+  'apps/desktop/src/main/runtime-info.ts',
+  // The typed client's deadline table is checked against it (S1.6s part 4).
+  'apps/desktop/src/renderer/src/backendClient.ts'
 ])
 
 export function isRustReachableDesktopPath(path) {

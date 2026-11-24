@@ -60,7 +60,7 @@ pub struct AccountAuthIntent {
     pub intent_generation: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerResponse {
     pub id: String,
@@ -71,21 +71,21 @@ pub struct ServerResponse {
     pub error: Option<ResponseError>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResponseError {
     pub code: String,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerEvent {
     pub event: String,
     pub payload: Value,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendConnection {
     pub host: String,
@@ -96,7 +96,7 @@ pub struct BackendConnection {
     pub parent_pid: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendHealth {
     pub status: String,
@@ -107,7 +107,7 @@ pub struct BackendHealth {
     pub secret_store_backend: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolStatus {
     pub path: String,
@@ -291,14 +291,14 @@ pub struct BackendLogEvent {
     pub timestamp: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceList {
     pub devices: Vec<Device>,
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Device {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -321,7 +321,7 @@ pub struct Device {
     pub height: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceApp {
     pub bundle_id: String,
@@ -369,7 +369,7 @@ pub enum AppWindowUnavailableReason {
     Minimized,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DeviceKind {
     Screen,
@@ -380,7 +380,7 @@ pub enum DeviceKind {
     SystemAudio,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DeviceStatus {
     Available,
