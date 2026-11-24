@@ -17,9 +17,71 @@ use videorc_protocol::{
     VideoSettings,
 };
 
-use crate::notices::{VIDEORC_PREMIUM_URL, is_premium_upgrade_message};
-use crate::studio::capture_config::VIDEO_PRESETS;
-use crate::studio::health_page::{format_bitrate, format_frame_rate};
+/// `VIDEORC_PREMIUM_URL`: where an upgrade line sends the streamer. The
+/// notices re-export it.
+pub const VIDEORC_PREMIUM_URL: &str = "https://www.videorc.com/premium";
+
+/// `isPremiumUpgradeMessage`: a backend reason that names Premium as a word
+/// (not inside another word) offers the upgrade link.
+pub fn is_premium_upgrade_message(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    let bytes = lowered.as_bytes();
+    let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    lowered.match_indices("premium").any(|(at, found)| {
+        let before = at.checked_sub(1).map(|i| bytes[i]);
+        let after = bytes.get(at + found.len()).copied();
+        !before.is_some_and(word) && !after.is_some_and(word)
+    })
+}
+
+/// `videoPresets` (`lib/capture.ts`): name, width, height, fps and bitrate
+/// (kbps). The Studio's capture config (S1.6a) holds the same table.
+pub const VIDEO_PRESETS: [(&str, u32, u32, u32, u32); 14] = [
+    ("tutorial-540p30", 960, 540, 30, 2500),
+    ("tutorial-720p30", 1280, 720, 30, 4000),
+    ("tutorial-1080p30", 1920, 1080, 30, 6000),
+    ("tutorial-1440p30", 2560, 1440, 30, 8000),
+    ("record-4k30", 3840, 2160, 30, 30000),
+    ("record-4k60-experimental", 3840, 2160, 60, 50000),
+    ("stream-safe-1080p30", 1920, 1080, 30, 6000),
+    ("stream-safe-1080p60", 1920, 1080, 60, 6000),
+    ("stream-youtube-1080p30", 1920, 1080, 30, 10000),
+    ("stream-youtube-1080p60", 1920, 1080, 60, 12000),
+    ("stream-youtube-4k30", 3840, 2160, 30, 30000),
+    ("stream-1080p60", 1920, 1080, 60, 9000),
+    ("vertical-1080x1920", 1080, 1920, 30, 9000),
+    ("custom", 1920, 1080, 30, 6000),
+];
+
+/// `Math.round`, half up.
+fn js_round(value: f64) -> f64 {
+    (value + 0.5).floor()
+}
+
+/// A number with at most `places` decimals and no trailing zeros.
+fn trim_decimals(value: f64, places: usize) -> String {
+    let text = format!("{value:.places$}");
+    let (whole, fraction) = text.split_once('.').unwrap_or((&text, ""));
+    let fraction = fraction.trim_end_matches('0');
+    if fraction.is_empty() {
+        whole.to_string()
+    } else {
+        format!("{whole}.{fraction}")
+    }
+}
+
+/// `formatBitrate` (`lib/format.ts`): "6 Mbps", "4.5 Mbps".
+fn format_bitrate(kbps: Option<f64>) -> Option<String> {
+    let kbps = kbps.filter(|kbps| kbps.is_finite() && *kbps >= 0.0)?;
+    let mbps = js_round(kbps / 100.0) / 10.0;
+    Some(format!("{} Mbps", trim_decimals(mbps, 1)))
+}
+
+/// `formatFrameRate`: "30 fps", "29.97 fps".
+fn format_frame_rate(fps: f64) -> String {
+    let rounded = js_round(fps * 100.0) / 100.0;
+    format!("{} fps", trim_decimals(rounded, 2))
+}
 
 /// The gates' words.
 pub mod copy {
@@ -299,7 +361,7 @@ pub fn noise_cleanup_gate(snapshot: Option<&EntitlementsSnapshot>) -> Entitlemen
     feature_gate(snapshot, FeatureId::NoiseCleanup)
 }
 
-/// `liveCohostGate`: Sidekick (Premium), fail-closed like every cloud gate.
+/// `liveCohostGate`: Sidekick Live (Premium), fail-closed like every cloud gate.
 pub fn live_cohost_gate(snapshot: Option<&EntitlementsSnapshot>) -> EntitlementGate {
     feature_gate(snapshot, FeatureId::LiveCohost)
 }
@@ -498,6 +560,30 @@ mod tests {
     use videorc_protocol::VideoPreset;
 
     use super::*;
+
+    /// The reasons are Electron's (`lib/entitlements.ts`), byte for byte.
+    #[test]
+    fn the_reasons_are_electrons() {
+        const ELECTRON: &str =
+            include_str!("../../../../apps/desktop/src/renderer/src/lib/entitlements.ts");
+        for reason in [
+            copy::CLOUD_AI_REASON,
+            copy::NOISE_CLEANUP_REASON,
+            copy::LIVE_COHOST_REASON,
+            copy::FEATURE_NOT_ENABLED,
+        ] {
+            assert!(
+                ELECTRON.contains(reason),
+                "lib/entitlements.ts no longer says {reason:?}"
+            );
+        }
+        assert!(is_premium_upgrade_message("Clips need Videorc Premium."));
+        assert!(!is_premium_upgrade_message("A premiumish word"));
+        assert_eq!(format_bitrate(Some(6_000.0)).as_deref(), Some("6 Mbps"));
+        assert_eq!(format_bitrate(Some(4_500.0)).as_deref(), Some("4.5 Mbps"));
+        assert_eq!(format_frame_rate(29.97), "29.97 fps");
+        assert_eq!(format_frame_rate(30.0), "30 fps");
+    }
 
     fn premium() -> EntitlementsSnapshot {
         use EntitlementState::Enabled;
