@@ -192,6 +192,61 @@ pub(crate) fn blend_over(dst: &mut [u8; 4], src: [u8; 4], alpha: f64) {
     dst[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
 }
 
+/// Straight-alpha BGRA resampled to `out_width` x `out_height` straight
+/// RGBA, as a canvas `drawImage` keeps it: each output pixel the area
+/// average of the source texels it covers, colour weighted by alpha, so a
+/// half-transparent background or a soft shadow keeps its coverage.
+pub(crate) fn resample_bgra(
+    bgra: &[u8],
+    width: u32,
+    height: u32,
+    out_width: u32,
+    out_height: u32,
+) -> Option<Vec<u8>> {
+    if width == 0
+        || height == 0
+        || out_width == 0
+        || out_height == 0
+        || bgra.len() < width as usize * height as usize * 4
+    {
+        return None;
+    }
+    let mut out = vec![0u8; out_width as usize * out_height as usize * 4];
+    for oy in 0..out_height {
+        let y0 = (u64::from(oy) * u64::from(height) / u64::from(out_height)) as u32;
+        let y1 = ((u64::from(oy + 1) * u64::from(height)).div_ceil(u64::from(out_height)) as u32)
+            .clamp(y0 + 1, height);
+        for ox in 0..out_width {
+            let x0 = (u64::from(ox) * u64::from(width) / u64::from(out_width)) as u32;
+            let x1 = ((u64::from(ox + 1) * u64::from(width)).div_ceil(u64::from(out_width)) as u32)
+                .clamp(x0 + 1, width);
+            // Premultiplied sums: [r, g, b] times alpha, and alpha.
+            let mut sum = [0.0f64; 4];
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let index = (sy as usize * width as usize + sx as usize) * 4;
+                    let alpha = f64::from(bgra[index + 3]) / 255.0;
+                    sum[0] += f64::from(bgra[index + 2]) * alpha;
+                    sum[1] += f64::from(bgra[index + 1]) * alpha;
+                    sum[2] += f64::from(bgra[index]) * alpha;
+                    sum[3] += alpha;
+                }
+            }
+            let count = f64::from((y1 - y0) * (x1 - x0));
+            let index = (oy as usize * out_width as usize + ox as usize) * 4;
+            if sum[3] <= 0.0 {
+                continue;
+            }
+            let coverage = sum[3];
+            for (slot, total) in out[index..index + 3].iter_mut().zip(&sum[..3]) {
+                *slot = (total / coverage).round().clamp(0.0, 255.0) as u8;
+            }
+            out[index + 3] = (coverage / count * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    Some(out)
+}
+
 /// S10 packing: colour left (opaque), an 8 px black gutter, alpha as grey.
 pub(crate) fn pack(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
     let packed_width = width * 2 + GUTTER;
@@ -214,9 +269,6 @@ pub(crate) fn pack(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
 fn draw_sheet(state: &AppState, orientation: &str, layers: &[Placement], now: i64) -> Vec<u8> {
     let (width, height) = sheet_size(orientation);
     let mut sheet = vec![0u8; (width * height * 4) as usize];
-    let mut plain = crate::protocol::default_layout_settings();
-    plain.camera_chroma_key_enabled = false;
-    plain.camera_look = crate::protocol::CameraLook::default();
     for layer in layers {
         let alpha = layer.opacity * fade_at(layer.fade.as_ref(), now);
         if alpha <= 0.0 {
@@ -229,15 +281,7 @@ fn draw_sheet(state: &AppState, orientation: &str, layers: &[Placement], now: i6
         if w == 0 || h == 0 {
             continue;
         }
-        let Some(scaled) = crate::compositor::camera_role_rgba(
-            &bitmap.bgra,
-            bitmap.width,
-            bitmap.height,
-            true,
-            &plain,
-            w,
-            h,
-        ) else {
+        let Some(scaled) = resample_bgra(&bitmap.bgra, bitmap.width, bitmap.height, w, h) else {
             continue;
         };
         for row in 0..h as usize {
@@ -688,6 +732,23 @@ mod tests {
         assert_eq!(pixel, [200, 100, 0, 128]);
         blend_over(&mut pixel, [0, 0, 200, 255], 1.0);
         assert_eq!(pixel, [0, 0, 200, 255]);
+    }
+
+    #[test]
+    fn resampling_keeps_partial_alpha() {
+        // BGRA: one opaque red texel and one 50% blue texel, side by side.
+        let bgra = [0, 0, 255, 255, 255, 0, 0, 128];
+        let one = resample_bgra(&bgra, 2, 1, 1, 1).unwrap();
+        // Coverage is the mean alpha; colour is weighted by it.
+        assert!((191..=192).contains(&one[3]), "{one:?}");
+        assert!(one[0] > one[2], "{one:?}");
+        let same = resample_bgra(&bgra, 2, 1, 2, 1).unwrap();
+        assert_eq!(same, vec![255, 0, 0, 255, 0, 0, 255, 128]);
+        // Fully clear stays clear.
+        assert_eq!(
+            resample_bgra(&[9, 9, 9, 0], 1, 1, 1, 1).unwrap(),
+            vec![0, 0, 0, 0]
+        );
     }
 
     #[test]
