@@ -11,6 +11,7 @@ use videorc_app_core::{BackendState, ConnectionState, Tone};
 use videorc_kit::{
     shortcut_keys::ShortcutKeys,
     status_bar::StatusBar,
+    status_bar_action::StatusBarAction,
     status_dot::{StatusDot, StatusTone},
     theme::{self, FONT, TypeScale, hsla},
     tokens::{Theme, radius, text},
@@ -71,6 +72,7 @@ pub struct Shell {
     /// Phase 3: Sources ⌘2.
     sources: Entity<SourcesPanel>,
     settings: Entity<SettingsScreen>,
+    health: Entity<crate::screens::health::HealthScreen>,
 }
 
 impl Shell {
@@ -81,6 +83,8 @@ impl Shell {
         preview: Entity<Preview>,
         sources: Entity<SourcesPanel>,
         settings: Entity<SettingsScreen>,
+        health: Entity<crate::screens::health::HealthScreen>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&backend, |_, _, cx| cx.notify()).detach();
@@ -89,32 +93,13 @@ impl Shell {
         // change, never per video frame.
         cx.observe(&preview, |_, _, cx| cx.notify()).detach();
         cx.observe(&sources, |_, _, cx| cx.notify()).detach();
-        // The Studio's jumps ("Open Destinations", a Session row) open that page.
-        // `subscribe_in` needs a Window at bind time; Shell::new has none, so
-        // mirror the Settings Navigate path (page + docked preview) here.
-        cx.subscribe(&studio, |this, _, open: &OpenPage, cx| {
-            let page = open.0;
-            if this.page != page {
-                this.settings
-                    .update(cx, |settings, cx| settings.disarm_shortcut(cx));
-                this.page = page;
-                if page == PageId::Settings {
-                    this.settings
-                        .update(cx, |settings, cx| settings.refresh(cx));
-                }
-                this.preview.update(cx, |preview, _| {
-                    preview.set_docked_shown(page == PageId::Studio)
-                });
-                cx.notify();
-            }
+        // Both routes use the same lifecycle, title and focus updates.
+        cx.subscribe_in(&studio, window, |this, _, open: &OpenPage, window, cx| {
+            this.open_page(open.0, window, cx);
         })
         .detach();
-        cx.subscribe(&settings, |this, _, Navigate(page), cx| {
-            this.page = *page;
-            this.preview.update(cx, |preview, _| {
-                preview.set_docked_shown(*page == PageId::Studio)
-            });
-            cx.notify();
+        cx.subscribe_in(&settings, window, |this, _, Navigate(page), window, cx| {
+            this.open_page(*page, window, cx);
         })
         .detach();
         Self {
@@ -125,6 +110,7 @@ impl Shell {
             preview,
             sources,
             settings,
+            health,
         }
     }
 
@@ -154,6 +140,9 @@ impl Shell {
             self.settings
                 .update(cx, |settings, cx| settings.disarm_shortcut(cx));
             self.page = page;
+            self.health.update(cx, |health, cx| {
+                health.set_active(page == PageId::Diagnostics, cx)
+            });
             if page == PageId::Settings {
                 self.settings
                     .update(cx, |settings, cx| settings.refresh(cx));
@@ -283,6 +272,8 @@ impl Render for Shell {
                             .map(|body| {
                                 if page == PageId::Settings {
                                     body.child(self.settings.clone())
+                                } else if page == PageId::Diagnostics {
+                                    body.child(self.health.clone())
                                 } else {
                                     body.child(
                                         div()
@@ -295,18 +286,23 @@ impl Render for Shell {
                     }),
             )
             .child(
-                StatusBar::new().leading(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(12.))
-                        .child(
-                            StatusDot::new("shell-status")
-                                .tone(status_tone(status.tone))
-                                .label(status.text.clone()),
-                        )
-                        .child(div().child(connection)),
-                ),
+                StatusBar::new()
+                    .leading(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(StatusDot::new("engine-status").tone(status_tone(status.tone)))
+                            .child(
+                                StatusBarAction::new("open-health", "Open Health")
+                                    .text(status.text)
+                                    .tooltip("Open Health", None)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_page(PageId::Diagnostics, window, cx)
+                                    })),
+                            ),
+                    )
+                    .child(div().text_color(hsla(t.muted_foreground)).child(connection)),
             )
     }
 }

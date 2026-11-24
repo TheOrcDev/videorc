@@ -137,6 +137,10 @@ The page keys come from `assignPageKeys` (shared/sidebar-pages.ts:129). Fixed ke
 
 Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, and the account menu "Health" row.
 
+The native implementation and remaining verification are recorded in
+[Health screen implementation](health-screen.md). Its cells stay unchecked
+until the runtime, visual and accessibility checks above can run.
+
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
 | P062 | Section "Checks" ("Is anything wrong right now?") | Verdict alert, warnings, check chips | `renderer/components/tabs/diagnostics-tab.tsx:223` | [ ] | [ ] | [ ] |
