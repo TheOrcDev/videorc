@@ -10270,6 +10270,9 @@ export interface LocalOffsetSpan {
 /** `time.localOffsets`: a zone's offsets from the backend's bundled tz data. */
 export interface LocalOffsets {
   timeZone: string
+  /** The window the spans cover; outside it, ask for that window. */
+  fromMs: number
+  untilMs: number
   spans: LocalOffsetSpan[]
 }
 

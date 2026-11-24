@@ -7342,6 +7342,8 @@ const runtimeContracts = {
     result: objectSchema(
       {
         timeZone: boundedString,
+        fromMs: numberSchema({ integer: true }),
+        untilMs: numberSchema({ integer: true }),
         spans: arraySchema(
           objectSchema(
             { fromMs: numberSchema({ integer: true }), offsetMinutes: utcOffsetMinutes },

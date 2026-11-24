@@ -6,7 +6,8 @@
 // `Intl.DateTimeFormat` read the wrong hour there. The backend bundles current
 // tz data: `time.localOffsets` sends the system zone's UTC offsets for a few
 // years around now, and every format here runs at a fixed offset from those
-// spans. The `videorc/no-system-local-time` lint rule keeps the rest of the
+// spans. An instant outside every window the backend covered asks for its
+// own window, and reads ICU's offset only until that answer arrives. The `videorc/no-system-local-time` lint rule keeps the rest of the
 // renderer on these helpers. Components that show a time call `useLocalTime()`
 // so they re-render when the spans arrive or refresh: no text stays on ICU's
 // hour.
@@ -19,10 +20,19 @@ import { offsetTimeZone } from '@/lib/schedule-time'
 const REFRESH_MS = 6 * 60 * 60_000
 const RETRY_MS = [1_000, 5_000, 30_000]
 const FORMATTER_CACHE_MAX = 200
+/** An out-of-window instant fetches the two-year window it falls in. */
+const WINDOW_MS = 2 * 366 * 86_400_000
 
-let spans: LocalOffsetSpan[] | null = null
-let spansZone: string | null = null
+interface CoveredWindow {
+  fromMs: number
+  untilMs: number
+  spans: LocalOffsetSpan[]
+}
+
+let windows: CoveredWindow[] = []
+let windowsZone: string | null = null
 let syncing: Promise<void> | null = null
+const requestedWindows = new Set<number>()
 const formatters = new Map<string, Intl.DateTimeFormat>()
 let revision = 0
 const listeners = new Set<() => void>()
@@ -32,10 +42,32 @@ export function systemTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone
 }
 
-/** Use these spans (tests, and every window after `time.localOffsets`). */
+/** Replace every covered window with this one (`null` forgets them all). */
 export function setLocalOffsets(next: LocalOffsets | null): void {
-  spans = next && next.spans.length ? [...next.spans].sort((a, b) => a.fromMs - b.fromMs) : null
-  spansZone = next?.timeZone ?? null
+  windows = []
+  windowsZone = next?.timeZone ?? null
+  requestedWindows.clear()
+  if (next) addWindow(next)
+  publish()
+}
+
+/** Add a window the backend covered, for the zone already loaded. */
+export function addLocalOffsets(next: LocalOffsets): void {
+  if (next.timeZone !== windowsZone) return
+  addWindow(next)
+  publish()
+}
+
+function addWindow(next: LocalOffsets): void {
+  if (!next.spans.length || next.untilMs <= next.fromMs) return
+  windows.push({
+    fromMs: next.fromMs,
+    untilMs: next.untilMs,
+    spans: [...next.spans].sort((a, b) => a.fromMs - b.fromMs)
+  })
+}
+
+function publish(): void {
   formatters.clear()
   revision += 1
   for (const listener of listeners) listener()
@@ -64,21 +96,43 @@ export function useLocalTime(): number {
 
 /**
  * The streamer's UTC offset at `ms`, in minutes (Vancouver from 2026-11: -420).
- * Before the backend answers, or for another zone, ICU's guess.
+ * ICU's guess before the backend answers, for another zone, and for an
+ * instant no window covers yet (which asks for its window).
  */
 export function localOffsetMinutes(ms: number): number {
-  if (spans && spansZone === systemTimeZone()) {
-    let low = 0
-    let high = spans.length - 1
-    while (low < high) {
-      const middle = Math.ceil((low + high) / 2)
-      if (spans[middle].fromMs <= ms) low = middle
-      else high = middle - 1
-    }
-    return spans[low].offsetMinutes
+  if (windowsZone !== null && windowsZone === systemTimeZone()) {
+    const window = windows.find((covered) => ms >= covered.fromMs && ms < covered.untilMs)
+    if (window) return spanOffsetAt(window.spans, ms)
+    requestWindow(ms)
   }
   // oxlint-disable-next-line videorc/no-system-local-time -- fallback until the backend answers
   return -new Date(ms).getTimezoneOffset()
+}
+
+function spanOffsetAt(spans: LocalOffsetSpan[], ms: number): number {
+  let low = 0
+  let high = spans.length - 1
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (spans[middle].fromMs <= ms) low = middle
+    else high = middle - 1
+  }
+  return spans[low].offsetMinutes
+}
+
+function requestWindow(ms: number): void {
+  if (!syncing || !Number.isFinite(ms)) return
+  const bucket = Math.floor(ms / WINDOW_MS)
+  if (requestedWindows.has(bucket)) return
+  requestedWindows.add(bucket)
+  const fromUtc = new Date(bucket * WINDOW_MS).toISOString()
+  const untilUtc = new Date((bucket + 1) * WINDOW_MS).toISOString()
+  void fetchOffsets({ timeZone: systemTimeZone(), fromUtc, untilUtc })
+    .then(addLocalOffsets)
+    .catch((error: unknown) => {
+      requestedWindows.delete(bucket)
+      console.warn('[local-time] could not read the offsets for', fromUtc, error)
+    })
 }
 
 /** Options for `formatLocal`: an `Intl` format without a zone of its own. */
@@ -139,20 +193,28 @@ export function startLocalTimeSync(): Promise<void> {
   return syncing
 }
 
-async function syncOnce(attempt: number): Promise<void> {
-  const timeZone = systemTimeZone()
-  let client: BackendClient | null = null
+async function fetchOffsets(params: {
+  timeZone: string
+  fromUtc?: string
+  untilUtc?: string
+}): Promise<LocalOffsets> {
+  const connection = await window.videorc.getBackendConnection()
+  if (!connection) throw new Error('Videorc is reconnecting.')
+  const client = new BackendClient(connection)
   try {
-    const connection = await window.videorc.getBackendConnection()
-    if (!connection) throw new Error('Videorc is reconnecting.')
-    client = new BackendClient(connection)
     await client.connect()
-    setLocalOffsets(await client.request<LocalOffsets>('time.localOffsets', { timeZone }))
+    return await client.request<LocalOffsets>('time.localOffsets', params)
+  } finally {
+    client.close()
+  }
+}
+
+async function syncOnce(attempt: number): Promise<void> {
+  try {
+    setLocalOffsets(await fetchOffsets({ timeZone: systemTimeZone() }))
   } catch (error) {
     console.warn('[local-time] using the system time zone data until Videorc answers:', error)
     const delay = RETRY_MS[attempt]
     if (delay !== undefined) setTimeout(() => void syncOnce(attempt + 1), delay)
-  } finally {
-    client?.close()
   }
 }

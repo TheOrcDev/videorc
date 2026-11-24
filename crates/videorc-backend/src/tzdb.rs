@@ -101,12 +101,17 @@ pub fn local_offsets(params: &Value, now: DateTime<Utc>) -> Result<Value> {
             None => Ok(default),
         }
     };
-    let spans = offset_spans(
-        time_zone,
-        at("fromUtc", now - reach)?,
-        at("untilUtc", now + reach)?,
-    )?;
-    Ok(serde_json::json!({ "timeZone": time_zone, "spans": spans }))
+    let from = at("fromUtc", now - reach)?;
+    let until = at("untilUtc", now + reach)?;
+    let spans = offset_spans(time_zone, from, until)?;
+    // The covered window: outside it the renderer asks again, never stretches
+    // the edge spans into other years.
+    Ok(serde_json::json!({
+        "timeZone": time_zone,
+        "fromMs": from.timestamp_millis(),
+        "untilMs": until.timestamp_millis(),
+        "spans": spans,
+    }))
 }
 
 #[cfg(test)]
@@ -167,6 +172,9 @@ mod tests {
         let now = utc("2026-12-15T12:00:00Z");
         let value = local_offsets(&serde_json::json!({"timeZone": "UTC"}), now).unwrap();
         assert_eq!(value["timeZone"], "UTC");
+        let reach = Duration::days(LOCAL_OFFSETS_REACH_DAYS);
+        assert_eq!(value["fromMs"], (now - reach).timestamp_millis());
+        assert_eq!(value["untilMs"], (now + reach).timestamp_millis());
         assert_eq!(value["spans"].as_array().unwrap().len(), 1);
         assert_eq!(value["spans"][0]["offsetMinutes"], 0);
         assert!(local_offsets(&serde_json::json!({"timeZone": "Mars/Base"}), now).is_err());
