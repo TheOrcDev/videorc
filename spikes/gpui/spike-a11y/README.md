@@ -95,13 +95,55 @@ the dialog open.
   accessibility tree update until it is uncovered. On a shared screen a
   driver must keep its window visible.
 
+## Verdicts on Linux (ogre, 2026-11-24, lane L5)
+
+ogre: Omarchy, Hyprland 0.56.2, release build, clocks pinned at 800 MHz.
+The owner's session was locked, so the spike ran in a **nested Hyprland**
+on the lab output, on Wayland and on its Xwayland. Accessibility was
+turned on only on a **private session bus** with its own AT-SPI bus
+(`at-spi-bus-launcher` and `at-spi2-registryd` started by hand on it; the
+owner's AT-SPI bus and its `IsEnabled = false` were not touched). The
+driver, [`linux/atspi-driver.py`](linux/atspi-driver.py) (AT-SPI through
+`gi`'s `Atspi`, already on ogre), finds controls by role and name and
+presses them with their `click` action; it is the Linux form of the UI
+driver's query.
+
+| Check | Verdict | Evidence |
+| --- | --- | --- |
+| The tree reaches AT-SPI | **PASS** (Wayland and X11) | The application `spike-a11y` on the bus, 26 nodes: `frame`, `tool bar "Studio"`, `heading`, `status bar "Ready"`, `button "Record"`, `list "Scenes"` with six `list item`s, `button "Delete scene…"` |
+| A UI driver finds a control by role and name | **PASS** | `button` named "Record" found and its `click` action run: `record started`; it came back as `button "Stop recording"` |
+| The list | **PASS, one gap** | Six `list item`s, each named, `selectable`, the selected one `selected`; pressing the second selected it. **`posinset` reads 2 to 7, not 1 to 6, and `setsize` is missing** (below) |
+| The dialog | **PASS** | An `alert` "Delete Screen and camera?" with the description as its description, a heading, the text, and `button`s Cancel and Delete; Cancel pressed through AT-SPI closed it and it left the tree |
+| A headless test clicks Record | **PASS** | `clicking_record_starts_and_stops` on ogre with the release-plus-debug-assertions command above (1,053 s build from a warm release target at 800 MHz, 0.01 s run) |
+| Orca speaks it | **OWED** | **Orca screen-reader pass owed: needs Orca installed on an unlocked session.** Orca is not installed on ogre and the session is locked |
+| Modal dialog hides the background | **FAIL** (as on macOS) | "Delete scene…" stays reachable while the dialog is open; the alert has no `modal` state |
+| Focus returns after the dialog | **FAIL** (as on macOS) | After Cancel only the `frame` is focused |
+
+Found on Linux:
+
+- **`aria_position_in_set` is 0-based in AccessKit**, and GPUI's own
+  `examples/a11y.rs` (and this spike) pass `i + 1`. GPUI's tree shows
+  `position_in_set: 1` for the first item; `accesskit_atspi_common` adds
+  one (`node.rs`, `position_in_set`), so AT-SPI reads `posinset 2`, and
+  Orca would say "2 of 6". The kit's list should pass the 0-based index.
+- **`setsize` is missing**: AccessKit's AT-SPI adapter reads the set size
+  from the container (`size_of_set_from_container`), and the spike sets it
+  on each item. The kit sets it on the list.
+- **Accessibility is off until a client asks**, as on macOS: with the
+  session's `org.a11y.Status.IsEnabled` false (the owner's), AccessKit
+  exposes nothing; a UI driver on Linux sets it on its own bus.
+- **ogre's AT-SPI bus is a `dbus-broker` that activates through systemd**;
+  on a private bus the registry must be started by hand
+  (`/usr/lib/at-spi2-registryd`), or `Atspi.get_desktop` fails with
+  "Could not activate remote peer".
+
 ## Windows and Linux
 
 The spike is all GPUI code. Windows (WC-0.8): `gpui-pre-windows` depends
 on `accesskit_windows`, and Zed's Narrator issue
 ([#41138](https://github.com/zed-industries/zed/issues/41138)) is still
-open, so the Narrator pass is the open question. Linux (L5): Orca through
-AT-SPI (`accesskit_unix`).
+open, so the Narrator pass is the open question. Linux (L5): the tree
+through AT-SPI passes (above); the Orca pass is owed.
 
 ## Summary fields
 
