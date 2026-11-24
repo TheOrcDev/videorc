@@ -1,0 +1,9 @@
+[package]
+name = "videorc-gpu-import"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "Plan 260: Imports the backend's shared preview surface (IOSurface, NT handle, dma-buf) as a GPU texture with no CPU copy."
+
+[dependencies]

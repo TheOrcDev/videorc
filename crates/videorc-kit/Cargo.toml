@@ -1,0 +1,9 @@
+[package]
+name = "videorc-kit"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "Plan 260: Videorc's design system on GPUI, synced from the GPUI flavour of videorc-ui (ui."
+
+[dependencies]

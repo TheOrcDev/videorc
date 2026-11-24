@@ -1,0 +1,9 @@
+[package]
+name = "videorc-preview"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "Plan 260: The preview element: on macOS a CAMetalLayer presented on its own thread from the backend's IOSurface ring, the lease loop, the first-frame and presenting contracts; the Linux Wayland/X11 presenter."
+
+[dependencies]

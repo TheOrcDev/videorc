@@ -3160,6 +3160,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "videorc-app"
+version = "0.1.0"
+
+[[package]]
+name = "videorc-app-core"
+version = "0.1.0"
+
+[[package]]
 name = "videorc-backend"
 version = "0.9.0"
 dependencies = [
@@ -3219,6 +3227,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "videorc-gpu-import"
+version = "0.1.0"
+
+[[package]]
+name = "videorc-kit"
+version = "0.1.0"
+
+[[package]]
 name = "videorc-native-preview-addon"
 version = "0.1.0"
 dependencies = [
@@ -3237,6 +3253,26 @@ dependencies = [
  "objc2-quartz-core",
  "objc2-system-extensions",
 ]
+
+[[package]]
+name = "videorc-page-host"
+version = "0.1.0"
+
+[[package]]
+name = "videorc-preview"
+version = "0.1.0"
+
+[[package]]
+name = "videorc-preview-ring"
+version = "0.1.0"
+
+[[package]]
+name = "videorc-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "videorc-updater"
+version = "0.1.0"
 
 [[package]]
 name = "videorc-wer-helper"
