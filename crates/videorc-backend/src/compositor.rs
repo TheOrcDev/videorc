@@ -14653,6 +14653,121 @@ fn source_pixel_len(source: &RgbaSource<'_>) -> usize {
 /// (no crop, fit, mirror or mask: the cloud scene renderer owns those),
 /// area-averaged to the logical size, as straight-alpha RGBA. `None` when the
 /// frame has no CPU bytes (a zero-copy capture) or the sizes are unusable.
+/// Plan 260 S1.8c: the scene background picture the program draws under the
+/// camera, with its decoded pixels from the compositor's own image cache
+/// (`true` when they are BGRA). `None` without a background, or before the
+/// picture is decoded.
+pub(crate) struct RoomBackground {
+    pub(crate) background: EffectiveSceneBackground,
+    pub(crate) pixels: Arc<Vec<u8>>,
+    pub(crate) size: (u32, u32),
+    pub(crate) bgra: bool,
+}
+
+impl CompositorRuntime {
+    pub(crate) fn room_background(&self) -> Option<RoomBackground> {
+        let background = self.scene.as_ref()?.scene.as_ref()?.background.as_ref()?;
+        let source = self.image_sources.source_for_path(
+            &background_cache_key(background),
+            &background.managed_asset_path,
+        )?;
+        let size = source.width.zip(source.height)?;
+        let (pixels, bgra) = match (source.bgra, source.rgba) {
+            (Some(bgra), _) => (bgra, true),
+            (None, Some(rgba)) => (rgba, false),
+            (None, None) => return None,
+        };
+        Some(RoomBackground {
+            background: background.clone(),
+            pixels,
+            size,
+            bgra,
+        })
+    }
+}
+
+/// Plan 260 S1.8c: the scene background at `out_width` x `out_height`, opaque
+/// RGBA, placed as the program places it (the same zoom crop and fit through
+/// `gpu_source_placement`), on `ground` where a fitted picture leaves bars.
+/// The program draws no blur, dim, saturation or vignette on this path, so
+/// neither does this.
+pub(crate) fn room_background_rgba(
+    room: &RoomBackground,
+    out_width: u32,
+    out_height: u32,
+    ground: u8,
+) -> Option<Vec<u8>> {
+    let (width, height) = room.size;
+    if width == 0
+        || height == 0
+        || out_width == 0
+        || out_height == 0
+        || room.pixels.len() < width as usize * height as usize * 4
+    {
+        return None;
+    }
+    let (dest, crop) = gpu_source_placement(
+        width,
+        height,
+        PixelRect {
+            x: 0,
+            y: 0,
+            width: out_width,
+            height: out_height,
+        },
+        matches!(room.background.fit, BackgroundFit::Fit),
+        background_zoom_crop(Some(&room.background)),
+        (0.0, 0.0),
+        out_width,
+        out_height,
+    )?;
+    // Fractions to whole pixels, within the side.
+    let edge = |fraction: f32, side: u32| ((fraction * side as f32).round() as u32).min(side);
+    // The source rectangle the crop keeps.
+    let (x0, y0) = (edge(crop[0], width), edge(crop[1], height));
+    let (x1, y1) = (
+        width - edge(crop[2], width).min(width - x0),
+        height - edge(crop[3], height).min(height - y0),
+    );
+    let (crop_width, crop_height) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+    if crop_width == 0 || crop_height == 0 {
+        return None;
+    }
+    let mut cropped = Vec::with_capacity(crop_width as usize * crop_height as usize * 4);
+    for y in y0..y1 {
+        let start = (y as usize * width as usize + x0 as usize) * 4;
+        cropped.extend_from_slice(&room.pixels[start..start + crop_width as usize * 4]);
+    }
+    // Where it lands on the canvas.
+    let (dx, dy) = (edge(dest[0], out_width), edge(dest[1], out_height));
+    if dx >= out_width || dy >= out_height {
+        return None;
+    }
+    let dw = edge(dest[2], out_width).min(out_width - dx).max(1);
+    let dh = edge(dest[3], out_height).min(out_height - dy).max(1);
+    // A plain area resample: no key, a neutral look.
+    let mut plain = crate::protocol::default_layout_settings();
+    plain.camera_chroma_key_enabled = false;
+    plain.camera_look = crate::protocol::CameraLook::default();
+    let scaled = camera_role_rgba(&cropped, crop_width, crop_height, room.bgra, &plain, dw, dh)?;
+    let mut canvas = [ground, ground, ground, 255].repeat(out_width as usize * out_height as usize);
+    for row in 0..dh as usize {
+        let from = row * dw as usize * 4;
+        let to = ((dy as usize + row) * out_width as usize + dx as usize) * 4;
+        let source = &scaled[from..from + dw as usize * 4];
+        let target = &mut canvas[to..to + dw as usize * 4];
+        // A picture with transparency sits on the ground too.
+        for (out, pixel) in target.chunks_exact_mut(4).zip(source.chunks_exact(4)) {
+            let alpha = u16::from(pixel[3]);
+            for (channel, value) in out[..3].iter_mut().zip(&pixel[..3]) {
+                *channel = ((u16::from(*value) * alpha + u16::from(ground) * (255 - alpha) + 127)
+                    / 255) as u8;
+            }
+        }
+    }
+    Some(canvas)
+}
+
 pub(crate) fn camera_role_rgba(
     bytes: &[u8],
     width: u32,
