@@ -4,31 +4,34 @@
 //!
 //! The view holds the tier layout and the window's keys (⌘J Sidekick, ⌘F
 //! search chat, ⌘L write in chat, in the `StreamManager` key context). The
-//! header, tabs, stats bar, panes and status bar are the kit's
-//! (`videorc-kit`) and fill these regions when it lands; until then the
-//! regions are plain, so no kit item is copied here.
+//! header, stats bar, panes and status bar are the kit's (`videorc-kit`).
 
 use gpui::{
-    App, AppContext, Bounds, Context, FocusHandle, FontWeight, Global, KeyBinding, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, actions, div, point,
-    prelude::*, px, rgb, size,
+    App, AppContext, Bounds, Context, FocusHandle, Global, KeyBinding, Subscription, Window,
+    WindowHandle, actions, div, prelude::*, px, size,
 };
 
+use super::activity::activity_pane;
+use super::chat::chat_pane;
 use super::frame::{DEFAULT_HEIGHT, DEFAULT_WIDTH, StreamManagerFrame};
 use super::layout::{MIN_HEIGHT, MIN_WIDTH, Pane, Slot, Tier, right_pane_width, slot};
 use super::panes::{PaneKey, Panes, composer_available, key_runs};
+use super::sidekick::sidekick_pane;
+use super::stats::{SessionChip, stats_bar};
+use super::status::status_bar;
 use crate::app::menus::ToggleStreamManager;
+use videorc_app_core::stream_manager::copy::WINDOW_NAME;
+use videorc_kit::{
+    theme::{self, hsla},
+    window,
+    window_frame::{WindowFrame, WindowHeader},
+};
 
 actions!(stream_manager, [ShowSidekick, SearchChat, WriteInChat]);
 
 pub const KEY_CONTEXT: &str = "StreamManager";
 /// `WINDOW_NAMES.streamManager`.
-pub const TITLE: &str = "Stream Manager";
-
-// Plain colours until the kit's tokens land (the shell's).
-const GROUND: u32 = 0x161618;
-const HAIRLINE: u32 = 0x2c2c30;
-const TEXT: u32 = 0xe8e8ea;
+pub const TITLE: &str = WINDOW_NAME;
 
 /// The one window, its frame file, and whether the quit is closing it.
 struct Open {
@@ -108,20 +111,12 @@ pub fn show(cx: &mut App) {
             cx,
         )
     });
-    let opened = cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some(TITLE.into()),
-                appears_transparent: true,
-                traffic_light_position: Some(point(px(14.), px(13.))),
-            }),
-            window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
-            app_id: Some(app_id.into()),
-            ..Default::default()
-        },
-        move |window, cx| cx.new(|cx| StreamManager::new(frame, window, cx)),
-    );
+    let mut options = window::options(TITLE, bounds);
+    options.window_min_size = Some(size(px(MIN_WIDTH), px(MIN_HEIGHT)));
+    options.app_id = Some(app_id.into());
+    let opened = cx.open_window(options, move |window, cx| {
+        cx.new(|cx| StreamManager::new(frame, window, cx))
+    });
     match opened {
         Ok(window) => cx.global_mut::<Open>().window = Some(window),
         Err(error) => eprintln!("[videorc-app] the Stream Manager did not open: {error:#}"),
@@ -149,6 +144,8 @@ pub struct StreamManager {
     notices: gpui::Entity<crate::screens::notifications::Centre>,
     panes: Panes,
     facts: Facts,
+    chip: SessionChip,
+    pinned: bool,
     focus: FocusHandle,
     _bounds: Subscription,
 }
@@ -170,6 +167,8 @@ impl StreamManager {
             notices,
             panes: Panes::default(),
             facts: Facts::default(),
+            chip: SessionChip::OffAir,
+            pinned: false,
             focus,
             _bounds: bounds,
         }
@@ -184,14 +183,23 @@ impl StreamManager {
             cx.propagate();
             return;
         }
-        // The pane is shown now; its search field, composer and Sidekick's
-        // expand take the focus once the kit's panes are in it.
         let _focus = self.panes.key(key);
         cx.notify();
     }
 
-    fn region(&self, pane: Pane, tier: Tier, width: f32) -> Option<gpui::AnyElement> {
-        let region = div().h_full().flex().flex_col().min_w(px(0.));
+    fn region(
+        &self,
+        pane: Pane,
+        tier: Tier,
+        width: f32,
+        border: gpui::Hsla,
+    ) -> Option<gpui::AnyElement> {
+        let body = match pane {
+            Pane::Chat => chat_pane(),
+            Pane::Activity => activity_pane(),
+            Pane::Sidekick => sidekick_pane(),
+        };
+        let region = div().h_full().flex().flex_col().min_w(px(0.)).child(body);
         let region = match slot(pane, tier, self.panes.narrow(), self.panes.right()) {
             Slot::Hidden => return None,
             Slot::Whole | Slot::Left => region.flex_1(),
@@ -199,7 +207,7 @@ impl StreamManager {
                 .flex_none()
                 .w(px(right_pane_width(width)))
                 .border_l_1()
-                .border_color(rgb(HAIRLINE)),
+                .border_color(border),
         };
         Some(region.into_any_element())
     }
@@ -209,51 +217,58 @@ impl Render for StreamManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let width = f32::from(window.viewport_size().width);
         let tier = Tier::of(width);
+        let t = theme::resolve(None, window, cx);
+        let border = hsla(t.border);
+        let mac = cfg!(target_os = "macos");
         let regions = [Pane::Chat, Pane::Activity, Pane::Sidekick]
             .into_iter()
-            .filter_map(|pane| self.region(pane, tier, width));
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(GROUND))
-            .text_color(rgb(TEXT))
-            .track_focus(&self.focus)
-            .key_context(KEY_CONTEXT)
-            .on_action(cx.listener(
-                |this, _: &crate::screens::notifications::ToggleNotifications, _, cx| {
-                    this.notices.update(cx, |centre, cx| centre.toggle(cx))
-                },
-            ))
-            .on_action(
-                cx.listener(|this, _: &ShowSidekick, _, cx| this.run(PaneKey::ShowSidekick, cx)),
-            )
-            .on_action(cx.listener(|this, _: &SearchChat, _, cx| this.run(PaneKey::SearchChat, cx)))
-            .on_action(
-                cx.listener(|this, _: &WriteInChat, _, cx| this.run(PaneKey::WriteInChat, cx)),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .h(px(40.))
-                    .flex()
-                    .items_center()
-                    .pl(px(84.))
-                    .border_b_1()
-                    .border_color(rgb(HAIRLINE))
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(TITLE),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .flex()
-                    .flex_row()
-                    .children(regions),
-            )
-            .child(videorc_kit::status_bar::StatusBar::new().child(self.notices.clone()))
-            .child(self.notices.read(cx).toasts())
+            .filter_map(|pane| self.region(pane, tier, width, border));
+        let pinned = self.pinned;
+        let this = cx.entity().downgrade();
+        WindowFrame::new().child(
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .track_focus(&self.focus)
+                .key_context(KEY_CONTEXT)
+                .on_action(cx.listener(
+                    |this, _: &crate::screens::notifications::ToggleNotifications, _, cx| {
+                        this.notices.update(cx, |centre, cx| centre.toggle(cx))
+                    },
+                ))
+                .on_action(
+                    cx.listener(|this, _: &ShowSidekick, _, cx| {
+                        this.run(PaneKey::ShowSidekick, cx)
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &SearchChat, _, cx| this.run(PaneKey::SearchChat, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &WriteInChat, _, cx| this.run(PaneKey::WriteInChat, cx)),
+                )
+                .child(WindowHeader::new(TITLE).mac(mac))
+                .child(stats_bar(t, self.chip))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .flex()
+                        .flex_row()
+                        .children(regions),
+                )
+                .child(status_bar(
+                    self.notices.clone(),
+                    pinned,
+                    move |next, _, _, app| {
+                        let _ = this.update(app, |this, cx| {
+                            this.pinned = next;
+                            cx.notify();
+                        });
+                    },
+                ))
+                .child(self.notices.read(cx).toasts()),
+        )
     }
 }
