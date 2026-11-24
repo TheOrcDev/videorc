@@ -656,17 +656,34 @@ impl<B: StudioBackend> Studio<B> {
     /// scene with the working background, committed; the reload a switch
     /// overtook persists nothing.
     async fn reload_scene_for_ring(&self) {
+        match self.load_scene_from_capture_config().await {
+            Ok(()) => {}
+            Err(error) if is_scene_reload_superseded(&error) => {}
+            Err(error) => self.report_ring_reload_failure(&error),
+        }
+    }
+
+    /// `loadScene` with the capture config (`reloadSceneFromCaptureConfig`):
+    /// the capture config's scene with the working background is committed
+    /// (`scene.load_from_capture_config`, `applyCommittedScene`), and the
+    /// working setup it confirms is saved (`persistWorkingVisual`); a reload
+    /// a key or switch overtook saves nothing. Nothing is asked while the
+    /// backend is away. S1.6b part 5e: the Clips ring's reload and the scene
+    /// editor's reload after an idle pick share it.
+    pub(super) async fn load_scene_from_capture_config(
+        &self,
+    ) -> Result<(), crate::client::RpcError> {
         let mark: ReloadMark = self.scene_reload_mark();
         let request = {
             let mut guard = self.lock();
             let inner = &mut *guard;
             if !matches!(inner.connection, Connection::Connected { .. }) {
-                return;
+                return Ok(());
             }
             let view = inner.settings_view();
             let params = preview_scene::studio_scene_params(&view.capture, &view.studio, false);
             let Ok(mut params) = serde_json::to_value(&params) else {
-                return;
+                return Ok(());
             };
             if let Some(background) = inner.scenes.switch.working_background.clone() {
                 params["background"] = background;
@@ -678,27 +695,26 @@ impl<B: StudioBackend> Studio<B> {
             )
         };
         let (params, layout, sources) = request;
-        match self.backend.scene_request(SCENE_LOAD_METHOD, params).await {
-            Ok(status) => {
-                let scene = status.get("scene").cloned();
-                if let Some(committed) = scene
-                    .clone()
-                    .and_then(|scene| serde_json::from_value::<videorc_protocol::Scene>(scene).ok())
-                {
-                    self.lock().sources.set_scene(committed);
-                    self.publish();
-                }
-                let background = scene
-                    .as_ref()
-                    .and_then(|scene| scene.get("background"))
-                    .filter(|background| background.is_object())
-                    .cloned();
-                self.note_scene_reloaded(mark, &layout, &sources, background)
-                    .await;
-            }
-            Err(error) if is_scene_reload_superseded(&error) => {}
-            Err(error) => self.report_ring_reload_failure(&error),
+        let status = self
+            .backend
+            .scene_request(SCENE_LOAD_METHOD, params)
+            .await?;
+        let scene = status.get("scene").cloned();
+        if let Some(committed) = scene
+            .clone()
+            .and_then(|scene| serde_json::from_value::<videorc_protocol::Scene>(scene).ok())
+        {
+            self.lock().sources.set_scene(committed);
+            self.publish();
         }
+        let background = scene
+            .as_ref()
+            .and_then(|scene| scene.get("background"))
+            .filter(|background| background.is_object())
+            .cloned();
+        self.note_scene_reloaded(mark, &layout, &sources, background)
+            .await;
+        Ok(())
     }
 
     /// `restartReplayForSources`'s `.catch`: the failed reload is logged,

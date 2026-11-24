@@ -449,6 +449,11 @@ pub struct StudioSnapshot {
     /// S1.6a part 6c: the Output page's Clips section (the switch, the
     /// ring's state, why it waits).
     pub clips: clips_ring::ClipsView,
+    /// S1.6b part 5e: the Scene page's canvas editor is open
+    /// (`sceneEditMode`). The scene editor holds the idle scene reload
+    /// (`shouldReloadSceneFromCaptureConfig`), so an idle screen or camera
+    /// pick made while it is open loads the scene itself.
+    pub scene_edit_mode: bool,
 }
 
 /// What a start did.
@@ -563,6 +568,9 @@ struct Inner {
     recordings_folder_facts: Option<(PathBuf, recordings_folder::DirectoryFacts)>,
     /// S1.6a part 6c: the Clips ring's controller, its timer and queue.
     clips: clips_actions::ClipsCore,
+    /// S1.6b part 5e: the Scene page's canvas editor is open
+    /// (`sceneEditMode`).
+    scene_edit_mode: bool,
 }
 
 /// S2.6c: the exclusion list's bookkeeping.
@@ -819,6 +827,7 @@ impl<B: StudioBackend> Studio<B> {
             live_audio_tokens: 0,
             recordings_folder_facts: None,
             clips: clips_actions::ClipsCore::default(),
+            scene_edit_mode: false,
         };
         // Writes a previous run journaled wait in the cache until the
         // snapshot is in; then they are sent.
@@ -1733,7 +1742,7 @@ impl<B: StudioBackend> Studio<B> {
         streaming: Option<StreamingSettings>,
     ) -> StartOutcome {
         let _running = self.start_lock.lock().await;
-        let (params, attempted) = {
+        let (params, attempted, start_sources) = {
             let mut inner = self.lock();
             if !inner.session.begin_start(intent) {
                 return StartOutcome::Busy;
@@ -1780,11 +1789,13 @@ impl<B: StudioBackend> Studio<B> {
                     },
                 ),
                 attempted,
+                // `sessionCaptureConfig.sources`: what the window rebind reads.
+                view.capture_doc["sources"].clone(),
             )
         };
         self.publish();
         self.post(attempted);
-        let params = match params {
+        let mut params = match params {
             Ok(params) => params,
             Err(message) => return self.refuse_start(message),
         };
@@ -1794,6 +1805,13 @@ impl<B: StudioBackend> Studio<B> {
             Ok(folder) => folder,
             Err(message) => return self.refuse_start(message),
         };
+        // S1.6b part 5e (plan 219 S3): a picked window that is not already
+        // live may have been closed and reopened under a new id. One
+        // window-list read, only then; no match leaves the pick alone (never
+        // a display or another window), and the backend names the refusal.
+        if let Some(window_id) = self.rebind_window_before_start(&start_sources).await {
+            params.sources.window_id = Some(window_id);
+        }
         self.prepare_session_capture(&params.sources, &params.output.video)
             .await;
         // S1.6b part 5d (plan 069): the audio this start sends seeds the
@@ -2570,6 +2588,7 @@ impl<B: StudioBackend> Studio<B> {
             takeover_mute_ownership,
             recordings_folder,
             clips,
+            scene_edit_mode: inner.scene_edit_mode,
         }
     }
 }

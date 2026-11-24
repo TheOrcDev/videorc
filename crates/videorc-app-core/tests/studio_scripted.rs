@@ -83,6 +83,16 @@ struct Script {
     /// Clips request made.
     replay_status: Option<Value>,
     clips_calls: Vec<(String, Value)>,
+    /// S1.6b part 5e: the ScreenCaptureKit windows `devices.list` lists
+    /// after the other devices (id, name); `sources.resolve_app_window`'s
+    /// answer (none: not connected) and every request it got; and
+    /// `scene.load_from_capture_config`'s answer (none: not connected, as
+    /// before part 5e) and every request it got.
+    windows: Vec<(String, String)>,
+    app_window: Option<Value>,
+    resolver_calls: Vec<Value>,
+    scene_load: Option<Value>,
+    scene_loads: Vec<Value>,
 }
 
 struct Scripted {
@@ -121,11 +131,17 @@ impl StudioBackend for Scripted {
 
     async fn devices(&self) -> Result<DeviceList, RpcError> {
         self.note("devices.list");
-        let ids = self.script.lock().unwrap().device_ids.clone();
-        Ok(match ids {
+        let (ids, windows) = {
+            let script = self.script.lock().unwrap();
+            (script.device_ids.clone(), script.windows.clone())
+        };
+        let mut list = match ids {
             Some(ids) => devices(&ids.iter().map(String::as_str).collect::<Vec<_>>()),
             None => devices(&["camera:1", "screen:screencapturekit:1"]),
-        })
+        };
+        list.devices
+            .extend(windows.iter().map(|(id, name)| window_device(id, name)));
+        Ok(list)
     }
 
     async fn recording_status(&self) -> Result<RecordingStatus, RpcError> {
@@ -325,6 +341,20 @@ impl StudioBackend for Scripted {
                 "sceneId": script.scene_get.as_ref().map(|scene| scene["id"].clone()),
             })),
             "diagnostics.stats" => Ok(json!({"activeSceneRevision": script.scene_revision})),
+            "sources.resolve_app_window" => {
+                script.resolver_calls.push(params);
+                script
+                    .app_window
+                    .clone()
+                    .ok_or_else(|| RpcError::not_connected(method))
+            }
+            "scene.load_from_capture_config" => {
+                script.scene_loads.push(params);
+                script
+                    .scene_load
+                    .clone()
+                    .ok_or_else(|| RpcError::not_connected(method))
+            }
             _ => Err(RpcError::not_connected(method)),
         }
     }
@@ -474,6 +504,22 @@ fn devices(ids: &[&str]) -> DeviceList {
             })
             .collect(),
         warnings: Vec::new(),
+    }
+}
+
+/// S1.6b part 5e: an on-screen ScreenCaptureKit window.
+fn window_device(id: &str, name: &str) -> Device {
+    Device {
+        app: None,
+        window_title: None,
+        display_uuid: None,
+        id: id.to_string(),
+        name: name.to_string(),
+        kind: DeviceKind::Window,
+        status: DeviceStatus::Available,
+        detail: None,
+        width: None,
+        height: None,
     }
 }
 
@@ -3252,4 +3298,249 @@ async fn a_chosen_folder_rides_each_start_as_a_capability() {
         backend.script.lock().unwrap().started_into,
         [None, Some("resource:folder-1".to_string()), None]
     );
+}
+
+// --- S1.6b part 5e: the window rebind, the resolver's app state, the editor's reload ---
+
+const ALPHA_OLD: &str = "window:screencapturekit:40696";
+const ALPHA_NEW: &str = "window:screencapturekit:51234";
+const ALPHA: &str = "Fixture Alpha - Alpha";
+
+/// A launched Studio whose capture is the window `ALPHA`, listed under its
+/// old id.
+async fn window_studio() -> (Arc<Scripted>, Arc<Studio<Scripted>>) {
+    let backend = Scripted::new();
+    let config = json!({
+        "recordEnabled": true,
+        "sources": {"windowId": ALPHA_OLD, "windowName": ALPHA, "cameraOff": true}
+    });
+    backend.with(|script| {
+        script.windows = vec![(ALPHA_OLD.to_string(), ALPHA.to_string())];
+        script.settings.insert(
+            keys::CAPTURE_CONFIG.to_string(),
+            Value::String(config.to_string()),
+        );
+    });
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    assert_eq!(
+        studio.snapshot().settings.capture_doc["sources"]["windowId"],
+        ALPHA_OLD
+    );
+    (backend, studio)
+}
+
+/// Plan 219 S3 (`window-source-rebind.test.ts`): a window closed and
+/// reopened under a new id is picked up again at Record, with one
+/// window-list read before `session.start`, and the pick keeps its new id.
+#[tokio::test]
+async fn a_window_reopened_under_a_new_id_is_picked_up_again_at_record() {
+    let (backend, studio) = window_studio().await;
+    // Closed and reopened: the list names it under a new id; no event came.
+    backend.with(|script| script.windows = vec![(ALPHA_NEW.to_string(), ALPHA.to_string())]);
+    let reads = backend.count("devices.list");
+    assert_eq!(studio.start_recording().await, StartOutcome::Started);
+    assert_eq!(
+        backend.count("devices.list"),
+        reads + 1,
+        "one window-list read"
+    );
+    {
+        let script = backend.script.lock().unwrap();
+        assert_eq!(
+            script.started_with[0].sources.window_id.as_deref(),
+            Some(ALPHA_NEW)
+        );
+        assert_eq!(
+            script
+                .screen_starts
+                .last()
+                .unwrap()
+                .sources
+                .window_id
+                .as_deref(),
+            Some(ALPHA_NEW),
+            "the session's capture starts on the window's new id"
+        );
+    }
+    let snapshot = studio.snapshot();
+    assert_eq!(
+        snapshot.settings.capture_doc["sources"]["windowId"],
+        ALPHA_NEW
+    );
+    assert_eq!(
+        snapshot.settings.capture_doc["sources"]["windowName"],
+        ALPHA
+    );
+    assert!(snapshot.sources.device(ALPHA_NEW).is_some());
+    assert_eq!(
+        stored_json(&backend, keys::CAPTURE_CONFIG).unwrap()["sources"]["windowId"],
+        ALPHA_NEW
+    );
+}
+
+/// Plan 219 S3: no match leaves the pick alone (the backend names the
+/// refusal), and a capture already live on the picked window costs no read.
+#[tokio::test]
+async fn a_window_with_no_match_or_already_live_is_left_alone_at_record() {
+    let (backend, studio) = window_studio().await;
+    // Closed for good: nothing of that name (and never a display).
+    backend.with(|script| script.windows.clear());
+    let reads = backend.count("devices.list");
+    assert_eq!(studio.start_recording().await, StartOutcome::Started);
+    assert_eq!(backend.count("devices.list"), reads + 1);
+    assert_eq!(
+        backend.script.lock().unwrap().started_with[0]
+            .sources
+            .window_id
+            .as_deref(),
+        Some(ALPHA_OLD)
+    );
+    assert_eq!(
+        studio.snapshot().settings.capture_doc["sources"]["windowId"],
+        ALPHA_OLD
+    );
+
+    // Live on the picked window: the record-latency budget, no round trip.
+    let (backend, studio) = window_studio().await;
+    studio
+        .handle_event(BackendEvent::Untyped {
+            event: "preview.screen.status".to_string(),
+            payload: json!({"state": "live", "sourceId": ALPHA_OLD}),
+        })
+        .await;
+    let reads = backend.count("devices.list");
+    assert_eq!(studio.start_recording().await, StartOutcome::Started);
+    assert_eq!(backend.count("devices.list"), reads);
+}
+
+/// Plan 210 D1: the working sources' reconcile says what the resolver found
+/// about the app of the scene on stream ("Figma's window is minimized"),
+/// not the device list's guess ("isn't open"); a new device list clears it
+/// and asks again.
+#[tokio::test]
+async fn the_reconcile_keeps_what_the_resolver_said_about_the_scenes_app() {
+    use videorc_app_core::scenes::window::{AppWindowFailure, SceneAppState};
+    // A profile whose scene on stream was made for Figma.
+    let (backend, first) = scenes_studio(capture_config_with_camera()).await;
+    assert!(apply(&first, "default-screen-only").await);
+    drop(first);
+    let figma = json!({"bundleId": "com.figma.Desktop", "name": "Figma", "follows": false});
+    let mut library = stored_json(&backend, keys::SCENES).unwrap();
+    for scene in library["scenes"].as_array_mut().unwrap() {
+        if scene["id"] == "default-screen-only" {
+            let mut shows = figma.clone();
+            shows["kind"] = json!("app");
+            scene["shows"] = shows;
+        }
+    }
+    let mut working = stored_json(&backend, keys::WORKING_SCENE).unwrap();
+    working["visual"]["sources"]["app"] = figma;
+    backend.with(|script| {
+        script
+            .settings
+            .insert(keys::SCENES.to_string(), Value::String(library.to_string()));
+        script.settings.insert(
+            keys::WORKING_SCENE.to_string(),
+            Value::String(working.to_string()),
+        );
+        script.app_window = Some(json!({"ok": false, "reason": "minimized"}));
+    });
+
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let snapshot = studio.snapshot();
+    assert_eq!(
+        snapshot.scenes.on_stream_id.as_deref(),
+        Some("default-screen-only")
+    );
+    let asked = backend.script.lock().unwrap().resolver_calls.clone();
+    assert!(
+        !asked.is_empty(),
+        "the launch's reconcile asks the resolver"
+    );
+    assert_eq!(asked[0]["bundleId"], "com.figma.Desktop");
+    assert_eq!(
+        snapshot.scenes.app_states.get("default-screen-only"),
+        Some(&SceneAppState::Failed(AppWindowFailure::Minimized))
+    );
+
+    // A new device list clears the answer, and the reconcile asks again.
+    backend.with(|script| script.app_window = Some(json!({"ok": false, "reason": "no-window"})));
+    studio
+        .handle_event(BackendEvent::DevicesChanged(Box::new(devices(&[
+            "camera:1",
+            "screen:screencapturekit:1",
+        ]))))
+        .await;
+    assert_eq!(
+        backend.script.lock().unwrap().resolver_calls.len(),
+        asked.len() + 1
+    );
+    assert_eq!(
+        studio
+            .snapshot()
+            .scenes
+            .app_states
+            .get("default-screen-only"),
+        Some(&SceneAppState::Failed(AppWindowFailure::NoWindow))
+    );
+}
+
+/// Every `scene.load_from_capture_config` asked for.
+fn loads(backend: &Scripted) -> Vec<Value> {
+    backend.script.lock().unwrap().scene_loads.clone()
+}
+
+/// `switchSourceDeviceLive`: the scene editor holds the idle reload, so an
+/// idle screen or camera pick made while it is open loads the scene with
+/// the pick; with the editor closed the preview feed's idle reload does.
+#[tokio::test]
+async fn an_idle_pick_in_the_scene_editor_loads_the_scene() {
+    use videorc_app_core::studio::source_selection::SourceKind;
+    let backend = Scripted::new();
+    backend.with(|script| {
+        script.device_ids = Some(vec![
+            "camera:1".to_string(),
+            "screen:screencapturekit:1".to_string(),
+            "screen:screencapturekit:2".to_string(),
+        ]);
+        script.settings.insert(
+            keys::CAPTURE_CONFIG.to_string(),
+            Value::String(capture_config_with_camera().to_string()),
+        );
+        script.scene_load = Some(json!({"scene": serde_json::to_value(scene()).unwrap()}));
+    });
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+
+    // The editor closed: the pick lands and loads nothing here.
+    studio
+        .select_source_device(SourceKind::Capture, Some("screen:screencapturekit:2"))
+        .await
+        .expect("the pick lands");
+    assert!(loads(&backend).is_empty());
+
+    studio.set_scene_edit_mode(true);
+    assert!(studio.snapshot().scene_edit_mode);
+    studio
+        .select_source_device(SourceKind::Capture, Some("screen:screencapturekit:1"))
+        .await
+        .expect("the pick lands");
+    let loaded = loads(&backend);
+    assert_eq!(loaded.len(), 1, "the editor's scene loads with the pick");
+    assert_eq!(
+        loaded[0]["sources"]["screenId"],
+        "screen:screencapturekit:1"
+    );
+    assert_eq!(loaded[0]["sources"]["cameraId"], "camera:1");
+    // The camera's Off is a pick too.
+    studio
+        .select_source_device(SourceKind::Camera, None)
+        .await
+        .expect("the pick lands");
+    assert_eq!(loads(&backend).len(), 2);
+
+    studio.set_scene_edit_mode(false);
+    assert!(!studio.snapshot().scene_edit_mode);
 }
