@@ -101,13 +101,9 @@ impl ChatFilter {
             return false;
         }
         let query = self.search.trim().to_lowercase();
-        if !query.is_empty()
-            && !message.message_text.to_lowercase().contains(&query)
-            && !message.author_name.to_lowercase().contains(&query)
-        {
-            return false;
-        }
-        true
+        query.is_empty()
+            || message.message_text.to_lowercase().contains(&query)
+            || message.author_name.to_lowercase().contains(&query)
     }
 }
 

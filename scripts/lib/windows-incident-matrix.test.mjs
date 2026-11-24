@@ -175,9 +175,197 @@ test('missing physical prerequisites remain blocked while actual failures take p
   const blocked = { state: 'BLOCKED', verdict: { pass: false } }
   const passed = { verdict: { pass: true } }
   const failed = { verdict: { pass: false } }
-  assert.equal(incidentAggregateVerdict([blocked, passed], 2), 'BLOCKED')
-  assert.equal(incidentAggregateVerdict([blocked, failed], 2), 'FAIL')
-  assert.equal(incidentAggregateVerdict([passed], 1), 'PASS')
+  assert.equal(incidentAggregateVerdict([blocked, passed], 2).verdict, 'BLOCKED')
+  assert.equal(incidentAggregateVerdict([blocked, failed], 2).verdict, 'FAIL')
+  assert.equal(incidentAggregateVerdict([passed], 1).verdict, 'PASS')
+})
+
+test('CI incident aggregate tolerates one single 3-frame repeated-frame burst when two reps pass', async () => {
+  const {
+    INCIDENT_CI_REPEATED_FRAME_BURST_ONLY,
+    isExactCiRepeatedFrameAnalyzerFailure,
+    isIncidentCiRepeatedFrameNoise,
+    incidentScenarioSurvivesCiNoise
+  } = await import('./windows-incident-matrix.mjs')
+  const { incidentAggregateVerdict } = await import('./windows-incident-runner.mjs')
+  const scenarioId = '720p30-single-controlled-same-process'
+  const noiseLine = `receiver-1 analyzed A/V artifact missing or failed: ${INCIDENT_CI_REPEATED_FRAME_BURST_ONLY}`
+  const cleanArtifact = {
+    role: 'receiver-1',
+    verdict: 'PASS',
+    width: 1280,
+    height: 720,
+    hasAudio: true,
+    packetTail: { pass: true, tailMismatchMs: 12 },
+    failures: []
+  }
+  const noisyArtifact = {
+    ...cleanArtifact,
+    verdict: 'FAIL',
+    failures: [INCIDENT_CI_REPEATED_FRAME_BURST_ONLY]
+  }
+  const noisyRun = {
+    scenario: scenarioId,
+    repetition: 3,
+    startOutcome: 'running',
+    cleanup: { receiversReaped: true, sessionIdle: true },
+    errors: [],
+    failure: null,
+    artifacts: [noisyArtifact],
+    verdict: { pass: false, failures: [noiseLine] }
+  }
+
+  assert.equal(isExactCiRepeatedFrameAnalyzerFailure([INCIDENT_CI_REPEATED_FRAME_BURST_ONLY]), true)
+  assert.equal(
+    isExactCiRepeatedFrameAnalyzerFailure([
+      INCIDENT_CI_REPEATED_FRAME_BURST_ONLY,
+      'Packet A/V tail mismatch of 140ms exceeds 100ms'
+    ]),
+    false
+  )
+  assert.equal(isIncidentCiRepeatedFrameNoise(noisyRun), true)
+  assert.equal(
+    isIncidentCiRepeatedFrameNoise({
+      ...noisyRun,
+      verdict: { pass: false, failures: [noiseLine, 'startup did not reach running'] }
+    }),
+    false
+  )
+  // Joined analyzer string (evaluateWindowsIncidentRun joins with "; ") must not match.
+  assert.equal(
+    isIncidentCiRepeatedFrameNoise({
+      ...noisyRun,
+      artifacts: [
+        {
+          ...noisyArtifact,
+          failures: [
+            INCIDENT_CI_REPEATED_FRAME_BURST_ONLY,
+            'Packet A/V tail mismatch of 140ms exceeds 100ms'
+          ]
+        }
+      ],
+      verdict: {
+        pass: false,
+        failures: [
+          `receiver-1 analyzed A/V artifact missing or failed: ${INCIDENT_CI_REPEATED_FRAME_BURST_ONLY}; Packet A/V tail mismatch of 140ms exceeds 100ms`
+        ]
+      }
+    }),
+    false
+  )
+  // Dimensions / audio / packet-tail predicates stay independent of the analyzer burst.
+  assert.equal(
+    isIncidentCiRepeatedFrameNoise({
+      ...noisyRun,
+      artifacts: [{ ...noisyArtifact, width: 1920 }]
+    }),
+    false
+  )
+  assert.equal(
+    isIncidentCiRepeatedFrameNoise({
+      ...noisyRun,
+      artifacts: [{ ...noisyArtifact, hasAudio: false }]
+    }),
+    false
+  )
+  assert.equal(
+    isIncidentCiRepeatedFrameNoise({
+      ...noisyRun,
+      artifacts: [
+        {
+          ...noisyArtifact,
+          packetTail: { pass: false, tailMismatchMs: 140, reason: 'Packet A/V tail mismatch' }
+        }
+      ]
+    }),
+    false
+  )
+
+  const scenarioRuns = [
+    {
+      scenario: scenarioId,
+      repetition: 1,
+      verdict: { pass: true, failures: [] },
+      artifacts: [cleanArtifact]
+    },
+    {
+      scenario: scenarioId,
+      repetition: 2,
+      verdict: { pass: true, failures: [] },
+      artifacts: [cleanArtifact]
+    },
+    noisyRun
+  ]
+  assert.equal(incidentScenarioSurvivesCiNoise(scenarioRuns).pass, true)
+
+  const strict = incidentAggregateVerdict(scenarioRuns, 3)
+  assert.equal(strict.verdict, 'FAIL')
+
+  const ci = incidentAggregateVerdict(scenarioRuns, 3, { ci: true })
+  assert.equal(ci.verdict, 'PASS')
+  assert.equal(ci.ciNoiseTolerated?.length, 1)
+  assert.match(ci.ciNoiseTolerated[0].reason, /CI runner noise/)
+
+  const twoNoisy = incidentAggregateVerdict(
+    [...scenarioRuns.slice(0, 1), { ...noisyRun, repetition: 2 }, noisyRun],
+    3,
+    { ci: true }
+  )
+  assert.equal(twoNoisy.verdict, 'FAIL')
+
+  const realFreeze = incidentAggregateVerdict(
+    [
+      ...scenarioRuns.slice(0, 2),
+      {
+        ...noisyRun,
+        artifacts: [
+          {
+            ...noisyArtifact,
+            failures: [
+              'repeated-frame burst of 7 consecutive identical frames exceeds 2 (1 burst(s))'
+            ]
+          }
+        ],
+        verdict: {
+          pass: false,
+          failures: [
+            'receiver-1 analyzed A/V artifact missing or failed: repeated-frame burst of 7 consecutive identical frames exceeds 2 (1 burst(s))'
+          ]
+        }
+      }
+    ],
+    3,
+    { ci: true }
+  )
+  assert.equal(realFreeze.verdict, 'FAIL')
+
+  const hiddenTail = incidentAggregateVerdict(
+    [
+      ...scenarioRuns.slice(0, 2),
+      {
+        ...noisyRun,
+        artifacts: [
+          {
+            ...noisyArtifact,
+            packetTail: { pass: false, tailMismatchMs: 140 },
+            failures: [
+              INCIDENT_CI_REPEATED_FRAME_BURST_ONLY,
+              'Packet A/V tail mismatch of 140ms exceeds 100ms'
+            ]
+          }
+        ],
+        verdict: {
+          pass: false,
+          failures: [
+            `receiver-1 analyzed A/V artifact missing or failed: ${INCIDENT_CI_REPEATED_FRAME_BURST_ONLY}; Packet A/V tail mismatch of 140ms exceeds 100ms`
+          ]
+        }
+      }
+    ],
+    3,
+    { ci: true }
+  )
+  assert.equal(hiddenTail.verdict, 'FAIL')
 })
 
 test('unsafe startup cleanup cannot become safe when no receiver reached the owned list', async () => {

@@ -53,8 +53,7 @@ const snapshot: NotificationsSnapshot = {
       actions: []
     }
   ],
-  count: { unread: 2, urgent: 1, tone: 'urgent' },
-  quiet: true
+  count: { unread: 2, urgent: 1, tone: 'urgent' }
 }
 
 beforeEach(() => {
@@ -150,9 +149,9 @@ describe("the Stream Manager's bell (plan 250 S8)", () => {
       actionId: 'unmute',
       door: false
     })
-    expect(document.querySelector('[data-notification-quiet-line]')?.textContent).toBe(
-      'Quiet while recording or live.'
-    )
+    // The quiet line and its switch are gone (the owner's rule made it
+    // always true).
+    expect(document.querySelector('[data-notification-quiet-line]')).toBeNull()
   })
 
   it('folds into the ⋯ menu, which opens the list', async () => {

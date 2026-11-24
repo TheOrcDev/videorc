@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
-use chrono::{DateTime, Datelike, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
@@ -303,21 +303,50 @@ pub struct YouTubeQuotaPaused {
 
 /// The next 00:00 America/Los_Angeles after `now`, DST-aware.
 pub fn next_pacific_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
-    let local = now.with_timezone(&chrono_tz::America::Los_Angeles);
-    let tomorrow = local.date_naive().succ_opt().unwrap_or(local.date_naive());
+    let today = pacific_date(now);
+    let tomorrow = today.succ_opt().unwrap_or(today);
     let midnight = tomorrow.and_hms_opt(0, 0, 0).expect("midnight exists");
-    chrono_tz::America::Los_Angeles
-        .from_local_datetime(&midnight)
-        .earliest()
-        .map(|local_midnight| local_midnight.with_timezone(&Utc))
+    crate::tzdb::zone(PACIFIC)
+        .ok()
+        .and_then(|zone| {
+            let local = jiff::civil::DateTime::new(
+                i16::try_from(tomorrow.year()).ok()?,
+                tomorrow.month() as i8,
+                tomorrow.day() as i8,
+                0,
+                0,
+                0,
+                0,
+            )
+            .ok()?;
+            let instant = zone.to_ambiguous_timestamp(local).earlier().ok()?;
+            crate::tzdb::utc(instant).ok()
+        })
         // Midnight never falls in a DST gap in Los Angeles, but never panic on
         // a calendar: fall back to PST (UTC-8).
         .unwrap_or_else(|| midnight.and_utc() + chrono::Duration::hours(8))
 }
 
+const PACIFIC: &str = "America/Los_Angeles";
+
+/// The Pacific calendar date of `now` (PST's if the zone were ever missing).
+fn pacific_date(now: DateTime<Utc>) -> chrono::NaiveDate {
+    crate::tzdb::zone(PACIFIC)
+        .ok()
+        .and_then(|zone| {
+            let date = zone.to_datetime(crate::tzdb::timestamp(now).ok()?).date();
+            chrono::NaiveDate::from_ymd_opt(
+                date.year().into(),
+                date.month() as u32,
+                date.day() as u32,
+            )
+        })
+        .unwrap_or_else(|| (now - chrono::Duration::hours(8)).date_naive())
+}
+
 /// The Pacific calendar day of `now`, `YYYY-MM-DD`.
 pub fn pacific_day(now: DateTime<Utc>) -> String {
-    let local = now.with_timezone(&chrono_tz::America::Los_Angeles);
+    let local = pacific_date(now);
     format!(
         "{:04}-{:02}-{:02}",
         local.year(),

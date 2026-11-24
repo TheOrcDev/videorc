@@ -33,10 +33,6 @@ export const openOutputClips = door('output-clips', () => openWorkspaceTab('reco
 export const openOutputVideorcCamera = door('output-videorc-camera', () =>
   openWorkspaceTab('recording')
 )
-/** Settings → General → Notifications, at the quiet switch. */
-export const openNotificationSettings = door('settings-notifications', () =>
-  openWorkspaceTab('settings', 'general')
-)
 /** Destinations → Setup → Videorc Cloud. */
 export const openDestinationsCloud = door('destinations-cloud', () =>
   openWorkspaceTab('live', 'setup')

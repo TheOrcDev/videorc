@@ -5,6 +5,7 @@
 //! the backend; nothing here talks to a room.
 
 pub mod layout;
+pub mod program;
 pub mod session;
 pub mod stage_screens;
 pub mod view;

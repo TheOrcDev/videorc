@@ -44,8 +44,7 @@ const entry: RelayedNotification = {
 }
 const snapshot: NotificationsSnapshot = {
   entries: [entry],
-  count: { unread: 1, urgent: 1, tone: 'urgent' },
-  quiet: true
+  count: { unread: 1, urgent: 1, tone: 'urgent' }
 }
 
 describe("the Stream Manager's copy of the list (plan 250 S8)", () => {

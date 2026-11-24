@@ -87,12 +87,6 @@ export type SettingsState = {
    */
   studioChat?: boolean
   /**
-   * Quiet while recording or live (plan 250, D4): only an urgent problem
-   * pops up as a toast; everything else waits behind the bell. Default on:
-   * an absent key is on.
-   */
-  quietWhileLive?: boolean
-  /**
    * OS-global shortcuts (work with the app unfocused — a Stream Deck's
    * native Hotkey action drives these). Electron accelerator syntax.
    */
@@ -1595,6 +1589,22 @@ export function normalizeCaptionsCaptureSettings(
     textSize:
       loaded?.textSize === 's' || loaded?.textSize === 'l' ? loaded.textSize : defaults.textSize
   }
+}
+
+/**
+ * Keys an older Videorc kept in `videorc.settings` that nothing reads any
+ * more. A settings file that still has one loads as before; the key is
+ * dropped on read, so the next save leaves it out.
+ *
+ * - `quietWhileLive`: "Quiet while recording or live" (plan 250 D4), retired
+ *   once only an urgent problem or a press's answer pops up, live or not.
+ */
+export const RETIRED_SETTINGS_KEYS: readonly string[] = ['quietWhileLive']
+
+/** `settings` without the retired keys (see `RETIRED_SETTINGS_KEYS`). */
+export function withoutRetiredSettings<T extends object>(settings: T): T {
+  const retired = new Set(RETIRED_SETTINGS_KEYS)
+  return Object.fromEntries(Object.entries(settings).filter(([key]) => !retired.has(key))) as T
 }
 
 export function loadJson<T>(key: string, fallback: T): T {

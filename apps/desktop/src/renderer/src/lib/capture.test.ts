@@ -65,7 +65,8 @@ import {
   streamOutputVideoSettings,
   streamOutputVideosForTargets,
   videoProfileCompatibility,
-  videoPresets
+  videoPresets,
+  withoutRetiredSettings
 } from './capture'
 import { returningSourceChoices } from './source-return'
 
@@ -2898,5 +2899,18 @@ describe('videoProfileCompatibility on Windows (issue #1062)', () => {
     const result = videoProfileCompatibility(config, 'win32')
     expect(result.blockingReason).toBeNull()
     expect(result.warning).toMatch(/4K local recording while livestreaming/)
+  })
+})
+
+describe('retired settings keys', () => {
+  it('drops "Quiet while recording or live" on read, and keeps everything else', () => {
+    expect(
+      withoutRetiredSettings({
+        quietWhileLive: false,
+        studioChat: true,
+        keepOriginalRecording: false
+      })
+    ).toEqual({ studioChat: true, keepOriginalRecording: false })
+    expect(withoutRetiredSettings({ studioChat: true })).toEqual({ studioChat: true })
   })
 })
