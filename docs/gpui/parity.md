@@ -431,7 +431,7 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 | P268 | "Takeover" header + "Open Images" cog | Opens Images page | `renderer/components/studio/session-panel.tsx:680` | [ ] | [ ] | [ ] |
 | P269 | Empty "No takeovers yet." + "Add in Images" | Opens Images | `renderer/components/studio/session-panel.tsx:684` | [ ] | [ ] | [ ] |
 | P270 | Takeover buttons (by name) | Cover output / click again to return | `renderer/components/studio/session-panel.tsx:703` | [ ] | [ ] | [ ] |
-| P271 | Hint line | What a click does, or disconnected reason | `renderer/components/studio/session-panel.tsx:740` | [ ] | [ ] | [ ] |
+| P271 | Hint line | What a click does, or disconnected reason | `renderer/components/studio/session-panel.tsx:740` | [[x] | [ ] | [ ] |
 
 ### Studio dashboard bottom row (studio-dashboard-bottom-row.tsx)
 

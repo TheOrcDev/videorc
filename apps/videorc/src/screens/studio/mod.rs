@@ -11,6 +11,7 @@
 pub mod layout;
 pub mod session;
 pub mod space;
+pub mod takeover;
 pub mod transport;
 
 use gpui::{
@@ -29,6 +30,7 @@ use crate::preview::Preview;
 use layout::{INSPECTOR_MAX_PX, StudioLayout};
 use session::SessionSection;
 use space::{KEY_CONTEXT, SPACE, SpaceAction, SpacePress, ToggleRecord, space_action};
+use takeover::TakeoverSection;
 use transport::{OpenPage, Transport};
 
 /// Binds the page's keys; call once at start.
@@ -41,6 +43,7 @@ pub struct StudioPage {
     transport: Entity<Transport>,
     preview: Entity<Preview>,
     session: Entity<SessionSection>,
+    takeover: Entity<TakeoverSection>,
     /// The page's width at the last paint, for the breakpoint.
     width: f32,
     /// The Space now dispatching is a held key's repeat.
@@ -62,12 +65,15 @@ impl StudioPage {
         transport: Entity<Transport>,
         preview: Entity<Preview>,
         session: Entity<SessionSection>,
+        takeover: Entity<TakeoverSection>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.subscribe(&transport, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
         cx.subscribe(&session, |_, _, open: &OpenPage, cx| cx.emit(*open))
+            .detach();
+        cx.subscribe(&takeover, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
         // The preview notifies only when its slot's words or its window
         // change, never per video frame.
@@ -79,6 +85,7 @@ impl StudioPage {
             transport,
             preview,
             session,
+            takeover,
             width: 0.,
             space_held: false,
         }
@@ -178,7 +185,8 @@ impl Render for StudioPage {
             .flex_col()
             .min_w_0()
             .min_h_0()
-            .child(self.session.clone());
+            .child(self.session.clone())
+            .child(self.takeover.clone());
         let transport = self.transport.clone();
 
         let grid = match layout {
