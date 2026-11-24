@@ -1569,9 +1569,9 @@ pub fn question_message_ids(state: &CohostState) -> Vec<String> {
 
 // --- Sidekick's and the avatar's words (`buddy-auto-chat-view.ts`) --------
 
-/// `DEFAULT_AVATAR_NAME` (`shared/avatar-name.ts`): the default avatar's name,
-/// and the name any surface falls back to when a persona has none.
-pub const DEFAULT_AVATAR_NAME: &str = "Flint";
+/// The default avatar's name (`shared/avatar-name.ts`), one constant for
+/// the crate.
+pub use crate::buddy::DEFAULT_AVATAR_NAME;
 
 /// `buddyDisplayName`: the streamer's name for the avatar, else
 /// [`DEFAULT_AVATAR_NAME`].
