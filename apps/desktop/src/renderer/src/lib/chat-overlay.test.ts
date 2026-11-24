@@ -297,6 +297,12 @@ describe('chat on stream: the driver', () => {
     const deps = {
       set: vi.fn(async (params: SetChatOverlayParams) => {
         sets.push(params)
+        // The canvas the backend draws the box for (plan 260 S1.2).
+        paintedFor.push({
+          width: params.canvasWidth ?? 0,
+          height: params.canvasHeight ?? 0,
+          rect: params.rect!
+        })
         return null
       }),
       clear: vi.fn(async () => null),
@@ -304,19 +310,11 @@ describe('chat on stream: the driver', () => {
         if (!canvasesRead) throw new Error('no backend')
         return canvasesRead
       }),
-      paint: vi.fn(
-        async (
-          messages: readonly LiveChatMessage[],
-          stream: ChatOverlayCanvas,
-          verticalCanvas?: ChatOverlayCanvas
-        ) => {
-          painted.push(messages.map((entry) => entry.id))
-          paintedFor.push(stream)
-          return verticalCanvas
-            ? { pngBase64: 'h-png', verticalPngBase64: 'v-png' }
-            : { pngBase64: 'h-png' }
-        }
-      ),
+      // The images are cached before each draw, for exactly the messages
+      // the box shows.
+      warm: vi.fn(async (messages: readonly LiveChatMessage[]) => {
+        painted.push(messages.map((entry) => entry.id))
+      }),
       warn: vi.fn(),
       clock
     }
@@ -332,16 +330,24 @@ describe('chat on stream: the driver', () => {
     return { clock, sets, painted, paintedFor, deps, driver, input }
   }
 
-  it('paints the box with the placed rect and never repaints the same box', async () => {
+  it('asks the backend to draw the box with the placed rect, never twice for the same box', async () => {
     const { clock, sets, painted, deps, driver, input } = setup()
     driver.update(input())
     await flush()
     expect(painted).toEqual([['1', '2']])
-    expect(sets).toEqual([{ pngBase64: 'h-png', rect: DEFAULT_OVERLAY_LAYOUT.chat.horizontal }])
+    expect(sets).toEqual([
+      {
+        messageIds: ['1', '2'],
+        canvasWidth: 1920,
+        canvasHeight: 1080,
+        rect: DEFAULT_OVERLAY_LAYOUT.chat.horizontal
+      }
+    ])
     driver.update(input())
     clock.advance(CHAT_OVERLAY_REPAINT_MS)
     await flush()
-    expect(deps.paint).toHaveBeenCalledTimes(1)
+    expect(deps.warm).toHaveBeenCalledTimes(1)
+    expect(deps.set).toHaveBeenCalledTimes(1)
   })
 
   it('takes a deleted message out of the box on the next draw', async () => {
@@ -369,9 +375,10 @@ describe('chat on stream: the driver', () => {
     driver.update(input())
     await flush()
     expect(sets[0]).toEqual({
-      pngBase64: 'h-png',
+      messageIds: ['1', '2'],
+      canvasWidth: 1920,
+      canvasHeight: 1080,
       rect: DEFAULT_OVERLAY_LAYOUT.chat.horizontal,
-      verticalPngBase64: 'v-png',
       verticalRect: DEFAULT_OVERLAY_LAYOUT.chat.vertical
     })
     driver.update(input({ messages: ['1', '2', '3'].map((id) => message(id)) }))

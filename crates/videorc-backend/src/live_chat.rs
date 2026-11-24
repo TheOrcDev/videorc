@@ -1444,6 +1444,40 @@ impl LiveChatCoordinator {
             .find(|message| message.id == message_id)
     }
 
+    /// The messages the chat box shows (plan 260 S1.2), in the order named:
+    /// this session's, skipping any no longer held.
+    pub(crate) fn chat_box_messages(&self, ids: &[String]) -> Vec<LiveChatMessage> {
+        let Some(session_id) = self.session_id.as_deref() else {
+            return Vec::new();
+        };
+        ids.iter()
+            .filter_map(|id| {
+                self.messages
+                    .iter()
+                    .find(|message| &message.id == id && message.session_id == session_id)
+                    .cloned()
+            })
+            .collect()
+    }
+
+    /// The message a highlight card is drawn from (plan 260 S1.2), when it is
+    /// this session's and eligible ([`Self::highlight_message_eligibility`]).
+    pub(crate) fn highlight_message(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<LiveChatMessage, HighlightMessageEligibility> {
+        match self.highlight_message_eligibility(session_id, message_id) {
+            HighlightMessageEligibility::Eligible => self
+                .messages
+                .iter()
+                .find(|message| message.id == message_id)
+                .cloned()
+                .ok_or(HighlightMessageEligibility::Missing),
+            refused => Err(refused),
+        }
+    }
+
     pub(crate) fn highlight_message_eligibility(
         &self,
         session_id: &str,

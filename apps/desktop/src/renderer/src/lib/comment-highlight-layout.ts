@@ -6,7 +6,7 @@
 // use-studio and stays text-only).
 
 import { gifTitle } from '../../../shared/chat-gif'
-import type { LiveChatMessageFragment, StreamPlatform } from '@/lib/backend'
+import type { LiveChatMessage, LiveChatMessageFragment, StreamPlatform } from '@/lib/backend'
 import { groupEmoteOverlays, type ChatMessagePiece } from '@/lib/chat-emotes'
 import {
   commentHighlightIdentity,
@@ -414,4 +414,39 @@ export function highlightEmoteImageUrl(url: string): string {
     /^(https:\/\/static-cdn\.jtvnw\.net\/emoticons\/v2\/[^/]+\/[^/]+\/[^/]+\/)1\.0$/,
     '$13.0'
   )
+}
+
+/**
+ * The files the backend draws a message's highlight card from (plan 260
+ * S1.2): the viewer's avatar, then the card's emotes at the card's size
+ * (Twitch's `/3.0`). An activity card stays text, so it has no emotes. The
+ * renderer caches them before asking for the card; the backend only reads
+ * its chat image cache.
+ */
+export function commentHighlightImageUrls(
+  message: Pick<LiveChatMessage, 'authorAvatarUrl' | 'details' | 'messageText' | 'fragments'>
+): string[] {
+  const emotes = message.details
+    ? []
+    : highlightEmoteUrls(highlightTokens(message.messageText, message.fragments)).map(
+        highlightEmoteImageUrl
+      )
+  return [...(message.authorAvatarUrl ? [message.authorAvatarUrl] : []), ...emotes]
+}
+
+/** The files the backend draws the chat box from (plan 260 S1.2): each
+ * viewer's avatar once, then the emotes at the box's size, one list for all
+ * its messages. */
+export function chatOverlayImageUrls(
+  messages: readonly Pick<LiveChatMessage, 'authorAvatarUrl' | 'messageText' | 'fragments'>[]
+): string[] {
+  const avatars = [
+    ...new Set(
+      messages.flatMap((message) => (message.authorAvatarUrl ? [message.authorAvatarUrl] : []))
+    )
+  ]
+  const tokens = messages.flatMap((message) =>
+    highlightTokens(message.messageText, message.fragments)
+  )
+  return [...avatars, ...highlightEmoteUrls(tokens).map(highlightEmoteImageUrl)]
 }
