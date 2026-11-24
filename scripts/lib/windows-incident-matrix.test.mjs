@@ -175,9 +175,80 @@ test('missing physical prerequisites remain blocked while actual failures take p
   const blocked = { state: 'BLOCKED', verdict: { pass: false } }
   const passed = { verdict: { pass: true } }
   const failed = { verdict: { pass: false } }
-  assert.equal(incidentAggregateVerdict([blocked, passed], 2), 'BLOCKED')
-  assert.equal(incidentAggregateVerdict([blocked, failed], 2), 'FAIL')
-  assert.equal(incidentAggregateVerdict([passed], 1), 'PASS')
+  assert.equal(incidentAggregateVerdict([blocked, passed], 2).verdict, 'BLOCKED')
+  assert.equal(incidentAggregateVerdict([blocked, failed], 2).verdict, 'FAIL')
+  assert.equal(incidentAggregateVerdict([passed], 1).verdict, 'PASS')
+})
+
+test('CI incident aggregate tolerates one single 3-frame repeated-frame burst when two reps pass', async () => {
+  const { isIncidentCiRepeatedFrameNoise, incidentScenarioSurvivesCiNoise } =
+    await import('./windows-incident-matrix.mjs')
+  const { incidentAggregateVerdict } = await import('./windows-incident-runner.mjs')
+  const noise =
+    'receiver-1 analyzed A/V artifact missing or failed: repeated-frame burst of 3 consecutive identical frames exceeds 2 (1 burst(s))'
+  assert.equal(isIncidentCiRepeatedFrameNoise([noise]), true)
+  assert.equal(isIncidentCiRepeatedFrameNoise([noise, 'startup did not reach running']), false)
+
+  const scenarioRuns = [
+    {
+      scenario: '720p30-single-controlled-same-process',
+      repetition: 1,
+      verdict: { pass: true, failures: [] }
+    },
+    {
+      scenario: '720p30-single-controlled-same-process',
+      repetition: 2,
+      verdict: { pass: true, failures: [] }
+    },
+    {
+      scenario: '720p30-single-controlled-same-process',
+      repetition: 3,
+      verdict: { pass: false, failures: [noise] }
+    }
+  ]
+  assert.equal(incidentScenarioSurvivesCiNoise(scenarioRuns).pass, true)
+
+  const strict = incidentAggregateVerdict(scenarioRuns, 3)
+  assert.equal(strict.verdict, 'FAIL')
+
+  const ci = incidentAggregateVerdict(scenarioRuns, 3, { ci: true })
+  assert.equal(ci.verdict, 'PASS')
+  assert.equal(ci.ciNoiseTolerated?.length, 1)
+  assert.match(ci.ciNoiseTolerated[0].reason, /CI runner noise/)
+
+  const twoNoisy = incidentAggregateVerdict(
+    [
+      ...scenarioRuns.slice(0, 1),
+      {
+        scenario: '720p30-single-controlled-same-process',
+        repetition: 2,
+        verdict: { pass: false, failures: [noise] }
+      },
+      scenarioRuns[2]
+    ],
+    3,
+    { ci: true }
+  )
+  assert.equal(twoNoisy.verdict, 'FAIL')
+
+  const realFreeze = incidentAggregateVerdict(
+    [
+      ...scenarioRuns.slice(0, 2),
+      {
+        scenario: '720p30-single-controlled-same-process',
+        repetition: 3,
+        verdict: {
+          pass: false,
+          failures: [
+            'receiver-1 analyzed A/V artifact missing or failed: repeated-frame burst of 7 consecutive identical frames exceeds 2 (1 burst(s))'
+          ]
+        }
+      }
+    ],
+    3,
+    { ci: true }
+  )
+  assert.equal(realFreeze.verdict, 'FAIL')
 })
 
 test('unsafe startup cleanup cannot become safe when no receiver reached the owned list', async () => {
