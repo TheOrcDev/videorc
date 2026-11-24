@@ -495,6 +495,106 @@ impl BackgroundDraft {
     }
 }
 
+// --- the Scene page's Background section (`camera-background-section.tsx`) ---
+
+/// `SECTION_IMAGES`: the pictures the section's row shows before Choose image….
+pub const SECTION_IMAGES: usize = 2;
+/// `BLUR_MARKS` and the slider's range.
+pub const BLUR_MARKS: [(f64, &str); 2] = [(SLIGHT_BLUR_PCT, "Slight"), (STRONG_BLUR_PCT, "Strong")];
+pub const BLUR_MIN_PCT: f64 = 10.0;
+pub const BLUR_MAX_PCT: f64 = 100.0;
+
+/// A screen's tuning, as its sliders and Hide edges show it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenTuningView {
+    pub similarity_pct: f64,
+    pub smoothness_pct: f64,
+    pub spill_pct: f64,
+    /// Every side present (`NO_CAMERA_KEY_EDGES` when none is set).
+    pub hide_edges: Value,
+}
+
+/// The camera's Background section on the Scene page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackgroundSectionView {
+    pub label: &'static str,
+    pub description: &'static str,
+    /// Off, the blurs, the first two pictures (the picked one first), the
+    /// screens.
+    pub tiles: Vec<Choice>,
+    pub selected: Option<ChoiceId>,
+    /// Why the effects can't be picked (no camera first).
+    pub reason: Option<&'static str>,
+    /// Choose image… opens the Images list (a camera is selected).
+    pub choose_image: bool,
+    /// Blur strength, for a blur.
+    pub blur_pct: Option<f64>,
+    /// The key's tuning, for Green or Blue screen.
+    pub screen: Option<ScreenTuningView>,
+    /// The line under the section: the hint, with the blur caveat for a blur
+    /// and the screen hint for a key; none without a camera.
+    pub hint: Option<String>,
+}
+
+/// The section for the selected camera's background (the shown one: a
+/// draft mid-drag, else the stored pick).
+pub fn background_section_view(
+    background: &Value,
+    images: &[Image],
+    camera_selected: bool,
+    room_open: bool,
+    platform: Option<&str>,
+) -> BackgroundSectionView {
+    let shown_images = images_picked_first(images, string(background.get("assetId")));
+    let tiles = choices(&ChoicesInput {
+        images: &shown_images,
+        camera_selected,
+        room_open,
+        platform,
+        image_limit: Some(SECTION_IMAGES),
+    });
+    let effect_reason =
+        platform_reason(platform).or(room_open.then_some(ROOM_BACKGROUND_UNAVAILABLE));
+    let mode = mode(background);
+    let screen = matches!(mode, "green" | "blue");
+    let key = key_of(background);
+    let tuning =
+        |name: &str, fallback: f64| key.get(name).and_then(Value::as_f64).unwrap_or(fallback);
+    BackgroundSectionView {
+        label: LABEL,
+        description: DESCRIPTION,
+        tiles,
+        selected: choice_id(background),
+        reason: if camera_selected {
+            effect_reason
+        } else {
+            Some(NO_CAMERA)
+        },
+        choose_image: camera_selected,
+        blur_pct: (mode == "blur").then(|| blur_pct(background)),
+        screen: screen.then(|| ScreenTuningView {
+            similarity_pct: tuning("similarityPct", 40.0),
+            smoothness_pct: tuning("smoothnessPct", 8.0),
+            spill_pct: tuning("spillPct", 10.0),
+            hide_edges: key_edges_of(key.get("hideEdges")),
+        }),
+        hint: camera_selected.then(|| match mode {
+            "blur" => format!("{HINT} {BLUR_CAVEAT}"),
+            _ if screen => SCREEN_HINT.to_string(),
+            _ => HINT.to_string(),
+        }),
+    }
+}
+
+/// `setKey(patch)`: the background with its key's tuning changed.
+pub fn background_with_key(background: &Value, patch: &serde_json::Map<String, Value>) -> Value {
+    let mut key = key_of(background).as_object().cloned().unwrap_or_default();
+    key.extend(patch.clone());
+    let mut next = background.clone();
+    next["key"] = Value::Object(key);
+    next
+}
+
 #[cfg(test)]
 #[path = "camera_background_view_tests.rs"]
 mod tests;
