@@ -701,6 +701,7 @@ export interface BackendRpcMethodMap {
   'cloud.room.client.report': BackendRpcDefinition<CloudRoomClientReportParams, CloudStatus>
   'cloud.room.avatar.set': BackendRpcDefinition<CloudRoomAvatarSetParams, { held: boolean }>
   'cloud.room.microphone.set': BackendRpcDefinition<CloudRoomMediaSetParams, { held: boolean }>
+  'cloud.room.camera.set': BackendRpcDefinition<CloudRoomMediaSetParams, { held: boolean }>
   'cloud.room.avatar.motion': BackendRpcDefinition<
     CloudRoomAvatarMotionParams,
     CloudRoomAvatarMotionResult
@@ -7068,7 +7069,7 @@ const cloudRoomAvatarSetParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CloudRoomAvatarSetParams>
 // Plan 260 S1.8c: the room microphone bridge's settings (its own bounds).
-const cloudRoomMediaSetParamsSchema = objectSchema(
+const cloudRoomMicrophoneSetParamsSchema = objectSchema(
   {
     microphone: nullableSchema(
       objectSchema(
@@ -7079,6 +7080,19 @@ const cloudRoomMediaSetParamsSchema = objectSchema(
           noise: enumSchema(['off', 'rnnoise']),
           offsetMs: numberSchema({ integer: true, min: 0, max: 1000 })
         },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CloudRoomMediaSetParams>
+// Plan 260 S1.8c: the camera the Studio has on (its effects are the scene
+// layout's, already the backend's).
+const cloudRoomCameraSetParamsSchema = objectSchema(
+  {
+    camera: nullableSchema(
+      objectSchema(
+        { deviceId: stringSchema({ minLength: 1, maxLength: 512 }) },
         { allowUnknown: false }
       )
     )
@@ -8017,7 +8031,11 @@ const runtimeContracts = {
     result: cloudRoomPresentationSetResultSchema
   },
   'cloud.room.microphone.set': {
-    params: cloudRoomMediaSetParamsSchema,
+    params: cloudRoomMicrophoneSetParamsSchema,
+    result: cloudRoomPresentationSetResultSchema
+  },
+  'cloud.room.camera.set': {
+    params: cloudRoomCameraSetParamsSchema,
     result: cloudRoomPresentationSetResultSchema
   },
   'cloud.room.avatar.motion': {

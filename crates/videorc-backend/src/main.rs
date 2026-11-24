@@ -6451,6 +6451,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cloud.room.scene.commit"
         // Plan 260 S1.8c: the host's own media in the backend's room.
         | "cloud.room.microphone.set"
+        | "cloud.room.camera.set"
         | "cloud.recordings.download"
         | "cloud.archive.stop"
         | "cloud.archive.cancel"
@@ -13665,6 +13666,29 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 260 S1.8c: the host's camera for the backend's room (on with
+        // its device, `null` off); its effects are the scene layout's.
+        "cloud.room.camera.set" => {
+            match serde_json::from_value::<cloud_talk::CloudRoomMediaSetParams>(command.params) {
+                Ok(params)
+                    if !params
+                        .camera
+                        .as_ref()
+                        .is_none_or(|settings| settings.valid()) =>
+                {
+                    ServerResponse::error(command.id, "invalid-params", "The camera id is invalid.")
+                }
+                #[cfg(target_os = "macos")]
+                Ok(params) if room_host::holds_seat() => {
+                    room_media::set_camera(params.camera);
+                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                }
+                Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         // Plan 260 S1.8b: one message of the renderer's avatar motion model,
         // sent to the pages that animate; answers who they are.
         "cloud.room.avatar.motion" => {
@@ -18795,7 +18819,13 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
                         // Plan 249 S13b: with the processed camera on, the native
                         // camera stays the one owner and the room publishes its
                         // processed frames; nothing is lent to the browser.
-                        if room_camera_source::enabled(state.smoke_rpc_enabled) {
+                        // Plan 260 S1.8c: the same while the backend's room is
+                        // on (its dev switch): the backend publishes the camera.
+                        #[cfg(target_os = "macos")]
+                        let backend_room = room_host::enabled();
+                        #[cfg(not(target_os = "macos"))]
+                        let backend_room = false;
+                        if backend_room || room_camera_source::enabled(state.smoke_rpc_enabled) {
                             room_camera_source::set_kept_for_room(true);
                             *state
                                 .cloud_live_hold

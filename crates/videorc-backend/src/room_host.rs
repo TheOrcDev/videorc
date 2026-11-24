@@ -315,6 +315,14 @@ async fn hold(
                     show_id.clone().unwrap_or_default(),
                     microphone_heard,
                 ));
+                // The host's camera (S1.8c): taken off when `camera_done`
+                // drops with this connection.
+                let (camera_done, camera_heard) = oneshot::channel::<()>();
+                tokio::spawn(crate::room_media::run_camera(
+                    state.clone(),
+                    room.clone(),
+                    camera_heard,
+                ));
                 let (overlay_queue, overlay_worker) = overlay_sender(
                     state.clone(),
                     room.local_participant(),
@@ -392,6 +400,7 @@ async fn hold(
                 avatar_task.abort();
                 scene_task.abort();
                 drop(microphone_done);
+                drop(camera_done);
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
                     DisconnectReason::DuplicateIdentity => {
