@@ -62,7 +62,9 @@ pub(crate) fn chime_pcm() -> Arc<[i16]> {
             .iter()
             .map(|(_, at, length)| LEAD_S + at + length + TAIL_S)
             .fold(0.0, f64::max);
-        let frames = (end * SAMPLE_RATE).ceil() as usize;
+        // To the nearest frame: 0.01 + 0.14 + 0.55 + 0.02 is 0.7200000000000001
+        // in f64, and a ceiling would add a frame.
+        let frames = (end * SAMPLE_RATE).round() as usize;
         let mut pcm = Vec::with_capacity(frames * 2);
         for frame in 0..frames {
             let t = frame as f64 / SAMPLE_RATE;
@@ -111,7 +113,7 @@ mod tests {
     fn the_chime_is_two_notes_at_the_renderers_level_and_length() {
         let pcm = chime_pcm();
         // 10 ms lead + 140 ms + 550 ms + 20 ms tail, stereo.
-        assert_eq!(pcm.len(), (0.72f64 * SAMPLE_RATE).ceil() as usize * 2);
+        assert_eq!(pcm.len(), 34_560 * 2);
         let peak = pcm
             .iter()
             .map(|sample| sample.unsigned_abs())
