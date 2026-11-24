@@ -444,8 +444,11 @@ impl<B: StudioBackend> Studio<B> {
     /// is sent the switch again whatever it held (the retry after a failed
     /// start or a lost update).
     pub async fn set_system_audio_enabled(&self, enabled: bool) {
-        if let Some(sync) = self.lock().live_audio.as_mut() {
-            sync.system_sent = None;
+        {
+            let mut inner = self.lock();
+            if let Some(sync) = inner.live_audio.as_mut() {
+                sync.system_sent = None;
+            }
         }
         self.write_audio("systemAudioEnabled", json!(enabled)).await;
     }

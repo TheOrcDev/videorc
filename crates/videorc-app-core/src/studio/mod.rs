@@ -1726,11 +1726,15 @@ impl<B: StudioBackend> Studio<B> {
         }
         let start_in_flight = LiveAudioStartInFlight(&self.inner);
         let answer = self.backend.session_start(params).await;
-        drop(start_in_flight);
+        // The guard only covers a dropped future; an answered start clears
+        // the flag under the lock that seeds the snapshot, so no status in
+        // between makes a sync without it.
+        std::mem::forget(start_in_flight);
         match answer {
             Ok(status) => {
                 let (resolution, effects) = {
                     let mut inner = self.lock();
+                    inner.live_audio_start_in_flight = false;
                     let (resolution, effects) = inner.session.finish_start(status, Instant::now());
                     inner.live_audio_start = match &resolution.status.session_id {
                         Some(session_id) if resolution.session_active => {
@@ -1763,7 +1767,10 @@ impl<B: StudioBackend> Studio<B> {
                     }
                 }
             }
-            Err(error) => self.refuse_start(start_failure_message(&error)),
+            Err(error) => {
+                self.lock().live_audio_start_in_flight = false;
+                self.refuse_start(start_failure_message(&error))
+            }
         }
     }
 
