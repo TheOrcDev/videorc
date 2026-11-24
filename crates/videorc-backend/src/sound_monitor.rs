@@ -78,6 +78,9 @@ pub(crate) struct VoiceReport {
     pub stopped: bool,
 }
 
+// Read only by `render`, which plays on macOS alone (S1.8d d3 made the
+// device callback generic).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug)]
 struct MixVoice {
     key: u64,
@@ -96,6 +99,7 @@ struct MixVoice {
     finished: bool,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl MixVoice {
     fn frames(&self) -> usize {
         self.pcm.len() / 2
@@ -200,6 +204,7 @@ impl MonitorMix {
 
     /// Writes every voice, summed, into `out` (interleaved stereo; a trailing
     /// odd sample is silence). Voices that end leave the mix with a report.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn render(&mut self, out: &mut [f32]) {
         out.fill(0.0);
         for voice in self.voices.iter_mut() {
@@ -514,16 +519,27 @@ fn log_reports(mix: &StdMutex<MonitorMix>) {
     }
 }
 
-/// The default output device, playing the mix.
-struct DeviceOutput {
+/// The default output device, playing a 48 kHz interleaved stereo render.
+/// Shared with the backend room's guest playout (plan 260 S1.8d d3).
+pub(crate) struct DeviceOutput {
     #[cfg(target_os = "macos")]
     _unit: coreaudio::audio_unit::AudioUnit,
-    device_name: String,
+    pub(crate) device_name: String,
 }
 
 impl DeviceOutput {
     #[cfg(target_os = "macos")]
     fn open(mix: Arc<StdMutex<MonitorMix>>) -> anyhow::Result<Self> {
+        Self::open_with(move |buffer| lock(&mix).render(buffer))
+    }
+
+    /// Opens the default output and plays `render`'s 48 kHz interleaved
+    /// stereo, called on CoreAudio's thread for each buffer. A panic in it
+    /// plays silence; it never unwinds into CoreAudio.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn open_with(
+        mut render: impl FnMut(&mut [f32]) + Send + 'static,
+    ) -> anyhow::Result<Self> {
         use anyhow::Context;
         use coreaudio::audio_unit::audio_format::LinearPcmFlags;
         use coreaudio::audio_unit::macos_helpers::{get_default_device_id, get_device_name};
@@ -552,7 +568,7 @@ impl DeviceOutput {
         .context("the 48 kHz stereo format was refused")?;
         type Args = render_callback::Args<data::Interleaved<f32>>;
         unit.set_render_callback(move |args: Args| {
-            render_callback_into(&mix, args.data.buffer, args.data.channels);
+            render_callback_into(&mut render, args.data.buffer, args.data.channels);
             Ok(())
         })
         .context("the render callback was refused")?;
@@ -571,16 +587,16 @@ impl DeviceOutput {
     }
 }
 
-/// The real-time side: render under the mix lock, and never unwind into
-/// CoreAudio (a panic plays silence instead).
+/// The real-time side: render (the monitor's under its mix lock), and never
+/// unwind into CoreAudio (a panic plays silence instead).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn render_callback_into(mix: &StdMutex<MonitorMix>, buffer: &mut [f32], channels: usize) {
+fn render_callback_into(render: &mut impl FnMut(&mut [f32]), buffer: &mut [f32], channels: usize) {
     if channels != 2 {
         buffer.fill(0.0);
         return;
     }
     let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        lock(mix).render(buffer);
+        render(buffer);
     }));
     if rendered.is_err() {
         buffer.fill(0.0);
@@ -845,11 +861,12 @@ mod tests {
     fn the_callback_plays_silence_for_a_layout_it_does_not_render() {
         let mix = StdMutex::new(MonitorMix::default());
         lock(&mix).start(&voice(1, flat(100, 16_384)));
+        let mut render = |buffer: &mut [f32]| lock(&mix).render(buffer);
         let mut mono = vec![1.0; 64];
-        render_callback_into(&mix, &mut mono, 1);
+        render_callback_into(&mut render, &mut mono, 1);
         assert!(mono.iter().all(|sample| *sample == 0.0));
         let mut stereo = vec![0.0; 64];
-        render_callback_into(&mix, &mut stereo, 2);
+        render_callback_into(&mut render, &mut stereo, 2);
         assert_eq!(stereo[0], 0.5);
     }
 }

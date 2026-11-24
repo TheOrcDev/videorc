@@ -1002,6 +1002,8 @@ mod tests {
             duration_ms: 10_000,
             looping: false,
             on_air: false,
+            started: Instant::now() - Duration::from_secs(20),
+            gain: crate::audio::db_to_gain(2.0),
             placing: false,
             gain_db: 2.0,
         });

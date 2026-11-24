@@ -133,6 +133,8 @@ mod room_html;
 mod room_media;
 #[cfg(target_os = "macos")]
 mod room_overlays;
+#[cfg(target_os = "macos")]
+mod room_playout;
 mod room_program_camera;
 #[cfg(target_os = "macos")]
 mod room_remote;

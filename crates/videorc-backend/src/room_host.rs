@@ -364,6 +364,13 @@ async fn hold(
                     subscriptions_heard,
                     subscriptions_stopped,
                 ));
+                // The guests heard here, with echo cancellation (S1.8d d3).
+                let (playout_done, playout_stopped) = oneshot::channel::<()>();
+                tokio::spawn(crate::room_playout::run(
+                    state.clone(),
+                    room.clone(),
+                    playout_stopped,
+                ));
                 // The guest captions mix, in-process (S1.8d d4).
                 let (guest_speech_done, guest_speech_stopped) = oneshot::channel::<()>();
                 tokio::spawn(crate::room_guest_speech::run(
@@ -529,6 +536,7 @@ async fn hold(
                 drop(html_done);
                 drop(remote_done);
                 drop(guest_speech_done);
+                drop(playout_done);
                 crate::room_aux::disarm_system();
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
