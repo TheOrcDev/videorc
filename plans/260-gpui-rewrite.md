@@ -987,14 +987,23 @@ not S1.8b.
 S1.8c's parts, each its own PR (the backend already makes most of this
 media for the renderer's bridges; S1.8c points it at the room instead):
 c1 the microphone (`room_microphone.rs`'s processed tap, 48 kHz mono, into
-a native audio source); c2 the camera (the compositor's camera role, VP8,
-simulcast 180p/360p under 720p); c3 the screen behind the privacy still,
-with its privacy topics and acknowledgements; c4 the aux track (soundboard
-and System audio, stereo, RED, 128 kbps, `AUX_TRACK_NAME`) and the audio
-routing topic; c5 the HTML layers' sheet track and its manifest; c6 the
+a native audio source; settings through `cloud.room.microphone.set`, in the
+bridge's own shape); c2 the camera (the compositor's camera role, VP8,
+simulcast 180p/360p under 720p; its device and effects through
+`cloud.room.camera.set`, the same parameter type); c3 the screen behind the
+privacy still, with its privacy topics and acknowledgements; c4 the aux
+track (soundboard and System audio, stereo, RED, 128 kbps, `AUX_TRACK_NAME`),
+the audio routing topic, and the room's microphone taken from the session's
+own microphone while this Mac records or streams (the c1 tap refuses to
+open while native capture owns the device, and a host recording while in a
+room is the normal talk-show case); c5 the HTML layers' sheet track and its manifest; c6 the
 latency reports from RTC stats. With c2 and c3 the scene adapter's
 readiness checks and the cards for the avatar's motion read the backend's
 room.
+
+**Blocker for turning the backend's room on by default:** c4's session
+microphone. Until it lands, the room has no microphone while this Mac
+records, so the switch (`VIDEORC_BACKEND_ROOM`) stays a dev switch.
 
 ### Phase 2: the shell, on all three platforms
 
