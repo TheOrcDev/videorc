@@ -53,8 +53,8 @@ use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
 use videorc_protocol::repair::GateStatus;
 use videorc_protocol::{
-    RecordingFinalizationState, RecordingState, SessionListItem, SessionListPage, SessionLogEntry,
-    SessionLogsPage,
+    NoiseCleanupJob, RecordingFinalizationState, RecordingState, SessionListItem, SessionListPage,
+    SessionLogEntry, SessionLogsPage,
 };
 
 use crate::client::{BackendClient, BackendEvent, RpcError};
@@ -71,8 +71,24 @@ pub const MARKER_CHANGED_EVENT: &str = "session.marker.changed";
 pub const REPLAY_SAVED_EVENT: &str = "replay.saved";
 
 /// The events the Library reads beyond the Studio's (the client's include
-/// list adds them).
-pub const LIBRARY_EVENTS: [&str; 2] = [MARKER_CREATED_EVENT, MARKER_CHANGED_EVENT];
+/// list adds them): the markers, noise cleanup's jobs and the Cloud tab's
+/// downloads.
+pub const LIBRARY_EVENTS: [&str; 4] = [
+    MARKER_CREATED_EVENT,
+    MARKER_CHANGED_EVENT,
+    noise::STATUS_EVENT,
+    cloud::CLOUD_DOWNLOAD_EVENT,
+];
+
+/// What the Library tells the window beyond the page (behind the bell, or
+/// a toast).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LibraryNotice {
+    /// "Noise cleanup complete", once per job.
+    NoiseCleanupCompleted(noise::CompletedNotice),
+    /// A cloud download failed, or finished while no Cloud tab was open.
+    CloudDownload(cloud::CloudDownloadNotice),
+}
 
 /// The backend, as the Library asks it: one request by name.
 pub trait LibraryBackend: Send + Sync + 'static {
@@ -134,6 +150,10 @@ pub struct LibraryData {
     pub server: Option<(u16, String)>,
     /// A marker of this session changed (its count goes up each time).
     pub marker_changes: BTreeMap<String, u64>,
+    /// Every noise cleanup job the window has heard.
+    pub noise_jobs: Vec<NoiseCleanupJob>,
+    /// The Cloud tab's downloads, kept for the life of the window.
+    pub cloud_downloads: cloud::CloudDownloads,
 }
 
 impl LibraryData {
@@ -203,6 +223,7 @@ struct Inner {
     /// The last recording state and session (`previousState`).
     last_state: Option<(RecordingState, Option<String>)>,
     logs_asked: BTreeSet<String>,
+    noise: noise::NoiseJobs,
 }
 
 /// The Library's data and its requests.
@@ -218,6 +239,8 @@ pub struct Library<B: LibraryBackend, F: LibraryFiles> {
     list_generation: AtomicU64,
     totals_read: AtomicU64,
     marker_sequence: AtomicU64,
+    cloud_downloads: Mutex<cloud::CloudDownloadsStore>,
+    notices: broadcast::Sender<LibraryNotice>,
 }
 
 fn read<T: serde::de::DeserializeOwned>(method: &str, value: Value) -> Result<T, RpcError> {
@@ -236,7 +259,120 @@ impl<B: LibraryBackend, F: LibraryFiles> Library<B, F> {
             list_generation: AtomicU64::new(0),
             totals_read: AtomicU64::new(0),
             marker_sequence: AtomicU64::new(0),
+            cloud_downloads: Mutex::new(cloud::CloudDownloadsStore::default()),
+            notices: broadcast::channel(16).0,
         }
+    }
+
+    /// What the Library tells the window beyond the page.
+    pub fn notices(&self) -> broadcast::Receiver<LibraryNotice> {
+        self.notices.subscribe()
+    }
+
+    fn notify(&self, notice: LibraryNotice) {
+        // Nobody listening is fine: the page still shows the state.
+        let _ = self.notices.send(notice);
+    }
+
+    fn publish_noise_jobs(&self) {
+        let jobs = self.lock().noise.jobs().to_vec();
+        self.data.send_if_modified(|data| {
+            let changed = data.noise_jobs != jobs;
+            data.noise_jobs = jobs;
+            changed
+        });
+    }
+
+    fn publish_cloud_downloads(&self) {
+        let downloads = self
+            .cloud_downloads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .downloads()
+            .clone();
+        self.data.send_if_modified(|data| {
+            let changed = data.cloud_downloads != downloads;
+            data.cloud_downloads = downloads;
+            changed
+        });
+    }
+
+    /// `noiseCleanup.list`: replaces the jobs (on connect and after a lag).
+    pub async fn refresh_noise_jobs(&self) -> Result<(), RpcError> {
+        let jobs = noise::list_jobs(self.backend.as_ref()).await?;
+        self.lock().noise.replace(jobs);
+        self.publish_noise_jobs();
+        Ok(())
+    }
+
+    /// "Reduce noise" or "Retry cleanup".
+    pub async fn start_noise_cleanup(&self, session_id: &str) -> Result<NoiseCleanupJob, RpcError> {
+        let job = noise::start_job(self.backend.as_ref(), session_id).await?;
+        self.lock().noise.answered(job.clone());
+        self.publish_noise_jobs();
+        Ok(job)
+    }
+
+    /// "Cancel cleanup": the answer says whether it stopped yet.
+    pub async fn cancel_noise_cleanup(&self, job_id: &str) -> Result<NoiseCleanupJob, RpcError> {
+        let job = noise::cancel_job(self.backend.as_ref(), job_id).await?;
+        self.lock().noise.answered(job.clone());
+        self.publish_noise_jobs();
+        Ok(job)
+    }
+
+    /// `cloud.recordings.downloads`: the jobs this window may have missed.
+    pub async fn reconcile_cloud_downloads(&self) {
+        cloud::reconcile_cloud_downloads(self.backend.as_ref(), &self.cloud_downloads).await;
+        self.publish_cloud_downloads();
+    }
+
+    /// Download on a cloud recording's row.
+    pub async fn start_cloud_download(
+        &self,
+        recording_id: &str,
+        output_directory_capability: Option<&str>,
+    ) -> Result<(), cloud::CloudDownloadRefusal> {
+        let started = cloud::start_cloud_download(
+            self.backend.as_ref(),
+            &self.cloud_downloads,
+            recording_id,
+            output_directory_capability,
+        )
+        .await;
+        self.publish_cloud_downloads();
+        started
+    }
+
+    /// Cancel on a downloading row.
+    pub async fn cancel_cloud_download(&self, job_id: &str) -> Result<(), RpcError> {
+        let cancelled =
+            cloud::cancel_cloud_download(self.backend.as_ref(), &self.cloud_downloads, job_id)
+                .await;
+        self.publish_cloud_downloads();
+        cancelled
+    }
+
+    /// A Cloud tab opened (`true`) or closed: while one shows, a finished
+    /// download is the row's news, not the bell's.
+    pub fn cloud_view_shown(&self, shown: bool) {
+        let mut store = self
+            .cloud_downloads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if shown {
+            store.hold_view();
+        } else {
+            store.release_view();
+        }
+    }
+
+    fn spawn_side_reads(self: &Arc<Self>) {
+        let library = self.clone();
+        tokio::spawn(async move {
+            let _ = library.refresh_noise_jobs().await;
+            library.reconcile_cloud_downloads().await;
+        });
     }
 
     pub fn watch(&self) -> watch::Receiver<LibraryData> {
@@ -588,6 +724,7 @@ impl<B: LibraryBackend, F: LibraryFiles> Library<B, F> {
                     data.server = Some((connection.port, connection.token.clone()));
                 });
                 self.spawn_refresh();
+                self.spawn_side_reads();
             }
             BackendEvent::ConnectionClosed { .. } => {
                 self.data.send_if_modified(|data| {
@@ -646,9 +783,39 @@ impl<B: LibraryBackend, F: LibraryFiles> Library<B, F> {
             }
             BackendEvent::EventsLagged(_) | BackendEvent::ClientLagged { .. } => {
                 self.spawn_refresh();
+                self.spawn_side_reads();
             }
             BackendEvent::Untyped { event, payload } => match event.as_str() {
                 REPLAY_SAVED_EVENT => self.spawn_refresh(),
+                noise::STATUS_EVENT => {
+                    let Ok(job) = serde_json::from_value::<NoiseCleanupJob>(payload) else {
+                        return;
+                    };
+                    let outcome = self.lock().noise.event(job);
+                    self.publish_noise_jobs();
+                    if outcome.refresh_sessions {
+                        self.spawn_refresh();
+                    }
+                    if let Some(completed) = outcome.completed {
+                        self.notify(LibraryNotice::NoiseCleanupCompleted(completed));
+                    }
+                }
+                cloud::CLOUD_DOWNLOAD_EVENT => {
+                    let Ok(download) =
+                        serde_json::from_value::<cloud::CloudRecordingDownloadEvent>(payload)
+                    else {
+                        return;
+                    };
+                    let notice = self
+                        .cloud_downloads
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .apply(&download);
+                    self.publish_cloud_downloads();
+                    if let Some(notice) = notice {
+                        self.notify(LibraryNotice::CloudDownload(notice));
+                    }
+                }
                 MARKER_CREATED_EVENT | MARKER_CHANGED_EVENT => {
                     if let Some(session_id) = payload.get("sessionId").and_then(Value::as_str) {
                         let sequence = self.marker_sequence.fetch_add(1, Ordering::SeqCst) + 1;

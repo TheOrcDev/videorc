@@ -853,6 +853,66 @@ async fn a_capture_start_and_end_read_the_list_again_and_marker_news_is_counted(
     assert!(!library.data().online);
 }
 
+#[tokio::test]
+async fn noise_cleanup_and_cloud_download_events_reach_the_page_and_the_bell() {
+    let (library, fake, _) = library();
+    let mut notices = library.notices();
+    library.on_event(BackendEvent::Untyped {
+        event: noise::STATUS_EVENT.into(),
+        payload: json!({
+            "id": "cleanup-1", "sourceSessionId": "s1", "status": "completed",
+            "progressPercent": 100, "preset": "speech-v1", "outputSessionId": "s1-clean",
+            "createdAt": "2026-11-01T10:00:00Z", "updatedAt": "2026-11-01T10:05:00Z"
+        }),
+    });
+    assert_eq!(library.data().noise_jobs.len(), 1);
+    assert_eq!(
+        notices.try_recv().unwrap(),
+        LibraryNotice::NoiseCleanupCompleted(noise::CompletedNotice {
+            key: "noise-cleanup:cleanup-1".into(),
+            job_id: "cleanup-1".into(),
+            output_session_id: "s1-clean".into(),
+        })
+    );
+    // A finished copy is a new recording: the list is read again.
+    for _ in 0..50 {
+        if fake
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("sessions.list"))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        fake.calls()
+            .iter()
+            .any(|call| call.starts_with("sessions.list"))
+    );
+
+    // A download that finishes with no Cloud tab open goes to the bell; with
+    // one open, the row says it.
+    let done = json!({"jobId": "j1", "recordingId": "r1", "state": "done"});
+    library.on_event(BackendEvent::Untyped {
+        event: cloud::CLOUD_DOWNLOAD_EVENT.into(),
+        payload: done.clone(),
+    });
+    assert!(library.data().cloud_downloads.contains_key("r1"));
+    assert!(matches!(
+        notices.try_recv().unwrap(),
+        LibraryNotice::CloudDownload(cloud::CloudDownloadNotice::Saved { .. })
+    ));
+    library.cloud_view_shown(true);
+    library.on_event(BackendEvent::Untyped {
+        event: cloud::CLOUD_DOWNLOAD_EVENT.into(),
+        payload: done,
+    });
+    assert!(notices.try_recv().is_err());
+    library.cloud_view_shown(false);
+    assert_eq!(LIBRARY_EVENTS.len(), 4);
+}
+
 // ── The page as one value ───────────────────────────────────────────────
 
 /// The Studio idle and connected: the pill reads Ready.
