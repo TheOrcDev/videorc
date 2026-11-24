@@ -277,8 +277,21 @@ pub fn system_audio_issue_label(issue: SystemAudioIssue) -> &'static str {
     }
 }
 
-/// `systemAudioIssueCopy`: what happened, and what still works.
-pub fn system_audio_issue_copy(issue: SystemAudioIssue, macos: bool) -> String {
+/// `platformCopy`'s word for this computer: "Mac" on macOS, "PC" on
+/// Windows, "computer" on Linux.
+pub fn this_computer_word() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Mac"
+    } else if cfg!(target_os = "linux") {
+        "computer"
+    } else {
+        "PC"
+    }
+}
+
+/// `systemAudioIssueCopy`: what happened, and what still works. `computer`
+/// is [`this_computer_word`].
+pub fn system_audio_issue_copy(issue: SystemAudioIssue, computer: &str) -> String {
     match issue {
         SystemAudioIssue::Lost => {
             "System audio stopped. Your recording or livestream keeps going.".to_string()
@@ -288,8 +301,7 @@ pub fn system_audio_issue_copy(issue: SystemAudioIssue, macos: bool) -> String {
                 .to_string()
         }
         SystemAudioIssue::Echo => format!(
-            "Paused: your stream is playing on this {} and coming back as an echo. Mute that tab, then resume.",
-            if macos { "Mac" } else { "PC" }
+            "Paused: your stream is playing on this {computer} and coming back as an echo. Mute that tab, then resume."
         ),
         SystemAudioIssue::Unavailable => "System audio couldn't start.".to_string(),
     }

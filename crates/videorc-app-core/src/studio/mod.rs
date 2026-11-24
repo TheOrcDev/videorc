@@ -32,7 +32,8 @@
 //!   Studio's Sources mirror), [`sources_page`] and [`camera_low_light`]
 //!   (part 5b) their views; [`audio_section`], [`sources_audio`],
 //!   [`audio_mixer`], [`audio_actions`], [`audio_levels`] and
-//!   [`takeover_microphone`] (part 5c) the microphone and System audio.
+//!   [`takeover_microphone`] (part 5c) the microphone and System audio,
+//!   with [`live_audio`] (part 5d) the running session's live audio sync.
 //! - [`scenes`] (S1.6b): plan 231's scene library as the Studio holds it,
 //!   read once the settings snapshot is in (the #1706 repair, the v1
 //!   migration, the working setup over the capture config, the scene on
@@ -74,6 +75,7 @@ pub mod health_page;
 pub mod js_value;
 pub mod latency;
 pub mod linux_desktop;
+pub mod live_audio;
 pub mod live_sources;
 pub mod preview_scene;
 pub mod scene_editor;
@@ -454,6 +456,20 @@ impl<T> Drop for ClearInFlight<'_, T> {
     }
 }
 
+/// S1.6b part 5d: `liveAudioProcessingStartRequestInFlightRef` back to
+/// false when the start's request ends, a dropped future included. Dropped
+/// with the Studio's lock free.
+struct LiveAudioStartInFlight<'a>(&'a Mutex<Inner>);
+
+impl Drop for LiveAudioStartInFlight<'_> {
+    fn drop(&mut self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .live_audio_start_in_flight = false;
+    }
+}
+
 /// What a stop request did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopOutcome {
@@ -508,6 +524,18 @@ struct Inner {
     /// S1.6b part 5c: System audio's issue (by session) and its join latch.
     system_audio_issue: Option<(String, audio_mixer::SystemAudioIssue)>,
     system_audio_join: Option<audio_mixer::SystemAudioJoin>,
+    /// S1.6b part 5d: the live audio sync (plan 069) for the running
+    /// session (`liveAudioProcessingSyncRef`), the audio the last start sent
+    /// (`liveAudioProcessingStartSnapshotRef`) and whether that start is on
+    /// its way, what the session last acknowledged
+    /// (`liveAudioProcessingApplied`), the mutes waiting for it, and the
+    /// syncs' tokens.
+    live_audio: Option<live_audio::LiveAudioSync>,
+    live_audio_start: Option<live_audio::StartSnapshot>,
+    live_audio_start_in_flight: bool,
+    live_audio_applied: Option<(String, live_audio::MicValues)>,
+    live_audio_waiters: live_audio::MicrophoneWaiters,
+    live_audio_tokens: u64,
 }
 
 /// S2.6c: the exclusion list's bookkeeping.
@@ -719,6 +747,9 @@ pub struct Studio<B: StudioBackend> {
     /// running waits for it, as Electron's `refresh()` returns the read in
     /// flight.
     live_read_done: Notify,
+    /// S1.6b part 5d: the live audio queue has work nobody drains; the
+    /// driver's drain takes it.
+    live_audio_kick: Notify,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -751,6 +782,12 @@ impl<B: StudioBackend> Studio<B> {
             low_light: camera_low_light::LowLightCore::default(),
             system_audio_issue: None,
             system_audio_join: None,
+            live_audio: None,
+            live_audio_start: None,
+            live_audio_start_in_flight: false,
+            live_audio_applied: None,
+            live_audio_waiters: live_audio::MicrophoneWaiters::default(),
+            live_audio_tokens: 0,
         };
         // Writes a previous run journaled wait in the cache until the
         // snapshot is in; then they are sent.
@@ -783,6 +820,7 @@ impl<B: StudioBackend> Studio<B> {
             settings_flush: tokio::sync::Mutex::new(()),
             settings_retry: Notify::new(),
             live_read_done: Notify::new(),
+            live_audio_kick: Notify::new(),
         }
     }
 
@@ -826,8 +864,17 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     /// Feeds the client's events until it closes, and runs the settings
-    /// retries when they fall due.
-    pub async fn drive(self: Arc<Self>, mut events: broadcast::Receiver<BackendEvent>) {
+    /// retries when they fall due. S1.6b part 5d: the live audio queue
+    /// drains beside the events, so an `audio.processing.update` in flight
+    /// never holds them up.
+    pub async fn drive(self: Arc<Self>, events: broadcast::Receiver<BackendEvent>) {
+        tokio::select! {
+            () = self.drive_events(events) => {}
+            () = self.drain_live_audio_when_kicked() => {}
+        }
+    }
+
+    async fn drive_events(&self, mut events: broadcast::Receiver<BackendEvent>) {
         loop {
             let (due, live_due, low_light_due) = {
                 let inner = self.lock();
@@ -890,6 +937,8 @@ impl<B: StudioBackend> Studio<B> {
                 };
                 self.publish();
                 self.bootstrap(generation).await;
+                // S1.6b part 5d: a session that runs on this connection.
+                self.follow_live_audio().await;
             }
             BackendEvent::RecordingStatus(status) => {
                 let (effects, state_changed) = {
@@ -901,6 +950,8 @@ impl<B: StudioBackend> Studio<B> {
                 };
                 self.publish();
                 self.emit_all(effects);
+                // S1.6b part 5d: the live audio sync follows the session.
+                self.follow_live_audio().await;
                 // S1.6b part 5a: a returned pick is offered only while a
                 // session runs.
                 self.announce_returning_sources().await;
@@ -963,6 +1014,7 @@ impl<B: StudioBackend> Studio<B> {
             BackendEvent::EventsLagged(_) | BackendEvent::ClientLagged { .. } => {
                 // State built from events must be read again.
                 self.resync().await;
+                self.follow_live_audio().await;
             }
             BackendEvent::ConnectionClosed { reason } => {
                 {
@@ -973,6 +1025,8 @@ impl<B: StudioBackend> Studio<B> {
                     inner.sources.forget_devices();
                 }
                 self.publish();
+                // S1.6b part 5d: the engine is away: the live sync ends.
+                self.follow_live_audio().await;
             }
             // The remote executor runs these from its own subscription; the
             // Studio only holds the state they act on.
@@ -995,6 +1049,9 @@ impl<B: StudioBackend> Studio<B> {
                         };
                         if applied {
                             self.publish();
+                            // S1.6b part 5d: another window's audio edit
+                            // reaches the session too.
+                            self.follow_live_audio().await;
                         }
                     }
                     Err(error) => self
@@ -1659,11 +1716,39 @@ impl<B: StudioBackend> Studio<B> {
         };
         self.prepare_session_capture(&params.sources, &params.output.video)
             .await;
-        match self.backend.session_start(params).await {
+        // S1.6b part 5d (plan 069): the audio this start sends seeds the
+        // live sync of the session it starts (`startAudioSnapshot`); while
+        // it is on its way the sync waits for it.
+        let start_mic = live_audio::MicValues::of(&params.audio);
+        let start_system = live_audio::SystemValues::of(&params.audio);
+        {
+            let mut inner = self.lock();
+            inner.live_audio_start = None;
+            inner.live_audio_start_in_flight = true;
+        }
+        let start_in_flight = LiveAudioStartInFlight(&self.inner);
+        let answer = self.backend.session_start(params).await;
+        // The guard only covers a dropped future; an answered start clears
+        // the flag under the lock that seeds the snapshot, so no status in
+        // between makes a sync without it.
+        std::mem::forget(start_in_flight);
+        match answer {
             Ok(status) => {
                 let (resolution, effects) = {
                     let mut inner = self.lock();
-                    inner.session.finish_start(status, Instant::now())
+                    inner.live_audio_start_in_flight = false;
+                    let (resolution, effects) = inner.session.finish_start(status, Instant::now());
+                    inner.live_audio_start = match &resolution.status.session_id {
+                        Some(session_id) if resolution.session_active => {
+                            Some(live_audio::StartSnapshot {
+                                session_id: session_id.clone(),
+                                mic: start_mic,
+                                system: Some(start_system),
+                            })
+                        }
+                        _ => None,
+                    };
+                    (resolution, effects)
                 };
                 self.publish();
                 // #1643: the start's scene is committed and the session's
@@ -1671,6 +1756,8 @@ impl<B: StudioBackend> Studio<B> {
                 // session it started.
                 self.release_start_scene();
                 self.emit_all(effects);
+                // S1.6b part 5d: the live sync seeds the session it started.
+                self.follow_live_audio().await;
                 if resolution.session_active {
                     StartOutcome::Started
                 } else {
@@ -1682,7 +1769,10 @@ impl<B: StudioBackend> Studio<B> {
                     }
                 }
             }
-            Err(error) => self.refuse_start(start_failure_message(&error)),
+            Err(error) => {
+                self.lock().live_audio_start_in_flight = false;
+                self.refuse_start(start_failure_message(&error))
+            }
         }
     }
 
@@ -1922,6 +2012,9 @@ impl<B: StudioBackend> Studio<B> {
             if !inner.session.begin_stop() {
                 return true;
             }
+            // S1.6b part 5d: the stop drops the live audio queue (its reply
+            // in flight is inert) and the mutes waiting on it.
+            inner.end_live_audio();
             inner.last_error = None;
             inner.latency.mark(
                 LatencyKind::Stop,
@@ -1952,6 +2045,9 @@ impl<B: StudioBackend> Studio<B> {
         };
         self.publish();
         self.emit_all(effects);
+        // S1.6b part 5d: a stop that failed leaves the session running; its
+        // live sync starts again.
+        self.follow_live_audio().await;
         // YouTube's broadcasts complete once the stream stopped (S1.6c).
         ok
     }
@@ -1967,66 +2063,6 @@ impl<B: StudioBackend> Studio<B> {
     pub fn session_owns_transport(&self) -> bool {
         let inner = self.lock();
         inner.session.is_active() && !session_is_replay_only(inner.session.status())
-    }
-
-    /// `requestRemoteMicrophoneMute`: idle, the
-    /// mute is written to the capture config and the next session starts
-    /// with it; while a session runs, the session takes it through
-    /// `audio.processing.update` and the config follows what it applied.
-    /// True when the mute landed. The renderer's latest-wins audio sync
-    /// queue (plan 069) is Phase 3: here one update is sent, and the
-    /// microphone the session mixes is read from the capture config the
-    /// start was built from.
-    pub async fn set_microphone_muted(&self, mode: MicrophoneMode) -> bool {
-        let (active, session_id, audio) = {
-            let mut inner = self.lock();
-            let view = inner.settings_view();
-            (
-                inner.session.is_active(),
-                inner.session.status().session_id.clone(),
-                view.capture.audio,
-            )
-        };
-        let muted = match mode {
-            MicrophoneMode::Mute => true,
-            MicrophoneMode::Unmute => false,
-            MicrophoneMode::Toggle => !audio.microphone_muted,
-        };
-        if !active {
-            return self.commit_microphone_muted(muted).await;
-        }
-        let Some(session_id) = session_id else {
-            return false;
-        };
-        let params = videorc_protocol::AudioProcessingUpdateParams {
-            microphone_noise_suppression: Some(audio.microphone_noise_suppression),
-            session_id: session_id.clone(),
-            microphone_gain_db: audio.microphone_gain_db,
-            microphone_muted: muted,
-            system_audio_enabled: None,
-            system_audio_gain_db: None,
-            system_audio_echo_guard: None,
-        };
-        match self.backend.audio_processing_update(params).await {
-            Ok(result) if result.applied && result.session_id == session_id => {
-                // The live audio sync (S1.6b) holds it, so it is not sent
-                // again, once it lands.
-                self.commit_microphone_muted(result.microphone_muted).await
-            }
-            Ok(result) => {
-                self.config.logger.warn(format!(
-                    "Studio: audio.processing.update not applied for {} ({})",
-                    result.session_id,
-                    result.reason_code.as_deref().unwrap_or("no reason")
-                ));
-                false
-            }
-            Err(error) => {
-                self.note_error(&mut self.lock(), "audio.processing.update", &error);
-                self.publish();
-                false
-            }
-        }
     }
 
     /// `setCaptureConfig(current => ({...current, audio: {...current.audio,
@@ -2077,21 +2113,40 @@ impl<B: StudioBackend> Studio<B> {
         {
             let mut guard = self.lock();
             let inner = &mut *guard;
-            inner.capture.sync(inner.settings.get(keys::CAPTURE_CONFIG));
-            let mut next = inner.capture.config.clone();
-            edit(&mut next);
-            let stored = capture_config::stored_capture_config(&next);
-            inner.stage_writes(
-                &[SettingWrite::Put {
-                    key: keys::CAPTURE_CONFIG.to_string(),
-                    value: stored.clone(),
-                }],
-                &self.config.logger,
-            )?;
-            inner.capture.set(next, Some(stored));
+            self.stage_capture_config(inner, edit)?;
+            // S1.6b part 5d (review of #1862): every writer reaches a running
+            // session through the live sync, as Electron's sync effect hears
+            // every `captureConfig.audio` change (a saved scene's System
+            // audio among them). Its pin-back, if any, goes in this flush.
+            self.stage_live_audio_and_kick(inner);
         }
         self.publish();
         self.flush_settings().await
+    }
+
+    /// [`Self::update_capture_config`]'s half under the lock: the config as
+    /// the Studio holds it changes and the store's write waits in the
+    /// journal ([`Self::flush_settings`] sends it). S1.6b part 5d: the live
+    /// audio sync's rollback checks what the controls show and writes in
+    /// one step, as `setCaptureConfig(current => ...)` does.
+    fn stage_capture_config(
+        &self,
+        inner: &mut Inner,
+        edit: impl FnOnce(&mut Value),
+    ) -> Result<(), RpcError> {
+        inner.capture.sync(inner.settings.get(keys::CAPTURE_CONFIG));
+        let mut next = inner.capture.config.clone();
+        edit(&mut next);
+        let stored = capture_config::stored_capture_config(&next);
+        inner.stage_writes(
+            &[SettingWrite::Put {
+                key: keys::CAPTURE_CONFIG.to_string(),
+                value: stored.clone(),
+            }],
+            &self.config.logger,
+        )?;
+        inner.capture.set(next, Some(stored));
+        Ok(())
     }
 
     /// The Sources page's development switch: the test pattern on (the

@@ -272,8 +272,9 @@ impl AudioSectionView {
             let issue = if view.permission_required {
                 Some(words::PERMISSION_REASON.to_string())
             } else {
-                view.issue
-                    .map(|issue| audio_mixer::system_audio_issue_copy(issue, macos))
+                view.issue.map(|issue| {
+                    audio_mixer::system_audio_issue_copy(issue, audio_mixer::this_computer_word())
+                })
             };
             let issue_action = if view.permission_required
                 || (view.issue == Some(SystemAudioIssue::Unavailable) && macos)
