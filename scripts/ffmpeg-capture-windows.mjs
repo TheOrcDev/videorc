@@ -243,6 +243,30 @@ export function verifyNormalizedCapture(output) {
   return { protocol: 1, normalizedFrames: output.length / 8, peak, measuredFrequency }
 }
 
+/**
+ * Message for the build script's "already built?" probe. A missing
+ * MANIFEST.json is the normal cold-cache path after `ffmpeg:fetch:windows`
+ * (that fetch only lands the LGPL output FFmpeg); the shell recipe then
+ * builds the capture worker. Never dump a raw ENOENT stack into CI logs —
+ * L2 mistook that for a packaging gap that continued past a real failure
+ * (PR #1812 Windows installer). Preflight still hard-fails if the rebuild
+ * does not leave a verified worker.
+ */
+export function windowsCaptureProbeFailureMessage(bundle, error) {
+  const code = error?.code
+  const path = error?.path ? String(error.path) : ''
+  if (
+    code === 'ENOENT' &&
+    (path.includes('capture/MANIFEST.json') || path.includes('capture\\MANIFEST.json'))
+  ) {
+    return (
+      `Capture worker not built yet under ${bundle} (no capture/MANIFEST.json). ` +
+      'Building from the pinned Windows capture source; packaging will refuse to continue without a verified worker.'
+    )
+  }
+  return `Capture worker check failed under ${bundle}: ${error?.message ?? error}`
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (process.argv[2] === '--configure-flags') console.log(CAPTURE_FLAGS.join('\n'))
   else if (process.argv[2] === '--check-configure-log')
@@ -268,11 +292,16 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         `Videorc capture-only FFmpeg ${expected.version}\nSource: ${expected.sourceUrl}\nSource SHA-256: ${expected.sourceSha256}\nModified with distributed source-patches/dshow-capture-clock.patch (SHA-256 ${expected.patchSha256}).\nBuild flags/toolchain and binary fingerprint: MANIFEST.json and TOOLCHAIN.txt.\nCorresponding source consists of the exact upstream archive and this patch.\n`
       )
     }
-    console.log(
-      JSON.stringify({
-        ...verifyWindowsCaptureManifest(bundle),
-        ...probeWindowsCaptureWorker(bundle)
-      })
-    )
+    try {
+      console.log(
+        JSON.stringify({
+          ...verifyWindowsCaptureManifest(bundle),
+          ...probeWindowsCaptureWorker(bundle)
+        })
+      )
+    } catch (error) {
+      console.error(windowsCaptureProbeFailureMessage(bundle, error))
+      process.exit(1)
+    }
   }
 }
