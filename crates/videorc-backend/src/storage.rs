@@ -83,6 +83,10 @@ pub const UI_SETTINGS_KEY_PREFIX: &str = "ui:";
 const UI_SETTINGS_REVISION_KEY: &str = "uiSettingsRevision";
 /// Backend-private row holding the one-time `localStorage` migration mark.
 const UI_SETTINGS_LOCAL_STORAGE_MIGRATED_KEY: &str = "uiSettingsLocalStorageMigrated";
+/// Backend-private rows `uiSettingsDeleted/<renderer key>`: a deleted UI
+/// setting's tombstone, whose `updated_at` is when it was deleted. Outside
+/// the `ui:` namespace, so a `get` never lists them.
+const UI_SETTINGS_TOMBSTONE_PREFIX: &str = "uiSettingsDeleted/";
 
 fn reject_ui_settings_namespace(key: &str) -> Result<()> {
     if key.starts_with(UI_SETTINGS_KEY_PREFIX) {
@@ -7209,9 +7213,13 @@ impl Database {
 
     /// One batch in one transaction: the puts (only onto absent keys when
     /// `if_absent`), then the deletes, then the migration mark. A key named in
-    /// `unless_updated_after` is left out when its row changed after that
-    /// time (Unix ms). Returns what landed and the revision after it; nothing
-    /// landing (and no mark) leaves the revision alone.
+    /// `unless_updated_after` is left out when its row (or, once deleted, its
+    /// tombstone) changed after that time (Unix ms); when it lands it is
+    /// stamped with that time, not now, so replays of several journals keep
+    /// the order the writes happened in. Every delete that lands leaves a
+    /// tombstone, which also keeps an `if_absent` copy from bringing the key
+    /// back. Returns what landed and the revision after it; nothing landing
+    /// (and no mark) leaves the revision alone.
     pub fn ui_settings_apply(
         &self,
         put: &BTreeMap<String, serde_json::Value>,
@@ -7225,60 +7233,78 @@ impl Database {
         let now = Utc::now().to_rfc3339();
         let mut landed_put = BTreeMap::new();
         let mut landed_delete = Vec::new();
-        let changed_since = |key: &str, name: &str| -> Result<bool> {
-            let Some(written_ms) = unless_updated_after.get(name) else {
-                return Ok(false);
-            };
-            let updated_at: Option<String> = transaction
+        let updated_at = |key: &str| -> Result<Option<String>> {
+            Ok(transaction
                 .query_row(
                     "SELECT updated_at FROM app_settings WHERE key = ?1",
                     params![key],
                     |row| row.get(0),
                 )
-                .optional()?;
+                .optional()?)
+        };
+        // The key's last change: its row's time, or its tombstone's once deleted.
+        let last_change = |name: &str| -> Result<Option<String>> {
+            match updated_at(&format!("{UI_SETTINGS_KEY_PREFIX}{name}"))? {
+                Some(time) => Ok(Some(time)),
+                None => updated_at(&format!("{UI_SETTINGS_TOMBSTONE_PREFIX}{name}")),
+            }
+        };
+        let changed_since = |name: &str| -> Result<bool> {
+            let Some(written_ms) = unless_updated_after.get(name) else {
+                return Ok(false);
+            };
             let written_ms = i64::try_from(*written_ms).unwrap_or(i64::MAX);
-            Ok(match updated_at {
+            Ok(match last_change(name)? {
                 None => false,
-                Some(updated_at) => match chrono::DateTime::parse_from_rfc3339(&updated_at) {
-                    Ok(updated) => updated.timestamp_millis() > written_ms,
-                    // A time that doesn't parse is treated as newer: the row stays.
+                Some(time) => match chrono::DateTime::parse_from_rfc3339(&time) {
+                    Ok(changed) => changed.timestamp_millis() > written_ms,
+                    // A time that doesn't parse is treated as newer: the key stays.
                     Err(_) => true,
                 },
             })
         };
+        let stamp = |name: &str| -> String {
+            unless_updated_after
+                .get(name)
+                .and_then(|ms| {
+                    chrono::DateTime::<Utc>::from_timestamp_millis(i64::try_from(*ms).ok()?)
+                })
+                .map_or_else(|| now.clone(), |written| written.to_rfc3339())
+        };
         for (name, value) in put {
             let key = format!("{UI_SETTINGS_KEY_PREFIX}{name}");
-            if if_absent {
-                let held: Option<String> = transaction
-                    .query_row(
-                        "SELECT key FROM app_settings WHERE key = ?1",
-                        params![key],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                if held.is_some() {
-                    continue;
-                }
+            if if_absent && last_change(name)?.is_some() {
+                continue;
             }
-            if changed_since(&key, name)? {
+            if changed_since(name)? {
                 continue;
             }
             transaction.execute(
                 "INSERT INTO app_settings (key, value_json, updated_at)
                  VALUES (?1, ?2, ?3)
                  ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
-                params![key, serde_json::to_string(value)?, now],
+                params![key, serde_json::to_string(value)?, stamp(name)],
+            )?;
+            transaction.execute(
+                "DELETE FROM app_settings WHERE key = ?1",
+                params![format!("{UI_SETTINGS_TOMBSTONE_PREFIX}{name}")],
             )?;
             landed_put.insert(name.clone(), value.clone());
         }
         for name in delete {
             let key = format!("{UI_SETTINGS_KEY_PREFIX}{name}");
-            if changed_since(&key, name)? {
+            if changed_since(name)? {
                 continue;
             }
             let removed =
                 transaction.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
             if removed > 0 {
+                transaction.execute(
+                    "INSERT INTO app_settings (key, value_json, updated_at)
+                     VALUES (?1, 'true', ?2)
+                     ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at",
+                    params![format!("{UI_SETTINGS_TOMBSTONE_PREFIX}{name}"), stamp(name)],
+                )?;
                 landed_delete.push(name.clone());
             }
         }

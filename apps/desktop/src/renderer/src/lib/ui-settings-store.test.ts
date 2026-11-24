@@ -61,7 +61,8 @@ function fakeStorage(seed: Record<string, string> = {}): UiSettingsStorage & {
  */
 function fakeEngine(initial: Record<string, UiSettingsValue> = {}) {
   const entries = new Map(Object.entries(initial))
-  // Each key's last write, on the engine's clock (Unix ms).
+  // Each key's last change (Unix ms): a write, or its delete (the tombstone).
+  // A replayed change is stamped with its journal's write time.
   let clock = 0
   const updatedAt = new Map([...entries.keys()].map((key) => [key, clock]))
   let revision = 0
@@ -75,7 +76,7 @@ function fakeEngine(initial: Record<string, UiSettingsValue> = {}) {
     const written = params.unlessUpdatedAfter?.[key]
     if (written === undefined) return false
     const updated = updatedAt.get(key)
-    return entries.has(key) && updated !== undefined && updated > written
+    return updated !== undefined && updated > written
   }
 
   function snapshot(params?: UiSettingsGetParams): UiSettingsSnapshot {
@@ -94,15 +95,18 @@ function fakeEngine(initial: Record<string, UiSettingsValue> = {}) {
     const put: Record<string, UiSettingsValue> = {}
     const deletes: string[] = []
     for (const [key, value] of Object.entries(params.put ?? {})) {
-      if (params.ifAbsent && entries.has(key)) continue
+      if (params.ifAbsent && (entries.has(key) || updatedAt.has(key))) continue
       if (changedSince(key, params)) continue
       entries.set(key, value)
-      updatedAt.set(key, clock)
+      updatedAt.set(key, params.unlessUpdatedAfter?.[key] ?? clock)
       put[key] = value
     }
     for (const key of params.delete ?? []) {
       if (changedSince(key, params)) continue
-      if (entries.delete(key)) deletes.push(key)
+      if (entries.delete(key)) {
+        updatedAt.set(key, params.unlessUpdatedAfter?.[key] ?? clock)
+        deletes.push(key)
+      }
     }
     const landed = Object.keys(put).length > 0 || deletes.length > 0
     if (landed || params.localStorageMigrated) revision += 1
@@ -756,6 +760,55 @@ describe('UI settings store (plan 220 S1.4a)', () => {
     expect(engine.entries.get('videorc.notesTab')).toBe('chat')
     // The rewritten journal stays for its window.
     expect(storage.getItem(journalKey)).toContain('buddy')
+  })
+
+  it('replays orphaned journals in write order whatever their order in storage, and never resurrects a delete', async () => {
+    const engine = fakeEngine({ 'videorc.notesTab': 'chat' })
+    const journal = (put: Record<string, string>, deletes: string[], at: number) =>
+      JSON.stringify({
+        put,
+        delete: deletes,
+        at: Object.fromEntries([...Object.keys(put), ...deletes].map((key) => [key, at]))
+      })
+    // Enumerated newest first: the t20 journal before the t10 one.
+    const storage = fakeStorage({
+      [`${UI_SETTINGS_JOURNAL_PREFIX}window-new`]: journal({ 'videorc.theme': 'v2' }, [], 20),
+      [`${UI_SETTINGS_JOURNAL_PREFIX}window-old`]: journal(
+        { 'videorc.theme': 'v1', 'videorc.notesTab': 'stale' },
+        [],
+        10
+      )
+    })
+    // Another window deleted notesTab at t15, after the old journal's put.
+    engine.setClock(15)
+    const deleter = createUiSettingsStore({
+      transport: engine.transport(),
+      storage: null,
+      writer: 'window-deleter',
+      log: quiet,
+      locks: null
+    })
+    await deleter.hydrate()
+    deleter.remove('videorc.notesTab')
+    await deleter.flush()
+    expect(engine.entries.has('videorc.notesTab')).toBe(false)
+
+    engine.setClock(30)
+    const recovering = createUiSettingsStore({
+      transport: engine.transport(),
+      storage,
+      writer: 'window-recovering',
+      log: quiet,
+      locks: null
+    })
+    expect(await recovering.hydrate()).toMatchObject({ state: 'hydrated', replayed: 1 })
+    // The t20 write stands over the t10 one, and the t15 delete over the t10 put.
+    expect(engine.entries.get('videorc.theme')).toBe('v2')
+    expect(engine.entries.has('videorc.notesTab')).toBe(false)
+    expect(recovering.get('videorc.theme')).toBe('v2')
+    expect(recovering.has('videorc.notesTab')).toBe(false)
+    // Both journals were replayed whole, so both are gone.
+    expect(storage.dump()).toEqual({})
   })
 
   it('refuses a null or undefined value: that is a remove', async () => {

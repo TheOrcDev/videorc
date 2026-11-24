@@ -14,7 +14,10 @@
 //!
 //! A journal replay names each key's write time (`unlessUpdatedAfter`): a key
 //! the store changed after it is left out, so a window's stale journal never
-//! overwrites what another window wrote since.
+//! overwrites what another window wrote since. A delete leaves a tombstone
+//! with its time, so a stale journal or a migration copy never resurrects
+//! it, and a replayed change is stamped with its write time, so journals
+//! replayed in any order leave the newest write.
 //!
 //! The one-time `localStorage` migration is the renderer's (it is the only
 //! side that can read `localStorage`): it sends every key the store lacks as
@@ -631,6 +634,114 @@ mod tests {
         assert_eq!(snapshot.entries["videorc.theme"], json!("light"));
         assert_eq!(snapshot.entries["videorc.notesTab"], json!("notes"));
         assert!(!snapshot.entries.contains_key("videorc.tab"));
+    }
+
+    /// One journal's replay: `put` (or delete, for `None`) of `key`, written at `at`.
+    fn replay(state: &AppState, key: &str, value: Option<Value>, at: u64) -> UiSettingsChange {
+        let (put, delete) = match value {
+            Some(value) => (BTreeMap::from([(key.to_string(), value)]), Vec::new()),
+            None => (BTreeMap::new(), vec![key.to_string()]),
+        };
+        set(
+            state,
+            UiSettingsSetParams {
+                put,
+                delete,
+                unless_updated_after: BTreeMap::from([(key.to_string(), at)]),
+                ..UiSettingsSetParams::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_deleted_key_stays_deleted_under_an_older_journal_and_an_ifabsent_copy() {
+        let (state, _) = test_state();
+        // Journal times after the live writes below, which are stamped now.
+        let t10 = chrono::Utc::now().timestamp_millis() as u64 + 3_600_000;
+        set(&state, put(&[("videorc.theme", json!("dark"))])).unwrap();
+        // Deleted at t20 by a replayed journal, and live (now) for another key.
+        assert_eq!(
+            replay(&state, "videorc.theme", None, t10 + 10_000).delete,
+            vec!["videorc.theme".to_string()]
+        );
+        set(&state, put(&[("videorc.tab", json!("chat"))])).unwrap();
+        set(
+            &state,
+            UiSettingsSetParams {
+                delete: vec!["videorc.tab".to_string()],
+                ..UiSettingsSetParams::default()
+            },
+        )
+        .unwrap();
+
+        // A journal's put from before either delete never brings them back.
+        assert!(
+            replay(&state, "videorc.theme", Some(json!("stale")), t10)
+                .put
+                .is_empty()
+        );
+        let before_now = chrono::Utc::now().timestamp_millis() as u64 - 60_000;
+        assert!(
+            replay(&state, "videorc.tab", Some(json!("stale")), before_now)
+                .put
+                .is_empty()
+        );
+        // Nor does an `ifAbsent` copy (the migration).
+        let copy = set(
+            &state,
+            UiSettingsSetParams {
+                if_absent: true,
+                ..put(&[
+                    ("videorc.theme", json!("old")),
+                    ("videorc.tab", json!("old")),
+                ])
+            },
+        )
+        .unwrap();
+        assert!(copy.put.is_empty());
+        let snapshot = get(&state.database, UiSettingsGetParams::default()).unwrap();
+        assert!(snapshot.entries.is_empty(), "{:?}", snapshot.entries);
+
+        // A write after the delete lands, and clears the tombstone.
+        assert_eq!(
+            replay(&state, "videorc.theme", Some(json!("light")), t10 + 20_000)
+                .put
+                .len(),
+            1
+        );
+        let snapshot = get(&state.database, UiSettingsGetParams::default()).unwrap();
+        assert_eq!(snapshot.entries["videorc.theme"], json!("light"));
+    }
+
+    #[test]
+    fn two_journals_of_one_key_leave_the_newer_write_in_either_order() {
+        let t10 = 1_795_000_010_000;
+        let t20 = t10 + 10_000;
+        for newer_first in [false, true] {
+            let (state, _) = test_state();
+            let journals = if newer_first {
+                [("v2", t20), ("v1", t10)]
+            } else {
+                [("v1", t10), ("v2", t20)]
+            };
+            for (value, at) in journals {
+                replay(&state, "videorc.theme", Some(json!(value)), at);
+            }
+            let snapshot = get(&state.database, UiSettingsGetParams::default()).unwrap();
+            assert_eq!(
+                snapshot.entries["videorc.theme"],
+                json!("v2"),
+                "newer first: {newer_first}"
+            );
+
+            // The same with a delete as the newer write.
+            for (value, at) in [(None, t20 + 10_000), (Some(json!("v3")), t20 + 5_000)] {
+                replay(&state, "videorc.theme", value, at);
+            }
+            let snapshot = get(&state.database, UiSettingsGetParams::default()).unwrap();
+            assert!(!snapshot.entries.contains_key("videorc.theme"));
+        }
     }
 
     #[test]
