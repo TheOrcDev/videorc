@@ -34,6 +34,10 @@
 //!   [`audio_mixer`], [`audio_actions`], [`audio_levels`] and
 //!   [`takeover_microphone`] (part 5c) the microphone and System audio,
 //!   with [`live_audio`] (part 5d) the running session's live audio sync.
+//! - The Session section (part 6a): [`transport`] (the status words, the
+//!   status bar's clock, Record's and Go Live's states, the stop control),
+//!   [`inspector`] (why a start waits and where it is fixed, the Session
+//!   facts and notices) and [`captions_readiness`] (a Go Live's captions).
 //! - [`scenes`] (S1.6b): plan 231's scene library as the Studio holds it,
 //!   read once the settings snapshot is in (the #1706 repair, the v1
 //!   migration, the working setup over the capture config, the scene on
@@ -66,12 +70,14 @@ pub mod camera_background_migration;
 pub mod camera_background_view;
 pub mod camera_frame_rate;
 pub mod camera_low_light;
+pub mod captions_readiness;
 pub mod capture_config;
 pub mod clips;
 pub mod clips_ring;
 pub mod families;
 pub mod health;
 pub mod health_page;
+pub mod inspector;
 pub mod js_value;
 pub mod latency;
 pub mod linux_desktop;
@@ -90,7 +96,10 @@ pub mod sources_audio;
 pub mod sources_page;
 pub mod sources_section;
 pub mod takeover_microphone;
+#[cfg(test)]
+mod test_support;
 pub mod timecode;
+pub mod transport;
 pub mod ui_local;
 pub mod ui_settings_wire;
 pub mod vertical_stream;
