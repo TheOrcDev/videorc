@@ -17,6 +17,9 @@ pub mod cohost;
 pub mod community;
 pub mod live_chat_moderation;
 pub mod overlay_layout;
+// Plan 260 (from plan 220 S3.7b): the Library's playback family, for
+// `videorc-preview`. The backend does not answer it yet (D9).
+pub mod playback;
 pub mod repair;
 pub mod room_program_camera;
 pub mod source_registry;
@@ -2081,6 +2084,11 @@ pub enum PreviewTransport {
     ElectronProofSurface,
     LatestJpegPolling,
     MjpegStream,
+    /// Plan 260 (from plan 220 S4.1d): the CPU-composed program as whole BGRA
+    /// frames in a shared-memory ring (`preview.cpu.open`), drawn by the app
+    /// itself (Windows route (d), Linux). Named for what it is; never a native
+    /// surface. The backend does not offer it yet (S0.2b).
+    CpuSharedMemory,
     Unavailable,
 }
 
@@ -2091,6 +2099,7 @@ impl PreviewTransport {
             PreviewTransport::NativeSurface
                 | PreviewTransport::D3d11SharedTexture
                 | PreviewTransport::ElectronProofSurface
+                | PreviewTransport::CpuSharedMemory
         )
     }
 }
@@ -2106,8 +2115,83 @@ pub enum PreviewSurfaceBacking {
     #[serde(rename = "directcomposition-swapchain")]
     DirectcompositionSwapChain,
     ElectronBrowserWindow,
+    /// Plan 260: the GPUI app's own UI draws the frame (an image GPUI paints,
+    /// the texture route); nothing native hosts it. Plan 220 called it
+    /// `slint-image`.
+    GpuiImage,
+    /// Plan 260 (from plan 220 S4.2c): the CPU ring's frames on a
+    /// `wl_subsurface` of the app's window, over a `wl_shm` pool on the ring
+    /// (Linux, Wayland). The compositor reads the shared memory; not a native
+    /// GPU surface.
+    WlShmSubsurface,
+    /// Plan 260 (from plan 220 S4.2c): the CPU ring's frames in an X11 child
+    /// window of the app's window over MIT-SHM (Linux, X11 or XWayland). Not a
+    /// native GPU surface.
+    #[serde(rename = "x11-shm-child-window")]
+    X11ShmChildWindow,
     #[default]
     None,
+}
+
+/// Plan 260 (from plan 220 S4.1d): where the CPU preview's frames are. The
+/// answer to `preview.cpu.open` and the `ring` of `preview.cpu.status`:
+/// everything a reader needs to map the ring (`videorc-preview-ring` reads
+/// the rest from the header). A new frame size is a new ring with the next
+/// `generation`; the old one is retired and the reader opens again. The
+/// backend does not write it yet (S0.2b).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewCpuRing {
+    /// `memfd-path` (Linux: a `/proc/<pid>/fd/<n>` path) or `file-mapping`
+    /// (Windows: a `Local\…` mapping name).
+    pub handle_kind: String,
+    pub handle: String,
+    /// The region's size in bytes.
+    pub bytes: u64,
+    /// The backend's process id (the owner of the memory file).
+    pub pid: u32,
+    pub generation: u64,
+    pub slot_count: u32,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    /// `bgra8`: row-major, top-down.
+    pub pixel_format: String,
+    pub header_bytes: u64,
+    pub slot_offset: u64,
+    pub slot_bytes: u64,
+}
+
+/// Plan 260 (from plan 220 S4.1d): `preview.cpu.status`, and what
+/// `preview.cpu.open` answers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewCpuRingStatus {
+    /// A client holds the ring open (the writer runs and pixels are demanded).
+    pub open: bool,
+    /// The current ring, once a frame told its size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ring: Option<PreviewCpuRing>,
+    /// Rings created since the open (one per frame size).
+    pub rings_created: u64,
+    /// Frames converted and published into a ring.
+    pub frames_written: u64,
+    /// Ticks that found no new program frame.
+    pub frames_idle: u64,
+    /// Program frames that carried no pixels (the compositor's metadata-only
+    /// tick, before pixel demand reached it).
+    pub frames_without_pixels: u64,
+    /// Frames the writer could not place (no free slot); never expected
+    /// with one reader.
+    pub frames_skipped: u64,
+    /// The I420 to BGRA conversion of the last frame, and the slowest.
+    pub convert_ms_last: f64,
+    pub convert_ms_max: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_source_sequence: Option<u64>,
+    /// Why there is no ring, in the backend's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
