@@ -51,6 +51,30 @@ impl StatusTone {
 }
 
 /// The ping's size and opacity at `delta` (0 to 1) through it: from the
+
+/// A lower-case, hyphenated machine value: `connected`, `device-missing`.
+pub fn is_raw_status_value(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+}
+
+/// The last resort for a state no map names yet: `device-missing` reads
+/// "Device missing". A map that names the state always wins.
+pub fn status_word_from_value(value: &str) -> String {
+    let spaced = value
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => spaced,
+    }
+}
+
+/// The ping ring's cycle (Tailwind's `animate-ping`).
+pub const PING: Duration = Duration::from_secs(1);
+
 /// dot at 60% to twice the dot, gone (`ping`, eased out).
 pub fn ping(delta: f32) -> (f32, f32) {
     let eased = 1.0 - (1.0 - delta.clamp(0.0, 1.0)).powi(3);
@@ -84,7 +108,13 @@ impl StatusDot {
 
     /// A word in sentence case, already mapped from its state.
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
-        self.label = Some(label.into());
+        let label = label.into();
+        if cfg!(debug_assertions) && is_raw_status_value(&label) {
+            eprintln!(
+                "StatusDot got the raw status value \"{label}\". Map it to a status word first."
+            );
+        }
+        self.label = Some(label);
         self
     }
 
@@ -152,6 +182,22 @@ impl RenderOnce for StatusDot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_values_are_caught_and_words_pass() {
+        assert!(is_raw_status_value("device-missing"));
+        assert!(is_raw_status_value("connected"));
+        assert!(!is_raw_status_value("Needs permission"));
+        assert!(!is_raw_status_value("Ready"));
+        assert!(!is_raw_status_value(""));
+    }
+
+    #[test]
+    fn a_value_reads_as_a_sentence_case_word() {
+        assert_eq!(status_word_from_value("device-missing"), "Device missing");
+        assert_eq!(status_word_from_value("on_air"), "On air");
+        assert_eq!(status_word_from_value("--"), "");
+    }
     use crate::tokens::DARK;
 
     #[test]

@@ -21,10 +21,10 @@ use gpui::{
 use smallvec::SmallVec;
 
 use crate::{
-    chrome::box_shadow,
+    chrome::focus_ring,
     section_label::SectionLabel,
     theme::{Appearance, TypeScale, hsla, resolve},
-    tokens::{Shadow, Theme, radius, size, text},
+    tokens::{radius, size, text},
 };
 
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -32,18 +32,6 @@ type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 /// A row a [`GroupedList`] can hold flush: it drops its own rounding.
 pub trait GroupedRow: IntoElement {
     fn grouped(self) -> Self;
-}
-
-/// The inset 2 px focus ring (`ring-2 ring-inset ring-ring`).
-pub(crate) fn focus_ring(t: &Theme) -> gpui::BoxShadow {
-    box_shadow(&Shadow {
-        inset: true,
-        x: 0.0,
-        y: 0.0,
-        blur: 0.0,
-        spread: 2.0,
-        color: t.ring,
-    })
 }
 
 #[derive(IntoElement)]

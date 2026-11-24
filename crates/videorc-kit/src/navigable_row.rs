@@ -19,8 +19,9 @@ use gpui::{
 };
 
 use crate::{
+    chrome::focus_ring,
     icon::{IconName, icon},
-    list_row::{GroupedRow, focus_ring},
+    list_row::GroupedRow,
     theme::{Appearance, hsla, resolve},
     tokens::{radius, size},
     tooltip::tooltip,

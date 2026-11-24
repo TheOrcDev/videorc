@@ -3,7 +3,8 @@
 //!
 //! `label` is the action's name: what a screen reader says, and the tooltip
 //! of an icon alone. `text` is the visible word when there is room for one
-//! ("Clip", "Clear"). `hint` says more than the name, in the tooltip.
+//! ("Clip", "Clear"). `hint` says more than the name, in the tooltip and as
+//! the button's accessible description.
 //! [`StatusBarAction::tooltip`] overrides the tooltip's words when they are
 //! neither (the bell is named "Notifications, 2 unread"; its tooltip says
 //! "Notifications"), with the shortcut the bar has no room to print. Never
@@ -172,6 +173,7 @@ impl RenderOnce for StatusBarAction {
         Press {
             id: self.id,
             label: self.label,
+            description: self.hint,
             pressed: self.pressed,
             disabled: self.disabled,
             expanded: self.expanded,
