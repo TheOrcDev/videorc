@@ -95,6 +95,11 @@ impl Platform for MacOs {
         Ok(Some(window.windowNumber() as u64))
     }
 
+    fn capture_window_id(&self, window: &Window) -> Option<u32> {
+        let number = ns_window(window).ok()?.windowNumber();
+        u32::try_from(number).ok().filter(|number| *number > 0)
+    }
+
     /// A normal window's level raised (panels hide when the app
     /// deactivates, so the app keeps normal windows).
     fn set_keep_on_top(&self, window: &Window, on_top: bool) -> OsResult<()> {
