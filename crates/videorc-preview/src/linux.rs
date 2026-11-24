@@ -238,6 +238,30 @@ impl Doorbell {
     }
 }
 
+/// Where the child sits against the host window's own drawing (plan 260
+/// S2.3c; spike S0.3 measured both under GPUI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Stacking {
+    /// Over the host's drawing: nothing the UI draws over the slot shows
+    /// (Slint's route, and X11's only one).
+    #[default]
+    AboveHost,
+    /// Wayland: under the host's own surface (`wl_subsurface.place_below`,
+    /// applied with the parent's next commit). The UI draws over the frames
+    /// wherever it paints (the editor's handles, the label pills, popups),
+    /// so it must leave the slot transparent to show them.
+    BelowHost,
+}
+
+/// The stacking a backing gives for a request: X11 stacks a child window
+/// over its parent's drawing, so it is always above.
+pub fn effective_stacking(requested: Stacking, backing: Backing) -> Stacking {
+    match backing {
+        Backing::WaylandSubsurface => requested,
+        Backing::X11ChildWindow => Stacking::AboveHost,
+    }
+}
+
 /// The `Send` half: what the ring's reader thread needs to show frames and
 /// name the ring.
 #[derive(Clone)]
@@ -289,13 +313,20 @@ pub struct Presenter {
     x11_socket: Option<OwnedFd>,
     placement: Option<Placement>,
     hidden: bool,
+    /// What the child got ([`effective_stacking`]).
+    stacking: Stacking,
 }
 
 impl Presenter {
-    /// Builds the child in `window`: a subsurface under Wayland, a child
-    /// window under X11, or the reason neither could be (the caller's
-    /// fallback is the texture route, named).
+    /// [`Self::attach_with`] above the host's drawing.
     pub fn attach(window: &dyn NativeHost) -> Result<Self, String> {
+        Self::attach_with(window, Stacking::AboveHost)
+    }
+
+    /// Builds the child in `window`: a subsurface under Wayland (stacked as
+    /// `requested`), a child window under X11 (always above), or the reason
+    /// neither could be (the caller's fallback is the texture route, named).
+    pub fn attach_with(window: &dyn NativeHost, requested: Stacking) -> Result<Self, String> {
         let handles = native_handles(window)?;
         // The Wayland child borrows winit's display and the window's
         // surface (raw pointers); the X11 child has a connection of its own
@@ -320,7 +351,7 @@ impl Presenter {
                     !thread_abandoned.load(Ordering::Acquire) && ready_tx.send(Ok(backing)).is_ok()
                 };
                 if handles.wayland_display != 0 && handles.wayland_surface != 0 {
-                    match wayland::Child::build(handles) {
+                    match wayland::Child::build(handles, requested) {
                         Ok(child) if wanted(Backing::WaylandSubsurface) => {
                             child.run(inbox, &thread_bell);
                         }
@@ -416,6 +447,7 @@ impl Presenter {
             x11_socket: socket_rx.try_recv().ok(),
             placement: None,
             hidden: false,
+            stacking: effective_stacking(requested, backing),
         })
     }
 
@@ -425,6 +457,12 @@ impl Presenter {
 
     pub fn backing(&self) -> Backing {
         self.client.backing
+    }
+
+    /// Where the child sits: what the UI must paint over the slot (a
+    /// transparent hole when it is below).
+    pub fn stacking(&self) -> Stacking {
+        self.stacking
     }
 
     /// Moves the child onto the slot's rect. Returns true when it changed.
@@ -677,7 +715,7 @@ mod wayland {
 
     use super::{
         Command, Doorbell, IDLE_POLL, Mapped, NativeHandles, OWN_BUFFERS, Placement, RELEASE_WAIT,
-        RingMapping, own_memory, poll_readable, report,
+        RingMapping, Stacking, own_memory, poll_readable, report,
     };
 
     /// The dispatch state: which of the presenter's own buffers the
@@ -763,7 +801,7 @@ mod wayland {
     }
 
     impl Child {
-        pub(super) fn build(handles: NativeHandles) -> Result<Self, String> {
+        pub(super) fn build(handles: NativeHandles, stacking: Stacking) -> Result<Self, String> {
             // SAFETY: winit's live display pointer; the connection is not
             // owned (winit closes it) and outlives this thread, which the
             // presenter's drop joins before the window goes.
@@ -800,6 +838,10 @@ mod wayland {
             region.destroy();
             let subsurface = subcompositor.get_subsurface(&child, &parent, &qh, ());
             subsurface.set_desync();
+            if stacking == Stacking::BelowHost {
+                // Applied with the parent's next commit (the UI's next frame).
+                subsurface.place_below(&parent);
+            }
             let viewport = viewporter.get_viewport(&child, &qh, ());
             Ok(Self {
                 conn,
@@ -1759,5 +1801,27 @@ mod x11 {
             let _ = self.conn.destroy_window(self.child);
             let _ = self.conn.flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod stacking_tests {
+    use super::{Backing, Stacking, effective_stacking};
+
+    #[test]
+    fn wayland_takes_the_stacking_asked_for_and_x11_stays_above() {
+        assert_eq!(Stacking::default(), Stacking::AboveHost);
+        assert_eq!(
+            effective_stacking(Stacking::BelowHost, Backing::WaylandSubsurface),
+            Stacking::BelowHost
+        );
+        assert_eq!(
+            effective_stacking(Stacking::AboveHost, Backing::WaylandSubsurface),
+            Stacking::AboveHost
+        );
+        assert_eq!(
+            effective_stacking(Stacking::BelowHost, Backing::X11ChildWindow),
+            Stacking::AboveHost
+        );
     }
 }
