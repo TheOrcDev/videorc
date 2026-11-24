@@ -260,6 +260,8 @@ struct Native {
 #[cfg(target_os = "linux")]
 struct Native {
     presenter: Option<LinuxPresenter>,
+    /// Plan 260 S2.3c: where the next attach puts the child.
+    stacking: crate::linux::Stacking,
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -338,7 +340,10 @@ impl Native {
 #[cfg(target_os = "linux")]
 impl Native {
     fn start() -> Result<Self, String> {
-        Ok(Self { presenter: None })
+        Ok(Self {
+            presenter: None,
+            stacking: crate::linux::Stacking::default(),
+        })
     }
 
     fn client(&self) -> Option<crate::linux::PresenterClient> {
@@ -768,13 +773,14 @@ impl PreviewElement {
     #[cfg(target_os = "linux")]
     pub fn attach(&mut self, window: &dyn NativeHost) -> Result<(), String> {
         self.native.presenter = None;
-        let mut presenter = LinuxPresenter::attach(window)?;
+        let mut presenter = LinuxPresenter::attach_with(window, self.native.stacking)?;
         presenter.set_hidden(!(self.visible && layer_shown(self.route, self.handover)));
         self.logger.log(
             Level::Info,
             &format!(
-                "[preview] Linux presenter attached: {} (never a native GPU surface)",
-                presenter.backing().as_str()
+                "[preview] Linux presenter attached: {}, {:?} (never a native GPU surface)",
+                presenter.backing().as_str(),
+                presenter.stacking()
             ),
         );
         self.native.presenter = Some(presenter);
@@ -790,6 +796,22 @@ impl PreviewElement {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub fn attach(&mut self, _window: &dyn HasWindowHandle) -> Result<(), String> {
         Err(LAYER_ROUTE_UNAVAILABLE.to_string())
+    }
+
+    /// Plan 260 S2.3c (spike S0.3): where the Linux child sits against the
+    /// UI's drawing. `BelowHost` lets the UI draw over the frames on Wayland,
+    /// so it must leave the slot transparent; X11 stays above whatever is
+    /// asked. Takes effect at the next attach or reset-native-path.
+    #[cfg(target_os = "linux")]
+    pub fn set_linux_stacking(&mut self, stacking: crate::linux::Stacking) {
+        self.native.stacking = stacking;
+    }
+
+    /// The stacking the presenter has, once attached: what the UI paints
+    /// over the slot (a transparent hole when below).
+    #[cfg(target_os = "linux")]
+    pub fn native_stacking(&self) -> Option<crate::linux::Stacking> {
+        self.native.presenter.as_ref().map(LinuxPresenter::stacking)
     }
 
     /// Plan 220 S4.2c: the surface the presenter has, named for the status.
