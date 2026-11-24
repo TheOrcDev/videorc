@@ -398,6 +398,12 @@ mod tests {
         fn reveal_cloud_download(&mut self, recording_id: &str) {
             self.calls.push(format!("download {recording_id}"));
         }
+        fn use_returned_source(&mut self, key: &str) {
+            self.calls.push(format!("use {key}"));
+        }
+        fn resume_system_audio(&mut self) {
+            self.calls.push("resume".into());
+        }
     }
 
     impl HealthPage for Studio {
