@@ -1231,6 +1231,22 @@ pub struct XBroadcastChanges {
     pub live_category_id: Option<String>,
 }
 
+/// `streamTargets.x.updateBroadcast`: the live broadcast's title or category
+/// changed from Videorc while it runs. `liveCategoryId: ""` clears it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct XUpdateBroadcastParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    pub broadcast_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_category_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
 /// A broadcast as `PUT /2/broadcasts/:id` answers it: the result of the
 /// update (a GET right after can still return the old values).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

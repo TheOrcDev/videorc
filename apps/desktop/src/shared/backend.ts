@@ -1765,6 +1765,31 @@ export interface XLiveCategoriesResult {
 }
 
 /**
+ * `streamTargets.x.updateBroadcast`: the live broadcast's title or category,
+ * changed while it runs (`PUT /2/broadcasts/:id`). `liveCategoryId: ''`
+ * clears the category. Send only what changes.
+ */
+export interface XUpdateBroadcastParams {
+  accountId?: string
+  broadcastId: string
+  title?: string
+  liveCategoryId?: string
+  sessionId?: string
+}
+
+/** X's answer to the update: the result (a read right after can lag). */
+export interface XBroadcastUpdated {
+  broadcastId: string
+  state: string
+  shareUrl: string
+  title?: string
+  liveCategoryId?: string
+  /** The category's name from the session's list, when it has it. */
+  liveCategoryName?: string
+  chatOption?: number
+}
+
+/**
  * `streamTargets.x.playback` event — the post-Go-Live broadcast state watch.
  * X's `/2/broadcasts` routes expose no playback URL, so `unavailable` now
  * means X ended the broadcast (TIMED_OUT, ENDED) while the session was still
