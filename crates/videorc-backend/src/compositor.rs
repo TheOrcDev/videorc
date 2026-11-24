@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior, sleep};
 use uuid::Uuid;
 
+use crate::background_effects::{BackgroundPictureEffects, apply_background_picture_effects};
 use crate::banner_prepare::{
     BannerBitmap, BannerBitmapKey, BannerPrepareRequest, BannerPrepareService,
 };
@@ -3526,6 +3527,8 @@ struct CompositorImagePreparation {
     cache_key: String,
     image_path: String,
     cached: Option<CompositorImageSource>,
+    /// The scene background picture's grade; always `None` for other images.
+    effects: Option<BackgroundPictureEffects>,
     read_error_prefix: &'static str,
     missing_message: &'static str,
 }
@@ -6580,6 +6583,7 @@ fn compositor_image_preparations(
             cached: compositor
                 .image_sources
                 .source_for_path(&screen.id, &screen.image_path),
+            effects: None,
             read_error_prefix: "Could not read uploaded screen image",
             missing_message: "Uploaded screen image file is missing.",
         });
@@ -6597,6 +6601,7 @@ fn compositor_image_preparations(
                 .source_for_path(&cache_key, &background.managed_asset_path),
             cache_key,
             image_path: background.managed_asset_path.clone(),
+            effects: BackgroundPictureEffects::for_background(background),
             read_error_prefix: "Could not read background image",
             missing_message: "Background image file is missing.",
         });
@@ -6628,6 +6633,7 @@ fn prepare_compositor_image(preparation: CompositorImagePreparation) -> Composit
     let CompositorImagePreparation {
         image_path,
         cached,
+        effects,
         read_error_prefix,
         missing_message,
         ..
@@ -6643,6 +6649,9 @@ fn prepare_compositor_image(preparation: CompositorImagePreparation) -> Composit
             Ok((image, optimization_message)) => {
                 let (width, height) = image.dimensions();
                 let mut bgra = image.into_raw();
+                if let Some(effects) = effects {
+                    apply_background_picture_effects(&mut bgra, width, height, effects);
+                }
                 rgba_to_bgra_in_place(&mut bgra);
                 CompositorImageSource {
                     image_path,
@@ -14979,7 +14988,10 @@ fn image_file_revision(path: &Path) -> Option<String> {
 }
 
 fn background_cache_key(background: &EffectiveSceneBackground) -> String {
-    format!("background:{}", background.asset_id)
+    let effects = BackgroundPictureEffects::for_background(background)
+        .map(|effects| effects.cache_key_suffix())
+        .unwrap_or_default();
+    format!("background:{}{effects}", background.asset_id)
 }
 
 fn image_cache_pinned_keys(snapshot: &CompositorSceneSnapshot) -> HashSet<String> {
@@ -22930,6 +22942,85 @@ mod tests {
         assert_eq!(missing.image_cache.resident_bytes, 0);
         assert_eq!(missing.image_cache.misses, 2);
         assert_eq!(state.compositor.lock().await.image_sources.len(), 1);
+    }
+
+    fn graded_test_background(dim_percent: f64) -> EffectiveSceneBackground {
+        EffectiveSceneBackground {
+            asset_id: "background-graded".to_string(),
+            managed_asset_path: "/tmp/background-graded.png".to_string(),
+            fit: BackgroundFit::Fill,
+            scale: 100.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur_px: 0.0,
+            dim_percent,
+            saturation_percent: 100.0,
+            vignette_percent: 0.0,
+            visibility_percent: 20.0,
+            live: None,
+        }
+    }
+
+    #[test]
+    fn background_cache_key_changes_only_when_the_picture_grade_changes() {
+        let neutral = graded_test_background(0.0);
+        assert_eq!(
+            background_cache_key(&neutral),
+            "background:background-graded"
+        );
+        let mut moved = neutral.clone();
+        moved.scale = 150.0;
+        moved.visibility_percent = 0.0;
+        assert_eq!(background_cache_key(&moved), background_cache_key(&neutral));
+        let dimmed = graded_test_background(30.0);
+        let dimmed_more = graded_test_background(60.0);
+        assert_ne!(
+            background_cache_key(&dimmed),
+            background_cache_key(&neutral)
+        );
+        assert_ne!(
+            background_cache_key(&dimmed),
+            background_cache_key(&dimmed_more)
+        );
+        let mut live = dimmed.clone();
+        live.live = Some(crate::protocol::LiveBackgroundSpec {
+            id: crate::protocol::LiveBackgroundId::Silk,
+            look: "satin".to_string(),
+            motion: crate::protocol::LiveBackgroundMotion::Calm,
+        });
+        assert_eq!(background_cache_key(&live), "background:background-graded");
+    }
+
+    #[test]
+    fn prepared_background_picture_carries_its_grade_in_bgra() {
+        let image_path =
+            std::env::temp_dir().join(format!("videorc-graded-background-{}.png", Uuid::new_v4()));
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([200, 100, 50, 255]))
+            .save(&image_path)
+            .unwrap();
+        let prepare = |background: &EffectiveSceneBackground| {
+            prepare_compositor_image(CompositorImagePreparation {
+                role: CompositorImagePreparationRole::Background,
+                cache_key: background_cache_key(background),
+                image_path: image_path.to_string_lossy().into_owned(),
+                cached: None,
+                effects: BackgroundPictureEffects::for_background(background),
+                read_error_prefix: "Could not read background image",
+                missing_message: "Background image file is missing.",
+            })
+        };
+        let plain = prepare(&graded_test_background(0.0));
+        let dimmed = prepare(&graded_test_background(50.0));
+        let mut grey = graded_test_background(0.0);
+        grey.saturation_percent = 0.0;
+        let grey = prepare(&grey);
+        std::fs::remove_file(&image_path).ok();
+
+        assert_eq!(plain.state, "live");
+        assert_eq!(plain.bgra.as_deref().unwrap()[..4], [50, 100, 200, 255]);
+        assert_eq!(dimmed.bgra.as_deref().unwrap()[..4], [25, 50, 100, 255]);
+        // 0.2126 * 200 + 0.7152 * 100 + 0.0722 * 50 = 117.6
+        assert_eq!(grey.bgra.as_deref().unwrap()[..4], [118, 118, 118, 255]);
     }
 
     #[test]
