@@ -88,6 +88,7 @@ pub mod latency;
 pub mod linux_desktop;
 pub mod live_audio;
 pub mod live_sources;
+mod platforms;
 pub mod preview_scene;
 pub mod recordings_folder;
 mod recordings_folder_actions;
@@ -111,6 +112,8 @@ pub mod ui_local;
 pub mod ui_settings_wire;
 pub mod vertical_stream;
 pub mod virtual_camera;
+
+pub use platforms::BROWSER_APPROVAL_TOAST_ID;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -198,7 +201,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 20] = [
+pub const STUDIO_EVENTS: [&str; 23] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -224,6 +227,10 @@ pub const STUDIO_EVENTS: [&str; 20] = [
     live_sources::SOURCES_CHANGED_EVENT,
     // S1.6b part 5b: the Captions row's word.
     sources_section::CAPTIONS_STATUS_EVENT,
+    // S1.6c: the platform accounts (`platforms`).
+    crate::livestream::ACCOUNTS_CHANGED_EVENT,
+    crate::livestream::OAUTH_CALLBACK_EVENT,
+    crate::livestream::YOUTUBE_QUOTA_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -848,6 +855,8 @@ pub struct Studio<B: StudioBackend> {
     live_audio_kick: Notify,
     /// S1.6a part 6b: the app's recordings folder capability issuer.
     output_authorizer: Mutex<Option<OutputAuthorizer>>,
+    /// S1.6c: the platform accounts, apart from the snapshot (`platforms`).
+    platforms_tx: watch::Sender<crate::livestream::PlatformsState>,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -903,6 +912,7 @@ impl<B: StudioBackend> Studio<B> {
         let (notices, _) = broadcast::channel(NOTICE_CHANNEL_CAPACITY);
         let (telemetry, _) = watch::channel(HealthTelemetry::default());
         let (levels, _) = watch::channel(audio_levels::MicLevels::default());
+        let (platforms_tx, _) = watch::channel(crate::livestream::PlatformsState::default());
         Self {
             backend,
             config,
@@ -923,6 +933,7 @@ impl<B: StudioBackend> Studio<B> {
             live_read_done: Notify::new(),
             live_audio_kick: Notify::new(),
             output_authorizer: Mutex::new(None),
+            platforms_tx,
         }
     }
 
@@ -1195,6 +1206,10 @@ impl<B: StudioBackend> Studio<B> {
                 self.apply_captions_status(payload);
             }
             BackendEvent::Untyped { event, payload } => {
+                // S1.6c: the platform accounts' events are theirs alone.
+                if self.handle_platforms_event(&event, &payload).await {
+                    return;
+                }
                 // The Health page's telemetry (`stream.targets` feeds both it
                 // and the toasts).
                 self.telemetry.send_if_modified(|telemetry| {
@@ -1474,6 +1489,8 @@ impl<B: StudioBackend> Studio<B> {
         self.read_captions_status(generation).await;
         // S1.6a part 6c: the Clips ring's state, and the launch's arming.
         self.read_replay_status(generation).await;
+        // S1.6c: the platform accounts (`platforms`).
+        self.read_platforms().await;
         // The other areas' first reads (the agents line, takeovers and the
         // soundboard, chat, Sidekick, destinations, chat commands, scheduled
         // streams, the performance check, Hide screen, captions, the working
