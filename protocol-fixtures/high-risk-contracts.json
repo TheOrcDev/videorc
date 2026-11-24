@@ -2870,6 +2870,16 @@
       },
       "guests": false
     },
+    "roomAvatarMotionParams": {
+      "message": {
+        "v": 1,
+        "show": "show_7f3a",
+        "publisherSid": "PA_host",
+        "epoch": "e1",
+        "seq": 3,
+        "kind": "tick"
+      }
+    },
     "roomSceneCommitParams": {
       "content": {
         "h": null,

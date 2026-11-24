@@ -6446,6 +6446,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         // memory).
         | "cloud.room.presentation.set"
         | "cloud.room.avatar.set"
+        | "cloud.room.avatar.motion"
         | "cloud.room.scene.commit"
         | "cloud.recordings.download"
         | "cloud.archive.stop"
@@ -13633,6 +13634,34 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }
+        // Plan 260 S1.8b: one message of the renderer's avatar motion model,
+        // sent to the pages that animate; answers who they are.
+        "cloud.room.avatar.motion" => {
+            let Some(message) = command.params.get("message").cloned() else {
+                return ServerResponse::error(command.id, "invalid-params", "Send the message.");
+            };
+            #[cfg(target_os = "macos")]
+            {
+                if room_host::holds_seat() {
+                    return match room_avatar::send_motion(&message).await {
+                        Ok(targets) => ServerResponse::ok(
+                            command.id,
+                            serde_json::json!({ "held": true, "targets": targets }),
+                        ),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cloud-room-motion-failed",
+                            format!("{error:#}"),
+                        ),
+                    };
+                }
+            }
+            let _ = message;
+            ServerResponse::ok(
+                command.id,
+                serde_json::json!({ "held": false, "targets": [] }),
+            )
         }
         "cloud.room.scene.commit" => {
             match serde_json::from_value::<cloud_talk::CloudRoomSceneCommitParams>(command.params) {

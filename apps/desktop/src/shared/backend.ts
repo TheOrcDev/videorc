@@ -6053,6 +6053,19 @@ export interface CloudRoomAvatarSetParams {
   guests?: boolean
 }
 
+/** `cloud.room.avatar.motion` (plan 260 S1.8b): one message of the
+ * renderer's avatar motion model, for the backend to send to the pages that
+ * animate. The model moves to app-core with the content builders. */
+export interface CloudRoomAvatarMotionParams {
+  message: import('./cloud-avatar-motion').MotionMessage
+}
+
+/** Who the motion went to (the model keyframes a page it has not served). */
+export interface CloudRoomAvatarMotionResult {
+  held: boolean
+  targets: string[]
+}
+
 /** A scene background picture, named by its SHA-256 (plan 249 S14). */
 export interface CloudSceneAsset {
   hash: string

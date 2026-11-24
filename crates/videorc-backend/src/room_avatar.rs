@@ -34,6 +34,63 @@ use crate::room_graphics::GraphicsSignal;
 use crate::state::AppState;
 
 pub(crate) const AVATAR_TOPIC: &str = "videorc.presentation.avatar.v1";
+/// Plan 249 S5: the avatar's motion, from the renderer's motion model for
+/// now (`cloud.room.avatar.motion`); it moves to app-core with the builders.
+pub(crate) const AVATAR_MOTION_TOPIC: &str = "videorc.presentation.avatar-motion.v1";
+const AVATAR_MOTION_MAX_BYTES: usize = 16 * 1024;
+
+/// The connection's sender and the pages that animate now (egress pages
+/// whose receipt advertises animation, for an output the content shows,
+/// with an atlas variant to draw), kept by the avatar publisher.
+static MOTION: StdMutex<Option<(LocalParticipant, Vec<String>)>> = StdMutex::new(None);
+
+fn motion_slot() -> std::sync::MutexGuard<'static, Option<(LocalParticipant, Vec<String>)>> {
+    MOTION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// `cloud.room.avatar.motion`: one message of the renderer's motion model,
+/// sent to the pages that animate. Answers who they are (the renderer's
+/// model sends a keyframe to a page it has not served yet).
+pub(crate) async fn send_motion(message: &Value) -> anyhow::Result<Vec<String>> {
+    let Some((local, targets)) = motion_slot().clone() else {
+        return Ok(Vec::new());
+    };
+    if targets.is_empty() {
+        return Ok(targets);
+    }
+    let payload = serde_json::to_vec(message)?;
+    if payload.len() > AVATAR_MOTION_MAX_BYTES {
+        anyhow::bail!("The avatar's motion message is over 16 KiB.");
+    }
+    local
+        .publish_data(livekit::prelude::DataPacket {
+            payload,
+            topic: Some(AVATAR_MOTION_TOPIC.to_string()),
+            reliable: true,
+            destination_identities: targets
+                .iter()
+                .map(|identity| identity.clone().into())
+                .collect(),
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(targets)
+}
+
+/// `motionTargets`.
+fn motion_targets(content: Option<&Value>, peers: &[AvatarPeer]) -> Vec<String> {
+    let Some(content) = content.filter(|c| c.get("animated").is_some_and(Value::is_object)) else {
+        return Vec::new();
+    };
+    peers
+        .iter()
+        .filter(|peer| peer.role == Role::Egress && peer.animation)
+        .filter(|peer| content.get(&peer.output).and_then(Value::as_bool) == Some(true))
+        .map(|peer| peer.identity.clone())
+        .collect()
+}
 const AVATAR_MAX_BYTES: usize = 512 * 1024;
 const AVATAR_LEASE_MS: i64 = 30_000;
 /// The same view goes again after this long (the lease renewal).
@@ -384,6 +441,15 @@ impl AvatarState {
     }
 }
 
+/// The connection ended: no motion goes out on it any more.
+struct ClearMotion;
+
+impl Drop for ClearMotion {
+    fn drop(&mut self) {
+        *motion_slot() = None;
+    }
+}
+
 fn lock(receipts: &StdMutex<CapabilityReceipts>) -> std::sync::MutexGuard<'_, CapabilityReceipts> {
     receipts
         .lock()
@@ -410,6 +476,8 @@ pub(crate) async fn run(
 ) {
     let mut avatar = AvatarState::default();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    *motion_slot() = Some((room.local_participant(), Vec::new()));
+    let _clear = ClearMotion;
     loop {
         tokio::select! {
             signal = signals.recv() => match signal {
@@ -461,6 +529,9 @@ async fn send_due(
         let receipts = lock(receipts);
         avatar_peers(&receipts, &visible, now)
     };
+    if let Some((_, targets)) = motion_slot().as_mut() {
+        *targets = motion_targets(avatar.content.as_ref(), &peers);
+    }
     let (status, accepted) = avatar.report(&peers, &local_sid, now);
     if let Some(status) = status {
         state.emit_event(

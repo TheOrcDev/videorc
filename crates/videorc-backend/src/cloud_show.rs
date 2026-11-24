@@ -8388,6 +8388,10 @@ mod tests {
             serde_json::from_value(scene.clone()).unwrap();
         assert_eq!(serde_json::to_value(&params).unwrap(), scene);
         assert_eq!(params.assets[0].mime, "image/webp");
+        // `cloud.room.avatar.motion` carries one motion message as it is.
+        let motion = high_risk_fixture("/cloud/roomAvatarMotionParams");
+        assert!(motion["message"].is_object());
+        assert!(serde_json::to_vec(&motion["message"]).unwrap().len() <= 16 * 1024);
         let patch: CloudSettingsPatch =
             serde_json::from_value(high_risk_fixture("/cloud/settingsPatch")).unwrap();
         assert_eq!(patch.enabled, Some(false));
