@@ -22,6 +22,9 @@ chrono = "0.4"
 # once the runner has the toolchain).
 gpui = { workspace = true }
 gpui_platform = { workspace = true, features = ["font-kit", "runtime_shaders", "wayland", "x11"] }
+# The design system (plan 260 Phase 3): the kit synced from videorc-ui's
+# GPUI flavour, which every screen draws with.
+videorc-kit = { workspace = true }
 # The core: the supervisor, the logs, the typed client, the stores.
 videorc-app-core = { workspace = true }
 # The core's own runtime (two workers), beside GPUI's executor.
