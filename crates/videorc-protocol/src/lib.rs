@@ -26,6 +26,7 @@ pub mod room_program_camera;
 pub mod source_registry;
 pub mod source_status;
 pub mod streaming;
+pub mod ui_settings;
 
 use std::collections::BTreeMap;
 

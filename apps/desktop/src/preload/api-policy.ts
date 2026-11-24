@@ -13,10 +13,18 @@ export const AUXILIARY_API_KEYS = {
     'saveNotesDocument',
     'onNotesFlushRequest',
     'onNotesWindowState',
+    // The UI settings store (plan 220 S1.4a): a get, a batch set, the changes.
+    'getUiSettings',
+    'setUiSettings',
+    'onUiSettingsChanged',
     // What the window sits on (plan 208): a value, read before first paint.
     'windowGround'
   ],
   comments: [
+    // The UI settings store (plan 220 S1.4a): a get, a batch set, the changes.
+    'getUiSettings',
+    'setUiSettings',
+    'onUiSettingsChanged',
     'cacheChatAvatar',
     'readChatAvatar',
     // Twitch GIFs in chat rows (plan 155).
@@ -109,6 +117,10 @@ export const AUXILIARY_API_KEYS = {
     'windowGround'
   ],
   captions: [
+    // The UI settings store (plan 220 S1.4a): a get, a batch set, the changes.
+    'getUiSettings',
+    'setUiSettings',
+    'onUiSettingsChanged',
     'getCaptionsWindowState',
     'setCaptionsWindowAlwaysOnTop',
     'onCaptionsWindowState',

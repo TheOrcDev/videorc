@@ -7114,6 +7114,13 @@ export interface VideorcApi {
   closeNotesWindow: () => Promise<NotesWindowState>
   getNotesWindowState: () => Promise<NotesWindowState>
   setNotesWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<NotesWindowState>
+  /** The UI settings store (plan 220 S1.4a) for the windows without a backend
+   * socket: main relays `ui.settings.get`/`ui.settings.set` over its admin
+   * lane and every landed batch as `onUiSettingsChanged`. The main window
+   * reads and writes the store over its own socket instead. */
+  getUiSettings: (params?: UiSettingsGetParams) => Promise<UiSettingsSnapshot>
+  setUiSettings: (params: UiSettingsSetParams) => Promise<UiSettingsChange>
+  onUiSettingsChanged: (callback: (change: UiSettingsChange) => void) => () => void
   getNotesDocument: () => Promise<NotesDocument>
   saveNotesDocument: (patch: Partial<NotesDocument>) => Promise<NotesDocument>
   onNotesFlushRequest: (callback: () => void) => () => void
@@ -8126,6 +8133,69 @@ export interface MigrateHighlightAnchorParams {
   anchor: CommentHighlightAnchor
 }
 // --- end overlay layout (plan 164) ------------------------------------------
+
+// --- UI settings store (plan 220 S1.4a) ------------------------------------
+// The key-value product state every window used to keep in `localStorage`,
+// now one backend row per key (`app_settings`, namespace `ui:`), read through
+// `ui.settings.get`, written in batches through `ui.settings.set` and
+// announced to every window as `ui.settings.changed`. Keys are the renderer's
+// `localStorage` names (`videorc.settings`, ...). Mirrors Rust
+// `videorc_protocol::ui_settings`; the limits mirror `ui_settings.rs`.
+
+/** Any JSON. A top-level value is never `null`: that is a delete. */
+export type UiSettingsJson =
+  | string
+  | number
+  | boolean
+  | null
+  | UiSettingsJson[]
+  | { [key: string]: UiSettingsJson }
+export type UiSettingsValue = Exclude<UiSettingsJson, null>
+
+/** A key is 1 to 256 characters, no control characters, no surrounding whitespace. */
+export const UI_SETTINGS_KEY_MAX_CHARS = 256
+/** Largest value, serialized (1 MiB). */
+export const UI_SETTINGS_VALUE_MAX_BYTES = 1024 * 1024
+/** Most keys one batch (puts plus deletes) or one read may name. */
+export const UI_SETTINGS_BATCH_MAX_KEYS = 256
+/** Largest batch, every value serialized (4 MiB). */
+export const UI_SETTINGS_BATCH_MAX_BYTES = 4 * 1024 * 1024
+/** Longest writer id. */
+export const UI_SETTINGS_WRITER_MAX_CHARS = 128
+
+/** No `keys` (or an empty list) reads the whole store. */
+export interface UiSettingsGetParams {
+  keys?: string[]
+}
+
+export interface UiSettingsSnapshot {
+  entries: Record<string, UiSettingsValue>
+  /** Bumped by every batch that lands something. */
+  revision: number
+  /** Whether the one-time `localStorage` migration has run on this profile. */
+  localStorageMigrated: boolean
+}
+
+/** One batch of puts and deletes, applied in one transaction. */
+export interface UiSettingsSetParams {
+  put?: Record<string, UiSettingsValue>
+  delete?: string[]
+  /** Puts land only on keys the store does not hold yet (the migration). */
+  ifAbsent?: boolean
+  /** Marks the one-time `localStorage` migration done. */
+  localStorageMigrated?: boolean
+  /** The writing window's id, echoed on the event so it can skip its own change. */
+  writer?: string
+}
+
+/** `ui.settings.set`'s answer and the `ui.settings.changed` event: what landed. */
+export interface UiSettingsChange {
+  revision: number
+  put: Record<string, UiSettingsValue>
+  delete: string[]
+  writer?: string
+}
+// --- end UI settings store (plan 220 S1.4a) --------------------------------
 
 // --- Banners (plan 186) -----------------------------------------------------
 // The streamer's own images placed anywhere on the picture. Backend-owned

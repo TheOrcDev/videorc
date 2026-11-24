@@ -1150,6 +1150,10 @@ pub struct AppState {
     /// Synchronous linearization gate shared by layout registration and the
     /// final, non-awaiting mutation edge of camera/screen admission.
     layout_source_admission: Arc<StdMutex<()>>,
+    /// Plan 220 S1.4a: one UI settings batch at a time, held across the
+    /// transaction and the `ui.settings.changed` emit, so the events every
+    /// window hears carry revisions in order.
+    pub(crate) ui_settings_write: Arc<StdMutex<()>>,
     pub source_registry: Arc<tokio::sync::Mutex<SourceRegistry>>,
     pub diagnostics: Arc<tokio::sync::Mutex<DiagnosticStats>>,
     /// Shared camera/render health authority latches. Every diagnostics writer
@@ -1518,6 +1522,7 @@ impl AppState {
             layout_intents: Arc::new(tokio::sync::Mutex::new(LayoutIntentState::default())),
             latest_layout_intent_id: Arc::new(AtomicU64::new(0)),
             layout_source_admission: Arc::new(StdMutex::new(())),
+            ui_settings_write: Arc::new(StdMutex::new(())),
             source_registry: Arc::new(tokio::sync::Mutex::new(SourceRegistry::new())),
             diagnostics: Arc::new(tokio::sync::Mutex::new(idle_diagnostics())),
             capture_health_stage_latches: new_capture_health_stage_latches_slot(),

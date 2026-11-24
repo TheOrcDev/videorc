@@ -51,6 +51,10 @@ import type {
   GlobalShortcutsResult,
   SessionMediaGrantResult,
   ShortcutRecorderArmResult,
+  UiSettingsChange,
+  UiSettingsGetParams,
+  UiSettingsSetParams,
+  UiSettingsSnapshot,
   VirtualCameraActionResult,
   VirtualCameraStatus
 } from '../shared/backend'
@@ -252,6 +256,7 @@ import {
   parseMainRecordingStatusEvent,
   parseMainScene,
   parseMainSceneChangedEvent,
+  parseMainUiSettingsChangedEvent,
   parseMainVirtualCameraChangedEvent
 } from './backend-event-message'
 import {
@@ -1828,6 +1833,24 @@ async function reconcileCameraExtensionWithBackend(): Promise<void> {
     void controller.activate()
   }
 }
+
+/**
+ * Plan 220 S1.4a: one landed UI settings batch, to every window. The main
+ * window hears it over its own socket too and skips the relay; the Stream
+ * Manager, Captions and Notes windows have no socket and learn it here. A
+ * bad payload is dropped with a warning, never the main socket.
+ */
+function relayUiSettingsChange(parse: () => UiSettingsChange): void {
+  let change: UiSettingsChange
+  try {
+    change = parse()
+  } catch (error) {
+    logBackend('warn', `Main dropped a UI settings change: ${errorMessageText(error)}`)
+    return
+  }
+  sendToWindows('ui-settings:changed', change)
+}
+
 /** `virtualCamera.changed`: the switch turning on at runtime activates the extension. */
 function acceptVirtualCameraStatus(parse: () => VirtualCameraStatus): void {
   let status: VirtualCameraStatus
@@ -11983,7 +12006,9 @@ function connectBackendEventSocket(connection: BackendConnection): void {
         'recording.status',
         'banners.changed',
         'overlays.layout',
-        'scene.changed'
+        'scene.changed',
+        // Plan 220 S1.4a: relayed to the windows without a socket.
+        'ui.settings.changed'
       ]
       if (process.platform === 'win32') {
         includedEvents.push('preview.surface.status')
@@ -12179,6 +12204,10 @@ function connectBackendEventSocket(connection: BackendConnection): void {
         acceptVirtualCameraStatus(() => parseMainVirtualCameraChangedEvent(parsed.payload))
         return
       }
+      if (parsed.event === 'ui.settings.changed') {
+        relayUiSettingsChange(() => parseMainUiSettingsChangedEvent(parsed.payload))
+        return
+      }
       if (parsed.event === 'preview.surface.status') {
         const status = parseMainPreviewSurfaceStatusEvent(parsed.payload)
         noteNativePreviewBackendSurfaceState(status.state)
@@ -12292,7 +12321,10 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'sessions.delete.complete',
   'liveChat.sendOperations.latest',
   // Show who followed from the Stream Manager (plan 071, S2).
-  'platformAccounts.oauth.startProvider'
+  'platformAccounts.oauth.startProvider',
+  // Plan 220 S1.4a: the UI settings store, relayed to the socket-less windows.
+  'ui.settings.get',
+  'ui.settings.set'
 ])
 
 async function requestBackendAdmin<T>(
@@ -19159,6 +19191,15 @@ app.whenReady().then(async () => {
   secureIpcHandle('notes-window:get-state', () => notesWindowState())
   secureIpcHandle('notes-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setNotesWindowAlwaysOnTop(Boolean(alwaysOnTop))
+  )
+  // Plan 220 S1.4a: the UI settings store for the windows without a backend
+  // socket. The preload checked the shapes; main only relays over its admin
+  // lane and lets the backend's refusal come back as the reply's error.
+  secureIpcHandle('ui-settings:get', (_event, params?: UiSettingsGetParams) =>
+    requestBackendAdmin<UiSettingsSnapshot>('ui.settings.get', { ...(params ?? {}) })
+  )
+  secureIpcHandle('ui-settings:set', (_event, params: UiSettingsSetParams) =>
+    requestBackendAdmin<UiSettingsChange>('ui.settings.set', { ...params })
   )
   // A failed read or write rejects the call (QA F9): the window shows it
   // instead of Saved, and never takes a failed read for empty notes.
