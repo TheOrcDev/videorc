@@ -14,7 +14,12 @@
 
 use std::time::Duration;
 
-use videorc_protocol::{LayoutPreset, RecordingState, SourceSelection};
+use videorc_protocol::{
+    LayoutPreset, LayoutSettings, RecordingState, SceneConfigParams, SourceSelection,
+};
+
+use super::settings::{CaptureConfig, StudioSettings};
+use super::{Connection, StudioSnapshot};
 
 /// The renderer's 250 ms between a change and the reload it runs.
 pub const SCENE_RELOAD_DELAY: Duration = Duration::from_millis(250);
@@ -98,6 +103,80 @@ pub fn smoke_preview_compositor_sources(
         microphone_id: sources.microphone_id.clone(),
         test_pattern: true,
     }
+}
+
+/// `cameraLookLayout`: the chosen camera's look from the settings
+/// (`settings.cameraLooks`) replaces whatever look the layout held; no look
+/// for that camera is the neutral one. Electron's `cameraOutputLayout` also
+/// puts the camera's background (plan 258) and, after the D4 migration, its
+/// key on the layout; that part lands with the camera background (S1.6b).
+pub fn camera_look_layout(
+    layout: &LayoutSettings,
+    camera_id: Option<&str>,
+    studio: &StudioSettings,
+) -> LayoutSettings {
+    let mut layout = layout.clone();
+    layout.camera_look = studio
+        .camera_look(camera_id)
+        .and_then(|look| serde_json::from_value(look).ok())
+        .unwrap_or_default();
+    layout
+}
+
+/// `reloadSceneFromCaptureConfig`'s params: the capture config's sources,
+/// layout (with the camera's look) and video; the smoke mode's sources in a
+/// preview smoke run. The working scene's background joins with the scenes
+/// (S1.6b).
+pub fn studio_scene_params(
+    capture: &CaptureConfig,
+    studio: &StudioSettings,
+    smoke_preview: bool,
+) -> SceneConfigParams {
+    let layout = camera_look_layout(
+        &capture.layout,
+        capture.sources.camera_id.as_deref(),
+        studio,
+    );
+    let sources = if smoke_preview {
+        smoke_preview_compositor_sources(&capture.sources, &layout.layout_preset)
+    } else {
+        capture.sources.clone()
+    };
+    SceneConfigParams {
+        sources,
+        layout,
+        video: Some(capture.video.clone()),
+        background: None,
+        protected_overlay_window_ids: Vec::new(),
+        transition_ms: None,
+    }
+}
+
+/// What the preview feed commits now: the Studio's scene while
+/// [`should_reload_scene_from_capture_config`] holds and the settings have
+/// loaded (a scene from the defaults would flash before the stored one),
+/// `None` otherwise. The scene editor and the performance check hold the
+/// scene once they land (S1.6b, and the check with Health).
+pub fn preview_scene_request(
+    snapshot: &StudioSnapshot,
+    smoke_preview: bool,
+) -> Option<SceneConfigParams> {
+    let allowed = snapshot.settings.hydrated
+        && should_reload_scene_from_capture_config(ReloadInput {
+            connected: matches!(snapshot.connection, Connection::Connected { .. }),
+            scene_edit_mode: false,
+            recording_state: &snapshot.session.status.state,
+            start_pending: snapshot.session.start_pending,
+            stop_pending: snapshot.session.stop_pending,
+            performance_check_running: false,
+        });
+    allowed.then(|| {
+        studio_scene_params(
+            &snapshot.settings.capture,
+            &snapshot.settings.studio,
+            smoke_preview,
+        )
+    })
 }
 
 #[cfg(test)]

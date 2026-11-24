@@ -37,5 +37,9 @@ pub use process::{
     BackendBootstrap, BackendLaunch, BackendOwnership, BackendProcess, BackendStopReport,
     Credential, Isolation, process_is_alive,
 };
+pub use studio::{
+    SessionEffect, SessionPhase, SessionStartIntent, StartOutcome, StopOrigin, Studio,
+    StudioBackend, StudioConfig, StudioSnapshot,
+};
 pub use supervisor::{BackendState, StopOutcome, Supervisor, SupervisorConfig, Tone};
 pub use videorc_protocol as protocol;
