@@ -1003,6 +1003,51 @@ impl VerdictVariant {
     }
 }
 
+/// One actionable permission, coalesced across the events that asked for it.
+#[derive(Debug, Clone)]
+pub struct PermissionWarning {
+    pub pane: crate::desktop::permissions::SystemPermissionPane,
+    pub event_ids: Vec<String>,
+    pub created_at: String,
+}
+
+/// `permissionWarnings` in health-checks.ts. Dismiss the existing events,
+/// never the permission itself: a later failure must be visible again.
+pub fn permission_warnings(
+    events: &[videorc_protocol::HealthEvent],
+    has_action: impl Fn(crate::desktop::permissions::SystemPermissionPane) -> bool,
+    dismissed: &std::collections::HashSet<String>,
+) -> Vec<PermissionWarning> {
+    use crate::desktop::permissions::SystemPermissionPane as Pane;
+    use videorc_protocol::PermissionPane;
+    let mut warnings: Vec<PermissionWarning> = Vec::new();
+    for event in events {
+        let pane = match event.permission_pane.as_ref() {
+            Some(PermissionPane::Privacy) => Pane::Privacy,
+            Some(PermissionPane::ScreenRecording) => Pane::ScreenRecording,
+            Some(PermissionPane::Camera) => Pane::Camera,
+            Some(PermissionPane::Microphone) => Pane::Microphone,
+            None => continue,
+        };
+        if dismissed.contains(&event.id) || !has_action(pane) {
+            continue;
+        }
+        if let Some(warning) = warnings.iter_mut().find(|w| w.pane == pane) {
+            warning.event_ids.push(event.id.clone());
+            if event.created_at > warning.created_at {
+                warning.created_at = event.created_at.clone();
+            }
+        } else {
+            warnings.push(PermissionWarning {
+                pane,
+                event_ids: vec![event.id.clone()],
+                created_at: event.created_at.clone(),
+            });
+        }
+    }
+    warnings
+}
+
 /// The one answer Health leads with (`HealthVerdict`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HealthVerdict {

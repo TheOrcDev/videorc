@@ -11,7 +11,7 @@ use videorc_app_core::{BackendState, ConnectionState, Tone};
 use videorc_kit::{
     shortcut_keys::ShortcutKeys,
     theme::{self, FONT, TypeScale, hsla},
-    tokens::{Theme, radius, size, text},
+    tokens::{Theme, radius, text},
 };
 
 use super::bridge::Mirror;
@@ -48,15 +48,6 @@ pub fn connection_text(state: &ConnectionState) -> String {
     }
 }
 
-fn tone_colour(tone: Tone, t: &Theme) -> u32 {
-    match tone {
-        Tone::Ready => t.success,
-        Tone::Busy => t.warning,
-        Tone::Failed => t.destructive,
-        Tone::Stopped => t.muted_foreground,
-    }
-}
-
 pub struct Shell {
     page: PageId,
     backend: Entity<Mirror<StatusLine>>,
@@ -69,6 +60,7 @@ pub struct Shell {
     /// Phase 3: Sources ⌘2.
     sources: Entity<SourcesPanel>,
     settings: Entity<SettingsScreen>,
+    health: Entity<crate::screens::health::HealthScreen>,
 }
 
 impl Shell {
@@ -79,6 +71,8 @@ impl Shell {
         preview: Entity<Preview>,
         sources: Entity<SourcesPanel>,
         settings: Entity<SettingsScreen>,
+        health: Entity<crate::screens::health::HealthScreen>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&backend, |_, _, cx| cx.notify()).detach();
@@ -87,32 +81,13 @@ impl Shell {
         // change, never per video frame.
         cx.observe(&preview, |_, _, cx| cx.notify()).detach();
         cx.observe(&sources, |_, _, cx| cx.notify()).detach();
-        // The Studio's jumps ("Open Destinations", a Session row) open that page.
-        // `subscribe_in` needs a Window at bind time; Shell::new has none, so
-        // mirror the Settings Navigate path (page + docked preview) here.
-        cx.subscribe(&studio, |this, _, open: &OpenPage, cx| {
-            let page = open.0;
-            if this.page != page {
-                this.settings
-                    .update(cx, |settings, cx| settings.disarm_shortcut(cx));
-                this.page = page;
-                if page == PageId::Settings {
-                    this.settings
-                        .update(cx, |settings, cx| settings.refresh(cx));
-                }
-                this.preview.update(cx, |preview, _| {
-                    preview.set_docked_shown(page == PageId::Studio)
-                });
-                cx.notify();
-            }
+        // Both routes use the same lifecycle, title and focus updates.
+        cx.subscribe_in(&studio, window, |this, _, open: &OpenPage, window, cx| {
+            this.open_page(open.0, window, cx);
         })
         .detach();
-        cx.subscribe(&settings, |this, _, Navigate(page), cx| {
-            this.page = *page;
-            this.preview.update(cx, |preview, _| {
-                preview.set_docked_shown(*page == PageId::Studio)
-            });
-            cx.notify();
+        cx.subscribe_in(&settings, window, |this, _, Navigate(page), window, cx| {
+            this.open_page(*page, window, cx);
         })
         .detach();
         Self {
@@ -123,6 +98,7 @@ impl Shell {
             preview,
             sources,
             settings,
+            health,
         }
     }
 
@@ -152,6 +128,9 @@ impl Shell {
             self.settings
                 .update(cx, |settings, cx| settings.disarm_shortcut(cx));
             self.page = page;
+            self.health.update(cx, |health, cx| {
+                health.set_active(page == PageId::Diagnostics, cx)
+            });
             if page == PageId::Settings {
                 self.settings
                     .update(cx, |settings, cx| settings.refresh(cx));
@@ -281,6 +260,8 @@ impl Render for Shell {
                             .map(|body| {
                                 if page == PageId::Settings {
                                     body.child(self.settings.clone())
+                                } else if page == PageId::Diagnostics {
+                                    body.child(self.health.clone())
                                 } else {
                                     body.child(
                                         div()
@@ -293,22 +274,38 @@ impl Render for Shell {
                     }),
             )
             .child(
-                div()
-                    .h(px(size::STATUS_BAR))
-                    .px(px(12.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .border_t_1()
-                    .border_color(hsla(t.border))
-                    .type_scale(text::META)
-                    .child(
+                videorc_kit::StatusBar::new()
+                    .leading(
                         div()
-                            .size(px(8.))
-                            .rounded_full()
-                            .bg(hsla(tone_colour(status.tone, t))),
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                videorc_kit::status_dot::StatusDot::new("engine-status").tone(
+                                    match status.tone {
+                                        Tone::Ready => videorc_kit::status_dot::StatusTone::Good,
+                                        Tone::Busy => videorc_kit::status_dot::StatusTone::Warn,
+                                        Tone::Failed => videorc_kit::status_dot::StatusTone::Error,
+                                        Tone::Stopped => {
+                                            videorc_kit::status_dot::StatusTone::Neutral
+                                        }
+                                    },
+                                ),
+                            )
+                            .child(
+                                videorc_kit::status_bar_action::StatusBarAction::new(
+                                    "open-health",
+                                    "Open Health",
+                                )
+                                .text(status.text)
+                                .tooltip("Open Health", None)
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.open_page(PageId::Diagnostics, window, cx)
+                                    },
+                                )),
+                            ),
                     )
-                    .child(status.text)
                     .child(div().text_color(hsla(t.muted_foreground)).child(connection)),
             )
     }

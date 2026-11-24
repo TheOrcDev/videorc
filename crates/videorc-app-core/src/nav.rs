@@ -150,9 +150,14 @@ const FIXED_KEYS: [(PageId, PageKey); 4] = [
     (PageId::Settings, PageKey::Settings),
 ];
 
-/// The pages the GPUI app has. Empty until Phase 3's screen slices: every
-/// page is listed and disabled until its slice adds it here.
-pub const PORTED: &[PageId] = &[];
+/// The page routes installed by the GPUI app. This is availability, not a
+/// claim of visual/runtime parity in docs/gpui/parity.md.
+pub const PORTED: &[PageId] = &[
+    PageId::Studio,
+    PageId::Sources,
+    PageId::Settings,
+    PageId::Diagnostics,
+];
 
 impl PageId {
     /// The page's id, as Electron names it.
@@ -1046,8 +1051,10 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_ported_yet_so_the_menu_offers_no_page() {
-        assert!(PAGES.iter().all(|page| !page.ported()));
-        assert!(menu_availability(&[]).pages.is_empty());
+    fn installed_pages_are_reachable_but_health_has_no_sidebar_key() {
+        assert!(PageId::Diagnostics.ported());
+        assert!(PageId::Diagnostics.key().is_none());
+        assert!(!PageId::Live.ported());
+        assert!(menu_availability(&[]).pages.contains(&PageKey::Settings));
     }
 }
