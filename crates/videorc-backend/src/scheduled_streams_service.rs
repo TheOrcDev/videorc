@@ -1793,7 +1793,7 @@ async fn execute_x(
             }
         }
         let broadcast = broadcast.unwrap_or(Value::Null);
-        attach_x_live_category(state, &api, &id).await;
+        attach_x_live_category(state, api, &id).await;
         let share = broadcast["share_url"]
             .as_str()
             .filter(|url| !url.is_empty())
