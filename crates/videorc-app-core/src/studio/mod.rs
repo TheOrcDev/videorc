@@ -519,10 +519,12 @@ impl<B: StudioBackend> Drop for AbandonStart<'_, B> {
     }
 }
 
-/// A stop's `stop_pending`, ended when its future is dropped before
-/// `session.stop` answered: the session would read Stopping for good and
-/// every later stop would answer at once without stopping. The answered
-/// ways out clear it first. Dropped with the Studio's lock free.
+/// A stop's `stop_pending` (set at the click, as Electron's
+/// `stopRequestPending`), ended when its future is dropped before
+/// `session.stop` answered, a wait for a start in flight included: the
+/// session would read Stopping for good and every later stop would answer at
+/// once without stopping. The answered ways out clear it first. Dropped with
+/// the Studio's lock free.
 struct AbandonStop<'a, B: StudioBackend>(&'a Studio<B>);
 
 impl<B: StudioBackend> Drop for AbandonStop<'_, B> {
@@ -2155,7 +2157,19 @@ impl<B: StudioBackend> Studio<B> {
         let answer = answer.expect("set above");
         // Cleared however this stop ends, a dropped future included.
         let clear = ClearInFlight(&self.stop_in_flight);
-        let ok = self.stop_once().await;
+        // Electron's `setStopRequestPending(true)` at the top of its stop: the
+        // stop reads "Stopping…" from the click, also while it waits below
+        // for a start in flight (a Record start's "Stop recording", a Go
+        // Live's "Cancel livestream", B-16). `stop_once` ends it on every
+        // answered way out, `AbandonStop` on a dropped future.
+        let marked = self.lock().session.begin_stop();
+        let ok = if marked {
+            let _abandon = AbandonStop(self);
+            self.publish();
+            self.stop_once().await
+        } else {
+            true
+        };
         drop(clear);
         answer.send_replace(Some(ok));
         ok
@@ -2167,9 +2181,11 @@ impl<B: StudioBackend> Studio<B> {
         let requested_at_ms = {
             let mut inner = self.lock();
             if !inner.session.is_active() {
-                return true;
-            }
-            if !inner.session.begin_stop() {
+                // Nothing runs (none did, or the start it waited for was
+                // refused): the stop marked at the click ends here.
+                inner.session.end_stop();
+                drop(inner);
+                self.publish();
                 return true;
             }
             // S1.6b part 5d: the stop drops the live audio queue (its reply
@@ -2186,8 +2202,6 @@ impl<B: StudioBackend> Studio<B> {
                 .latency
                 .take_click_epoch_ms(LatencyKind::Stop, Instant::now(), epoch_ms())
         };
-        // A stop dropped before its answer lets the next one run.
-        let _abandon = AbandonStop(self);
         self.publish();
         // X's broadcasts end before the stream does (S1.6c).
         let params = SessionStopParams {
