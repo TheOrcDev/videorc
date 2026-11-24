@@ -203,7 +203,7 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 | --- | --- | --- | --- | :-: | :-: | :-: |
 | P111 | Space key | Records when idle; stops a recording; asks to end a livestream | `renderer/components/tabs/studio-tab.tsx:137` | [ ] | [ ] | [ ] |
 | P112 | Space yields | Ignored while a dialog, menu, focused control or repeat owns it | `renderer/lib/studio-space-shortcut.ts:1` | [ ] | [ ] | [ ] |
-| P113 | Responsive layout | Inspector sits beside preview from 720 px; narrower, transport leads | `renderer/components/tabs/studio-tab.tsx:185` | [ ] | [ ] | [ ] |
+| P113 | Responsive layout | Inspector sits beside preview from 720 px; narrower, transport leads | `renderer/components/tabs/studio-tab.tsx:185` | [[x] | [ ] | [ ] |
 | P114 | "Session inspector" aside | Holds cloud notice, Session, Chat, Audio, Sources, Takeover | `renderer/components/tabs/studio-tab.tsx:225` | [ ] | [ ] | [ ] |
 | P115 | Retro LCD switch | Settings → General Retro LCD swaps every inspector section to LCD | `renderer/components/tabs/studio-tab.tsx:72` | [ ] | [ ] | [ ] |
 | P116 | "Preview" section | Holds the preview stage; untitled when docked | `renderer/components/tabs/studio-tab.tsx:480` | [ ] | [ ] | [ ] |
