@@ -37,7 +37,10 @@
     "spinner",
     "toggle-group",
     "segmented-control",
-    "pin-window-button"
+    "pin-window-button",
+    "empty",
+    "page-tabs",
+    "settings-row"
   ],
   "keepLocal": []
 }
