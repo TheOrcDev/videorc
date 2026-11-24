@@ -39,15 +39,22 @@ export async function commitSceneToBackend(
   assets: readonly PreparedBackgroundAsset[],
   waitMs = BACKEND_SCENE_COMMIT_WAIT_MS
 ): Promise<RoomSceneCommit | null> {
-  let latest: RoomPresentationStatus | null = null
+  // Every scene entry from before the answer is kept: the backend reports
+  // this commit as soon as it has it, possibly before the RPC returns. Only
+  // an entry of this commit's generation settles it.
+  const heard: RoomPresentationStatus[] = []
+  let generation: number | null = null
   let settle: (() => void) | null = null
-  let sinceRevision = Number.POSITIVE_INFINITY
   const off = client.on('cloud.room.presentation', (event: CloudRoomPresentationEvent) => {
     if (event.showId !== showId || !event.scene) return
-    if (event.scene.revision <= sinceRevision) return
-    latest = event.scene
-    if (event.scene.state !== 'waiting') settle?.()
+    heard.push(event.scene)
+    if (event.scene.revision === generation && event.scene.state !== 'waiting') settle?.()
   })
+  const mine = (): RoomPresentationStatus | null => {
+    for (let index = heard.length - 1; index >= 0; index -= 1)
+      if (heard[index].revision === generation) return heard[index]
+    return null
+  }
   try {
     const answer = await client.requestTyped('cloud.room.scene.commit', {
       content,
@@ -62,10 +69,11 @@ export async function commitSceneToBackend(
         : []
     })
     if (!answer.held) return null
-    // Only a status of this commit's generation or later settles it.
-    sinceRevision = 0
-    const settled = latest && (latest as RoomPresentationStatus).state !== 'waiting'
-    if (!settled)
+    generation = answer.generation ?? null
+    // An unchanged commit answers with its standing result.
+    if (answer.status && answer.status.revision === generation) heard.push(answer.status)
+    const settled = mine()
+    if (generation !== null && (!settled || settled.state === 'waiting'))
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, waitMs)
         settle = () => {
@@ -73,7 +81,7 @@ export async function commitSceneToBackend(
           resolve()
         }
       })
-    const status = latest as RoomPresentationStatus | null
+    const status = mine()
     if (!status)
       return {
         state: 'waiting',

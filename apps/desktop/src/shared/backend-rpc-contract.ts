@@ -160,6 +160,7 @@ import type {
   CloudRecordingStatus,
   CloudRoomOverlayEvent,
   CloudRoomPresentationEvent,
+  RoomPresentationStatus,
   CloudRoomPresentationSetParams,
   CloudRoomAvatarSetParams,
   CloudRoomAvatarMotionParams,
@@ -702,7 +703,12 @@ export interface BackendRpcMethodMap {
     CloudRoomAvatarMotionParams,
     CloudRoomAvatarMotionResult
   >
-  'cloud.room.scene.commit': BackendRpcDefinition<CloudRoomSceneCommitParams, { held: boolean }>
+  /** The commit's generation (the scene entry's `revision`) and, for an
+   * unchanged commit, the entry already reported for it. */
+  'cloud.room.scene.commit': BackendRpcDefinition<
+    CloudRoomSceneCommitParams,
+    { held: boolean; generation?: number; status?: RoomPresentationStatus | null }
+  >
   'cloud.room.presentation.set': BackendRpcDefinition<
     CloudRoomPresentationSetParams,
     { held: boolean }
@@ -7996,7 +8002,18 @@ const runtimeContracts = {
   },
   'cloud.room.scene.commit': {
     params: cloudRoomSceneCommitParamsSchema,
-    result: cloudRoomPresentationSetResultSchema
+    result: objectSchema(
+      {
+        held: booleanSchema,
+        generation: optionalSchema(nonNegativeInteger),
+        status: optionalSchema(nullableSchema(roomPresentationStatusSchema))
+      },
+      { allowUnknown: false }
+    ) as RuntimeSchema<{
+      held: boolean
+      generation?: number
+      status?: RoomPresentationStatus | null
+    }>
   },
   'cloud.room.presentation.set': {
     params: cloudRoomPresentationSetParamsSchema,

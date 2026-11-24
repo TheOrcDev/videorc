@@ -13666,8 +13666,17 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<cloud_talk::CloudRoomSceneCommitParams>(command.params) {
                 #[cfg(target_os = "macos")]
                 Ok(params) if room_host::holds_seat() => {
-                    room_content::commit_scene(params);
-                    ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
+                    // The commit's generation (the scene entry's revision),
+                    // and its standing result when nothing changed.
+                    let (generation, status) = room_content::commit_scene(params);
+                    ServerResponse::ok(
+                        command.id,
+                        serde_json::json!({
+                            "held": true,
+                            "generation": generation,
+                            "status": status,
+                        }),
+                    )
                 }
                 Ok(_) => ServerResponse::ok(command.id, serde_json::json!({ "held": false })),
                 Err(error) => {
