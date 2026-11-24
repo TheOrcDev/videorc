@@ -7,3 +7,9 @@ publish = false
 description = "Plan 260: The Videorc app without a UI: the typed backend client, the supervisor, the Studio state machine and every page's view-model, the smoke command server, settings."
 
 [dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3"

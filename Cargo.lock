@@ -3166,6 +3166,12 @@ version = "0.1.0"
 [[package]]
 name = "videorc-app-core"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "videorc-backend"
