@@ -256,7 +256,7 @@ Ways in: ⌘K "Health" (command-palette.tsx:153), the status-bar state button, a
 | P153 | Disabled-reason tooltips | Hover/focus tells why Record or Go Live is off | `renderer/components/studio/session-panel.tsx:167` | [x] | [ ] | [ ] |
 | P154 | Stop note "Your recording stops too." | Explains End livestream also stops recording | `renderer/components/studio/session-panel.tsx:200` | [x] | [ ] | [ ] |
 | P155 | Blocked reason line + jump link | One line why start is blocked, link to fix page | `renderer/components/studio/session-panel.tsx:233` | [ ] | [ ] | [ ] |
-| P156 | Alert "Stopping is taking longer than expected" | Explains Force stop when stop overruns | `renderer/components/studio/session-panel.tsx:210` | [ ] | [ ] | [ ] |
+| P156 | Alert "Stopping is taking longer than expected" | Explains Force stop when stop overruns | `renderer/components/studio/session-panel.tsx:210` | [[x] | [ ] | [ ] |
 | P157 | "End livestream?" dialog (shell) | Confirms ending livestream; "Keep streaming"/hand-off options | `renderer/components/end-livestream-dialog.tsx:81` | [ ] | [ ] | [ ] |
 | P158 | Go Live confirmation dialog (shell) | Opened by Go Live; ⌘Enter confirms | `renderer/lib/shortcuts.ts:64` | [ ] | [ ] | [ ] |
 
