@@ -19,6 +19,7 @@ pub mod notices;
 pub mod paths;
 pub mod process;
 pub mod restart;
+pub mod scenes;
 pub mod studio;
 pub mod supervisor;
 pub mod user_error;
