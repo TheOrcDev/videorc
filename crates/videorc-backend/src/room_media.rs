@@ -95,13 +95,16 @@ pub(crate) fn update_media(
         let mut media = MEDIA
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let entry = media.get_or_insert_with(|| (show_id.to_string(), RoomMediaStatus::default()));
-        if entry.0 != show_id {
-            *entry = (show_id.to_string(), RoomMediaStatus::default());
+        // A new connection's first report always goes out: the Studio learns
+        // the backend holds the room before anything is published.
+        let fresh = media.as_ref().is_none_or(|entry| entry.0 != show_id);
+        if fresh {
+            *media = Some((show_id.to_string(), RoomMediaStatus::default()));
         }
+        let entry = media.get_or_insert_with(|| (show_id.to_string(), RoomMediaStatus::default()));
         let before = entry.1.clone();
         change(&mut entry.1);
-        (entry.1 != before).then(|| entry.1.clone())
+        (fresh || entry.1 != before).then(|| entry.1.clone())
     };
     if let Some(media) = changed {
         state.emit_event(

@@ -648,6 +648,8 @@ import {
   offCohostState
 } from '@/lib/backend'
 import type { WatchdogAlert, WatchdogAlertFix, WatchdogAlertsView } from '@/lib/backend'
+import type { RoomMediaStatus } from '@/lib/backend'
+import type { SceneContent } from '@/lib/room-scene-publisher'
 import { backendAudioLevels } from '@/lib/backend-audio-levels'
 import { soundboard } from '@/lib/soundboard-store'
 import {
@@ -2882,6 +2884,24 @@ function StudioCloudProvider({
  * Studio first renders. The migration is a chunk of its own, loaded only on
  * that launch; every other launch reads the stored library and renders at once.
  */
+
+/** Plan 260 S1.8c: the backend room's screen privacy in the room client's
+ * `screenPrivacy` shape, for the Studio's Hide screen status. */
+function backendScreenPrivacy(
+  media: RoomMediaStatus | null
+): TalkShowRoomSnapshot['screenPrivacy'] | undefined {
+  const screen = media?.screen
+  if (!screen) return undefined
+  return {
+    epoch: screen.epoch,
+    generation: screen.generation,
+    hidden: screen.hidden,
+    sourceBlockedAt: screen.sourceBlockedAt,
+    status: screen.status,
+    observations: screen.observations
+  }
+}
+
 export function StudioProvider({ children }: { children: ReactNode }): ReactElement | null {
   const [ready, setReady] = useState(scenesStored)
   useEffect(() => {
@@ -5835,6 +5855,21 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   /** Plan 249 S12: asks for the room scene to be sent again after a confirmed edit. */
   const requestRoomSceneResendRef = useRef<() => void>(() => {})
   const [roomMedia, setRoomMedia] = useState<TalkShowRoomSnapshot | undefined>()
+  // Plan 260 S1.8c: the host's media in the backend's room (its dev switch),
+  // a token for that room (one per hold, as the room client is), and the
+  // scene last committed there.
+  const [backendRoomMedia, setBackendRoomMedia] = useState<RoomMediaStatus | null>(null)
+  const backendRoomMediaRef = useRef(backendRoomMedia)
+  backendRoomMediaRef.current = backendRoomMedia
+  const backendRoomRef = useRef<object | null>(null)
+  const backendSceneContentRef = useRef<SceneContent | null>(null)
+  const onBackendRoomMedia = useCallback((media: RoomMediaStatus | null) => {
+    if (!media) {
+      backendRoomRef.current = null
+      backendSceneContentRef.current = null
+    } else backendRoomRef.current ??= {}
+    setBackendRoomMedia(media)
+  }, [])
   const onRoomMediaSnapshot = useCallback((snapshot: TalkShowRoomSnapshot) => {
     setRoomMedia((previous) =>
       previous?.state === snapshot.state &&
@@ -11939,6 +11974,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       current?: () => boolean
     ): Promise<RoomSceneResult> => {
       const { applySceneToRoom } = await import('@/lib/cloud-scene-adapter')
+      const { capturerIdForNative } = await import('@/lib/room-screen-source')
       return applySceneToRoom(
         { ...target, video: captureConfigRef.current.video },
         {
@@ -11949,6 +11985,41 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           room: () => {
             const controls = roomControlsRef.current
             const status = cloudStatusRef.current
+            const backend = backendRoomMediaRef.current
+            // Plan 260 S1.8c: the backend's room, from its media status.
+            if (!controls && backend && status?.room && status.show) {
+              const showId = status.show.id
+              return {
+                identity: status.room.client === 'connected' ? `host:${showId}` : null,
+                cameraPublished: backend.camera,
+                cameraOff: captureConfigRef.current.sources.cameraOff === true,
+                screenPublished: backend.screen?.published === true,
+                screenSourceId: backend.screen
+                  ? capturerIdForNative(backend.screen.sourceId)
+                  : null,
+                stage: status.room.stage,
+                commitScene: async (content, assets) => {
+                  const backendClient = clientRef.current
+                  if (!backendClient)
+                    return { state: 'failed', reason: 'Videorc is offline.', observed: {} }
+                  const { commitSceneToBackend } = await import('@/lib/room-scene-backend')
+                  const answered = await commitSceneToBackend(
+                    backendClient,
+                    showId,
+                    content,
+                    assets ?? []
+                  ).catch(() => null)
+                  if (!answered)
+                    return {
+                      state: 'failed',
+                      reason: 'The room did not take the scene.',
+                      observed: {}
+                    }
+                  backendSceneContentRef.current = content
+                  return answered
+                }
+              }
+            }
             if (!controls || !status?.room || !status.show) return null
             const snapshot = controls.snapshot
             return {
@@ -11984,6 +12055,17 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
           // one-shot source grant and the room's privacy-gated capture.
           shareScreen: async (want) => {
             const controls = roomControlsRef.current
+            // Plan 260 S1.8c: the backend's room shares by native id.
+            if (!controls && backendRoomMediaRef.current) {
+              if (!clientRef.current) throw offlineError()
+              if (!want.nativeId) throw new Error("the room can't share this source here.")
+              roomScreenWantedRef.current = want.capturerId
+              const answer = await clientRef.current.requestTyped('cloud.room.screen.set', {
+                screen: { sourceId: want.nativeId }
+              })
+              if (!answer.held) throw new Error('the room is not open.')
+              return
+            }
             if (!controls) throw new Error('The room is not open.')
             roomScreenWantedRef.current = want.capturerId
             const granted = await window.videorc?.setTalkShowMediaGrant?.({
@@ -12040,7 +12122,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     (): boolean =>
       roomHoldsTheCamera(cloudStatusRef.current?.room) &&
       roomScenesOn() &&
-      Boolean(roomControlsRef.current?.sceneContent),
+      Boolean(roomControlsRef.current?.sceneContent ?? backendSceneContentRef.current),
     [roomScenesOn]
   )
   // Plan 249 S12: confirmed edits (drag, nudge, reset, Show/Hide, a look
@@ -12050,7 +12132,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   roomSceneEditDepsRef.current = { live: roomSceneLive, send: sendSceneToRoom }
   roomSceneEditSyncRef.current ??= createRoomSceneEditSync({
     live: () => roomSceneEditDepsRef.current.live(),
-    room: () => roomControlsRef.current,
+    room: () => roomControlsRef.current ?? backendRoomRef.current,
     target: () => ({
       layout: captureConfigRef.current.layout,
       sources: captureConfigRef.current.sources,
@@ -18550,6 +18632,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       stopOutput: (output) => stopOutputRef.current?.(output) ?? Promise.resolve(false),
       controlsRef: roomControlsRef,
       onMediaSnapshot: onRoomMediaSnapshot,
+      onBackendMedia: onBackendRoomMedia,
       microphoneMuted: captureConfig.audio.microphoneMuted,
       microphoneAudio: captureConfig.audio,
       cameraOff: captureConfig.sources.cameraOff === true,
@@ -18572,6 +18655,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       deviceList.devices,
       smokeTalkShowRoomOpen,
       onRoomMediaSnapshot,
+      onBackendRoomMedia,
       captureConfig.audio,
       captureConfig.sources.cameraOff,
       talkShowCameraId,
@@ -21673,7 +21757,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   const value = useMemo<StudioCoreContextValue>(
     () => ({
       ...privacy,
-      roomScreenPrivacy: roomMedia?.screenPrivacy,
+      roomScreenPrivacy: roomMedia?.screenPrivacy ?? backendScreenPrivacy(backendRoomMedia),
       connection,
       wsStatus,
       health,
@@ -21929,6 +22013,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     [
       privacy,
       roomMedia,
+      backendRoomMedia,
       connection,
       wsStatus,
       health,

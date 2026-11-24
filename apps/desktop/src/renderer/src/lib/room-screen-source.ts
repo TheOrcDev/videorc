@@ -24,7 +24,13 @@ import type { SourceSelection } from '@/lib/backend'
 export type RoomScreenWant =
   /** The scene names no screen: keep whatever the room shares. */
   | { kind: 'keep' }
-  | { kind: 'source'; capturerId: string; sourceKind: 'screen' | 'window' }
+  | {
+      kind: 'source'
+      capturerId: string
+      sourceKind: 'screen' | 'window'
+      /** Plan 260 S1.8c: the native id, for the backend's room. */
+      nativeId?: string
+    }
   | { kind: 'unsupported'; reason: string }
 
 /** How the room's screen is captured, measured facts only (V13). */
@@ -48,6 +54,18 @@ export function capturerIdForNative(nativeId: string | undefined): string | null
   return `${match[1]}:${id}:0`
 }
 
+const CAPTURER = /^(screen|window):([0-9]{1,10}):0$/
+
+/** `screen:5:0` -> `screen:screencapturekit:5` (plan 260 S1.8c: the
+ * backend's room shares by native id); null when the id does not map. */
+export function nativeIdForCapturer(capturerId: string | undefined): string | null {
+  const match = capturerId ? CAPTURER.exec(capturerId) : null
+  if (!match) return null
+  const id = Number(match[2])
+  if (!Number.isSafeInteger(id) || id <= 0 || id > 0xffffffff) return null
+  return `${match[1]}:screencapturekit:${id}`
+}
+
 /** What the room should share for a scene's sources. A window wins over a display, as natively. */
 export function roomScreenWant(
   sources: Pick<SourceSelection, 'screenId' | 'windowId' | 'captureOff'>
@@ -63,7 +81,8 @@ export function roomScreenWant(
   return {
     kind: 'source',
     capturerId,
-    sourceKind: capturerId.startsWith('window:') ? 'window' : 'screen'
+    sourceKind: capturerId.startsWith('window:') ? 'window' : 'screen',
+    nativeId: native
   }
 }
 
