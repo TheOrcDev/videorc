@@ -37,6 +37,7 @@ fn message(session_id: &str, seq: u32, text: &str) -> LiveChatMessage {
         reply: None,
         first_message: false,
         first_in_session: false,
+        arrival: None,
         author_handle: None,
         author_affiliation: None,
         author_verified: None,
