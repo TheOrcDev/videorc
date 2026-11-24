@@ -1040,6 +1040,16 @@ land, the switch `VIDEORC_BACKEND_ROOM` stays a dev switch):
   dependency): the guest mix as the far end, every room microphone frame
   (own tap or session tap) through it before it is published. Without it a
   host on speakers echoes the guests back; today's room has the browser's.
+Accepted until Phase 2 (decided 2026-11-24, #1895): subscription grants
+are identity-scoped (LiveKit's Rust SDK has no session field), with review
+option D (no grant without a receipt current for the participant's present
+session; every connect revokes in the same update) and a persistent deny
+for any identity the host removes or blocks, kept until the host admits it
+again. The remaining sub-second window between a replacement's connect and
+D's revoke is accepted. Per-join guest identities (guest id plus a nonce,
+minted by the web) are a candidate cross-repo plan, not scheduled: about 35
+web files and the desktop treat the LiveKit identity as the guest id.
+
 - Every live guest page sends media-v2 receipts. The backend's room grants
   a participant nothing until its receipt is current for the session it is
   in (review option D, #1895), so a page that never sends one gets no host
