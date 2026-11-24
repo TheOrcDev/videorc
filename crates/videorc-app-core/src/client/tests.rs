@@ -427,3 +427,63 @@ async fn a_sent_request_that_never_answers_has_an_unknown_outcome() {
         .unwrap_err();
     assert_eq!(error.code, codes::NOT_CONNECTED);
 }
+
+/// A backend that sends `backend.ready` and then never reads again, so a
+/// close frame gets no answer: the reader is still waiting when `close`
+/// aborts it, and never records the close itself.
+async fn silent_backend() -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let ready = json!({
+            "event": "backend.ready",
+            "payload": {"host": "127.0.0.1", "port": port, "token": TOKEN, "pid": 4242}
+        });
+        socket.send(Message::text(ready.to_string())).await.unwrap();
+        // Holds the connection open without reading: no answer to anything.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        drop(socket);
+    });
+    (port, server)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_says_closed_even_when_the_reader_never_saw_it() {
+    let (port, server) = silent_backend().await;
+    let credential = Credential {
+        host: "127.0.0.1".to_string(),
+        port,
+        token: TOKEN.to_string(),
+    };
+    let socket = BackendSocket::connect_with(&credential, SocketOptions::default())
+        .await
+        .unwrap();
+    assert!(socket.is_open());
+
+    // A request the engine will never answer, waiting when the close lands.
+    let pending = socket.request_with_timeout("never.answers", Value::Null, WAIT);
+    let close = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        socket.close().await;
+    };
+    let started = std::time::Instant::now();
+    let (result, ()) = tokio::join!(pending, close);
+
+    // Closed at once, in this app's words, and the waiting request failed
+    // with the close instead of waiting out its own deadline.
+    assert!(!socket.is_open());
+    assert_eq!(
+        socket.closed_reason().as_deref(),
+        Some(super::socket::CLIENT_CLOSED)
+    );
+    let error = result.unwrap_err();
+    assert!(error.is_outcome_unknown(), "{error}");
+    assert!(started.elapsed() < WAIT, "{:?}", started.elapsed());
+    let reason = tokio::time::timeout(WAIT, socket.wait_closed())
+        .await
+        .expect("wait_closed returns once closed");
+    assert_eq!(reason, super::socket::CLIENT_CLOSED);
+    server.abort();
+}
