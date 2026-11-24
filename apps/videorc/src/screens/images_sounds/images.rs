@@ -6,6 +6,7 @@ use gpui::{Context, Window, div, prelude::*, px};
 use serde_json::Value;
 use videorc_app_core::assets::{self, BannerImportKind, ImportPhase};
 use videorc_app_core::protocol::{Banner, StreamScreen};
+use videorc_app_core::studio::StudioBackend;
 use videorc_app_core::{BackendClient, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
@@ -315,7 +316,7 @@ impl Render for ImagesPanel {
         let mut takeovers_section = PanelSection::new("images-takeovers")
             .title(assets::TAKEOVERS)
             .description(assets::TAKEOVERS_DESCRIPTION)
-            .last()
+            .last(true)
             .action(
                 Button::new("takeover-import")
                     .label(assets::takeover_import_label(
