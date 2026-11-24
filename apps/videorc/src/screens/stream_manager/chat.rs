@@ -2,13 +2,20 @@
 //! Rows and send land in later slices; this draws the chrome and holds the
 //! filter / draft state the drivers will read.
 
+use std::sync::Arc;
+
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, Focusable, IntoElement, SharedString,
     Subscription, Window, div, prelude::*, px,
 };
+use videorc_app_core::chat::model::LiveChatMessage;
 use videorc_app_core::chat::view::platform_label;
-use videorc_app_core::stream_manager::copy::{CHAT_ON_STREAM, CHAT_PANE, START_A_LIVESTREAM};
-use videorc_app_core::stream_manager::pane::{self, ChatFilter};
+use videorc_app_core::stream_manager::copy::{
+    CHAT_MESSAGES, CHAT_ON_STREAM, CHAT_PANE, START_A_LIVESTREAM,
+};
+use videorc_app_core::stream_manager::pane::{
+    self, ChatFilter, chat_pane_messages, filter_platforms,
+};
 use videorc_app_core::stream_manager::send::{CHAT_SEND_MAX_CHARS, draft_length};
 use videorc_kit::{
     badge::{Badge, BadgeVariant},
@@ -25,12 +32,16 @@ use videorc_kit::{
 };
 
 use super::layout::{Tier, full_labels};
+use super::rows::{chat_row, shell_messages};
 
-/// The chat pane: filter bar, empty body and composer shell.
+/// The chat pane: filter bar, rows, empty body and composer shell.
 pub struct ChatPane {
     filter: ChatFilter,
     /// Destinations + message platforms (≥2 draws the platform chips).
     platforms: Vec<String>,
+    messages: Vec<Arc<LiveChatMessage>>,
+    mention_names: Vec<String>,
+    live: bool,
     search: Entity<InputState>,
     draft: Entity<InputState>,
     chat_on_stream: bool,
@@ -58,9 +69,14 @@ impl ChatPane {
                 cx.notify();
             }
         });
+        let messages = shell_messages();
+        let platforms = filter_platforms(&[], &messages);
         Self {
             filter: ChatFilter::default(),
-            platforms: Vec::new(),
+            platforms,
+            messages,
+            mention_names: vec!["orc".into()],
+            live: false,
             search,
             draft,
             chat_on_stream: false,
@@ -319,16 +335,44 @@ impl Render for ChatPane {
         let t = theme::resolve(None, window, cx);
         let border = hsla(t.border);
         let muted = hsla(t.muted_foreground);
+        let shown = chat_pane_messages(&self.messages, &self.filter, &self.mention_names);
         let filtering = self.filter.filtering();
-        let empty = if filtering {
-            pane::copy::NO_MATCH
-        } else {
-            START_A_LIVESTREAM
-        };
         let draft = self.draft.read(cx).value().to_string();
         let draft_len = draft_length(draft.trim());
         let can_send = !draft.trim().is_empty();
         let filters = self.filters_bar(tier, labels, window, cx);
+        let live = self.live;
+        let list: AnyElement = if shown.is_empty() {
+            let empty = if filtering {
+                pane::copy::NO_MATCH
+            } else {
+                START_A_LIVESTREAM
+            };
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .px(px(16.))
+                .child(Empty::new().description(empty))
+                .into_any_element()
+        } else {
+            div()
+                .id("chat-messages")
+                .flex_1()
+                .min_h(px(0.))
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .px(px(4.))
+                .py(px(4.))
+                .overflow_y_scroll()
+                .aria_label(CHAT_MESSAGES)
+                .children(shown.into_iter().map(|message| chat_row(message, live)))
+                .into_any_element()
+        };
 
         div()
             .id("chat-pane")
@@ -337,16 +381,7 @@ impl Render for ChatPane {
             .flex_col()
             .aria_label(CHAT_PANE)
             .child(filters)
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .px(px(16.))
-                    .child(Empty::new().description(empty)),
-            )
+            .child(list)
             .when(self.composer, |pane| {
                 pane.child(
                     div()
