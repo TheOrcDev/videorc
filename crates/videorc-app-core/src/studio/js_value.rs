@@ -394,6 +394,35 @@ pub fn stored_text(value: Option<&Value>) -> Option<String> {
     }
 }
 
+/// `Intl.ListFormat('en-US', {style: 'long', type: 'conjunction'})`: "A",
+/// "A and B", "A, B, and C".
+pub fn list_format(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
+}
+
+/// `canonicalJson(a) === canonicalJson(b)` (`lib/scene-visibility-identity.ts`):
+/// key order is not content, and a number is its value (`12` and `12.0`
+/// print the same in JavaScript). Arrays keep their order.
+pub fn canonical_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| canonical_eq(a, b))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(key, value)| b.get(key).is_some_and(|other| canonical_eq(value, other)))
+        }
+        _ => a == b,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
