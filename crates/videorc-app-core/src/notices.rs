@@ -334,8 +334,9 @@ pub fn support_bundle_export_failed(offline: bool) -> NoticeCommand {
     )
 }
 
-/// `VIDEORC_PREMIUM_URL` (the production origin).
-pub const VIDEORC_PREMIUM_URL: &str = "https://www.videorc.com/premium";
+/// `VIDEORC_PREMIUM_URL` and `isPremiumUpgradeMessage` live with the
+/// entitlements (S1.6e); the toasts use them from there.
+pub use crate::account::entitlements::{VIDEORC_PREMIUM_URL, is_premium_upgrade_message};
 
 /// The toast ids the session's news shares.
 pub mod ids {
@@ -757,18 +758,6 @@ pub fn recording_failure(notice: &RecordingFailedNotice) -> Vec<NoticeCommand> {
         NoticeCommand::Dismiss(ids::MICROPHONE_INPUT_LOST.to_string()),
         NoticeCommand::Show(request.finish()),
     ]
-}
-
-/// `isPremiumUpgradeMessage`: `/\b(?:Videorc\s+)?Premium\b/i`.
-pub fn is_premium_upgrade_message(message: &str) -> bool {
-    let lowered = message.to_ascii_lowercase();
-    let bytes = lowered.as_bytes();
-    let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
-    lowered.match_indices("premium").any(|(at, found)| {
-        let before = at.checked_sub(1).map(|i| bytes[i]);
-        let after = bytes.get(at + found.len()).copied();
-        !before.is_some_and(word) && !after.is_some_and(word)
-    })
 }
 
 /// `showPremiumUpgrade`: a plan limit is news about Premium, not a failure.
