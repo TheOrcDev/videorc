@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>S0.8 room page</title>
+<style>
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 12px; background: #111; color: #eee; }
+  video, canvas { width: 480px; height: 270px; background: #000; margin: 4px; }
+  pre { white-space: pre-wrap; font-size: 12px; }
+</style>
+</head>
+<body>
+<div><b id="title"></b></div>
+<canvas id="camera" width="1280" height="720"></canvas>
+<video id="remote" autoplay playsinline muted></video>
+<pre id="status">loading</pre>
+<script type="module">
+import { Room, RoomEvent, Track } from '/lk.mjs'
+
+// Plan 260 S0.8. role=guest (publishes a barcoded camera and a tone, watches
+// the host), role=watch (Chromium's own WebRTC watching guest:0: the
+// baseline for the Rust host's delay), role=program (a managed show's
+// program page: publishes a picture and reports its stage state).
+const params = new URLSearchParams(location.search)
+const role = params.get('role')
+const idx = Number(params.get('idx') ?? 0)
+const LEFT = 16, BLOCK = 24, ROW_A = 8, ROW_B = 40, BITS = 48
+const state = (window.__state = {
+  role, idx, phase: 'connecting', errors: [], remoteFrames: 0, unreadable: 0, delays: [],
+  stage: [], overlays: [], clears: [], watched: null
+})
+document.getElementById('title').textContent = `${role} ${idx}`
+const show = () => (document.getElementById('status').textContent = JSON.stringify(
+  { ...state, delays: state.delays.length, last: state.delays.slice(-5) }, null, 1))
+
+function drawCamera(ctx, hue, n) {
+  ctx.fillStyle = `hsl(${hue} 40% 35%)`
+  ctx.fillRect(0, 0, 1280, 720)
+  ctx.fillStyle = '#ddd'
+  ctx.fillRect((n * 8) % 1280, 100, 40, 620)
+  ctx.font = '64px system-ui'
+  ctx.fillText(`${role} ${idx}`, 60, 400)
+  const now = Date.now()
+  for (let bit = 0; bit < BITS; bit++) {
+    const on = Math.floor(now / 2 ** (BITS - 1 - bit)) % 2 === 1
+    ctx.fillStyle = on ? '#fff' : '#000'
+    ctx.fillRect(LEFT + bit * BLOCK, ROW_A, BLOCK, BLOCK)
+    ctx.fillStyle = on ? '#000' : '#fff'
+    ctx.fillRect(LEFT + bit * BLOCK, ROW_B, BLOCK, BLOCK)
+  }
+}
+
+const probe = document.createElement('canvas')
+const probeCtx = probe.getContext('2d', { willReadFrequently: true })
+function readBarcode(video) {
+  const w = video.videoWidth, h = video.videoHeight
+  if (!w || !h) return null
+  probe.width = w; probe.height = Math.ceil(h * 0.1) + 4
+  probeCtx.drawImage(video, 0, 0, w, h)
+  const scale = w / 1280
+  const img = probeCtx.getImageData(0, 0, w, probe.height).data
+  const luma = (x, y) => { const i = (Math.floor(y) * w + Math.floor(x)) * 4; return 0.299 * img[i] + 0.587 * img[i + 1] + 0.114 * img[i + 2] }
+  let value = 0
+  for (let bit = 0; bit < BITS; bit++) {
+    const x = (LEFT + bit * BLOCK + BLOCK / 2) * scale
+    const a = luma(x, (ROW_A + BLOCK / 2) * scale), b = luma(x, (ROW_B + BLOCK / 2) * scale)
+    if (Math.abs(a - b) < 40) return null
+    value = value * 2 + (a > b ? 1 : 0)
+  }
+  return value
+}
+
+function watch(track) {
+  const video = document.getElementById('remote')
+  track.attach(video)
+  const onFrame = () => {
+    state.remoteFrames++
+    const sent = readBarcode(video)
+    const now = Date.now()
+    if (sent !== null && sent <= now && now - sent < 10000) state.delays.push(now - sent)
+    else state.unreadable++
+    video.requestVideoFrameCallback(onFrame)
+  }
+  video.requestVideoFrameCallback(onFrame)
+}
+
+async function main() {
+  const room = new Room({ adaptiveStream: false, dynacast: true })
+  room.on(RoomEvent.Disconnected, (reason) => { state.phase = `disconnected:${reason}` })
+  room.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
+    if (topic !== 'videorc.stage') return
+    try { const m = JSON.parse(new TextDecoder().decode(payload)); state.stage.push({ seq: m.seq, from: participant?.identity, delayMs: Date.now() - m.sentAt, onStage: m.stage.length }) }
+    catch (e) { state.errors.push(`stage: ${e}`) }
+  })
+  room.registerByteStreamHandler('videorc.overlay.set', async (reader, from) => {
+    const info = reader.info, startedAt = Date.now()
+    const entry = { from: from.identity, topic: info.topic, mimeType: info.mimeType, declared: info.size,
+      attributes: info.attributes, attributeTypes: Object.fromEntries(Object.entries(info.attributes ?? {}).map(([k, v]) => [k, typeof v])),
+      complete: false, bytes: 0 }
+    state.overlays.push(entry)
+    try {
+      const chunks = await reader.readAll()
+      entry.bytes = chunks.reduce((n, c) => n + c.byteLength, 0)
+      entry.complete = true
+      entry.whole = entry.bytes === info.size
+      entry.ms = Date.now() - startedAt
+    } catch (e) { entry.error = String(e?.message ?? e) }
+    show()
+  })
+  room.registerByteStreamHandler('videorc.overlay.clear', async (reader, from) => {
+    try {
+      const chunks = await reader.readAll()
+      const text = new TextDecoder().decode(new Uint8Array(chunks.flatMap((c) => [...c])))
+      state.clears.push({ from: from.identity, mimeType: reader.info.mimeType, body: JSON.parse(text) })
+    } catch (e) { state.errors.push(`clear: ${e}`) }
+  })
+  const subscribeIf = (publication, participant) => {
+    if (role === 'guest' && participant.identity.startsWith('host:') && publication.kind === 'video' && publication.source === Track.Source.Camera) publication.setSubscribed(true)
+    if (role === 'watch' && participant.identity === 'guest:0' && publication.kind === 'video') publication.setSubscribed(true)
+  }
+  room.on(RoomEvent.TrackPublished, subscribeIf)
+  room.on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
+    if (track.kind === 'video') { state.watched = participant.identity; watch(track) }
+  })
+  await room.connect(params.get('url'), params.get('token'), { autoSubscribe: false })
+  for (const participant of room.remoteParticipants.values()) for (const pub of participant.trackPublications.values()) subscribeIf(pub, participant)
+  state.phase = 'connected'
+
+  if (role === 'guest' || role === 'program') {
+    const canvas = document.getElementById('camera')
+    const ctx = canvas.getContext('2d')
+    let n = 0
+    setInterval(() => drawCamera(ctx, (idx * 37) % 360, n++), 33)
+    const [video] = canvas.captureStream(30).getVideoTracks()
+    await room.localParticipant.publishTrack(video, { source: Track.Source.Camera, videoCodec: 'vp8', simulcast: true })
+  }
+  if (role === 'guest') {
+    const audio = new AudioContext()
+    const osc = audio.createOscillator()
+    osc.frequency.value = 300 + 100 * idx
+    const dest = audio.createMediaStreamDestination()
+    osc.connect(dest); osc.start()
+    await room.localParticipant.publishTrack(dest.stream.getAudioTracks()[0], { source: Track.Source.Microphone })
+  }
+  if (role === 'program') {
+    setInterval(() => room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify({ v: 1, state: 'shown' })), { reliable: true, topic: 'videorc.program' }), 1000)
+  }
+  setInterval(show, 1000)
+}
+main().catch((e) => { state.phase = 'failed'; state.errors.push(String(e?.stack ?? e)); show() })
+</script>
+</body>
+</html>
