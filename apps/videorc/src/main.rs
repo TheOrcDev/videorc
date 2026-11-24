@@ -331,6 +331,16 @@ fn main() -> Result<()> {
         ExitGuard::install(cx, &exit_runtime, exit_events);
         menus::install(cx);
         studio_screen::bind_keys(cx);
+        screens::notifications::install_keys(cx);
+        let notices = cx.new(|cx| {
+            screens::notifications::Hub::new(
+                studio.clone(),
+                core_handle.clone(),
+                backend_state.clone(),
+                cx,
+            )
+        });
+        cx.set_global(screens::notifications::Shared(notices.clone()));
 
         // Hide from stream: content protection and the capture filter's
         // list, which the Studio sends with the screen capture when it lands.
@@ -464,6 +474,7 @@ fn main() -> Result<()> {
                         settings.clone(),
                         health.clone(),
                         palette,
+                        notices.clone(),
                         window,
                         cx,
                     )

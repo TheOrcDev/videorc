@@ -2,6 +2,7 @@
 
 pub mod command_palette;
 pub mod health;
+pub mod notifications;
 pub mod output;
 pub mod settings;
 pub mod sources;
