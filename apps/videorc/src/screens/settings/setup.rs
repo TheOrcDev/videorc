@@ -40,22 +40,13 @@ impl SettingsScreen {
                 .to_string(),
         )
     }
-    pub fn open_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_setup(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.disabled() || self.studio.snapshot().session.phase.is_active() {
             return;
         }
-        self.setup.goal = self
-            .studio
-            .setting(f::FIRST_RUN_KEY)
-            .and_then(|value| f::parse_record(Some(&value.to_string())))
-            .and_then(|record| record.goal);
-        self.setup.step =
-            f::steps_for(self.setup.goal, Some(crate::app::hotkeys::node_platform()))[0];
-        // A replay writes no onboarding marker and starts no session or
-        // performance capture. All changes below require an explicit click.
-        self.setup.dialog.open(window, cx);
-        self.refresh(cx);
-        cx.notify();
+        // Full-window FirstRunScreen owns the replay (Electron's first-run
+        // overlay). The Settings dialog is kept as a fallback stub only.
+        cx.emit(OpenSetup);
     }
     fn setup_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match f::next_step(

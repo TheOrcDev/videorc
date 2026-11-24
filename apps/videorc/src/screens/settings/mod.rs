@@ -35,6 +35,11 @@ pub const EVENTS: [&str; 6] = [
 pub struct Navigate(pub videorc_app_core::nav::PageId);
 impl EventEmitter<Navigate> for SettingsScreen {}
 
+/// Shell opens the full-window first-run setup (replay from Settings / ⌘K).
+#[derive(Debug, Clone, Copy)]
+pub struct OpenSetup;
+impl EventEmitter<OpenSetup> for SettingsScreen {}
+
 pub struct SettingsScreen {
     studio: Arc<Studio<BackendClient>>,
     backend: tokio::sync::watch::Receiver<videorc_app_core::supervisor::BackendState>,

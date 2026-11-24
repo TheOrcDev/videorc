@@ -24,10 +24,12 @@ use videorc_kit::{
 use super::bridge::Mirror;
 use crate::preview::Preview;
 use crate::screens::destinations::DestinationsPanel;
+use crate::screens::first_run::{FirstRunScreen, OpenPage as FirstRunOpenPage};
 use crate::screens::go_live::GoLiveDialog;
 use crate::screens::guests::GuestsPanel;
 use crate::screens::images_sounds::{ImagesPanel, SoundsPanel};
 use crate::screens::output::OutputPanel;
+use crate::screens::settings::OpenSetup;
 use crate::screens::sidekick::SidekickScreen;
 use crate::screens::sources::SourcesPanel;
 use crate::screens::studio::{StudioPage, transport::OpenPage};
@@ -95,6 +97,8 @@ pub struct Shell {
     sounds: Entity<SoundsPanel>,
     /// Phase 3: Go Live confirmation (over any page).
     go_live: Entity<GoLiveDialog>,
+    /// Phase 3: First-run / "Run setup again…" full-window overlay.
+    first_run: Entity<FirstRunScreen>,
     settings: Entity<SettingsScreen>,
     health: Entity<crate::screens::health::HealthScreen>,
     library: Entity<crate::screens::library::LibraryScreen>,
@@ -119,6 +123,7 @@ impl Shell {
         images: Entity<ImagesPanel>,
         sounds: Entity<SoundsPanel>,
         go_live: Entity<GoLiveDialog>,
+        first_run: Entity<FirstRunScreen>,
         settings: Entity<SettingsScreen>,
         health: Entity<crate::screens::health::HealthScreen>,
         library: Entity<crate::screens::library::LibraryScreen>,
@@ -188,6 +193,7 @@ impl Shell {
         cx.observe(&images, |_, _, cx| cx.notify()).detach();
         cx.observe(&sounds, |_, _, cx| cx.notify()).detach();
         cx.observe(&go_live, |_, _, cx| cx.notify()).detach();
+        cx.observe(&first_run, |_, _, cx| cx.notify()).detach();
         // Both routes use the same lifecycle, title and focus updates.
         cx.subscribe_in(&studio, window, |this, _, open: &OpenPage, window, cx| {
             if let Some(tab) = open.settings_tab {
@@ -201,6 +207,20 @@ impl Shell {
             this.open_page(*page, window, cx);
         })
         .detach();
+        cx.subscribe_in(&settings, window, |this, _, _: &OpenSetup, _, cx| {
+            let return_to = this.page;
+            this.first_run
+                .update(cx, |setup, cx| setup.open_replay(return_to, cx));
+        })
+        .detach();
+        cx.subscribe_in(
+            &first_run,
+            window,
+            |this, _, open: &FirstRunOpenPage, window, cx| {
+                this.open_page(open.0, window, cx);
+            },
+        )
+        .detach();
         cx.subscribe_in(
             &palette,
             window,
@@ -209,9 +229,9 @@ impl Shell {
                 Command::Page(page) => this.open_page(*page, window, cx),
                 Command::Settings(tab) => this.open_settings(Some(*tab), window, cx),
                 Command::Setup => {
-                    this.open_page(PageId::Settings, window, cx);
-                    this.settings
-                        .update(cx, |settings, cx| settings.open_setup(window, cx));
+                    let return_to = this.page;
+                    this.first_run
+                        .update(cx, |setup, cx| setup.open_replay(return_to, cx));
                 }
                 Command::Preview => this
                     .preview
@@ -238,6 +258,7 @@ impl Shell {
             images,
             sounds,
             go_live,
+            first_run,
             settings,
             health,
             library,
@@ -569,6 +590,7 @@ impl Render for Shell {
             )
             .child(self.palette.clone())
             .child(self.go_live.clone())
+            .child(self.first_run.clone())
             .child(self.dialogs.clone())
             .child(self.notices.read(cx).toasts())
     }
