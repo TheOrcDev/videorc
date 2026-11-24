@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import { useEffect, type ReactElement } from 'react'
 
 import { LockAlert } from '@/components/lock-alert'
@@ -43,6 +44,7 @@ import { VIDEORC_PREMIUM_URL } from '@/lib/videorc-web-links'
 const BRB_CARD = 'default'
 
 export function CloudSection(): ReactElement | null {
+  useLocalTime()
   const { cloudStatus, refreshCloudAllowance, runCloudTest, setCloudSettings } = useStudioCloud()
   const { captureConfig, isSessionActive, screens } = useStudioCore()
   const section = cloudSectionState(cloudStatus)

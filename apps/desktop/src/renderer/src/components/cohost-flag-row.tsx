@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import type { ReactElement } from 'react'
 
 import { Badge } from '@/components/ui/badge'
@@ -31,6 +32,7 @@ export function CohostFlagRow({
   onSelect: (key: string) => void
   onJump: (flag: CohostFlag) => void
 }): ReactElement {
+  useLocalTime()
   const key = cohostFlagRowKey(flag.messageId)
   const detail = cohostFlagDetail(flag)
   const action = cohostFlagActionLabel(flag)

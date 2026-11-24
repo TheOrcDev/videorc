@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import { lazy, Suspense, useRef, useState, type ReactElement } from 'react'
 
 import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -377,6 +378,7 @@ export function StreamManagerStatusBar({
   statsLayout?: StatsLayout
   onStatsLayoutChange?: (layout: StatsLayout) => void
 }): ReactElement {
+  useLocalTime()
   const anchorControl =
     highlightAnchor && onHighlightAnchorChange
       ? { anchor: highlightAnchor, onChange: onHighlightAnchorChange }

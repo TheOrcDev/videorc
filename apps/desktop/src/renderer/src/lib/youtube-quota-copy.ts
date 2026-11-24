@@ -1,3 +1,4 @@
+import { formatLocal, localDayKey, localDayKeyAfter } from '@/lib/local-time'
 import type {
   LiveChatProviderState,
   StreamPlatform,
@@ -32,21 +33,13 @@ export const YOUTUBE_STREAM_KEY_LINK_LABEL = 'YouTube Studio → Go live → Str
 export function formatResumeTime(at: Date | string, now: Date = new Date()): string {
   const date = typeof at === 'string' ? new Date(at) : at
   if (Number.isNaN(date.getTime())) return 'the reset'
-  const time = date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-  const sameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate()
-  if (sameDay) return time
-  const tomorrow = new Date(now)
-  tomorrow.setDate(now.getDate() + 1)
-  const isTomorrow =
-    date.getFullYear() === tomorrow.getFullYear() &&
-    date.getMonth() === tomorrow.getMonth() &&
-    date.getDate() === tomorrow.getDate()
-  return isTomorrow
+  const ms = date.getTime()
+  const time = formatLocal(ms, { hour: '2-digit', minute: '2-digit' })
+  const day = localDayKey(ms)
+  if (day === localDayKey(now.getTime())) return time
+  return day === localDayKeyAfter(now.getTime(), 1)
     ? `tomorrow ${time}`
-    : `${date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${time}`
+    : `${formatLocal(ms, { month: 'short', day: 'numeric' })} ${time}`
 }
 
 /**

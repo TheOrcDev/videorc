@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import { MicrophoneIcon, BuddyPageIcon } from '@/components/icons'
 import type React from 'react'
 import {
@@ -1097,6 +1098,7 @@ function CohostSayHiList({
   disabled: boolean
   onGreeted?: (entry: CohostSayHi) => void
 }): ReactElement {
+  useLocalTime()
   return (
     <div data-slot="cohost-say-hi">
       <Separator />
@@ -1160,6 +1162,7 @@ function CohostWelcomeBackList({
   disabled: boolean
   onWave?: (entry: CohostWelcomeBack) => void
 }): ReactElement {
+  useLocalTime()
   return (
     <div data-slot="cohost-welcome-back">
       <Separator />

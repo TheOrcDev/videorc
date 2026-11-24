@@ -1,3 +1,4 @@
+import { formatLocal, LOCAL_DATE_TIME, useLocalTime } from '@/lib/local-time'
 import { CaptionsIcon, LivestreamIcon } from '@/components/icons'
 import { useId, useRef, useState, type KeyboardEvent, type ReactElement } from 'react'
 
@@ -746,6 +747,7 @@ export function GoLiveDestinationRow({
   onReconnect?: (destination: GoLiveDestinationPreflight) => void
   onRecheck?: () => void
 }): ReactElement {
+  useLocalTime()
   const { destination, ready, problem } = view
   const titleId = useId()
   const oauth = destination.authMode === 'oauth'
@@ -761,7 +763,7 @@ export function GoLiveDestinationRow({
       ? [
           scheduledTitle ? `Scheduled: ${scheduledTitle}` : 'Scheduled event',
           scheduledPrivacy ? capitalize(scheduledPrivacy) : undefined,
-          scheduledStart ? new Date(scheduledStart).toLocaleString() : undefined
+          scheduledStart ? formatLocal(Date.parse(scheduledStart), LOCAL_DATE_TIME) : undefined
         ]
           .filter(Boolean)
           .join(' · ')

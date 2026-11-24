@@ -94,6 +94,7 @@ import type {
   ChatCommandsSummary
 } from '../../shared/chat-commands'
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
+import { startLocalTimeSync } from '@/lib/local-time'
 import '@/styles.css'
 
 /** What a failed Buddy action was, for its toast (plan 174 S2.4). */
@@ -1221,6 +1222,8 @@ function CommentsWindowApp(): ReactElement {
     </WindowFrame>
   )
 }
+
+void startLocalTimeSync()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

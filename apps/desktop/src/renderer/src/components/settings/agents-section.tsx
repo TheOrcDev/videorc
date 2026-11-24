@@ -1,3 +1,4 @@
+import { useLocalTime } from '@/lib/local-time'
 import { DeleteIcon, TerminalIcon } from '@/components/icons'
 import { useCallback, useState, useSyncExternalStore, type ReactElement } from 'react'
 
@@ -82,6 +83,7 @@ const ALL_AGENTS = 'all'
  * when the streamer reads what happened and removes an agent.
  */
 export function AgentsSection(): ReactElement {
+  useLocalTime()
   const { status, activity, activityAgentId, activityLoaded, bridge, connectOpen, connectRequest } =
     useAgents()
   const actions = useAgentsActions()
@@ -326,6 +328,7 @@ function AgentActivityRow({
   entry: AgentActivityEntry
   now: number
 }): ReactElement {
+  useLocalTime()
   const outcome = agentOutcomeView(entry.outcome)
   const detail =
     entry.outcome === 'ok' ? activityArgumentsLabel(entry.summary) : (entry.message ?? '')

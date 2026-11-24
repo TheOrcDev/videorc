@@ -1,3 +1,4 @@
+import { formatLocal, useLocalTime } from '@/lib/local-time'
 import {
   Fragment,
   useEffect,
@@ -112,9 +113,7 @@ export function commentHighlightPresentationForMessage({
 }
 
 export function formatCommentTime(iso: string): string {
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return ''
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return formatLocal(Date.parse(iso), { hour: '2-digit', minute: '2-digit' })
 }
 
 /**
@@ -758,6 +757,7 @@ function CommentContent({
   timestamps: CommentTimestamps
   nameIds?: CommentNameIds
 }): ReactElement {
+  useLocalTime()
   const avatarUrl = useCachedAvatar(message.authorAvatarUrl)
   const time = formatCommentTime(message.receivedAt)
   const noticeWords = noticeViewerWords(message)

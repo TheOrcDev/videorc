@@ -1,3 +1,4 @@
+import { formatLocal, LOCAL_DATE, useLocalTime } from '@/lib/local-time'
 import { useCallback, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -121,6 +122,7 @@ export function PersonCardBody({
   /** Something about the community changed (a list may refresh). */
   onChanged?: () => void
 }): ReactElement {
+  useLocalTime()
   const [person, setPerson] = useState<CommunityPerson | null>(null)
   const [loadError, setLoadError] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
@@ -351,7 +353,7 @@ export function PersonCardBody({
                   {linkEventLabel(event.kind)} · {event.accountKey.split(':')[0]}
                 </span>
                 <time className="shrink-0 tabular-nums" dateTime={event.at}>
-                  {new Date(event.at).toLocaleDateString()}
+                  {formatLocal(Date.parse(event.at), LOCAL_DATE)}
                 </time>
               </li>
             ))}

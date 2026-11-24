@@ -1,30 +1,18 @@
+import { formatLocal } from '@/lib/local-time'
 import type { Device, RecordingStatus, StreamHealth } from '../../../shared/backend'
 import { isActiveRecordingState as isSharedActiveRecordingState } from '../../../shared/capture-state'
 import { formatTimecode } from '../../../shared/timecode'
 
 export function compactTime(timestamp: string): string {
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit'
-    }).format(new Date(timestamp))
-  } catch {
-    return timestamp
-  }
+  const at = Date.parse(timestamp)
+  if (Number.isNaN(at)) return timestamp
+  return formatLocal(at, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
 export function dayLabel(timestamp: string): string {
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    }).format(new Date(timestamp))
-  } catch {
-    return timestamp
-  }
+  const at = Date.parse(timestamp)
+  if (Number.isNaN(at)) return timestamp
+  return formatLocal(at, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
 /**

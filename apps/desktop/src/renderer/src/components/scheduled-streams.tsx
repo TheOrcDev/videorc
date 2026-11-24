@@ -1,3 +1,4 @@
+import { formatLocal, LOCAL_DATE_TIME, useLocalTime } from '@/lib/local-time'
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
 import { lastCheckedLabel } from '@/hooks/use-scheduled-streams'
 import { openLivestreamView } from '@/lib/livestream-tabs'
@@ -75,6 +76,7 @@ type Candidate = ScheduledStreamCandidate
 type Editing = { event: ScheduledStreamEvent | null; provider: ScheduledStreamProvider }
 
 export function ScheduledStreams(): ReactElement {
+  useLocalTime()
   const state = useScheduledStreams()
   const { captureConfig, setCaptureConfig, isSessionActive } = useStudioCore()
   const formTrigger = useRef<HTMLElement | null>(null)
@@ -749,13 +751,14 @@ function ScheduledMetaLine({
   text: string
   lastSyncedAt?: string | null
 }): ReactElement {
+  useLocalTime()
   const line = <span className="truncate text-xs text-muted-foreground">{text}</span>
   if (!lastSyncedAt) return line
   return (
     <Tooltip>
       <TooltipTrigger render={line} />
       <TooltipContent align="start">
-        Last checked {new Date(lastSyncedAt).toLocaleString()}
+        Last checked {formatLocal(Date.parse(lastSyncedAt), LOCAL_DATE_TIME)}
       </TooltipContent>
     </Tooltip>
   )
