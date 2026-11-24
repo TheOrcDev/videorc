@@ -15,6 +15,7 @@ import type {
 import { cameraLowFrameRateLine, type CameraLowFrameRate } from '@/lib/camera-frame-rate'
 import { NO_VALUE, formatMetric, plural } from '@/lib/format'
 import { cameraNoVideoLine, cameraSendsNoVideo } from '@/lib/source-status'
+import { linuxDesktopChecks, type LinuxDesktopInput } from '@/lib/linux-desktop-check'
 import { previewSourceStateLabel, previewStateLabel } from '@/lib/state-labels'
 import { statusWordFromValue } from '@/lib/status-word'
 import type { RecentStreamDrops } from '@/lib/stream-health-attribution'
@@ -41,6 +42,10 @@ export type HealthCheckId =
   | 'destinations'
   | 'memory'
   | 'file-repair'
+  // Linux only (plan 257 S18): see linux-desktop-check.ts.
+  | 'keyring'
+  | 'device-groups'
+  | 'screen-portal'
 
 /** One Health check: what it looks at, its state in words, and its tone. */
 export interface HealthCheck {
@@ -315,10 +320,15 @@ export function previewSpeedCheck({
   if (!nativePreviewSurfaceEnabled) {
     return { value: 'Fallback', tone: unavailable ? 'neutral' : 'warn' }
   }
-  if (diagnosticStats.previewTransport === 'electron-proof-surface') {
+  // Plan 257 S3: the proof surface is the Linux Preview, measured on its own
+  // presented rate below; on Windows it stays a named fallback.
+  const linuxProof =
+    platform === 'linux' && diagnosticStats.previewTransport === 'electron-proof-surface'
+  if (diagnosticStats.previewTransport === 'electron-proof-surface' && !linuxProof) {
     return { value: 'Fallback', tone: 'warn' }
   }
   if (
+    !linuxProof &&
     !isNativePreviewCapability(
       {
         transport: diagnosticStats.previewTransport,
@@ -351,19 +361,37 @@ export function previewSpeedCheck({
   ) {
     return { value: 'Screen slow', tone: 'warn' }
   }
-  if (
+  if (linuxProof) {
+    if (previewSurfaceStatus.firstFrameContract === 'fallback') {
+      return { value: 'Stalled', tone: 'warn' }
+    }
+    // Every layer keeps up with what its source sends (or the target, when no
+    // rate is known). A hidden Preview fetches no frames: nothing to judge.
+    const sourceRates = [
+      shouldCheckCamera && previewCameraStatus.state === 'live' && previewCameraStatus.sourceFps,
+      shouldCheckScreen && previewScreenStatus.state === 'live' && previewScreenStatus.sourceFps
+    ].filter((fps): fps is number => typeof fps === 'number' && fps > 0)
+    const shownFps = previewSurfaceStatus.proofSourceFps
+    if (
+      sourceRates.length > 0 &&
+      typeof shownFps === 'number' &&
+      previewSurfaceStatus.framePollingSuppressed !== true &&
+      previewSurfaceStatus.bounds?.visible !== false &&
+      shownFps < Math.min(targetFps, ...sourceRates) * 0.9
+    ) {
+      return { value: 'Slow display', tone: 'warn' }
+    }
+  } else if (
     typeof diagnosticStats.previewRenderFrameTimeP95Ms === 'number' &&
     diagnosticStats.previewRenderFrameTimeP95Ms > (1000 / Math.max(1, targetFps)) * 1.5
   ) {
     return { value: 'Slow rendering', tone: 'warn' }
-  }
-  if (
+  } else if (
     typeof diagnosticStats.previewPresentFps === 'number' &&
     diagnosticStats.previewPresentFps < minimumSourceFps
   ) {
     return { value: 'Slow display', tone: 'warn' }
-  }
-  if (
+  } else if (
     diagnosticStats.previewDroppedFrames > 0 ||
     diagnosticStats.previewRepeatedFrames > targetFps ||
     (typeof diagnosticStats.previewCompositorFrameLag === 'number' &&
@@ -411,7 +439,10 @@ export function previewPathCheck(
     case 'd3d11-shared-texture':
       return { value: 'Native, unconfirmed', tone: 'warn' }
     case 'electron-proof-surface':
-      return { value: 'Fallback window', tone: 'warn' }
+      // Plan 257 S3: Linux's own Preview path, never called native.
+      return platform === 'linux'
+        ? { value: 'App window', tone: 'good' }
+        : { value: 'Fallback window', tone: 'warn' }
     case 'latest-jpeg-polling':
       return { value: 'Fallback (JPEG)', tone: 'warn' }
     case 'mjpeg-stream':
@@ -485,6 +516,8 @@ export type HealthChecksInput = PreviewSpeedInput & {
   recentStreamDrops: Pick<RecentStreamDrops, 'capture'>
   streamHealth: { speed?: number; droppedFrames?: number } | null
   streamTargets: readonly StreamTargetRuntime[]
+  /** Linux: the keyring, device groups and portal (plan 257 S18). */
+  linuxDesktop?: LinuxDesktopInput
 }
 
 /** Every check, in the order "Show all checks" lists them. */
@@ -528,7 +561,8 @@ export function healthChecks(input: HealthChecksInput): HealthCheck[] {
     ),
     check('destinations', 'Destinations', destinationsCheck(input.streamTargets)),
     check('memory', 'Memory', memoryCheck(stats.backendRssBytes)),
-    check('file-repair', 'File repair', fileRepairCheck(stats))
+    check('file-repair', 'File repair', fileRepairCheck(stats)),
+    ...(platform === 'linux' ? linuxDesktopChecks(input.linuxDesktop ?? {}) : [])
   ]
 }
 

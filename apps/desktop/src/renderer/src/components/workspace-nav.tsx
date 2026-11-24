@@ -1,19 +1,19 @@
 import {
   type AppIcon,
   AccountIcon,
-  AssetsIcon,
+  AssetsRowIcon,
   AvatarPageIcon,
-  BuddyPageIcon,
-  CaptionsIcon,
-  HealthIcon,
-  LibraryIcon,
-  LivestreamIcon,
+  BuddyPageRowIcon,
+  CaptionsRowIcon,
+  HealthRowIcon,
+  LibraryRowIcon,
+  LivestreamRowIcon,
   OutputIcon,
-  SceneIcon,
+  SceneRowIcon,
   SettingsIcon,
   SoundsPageIcon,
   SourcesIcon,
-  StudioIcon
+  StudioRowIcon
 } from '@/components/icons'
 import { createContext, useContext } from 'react'
 
@@ -78,18 +78,18 @@ export type StudioPanelMeta = {
 
 // Sidekick (plan 119) keeps the id `ai`, the id deep links, smokes and the
 // `data-videorc-tab-trigger` value already use. Its row wears a plain glyph,
-// `BuddyPageIcon` (plan 235 D7). The avatar, the character on the stream,
+// `BuddyPageRowIcon` (plan 235 D7). The avatar, the character on the stream,
 // has its own page since plan 239, with its own glyph, in Livestream. Guests, the
 // talk show's room (plan 224 D16), is its own page since 0.31.1. (No comments
 // inside these arrays: the eager build ships them.)
 export const WORKSPACE_TABS: WorkspaceTabMeta[] = [
-  { id: 'studio', label: SIDEBAR_PAGE_LABELS.studio, icon: StudioIcon },
+  { id: 'studio', label: SIDEBAR_PAGE_LABELS.studio, icon: StudioRowIcon },
   { id: 'avatar', label: SIDEBAR_PAGE_LABELS.avatar, icon: AvatarPageIcon },
   { id: 'guests', label: SIDEBAR_PAGE_LABELS.guests, icon: AccountIcon },
-  { id: 'ai', label: SIDEBAR_PAGE_LABELS.ai, icon: BuddyPageIcon },
-  { id: 'library', label: SIDEBAR_PAGE_LABELS.library, icon: LibraryIcon },
+  { id: 'ai', label: SIDEBAR_PAGE_LABELS.ai, icon: BuddyPageRowIcon },
+  { id: 'library', label: SIDEBAR_PAGE_LABELS.library, icon: LibraryRowIcon },
   { id: 'settings', label: SIDEBAR_PAGE_LABELS.settings, icon: SettingsIcon },
-  { id: 'diagnostics', label: 'Health', icon: HealthIcon }
+  { id: 'diagnostics', label: 'Health', icon: HealthRowIcon }
 ]
 
 // The panel pages in sidebar order. There is no Audio page — the microphone and
@@ -100,12 +100,12 @@ export const WORKSPACE_TABS: WorkspaceTabMeta[] = [
 const L = SIDEBAR_PAGE_LABELS
 export const STUDIO_PANELS: StudioPanelMeta[] = [
   { id: 'sources', label: L.sources, icon: SourcesIcon, legacyTabId: 'sources' },
-  { id: 'layouts', label: L.layouts, icon: SceneIcon, legacyTabId: 'layout' },
-  { id: 'assets', label: L.assets, icon: AssetsIcon, legacyTabId: 'assets' },
+  { id: 'layouts', label: L.layouts, icon: SceneRowIcon, legacyTabId: 'layout' },
+  { id: 'assets', label: L.assets, icon: AssetsRowIcon, legacyTabId: 'assets' },
   { id: 'sounds', label: L.sounds, icon: SoundsPageIcon, legacyTabId: 'sounds' },
-  { id: 'captions', label: L.captions, icon: CaptionsIcon, legacyTabId: 'captions' },
+  { id: 'captions', label: L.captions, icon: CaptionsRowIcon, legacyTabId: 'captions' },
   { id: 'recording', label: L.recording, icon: OutputIcon, legacyTabId: 'recording' },
-  { id: 'live', label: L.live, icon: LivestreamIcon, legacyTabId: 'streaming' }
+  { id: 'live', label: L.live, icon: LivestreamRowIcon, legacyTabId: 'streaming' }
 ]
 
 export type { SidebarZoneId }

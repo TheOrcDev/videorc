@@ -1,4 +1,4 @@
-import type { PreviewSurfaceStatus } from '../shared/backend'
+import type { PreviewSurfaceState, PreviewSurfaceStatus } from '../shared/backend'
 import {
   hasCanonicalWindowsD3d11PresenterEvidence,
   isCanonicalWindowsD3d11PreviewStatus,
@@ -39,6 +39,58 @@ export interface WindowsD3d11PresenterReconcileInput {
 export interface WindowsD3d11BackendEventAuthority {
   previewGeneration: number
   mediaGeneration: number
+}
+
+/**
+ * Whether main holds a Preview placement push until the backend's preview
+ * surface is up (#1629). On Windows every push first sends
+ * `resource.admin.preview_surface_bounds`, which the backend refuses unless its
+ * surface slot is starting or live; the renderer's `preview.surface.create`
+ * is what makes it live, and main's window events can beat it. Main holds
+ * only when it knows the slot is down: with no status yet (or after its event
+ * socket retired) it pushes as before and a refusal still retries.
+ */
+export function backendPreviewSurfaceHoldsPlacement(input: {
+  platform: NodeJS.Platform
+  backendSurfaceState: PreviewSurfaceState | null
+}): boolean {
+  return (
+    input.platform === 'win32' &&
+    input.backendSurfaceState !== null &&
+    !backendPreviewSurfaceAcceptsPlacement(input.backendSurfaceState)
+  )
+}
+
+/**
+ * What to do with a placement held for the backend surface (#1629) when its
+ * state or the proof surface changes. Once the backend is up, the renderer
+ * drains its surface create's host command, which creates the proof window
+ * and pushes the first placement; the held placement waits for that, so it
+ * lands as a move of the new surface rather than a second create ahead of
+ * the drain. After `surfaceWaitElapsed` it runs anyway, as a refused push
+ * used to retry. Unknown state (no status, or the event socket retired)
+ * releases nothing: the reconnect's status does.
+ */
+export function heldPreviewPlacementRelease(input: {
+  placementHeld: boolean
+  platform: NodeJS.Platform
+  backendSurfaceState: PreviewSurfaceState | null
+  surfaceExists: boolean
+  surfaceWaitElapsed: boolean
+}): 'none' | 'wait-for-surface' | 'release' {
+  if (
+    !input.placementHeld ||
+    input.backendSurfaceState === null ||
+    backendPreviewSurfaceHoldsPlacement(input)
+  ) {
+    return 'none'
+  }
+  return input.surfaceExists || input.surfaceWaitElapsed ? 'release' : 'wait-for-surface'
+}
+
+/** The backend slot states that take main-owned bounds (`preview_surface.rs`). */
+export function backendPreviewSurfaceAcceptsPlacement(state: PreviewSurfaceState): boolean {
+  return state === 'starting' || state === 'live'
 }
 
 /** Backend events are authoritative only when they name both host and media runs. */

@@ -15,6 +15,10 @@ pub struct LatestPreviewBmp {
     pub stride: u32,
     pub pixel_format: &'static str,
     pub bytes: Vec<u8>,
+    /// Plan 257 S3: when the capture produced the frame, so the response can
+    /// say how old it is (`x-videorc-frame-age-ms`) and the Preview can
+    /// measure capture-to-screen latency. Set by the source's route.
+    pub captured_at: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +33,39 @@ pub enum LatestPreviewBmpPoll {
     Unchanged { generation: String, sequence: u64 },
 }
 
+impl LatestPreviewBmpPoll {
+    /// The poll with its frame's capture time attached (a 204 has no frame).
+    pub fn captured_at(self, captured_at: std::time::Instant) -> Self {
+        match self {
+            Self::Frame(frame) => Self::Frame(LatestPreviewBmp {
+                captured_at: Some(captured_at),
+                ..frame
+            }),
+            unchanged @ Self::Unchanged { .. } => unchanged,
+        }
+    }
+}
+
+/// Plan 257 S3: the longest one latest-frame request may wait for a frame
+/// newer than its cursor before it answers 204. A request that names no wait
+/// answers at once, as before.
+pub const PREVIEW_BMP_MAX_WAIT_MS: u32 = 250;
+
+/// Plan 257 S3: how often a waiting request looks for a newer frame. The
+/// look is a sequence compare under the store's lock, so it is cheap; the
+/// step bounds the delay a frame can sit in the store unsent.
+pub const PREVIEW_BMP_WAIT_STEP: std::time::Duration = std::time::Duration::from_millis(4);
+
+/// Whether the cursor already names this frame (same source run, same or
+/// newer sequence): the client has it and there is nothing to send.
+pub fn cursor_names_frame(
+    cursor: Option<&PreviewBmpCursor>,
+    generation: &str,
+    sequence: u64,
+) -> bool {
+    cursor.is_some_and(|cursor| cursor.generation == generation && sequence <= cursor.sequence)
+}
+
 pub fn encode_latest_bgra_bmp(
     cursor: Option<&PreviewBmpCursor>,
     generation: String,
@@ -41,7 +78,7 @@ pub fn encode_latest_bgra_bmp(
     // Capture-local frame sequences restart at one whenever a source runtime is
     // replaced. Suppress only within the same runtime generation, and do it
     // before copying, resizing, or wrapping the frame as BMP.
-    if cursor.is_some_and(|cursor| cursor.generation == generation && sequence <= cursor.sequence) {
+    if cursor_names_frame(cursor, &generation, sequence) {
         return Some(LatestPreviewBmpPoll::Unchanged {
             generation,
             sequence,
@@ -108,7 +145,290 @@ pub fn encode_latest_bgra_bmp(
         stride,
         pixel_format: "bgra8",
         bytes: bmp,
+        captured_at: None,
     }))
+}
+
+/// Plan 257 S3: the pixel format a latest-frame request asks for. `Bmp` is the
+/// Windows proof surface's top-down BGRA BMP (the default); `I420` is the
+/// Linux Preview's planar BT.709 video-range 4:2:0 (Y, then U, then V), 1.5
+/// bytes a pixel against BGRA's 4, which the page hands to a `VideoFrame`
+/// for the GPU to convert and scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreviewFrameFormat {
+    #[default]
+    Bmp,
+    I420,
+}
+
+impl PreviewFrameFormat {
+    pub fn from_query(value: Option<&str>) -> Self {
+        match value {
+            Some("i420") => Self::I420,
+            _ => Self::Bmp,
+        }
+    }
+}
+
+/// Plan 257 S3: the integer factor an I420 frame shrinks by. The page scales
+/// on the GPU as it draws, so the backend only takes out whole factors (a box
+/// average, cheap) while the frame stays wider than 1.5 times what the page
+/// shows: 1280 for a 942-wide Preview is sent as it is, 1920 halves to 960, a
+/// 2880 screen thirds to 960. The triangle resize this replaces cost ogre 28 ms
+/// a 720p frame, so the source rate could never reach the screen.
+pub fn i420_box_factor(width: u32, max_width: u32) -> u32 {
+    let max_width = u64::from(max_width.max(1));
+    let factor = (2 * u64::from(width)).div_ceil(3 * max_width);
+    factor.clamp(1, 64) as u32
+}
+
+/// Plan 257 S3: the I420 counterpart of `encode_latest_bgra_bmp`: the same
+/// cursor rule, then a box shrink by `i420_box_factor` and a BT.709
+/// video-range conversion (the recording colorimetry, `color.rs`). Output
+/// dimensions are even (4:2:0 chroma), at least 2x2.
+pub fn encode_latest_i420(
+    cursor: Option<&PreviewBmpCursor>,
+    generation: String,
+    sequence: u64,
+    width: u32,
+    height: u32,
+    bytes: &[u8],
+    max_width: u32,
+) -> Option<LatestPreviewBmpPoll> {
+    if cursor_names_frame(cursor, &generation, sequence) {
+        return Some(LatestPreviewBmpPoll::Unchanged {
+            generation,
+            sequence,
+        });
+    }
+    let (width, height) = (width.max(1), height.max(1));
+    let row_len = usize::try_from(width).ok()?.checked_mul(4)?;
+    let expected_len = row_len.checked_mul(usize::try_from(height).ok()?)?;
+    let source = bytes.get(..expected_len)?;
+    // Never shrink below 4:2:0's 2x2.
+    let factor = i420_box_factor(width, max_width)
+        .min((width / 2).max(1))
+        .min((height / 2).max(1));
+    let out_width = (width / factor) & !1;
+    let out_height = (height / factor) & !1;
+    if out_width < 2 || out_height < 2 {
+        return None;
+    }
+    let out = bgra_box_to_i420(
+        source,
+        row_len,
+        factor as usize,
+        out_width as usize,
+        out_height as usize,
+    );
+    Some(LatestPreviewBmpPoll::Frame(LatestPreviewBmp {
+        generation,
+        sequence,
+        width: out_width,
+        height: out_height,
+        stride: out_width,
+        pixel_format: "i420",
+        bytes: out,
+        captured_at: None,
+    }))
+}
+
+/// Box-average `factor` x `factor` source blocks into an `out_width` x
+/// `out_height` I420 frame: every luma sample averages its block, every chroma
+/// sample averages the 2x2 averaged pixels under it. Factor 1 converts the
+/// frame as it is; a larger factor shrinks it first (`box_shrink_bgra`).
+fn bgra_box_to_i420(
+    source: &[u8],
+    row_len: usize,
+    factor: usize,
+    out_width: usize,
+    out_height: usize,
+) -> Vec<u8> {
+    if factor <= 1 {
+        return bgra_to_i420(source, row_len, out_width, out_height);
+    }
+    if factor == 2 {
+        // The common case (a 1080p source in a Studio-sized Preview), fused:
+        // 1.6 ms against 7 ms for the two passes below on ogre, same bytes.
+        return box2_to_i420(source, row_len, out_width, out_height);
+    }
+    let shrunk = box_shrink_bgra(source, row_len, factor, out_width, out_height);
+    bgra_to_i420(&shrunk, out_width * 4, out_width, out_height)
+}
+
+/// Plan 257 S3: whole-factor box shrink of BGRA. Each output row sums its
+/// `factor` source rows into a `u32` row (a straight add the compiler
+/// vectorises), then each pixel sums `factor` of those, rounded once.
+fn box_shrink_bgra(
+    source: &[u8],
+    row_len: usize,
+    factor: usize,
+    out_width: usize,
+    out_height: usize,
+) -> Vec<u8> {
+    let used = out_width * factor * 4;
+    let area = (factor * factor) as u32;
+    let half = area / 2;
+    let mut out = vec![0_u8; out_width * out_height * 4];
+    let mut sums = vec![0_u32; used];
+    for (out_y, out_row) in out.chunks_exact_mut(out_width * 4).enumerate() {
+        sums.fill(0);
+        for dy in 0..factor {
+            let row = &source[(out_y * factor + dy) * row_len..][..used];
+            for (sum, &value) in sums.iter_mut().zip(row) {
+                *sum += u32::from(value);
+            }
+        }
+        for (pixel, block) in out_row
+            .chunks_exact_mut(4)
+            .zip(sums.chunks_exact(factor * 4))
+        {
+            let mut total = [0_u32; 4];
+            for source_pixel in block.chunks_exact(4) {
+                for (channel, &value) in total.iter_mut().zip(source_pixel) {
+                    *channel += value;
+                }
+            }
+            for (out_channel, channel) in pixel.iter_mut().zip(total) {
+                *out_channel = ((channel + half) / area) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// BT.709 video-range luma of one BGRA row (`rgb_to_y_video_range_bt709`
+/// without its clamp, which no 8-bit input reaches), in blocks of 16 pixels so
+/// the multiply-adds stay in registers: 2.0 against 2.7 ms a 1080p frame on
+/// ogre's baseline x86-64 build.
+fn bgra_row_to_luma(row: &[u8], luma: &mut [u8]) {
+    const BLOCK: usize = 16;
+    let luma_of = |pixel: &[u8]| {
+        ((11968 * u32::from(pixel[2])
+            + 40258 * u32::from(pixel[1])
+            + 4064 * u32::from(pixel[0])
+            + 32768
+            + (16 << 16))
+            >> 16) as u8
+    };
+    let mut luma_blocks = luma.chunks_exact_mut(BLOCK);
+    let mut row_blocks = row.chunks_exact(BLOCK * 4);
+    for (out, pixels) in (&mut luma_blocks).zip(&mut row_blocks) {
+        let mut sums = [0_u32; BLOCK];
+        for (sum, pixel) in sums.iter_mut().zip(pixels.chunks_exact(4)) {
+            *sum = 11968 * u32::from(pixel[2])
+                + 40258 * u32::from(pixel[1])
+                + 4064 * u32::from(pixel[0]);
+        }
+        for (value, sum) in out.iter_mut().zip(sums) {
+            *value = ((sum + 32768 + (16 << 16)) >> 16) as u8;
+        }
+    }
+    for (value, pixel) in luma_blocks
+        .into_remainder()
+        .iter_mut()
+        .zip(row_blocks.remainder().chunks_exact(4))
+    {
+        *value = luma_of(pixel);
+    }
+}
+
+/// Plan 257 S3: the factor-2 box shrink fused with the conversion. Each output
+/// pixel is its 2x2 block's rounded mean (as `box_shrink_bgra` makes it); two
+/// such rows at a time give two luma rows and their chroma row.
+fn box2_to_i420(source: &[u8], row_len: usize, out_width: usize, out_height: usize) -> Vec<u8> {
+    let luma_len = out_width * out_height;
+    let chroma_width = out_width / 2;
+    let chroma_len = chroma_width * (out_height / 2);
+    let mut out = vec![0_u8; luma_len + 2 * chroma_len];
+    let (luma, chroma) = out.split_at_mut(luma_len);
+    let (u_plane, v_plane) = chroma.split_at_mut(chroma_len);
+    let mut rows = [vec![0_u8; out_width * 4], vec![0_u8; out_width * 4]];
+    for out_y in 0..out_height {
+        let upper = &source[out_y * 2 * row_len..][..out_width * 8];
+        let lower = &source[(out_y * 2 + 1) * row_len..][..out_width * 8];
+        let row = &mut rows[out_y & 1];
+        for ((pixel, top), bottom) in row
+            .chunks_exact_mut(4)
+            .zip(upper.chunks_exact(8))
+            .zip(lower.chunks_exact(8))
+        {
+            for channel in 0..4 {
+                pixel[channel] = ((u16::from(top[channel])
+                    + u16::from(top[4 + channel])
+                    + u16::from(bottom[channel])
+                    + u16::from(bottom[4 + channel])
+                    + 2)
+                    >> 2) as u8;
+            }
+        }
+        bgra_row_to_luma(row, &mut luma[out_y * out_width..][..out_width]);
+        if out_y & 1 == 1 {
+            let chroma_y = out_y / 2;
+            let u_row = &mut u_plane[chroma_y * chroma_width..][..chroma_width];
+            let v_row = &mut v_plane[chroma_y * chroma_width..][..chroma_width];
+            for (((top, bottom), u), v) in rows[0]
+                .chunks_exact(8)
+                .zip(rows[1].chunks_exact(8))
+                .zip(u_row.iter_mut())
+                .zip(v_row.iter_mut())
+            {
+                (*u, *v) = chroma_of_block(top, bottom);
+            }
+        }
+    }
+    out
+}
+
+/// The BT.709 video-range chroma of a 2x2 block (two BGRA pixels from each of
+/// two rows): its rounded mean colour through `rgb_to_uv_video_range_bt709`'s
+/// formula, which no 8-bit input takes out of 16..=240.
+fn chroma_of_block(top: &[u8], bottom: &[u8]) -> (u8, u8) {
+    let mean = |channel: usize| {
+        (i32::from(top[channel])
+            + i32::from(top[4 + channel])
+            + i32::from(bottom[channel])
+            + i32::from(bottom[4 + channel])
+            + 2)
+            >> 2
+    };
+    let (b, g, r) = (mean(0), mean(1), mean(2));
+    (
+        (128 + ((-6596 * r - 22189 * g + 28785 * b + 32768) >> 16)) as u8,
+        (128 + ((28785 * r - 26147 * g - 2638 * b + 32768) >> 16)) as u8,
+    )
+}
+
+/// Plan 257 S3: BGRA to I420 (BT.709 video range), the integer formulas of
+/// `color.rs` (`rgb_to_y_video_range_bt709` / `rgb_to_uv_video_range_bt709`)
+/// written as plain row loops the compiler vectorises. They need no clamp: for
+/// any 8-bit RGB the luma stays in 16..=235 and the chroma in 16..=240, so the
+/// results are exactly `color.rs`'s (`i420_rows_match_color_rs` proves it).
+fn bgra_to_i420(source: &[u8], row_len: usize, width: usize, height: usize) -> Vec<u8> {
+    let luma_len = width * height;
+    let chroma_width = width / 2;
+    let chroma_len = chroma_width * (height / 2);
+    let mut out = vec![0_u8; luma_len + 2 * chroma_len];
+    let (luma, chroma) = out.split_at_mut(luma_len);
+    let (u_plane, v_plane) = chroma.split_at_mut(chroma_len);
+    for (y, luma_row) in luma.chunks_exact_mut(width).enumerate() {
+        bgra_row_to_luma(&source[y * row_len..][..width * 4], luma_row);
+    }
+    for chroma_y in 0..height / 2 {
+        let top = &source[chroma_y * 2 * row_len..][..chroma_width * 8];
+        let bottom = &source[(chroma_y * 2 + 1) * row_len..][..chroma_width * 8];
+        let u_row = &mut u_plane[chroma_y * chroma_width..][..chroma_width];
+        let v_row = &mut v_plane[chroma_y * chroma_width..][..chroma_width];
+        for (((top_pair, bottom_pair), u), v) in top
+            .chunks_exact(8)
+            .zip(bottom.chunks_exact(8))
+            .zip(u_row.iter_mut())
+            .zip(v_row.iter_mut())
+        {
+            (*u, *v) = chroma_of_block(top_pair, bottom_pair);
+        }
+    }
+    out
 }
 
 /// The bounded preview size: a frame wider than `max_width` shrinks to that
@@ -484,6 +804,177 @@ mod tests {
                 sequence: 12,
             })
         );
+    }
+
+    // Plan 257 S3: the Linux Preview's I420 frames.
+    #[test]
+    fn the_i420_box_factor_only_takes_out_whole_factors_past_one_and_a_half() {
+        assert_eq!(i420_box_factor(1280, 942), 1);
+        assert_eq!(i420_box_factor(1920, 942), 2);
+        assert_eq!(i420_box_factor(2880, 942), 3);
+        assert_eq!(i420_box_factor(1920, 1300), 1);
+        assert_eq!(i420_box_factor(3840, 640), 4);
+        // A zero width asks for the largest factor, which is capped.
+        assert_eq!(i420_box_factor(640, 0), 64);
+    }
+
+    #[test]
+    fn an_i420_frame_is_planar_bt709_video_range_with_even_dimensions() {
+        let (width, height) = (1921_u32, 1081_u32);
+        let white = vec![255_u8; (width * height * 4) as usize];
+        let Some(LatestPreviewBmpPoll::Frame(frame)) =
+            encode_latest_i420(None, "run".to_string(), 1, width, height, &white, 942)
+        else {
+            panic!("frame expected");
+        };
+        // 1921 / 2 = 960, 1081 / 2 = 540, both already even.
+        assert_eq!((frame.width, frame.height, frame.stride), (960, 540, 960));
+        assert_eq!(frame.pixel_format, "i420");
+        let luma = (960 * 540) as usize;
+        assert_eq!(frame.bytes.len(), luma + 2 * luma / 4);
+        assert!(frame.bytes[..luma].iter().all(|&y| y == 235));
+        assert!(frame.bytes[luma..].iter().all(|&c| c == 128));
+
+        let black = vec![0_u8; 64 * 36 * 4];
+        let Some(LatestPreviewBmpPoll::Frame(frame)) =
+            encode_latest_i420(None, "run".to_string(), 1, 64, 36, &black, 64)
+        else {
+            panic!("frame expected");
+        };
+        assert_eq!((frame.width, frame.height), (64, 36));
+        assert!(frame.bytes[..64 * 36].iter().all(|&y| y == 16));
+    }
+
+    #[test]
+    fn an_i420_frame_averages_its_box_and_keeps_the_cursor_rule() {
+        // 8x4, columns alternating black and white, asked for 2 wide: the
+        // factor caps at 2 (height 4 / 2), so every 2x2 box is half white.
+        let mut source = vec![0_u8; 8 * 4 * 4];
+        for (index, pixel) in source.chunks_exact_mut(4).enumerate() {
+            let level = if index % 2 == 0 { 0 } else { 255 };
+            pixel.copy_from_slice(&[level, level, level, 255]);
+        }
+        let Some(LatestPreviewBmpPoll::Frame(frame)) =
+            encode_latest_i420(None, "run".to_string(), 3, 8, 4, &source, 2)
+        else {
+            panic!("frame expected");
+        };
+        assert_eq!((frame.width, frame.height), (4, 2));
+        let grey = crate::color::rgb_to_y_video_range_bt709(128, 128, 128);
+        assert!(
+            frame.bytes[..8].iter().all(|&y| y == grey),
+            "{:?}",
+            &frame.bytes[..8]
+        );
+        assert!(frame.bytes[8..].iter().all(|&c| c == 128));
+
+        let cursor = PreviewBmpCursor {
+            generation: "run".to_string(),
+            sequence: 3,
+        };
+        assert_eq!(
+            encode_latest_i420(Some(&cursor), "run".to_string(), 3, 8, 4, &source, 2),
+            Some(LatestPreviewBmpPoll::Unchanged {
+                generation: "run".to_string(),
+                sequence: 3
+            })
+        );
+        assert_eq!(
+            encode_latest_i420(None, "run".to_string(), 3, 8, 4, &source[..8], 2),
+            None
+        );
+        assert_eq!(
+            encode_latest_i420(None, "run".to_string(), 3, 1, 1, &source[..4], 2),
+            None
+        );
+    }
+
+    #[test]
+    fn the_fused_factor_two_path_matches_the_two_passes() {
+        let (width, height) = (36_usize, 20_usize);
+        let source: Vec<u8> = (0..width * height * 4)
+            .map(|index| (index.wrapping_mul(2_654_435_761) >> 7) as u8)
+            .collect();
+        let shrunk = box_shrink_bgra(&source, width * 4, 2, width / 2, height / 2);
+        assert_eq!(
+            box2_to_i420(&source, width * 4, width / 2, height / 2),
+            bgra_to_i420(&shrunk, width * 2, width / 2, height / 2)
+        );
+    }
+
+    #[test]
+    fn i420_rows_match_color_rs() {
+        // Every 8-bit level on each channel, in 2x2 blocks with mixed partners.
+        let (width, height) = (256_usize, 4_usize);
+        let mut source = vec![0_u8; width * height * 4];
+        for (index, pixel) in source.chunks_exact_mut(4).enumerate() {
+            let x = (index % width) as u8;
+            let y = (index / width) as u8;
+            pixel.copy_from_slice(&[x, x.wrapping_mul(7).wrapping_add(y), 255 - x, 255]);
+        }
+        let out = bgra_to_i420(&source, width * 4, width, height);
+        for (index, pixel) in source.chunks_exact(4).enumerate() {
+            assert_eq!(
+                out[index],
+                crate::color::rgb_to_y_video_range_bt709(pixel[2], pixel[1], pixel[0]),
+                "luma {index}"
+            );
+        }
+        let chroma_width = width / 2;
+        let chroma_len = chroma_width * height / 2;
+        for chroma_y in 0..height / 2 {
+            for chroma_x in 0..chroma_width {
+                let at = |dx: usize, dy: usize, channel: usize| {
+                    u32::from(
+                        source[((chroma_y * 2 + dy) * width + chroma_x * 2 + dx) * 4 + channel],
+                    )
+                };
+                let mean = |channel: usize| {
+                    ((at(0, 0, channel)
+                        + at(1, 0, channel)
+                        + at(0, 1, channel)
+                        + at(1, 1, channel)
+                        + 2)
+                        / 4) as u8
+                };
+                let (u, v) = crate::color::rgb_to_uv_video_range_bt709(mean(2), mean(1), mean(0));
+                let index = chroma_y * chroma_width + chroma_x;
+                assert_eq!(out[width * height + index], u, "u {index}");
+                assert_eq!(out[width * height + chroma_len + index], v, "v {index}");
+            }
+        }
+    }
+
+    // Plan 257 S3: the cursor check a waiting request repeats every few ms.
+    #[test]
+    fn the_cursor_names_a_frame_only_in_its_own_run() {
+        let cursor = PreviewBmpCursor {
+            generation: "run-a".to_string(),
+            sequence: 5,
+        };
+        assert!(cursor_names_frame(Some(&cursor), "run-a", 5));
+        assert!(cursor_names_frame(Some(&cursor), "run-a", 4));
+        assert!(!cursor_names_frame(Some(&cursor), "run-a", 6));
+        assert!(!cursor_names_frame(Some(&cursor), "run-b", 1));
+        assert!(!cursor_names_frame(None, "run-a", 1));
+    }
+
+    #[test]
+    fn a_frame_carries_its_capture_time_and_a_204_does_not() {
+        let captured_at = std::time::Instant::now();
+        let Some(poll) = encode_latest_bgra_bmp(None, "run".to_string(), 1, 1, 1, &[1; 4], 1)
+        else {
+            panic!("frame expected");
+        };
+        match poll.captured_at(captured_at) {
+            LatestPreviewBmpPoll::Frame(frame) => assert_eq!(frame.captured_at, Some(captured_at)),
+            LatestPreviewBmpPoll::Unchanged { .. } => panic!("frame expected"),
+        }
+        let unchanged = LatestPreviewBmpPoll::Unchanged {
+            generation: "run".to_string(),
+            sequence: 1,
+        };
+        assert_eq!(unchanged.clone().captured_at(captured_at), unchanged);
     }
 
     #[test]

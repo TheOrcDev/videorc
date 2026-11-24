@@ -51,11 +51,8 @@ describe('account.changed', () => {
       detail: 'Sign in again.',
       actions: [{ id: 'sign-in', label: 'Sign in', kind: 'fix' }]
     })
-    // Idle, so it also shows for 8 s; nothing is pinned.
-    expect(toast.warning).toHaveBeenCalledWith(
-      'Your Videorc sign-in expired',
-      expect.objectContaining({ id: 'notification:account-session', duration: 8_000 })
-    )
+    // Idle, so it waits behind the bell: no toast (the owner, 2026-11-22).
+    expect(toast.warning).not.toHaveBeenCalled()
 
     // The next sign-in resolves it.
     handleAccountChangedEvent(

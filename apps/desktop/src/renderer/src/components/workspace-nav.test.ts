@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { AccountIcon, AvatarPageIcon, BuddyPageIcon } from './icons'
+import { AccountIcon, AvatarPageIcon, BuddyPageRowIcon } from './icons'
 import {
   SIDEBAR_ZONES,
   STUDIO_PANELS,
@@ -130,7 +130,7 @@ describe('workspace navigation', () => {
     expect(WORKSPACE_TABS.find((tab) => tab.id === 'ai')).toEqual({
       id: 'ai',
       label: 'Sidekick',
-      icon: BuddyPageIcon
+      icon: BuddyPageRowIcon
     })
     expect(pageShortcutFor('ai')).toBe('CmdOrCtrl+9')
     expect(workspaceTabLabel('ai')).toBe('Sidekick')

@@ -4,10 +4,11 @@ How to develop and verify Videorc on a Linux box. First run on real hardware
 2026-09-24 (ogre: T2 MacBook Pro, Omarchy 4.0.4, Hyprland/Wayland, Intel UHD
 630 plus Radeon Pro 555X).
 
-Linux is an incremental port (`linux-port-plan.md`). L1 through L6 packaging
-exist as engineering paths. A private Linux Alpha candidate can be stored
-from protected `main`; nothing in this document is public release
-authorization.
+Linux is a public Alpha on its way to Beta (`linux-port-plan.md`, plan 257).
+L1 through L6 packaging exist and have shipped as owner-waived Alpha
+releases. A private Linux Alpha candidate can be stored from protected
+`main`; nothing in this document is public release authorization, which stays
+with the release owner and the release skill.
 
 ## One-time setup
 
@@ -46,6 +47,29 @@ real fix):
 sudo setfacl -m "u:$USER:rw" /dev/video0
 ```
 
+### Camera modes and hotplug (plan 257 S2)
+
+The camera asks for one of its own V4L2 modes (read once per device with
+`VIDIOC_ENUM_FMT`/`ENUM_FRAMESIZES`/`ENUM_FRAMEINTERVALS`): the most picture
+that fits the canvas at the session rate, MJPEG above 720p and raw
+(NV12, then YUYV) at or below. Frames are piped at that native size and
+the compositor scales them. Health → Preview shows the mode as
+**Camera format** (`1280 × 720 NV12 · 30 fps`). `v4l2-ctl --list-formats-ext
+-d /dev/video0` (package `v4l-utils`) lists the same modes.
+
+Cameras appear and disappear in the picker on their own: the backend
+watches `/dev` and `/dev/v4l/by-id` with inotify. To check it with a USB
+webcam (the probe asks you to unplug and replug it):
+
+```bash
+VIDEORC_DEV_BACKEND_PROFILE=release VIDEORC_HOTPLUG_CAMERA_NAME="<part of its name>" \
+  pnpm probe:linux-camera-hotplug
+```
+
+Without a spare webcam, `VIDEORC_HOTPLUG_UVC_INTERFACE=<usb interface>`
+(from `ls /sys/bus/usb/drivers/uvcvideo/`) unbinds and rebinds a built-in
+camera with `sudo -n` instead.
+
 Check that the portal and PipeWire are live before expecting any capture
 path to work later:
 
@@ -58,8 +82,11 @@ systemctl --user status pipewire xdg-desktop-portal
 On a multi-GPU host, pin VAAPI to one render node before the first launch.
 Whichever node you pin is the only one the app probes; every other node is
 listed in diagnostics as `skipped`. On ogre the Intel node is safe and the
-AMD node hangs the whole host on VAAPI encode, so the pin is not optional
-there:
+AMD node hangs the whole host on VAAPI encode. Since plan 257 S5 ogre's
+quarantine names the AMD GPU by driver, so `auto` with nothing set probes
+only Intel whichever number each GPU boots with (that is how L1.5 was
+accepted on 2026-11-23); pin anyway on a new multi-GPU box until the app has
+seen it once:
 
 The numbering is not stable: on ogre `renderD128` has been the Intel node on
 some boots and the AMD node on others (2026-10-20), and following a
@@ -71,13 +98,18 @@ for d in /sys/class/drm/renderD*; do echo "$d $(readlink "$d/device/driver")"; d
 intel=$(for d in /sys/class/drm/renderD*; do
   [ "$(basename "$(readlink "$d/device/driver")")" = i915 ] && echo "/dev/dri/$(basename "$d")"
 done)
-[ -n "$intel" ] || echo "no i915 render node: do not pin, use openh264" >&2
-export LIBVA_DRIVER_NAME=iHD
-export LIBVA_DRIVERS_PATH=/usr/lib/dri
-export LIBVA_DEVICE=$intel
-export VIDEORC_LINUX_VAAPI_DEVICE=$intel
-# Safe default while diagnosing the bridge: the software encoder only.
-export VIDEORC_LINUX_H264_ENCODER=openh264
+if [ -n "$intel" ]; then
+  export LIBVA_DRIVER_NAME=iHD
+  export LIBVA_DRIVERS_PATH=/usr/lib/dri
+  export LIBVA_DEVICE=$intel
+  export VIDEORC_LINUX_VAAPI_DEVICE=$intel
+else
+  # A blank pin means "probe every unquarantined node": never export one.
+  echo "no i915 render node: do not pin, use openh264" >&2
+  export VIDEORC_LINUX_H264_ENCODER=openh264
+fi
+# Only while diagnosing the bridge: the software encoder only.
+# export VIDEORC_LINUX_H264_ENCODER=openh264
 ```
 
 `VIDEORC_LINUX_H264_ENCODER=auto|vaapi|openh264` picks the encoder; `auto` is
@@ -93,6 +125,27 @@ running after 20 s is quarantined on the spot (its FFmpeg is killed, the
 entry carries `timedOutAfterSecs`) and nothing else is probed until the
 next start. After a host hang, plant the quarantine entry by hand before the
 next launch rather than letting the app discover it a second time.
+
+Entries name the GPU, not the node number: a node matches an entry by PCI
+address (`device`), else by `driver`, else by node name, so a boot that swaps
+the numbers still keeps the hung GPU out. Plant `node`, `driver` and `device`
+read from the same node, found by its driver (never by a remembered number).
+This prints one entry per amdgpu node; put the entries in a JSON array in
+`quarantined.json`. Keep every field: a list that does not parse reads as
+empty.
+
+```bash
+now=$(date +%s)
+for d in /sys/class/drm/renderD*; do
+  [ "$(basename "$(readlink "$d/device/driver")")" = amdgpu ] || continue
+  printf '{"node": "%s", "driver": "amdgpu", "device": "%s", "ffmpegPath": "planted by hand", "probeStartedAtUnixSecs": %s, "quarantinedAtUnixSecs": %s}\n' \
+    "$(basename "$d")" "$(basename "$(readlink "$d/device")")" "$now" "$now"
+done
+```
+
+Smoke profiles are isolated, but they also read the machine's list in
+`~/.videorc/linux-vaapi/quarantined.json` (never writing it), so an unpinned
+smoke on ogre still skips the AMD GPU.
 
 `cargo test -p videorc-backend` never probes a render node and never touches
 the real quarantine (#1027): without `VIDEORC_DATABASE_PATH` the tests use a
@@ -199,7 +252,7 @@ Do not enable AMD VAAPI / renderD129 for this smoke.
 
 ## Packaged run (L6 / Plan 0008)
 
-`pnpm package:desktop:linux` builds an unsigned x64 AppImage after `package:backend`, `ffmpeg:fetch:linux`, and `scripts/preflight-linux-package.mjs`. Ubuntu 24.04 remains the named packaging box; ogre can produce the artifact for smoke. Dispatch `release-linux-alpha.yml` from protected `main` to store a private candidate. Public updater promotion and the videorc-web download button are still owed. Hold the Linux Discord announcement until that public download exists (`pnpm release:notify:discord <releaseId> --dry-run` first; never print `VIDEORC_DISCORD_RELEASE_WEBHOOK`).
+`pnpm package:desktop:linux` builds an unsigned x64 AppImage after `package:backend`, `ffmpeg:fetch:linux`, and `scripts/preflight-linux-package.mjs`. Ubuntu 24.04 remains the named packaging box; ogre can produce the artifact for smoke. Dispatch `release-linux-alpha.yml` from protected `main` to store a private candidate; the owner then publishes it as an owner-waived Alpha (see `docs/releases/release-runbook.md`). There is no promote workflow and no updater feed yet: Linux gets a changelog notice, not a self-update. Send the Linux Discord announcement once the release is public (`pnpm release:notify:discord <releaseId> --dry-run` first; never print `VIDEORC_DISCORD_RELEASE_WEBHOOK`).
 
 ## Verify gates that work on Linux
 
@@ -243,6 +296,25 @@ pnpm smoke:linux-encoder-acceptance
 Any named physical Linux x64 box qualifies. The evidence records the
 distribution, kernel, render nodes with their drivers, and the VAAPI pin.
 Virtual machines and CI runners still do not count.
+
+Microphone continuity and clean Stop (plan 257 S1). One launch, N takes of
+a real session (microphone + camera + portal screen by default) with a
+continuous tone playing into the microphone; every whole second of each file
+must carry the tone, the analyzer must pass, and Stop must end FFmpeg with
+no TERM/KILL. `--load-cpus 8` runs eight owned busy loops for the whole run
+(`stress-ng --cpu 8` without stress-ng). On ogre the tone goes into the lab
+sink `videorc_lab_speech` and is recorded through `videorc_lab_mic`:
+
+```bash
+VIDEORC_DEV_BACKEND_PROFILE=release \
+VIDEORC_SMOKE_FFMPEG_PATH=$PWD/vendor/ffmpeg/linux-x64/bin/ffmpeg \
+VIDEORC_SMOKE_OUTPUT_DIR=$HOME/linux-beta/s1/quiet \
+pnpm smoke:linux-mic-continuity -- --takes 10 --recording-ms 60000
+```
+
+Reuse the output directory between runs: the portal restore token lives in
+its profile. A static scene repeats frames by design, so freeze and repeat
+findings are advisory there; timing claims need a quiet box (load under 2).
 
 ## Videorc Camera (plan 214 D: spike P0c and the F4 acceptance)
 

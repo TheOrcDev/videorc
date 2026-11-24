@@ -3,12 +3,19 @@
 // store lives here; other windows read a copy.
 
 import { announceNotification, setNotificationCount } from '@/lib/notification-count'
+import { LAUNCH_QUIET_MS } from '@/lib/notifications/policy'
 import { installNotificationPopUps } from '@/lib/notifications/pop-up'
 import { startNotificationRelay } from '@/lib/notifications/relay'
 import { createNotificationStore } from '@/lib/notifications/store'
 import { guardToastText } from '@/lib/toast'
+import { userHasPressed } from '@/lib/user-pressed'
+
+const storeStartedAt = typeof performance === 'undefined' ? 0 : performance.now()
 
 export const notifications = createNotificationStore({
+  // At launch, what Videorc found on its own waits behind the bell.
+  launchQuietMs: LAUNCH_QUIET_MS,
+  pressed: userHasPressed,
   onCount: setNotificationCount,
   guardText: (text) => guardToastText(text).text,
   onAnnounce: (entry) => announceNotification(entry.title, entry.tone === 'urgent')
@@ -42,7 +49,10 @@ if (import.meta.env.DEV && typeof window !== 'undefined') {
     window as Window & { __videorcSmokeNotifications?: () => unknown }
   ).__videorcSmokeNotifications = () => ({
     count: notifications.count(),
-    entries: notifications.snapshot()
+    entries: notifications.snapshot(),
+    // When this store started (`performance.now()`): its first minute is
+    // the launch, so a smoke times "after the launch" from here.
+    startedAt: storeStartedAt
   })
 }
 

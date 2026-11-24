@@ -6,8 +6,9 @@ import { ErrorIcon, InfoIcon, LockIcon, SuccessIcon, WarningIcon } from '@/compo
 import type { AppIcon } from '@/components/icons'
 import { cn } from '@/lib/utils'
 
-// A flush inline status row, never a card: a faint tone tint, the icon in the
-// tone, and monochrome text.
+// A flush inline status row, never a card: one neutral fill for every tone,
+// the icon in the tone, and monochrome text. A tone never tints the row, as it
+// never tints a toast, and a test holds it.
 // - The variant is the tone and brings its own icon: one glyph and one weight
 //   per tone. `icon` swaps in a subject's own mark (the microphone, a
 //   platform), and `icon={null}` drops it. Callers never pass an icon as a
@@ -20,19 +21,19 @@ import { cn } from '@/lib/utils'
 // - A title alone is a message and reads in regular weight; a title over an
 //   AlertDescription is a heading and reads in medium.
 const alertVariants = cva(
-  "group/alert rounded-row text-foreground relative grid w-full gap-0.5 px-3 py-2.5 text-left text-sm has-data-[slot=alert-action]:relative has-data-[slot=alert-action]:pr-18 has-[>svg]:grid-cols-[auto_1fr] has-[>svg]:gap-x-2.5 *:[svg]:row-span-2 *:[svg]:translate-y-0.5 *:[svg:not([class*='size-'])]:size-4",
+  "group/alert rounded-row bg-foreground/4 text-foreground relative grid w-full gap-0.5 px-3 py-2.5 text-left text-sm has-data-[slot=alert-action]:relative has-data-[slot=alert-action]:pr-18 has-[>svg]:grid-cols-[auto_1fr] has-[>svg]:gap-x-2.5 *:[svg]:row-span-2 *:[svg]:translate-y-0.5 *:[svg:not([class*='size-'])]:size-4",
   {
     defaultVariants: {
       variant: 'default'
     },
     variants: {
       variant: {
-        default: 'bg-foreground/4 *:[svg]:text-muted-foreground',
-        destructive: 'bg-destructive/10 *:[svg]:text-destructive',
-        locked: 'bg-foreground/4 *:[svg]:text-muted-foreground',
-        quiet: 'bg-foreground/4 *:[svg]:text-muted-foreground',
-        success: 'bg-success/10 *:[svg]:text-success',
-        warning: 'bg-warning/10 *:[svg]:text-warning'
+        default: '*:[svg]:text-muted-foreground',
+        destructive: '*:[svg]:text-destructive',
+        locked: '*:[svg]:text-muted-foreground',
+        quiet: '*:[svg]:text-muted-foreground',
+        success: '*:[svg]:text-success',
+        warning: '*:[svg]:text-warning'
       }
     }
   }

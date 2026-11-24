@@ -46,6 +46,9 @@ vi.mock('@/hooks/use-studio', () => ({
   useStudioReplay: () => mocked.replay
 }))
 vi.mock('@/hooks/use-soundboard', () => ({ useSoundboard: () => mocked.soundboard }))
+vi.mock('@/hooks/use-background-assets', () => ({
+  useBackgroundAssets: () => ({ registry: { slots: [], assets: {} } })
+}))
 vi.mock('@/hooks/use-virtual-camera', () => ({ useVirtualCamera: () => mocked.camera }))
 vi.mock('@/hooks/use-agents', () => ({
   useAgents: () => mocked.agents,
@@ -104,6 +107,7 @@ beforeEach(() => {
       layout: { cameraChromaKeyEnabled: false, cameraChromaKeyColor: '#00FF00' }
     },
     applyLayoutPatch: vi.fn(),
+    applyCameraBackground: vi.fn(async () => true),
     setCaptureConfig: vi.fn(),
     settings: {},
     markClip: vi.fn(async () => null),
@@ -362,7 +366,7 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
       'Open Sources',
       'Open Scene',
       'Edit scene',
-      'Green screen settings',
+      'Background settings',
       'Open Captions',
       'Open Output',
       'Open Destinations',
@@ -472,7 +476,7 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
     await render()
     expect(values()).not.toContain('Turn on green screen')
     await search('blue screen')
-    expect(values()).toContain('Green screen settings')
+    expect(values()).toContain('Background settings')
 
     mocked.core.captureConfig = {
       ...(mocked.core.captureConfig as object),
@@ -482,7 +486,11 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
     await search('chroma key')
     expect(values()).toContain('Turn on green screen')
     await act(async () => item('Turn on green screen').click())
-    expect(mocked.core.applyLayoutPatch).toHaveBeenCalledWith({ cameraChromaKeyEnabled: true })
+    // Plan 258 S5: the camera's one pick, never a scene's key field.
+    expect(mocked.core.applyCameraBackground).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'green' })
+    )
+    expect(mocked.core.applyLayoutPatch).not.toHaveBeenCalled()
 
     mocked.core.captureConfig = {
       ...(mocked.core.captureConfig as object),
@@ -491,6 +499,43 @@ describe('CommandPalette order and verbs (plan 174 A-9, A-13)', () => {
     await render()
     await search('remove background')
     expect(values()).toContain('Turn off blue screen')
+  })
+
+  it('blurs the background or turns the effect off, by state, found by "blur" (plan 258 S5)', async () => {
+    mocked.core.captureConfig = {
+      ...(mocked.core.captureConfig as object),
+      sources: { cameraId: 'camera:1' }
+    }
+    await render()
+    await search('virtual background')
+    expect(values()).toContain('Blur background')
+    expect(values()).toContain('Background settings')
+    await act(async () => item('Blur background').click())
+    expect(mocked.core.applyCameraBackground).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'blur', blurPct: 70 })
+    )
+
+    mocked.core.settings = {
+      cameraBackgrounds: { 'camera:1': { mode: 'blur', blurPct: 70, edges: 'balanced' } }
+    }
+    await render()
+    await search('blur')
+    expect(values()).toContain('Turn off background effect')
+    expect(values()).not.toContain('Blur background')
+    await act(async () => item('Turn off background effect').click())
+    expect(mocked.core.applyCameraBackground).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mode: 'off' })
+    )
+
+    // An open room can't apply one before S8: no Blur background, but Off stays.
+    mocked.cloud = { cloudStatus: { room: { phase: 'open' } } }
+    await render()
+    await search('blur')
+    expect(values()).toContain('Turn off background effect')
+    mocked.core.settings = {}
+    await render()
+    await search('blur')
+    expect(values()).not.toContain('Blur background')
   })
 
   it('names the selected action in the footer, with the Return chip', async () => {

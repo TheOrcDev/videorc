@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   PROOF_POLLING_MIN_MAX_WIDTH,
   PROOF_POLLING_WIDTH_STEP,
+  nativePreviewProofFrameTransport,
   nativePreviewProofFrameUrl,
   nativePreviewProofPollingMaxWidth,
   nativePreviewProofPollingProfile,
@@ -127,5 +128,26 @@ describe('nativePreviewProofPresentStatus', () => {
     expect(
       nativePreviewProofPresentStatus({ state: 'starting', framesRendered: 0, width: 1280 })
     ).toEqual({ state: 'starting', framesRendered: 0, width: 1280, sources: [] })
+  })
+})
+
+// Plan 257 S3: Linux waits for I420 frames; Windows keeps its interval BMP.
+describe('nativePreviewProofFrameTransport', () => {
+  it('picks the waiting I420 transport on Linux only', () => {
+    expect(nativePreviewProofFrameTransport('linux', {})).toBe('wait-i420')
+    expect(nativePreviewProofFrameTransport('win32', {})).toBe('interval')
+    expect(nativePreviewProofFrameTransport('darwin', {})).toBe('interval')
+  })
+
+  it('takes only a known override', () => {
+    expect(
+      nativePreviewProofFrameTransport('linux', { VIDEORC_PROOF_FRAME_TRANSPORT: 'interval' })
+    ).toBe('interval')
+    expect(
+      nativePreviewProofFrameTransport('win32', { VIDEORC_PROOF_FRAME_TRANSPORT: 'wait-i420' })
+    ).toBe('wait-i420')
+    expect(
+      nativePreviewProofFrameTransport('linux', { VIDEORC_PROOF_FRAME_TRANSPORT: 'h264' })
+    ).toBe('wait-i420')
   })
 })

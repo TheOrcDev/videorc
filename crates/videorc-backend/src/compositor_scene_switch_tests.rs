@@ -240,6 +240,38 @@ async fn publish(
     sources: &mut CompositorLiveSources,
     cache: &mut CompositorRenderCache,
 ) -> CompositorPublishResult {
+    publish_with(
+        state,
+        sources,
+        cache,
+        super::LiveBackgroundLeg::unmeasured(&mut None),
+    )
+    .await
+}
+
+/// [`publish`] for a tick pinned to `at`: the scene-switch hold is judged at
+/// `at`, however long the host takes between ticks.
+async fn publish_at(
+    state: &AppState,
+    sources: &mut CompositorLiveSources,
+    cache: &mut CompositorRenderCache,
+    at: Instant,
+) -> CompositorPublishResult {
+    publish_with(
+        state,
+        sources,
+        cache,
+        super::LiveBackgroundLeg::pinned_at(&mut None, at),
+    )
+    .await
+}
+
+async fn publish_with(
+    state: &AppState,
+    sources: &mut CompositorLiveSources,
+    cache: &mut CompositorRenderCache,
+    live: super::LiveBackgroundLeg<'_>,
+) -> CompositorPublishResult {
     publish_compositor_frame(
         state,
         "scene-switch-test",
@@ -262,8 +294,8 @@ async fn publish(
         false,
         false,
         super::ChatOverlayLegs::OFF,
-        super::LiveBackgroundLeg::unmeasured(&mut None),
-        super::ProgramLeg::off(&mut None),
+        live,
+        super::ProgramLeg::off(&mut super::ProgramLegState::default()),
     )
 }
 
@@ -519,7 +551,7 @@ async fn publish_dual(
         false,
         super::ChatOverlayLegs::OFF,
         super::LiveBackgroundLeg::unmeasured(&mut None),
-        super::ProgramLeg::off(&mut None),
+        super::ProgramLeg::off(&mut super::ProgramLegState::default()),
     )
 }
 
@@ -650,6 +682,11 @@ async fn each_leg_cuts_to_the_next_window_only_when_its_own_scene_names_it() {
 #[tokio::test]
 async fn a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit() {
     let state = state();
+    // Ticks a frame apart on a pinned clock: the hold below is judged by tick
+    // time. On wall time a loaded runner took over `LEG_SCENE_HOLD_MAX` across
+    // the two busy ticks and the bound released the hold mid-test.
+    let t0 = Instant::now();
+    let tick = |n: u32| t0 + Duration::from_millis(33) * n;
     let mut scene = snapshot(SceneSourceKind::Window);
     scene.scene.as_mut().unwrap().sources[0].device_id = Some("window:alpha".into());
     state.compositor.lock().await.scene = Some(scene.clone());
@@ -657,7 +694,7 @@ async fn a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit() {
     let mut sources = CompositorLiveSources::default();
     let mut cache = CompositorRenderCache::refresh_initial(&state).await;
     assert_eq!(
-        publish(&state, &mut sources, &mut cache)
+        publish_at(&state, &mut sources, &mut cache, tick(0))
             .await
             .fingerprint
             .screen,
@@ -695,7 +732,7 @@ async fn a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit() {
     // ...but the compositor cannot adopt the capture this tick: the preview
     // slot is busy (a swap installing, a metrics poll, a status read).
     let busy_slot = state.preview_screen.lock().await;
-    let result = publish(&state, &mut sources, &mut cache).await;
+    let result = publish_at(&state, &mut sources, &mut cache, tick(1)).await;
     assert_eq!(
         result.fingerprint.screen, None,
         "no Beta frame proves anything yet"
@@ -705,12 +742,12 @@ async fn a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit() {
         alpha_full,
         "Alpha's frame stays under Alpha's layout: never Alpha inside Beta's shrunk layout"
     );
-    publish(&state, &mut sources, &mut cache).await;
+    publish_at(&state, &mut sources, &mut cache, tick(2)).await;
     assert_eq!(latest_bytes(&state).await, alpha_full, "the hold is steady");
     drop(busy_slot);
 
     // The next tick adopts Beta: layout and window cut together.
-    let result = publish(&state, &mut sources, &mut cache).await;
+    let result = publish_at(&state, &mut sources, &mut cache, tick(3)).await;
     assert_eq!(result.fingerprint.screen, Some(22));
     let beta_shrunk = latest_bytes(&state).await;
     assert_ne!(beta_shrunk, alpha_full);
@@ -718,7 +755,7 @@ async fn a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit() {
         beta_shrunk[0] < 40,
         "Beta's shrunk layout leaves the corner dark"
     );
-    publish(&state, &mut sources, &mut cache).await;
+    publish_at(&state, &mut sources, &mut cache, tick(4)).await;
     assert_eq!(latest_bytes(&state).await, beta_shrunk, "and the cut holds");
 
     // A layout edit on the same, delivering capture cuts at once: no hold.
@@ -726,7 +763,7 @@ async fn a_leg_cuts_layout_and_window_together_when_adoption_lags_the_commit() {
     edited.revision = 3;
     edited.scene.as_mut().unwrap().sources[0].transform.x = 0.0;
     state.compositor.lock().await.scene = Some(edited);
-    publish(&state, &mut sources, &mut cache).await;
+    publish_at(&state, &mut sources, &mut cache, tick(5)).await;
     assert_ne!(latest_bytes(&state).await, beta_shrunk);
 }
 
@@ -910,6 +947,9 @@ async fn a_swap_while_hidden_cuts_to_a_frosted_still_never_the_live_window() {
 
     state.screen_privacy.show();
     assert!(crate::preview_screen::release_screen_now(&state).await);
+    // Plan 210 D8: the held picture goes back on air only once the capture
+    // proves it is still the screen after the show (an idle callback).
+    crate::preview_screen::test_confirm_screen_current(&state, Instant::now()).await;
     publish(&state, &mut sources, &mut cache).await;
     let shown = latest_bytes(&state).await;
     let row: Vec<u8> = (8..WIDTH - 8)
@@ -1014,6 +1054,9 @@ async fn a_hide_during_an_in_flight_swap_never_keeps_the_previous_window_live() 
 
     state.screen_privacy.show();
     assert!(crate::preview_screen::release_screen_now(&state).await);
+    // Plan 210 D8: the held picture goes back on air only once the capture
+    // proves it is still the screen after the show (an idle callback).
+    crate::preview_screen::test_confirm_screen_current(&state, Instant::now()).await;
     publish(&state, &mut sources, &mut cache).await;
     let step = max_step(&latest_bytes(&state).await);
     assert!(
@@ -1227,7 +1270,7 @@ async fn scene_switch_artifact_fixture() {
                 false,
                 super::ChatOverlayLegs::OFF,
                 super::LiveBackgroundLeg::unmeasured(&mut None),
-                super::ProgramLeg::off(&mut None),
+                super::ProgramLeg::off(&mut super::ProgramLegState::default()),
             );
             if metal {
                 assert_eq!(result.compositor_backend, CompositorBackend::Metal);
@@ -1396,7 +1439,7 @@ async fn source_iso_artifact_fixture() {
                 false,
                 super::ChatOverlayLegs::OFF,
                 super::LiveBackgroundLeg::unmeasured(&mut None),
-                super::ProgramLeg::off(&mut None),
+                super::ProgramLeg::off(&mut super::ProgramLegState::default()),
             );
             if metal {
                 assert_eq!(result.compositor_backend, CompositorBackend::Metal);
@@ -1503,7 +1546,7 @@ async fn source_iso_artifact_fixture() {
             false,
             super::ChatOverlayLegs::OFF,
             super::LiveBackgroundLeg::unmeasured(&mut None),
-            super::ProgramLeg::off(&mut None),
+            super::ProgramLeg::off(&mut super::ProgramLegState::default()),
         );
         let latest_sequence =
             |store: &CompositorFrameStore| store.lock().unwrap().latest().unwrap().sequence;
@@ -1983,7 +2026,7 @@ async fn source_edit_publication_refuses_stale_camera_and_failed_auxiliary_outpu
             false,
             super::ChatOverlayLegs::OFF,
             super::LiveBackgroundLeg::unmeasured(&mut None),
-            super::ProgramLeg::off(&mut None),
+            super::ProgramLeg::off(&mut super::ProgramLegState::default()),
         );
         let snapshot = state
             .live_source_switch
@@ -2177,7 +2220,7 @@ async fn source_edit_takeover_pixels_do_not_prove_hidden_capture_and_clear_revea
             false,
             super::ChatOverlayLegs::OFF,
             super::LiveBackgroundLeg::unmeasured(&mut None),
-            super::ProgramLeg::off(&mut None),
+            super::ProgramLeg::off(&mut super::ProgramLegState::default()),
         );
         let observed = state
             .live_source_switch
@@ -2279,7 +2322,7 @@ async fn windows_source_render_edit_samples_glide_without_mutating_committed_pro
     assert!(!compositor.source_edit_is_current(&rendered));
 }
 
-/// Plan 210 S7: while the screen is hidden every leg carries the frosted
+/// Plan 210 S7: while the screen is hidden every leg carries the hidden
 /// still and never a live frame: the program (which Clips and the native
 /// preview read), the vertical aux leg (its own composition from the
 /// simulcast snapshot) and the Screen ISO leg, on CPU and on Metal. The
@@ -2488,12 +2531,16 @@ async fn hidden_screen_frost_reaches_every_leg() {
                 ("Screen ISO", iso_screen(&iso)),
             ] {
                 let mean = mean(&samples);
+                // The hidden still is a dark navy gradient (mean luma ~52);
+                // the live stripes average ~128 and white is 255.
                 assert!(
-                    (70.0..=190.0).contains(&mean),
-                    "{mode} tick {tick}: the {leg} does not carry the frost (mean luma {mean})"
+                    (35.0..=80.0).contains(&mean),
+                    "{mode} tick {tick}: the {leg} does not carry the hidden still (mean luma {mean})"
                 );
+                // The still's glass disc steps luma by up to ~30 at this
+                // size; the live stripes step by 255.
                 assert!(
-                    max_step(&samples) < 24,
+                    max_step(&samples) < 48,
                     "{mode} tick {tick}: live stripes on the {leg} while hidden"
                 );
                 assert!(
@@ -2512,12 +2559,85 @@ async fn hidden_screen_frost_reaches_every_leg() {
             4
         );
 
-        // 3. Show: the held live frame (white) is on every leg at once.
+        // 3. Show. The capture's frames up to the show were taken while
+        //    hidden: every leg keeps the still, even for a frame handed over
+        //    after the show (stripes, taken just before it).
+        // Read right before `show()`, this stamp can equal the Show's own
+        // (`Instant` ticks about every 42 ns on Apple silicon); a frame dated
+        // at the Show holds as well, so either way it is not after it.
+        let before_show = Instant::now();
         state.screen_privacy.show();
+        assert!(
+            state
+                .screen_privacy
+                .view()
+                .shown_at
+                .is_some_and(|shown_at| before_show <= shown_at),
+            "the frame must not be taken after the Show"
+        );
         assert!(crate::preview_screen::release_screen_now(&state).await);
+        assert!(
+            crate::preview_screen::test_publish_screen_bgra(&state, 7, stripes(), before_show)
+                .await
+        );
         hide_screen_render(
             &state,
             6,
+            &mut gpus,
+            &mut sources,
+            &mut cache,
+            stream_output,
+            metal,
+        )
+        .await;
+        let program = latest(&compositor_frame_store(&state).await);
+        let aux = latest(&stream_store);
+        let iso = latest(&iso_stores.screen);
+        for (leg, samples) in [
+            ("program", program_screen(&program)),
+            ("vertical leg", aux_screen(&aux)),
+            ("Screen ISO", iso_screen(&iso)),
+        ] {
+            assert!(
+                max_step(&samples) < 48,
+                "{mode}: a frame taken while hidden reached the {leg} after the show"
+            );
+        }
+        // 4. The capture confirms nothing changed after the show (an idle
+        //    callback dated after it): the held picture, the stripes taken
+        //    just before the show and still on the screen, is on every leg.
+        crate::preview_screen::test_confirm_screen_current(&state, Instant::now()).await;
+        hide_screen_render(
+            &state,
+            7,
+            &mut gpus,
+            &mut sources,
+            &mut cache,
+            stream_output,
+            metal,
+        )
+        .await;
+        let program = latest(&compositor_frame_store(&state).await);
+        let aux = latest(&stream_store);
+        let iso = latest(&iso_stores.screen);
+        for (leg, samples) in [
+            ("program", program_screen(&program)),
+            ("vertical leg", aux_screen(&aux)),
+            ("Screen ISO", iso_screen(&iso)),
+        ] {
+            assert!(
+                max_step(&samples) > 100,
+                "{mode}: the {leg} did not return to the live picture once the show was confirmed"
+            );
+        }
+        // 5. The next frame, taken after the show, is on every leg.
+        assert!(
+            crate::preview_screen::test_publish_screen_bgra(&state, 9, white(), Instant::now())
+                .await
+        );
+        hide_screen_render(
+            &state,
+            8,
             &mut gpus,
             &mut sources,
             &mut cache,
@@ -2584,7 +2704,7 @@ async fn hide_screen_render(
         false,
         super::ChatOverlayLegs::OFF,
         super::LiveBackgroundLeg::unmeasured(&mut None),
-        super::ProgramLeg::off(&mut None),
+        super::ProgramLeg::off(&mut super::ProgramLegState::default()),
     );
     if metal {
         assert_eq!(result.compositor_backend, CompositorBackend::Metal);

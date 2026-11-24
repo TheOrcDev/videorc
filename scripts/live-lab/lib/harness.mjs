@@ -315,6 +315,7 @@ function outcomeOf({ crashed, stopped, failed }) {
  *   quotaUnitsToday() (sync), fetchControl(), stopFilePath, stopFileExists(),
  *   readRunLock(), acquireRunLock({ runId }), releaseRunLock({ runId }),
  *   processAlive(pid), machineFacts(), startSession(options) -> session,
+ *   sessionLock (optional, Linux) -> { locked: true | false | null, detail },
  *   createKillSwitch (optional), attachSignals (optional, default false),
  *   out(line) (stdout), random (optional run id suffix)
  */
@@ -398,6 +399,14 @@ export async function executeRun({ argv, deps }) {
   )
   if (!verdict.ok) return refuse(verdict.reason)
   const privacy = verdict.privacy
+
+  // Plan 257 D12: a locked session draws its lock screen on the lab output, so
+  // the run would stream it as the test card. Refused before the run lock and
+  // the run folder, so it costs none of the day's runs.
+  if (deps.sessionLock) {
+    const sessionLock = await deps.sessionLock().catch(() => null)
+    if (sessionLock?.locked === true) return refuse(`session-locked: ${sessionLock.detail}`)
+  }
 
   const runId = newRunId({
     nowMs: startedAtMs,

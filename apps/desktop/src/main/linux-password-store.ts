@@ -84,3 +84,44 @@ export function linuxPasswordStoreSwitch(
   if (platform !== 'linux' || userPassedSwitch) return null
   return chromiumMapsPasswordStore(env) ? null : LIBSECRET_PASSWORD_STORE
 }
+
+type SafeStorageProbe = {
+  isEncryptionAvailable: () => boolean
+  getSelectedStorageBackend?: () => string
+}
+
+function askSafely<T, F>(ask: () => T, fallback: F): T | F {
+  try {
+    return ask()
+  } catch {
+    return fallback
+  }
+}
+
+export type LinuxKeyringStatus = {
+  backend: string
+  available: boolean
+  userPasswordStore: string | null
+}
+
+/**
+ * What Health and Destinations say about the keyring (plan 257 S18): the
+ * store Chromium settled on and whether SecurePersistenceCodec will accept
+ * it (it refuses basic_text). Null off Linux. Call after app ready; Chromium
+ * initialises the store on the first safeStorage call, so availability is
+ * asked first.
+ */
+export function linuxKeyringStatus(
+  platform: NodeJS.Platform,
+  safeStorage: SafeStorageProbe,
+  userPasswordStore: string | null
+): LinuxKeyringStatus | null {
+  if (platform !== 'linux') return null
+  const encryptionAvailable = askSafely(() => safeStorage.isEncryptionAvailable(), false)
+  const backend = askSafely(() => safeStorage.getSelectedStorageBackend?.(), undefined) || 'unknown'
+  return {
+    backend,
+    available: encryptionAvailable && backend !== 'basic_text',
+    userPasswordStore: userPasswordStore || null
+  }
+}

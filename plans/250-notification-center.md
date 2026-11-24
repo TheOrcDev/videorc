@@ -143,6 +143,57 @@ do; unit-tested), VoiceOver, Increase Contrast and Reduce Motion, Windows,
 the Videorc Cloud door (the cloud is off on a test profile), and a real
 stream.
 
+## The first minute (2026-11-22)
+
+The owner, after 0.36.1: "it's very annoying, especially when you enter the
+app; the first thing you see is a bunch of toasts". The idle row of "What
+pops up" let every warning found at launch pop up: the Clips ring is a
+session but not "live", so a loaded Mac's first seconds (overloaded, a
+silent microphone, a shortcut taken, Videorc Camera, the sign-in, the
+Cloud announcement) stacked up to eight toasts. Since then:
+
+- **For the first minute of a run** (`LAUNCH_QUIET_MS`, from the store's
+  start, so a reload counts too) nothing Videorc found on its own pops up.
+  Only the answer to a press does, once the streamer has pressed something
+  (a click or key in the window, a global shortcut, a phone remote or Stream
+  Deck press: `lib/user-pressed.ts`), and an urgent problem in a recording
+  or livestream the streamer started. The rest waits behind the bell.
+- **An announcement counts on the bell**, or nobody would see it.
+- **What Videorc tried on its own and could not do** (the launch's reads,
+  the scene reload, the auto preview, background YouTube and X reads, a
+  chunk that did not load) is an entry, one per cause (`reportUnasked`,
+  `noteBackgroundError`), never a toast. Live captions that start on their
+  own with a session, and the Clips ring's "Couldn't start", are entries too.
+- **Guards:** every toast call site is on an inventory in
+  `renderer-toast-guards.test.ts`, by file and function, and a site that an
+  effect, an event or a timer runs needs its reason there.
+  `VIDEORC_FIRST_RUN_SMOKE_ONLY=launch-quiet pnpm smoke:first-run` relaunches
+  a returning user, sends the owner's launch reports through the app's own
+  handlers and fails on any toast in the first 60 s.
+
+## Idle is the bell only (2026-11-22)
+
+The owner, the same day: "we said we are going to put everything inside of
+our notifications". The idle column of "What pops up" is the bell only, at
+any time, not only in the first minute: with nothing recording or live,
+what Videorc notices on its own never becomes a toast.
+
+- **What still pops up:** the answer to a press (now with "Recording
+  saved", the late answer to Stop), the six unprompted toasts D11 keeps,
+  and during a recording or livestream the streamer started, an urgent
+  problem (and, with Quiet off, a warning or finished work). A recording or
+  livestream that failed pops up although it has just ended: its kind is
+  urgent on its own (`failedSession`).
+- **What changed for the streamer:** a warning, finished work out of view
+  (MP4 ready, a clean cut, noise cleanup), the Cloud announcement and an
+  urgent problem while idle (the engine needs a restart) only raise the
+  number on the bell.
+- **Guard:** the launch check keeps watching after the first minute. It
+  sends a second batch of reports 61 s after the notification store starts
+  (low space, a failed read, an output too heavy), still with no input, and
+  fails on any toast up to 14 s after it. With the old idle row it fails on
+  those three.
+
 ## The short version
 
 Videorc shows 317 toast call sites today. 212 answer something the streamer
@@ -451,13 +502,17 @@ toast you close by hand, or whose button you press, marks its entry read.
 One that times out leaves it unread behind the bell. So nothing is lost
 when a toast goes, and no toast needs to be pinned any more.
 
-| | Idle | Recording or live, quiet on (the default) | Quiet off |
+| | Idle | Recording or live, quiet on (the default) | Quiet off (recording or live) |
 | --- | --- | --- | --- |
-| Urgent | Toast, 15 s | **Toast, 15 s, once** | Toast, 15 s |
-| Warning | Toast, 8 s | Bell only | Toast, 8 s |
-| Done | Toast, 8 s | Bell only | Toast, 8 s |
+| Urgent | Bell only (a recording or livestream that just failed: toast, 15 s) | **Toast, 15 s, once** | Toast, 15 s |
+| Warning | Bell only | Bell only | Toast, 8 s |
+| Done | Bell only | Bell only | Toast, 8 s |
 | News | Bell only | Bell only | Bell only |
 | The late answer to a press | Toast, 4 to 8 s | Toast, 4 to 8 s | Toast, 4 to 8 s |
+
+Idle was "Toast" for urgent, warning and done until 2026-11-22; see "Idle is
+the bell only". In the first minute of a run nothing pops up until the
+streamer has pressed something (see "The first minute").
 
 - **Once** means once per episode. An update to an open entry never pops up
   again. The same subject pops up again only when it gets worse (warning →

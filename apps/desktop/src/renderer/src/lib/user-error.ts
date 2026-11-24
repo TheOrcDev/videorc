@@ -62,6 +62,8 @@ const UNKNOWN_OUTCOME = /its outcome is unknown\.$/
 // SecurePersistenceCodec's refusal: safeStorage has no OS store to seal
 // folder grants or sign-in with (on Linux, no keyring answered).
 const SECURE_STORAGE_UNAVAILABLE = /^Protected desktop persistence is unavailable\.$/
+// Matched by its opening, so the eager bundle doesn't carry the whole sentence.
+const LINUX_KEYRING_REFUSAL = /^Signing in needs a keyring/
 /** The sentence for that refusal. */
 export const SECURE_STORAGE_REASON =
   "Videorc couldn't reach your system keyring to save this. Make sure a keyring is running and unlocked, then try again."
@@ -229,6 +231,11 @@ export function userErrorMessage(error: unknown, context?: UserErrorContext): Us
   }
   if (SECURE_STORAGE_UNAVAILABLE.test(raw)) {
     return shape('known', SECURE_STORAGE_REASON, 'error')
+  }
+  // Plan 257 S18: main's Linux sign-in refusal (shared/linux-keyring.ts)
+  // already names what to install, so it is shown as is.
+  if (LINUX_KEYRING_REFUSAL.test(raw)) {
+    return shape('known', raw, 'error')
   }
   const spaceRefusal = exportSpaceRefusal(raw)
   if (spaceRefusal) {

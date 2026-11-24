@@ -265,7 +265,10 @@ export function objectSchema<const TShape extends ObjectShape>(
     const record = value as Record<string, unknown>
     if (!options.allowUnknown) {
       for (const key of Object.keys(record)) {
-        if (!(key in shape)) throw new RuntimeSchemaError(`${path}.${key}`, 'a known field')
+        // Own keys only: `in` also finds `constructor` and the rest of
+        // Object.prototype, so a strict schema would let them through.
+        if (!Object.hasOwn(shape, key))
+          throw new RuntimeSchemaError(`${path}.${key}`, 'a known field')
       }
     }
     const result: Record<string, unknown> = {}

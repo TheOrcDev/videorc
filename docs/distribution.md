@@ -6,11 +6,15 @@ Current release policy:
 | ----------------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | macOS 13+ Apple Silicon | **Beta**  | Publish only the signed, notarized, stapled DMG after the macOS clean-machine gate.                                                                                                          |
 | Windows 11 x64          | **Alpha** | Default deny. Publish only a signed installer whose exact publisher and timestamp, digest and byte size, malware scan, real-device acceptance, update feed, and uninstall evidence all pass. |
-| Ubuntu 24.04 LTS x64    | **Alpha** | Default deny. The candidate workflow may store a private unsigned AppImage. Do not publish a public download, website button, or updater pointer until promote and named-box proof exist.    |
+| Linux x64 (AppImage)    | **Alpha** | Public, **owner-waived**. The candidate workflow stores a private unsigned AppImage; the release owner publishes `releases/linux-alpha/<releaseId>/release.json` with a commit-pinned owner-waiver record and the signed-in videorc.com download serves it. No promote workflow, no updater feed, no physical acceptance yet. Beta needs both. |
 
 Hosted CI and local unsigned packages are engineering evidence, not public
-Windows or Linux Alpha releases. Keep those downloads unavailable when any
-required gate is missing, failed, or blocked.
+Windows or Linux Alpha releases. Keep the Windows download unavailable when any
+required gate is missing, failed, or blocked. A Linux Alpha is published only
+with an exact-candidate owner-waiver record (`docs/acceptance/linux-alpha/`);
+a failed or missing candidate validation still blocks it. Linux moves from
+Alpha to Beta only with physical acceptance on both Tier 1 boxes and no waiver
+(plan 257, D11).
 
 ## Local Packaging
 
@@ -136,7 +140,10 @@ restrictions.
 ## Current Linux Alpha Target
 
 - Packaging tool: Electron Builder
-- Supported candidate target: Ubuntu 24.04 LTS x64 AppImage only
+- Supported target: x64 AppImage only, built on Ubuntu 24.04. The supported
+  desktops are the Tier table in [linux-port-plan.md](linux-port-plan.md)
+  (Ubuntu 24.04 GNOME, Arch/Omarchy Hyprland and Fedora KDE on Wayland are
+  Tier 1; other desktops are best effort). `.deb` and Flatpak come after Beta.
 - Signing: unsigned (no Linux code-signing lane yet)
 - AppImage runtime: the static type2-runtime (`toolsets.appimage: '1.0.2'`
   in `apps/desktop/electron-builder.yml`). FUSE is linked in and it mounts
@@ -159,9 +166,12 @@ restrictions.
   `workflow_dispatch` from protected `main` only
 - Private storage prefix:
   `candidates/linux-alpha/<releaseId>/<sourceCommit>/`
-- Intended later public prefix:
-  `releases/linux-alpha/<releaseId>/`
-- Updater feed filename: `latest-linux.yml` only
+- Public prefix: `releases/linux-alpha/<releaseId>/`, written create-only
+  by the release owner after the candidate passes validation
+  (`release.json` carries `acceptanceStatus: waived` and the commit-pinned
+  owner-waiver record URL; there is no promote workflow)
+- Updater feed filename: `latest-linux.yml` only. It is not published, so
+  Linux does not self-update yet (plan 257 D4 adds AppImage updates)
 - In-app update notice: Linux builds never run electron-updater. They read
   the public `https://www.videorc.com/api/changelog?since=<core>-alpha.0`
   and show "Videorc X is available. Download it from videorc.com" for the
@@ -170,12 +180,14 @@ restrictions.
   release must therefore publish its `linux` changelog entry; until the
   changelog lists the running Linux line, Settings says nothing about being
   up to date.
-- Public download, videorc-web button, and `updates/linux-alpha/` pointers
-  stay disabled until `promote-linux-alpha.yml` and Ubuntu 24.04 named-box
-  packaged/updater proof exist. Hold the Linux Discord announcement until
-  that public download exists; preview with
-  `pnpm release:notify:discord <releaseId> --dry-run` first, and never print
-  `VIDEORC_DISCORD_RELEASE_WEBHOOK`.
+- Public download: the videorc-web Linux download is live, signed-in
+  (`/api/downloads/linux/latest` answers 401 signed out), and points at the
+  newest published `release.json` through
+  `VIDEORC_LINUX_DOWNLOAD_MANIFEST_OBJECT_KEY`. The `updates/linux-alpha/`
+  updater pointers stay unpublished until the Beta promote workflow and
+  self-update exist. Send the Linux Discord announcement once that release is
+  public; preview with `pnpm release:notify:discord <releaseId> --dry-run`
+  first, and never print `VIDEORC_DISCORD_RELEASE_WEBHOOK`.
 
 Build a local AppImage with:
 
@@ -191,7 +203,8 @@ VIDEORC_RELEASE_SOURCE_COMMIT=<40-character-sha> \
 pnpm release:preflight:linux && pnpm release:manifest:linux && pnpm release:validate:linux
 ```
 
-Store the private candidate (does not flip public feeds):
+Store the private candidate (does not publish it; the owner publishes the
+public `release.json` as a separate step):
 
 ```sh
 pnpm release:secrets:linux && pnpm release:candidate:upload:linux

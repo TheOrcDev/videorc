@@ -1,5 +1,7 @@
 mod cloud_archives;
 mod cloud_clips;
+mod cloud_latency;
+pub(crate) use cloud_latency::LatencyMinuteRow;
 mod cloud_recordings;
 mod cloud_speech;
 pub(crate) use cloud_speech::HostTranscriptCue;
@@ -9060,6 +9062,7 @@ impl Database {
         conn.execute_batch(include_str!("storage/cloud_archives.sql"))?;
         conn.execute_batch(include_str!("storage/cloud_source_iso.sql"))?;
         conn.execute_batch(include_str!("storage/cloud_clips.sql"))?;
+        conn.execute_batch(include_str!("storage/cloud_latency.sql"))?;
         ensure_column(&conn, "sessions", "source_title", "source_title TEXT")?;
         ensure_column(&conn, "sessions", "processing_kind", "processing_kind TEXT")?;
         // Stream Manager (plan 055): structured event facts, reply context and
@@ -10776,7 +10779,13 @@ pub fn default_database_path() -> PathBuf {
     if let Some(custom) = std::env::var_os("VIDEORC_DATABASE_PATH") {
         return PathBuf::from(custom);
     }
+    platform_default_database_path()
+}
 
+/// The un-isolated profile's database, whatever `VIDEORC_DATABASE_PATH`
+/// says. Only machine-wide facts may be read from beside it (the Linux VAAPI
+/// quarantine); an isolated run never writes there.
+pub fn platform_default_database_path() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         home_dir()
@@ -13586,6 +13595,7 @@ mod tests {
                 source_transform_overrides: std::collections::BTreeMap::new(),
                 source_visibility: Default::default(),
                 camera_look: Default::default(),
+                camera_background: None,
                 camera_chroma_key_enabled: false,
                 camera_chroma_key_color: "#00FF00".to_string(),
                 camera_chroma_key_similarity_pct: 40,
@@ -13942,6 +13952,7 @@ mod tests {
             source_transform_overrides: std::collections::BTreeMap::new(),
             source_visibility: Default::default(),
             camera_look: Default::default(),
+            camera_background: None,
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,

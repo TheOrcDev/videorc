@@ -830,9 +830,65 @@ export interface CameraKeyEdges {
 /** The largest share of the camera one side of Hide edges may take (%). */
 export const CAMERA_KEY_EDGE_MAX_PCT = 25
 
+/**
+ * Plan 258 D4/D5: what is behind the person on one camera, as one pick.
+ * Never two at once: a blur, a picture or Cut out never runs with a key.
+ */
+export const CAMERA_BACKGROUND_MODES = [
+  'off',
+  'blur',
+  'image',
+  'video',
+  'cutout',
+  'green',
+  'blue'
+] as const
+export type CameraBackgroundMode = (typeof CAMERA_BACKGROUND_MODES)[number]
+
+/** How hard the outline between the person and what's behind them is (Edges). */
+export const CAMERA_BACKGROUND_EDGES = ['soft', 'balanced', 'sharp'] as const
+export type CameraBackgroundEdges = (typeof CAMERA_BACKGROUND_EDGES)[number]
+
+/** Slight blur and Strong blur, as Blur strength (%) marks (D5). */
+export const CAMERA_BACKGROUND_SLIGHT_BLUR_PCT = 30
+export const CAMERA_BACKGROUND_STRONG_BLUR_PCT = 70
+
+/**
+ * The green or blue screen's tuning, kept with the camera (D4). The colour
+ * is the mode (`green` or `blue`); the fields are the scene key's.
+ */
+export interface CameraBackgroundKey {
+  similarityPct: number
+  smoothnessPct: number
+  spillPct: number
+  /** Hide edges; omitted while every side is 0. */
+  hideEdges?: CameraKeyEdges
+}
+
+/**
+ * Plan 258 D3: one camera's background, kept in every scene (stored per
+ * camera beside `cameraLooks`). Off keeps the tuning, so picking Blur or a
+ * screen again finds it as it was.
+ */
+export interface CameraBackground {
+  mode: CameraBackgroundMode
+  /** Blur strength (%), 0–100; Slight is 30, Strong 70. */
+  blurPct: number
+  edges: CameraBackgroundEdges
+  /** The picture or video behind you (`image`, `video`): a background asset id. */
+  assetId?: string
+  /** The green or blue screen's tuning (`green`, `blue`). */
+  key?: CameraBackgroundKey
+}
+
 export interface LayoutSettings {
   /** Per-camera setting injected at the output boundary; omitted when neutral. */
   cameraLook?: CameraLook
+  /**
+   * Plan 258: the camera's background, injected at the output boundary like
+   * the look; omitted while Off. Never saved into a scene.
+   */
+  cameraBackground?: CameraBackground
   layoutPreset: LayoutPreset
   cameraTransformMode: CameraTransformMode
   cameraTransform: CameraTransform | null
@@ -3064,6 +3120,12 @@ export interface PreviewSurfaceStatus {
   proofTransportBytesPerSecond?: number
   proofTransportDecodedFramesPerSecond?: number
   proofSourceDimensions?: Record<string, { width: number; height: number }>
+  /** Plan 257 S3: the slowest polled source layer's presented frames per
+   * second over the last two seconds (proof surface only). */
+  proofSourceFps?: number
+  /** Plan 257 S3: capture-to-page latency of presented source frames, 95th
+   * percentile of the newest 300 (proof surface only). */
+  proofFrameLatencyP95Ms?: number
   droppedFrames: number
   inputToPresentLatencyMs?: number
   inputToPresentLatencyP50Ms?: number
@@ -3107,6 +3169,8 @@ export interface PreviewSurfaceStatus {
   nativePreviewPlacementsFailed?: number
   /** Retries run after a refused placement push (#1272). */
   nativePreviewPlacementsRetried?: number
+  /** Placement pushes held until the backend surface was live (#1629). */
+  nativePreviewPlacementsHeld?: number
   nativePreviewPlacementRoundTripP95Ms?: number
   nativePreviewPresentRoundTripP95Ms?: number
   nativePreviewIosurfaceCacheHits?: number
@@ -3271,6 +3335,56 @@ export interface PreviewCameraStatus {
    * the backend's first-frame grace. Absent otherwise.
    */
   noVideo?: boolean
+  /**
+   * Plan 258 S4 (D12): the operating system's own effects on this camera
+   * (macOS Video Effects, Windows Studio Effects), read from the device.
+   * Absent until the camera is live and the system has answered.
+   */
+  systemEffect?: CameraSystemEffect
+  /**
+   * Plan 258 S3: the camera effect stage, while this camera's background is
+   * an effect (a blur or a picture). Absent while Off or a screen key.
+   */
+  cameraBackground?: CameraBackgroundStatus
+}
+
+/** How the camera effect stage is doing (plan 258 S3, D6). */
+export type CameraBackgroundStageState = 'running' | 'cover' | 'unavailable'
+
+/** The camera effect stage's line for the Studio, Health and support (plan 258 S3). */
+export interface CameraBackgroundStatus {
+  mode: CameraBackgroundMode
+  state: CameraBackgroundStageState
+  /** The newest matte's age at the last capture. */
+  maskAgeMs?: number
+  segmentMsP95?: number
+  /** The effect pass, wall time on the worker. */
+  composeMsP95?: number
+  /** The effect pass's GPU time. */
+  composeGpuMsP95?: number
+  processedFrames: number
+  coverFrames: number
+  /** How long the cover has stood in (the Studio says so after 2 s). */
+  coverForMs?: number
+  /** The newest matte's age when the cover last took over (D6: the first capture past 100 ms). */
+  coverAfterMaskAgeMs?: number
+  message?: string
+}
+
+/** Which operating system feature is changing the camera's picture (plan 258 S4). */
+export type CameraSystemEffectProvider = 'macos-video-effects' | 'windows-studio-effects'
+
+/** What the system is doing to the camera Videorc has open (plan 258 S4). */
+export interface CameraSystemEffect {
+  provider: CameraSystemEffectProvider
+  /** macOS Portrait, or Windows Studio Effects background blur. */
+  backgroundBlur: boolean
+  /** macOS 15's background replacement; never on Windows. */
+  backgroundReplacement: boolean
+  /** macOS Studio Light: the light on the face, not the background. */
+  studioLight: boolean
+  /** Windows: Videorc turned Studio Effects blur off while its own background runs. */
+  turnedOffByVideorc: boolean
 }
 
 export interface CameraCapabilityFormat {
@@ -4948,6 +5062,55 @@ export interface ReorderScreensParams {
   screenIds: string[]
 }
 
+/**
+ * Linux (plan 257 S18): Electron's password store for this run. Chromium
+ * picks it once at launch, so a keyring installed later needs a restart.
+ */
+export interface LinuxKeyringStatus {
+  /** `safeStorage.getSelectedStorageBackend()`: gnome_libsecret, kwallet6, basic_text, unknown. */
+  backend: string
+  /** True when Videorc can seal sign-in and folder grants with it. */
+  available: boolean
+  /** The `--password-store` the person passed at launch, when they did. */
+  userPasswordStore: string | null
+}
+
+/** A well-known D-Bus name on the session bus (plan 257 S18). */
+export type LinuxBusServiceState = 'running' | 'activatable' | 'missing' | 'unknown'
+
+export interface LinuxPortalCheck {
+  /** `org.freedesktop.portal.Desktop`, the portal frontend. */
+  frontend: LinuxBusServiceState
+  /** ScreenCast's version; absent when no portal backend offers it. */
+  screenCastVersion?: number
+  /** The `org.freedesktop.impl.portal.desktop.*` backends on the bus (`hyprland`, `gtk`). */
+  backends: string[]
+  /** Why ScreenCast could not be read, for support bundles. */
+  detail?: string
+}
+
+export interface LinuxDeviceGroupCheck {
+  /** `video` or `render`. */
+  name: string
+  exists: boolean
+  /** This run carries the group; `usermod -aG` counts only after logging in again. */
+  member: boolean
+  /** Device nodes the group guards (`/dev/video*`, `/dev/dri/renderD*`). */
+  devices: number
+  /** How many of them open read-write (the seat ACL can grant this without the group). */
+  accessible: number
+}
+
+/** `diagnostics.linuxDesktop` (plan 257 S18): what this Linux desktop is missing. */
+export interface LinuxDesktopCheck {
+  /** `org.freedesktop.secrets`: GNOME Keyring, KWallet, KeePassXC. */
+  secretService: LinuxBusServiceState
+  portal: LinuxPortalCheck
+  groups: LinuxDeviceGroupCheck[]
+  /** `XDG_CURRENT_DESKTOP`. */
+  currentDesktop?: string
+}
+
 export interface RuntimeInfo {
   /** The running app version (`app.getVersion()`), shown in Settings → About. */
   version: string
@@ -4989,6 +5152,9 @@ export interface RuntimeInfo {
   /** Why global shortcuts can't work in this session (Linux on Wayland), in
    * words Settings shows; absent where they can. */
   globalShortcutsUnavailable?: string
+  /** Linux only (plan 257 S18): the password store Electron's safeStorage
+   * picked, which sign-in and the recordings folder need. */
+  linuxKeyring?: LinuxKeyringStatus
   isPackaged: boolean
   /** Suppresses first-run setup without changing its persisted record (smokes). */
   firstRunSuppressed: boolean
@@ -5780,6 +5946,8 @@ export interface CloudStatus {
   room?: CloudRoomStatus
   /** Plan 224 D10: the cloud recording, on a talk show. */
   recording?: CloudRecordingStatus
+  /** Plan 253 S7: how long the web took to answer this show's commands. */
+  commandTimes?: CloudCommandTimes
   /** Plan 243: the device on air, on a managed show. */
   onAir?: CloudOnAir
   /**
@@ -6030,6 +6198,46 @@ export interface CloudRoomShown {
   stageKey?: string
   /** Plan 249 S6: when that report arrived, ISO 8601. Present with `stageKey`. */
   at?: string
+  /**
+   * Plan 253 S7 (contract section 6): how long the program page took to draw
+   * the stage the web accepted, in ms. Only on a managed show, and only
+   * while the page shows that stage. Kept in the record; no UI reads it yet.
+   */
+  applyMs?: number
+}
+
+/**
+ * Plan 253 S7 (D8): how long the web took to answer this show's commands,
+ * in ms on the backend's clock. Absent until a command of a managed talk
+ * show was timed.
+ */
+export interface CloudCommandTimes {
+  lastMs: number
+  slowestMs: number
+}
+
+/**
+ * Plan 253 S7, `cloud.room.latency.report`: what the host's room client
+ * measured over its last sample, for the show's record. Durations only, in
+ * whole ms (0 to 60000); a figure that could not be measured is absent.
+ */
+export interface CloudRoomLatencyReport {
+  showId: string
+  /** The host's own round trip to the room. */
+  hostRttMs?: number
+  people: Array<{
+    identity: string
+    name?: string
+    /** The conversation delay: the worse of the two directions. */
+    ms: number
+    /** A part or a direction is missing: `ms` is a floor. */
+    partial: boolean
+    toGuestMs?: number
+    fromGuestMs?: number
+    videoToGuestMs?: number
+    videoFromGuestMs?: number
+  }>
+  program?: { ms: number; audioMs?: number }
 }
 
 /** `CloudStatus.room`: what the Guests tab, the Show stage and the strip draw. */
@@ -8259,6 +8467,25 @@ export interface BuddyOverlaySnapshot {
   personaId: string
   state: CohostAvatarState
   bubble: BuddyBubble | null
+}
+
+/** `captions.overlay.set` (plan 260 S1.2b): the caption line the backend
+ * draws for one leg at that leg's canvas, and blits inside `rect`. Mirrors
+ * Rust `CaptionOverlaySetRequest`, which still accepts the previous release's
+ * `pngBase64` bar for one release. */
+export interface SetCaptionOverlayParams {
+  text: string
+  textSize: 's' | 'm' | 'l'
+  styleId: CaptionStyleId
+  /** The canvas the bar is drawn for: the leg's output size. */
+  canvasWidth: number
+  canvasHeight: number
+  position: 'top' | 'bottom'
+  /** The captions rect for this leg's orientation (plan 164): the bar wraps
+   *  to its width. Omitted keeps the `position` bar. */
+  rect?: OverlayRect
+  target: OverlayTarget
+  styleRevision: number
 }
 
 /** `buddy.overlay.set`: the renderer's raster of the bubble for one output

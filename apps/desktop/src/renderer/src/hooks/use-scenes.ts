@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { GlobalShortcutsConfig } from '@/lib/backend'
 import { loadJson } from '@/lib/capture'
 import { movedScenes } from '@/lib/scene-order'
-import { sceneNameError } from '@/lib/scene-presets'
+import { sceneNameError, WORKING_SCENE_KEY } from '@/lib/scene-presets'
 import { SCENES_KEY, type MainDisplay, type Scene, type SceneLibrary } from '@/lib/scenes'
 import { toast } from '@/lib/toast'
 
@@ -32,8 +32,26 @@ function read(key: string): unknown {
 /** The migration `prepareScenes` made for this launch, when the profile needed one. */
 let prepared: { library: SceneLibrary; globalShortcuts: GlobalShortcutsConfig } | null = null
 
-/** The library's reader (`lib/scenes-store`), loaded by `prepareScenes`. */
+/** The library's reader (`lib/scenes-store`), loaded by `loadStore`. */
 let store: typeof import('@/lib/scenes-store') | null = null
+let storeLoad: Promise<unknown> | null = null
+
+/** One load of the reader at a time; a failed load is tried again by the next caller. */
+function loadStore(): Promise<unknown> {
+  return (storeLoad ??= import('@/lib/scenes-store').then(
+    (module) => (store = module),
+    (error: unknown) => {
+      storeLoad = null
+      throw error
+    }
+  ))
+}
+
+// PH-09 (11-20): the load starts as the entry runs, so the Studio's first
+// render usually finds the reader and renders at once, instead of rendering
+// nothing for one more chunk round trip. Only the reader starts here: the v1
+// migration still runs in `prepareScenes`, in the Studio's own order.
+void loadStore().catch(() => undefined)
 
 function scenesStore(): typeof import('@/lib/scenes-store') {
   if (!store) throw new Error('The scene library was read before it was prepared.')
@@ -60,6 +78,25 @@ export function scenesStored(): boolean {
 }
 
 /**
+ * A library made by 0.34.0 to 0.37.0 whose default "Screen + camera" or
+ * "Side by side" shows only the camera in 9:16 (`repairStoredSceneVerticals`)
+ * is repaired once, before the Studio reads it and the working setup. The
+ * working setup is written first: if the library's write then fails, the
+ * next launch repairs the library and finds the working setup already on
+ * the repaired layout, so the two never end up apart.
+ */
+function repairStoredScenes(): void {
+  const repair = scenesStore().repairStoredSceneVerticals(read(SCENES_KEY), read(WORKING_SCENE_KEY))
+  if (!repair) return
+  try {
+    if (repair.working) localStorage.setItem(WORKING_SCENE_KEY, JSON.stringify(repair.working))
+    localStorage.setItem(SCENES_KEY, JSON.stringify(repair.library))
+  } catch {
+    /* Kept as stored: the next launch repairs it. */
+  }
+}
+
+/**
  * Before the Studio first renders: the library's reader is loaded (its own
  * chunk, so the entry carries none of it), and a profile with no usable
  * scene library gets one made from its v1 scenes and working setup (plan
@@ -67,9 +104,12 @@ export function scenesStored(): boolean {
  * launch that needs it.
  */
 export async function prepareScenes(): Promise<void> {
-  store ??= await import('@/lib/scenes-store')
-  const stored = store.hydrateScenes(read(SCENES_KEY))
-  if (stored.library) return
+  await loadStore()
+  const stored = scenesStore().hydrateScenes(read(SCENES_KEY))
+  if (stored.library) {
+    repairStoredScenes()
+    return
+  }
   const { migrateStoredScenes } = await import('@/lib/scenes-migration')
   prepared = migrateStoredScenes({ readOnly: stored.readOnly })
 }

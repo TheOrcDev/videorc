@@ -12,7 +12,8 @@ import {
   healthRecordFromEvent,
   journalDirCandidates,
   memoryFromCensus,
-  parseJournalLine
+  parseJournalLine,
+  streamOutputFromEvent
 } from './app-observer.mjs'
 import { createFakeClock } from './harness-test-fakes.mjs'
 import { createEventBus } from './step-engine.mjs'
@@ -106,6 +107,27 @@ test('the tail reads appended lines, a late file, and rolls over at UTC midnight
     '2026-10-12T23:59:59.000Z',
     '2026-10-13T00:00:04.000Z'
   ])
+})
+
+test("the tail skips the day's lines from before the run", async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'videorc-journal-'))
+  const clock = createFakeClock(Date.parse('2026-11-21T18:36:21.000Z'))
+  const seen = []
+  const tail = createJournalTail({
+    dirs: [dir],
+    onLine: (line) => seen.push(line.ts),
+    sinceMs: clock.now(),
+    clock
+  })
+  const line = (ts) =>
+    `${JSON.stringify({ schemaVersion: 1, kind: 'sample', ts, state: 'live', legs: [] })}\n`
+  // A morning run on the same profile, then this run's first sample.
+  await writeFile(
+    join(dir, '2026-11-21.ndjson'),
+    line('2026-11-21T11:07:00.000Z') + line('2026-11-21T18:36:22.000Z')
+  )
+  await tail.poll()
+  assert.deepEqual(seen, ['2026-11-21T18:36:22.000Z'])
 })
 
 test('census memory per card role and CSV rows without args', () => {
@@ -203,7 +225,7 @@ test('the observer writes evidence, emits bus events and pushes the card', async
     payload: { code: 'host-overloaded', level: 'warn', createdAt: '2026-10-12T10:00:30.000Z' }
   })
   await clock.advance(10_000)
-  observer.stop()
+  await observer.stop()
   assert.ok(observer.journalLines().length >= 3)
   assert.equal(observer.latestJournal().kind, 'sample')
   assert.ok(observer.healthEventsFlat().some((event) => event.code === 'host-overloaded'))
@@ -212,11 +234,103 @@ test('the observer writes evidence, emits bus events and pushes the card', async
   assert.ok(
     pushes.some((snapshot) => snapshot.memoryMb?.main === 100 && snapshot.memoryMb?.backend === 300)
   )
-  await new Promise((resolve) => setImmediate(resolve))
   const census = await readFile(join(runDir, 'census.csv'), 'utf8')
   assert.ok(census.startsWith('ts,pid,ppid,role,rssKb\n'))
   const journal = (await readFile(join(runDir, 'journal.ndjson'), 'utf8')).trim().split('\n')
   assert.ok(journal.length >= 3)
   assert.equal(JSON.parse(journal[0]).tsMs, undefined)
   assert.ok((await readFile(join(runDir, 'health.ndjson'), 'utf8')).includes('host-overloaded'))
+})
+
+test('evidence lines land in call order and stop() waits for the last write', async () => {
+  const runDir = await mkdtemp(join(tmpdir(), 'videorc-observer-order-'))
+  const clock = createFakeClock(Date.parse('2026-10-12T10:00:00.000Z'))
+  const written = []
+  let calls = 0
+  // The first append is the slowest, as a busy disk can make it.
+  const append = (path, text) => {
+    const delayMs = calls++ === 0 ? 40 : 0
+    return new Promise((resolve) =>
+      setTimeout(() => {
+        written.push({ path, text })
+        resolve()
+      }, delayMs)
+    )
+  }
+  const observer = createAppObserver({
+    bus: createEventBus(),
+    runDir,
+    journalDirs: [],
+    ledgerPaths: async () => [],
+    rootPid: async () => null,
+    clock,
+    append,
+    collectCensus: async () => ({ summary: {}, aliveRecords: [], processRows: [] })
+  })
+  observer.onBackendMessage({
+    event: 'health.event',
+    payload: { code: 'host-overloaded', level: 'warn', createdAt: '2026-10-12T10:00:01.000Z' }
+  })
+  observer.onBackendMessage({
+    event: 'health.event',
+    payload: {
+      code: 'stream-target-reconnecting',
+      level: 'warn',
+      createdAt: '2026-10-12T10:00:02.000Z'
+    }
+  })
+  await observer.stop()
+  const health = written.filter(({ path }) => path.endsWith('health.ndjson'))
+  assert.equal(health.length, 2)
+  assert.ok(health[0].text.includes('host-overloaded'))
+  assert.ok(health[1].text.includes('stream-target-reconnecting'))
+})
+
+test("the backend's stream-output figures come from diagnostics.stats only", () => {
+  const at = '2026-11-21T11:12:00.000Z'
+  assert.deepEqual(
+    streamOutputFromEvent(
+      {
+        event: 'diagnostics.stats',
+        payload: {
+          sessionId: 's1',
+          streamMeasuredBitrateKbps: 5950.5,
+          streamOutputTotalBytes: 40000,
+          streamOutputBitrateKbps: 6000,
+          streamKey: 'never-copied'
+        }
+      },
+      at
+    ),
+    {
+      ts: at,
+      sessionId: 's1',
+      measuredBitrateKbps: 5950.5,
+      totalBytes: 40000,
+      configuredBitrateKbps: 6000
+    }
+  )
+  // Linux's raw-frame bridge: 0 kbps over no encoded bytes is no measure.
+  assert.deepEqual(
+    streamOutputFromEvent(
+      {
+        event: 'diagnostics.stats',
+        payload: {
+          streamMeasuredBitrateKbps: 0,
+          streamOutputTotalBytes: 0,
+          streamOutputBitrateKbps: 6000
+        }
+      },
+      at
+    ),
+    {
+      ts: at,
+      sessionId: null,
+      measuredBitrateKbps: null,
+      totalBytes: null,
+      configuredBitrateKbps: 6000
+    }
+  )
+  assert.equal(streamOutputFromEvent({ event: 'diagnostics.stats', payload: {} }, at), null)
+  assert.equal(streamOutputFromEvent({ event: 'health.event', payload: {} }, at), null)
 })

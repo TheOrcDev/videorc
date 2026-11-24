@@ -322,6 +322,14 @@ describe('runtime info helpers', () => {
     ).toBe('No key grab here.')
   })
 
+  it('carries the Linux keyring only when main measured one (plan 257 S18)', () => {
+    const base = { appVersion: '1.2.3', execPath: '/opt/Videorc/videorc', env: {} }
+    expect(buildRuntimeInfo(base)).not.toHaveProperty('linuxKeyring')
+    expect(buildRuntimeInfo({ ...base, linuxKeyring: null })).not.toHaveProperty('linuxKeyring')
+    const keyring = { backend: 'basic_text', available: false, userPasswordStore: null }
+    expect(buildRuntimeInfo({ ...base, linuxKeyring: keyring }).linuxKeyring).toEqual(keyring)
+  })
+
   it('surfaces graphics fallback evidence and recovery state', () => {
     const info = buildRuntimeInfo({
       appVersion: '1.2.3',

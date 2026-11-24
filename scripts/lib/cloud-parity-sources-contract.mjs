@@ -37,8 +37,14 @@ export const SOURCE_FIXTURE = {
   refused: 'window:4199:0',
   refusedNative: { windowId: 'window:screencapturekit:4199' }
 }
-/** S2's opaque neutral frost. */
+/** S2's opaque neutral frost: the wire's grey while hidden. */
 export const FROST_RGB = [128, 128, 128]
+/**
+ * The centre of Hide screen's designed still (owner 2026-11-20,
+ * protocol-fixtures/hidden-screen-still.json): the middle of the eye's slash,
+ * which every receiver draws over the wire's grey. Counts as frost.
+ */
+export const HIDDEN_STILL_CENTRE_RGB = [115, 118, 138]
 /** The page's plain stage ground (no background): runner luma 24. */
 export const STAGE_GROUND_RGB = [9, 9, 9]
 export const SOURCES_TIMING = {
@@ -79,7 +85,7 @@ const near = (a, b, tolerance) => a.every((v, i) => Math.abs(v - b[i]) <= tolera
 export function classifySource(rgb, tolerance = 40) {
   for (const [id, colour] of Object.entries(SOURCE_FIXTURE.sources))
     if (near(rgb, colour, tolerance)) return id
-  if (near(rgb, FROST_RGB, 14)) return 'frost'
+  if (near(rgb, FROST_RGB, 14) || near(rgb, HIDDEN_STILL_CENTRE_RGB, 18)) return 'frost'
   if (near(rgb, STAGE_GROUND_RGB, 6)) return 'ground'
   return null
 }

@@ -1,6 +1,6 @@
 ---
 name: videorc-release
-description: Cut and publish coordinated Videorc desktop releases for the signed and notarized macOS Beta and the signed Windows 11 x64 Alpha, including version/changelog preparation, protected Windows candidate and promotion workflows, release storage publication (Neon target origin), updater verification, and release records. Use when the user asks to cut, ship, publish, deploy, or make a new Videorc desktop release or update. Target both macOS and Windows by default unless the user explicitly narrows the platform.
+description: Cut and publish coordinated Videorc desktop releases for the signed and notarized macOS Beta, the signed Windows 11 x64 Alpha, and the owner-waived Linux x64 Alpha, including version/changelog preparation, protected Windows candidate and promotion workflows, release storage publication (Neon target origin), updater verification, and release records. Use when the user asks to cut, ship, publish, deploy, or make a new Videorc desktop release or update. Target both macOS and Windows by default unless the user explicitly narrows the platform.
 ---
 
 # Videorc release
@@ -9,8 +9,8 @@ Ship one new numeric desktop version on the supported tracks:
 
 - macOS arm64 Beta: `<version>-beta.<N>`;
 - Windows 11 x64 Alpha: `<version>-alpha.1`;
-- Linux x64 Alpha candidate: the same `<version>-alpha.1` (public download
-  still owed; announce only when that download is public).
+- Linux x64 Alpha: the same `<version>-alpha.1`, public under an owner waiver
+  (no physical acceptance yet; announce only once the download is public).
 
 Target macOS and Windows unless the user explicitly requests a platform-only
 release. Do not silently skip Windows because macOS can be released locally.
@@ -20,7 +20,7 @@ completion.
 Before acting, read these sources of truth in full:
 
 - `docs/releases/release-runbook.md` for macOS, shared versioning, Linux
-  Alpha candidate notes, and rollback;
+  Alpha notes, and rollback;
 - `docs/releases/windows-alpha-runbook.md` for Windows signing, candidate,
   physical acceptance, pilot, public promotion, and rollback.
 
@@ -256,11 +256,15 @@ record.
 
 ## 5. Store the Linux Alpha candidate
 
-Linux is a third, candidate-only Alpha track. It is not required for a
-coordinated macOS+Windows completion. Follow the Linux section in
-`docs/releases/release-runbook.md` and `docs/distribution.md`. Public
-download, `promote-linux-alpha.yml`, and the videorc-web button are still
-owed; never treat a private candidate as shipped.
+Linux is a third Alpha track, public under an owner waiver. It is not
+required for a coordinated macOS+Windows completion. Follow the Linux section
+in `docs/releases/release-runbook.md` and `docs/distribution.md`. There is no
+`promote-linux-alpha.yml` and no updater feed yet, and no physical acceptance
+has ever run: a Linux release is published by the owner (a committed
+exact-candidate waiver record, a create-only `release.json`, the videorc-web
+manifest env) and recorded as "owner-waived", never PASS. A private candidate
+alone is not shipped. Beta replaces the waiver with physical acceptance on
+both Tier 1 boxes (plan 257).
 
 1. Reuse the prepared `<version>-alpha.1` changelog entry (include `linux`
    in `platforms`) rather than bumping the numeric version again.
@@ -271,8 +275,9 @@ owed; never treat a private candidate as shipped.
      -f release_id=<version>-alpha.1
    ```
 
-3. Record the workflow URL, AppImage SHA-256, candidate prefix, and any
-   owner waiver. Keep the candidate private.
+3. Record the workflow URL, AppImage SHA-256, candidate prefix, and the
+   owner-waiver record. The candidate stays private until the owner
+   publishes it.
 4. If the step changes `VIDEORC_LINUX_DOWNLOAD_MANIFEST_OBJECT_KEY` (or any
    other videorc-web production env), apply it with `pnpm release:web:redeploy`
    and record its `web-production: PASS` output. Never `vercel deploy --prod`
@@ -280,7 +285,7 @@ owed; never treat a private candidate as shipped.
    now: on 2026-11-05..07 that shipped 2026-10-10 web code and broke X chat for
    every desktop.
 
-When the Linux download is actually public, preview then send its Discord
+Once the Linux download is public, preview then send its Discord
 announcement (see section 6). Hold that post until then. Never print
 `VIDEORC_DISCORD_RELEASE_WEBHOOK`.
 

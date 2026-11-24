@@ -8,6 +8,7 @@
 //! for the SRT + burned copy.
 
 pub mod cloud_host;
+pub mod guest_lane;
 
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -26,6 +27,11 @@ use crate::process_job::spawn_owned_tokio;
 use crate::state::AppState;
 use crate::videorc_api::{
     CAPTION_CHUNK_UPLOAD_TIMEOUT, CaptionChunkFailure, CaptionChunkResponse, VideorcApiClient,
+};
+
+// Plan 260 S1.1: these wire types live in `videorc-protocol` now.
+pub use videorc_protocol::captions::{
+    CaptionBurnTarget, CaptionOverlayPosition, CaptionStyleId, CaptionTextSize,
 };
 
 pub const CAPTION_SAMPLE_RATE: u32 = 16_000;
@@ -599,28 +605,6 @@ pub fn render_srt(chunks: &[CaptionChunkRecord]) -> String {
     srt
 }
 
-/// Caption text size for the burned copy (mirrors the renderer knob).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CaptionTextSize {
-    S,
-    #[default]
-    M,
-    L,
-}
-
-/// Visual preset captured with each session. The renderer owns the actual
-/// recipe, while Rust persists the stable identity for artifact/session parity.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CaptionStyleId {
-    #[default]
-    Classic,
-    Glass,
-    LowerThird,
-    HighContrast,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptionStyleSnapshot {
@@ -666,29 +650,6 @@ pub fn caption_style_error_code(error: &anyhow::Error) -> &'static str {
         "captions-style-stale"
     } else {
         "captions-style-invalid"
-    }
-}
-
-/// Which caption products the user selected for this session. `Recording`
-/// means a non-destructive aligned `(captioned)` copy; the source recording is
-/// never a live burn target.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CaptionBurnTarget {
-    #[default]
-    Off,
-    Stream,
-    Recording,
-    Both,
-}
-
-impl CaptionBurnTarget {
-    pub fn burns_stream(self) -> bool {
-        matches!(self, CaptionBurnTarget::Stream | CaptionBurnTarget::Both)
-    }
-
-    pub fn requests_captioned_copy(self) -> bool {
-        matches!(self, CaptionBurnTarget::Recording | CaptionBurnTarget::Both)
     }
 }
 
@@ -2493,14 +2454,6 @@ const OVERLAY_MAX_WIDTH: u32 = 4096;
 const OVERLAY_MAX_HEIGHT: u32 = 2048;
 const OVERLAY_MAX_ENCODED_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CaptionOverlayPosition {
-    Top,
-    #[default]
-    Bottom,
-}
-
 /// Where a composited overlay bitmap lands when its push carried no rect
 /// (older callers and smokes): one of the snap presets, resolved against the
 /// canvas orientation at blit time so a legacy push still clears the portrait
@@ -2671,6 +2624,135 @@ pub struct SetCaptionOverlayParams {
     pub style_revision: Option<u64>,
 }
 
+/// `captions.overlay.set` (plan 260 S1.2b): the caption line the backend
+/// draws for one leg at the canvas the renderer names (its burn-in target
+/// plan, unchanged), or, for one release, the bar the renderer rasterized
+/// itself (`pngBase64`, the path before S1.2b), installed as it was. Either
+/// way the bar lands in the same slot with the same placement and style
+/// revision check.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionOverlaySetRequest {
+    /// The renderer's own bar (before plan 260 S1.2b). Accepted for one
+    /// release; when present, the text fields are ignored.
+    #[serde(default)]
+    pub png_base64: Option<String>,
+    /// The caption line to draw. Required without `pngBase64`.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Required with `text`.
+    #[serde(default)]
+    pub text_size: Option<CaptionTextSize>,
+    /// Missing: glass, the renderer painter's own default.
+    #[serde(default)]
+    pub style_id: Option<CaptionStyleId>,
+    /// The canvas the bar is drawn for (the leg's output size). Required with
+    /// `text`.
+    #[serde(default)]
+    pub canvas_width: Option<u32>,
+    #[serde(default)]
+    pub canvas_height: Option<u32>,
+    #[serde(default)]
+    pub position: CaptionOverlayPosition,
+    /// The captions rect for this target's orientation (plan 164): the bar
+    /// wraps to its width and is blitted inside it. Missing => the legacy
+    /// top/bottom bar snap for `position`.
+    #[serde(default)]
+    pub rect: Option<OverlayRect>,
+    #[serde(default)]
+    pub target: Option<CaptionOverlayTarget>,
+    #[serde(default)]
+    pub style_revision: Option<u64>,
+}
+
+/// The largest canvas side a caption bar is drawn for (8K).
+const CAPTION_CANVAS_MAX_SIDE: u32 = 7680;
+
+/// `captions.overlay.set`. With the line's text the backend draws the bar
+/// (`overlay_raster`, the renderer's painter in Rust) off the async runtime,
+/// then installs it as a PNG bar would be; with `pngBase64` the renderer's
+/// bar is installed as before.
+pub async fn set_caption_overlay(
+    slots: &CaptionOverlaySlots,
+    request: CaptionOverlaySetRequest,
+) -> Result<CaptionOverlayTargetsInfo> {
+    let CaptionOverlaySetRequest {
+        png_base64,
+        text,
+        text_size,
+        style_id,
+        canvas_width,
+        canvas_height,
+        position,
+        rect,
+        target,
+        style_revision,
+    } = request;
+    if let Some(png_base64) = png_base64.filter(|png| !png.trim().is_empty()) {
+        return install_caption_overlays(
+            slots,
+            SetCaptionOverlayParams {
+                png_base64,
+                position,
+                rect,
+                target,
+                style_revision,
+            },
+        );
+    }
+    let Some(text) = text.filter(|text| !text.trim().is_empty()) else {
+        bail!("captions.overlay.set needs the caption text (or, for one release, pngBase64).");
+    };
+    let Some(text_size) = text_size else {
+        bail!("captions.overlay.set needs textSize with the caption text.");
+    };
+    let canvas = match (canvas_width, canvas_height) {
+        (Some(width), Some(height))
+            if (1..=CAPTION_CANVAS_MAX_SIDE).contains(&width)
+                && (1..=CAPTION_CANVAS_MAX_SIDE).contains(&height) =>
+        {
+            (width, height)
+        }
+        _ => bail!(
+            "captions.overlay.set needs canvasWidth and canvasHeight (1 to {CAPTION_CANVAS_MAX_SIDE}) with the caption text."
+        ),
+    };
+    let style_id = style_id.unwrap_or(CaptionStyleId::Glass);
+    let prepared = tokio::task::spawn_blocking(move || {
+        draw_caption_bar(&text, canvas, text_size, style_id, rect)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("The caption bar drawing task failed: {error}"))??;
+    install_prepared_caption_overlays(
+        slots,
+        &prepared,
+        OverlayPlacement::new(rect, position),
+        target,
+        style_revision,
+    )
+}
+
+/// Blocking: the bar `renderCaptionOverlayPng` drew for this canvas.
+fn draw_caption_bar(
+    text: &str,
+    canvas: (u32, u32),
+    text_size: CaptionTextSize,
+    style_id: CaptionStyleId,
+    rect: Option<OverlayRect>,
+) -> Result<PreparedCaptionOverlay> {
+    use crate::overlay_raster::{self, OverlayState};
+
+    let bar = overlay_raster::caption_bar(text, canvas, text_size, style_id, rect);
+    let drawn = overlay_raster::render(&OverlayState::Caption(bar)).ok_or_else(|| {
+        anyhow::anyhow!(
+            "The caption bar could not be drawn for a {}x{} canvas.",
+            canvas.0,
+            canvas.1
+        )
+    })?;
+    prepare_rgba_caption_overlay(drawn.width, drawn.height, drawn.rgba)
+}
+
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClearCaptionOverlayParams {
@@ -2775,11 +2857,23 @@ fn decode_caption_overlay(png_base64: &str) -> Result<PreparedCaptionOverlay> {
         .map_err(|_| anyhow::anyhow!("Caption overlay image could not be decoded."))?
         .into_rgba8();
     let (width, height) = image.dimensions();
+    prepare_rgba_caption_overlay(width, height, image.into_raw())
+}
+
+/// A straight-alpha RGBA bar (decoded from a PNG, or drawn by the backend)
+/// readied for both compositor pixel orders.
+fn prepare_rgba_caption_overlay(
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+) -> Result<PreparedCaptionOverlay> {
     if width == 0 || height == 0 || width > OVERLAY_MAX_WIDTH || height > OVERLAY_MAX_HEIGHT {
         bail!("Caption overlay dimensions are out of range ({width}x{height}).");
     }
-
-    let rgba = Arc::new(image.into_raw());
+    if rgba.len() != width as usize * height as usize * 4 {
+        bail!("Caption overlay pixels do not match {width}x{height}.");
+    }
+    let rgba = Arc::new(rgba);
     let bgra = Arc::new(
         rgba.as_chunks::<4>()
             .0
@@ -2816,30 +2910,31 @@ pub fn install_caption_overlays(
     params: SetCaptionOverlayParams,
 ) -> Result<CaptionOverlayTargetsInfo> {
     let decoded = decode_caption_overlay(&params.png_base64)?;
-    let mut guard = slots.inner.lock().expect("caption overlay slots lock");
-    validate_overlay_style_revision(&guard, params.target, params.style_revision)?;
+    install_prepared_caption_overlays(
+        slots,
+        &decoded,
+        OverlayPlacement::new(params.rect, params.position),
+        params.target,
+        params.style_revision,
+    )
+}
 
-    if params
-        .target
-        .is_none_or(|target| target == CaptionOverlayTarget::Primary)
-    {
-        install_decoded_caption_overlay(
-            &mut guard.primary,
-            &decoded,
-            OverlayPlacement::new(params.rect, params.position),
-            params.style_revision,
-        );
+/// One bar, installed in the target it names (or both) after the style
+/// revision check, in one critical section: the PNG path and the drawn path.
+fn install_prepared_caption_overlays(
+    slots: &CaptionOverlaySlots,
+    prepared: &PreparedCaptionOverlay,
+    placement: OverlayPlacement,
+    target: Option<CaptionOverlayTarget>,
+    style_revision: Option<u64>,
+) -> Result<CaptionOverlayTargetsInfo> {
+    let mut guard = slots.inner.lock().expect("caption overlay slots lock");
+    validate_overlay_style_revision(&guard, target, style_revision)?;
+    if target.is_none_or(|target| target == CaptionOverlayTarget::Primary) {
+        install_decoded_caption_overlay(&mut guard.primary, prepared, placement, style_revision);
     }
-    if params
-        .target
-        .is_none_or(|target| target == CaptionOverlayTarget::Auxiliary)
-    {
-        install_decoded_caption_overlay(
-            &mut guard.auxiliary,
-            &decoded,
-            OverlayPlacement::new(params.rect, params.position),
-            params.style_revision,
-        );
+    if target.is_none_or(|target| target == CaptionOverlayTarget::Auxiliary) {
+        install_decoded_caption_overlay(&mut guard.auxiliary, prepared, placement, style_revision);
     }
     Ok(caption_overlay_targets_info(&guard))
 }
@@ -3152,6 +3247,9 @@ pub struct CaptionContractTestCue {
 #[derive(Default)]
 pub struct CaptionsCoordinator {
     room_owner: Option<Arc<cloud_host::Owner>>,
+    /// The talk show's captions-only guest stream (`guest_lane`). Its own
+    /// source, channel, provider task and leases: never the host tap.
+    guests: guest_lane::GuestLane,
     room_presentation: Option<cloud_host::Presentation>,
     // Source-clock room cues must never be drained into a native recording artifact.
     room_chunks: bool,
@@ -4849,6 +4947,8 @@ pub async fn stop_listen_with(state: &AppState, how: ListenStop) {
 
 pub async fn stop_captions(state: &AppState) -> CaptionsStatus {
     let _control = CAPTION_CONTROL.lock().await;
+    // The guests' stream ends with the switch, whatever Sidekick wants.
+    guest_lane::stop(state).await;
     let keep_listen_task = {
         let mut coordinator = state.captions.lock().await;
         advance_caption_start_intent(&mut coordinator);
@@ -4898,6 +4998,7 @@ pub async fn stop_captions_for_sign_out(
         artifact_publication,
         private_frame_io,
         task_mark_target,
+        guest_runtime,
     ) = {
         let _control = CAPTION_CONTROL.lock().await;
         let mut coordinator = state.captions.lock().await;
@@ -4932,6 +5033,7 @@ pub async fn stop_captions_for_sign_out(
             coordinator.stop.take(),
             coordinator.task_mark_target.take(),
         );
+        let guest_runtime = guest_lane::take_for_sign_out(&mut coordinator.guests);
         let pending_frames_dirs = take_pending_caption_frame_dirs(&mut coordinator);
         let caption_burn_tasks = std::mem::take(&mut coordinator.caption_burn_tasks);
         let artifact_publication = coordinator.artifact_publication.clone();
@@ -4946,6 +5048,7 @@ pub async fn stop_captions_for_sign_out(
             artifact_publication,
             private_frame_io,
             runtime.2,
+            guest_runtime,
         )
     };
 
@@ -4956,8 +5059,11 @@ pub async fn stop_captions_for_sign_out(
     TAP_FRAMES_SEEN.store(0, Ordering::Release);
     TAP_FRAMES_DROPPED.store(0, Ordering::Release);
     clear_caption_presentation(state, "signing-out");
-    let runtime_stopped = finish_taken_caption_task(task, stop, false).await;
-    note_caption_provider_join(state, task_mark_target.as_ref(), runtime_stopped);
+    let host_runtime_stopped = finish_taken_caption_task(task, stop, false).await;
+    note_caption_provider_join(state, task_mark_target.as_ref(), host_runtime_stopped);
+    // The guests' stream joins before credentials go too.
+    let guest_runtime_stopped = guest_lane::finish_runtime(guest_runtime).await;
+    let runtime_stopped = host_runtime_stopped && guest_runtime_stopped;
     if runtime_stopped {
         // The provider was detached under the generation fence, but an
         // already-polled future could have committed one last chunk before
@@ -5071,6 +5177,7 @@ async fn shutdown_caption_runtime_after_control(state: &AppState) {
         let mut coordinator = state.captions.lock().await;
         advance_caption_start_intent(&mut coordinator);
     }
+    guest_lane::stop(state).await;
     finish_caption_task(state, true, false).await;
     TAP_FRAMES_SEEN.store(0, Ordering::Release);
     TAP_FRAMES_DROPPED.store(0, Ordering::Release);
@@ -5271,6 +5378,8 @@ async fn block_captions_after_control(state: &AppState, reason_code: &str, messa
         let mut coordinator = state.captions.lock().await;
         advance_caption_start_intent(&mut coordinator);
     }
+    // A block (a used-up allowance included) stops both streams.
+    guest_lane::stop(state).await;
     // A block is terminal for this runtime. Discard pending PCM just like an
     // explicit opt-out; only a normal capture end may drain final audio. A
     // task Buddy's listen intent still wants keeps running unpresented.
@@ -12289,6 +12398,105 @@ mod tests {
         let cleared = clear_caption_overlay(&slot);
         assert!(!cleared.active);
         assert!(current_caption_overlay(&slot).is_none());
+    }
+
+    /// Plan 260 S1.2b: the caption line `captions.overlay.set` now carries.
+    fn caption_line(target: CaptionOverlayTarget, style_revision: u64) -> CaptionOverlaySetRequest {
+        serde_json::from_value(serde_json::json!({
+            "text": "VIDEORC LIVE CAPTION RENDERER PROOF",
+            "textSize": "l",
+            "styleId": "high-contrast",
+            "canvasWidth": 640,
+            "canvasHeight": 360,
+            "position": "bottom",
+            "rect": { "x": 0.04, "y": 0.8, "w": 0.92, "h": 0.16 },
+            "target": match target {
+                CaptionOverlayTarget::Primary => "primary",
+                CaptionOverlayTarget::Auxiliary => "auxiliary",
+            },
+            "styleRevision": style_revision
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_backend_draws_the_caption_line_into_the_leg_it_names() {
+        let slots = new_caption_overlay_slots();
+        let info = set_caption_overlay(&slots, caption_line(CaptionOverlayTarget::Auxiliary, 3))
+            .await
+            .unwrap();
+        assert!(info.auxiliary.active);
+        assert!(!info.primary.active, "only the leg the line names");
+        // The bar the renderer's painter drew for this line on this canvas
+        // (the `caption-high-contrast-l-360p-live` golden is 549x86).
+        let bar = crate::overlay_raster::render(&crate::overlay_raster::OverlayState::Caption(
+            crate::overlay_raster::caption_bar(
+                "VIDEORC LIVE CAPTION RENDERER PROOF",
+                (640, 360),
+                CaptionTextSize::L,
+                CaptionStyleId::HighContrast,
+                Some(OverlayRect {
+                    x: 0.04,
+                    y: 0.8,
+                    w: 0.92,
+                    h: 0.16,
+                }),
+            ),
+        ))
+        .unwrap();
+        assert_eq!(
+            (info.auxiliary.width, info.auxiliary.height),
+            (bar.width, bar.height)
+        );
+        let installed = current_caption_overlays(&slots).auxiliary.unwrap();
+        assert_eq!(installed.position(), CaptionOverlayPosition::Bottom);
+    }
+
+    #[tokio::test]
+    async fn a_drawn_caption_line_keeps_the_style_revision_check() {
+        let slots = new_caption_overlay_slots();
+        set_caption_overlay(&slots, caption_line(CaptionOverlayTarget::Primary, 9))
+            .await
+            .unwrap();
+        let stale = set_caption_overlay(&slots, caption_line(CaptionOverlayTarget::Primary, 8))
+            .await
+            .unwrap_err();
+        assert_eq!(caption_overlay_error_code(&stale), "captions-overlay-stale");
+    }
+
+    #[tokio::test]
+    async fn the_previous_releases_png_bar_is_still_installed() {
+        let slots = new_caption_overlay_slots();
+        let request: CaptionOverlaySetRequest = serde_json::from_value(serde_json::json!({
+            "pngBase64": encode_test_png(640, 100),
+            "position": "top",
+            "target": "primary",
+            "styleRevision": 1
+        }))
+        .unwrap();
+        let info = set_caption_overlay(&slots, request).await.unwrap();
+        assert_eq!((info.primary.width, info.primary.height), (640, 100));
+    }
+
+    #[tokio::test]
+    async fn a_caption_line_without_its_size_or_canvas_is_refused() {
+        let slots = new_caption_overlay_slots();
+        for missing in ["text", "textSize", "canvasWidth"] {
+            let mut value = serde_json::to_value(serde_json::json!({
+                "text": "Hello", "textSize": "m", "canvasWidth": 1280, "canvasHeight": 720,
+                "target": "primary", "styleRevision": 1
+            }))
+            .unwrap();
+            value.as_object_mut().unwrap().remove(missing);
+            let request: CaptionOverlaySetRequest = serde_json::from_value(value).unwrap();
+            let error = set_caption_overlay(&slots, request).await.unwrap_err();
+            assert_eq!(
+                caption_overlay_error_code(&error),
+                "captions-overlay-invalid",
+                "{missing}"
+            );
+        }
+        assert!(current_caption_overlays(&slots).primary.is_none());
     }
 
     #[test]

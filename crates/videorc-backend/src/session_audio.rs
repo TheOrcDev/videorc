@@ -15,6 +15,20 @@ pub const CHUNK_FRAMES: usize = 480;
 /// and a slow muxer start without turning captured speech into silence. Memory
 /// stays bounded by the producer's 1024-packet channel upstream.
 const MAX_BUFFERED_FRAMES: u64 = 48_000;
+/// Plan 257 S1 (Linux): how far the output may trail the wall clock while the
+/// bus still queues on-time capture for it. Linux FFmpeg encodes the raw
+/// bridge itself, and its scheduler reads the audio FIFO only as far as the
+/// muxed video has got; a below-realtime encode (a busy box) holds the
+/// cursor back for as long as it lasts. With only [`MAX_BUFFERED_FRAMES`] of
+/// headroom every buffer was then refused, and the take kept 3.5-6 s of
+/// microphone and silence after it (ogre audit, 2026-11-21). Buffers on time
+/// by the wall clock now wait for the cursor, up to 20 s (7.7 MB of stereo
+/// f32); a source clock running ahead of the wall clock is still refused.
+/// macOS and Windows keep their bound: their encoders run beside the bridge.
+#[cfg(target_os = "linux")]
+const OUTPUT_BACKLOG_FRAMES: u64 = 20 * 48_000;
+#[cfg(not(target_os = "linux"))]
+const OUTPUT_BACKLOG_FRAMES: u64 = 0;
 /// Contiguous packets are merged until a queued packet reaches this size, so
 /// the queue length is independent of the device callback size.
 const COALESCE_LIMIT_FRAMES: u64 = 4_800;
@@ -238,6 +252,39 @@ impl AudioTimeline {
 
     /// [`Self::push`], saying why a packet did not reach the queue.
     fn push_outcome(&mut self, generation: u64, start: u64, frame: AudioFrame) -> PushOutcome {
+        let ceiling = self.cursor.saturating_add(self.ahead_limit);
+        self.push_below(generation, start, frame, ceiling)
+    }
+
+    /// The highest sample a packet may end at when the cursor would be at
+    /// `wall_cursor` had the output kept pace (plan 257 S1). A cursor that
+    /// keeps pace gets the usual ahead limit; one that trails the wall clock
+    /// may queue on-time capture up to [`OUTPUT_BACKLOG_FRAMES`] past it.
+    fn ahead_ceiling(&self, wall_cursor: u64) -> u64 {
+        let ceiling = self.cursor.saturating_add(self.ahead_limit);
+        let on_time = wall_cursor.saturating_add(self.ahead_limit);
+        ceiling.max(on_time.min(ceiling.saturating_add(OUTPUT_BACKLOG_FRAMES)))
+    }
+
+    /// [`Self::push_outcome`] against [`Self::ahead_ceiling`].
+    fn push_outcome_at(
+        &mut self,
+        generation: u64,
+        start: u64,
+        frame: AudioFrame,
+        wall_cursor: u64,
+    ) -> PushOutcome {
+        let ceiling = self.ahead_ceiling(wall_cursor);
+        self.push_below(generation, start, frame, ceiling)
+    }
+
+    fn push_below(
+        &mut self,
+        generation: u64,
+        start: u64,
+        frame: AudioFrame,
+        ceiling: u64,
+    ) -> PushOutcome {
         let frames = frame.frame_count() as u64;
         if generation != self.generation
             || frame.sample_rate != NATIVE_AUDIO_SAMPLE_RATE
@@ -264,7 +311,7 @@ impl AudioTimeline {
         // The only ceiling is time ahead of the cursor. A packet count would
         // give a 128-frame callback device a fraction of the headroom.
         let end = start.saturating_add(frames);
-        if end > self.cursor.saturating_add(self.ahead_limit) {
+        if end > ceiling {
             self.counters.dropped_frames += frames;
             self.losses.dropped_ahead_of_cap += frames;
             return PushOutcome::AheadOfCap { end, frames };
@@ -2959,10 +3006,25 @@ struct Placement {
     /// The output is in a stall episode ([`OutputStall`]): a packet that is
     /// on time by the wall clock is not its source's fault.
     output_behind: bool,
+    /// The output kept pace at least once ([`OutputStall`]). Only then does
+    /// a trailing cursor mean a stalled reader whose on-time capture waits in
+    /// the backlog (plan 257 S1); a bus that never kept pace has a timeline
+    /// fault (plan 070) and keeps the plain ahead limit.
+    kept_pace: bool,
 }
 impl Placement {
     fn wall_cursor(&self, now: Instant) -> u64 {
         wall_cursor_at(now, self.epoch, self.playout_delay)
+    }
+
+    /// The wall cursor the backlog may queue against: none (0) until the
+    /// output has kept pace.
+    fn backlog_wall_cursor(&self, now: Instant) -> u64 {
+        if self.kept_pace {
+            self.wall_cursor(now)
+        } else {
+            0
+        }
     }
 }
 
@@ -3284,7 +3346,12 @@ fn ingest_pending(
                     .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
                 stats.record_capture_evidence(frame.frame_count() as u64, peak);
                 totals.record_capture_evidence(frame.frame_count() as u64, peak);
-                match timeline.push_outcome(generation, start, resample_frame(frame, frames)) {
+                match timeline.push_outcome_at(
+                    generation,
+                    start,
+                    resample_frame(frame, frames),
+                    placement.backlog_wall_cursor(now),
+                ) {
                     PushOutcome::Placed => {
                         activity.placed = now;
                         activity.live = now;
@@ -5167,6 +5234,9 @@ struct SourceSlot {
     /// a stall episode, so a buffer on time by the wall clock is not refused
     /// by this source's fault.
     output_behind: bool,
+    /// Set with `output_behind`: the output kept pace at least once, so
+    /// on-time capture may wait in the backlog (plan 257 S1).
+    output_kept_pace: bool,
     /// Arrival of the first buffer in the current run of buffers that placed
     /// no sample (and were not excused by a stalled output); `None` once one
     /// did.
@@ -5237,6 +5307,7 @@ impl SourceSlot {
             exit: None,
             playout_delay,
             output_behind: false,
+            output_kept_pace: false,
             unplayable_since: None,
             last_placed: Instant::now(),
             fault: TimelineFault::default(),
@@ -5356,10 +5427,16 @@ impl SourceSlot {
             self.timeline.losses.discarded_duplicate += frames;
             return PlaceOutcome::Refused;
         };
-        match self
-            .timeline
-            .push_outcome(0, start, resample_frame(frame, frames))
-        {
+        match self.timeline.push_outcome_at(
+            0,
+            start,
+            resample_frame(frame, frames),
+            if self.output_kept_pace {
+                wall_cursor_at(now, epoch, self.playout_delay)
+            } else {
+                0
+            },
+        ) {
             PushOutcome::Placed => PlaceOutcome::Placed,
             PushOutcome::AheadOfCap { end, frames } => {
                 let wall_cursor = wall_cursor_at(now, epoch, self.playout_delay);
@@ -5602,7 +5679,29 @@ impl StopDrain {
     fn done(&self, cursor: u64, now: Instant) -> bool {
         cursor >= self.target || now >= self.deadline
     }
+
+    /// Plan 257 S1 (Linux): a cursor that trails the stop instant by a stall
+    /// still owes FFmpeg the capture queued for it ([`OUTPUT_BACKLOG_FRAMES`]).
+    /// FFmpeg reads it only as fast as it drains its own below-realtime video
+    /// backlog (ogre at load 20: 10 s owed took longer than 10 s), so the drain
+    /// gets the whole [`STOP_BACKLOG_DRAIN_MAX`] and still ends the moment the
+    /// cursor reaches the stop instant. Exiting at the usual deadline cut the
+    /// audio FIFO short and the file's tail became padded silence. A cursor
+    /// that kept pace (owing less than a stall) and a bus that keeps no
+    /// backlog keep the usual deadline.
+    fn with_backlog(mut self, cursor_at_stop: u64) -> Self {
+        if OUTPUT_BACKLOG_FRAMES == 0
+            || self.target.saturating_sub(cursor_at_stop) < OUTPUT_STALL_START_FRAMES
+        {
+            return self;
+        }
+        self.deadline += STOP_BACKLOG_DRAIN_MAX;
+        self
+    }
 }
+/// Bounds [`StopDrain::with_backlog`], inside the recording's quit grace for an
+/// FFmpeg that keeps advancing (`STOP_TERM_DRAIN_MAX`, 18 s).
+const STOP_BACKLOG_DRAIN_MAX: Duration = Duration::from_secs(15);
 
 // Stereo PCM after this source-clock boundary would be future capture, not
 // buffered pre-Stop content. Keep the corrected tail truthful while flushing.
@@ -5916,10 +6015,15 @@ fn run_bus_owned(
     // Writes stop on this, not on `stop`: a stopping bus drains first.
     let write_stop = AtomicBool::new(false);
     let mut drain: Option<StopDrain> = None;
+    // Where the cursor stood when this bus first saw Stop (plan 257 S1).
+    let cursor_at_stop = std::cell::Cell::new(None);
     loop {
         if stop.load(Ordering::Acquire) {
+            let at_stop = *cursor_at_stop.get().get_or_insert(timeline.cursor());
+            cursor_at_stop.set(Some(at_stop));
             let drain = drain.get_or_insert_with(|| {
-                let mut drain = StopDrain::at(stop_requested_at, epoch, playout_delay);
+                let mut drain =
+                    StopDrain::at(stop_requested_at, epoch, playout_delay).with_backlog(at_stop);
                 // ISO muxers trim the common negative track shift. Flush the
                 // already captured system samples delayed by that same shift;
                 // the existing unpaced bounded drain does not await new audio.
@@ -6015,6 +6119,7 @@ fn run_bus_owned(
             epoch,
             playout_delay,
             output_behind: stall.output_behind(Instant::now()),
+            kept_pace: stall.kept_pace,
         };
         let mut loss_reason = None;
         if let Some(receiver) = receiver.as_ref() {
@@ -6100,6 +6205,7 @@ fn run_bus_owned(
         if let Some(slot) = system.as_mut() {
             slot.account_producer_drops();
             slot.output_behind = placement.output_behind;
+            slot.output_kept_pace = placement.kept_pace;
             // No stall rule here (decision 11): only the platform's failure
             // signal or the end of the stream retires a system source.
             let health = slot.ingest_health(epoch);
@@ -6142,10 +6248,12 @@ fn run_bus_owned(
         ) {
             publish_output_stall(shared, report);
         }
-        timeline.discard_before(wall_cursor.saturating_sub(MAX_BUFFERED_FRAMES));
+        // Queued capture the trailing cursor has yet to reach is not stale
+        // (plan 257 S1); the floor moves back by the backlog it may hold.
+        let floor = wall_cursor.saturating_sub(MAX_BUFFERED_FRAMES + OUTPUT_BACKLOG_FRAMES);
+        timeline.discard_before(floor);
         if let Some(slot) = system.as_mut() {
-            slot.timeline
-                .discard_before(wall_cursor.saturating_sub(MAX_BUFFERED_FRAMES));
+            slot.timeline.discard_before(floor);
         }
         let next = epoch
             + playout_delay
@@ -6513,9 +6621,13 @@ fn run_bus_owned(
         let mut deferred_health = Vec::new();
         let mut wait = || {
             // A stop that arrives mid-write drains too, until its deadline.
-            if stop.load(Ordering::Acquire)
-                && StopDrain::at(stop_requested_at, epoch, playout_delay).done(0, Instant::now())
-            {
+            if stop.load(Ordering::Acquire) && {
+                let at_stop = *cursor_at_stop.get().get_or_insert(timeline.cursor());
+                cursor_at_stop.set(Some(at_stop));
+                StopDrain::at(stop_requested_at, epoch, playout_delay)
+                    .with_backlog(at_stop)
+                    .done(0, Instant::now())
+            } {
                 write_stop.store(true, Ordering::Release);
             }
             if draining.load(Ordering::Acquire) {
@@ -6546,6 +6658,7 @@ fn run_bus_owned(
                 epoch,
                 playout_delay,
                 output_behind: stall.output_behind(now),
+                kept_pace: stall.kept_pace,
             };
             if let Some(receiver) = receiver.as_ref() {
                 ingest_pending(
@@ -6565,6 +6678,7 @@ fn run_bus_owned(
                 // pass observes it again and ramps the slot out. The edges
                 // of a timeline loss are kept for that pass.
                 slot.output_behind = placement.output_behind;
+                slot.output_kept_pace = placement.kept_pace;
                 match slot.ingest_health(epoch) {
                     SlotHealth::Healthy | SlotHealth::Stopped(_) => {}
                     health => deferred_health.push(health),
@@ -7637,6 +7751,7 @@ mod tests {
                 epoch,
                 playout_delay: PLAYOUT_DELAY,
                 output_behind: false,
+                kept_pace: false,
             },
             0,
             &stats,
@@ -7682,6 +7797,7 @@ mod tests {
                 epoch: now - Duration::from_secs(9),
                 playout_delay: PLAYOUT_DELAY,
                 output_behind: false,
+                kept_pace: false,
             },
             0,
             &stats,
@@ -7764,6 +7880,72 @@ mod tests {
             channels: NATIVE_AUDIO_CHANNELS,
             samples: vec![value; count * 2],
         }
+    }
+
+    /// Plan 257 S1: a trailing output keeps on-time capture on Linux (the
+    /// raw bridge's FFmpeg holds the cursor back for as long as its encode
+    /// runs below realtime) and refuses capture ahead of the wall clock.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_trailing_output_queues_on_time_capture_up_to_the_backlog() {
+        let mut timeline = AudioTimeline::new();
+        // The cursor is at 0 while the wall clock says 6 s.
+        let wall_cursor = 6 * 48_000;
+        assert_eq!(
+            timeline.push_outcome_at(0, wall_cursor - 480, frame(0.4, 480), wall_cursor),
+            PushOutcome::Placed,
+            "capture 6 s ahead of a stalled cursor is on time, not ahead of cap"
+        );
+        assert_eq!(timeline.losses().dropped_ahead_of_cap, 0);
+        assert!(matches!(
+            timeline.push_outcome_at(0, wall_cursor + 2 * 48_000, frame(0.4, 480), wall_cursor),
+            PushOutcome::AheadOfCap { .. }
+        ));
+        // Beyond the backlog the old rule holds: the queue stays bounded.
+        let far = OUTPUT_BACKLOG_FRAMES + 5 * 48_000;
+        assert!(matches!(
+            timeline.push_outcome_at(0, far, frame(0.4, 480), far + 480),
+            PushOutcome::AheadOfCap { .. }
+        ));
+        // The queued capture plays at its own sample, once the cursor gets there.
+        timeline.cursor = wall_cursor - 480;
+        let rendered = timeline.render_with_provenance();
+        assert!(rendered.captured[..480].iter().all(|captured| *captured));
+        assert!(rendered.samples[..960].iter().all(|sample| *sample == 0.4));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn other_platforms_keep_the_one_second_ahead_cap() {
+        let mut timeline = AudioTimeline::new();
+        let wall_cursor = 6 * 48_000;
+        assert!(matches!(
+            timeline.push_outcome_at(0, wall_cursor - 480, frame(0.4, 480), wall_cursor),
+            PushOutcome::AheadOfCap { .. }
+        ));
+        let stop_at = Instant::now();
+        let drain = StopDrain::new(stop_at, stop_at - Duration::from_secs(6), PLAYOUT_DELAY);
+        assert_eq!(drain.with_backlog(0), drain);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stop_behind_the_wall_clock_drains_the_owed_backlog_within_a_bound() {
+        let stop_at = Instant::now();
+        let epoch = stop_at - Duration::from_secs(30);
+        let drain = StopDrain::new(stop_at, epoch, PLAYOUT_DELAY);
+        let base = drain.deadline;
+        assert_eq!(drain.target, 30 * 48_000);
+        // A cursor 4 s behind may take the bounded drain to hand FFmpeg what
+        // it queued: FFmpeg reads it below realtime.
+        let owed = drain.with_backlog(26 * 48_000);
+        assert_eq!(owed.deadline, base + STOP_BACKLOG_DRAIN_MAX);
+        assert!(!owed.done(27 * 48_000, base + Duration::from_secs(6)));
+        assert!(owed.done(30 * 48_000, base), "the target still ends it");
+        assert!(owed.done(27 * 48_000, base + STOP_BACKLOG_DRAIN_MAX));
+        // A cursor that kept pace owes only its playout delay: no extension.
+        assert_eq!(drain.with_backlog(drain.target).deadline, base);
+        assert_eq!(drain.with_backlog(drain.target - 2_400).deadline, base);
     }
 
     #[test]
@@ -11167,8 +11349,13 @@ mod mix_tests {
     /// Everything the bus reports until an output stall is (the episode
     /// ends once the bus catches up, which a slow machine takes longer to
     /// do), and the output position at that moment.
+    /// Waits for the stall report, or on Linux (plan 257 S1) for the bus to
+    /// get past the stall: the backlog rides it out with nothing lost, and a
+    /// stall that cost no audio is logged, never reported. `resumed_at` is
+    /// the bus frame where the fixture reader resumes.
     async fn observe_until_stall_reported(
         bus: &Bus,
+        resumed_at: usize,
     ) -> (
         Vec<SourceLoss>,
         Vec<OutputStallReport>,
@@ -11181,7 +11368,8 @@ mod mix_tests {
             let observation = bus.session.observation(false);
             losses.extend(observation.losses);
             stalls.extend(observation.output_stalls);
-            if !stalls.is_empty() || Instant::now() >= deadline {
+            let settled = cfg!(target_os = "linux") && *bus.progress.borrow() >= resumed_at;
+            if !stalls.is_empty() || settled || Instant::now() >= deadline {
                 if bus.observation.is_some() {
                     record_mix_boundary(&bus.session, "stall-reported");
                 }
@@ -11698,6 +11886,10 @@ mod mix_tests {
     }
 
     /// Frames in `from..to` whose left sample is exactly `value`.
+    /// The stall fixtures pause the reader at 72 000 frames for 3 s.
+    const STALL_AT: usize = 72_000;
+    const STALL_RESUMES_AT: usize = STALL_AT + 48_000 * 3;
+
     fn frames_at(samples: &[f32], from: usize, to: usize, value: f32) -> usize {
         (from..to.min(samples.len() / 2))
             .filter(|frame| samples[frame * 2] == value)
@@ -11777,7 +11969,8 @@ mod mix_tests {
                 Some((72_000, Duration::from_secs(3))),
             )
             .await;
-            let (losses, stalls, input_state, caught_up) = observe_until_stall_reported(&bus).await;
+            let (losses, stalls, input_state, caught_up) =
+                observe_until_stall_reported(&bus, STALL_RESUMES_AT).await;
             set_mix_window(
                 &evidence,
                 (caught_up + 48_000) as u64,
@@ -11797,13 +11990,25 @@ mod mix_tests {
             );
             assert_eq!(losses, vec![], "not a source loss");
             assert_eq!(input_state, NativeAudioInputState::Live);
-            // Scheduling jitter may split the episode; together they cover
-            // the stall.
-            assert!(!stalls.is_empty(), "the stall is reported");
-            let longest = stalls.iter().map(|stall| stall.duration_ms).max().unwrap();
-            assert!(longest >= 2_500, "{stalls:?}");
-            let lost: u64 = stalls.iter().map(|stall| stall.lost_ms).sum();
-            assert!(lost >= 1_000, "{stalls:?}");
+            if cfg!(target_os = "linux") {
+                // Plan 257 S1 (Linux): the backlog keeps the stalled stretch;
+                // only the chunk blocked when the reader stopped can lose its
+                // stale tail, and nothing audible is reported.
+                assert_eq!(stalls, vec![], "nothing was lost to report");
+                let kept = frames_at(&samples, STALL_AT, STALL_RESUMES_AT, 0.2);
+                assert!(
+                    kept >= STALL_RESUMES_AT - STALL_AT - 2 * CHUNK_FRAMES,
+                    "the stalled stretch keeps the microphone: {kept}"
+                );
+            } else {
+                // Scheduling jitter may split the episode; together they
+                // cover the stall.
+                assert!(!stalls.is_empty(), "the stall is reported");
+                let longest = stalls.iter().map(|stall| stall.duration_ms).max().unwrap();
+                assert!(longest >= 2_500, "{stalls:?}");
+                let lost: u64 = stalls.iter().map(|stall| stall.lost_ms).sum();
+                assert!(lost >= 1_000, "{stalls:?}");
+            }
             assert_eq!(frames_at(&samples, 24_000, 72_000, 0.2), 48_000, "before");
             assert_eq!(
                 frames_at(&samples, caught_up + 48_000, caught_up + 96_000, 0.2),
@@ -11924,7 +12129,8 @@ mod mix_tests {
                 .await;
                 bus.session.attach_system(producer).await.unwrap();
             }
-            let (losses, stalls, state, caught_up) = observe_until_stall_reported(&bus).await;
+            let (losses, stalls, state, caught_up) =
+                observe_until_stall_reported(&bus, STALL_RESUMES_AT).await;
             bus.wait_for_frames(caught_up + 96_000).await;
             assert!(bus.session.microphone_owner_present());
             if mixed {
@@ -11935,11 +12141,16 @@ mod mix_tests {
             let samples = decode(&bytes);
             assert!(losses.is_empty());
             assert_eq!(state, NativeAudioInputState::Live);
-            assert!(!stalls.is_empty());
-            assert!(
-                status.counters.generated_frames > 4800,
-                "stale output becomes generated silence"
-            );
+            if cfg!(target_os = "linux") {
+                // Plan 257 S1 (Linux): the backlog plays the stalled stretch.
+                assert_eq!(stalls, vec![]);
+            } else {
+                assert!(!stalls.is_empty());
+                assert!(
+                    status.counters.generated_frames > 4800,
+                    "stale output becomes generated silence"
+                );
+            }
             // RNNoise strongly attenuates this synthetic voice. Require real
             // output above float cancellation residue, not a quality score.
             let before_peak = samples[..72_000 * 2]
@@ -12111,7 +12322,8 @@ mod mix_tests {
         )
         .await;
         bus.session.attach_system(producer).await.unwrap();
-        let (losses, stalls, _, caught_up) = observe_until_stall_reported(&bus).await;
+        let (losses, stalls, _, caught_up) =
+            observe_until_stall_reported(&bus, STALL_RESUMES_AT).await;
         set_mix_window(
             &evidence,
             (caught_up + 48_000) as u64,
@@ -12124,7 +12336,17 @@ mod mix_tests {
         let samples = decode(&bytes);
         report_mix_evidence("system-after-stall", &evidence, &samples, (0.7, 0.45), 0.0);
         assert_eq!(losses, vec![]);
-        assert!(!stalls.is_empty(), "the stall is reported");
+        if cfg!(target_os = "linux") {
+            // Plan 257 S1 (Linux): both sources play through the stall.
+            assert_eq!(stalls, vec![], "nothing was lost to report");
+            let kept = frames_at(&samples, STALL_AT, STALL_RESUMES_AT, 0.7);
+            assert!(
+                kept >= STALL_RESUMES_AT - STALL_AT - 2 * CHUNK_FRAMES,
+                "the stalled stretch keeps microphone plus system: {kept}"
+            );
+        } else {
+            assert!(!stalls.is_empty(), "the stall is reported");
+        }
         assert_eq!(
             frames_at(&samples, caught_up + 48_000, caught_up + 96_000, 0.7),
             48_000,
@@ -12143,11 +12365,21 @@ mod mix_tests {
         for packet in microphone.iter_mut().skip(200) {
             packet.timestamp_micros += 5_000_000;
         }
+        // The fault under test is the device clock's jump, judged on
+        // placement times; the playout delay is only the scheduling slack the
+        // bus and the fixture's sender share. 50 ms was too little on a
+        // loaded CI runner: the sender once sent a packet 60 ms late and the
+        // bus rightly played silence for it (release 68faba84f), and a
+        // starved local run stalled the bus writer 108 ms. This test runs at
+        // the shipped system-audio playout delay (150 ms) instead.
         let (bus, evidence) = start_observed_bus_with_trace(
             epoch,
             Some(microphone),
             AudioProcessingSettings::default(),
-            SessionAudioOptions::default(),
+            SessionAudioOptions {
+                playout_delay: SYSTEM_AUDIO_PLAYOUT_DELAY,
+                ..SessionAudioOptions::default()
+            },
             None,
             Some((288_000, 384_000)),
         )

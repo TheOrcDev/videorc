@@ -1,28 +1,48 @@
 # Linux Port Plan
 
-Linux support is an incremental port, not a relabeling of the macOS or Windows
-runtime. L1 established the native Rust gate. L1.5 adds a production-safe H.264
-encoder contract, but does **not** claim that capture, preview, recording,
-packaging, or release are supported yet.
+Linux is a **public Alpha** on its way to Beta. Since 0.9.122 every
+`<version>-alpha.1` Linux AppImage has been published through the signed-in
+videorc.com download under an **owner waiver**: no physical acceptance pass
+was ever performed (`docs/acceptance/linux-alpha/*.json`, `performed: false`;
+0.36.0 is the latest). The Beta bar, the supported desktops and the parity
+matrix against macOS live in
+[plan 257](../plans/257-linux-beta.md). The L-phases below are the original
+delivery history of the port; each has an implementation, and the status
+column says what is still short.
 
 ## Support baseline
 
 | Area | Alpha baseline | Current status |
 | --- | --- | --- |
-| Distribution | Ubuntu 24.04 LTS | Compile/test gate only |
-| Architecture | x86_64 | CI runner architecture |
-| Display session | Wayland first | Unsupported |
-| Screen/window capture | `xdg-desktop-portal` backed by PipeWire | L4 |
-| Camera | V4L2 | L3 |
-| Audio | PipeWire | L2 |
-| Preview | CPU composition and JPEG transport | L5 |
-| H.264 encode | VAAPI hardware, OpenH264 software fallback | L1.5 implemented; hardware proof pending |
-| Packaging | AppImage | L6 |
+| Distribution | Ubuntu 24.04 LTS (the CI build and packaging box) | Shipped as an AppImage built on Ubuntu 24.04; supported desktops are the Tier table below |
+| Architecture | x86_64 | x64 only; arm64 is not in Beta |
+| Display session | Wayland first | Wayland is the Tier 1 session; X11 is best effort (global shortcuts work there, not on Wayland) |
+| Screen/window capture | `xdg-desktop-portal` backed by PipeWire | Works (L4). CPU copy into BGRA, no DMA-BUF; one stream, no resolution-change follow; no app scenes or Follow front app (no Wayland API) |
+| Camera | V4L2 | Works, degraded (L3): an FFmpeg `-f v4l2` child scales on the CPU (about 180 % CPU at idle with ogre's FaceTime camera, plan 257 audit); no hotplug until restart |
+| Audio | PipeWire | Microphone through pipewire-pulse (L2). Desktop/system audio is missing. Live captions are not available yet |
+| Preview | CPU composition and BMP transport | Works, degraded (L5): the Electron proof surface polls per-source BMPs on the CPU and Health reports "Fallback"; no live canvas on the Scene tab |
+| H.264 encode | VAAPI hardware, OpenH264 software fallback | Works (L1.5, proven on ogre 2026-11-23): with nothing set, `auto` probes the render nodes and picks VAAPI on Intel iHD; OpenH264 is the fallback. AMD VAAPI is unproven (no second box, D2); no NVENC arm |
+| Packaging | AppImage | Shipped (L6), unsigned, public Alpha under owner waiver. No self-update: the app only shows a changelog notice |
 | Videorc Camera (plan 214 D) | v4l2loopback: the user installs the module, the app loads it with `pkexec modprobe … exclusive_caps=1 card_label="Videorc Camera" video_nr=42` and writes YUYV 1080p30 to the device found by name | Written and compiled by the Linux CI job; hidden (`PROVEN = false` in `virtual_camera_linux.rs`) until spike P0c passes on a named box |
 
-The Ubuntu 24.04 row is the packaging and support baseline that L6 must prove
-on. The encoder contract in L1.5 is distribution-independent and is accepted
-from any named physical Linux x64 box (see "Named tester boxes").
+### Supported desktops (plan 257, D1)
+
+| Tier | Distro and desktop | Session | GPU and encoder |
+| --- | --- | --- | --- |
+| 1 (beta-supported, in acceptance) | Ubuntu 24.04 LTS, GNOME 46+ | Wayland | Intel iHD or AMD radeonsi VAAPI |
+| 1 | Arch-family (Omarchy) with Hyprland 0.5x (ogre) | Wayland | Intel iHD VAAPI; OpenH264 fallback |
+| 1 | Fedora 41+ KDE Plasma 6 | Wayland | VAAPI |
+| 2 (best effort, bug reports accepted) | The same distros on X11; Sway and other wlroots; Debian 13; Linux Mint | Either | VAAPI, NVENC (after plan 257 S6), OpenH264 |
+| Not supported | VMs, arm64, Ubuntu 22.04 and older (old PipeWire and portal) | n/a | n/a |
+
+Minimums: PipeWire 1.0 or newer with pipewire-pulse, xdg-desktop-portal 1.18
+or newer with the desktop's backend, a Secret Service (gnome-keyring or
+KWallet), and the user in the `video` and `render` groups.
+
+Ubuntu 24.04 GNOME Wayland is the packaging baseline and a Tier 1 desktop,
+but no Ubuntu box has ever run an acceptance pass (plan 257 D2, owner-owed).
+The encoder contract in L1.5 is distribution-independent and is accepted from
+any named physical Linux x64 box (see "Named tester boxes").
 
 Wayland capture must go through the desktop portal rather than bypassing the
 user-consent boundary. PipeWire is required for screen capture and audio; V4L2
@@ -92,15 +112,31 @@ GPU hang, so the policy keeps the app from touching a bad node at all:
 - The driver is evidence, not policy. There is no amdgpu or other driver
   blocklist; most amdgpu boxes encode fine through VAAPI. The quarantine file
   is box-local state.
+- A quarantine entry names the GPU, not its node number (plan 257 S5).
+  Numbers can swap between boots (ogre, 2026-10-20: the AMD GPU came up as
+  `renderD128`). Entries carry the PCI address (`device`, the basename of
+  `/sys/class/drm/<node>/device`) and the driver. A node matches an entry by
+  PCI address when both sides know it, else by driver, else by node name
+  (an entry planted by hand with neither). ogre's older entry
+  (`renderD129`, `amdgpu`, no address) therefore keeps the AMD GPU out
+  whichever number it boots with.
+- An isolated profile (`VIDEORC_DATABASE_PATH` elsewhere, as every smoke
+  sets it) also reads the machine's list beside the un-isolated database
+  (`~/.videorc/linux-vaapi/quarantined.json`) and never writes it. A hang is
+  a fact about the hardware: without this, a fresh smoke profile started with
+  an empty list and, unpinned, could probe the GPU the machine had already
+  quarantined.
 
 ### Named tester boxes
 
 | Box | Hardware | Distribution / session | Render nodes | Role |
 | --- | --- | --- | --- | --- |
-| ogre | T2 MacBook Pro, Intel UHD 630 (Coffee Lake) + Radeon Pro 555X, FaceTime HD camera | Omarchy 4.0.4 (Arch family), Hyprland / Wayland, PipeWire + `xdg-desktop-portal-hyprland` | `renderD128` i915, allowed; `renderD129` amdgpu, **quarantined** after the 2026-09-24 host hang | Named physical tester for L1.5 through L5 |
+| ogre | T2 MacBook Pro, Intel UHD 630 (Coffee Lake) + Radeon Pro 555X, FaceTime HD camera | Omarchy 4.5.0 (Arch family), Hyprland / Wayland, PipeWire + `xdg-desktop-portal-hyprland` | `renderD128` i915, allowed; `renderD129` amdgpu, **quarantined** after the 2026-09-24 host hang | Named physical tester for L1.5 through L5 |
 
-L6 still needs an Ubuntu 24.04 x64 machine for the AppImage and updater
-evidence; ogre does not substitute for it.
+Beta needs a second named Tier 1 box, an Ubuntu 24.04 x64 machine (plan 257
+D2, owner-owed), for the AppImage and updater evidence; ogre does not
+substitute for it. Until that box exists AMD VAAPI, GNOME, KDE and Ubuntu's
+Secure Boot path cannot be accepted.
 
 The binary pin lives in `vendor/ffmpeg/linux-pin.json`. Run
 `pnpm ffmpeg:fetch:linux` on Linux x64 to download and stage it. The fetch step
@@ -116,6 +152,9 @@ while a plain CLI encode passes. The probe therefore tries a compat set
 (CBR, no B-frames, no level pin) after the standard set fails on the same
 node; that compat set is provisional until the bisect on the box confirms
 which argument the iHD driver rejects (Plan 053, S3).
+The bisect found the `-level 4.0` spelling (`linux-dev-loop.md`); on
+2026-11-23 the standard set passed on `renderD128` in every run, so the compat
+set stays as defence in depth only.
 
 ## Delivery phases
 
@@ -141,9 +180,13 @@ rather than allowed crate-wide.
   rate control, and truthful backend diagnostics.
 - Keep `libx264`, GPL, and nonfree builds out of provisioning and runtime args.
 
-The code and CI contract are implemented. A named physical Linux machine must
-still prove both the VAAPI path and the software fallback before the release
-can advance.
+The code and CI contract are implemented, and L1.5 is proven on ogre
+(2026-11-23, plan 257 S5): the two-backend acceptance passed with
+`complete: true` and no device pin, and `auto` with nothing set picks VAAPI on
+the Intel node while the AMD node stays quarantined. Record:
+[`acceptance/2026-11-23-linux-l1.5-ogre.md`](acceptance/2026-11-23-linux-l1.5-ogre.md)
+and its JSON. AMD VAAPI still needs a box whose AMD GPU encodes (plan 257 S21,
+blocked on D2).
 
 Run the hardware-only acceptance command on a named physical Linux x64 tester
 box (the distribution is recorded in the evidence, not gated). It requires a
@@ -187,11 +230,13 @@ Secure Boot, Linux ships guidance only.
 
 ### Hardware stop before L2
 
-Do not start L2 until a named Linux tester and a specific physical Linux x64
-machine are recorded in "Named tester boxes" and the L1.5 evidence is
-`complete: true`. Virtual machines and CI runners do not satisfy this gate.
-Each later phase must include dated real-device evidence before the next phase
-starts.
+This was the rule for building L2 onward: a named Linux tester and a specific
+physical Linux x64 machine had to be recorded in "Named tester boxes" and the
+L1.5 evidence had to be `complete: true`. L2 through L6 were then built and
+shipped as an Alpha under owner waivers without that evidence. ogre's L1.5
+evidence is now committed (2026-11-23). Beta removes the waiver: virtual
+machines and CI runners still do not satisfy the gate, and both Tier 1 boxes
+need a physical acceptance pass (plan 257 D11).
 
 ### L2 — PipeWire audio
 
@@ -246,23 +291,31 @@ starts.
 
 ### L6 — AppImage, release lane, and acceptance
 
-- Status (Plan 0008/0009, 2026-09-25): `electron-builder.yml` has a Linux
+- Status: shipped as a public Alpha under owner waiver
+  (`docs/acceptance/linux-alpha/`). `electron-builder.yml` has a Linux
   AppImage+dir target; `pnpm package:desktop:linux` +
   `preflight-linux-package.mjs` stage the release backend and pinned LGPL
-  FFmpeg. `.github/workflows/release-linux-alpha.yml` now builds an unsigned
-  Ubuntu 24.04 x64 AppImage candidate, writes isolated
-  `release.json` / `latest-linux.yml` under `releases/linux-alpha/<releaseId>/`
-  (stored at `candidates/linux-alpha/<releaseId>/<sourceCommit>/`), and uploads
-  only to private candidate prefixes. Public download, website manifests,
-  `promote-linux-alpha.yml`, Ubuntu 24.04 named-box packaged smoke, and the
-  videorc-web download button are still owed.
+  FFmpeg. `.github/workflows/release-linux-alpha.yml` builds an unsigned
+  Ubuntu 24.04 x64 AppImage and stores it as a private candidate under
+  `candidates/linux-alpha/<releaseId>/<sourceCommit>/`. There is no promote
+  workflow: the release owner publishes the create-only
+  `releases/linux-alpha/<releaseId>/release.json` (with the commit-pinned
+  owner-waiver record URL) and the videorc-web download manifest env, and the
+  signed-in videorc.com download serves it. The in-app update is a changelog
+  notice, not an updater: the `latest-linux.yml` feed is not published, so
+  Linux never self-updates.
+- Still owed for Beta (plan 257): a promote workflow with a signature and
+  `.sha256` per release, AppImage self-update from a published feed, packaged
+  smoke on a named Ubuntu 24.04 box, and a physical acceptance pass on both
+  Tier 1 boxes with no waiver.
 
 - Build an Ubuntu 24.04 x64 AppImage with the verified LGPL FFmpeg payload.
-- Use an isolated Linux Alpha lane with candidate, pilot, then public
-  promotion; never reuse or mutate the macOS Beta or Windows Alpha manifests.
+- Use an isolated Linux lane under `releases/linux-alpha/`; never reuse or
+  mutate the macOS Beta or Windows Alpha manifests.
 - Add packaged-app device, recording, streaming, updater, and cleanup smokes.
-- Publish Linux only after dated real-device evidence meets the same explicit
-  quality and lifecycle bar as the other shipping platforms.
+- Beta publishes Linux only after dated real-device evidence on both Tier 1
+  boxes meets the same quality and lifecycle bar as the other shipping
+  platforms; the Alpha lane has used an owner waiver instead.
 
 ## Reference implementation and attribution
 

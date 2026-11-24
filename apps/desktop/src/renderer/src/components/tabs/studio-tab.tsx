@@ -73,7 +73,8 @@ export function StudioTab(): ReactElement {
   const Transport = retro ? RetroSessionTransport : SessionTransport
   const InspectorSession = retro ? RetroSessionPanel : SessionPanel
   const { recording } = useStudioRecordingState()
-  const { cloudStatus: talkStatus, talkShow } = useStudioCloud()
+  // No cloud read here: a room snapshot (a guest starts talking) would
+  // re-render the whole page. The transport reads it (PH-12).
   const {
     canStop,
     startRequestPending,
@@ -196,19 +197,9 @@ export function StudioTab(): ReactElement {
               above Session (owner call, 2026-09-23); Space still records.
               The state and the clock are the status bar's and the sidebar
               Studio row's (plan 235 D1). */}
-          <Transport
+          <StudioTransport
+            Transport={Transport}
             active={active}
-            talkShowOutputs={
-              talkStatus?.room?.phase === 'open'
-                ? {
-                    recording: talkStatus.recording?.active === true,
-                    live: talkStatus.room.live,
-                    onStopRecording: () => {
-                      void talkShow.stopCloudRecording()
-                    }
-                  }
-                : undefined
-            }
             blockedJump={
               banner?.jumpTo && banner.jumpLabel
                 ? { label: banner.jumpLabel, to: banner.jumpTo, settingsTab: banner.settingsTab }
@@ -274,6 +265,39 @@ export function StudioTab(): ReactElement {
         </aside>
       </div>
     </div>
+  )
+}
+
+type TransportProps = Parameters<typeof SessionTransport>[0]
+
+/**
+ * Record, Go Live and Stop, with a talk show's own outputs while its room is
+ * open (plan 224). Its own component, so the room's snapshots re-render only
+ * the transport, not the Studio page (PH-12).
+ */
+function StudioTransport({
+  Transport,
+  ...props
+}: Omit<TransportProps, 'talkShowOutputs'> & {
+  Transport: (props: TransportProps) => ReactElement
+}): ReactElement {
+  const { cloudStatus, talkShow } = useStudioCloud()
+  const room = cloudStatus?.room
+  return (
+    <Transport
+      {...props}
+      talkShowOutputs={
+        room?.phase === 'open'
+          ? {
+              recording: cloudStatus?.recording?.active === true,
+              live: room.live,
+              onStopRecording: () => {
+                void talkShow.stopCloudRecording()
+              }
+            }
+          : undefined
+      }
+    />
   )
 }
 

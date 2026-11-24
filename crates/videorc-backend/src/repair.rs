@@ -23,6 +23,9 @@ use serde::{Deserialize, Serialize};
 use crate::ffmpeg::ffmpeg_file_path;
 use crate::process_job::spawn_owned_std;
 
+// Plan 260 S1.1: these wire types live in `videorc-protocol` now.
+pub use videorc_protocol::repair::GateStatus;
+
 pub const MAINTENANCE_CANCELLED: &str = "maintenance cancelled";
 pub const STRICT_AV_SKEW_HARD_FAIL_MS: f64 = 150.0;
 pub const STRICT_MAX_AUDIO_GAP_MS: f64 = 20.0;
@@ -1048,7 +1051,7 @@ impl RepairVideoEncoder {
     /// the old hardcoded `libx264 -crf 18` failed on every bundled build with
     /// "Unrecognized option 'crf'". `video_bitrate_kbps` is the target for
     /// the encoder without one (libopenh264).
-    fn encode_args(self, video_bitrate_kbps: u32) -> Vec<String> {
+    pub(crate) fn encode_args(self, video_bitrate_kbps: u32) -> Vec<String> {
         let args: &[&str] = match self {
             RepairVideoEncoder::Libx264 => &[
                 "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-threads", "1",
@@ -1187,6 +1190,35 @@ pub fn probe_repair_encoder(ffmpeg_path: &str) -> Option<RepairVideoEncoder> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     cache.insert(ffmpeg_path.to_string(), probed);
     probed
+}
+
+/// `-c:v …` args for a test fixture that needs a valid H.264 stream, from
+/// the encoder `ffmpeg_path` actually ships (#1635). Every FFmpeg Videorc
+/// bundles is LGPL with no libx264, so a hardcoded `-c:v libx264` failed
+/// "Unknown encoder" before the test proved anything. libx264 keeps the old
+/// fixtures' fast preset; the others take the repair encode, which never skips
+/// a frame. `None`, with `test` named on stderr, when the binary has no H.264
+/// encoder at all: the caller skips.
+#[cfg(test)]
+pub(crate) fn test_h264_encode_args(ffmpeg_path: &str, test: &str) -> Option<Vec<String>> {
+    let Some(encoder) = probe_repair_encoder(ffmpeg_path) else {
+        eprintln!("{test}: skipped, {ffmpeg_path} has no H.264 encoder");
+        return None;
+    };
+    Some(match encoder {
+        RepairVideoEncoder::Libx264 => [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+        .iter()
+        .map(|arg| arg.to_string())
+        .collect(),
+        other => other.encode_args(4_000),
+    })
 }
 
 /// Whether any issue is something a viewer notices immediately (a missing stream),
@@ -2415,38 +2447,6 @@ pub fn write_repair_reports(
 }
 
 // --- Post-recording quality gate (slice 8) ---
-
-/// The post-recording quality-gate result for one finalized file. This is the backend
-/// decision; the renderer-facing status strings (`checking`/`repairing`/`ready`/
-/// `not-100%`/`cancelled`) are mapped in the protocol slice.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "status", rename_all = "kebab-case")]
-pub enum GateStatus {
-    /// Passed every objective gate as-is.
-    Ready {
-        path: String,
-        /// Plan 200 C8: a quick check of a long recording (sampled windows).
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        sampled: bool,
-    },
-    /// Failed the gate but was repaired in place (backup kept) and now passes.
-    Repaired { path: String, interpolated: bool },
-    /// Could not be brought to 100%; the original visible file is kept, with reasons.
-    /// `needs_attention` marks verdicts a user would actually notice (a missing
-    /// stream) as opposed to pacing/skew residuals only visible to the analyzer.
-    NotHundredPercent {
-        path: String,
-        reasons: Vec<String>,
-        #[serde(default)]
-        needs_attention: bool,
-        /// Plan 200 C8: a quick check of a long recording (sampled windows).
-        /// It is reported, never repaired automatically.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        sampled: bool,
-    },
-    /// The gate itself could not run (e.g. the file could not be probed).
-    Failed { path: String, reason: String },
-}
 
 /// Plain-English reasons for a set of issues (drives the "not 100%" warning copy).
 pub fn issue_reasons(issues: &[QualityIssue]) -> Vec<String> {
@@ -4127,6 +4127,11 @@ mod tests {
     #[test]
     #[ignore = "builds ffmpeg fixtures and repairs them; run with --ignored"]
     fn repairs_a_one_sided_recording_end_to_end() {
+        let Some(video_args) =
+            test_h264_encode_args("ffmpeg", "repairs_a_one_sided_recording_end_to_end")
+        else {
+            return;
+        };
         let dir = scratch_dir("fixture-one-sided");
         let original = dir.join("one_sided.mp4");
 
@@ -4157,17 +4162,9 @@ mod tests {
                 "30",
                 "-vsync",
                 "cfr",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-ac",
-                "2",
             ])
+            .args(&video_args)
+            .args(["-c:a", "aac", "-ac", "2"])
             .arg(&original)
             .status()
             .expect("ffmpeg should be on PATH for this ignored test");
@@ -4467,6 +4464,10 @@ mod tests {
     #[test]
     #[ignore = "spawns ffmpeg/ffprobe to build and gate a real clean recording"]
     fn gate_passes_a_clean_recording() {
+        let Some(video_args) = test_h264_encode_args("ffmpeg", "gate_passes_a_clean_recording")
+        else {
+            return;
+        };
         let dir = scratch_dir("gate-clean");
         let path = dir.join("clean.mp4");
         let built = Command::new("ffmpeg")
@@ -4482,14 +4483,9 @@ mod tests {
                 "sine=frequency=440",
                 "-t",
                 "1",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                path.to_str().unwrap(),
             ])
+            .args(&video_args)
+            .args(["-c:a", "aac", path.to_str().unwrap()])
             .output()
             .unwrap();
         assert!(
@@ -4517,6 +4513,11 @@ mod tests {
     #[test]
     #[ignore = "spawns ffmpeg/ffprobe to build and gate a one-sided recording"]
     fn gate_repairs_a_one_sided_recording() {
+        let Some(video_args) =
+            test_h264_encode_args("ffmpeg", "gate_repairs_a_one_sided_recording")
+        else {
+            return;
+        };
         let dir = scratch_dir("gate-one-sided");
         let path = dir.join("one-sided.mp4");
         let built = Command::new("ffmpeg")
@@ -4534,14 +4535,9 @@ mod tests {
                 "1",
                 "-af",
                 "pan=stereo|c0=c0|c1=0*c0",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                path.to_str().unwrap(),
             ])
+            .args(&video_args)
+            .args(["-c:a", "aac", path.to_str().unwrap()])
             .output()
             .unwrap();
         assert!(

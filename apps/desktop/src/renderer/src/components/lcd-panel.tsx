@@ -301,21 +301,35 @@ const ROW_BUTTON =
 /**
  * A fact that goes to the page owning it (the screen's `NavigableRow`): the
  * label, the lit value and a pixel chevron. `hint` lists what a summarised
- * value stands for, on hover and on focus.
+ * value stands for, on hover and on focus. A row that opens a popover (the
+ * camera's Background) is this row too: the trigger renders it.
  */
 export function LcdPanelNavRow({
   label,
   value,
   hint,
-  onNavigate
-}: {
+  className,
+  onNavigate,
+  onClick,
+  ...buttonProps
+}: Omit<ComponentProps<'button'>, 'children' | 'value'> & {
   label: string
   value: ReactNode
   hint?: ReactNode
-  onNavigate: () => void
+  /** Omitted when a popover's trigger renders the row and opens its popover instead. */
+  onNavigate?: () => void
 }): ReactElement {
   const button = (
-    <button className={ROW_BUTTON} data-slot="lcd-panel-nav-row" type="button" onClick={onNavigate}>
+    <button
+      {...buttonProps}
+      className={cn(ROW_BUTTON, className)}
+      data-slot="lcd-panel-nav-row"
+      type="button"
+      onClick={(event) => {
+        onClick?.(event)
+        onNavigate?.()
+      }}
+    >
       <span className="shrink-0 text-(--lcd-display-ink-dim)">{label}</span>
       <span className="flex min-w-0 items-center gap-2 text-(--lcd-display-lit)">
         {/* A long value truncates: the title on the cut text reveals it (plan 174 S1.10). */}

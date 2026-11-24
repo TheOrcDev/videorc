@@ -15,9 +15,15 @@ import {
 import { SystemAudioIdleLine, type SystemAudioRowProps } from './audio-section'
 import { RetroAudioSectionView, RetroQuickSettings, RetroTakeoverSection } from './retro-lcd-studio'
 
-const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
+const mocked = vi.hoisted(() => ({
+  core: {} as Record<string, unknown>,
+  // Plan 258 S4: the camera status the system effect line reads.
+  preview: { previewCameraStatus: {} as Record<string, unknown> }
+}))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
+  useStudioPreview: () => mocked.preview,
+  useStudioCloud: () => ({ cloudStatus: null }),
   // The Chat row under Captions (plan 213 B1), idle.
   useStudioChat: () => ({
     liveChatSnapshot: { providers: [], messages: [], unreadCount: 0, updatedAt: '' },
@@ -25,6 +31,9 @@ vi.mock('@/hooks/use-studio', () => ({
   }),
   useStudioRecordingState: () => ({ recording: { state: 'idle' } }),
   useStudioShell: () => ({ openCommentsWindow: vi.fn(), runtimeInfo: { platform: 'darwin' } })
+}))
+vi.mock('@/hooks/use-background-assets', () => ({
+  useBackgroundAssets: () => ({ registry: { slots: [], assets: {} } })
 }))
 vi.mock('@/components/workspace-nav', () => ({
   useWorkspaceNav: () => ({ openSettings: vi.fn(), openStudioPanel: vi.fn(), setActive: vi.fn() }),
@@ -286,6 +295,8 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
       systemAudioConfirmed: null,
       systemAudioIssue: null,
       settings: {},
+      applyCameraBackground: vi.fn(),
+      runtimeInfo: { platform: 'darwin' },
       screenPrivacy: { hidden: false },
       ...extra
     }
@@ -304,26 +315,29 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
     const cog = (sources ?? '').indexOf('aria-label="Open Sources"')
     expect(cog).toBeGreaterThan((sources ?? '').indexOf('aria-label="Camera"'))
     // System audio is in Audio since plan 201.
-    // Green screen under the Camera picker: Off, Green screen or Blue screen,
-    // with no label and no Adjust (plan 248). The Screen lives with the scene
-    // that shows it (plan 231 D8).
+    // Background under the Camera picker (plan 258 S5, where plan 248's
+    // Green screen was): the pick lit on the screen, opening the picker; no
+    // Adjust. The Screen lives with the scene that shows it (plan 231 D8).
+    // It is the same row as Captions (a nav row with the pixel chevron
+    // pointing right), never a value button with a down chevron.
     expect(rowLabels(sources ?? '')).toEqual(['Camera'])
-    const greenScreen = (sources ?? '').split('data-testid="green-screen"')[1] ?? ''
-    expect(greenScreen).toMatch(
-      /aria-label="Green screen"[^>]*role="radiogroup"|role="radiogroup"[^>]*aria-label="Green screen"/
-    )
-    expect(
-      [...greenScreen.matchAll(/role="radio"[^>]*>(?:<span[^>]*>)?([^<]+)</g)].map(
-        (match) => match[1]
-      )
-    ).toEqual(['Off', 'Green screen', 'Blue screen'])
-    expect(greenScreen).toMatch(/aria-checked="true"[^>]*role="radio"[^>]*><span[^>]*>Off</)
+    const background =
+      /<button[^>]*data-videorc-camera-background-trigger[^>]*>[\s\S]*?<\/button>/.exec(
+        sources ?? ''
+      )?.[0] ?? ''
+    expect(background).toContain('aria-label="Background: Off"')
+    expect(background).toContain('data-slot="lcd-panel-nav-row"')
+    expect(background).toContain('>Background<')
+    expect(background).toContain('>Off<')
+    expect(background).toContain('viewBox="0 0 3 5"')
+    expect(background).not.toContain('viewBox="0 0 5 3"')
+    expect(sources).not.toContain('role="radiogroup"')
     expect(sources).not.toContain('Adjust')
     expect(sources).not.toContain('System audio')
     expect(/<button[^>]*aria-label="Camera"[^>]*>/.exec(markup)?.[0]).toContain('role="combobox"')
     expect(markup).not.toContain('aria-label="Screen"')
     expect(markup).not.toContain('Hide screen')
-    // No switch: Green screen is a pick, and System audio lives in Audio.
+    // No switch: Background is a pick, and System audio lives in Audio.
     expect(sources).not.toContain('role="switch"')
     // Captions: under no heading, a door to its page (B-13, B-15).
     expect(captions).not.toContain('<h2')
@@ -331,6 +345,32 @@ describe('Retro LCD Sources and Takeover (plan 197)', () => {
     // Chat's door shares the Captions screen, right under it (plan 213 B1).
     expect(captions).toMatch(/>Captions<[\s\S]*data-slot="lcd-panel-nav-row"[^>]*>[\s\S]*?>Chat</)
     expect(captions).toContain('Stream Manager · <span')
+  })
+
+  it('says under the camera when macOS is blurring it, and nothing otherwise (plan 258 S4)', () => {
+    core({ screenId: 'screen:2', cameraId: 'camera:1' }, [display, camera])
+    mocked.preview = { previewCameraStatus: {} }
+    expect(renderToStaticMarkup(createElement(RetroQuickSettings))).not.toContain(
+      'data-slot="camera-system-effect"'
+    )
+    mocked.preview = {
+      previewCameraStatus: {
+        systemEffect: {
+          provider: 'macos-video-effects',
+          backgroundBlur: true,
+          backgroundReplacement: false,
+          studioLight: false,
+          turnedOffByVideorc: false
+        }
+      }
+    }
+    const markup = renderToStaticMarkup(createElement(RetroQuickSettings))
+    mocked.preview = { previewCameraStatus: {} }
+    const line = markup.split('data-slot="camera-system-effect"')[1] ?? ''
+    expect(line).toContain('macOS is blurring this camera (Video menu, Portrait).')
+    expect(markup.indexOf('data-slot="camera-system-effect"')).toBeGreaterThan(
+      markup.indexOf('data-videorc-camera-background-trigger')
+    )
   })
 
   it('switches takeovers from rows that say On or Off, and says what a click does', () => {

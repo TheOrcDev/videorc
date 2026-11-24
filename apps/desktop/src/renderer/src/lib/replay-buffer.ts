@@ -11,6 +11,7 @@ import { withWorkNotifications } from '@/lib/notify'
 import { buildStartSessionParams } from '@/lib/session-params'
 import { toast } from '@/lib/toast'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
+import { replaySourcesNotReadyStep } from '@/lib/replay-buffer-camera-wait'
 
 // Plan 181 (the owner's redesign, R4): the clip buffer's words, numbers and
 // toasts. Loaded lazily by the Studio provider and the UI that shows the
@@ -116,6 +117,32 @@ export function showClipsCouldNotStart(reason: string): void {
   withWorkNotifications((work) => work.publishClipsCouldNotStart(reason))
 }
 
+type CameraWaitInput = Parameters<typeof replaySourcesNotReadyStep>[0]
+
+/** A `replay-sources-not-ready` refusal (lib/replay-buffer-camera-wait); its
+ * one notice is the Clips entry behind the bell. Positional, so the eager
+ * Studio call stays small. False: the start counts as failed. */
+export function takeSourcesNotReady(
+  client: BackendClient,
+  wait: CameraWaitInput['wait'],
+  waitingForLive: CameraWaitInput['waitingForLive'],
+  notified: CameraWaitInput['notified'],
+  camera: { current: CameraWaitInput['camera'] },
+  config: { current: CaptureConfig },
+  schedule: CameraWaitInput['schedule']
+): boolean {
+  return replaySourcesNotReadyStep({
+    wait,
+    waitingForLive,
+    notified,
+    camera: camera.current,
+    chosenCameraId: config.current.sources.cameraId,
+    schedule,
+    notify: showClipsCouldNotStart,
+    watch: (listener) => client.on('preview.camera.status', listener)
+  })
+}
+
 /**
  * The buffer-only session's request (plan 181): the Record session's params
  * with no file and no stream, the ring attached, built here so the eager
@@ -123,17 +150,24 @@ export function showClipsCouldNotStart(reason: string): void {
  */
 export async function startBufferOnlySession(input: {
   client: BackendClient
-  captureConfig: CaptureConfig
-  scene: Scene | null
+  /**
+   * The capture config and the scene the Studio holds, read as the request
+   * goes out. The backend commits a start's scene over the layout, so a
+   * scene from an older render (or from before the awaits here) puts the
+   * scene a layout change left behind back: a camera dragged into Freeform
+   * from Screen only vanished that way.
+   */
+  current: () => { captureConfig: CaptureConfig; scene: Scene | null }
   sceneEditMode: boolean
   settings: SettingsState
 }): Promise<RecordingStatus> {
   const outputDirectory = input.settings.outputDirectoryHandle
     ? await window.videorc?.authorizeOutputDirectory?.(input.settings.outputDirectoryHandle)
     : null
+  const { captureConfig, scene } = input.current()
   const params = buildStartSessionParams({
-    captureConfig: input.captureConfig,
-    scene: input.scene,
+    captureConfig,
+    scene,
     sceneEditMode: input.sceneEditMode,
     settings: input.settings,
     suppressCaptionsForSession: true,

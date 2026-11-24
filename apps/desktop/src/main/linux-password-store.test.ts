@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { chromiumMapsPasswordStore, linuxPasswordStoreSwitch } from './linux-password-store'
+import {
+  chromiumMapsPasswordStore,
+  linuxKeyringStatus,
+  linuxPasswordStoreSwitch
+} from './linux-password-store'
 
 describe('linuxPasswordStoreSwitch', () => {
   it.each(['Hyprland', 'sway', 'i3', 'niri', 'LXQt', ''])(
@@ -56,5 +60,56 @@ describe('linuxPasswordStoreSwitch', () => {
     expect(
       linuxPasswordStoreSwitch(platform, { XDG_CURRENT_DESKTOP: 'Hyprland' }, false)
     ).toBeNull()
+  })
+})
+
+describe('linuxKeyringStatus (plan 257 S18)', () => {
+  const store = (available: boolean, backend: string) => ({
+    isEncryptionAvailable: () => available,
+    getSelectedStorageBackend: () => backend
+  })
+
+  it('says nothing off Linux, so macOS and Windows never ask safeStorage', () => {
+    const probe = {
+      isEncryptionAvailable: () => {
+        throw new Error('must not be asked')
+      }
+    }
+    expect(linuxKeyringStatus('darwin', probe, null)).toBeNull()
+    expect(linuxKeyringStatus('win32', probe, null)).toBeNull()
+  })
+
+  it('is available with a real store', () => {
+    expect(linuxKeyringStatus('linux', store(true, 'gnome_libsecret'), null)).toEqual({
+      backend: 'gnome_libsecret',
+      available: true,
+      userPasswordStore: null
+    })
+    expect(linuxKeyringStatus('linux', store(true, 'kwallet6'), null)?.available).toBe(true)
+  })
+
+  it('is unavailable on basic_text even when Chromium calls it available', () => {
+    expect(linuxKeyringStatus('linux', store(true, 'basic_text'), null)?.available).toBe(false)
+    expect(linuxKeyringStatus('linux', store(false, 'basic_text'), 'basic')).toEqual({
+      backend: 'basic_text',
+      available: false,
+      userPasswordStore: 'basic'
+    })
+  })
+
+  it('reads a throwing safeStorage as unavailable, never as a crash', () => {
+    const probe = {
+      isEncryptionAvailable: () => {
+        throw new Error('not ready')
+      },
+      getSelectedStorageBackend: () => {
+        throw new Error('not ready')
+      }
+    }
+    expect(linuxKeyringStatus('linux', probe, null)).toEqual({
+      backend: 'unknown',
+      available: false,
+      userPasswordStore: null
+    })
   })
 })

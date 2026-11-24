@@ -28,8 +28,7 @@ import { PanelSection } from '@/components/panel-section'
 import { dockHiddenDisplay } from '@/components/preview-stage'
 import { BannerInspector, SceneBannersSection } from '@/components/scene/banner-inspector'
 import { CameraResetButton } from '@/components/scene/camera-reset-button'
-import { CameraKeyEdgesFields } from '@/components/scene/camera-key-edges-fields'
-import { cameraKeyEdgesOf } from '@/components/scene/camera-key-edges'
+import { CameraBackgroundSection } from '@/components/camera-background/camera-background-section'
 import {
   BannerEdits,
   OverlayEdits,
@@ -127,14 +126,7 @@ import {
 } from '@/lib/page-layout'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { overlayLayoutForDisplay } from '@/lib/captions-output'
-import {
-  GREEN_SCREEN_MODES,
-  type GreenScreenMode,
-  greenScreenMode,
-  greenScreenModePatch,
-  SCENE_GREEN_SCREEN_EVENT,
-  takeSceneGreenScreenRequest
-} from '@/lib/green-screen'
+import { SCENE_BACKGROUND_EVENT, takeSceneBackgroundRequest } from '@/lib/green-screen'
 import { freeformSwitching, presetSwitching } from '@/lib/layout-switch-pending'
 import {
   effectiveCameraMaskShape,
@@ -312,11 +304,6 @@ const CAMERA_FIT_OPTIONS: SegmentedControlOption<CameraFit>[] = [
   { value: 'fill', label: 'Fill crop' },
   { value: 'fit', label: 'Fit frame' }
 ]
-
-// Off takes the room its word needs; the two screens share the rest evenly.
-const CHROMA_KEY_MODE_OPTIONS: SegmentedControlOption<GreenScreenMode>[] = GREEN_SCREEN_MODES.map(
-  ({ value, label }) => ({ value, label, className: value === 'off' ? 'flex-none' : undefined })
-)
 
 function OpenSourcesLink(): ReactElement {
   return (
@@ -558,18 +545,18 @@ export function LayoutTab(): ReactElement {
     selectedSceneSourceId,
     setSelectedSceneSourceId
   ])
-  // Green screen settings from ⌘K: the camera takes the
-  // stage's one selection and its inspector brings Green screen into view.
+  // Background settings (⌘K, the Studio popover's Settings): the camera takes
+  // the stage's one selection and its inspector brings Background into view.
   // The request waits for the page (it mounts only while open), and a page
   // already open hears it.
   const [greenScreenFocus, setGreenScreenFocus] = useState(false)
   useEffect(() => {
     const take = (): void => {
-      if (takeSceneGreenScreenRequest()) setGreenScreenFocus(true)
+      if (takeSceneBackgroundRequest()) setGreenScreenFocus(true)
     }
     take()
-    window.addEventListener(SCENE_GREEN_SCREEN_EVENT, take)
-    return () => window.removeEventListener(SCENE_GREEN_SCREEN_EVENT, take)
+    window.addEventListener(SCENE_BACKGROUND_EVENT, take)
+    return () => window.removeEventListener(SCENE_BACKGROUND_EVENT, take)
   }, [])
   useEffect(() => {
     if (!greenScreenFocus || !scene) return
@@ -728,10 +715,14 @@ export function LayoutTab(): ReactElement {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [platform, undoLayoutPatch])
 
-  // Live canvas (plan 058, macOS only): the docked native preview glues into
-  // the stage's canvas rect instead of the Studio slot while this tab is
-  // mounted. Only one tab mounts at a time, so the two reporters never fight.
-  const liveCanvasSupported = nativePreviewSurfaceEnabled && runtimeInfo?.platform === 'darwin'
+  // Live canvas (plan 058): the docked preview glues into the stage's canvas
+  // rect instead of the Studio slot while this tab is mounted. Only one tab
+  // mounts at a time, so the two reporters never fight. macOS and Linux dock
+  // the same in-window proof view (plan 216 D4, plan 257 S3), which forwards
+  // the mouse to the stage under it.
+  const liveCanvasSupported =
+    nativePreviewSurfaceEnabled &&
+    (runtimeInfo?.platform === 'darwin' || runtimeInfo?.platform === 'linux')
   const liveCanvasActive =
     liveCanvasSupported && previewWindow.open && previewWindow.mode === 'docked'
   const slotRef = useDockSlotReporter(liveCanvasActive, previewWindow.dockEpoch, 'scene')
@@ -1154,7 +1145,7 @@ export function LayoutTab(): ReactElement {
         </div>
 
         {/* The inspector: one section named after the selection, then the
-            camera's Placement, Lens and Green screen (plan 174 S3.9, C-33 and
+            camera's Background, Placement and Lens (plan 174 S3.9, C-33 and
             C-35). Inert only during a pointer gesture (C-5). */}
         <FieldSet className={SCENE_INSPECTOR} inert={stageDragging}>
           {selectedBanner ? (
@@ -1464,7 +1455,7 @@ export function LayoutTab(): ReactElement {
 
 type CameraLayout = ReturnType<typeof useStudioCore>['captureConfig']['layout']
 
-// The camera's inspector: Placement, Lens and Green screen as three flush
+// The camera's inspector: Background, Placement and Lens as three flush
 // sections under the camera's own (plan 174 S3.9, step 7). Each takes its
 // description from the layout, so a scene with no corner or size says so once
 // in the right place instead of a loose paragraph.
@@ -1512,7 +1503,7 @@ function CameraInspector({
   positionLockReason: string | null
   stageDragging: boolean
   aspectLocked: boolean
-  /** Bring Green screen into view and focus its pick (⌘K's Green screen settings). */
+  /** Bring Background into view and focus its pick (⌘K's Background settings). */
   greenScreenFocus: boolean
   outputWidth: number
   outputHeight: number
@@ -1526,17 +1517,6 @@ function CameraInspector({
   onTransformCommit: (patch: { x?: number; y?: number; width?: number; height?: number }) => void
   onVisibilityChange: (sourceId: string, visible: boolean) => Promise<void>
 }): ReactElement {
-  // ⌘K's Green screen settings lands here: Green screen in view, its picked
-  // choice focused, once per request.
-  useEffect(() => {
-    if (!greenScreenFocus) return
-    const section = document.querySelector<HTMLElement>('[data-videorc-camera-green-screen]')
-    section?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-    section
-      ?.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]')
-      ?.focus({ preventScroll: true })
-    onGreenScreenFocused()
-  }, [greenScreenFocus, onGreenScreenFocused])
   // Plan 215 D1: while recording or live, the box's line says what is locked
   // or where a change lands; the preset copy stays where there is no box.
   const positionLocked = positionLockReason !== null
@@ -1708,82 +1688,10 @@ function CameraInspector({
           }}
         />
       </PanelSection>
-      {/* Green screen right under the camera's name, before Placement: a
-          yes or no people look for first, with its tuning folded until on. */}
-      <PanelSection
-        className="min-w-0"
-        data-videorc-camera-green-screen=""
-        headingLevel={3}
-        title="Green screen"
-      >
-        {/* Plan 248: the same three choices as the Studio's Camera row, so
-            the key and its colour are one pick; the tuning opens under it
-            while a key is on. */}
-        <Field>
-          <SegmentedControl
-            aria-label="Green screen"
-            className="w-full"
-            data-videorc-camera-green-screen-mode=""
-            options={CHROMA_KEY_MODE_OPTIONS}
-            value={greenScreenMode(layout)}
-            onValueChange={(mode) => onApplyLayoutPatch(greenScreenModePatch(mode))}
-          />
-          <p className="text-xs text-muted-foreground">
-            Needs an evenly lit green or blue screen behind you.
-          </p>
-        </Field>
-        {layout.cameraChromaKeyEnabled ? (
-          <>
-            <PowerSlider
-              label="Similarity"
-              max={100}
-              min={0}
-              numericInput
-              step={1}
-              suffix="%"
-              value={layout.cameraChromaKeySimilarityPct}
-              onChange={(cameraChromaKeySimilarityPct) =>
-                onPatchLayout({ cameraChromaKeySimilarityPct })
-              }
-              onCommit={(cameraChromaKeySimilarityPct) =>
-                onApplyLayoutPatch({ cameraChromaKeySimilarityPct })
-              }
-            />
-            <PowerSlider
-              label="Smoothness"
-              max={100}
-              min={0}
-              numericInput
-              step={1}
-              suffix="%"
-              value={layout.cameraChromaKeySmoothnessPct}
-              onChange={(cameraChromaKeySmoothnessPct) =>
-                onPatchLayout({ cameraChromaKeySmoothnessPct })
-              }
-              onCommit={(cameraChromaKeySmoothnessPct) =>
-                onApplyLayoutPatch({ cameraChromaKeySmoothnessPct })
-              }
-            />
-            <PowerSlider
-              label="Spill removal"
-              max={100}
-              min={0}
-              numericInput
-              step={1}
-              suffix="%"
-              value={layout.cameraChromaKeySpillPct}
-              onChange={(cameraChromaKeySpillPct) => onPatchLayout({ cameraChromaKeySpillPct })}
-              onCommit={(cameraChromaKeySpillPct) =>
-                onApplyLayoutPatch({ cameraChromaKeySpillPct })
-              }
-            />
-            <CameraKeyEdgesFields
-              edges={cameraKeyEdgesOf(layout)}
-              onCommit={(cameraChromaKeyEdges) => onApplyLayoutPatch({ cameraChromaKeyEdges })}
-            />
-          </>
-        ) : null}
-      </PanelSection>
+      {/* Plan 258 S5: Background right under the camera's name, before
+          Placement, where Green screen was: the camera's own pick (a blur,
+          a picture or a screen), the same in every scene. */}
+      <CameraBackgroundSection focus={greenScreenFocus} onFocused={onGreenScreenFocused} />
       <PanelSection
         className="min-w-0"
         description={placementDescription}

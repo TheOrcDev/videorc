@@ -7,6 +7,7 @@ import {
   oneScreenStage,
   pruneStageScreens,
   removeScreen,
+  screensByOwner,
   showScreens,
   stageScreens,
   stageSharers,
@@ -159,6 +160,21 @@ describe('the stage screens (plan 251)', () => {
     expect(twoScreensChosen({ ...pair, layout: 'spotlight' }, true)).toBe(false)
     expect(twoScreensChosen(stage(), true)).toBe(false)
     expect(twoScreensChosen(null, true)).toBe(false)
+  })
+
+  it("orders two screens as their owners stand on the stage, for each owner's side", () => {
+    const onStage = [HOST, 'g_ada', 'g_bo']
+    // The guest shared first, so the stage names the guest's screen first:
+    // drawn, the host's is still first (on the left, over the host).
+    expect(screensByOwner(['g_ada', HOST], onStage)).toEqual([HOST, 'g_ada'])
+    expect(screensByOwner([HOST, 'g_ada'], onStage)).toEqual([HOST, 'g_ada'])
+    expect(screensByOwner(['g_bo', 'g_ada'], onStage)).toEqual(['g_ada', 'g_bo'])
+    // The stage is not rewritten: `screen` stays the first one put up.
+    expect(stageScreens(pair)).toEqual(['g_ada', HOST])
+    // One screen, none, or an owner the order does not name: as it came.
+    expect(screensByOwner(['g_ada'], onStage)).toEqual(['g_ada'])
+    expect(screensByOwner([], onStage)).toEqual([])
+    expect(screensByOwner(['g_ada', HOST], ['g_ada'])).toEqual(['g_ada', HOST])
   })
 
   it('the Screen + people card: one screen, never a pair', () => {

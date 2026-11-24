@@ -12,6 +12,7 @@ vi.mock('@/lib/notifications/kinds', async (original) => {
       finished: { tone: 'done', life: 'event' },
       failure: { tone: 'urgent', life: 'event' },
       answer: { tone: 'done', life: 'event', answersAPress: true },
+      xEnded: { tone: 'warning', life: 'condition', mayBe: ['urgent'], failsASession: true },
       work: { tone: 'news', life: 'progress' }
     }
   }
@@ -50,8 +51,11 @@ describe('the notification store (plan 250)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     clock = 1_000_000
-    live = false
-    quiet = true
+    // A recording with "Quiet while recording or live" off: the one row of
+    // the table where every tone but news pops up, so these tests see the
+    // rules that decide when. Idle is the bell only.
+    live = true
+    quiet = false
     counts = []
     store = createNotificationStore({
       now: () => clock,
@@ -134,8 +138,92 @@ describe('the notification store (plan 250)', () => {
     })
   })
 
+  describe('at launch (the owner, 2026-11-22: no stack of toasts when you open the app)', () => {
+    let pressed = false
+    const launching = (): NotificationStore => {
+      pressed = false
+      const fresh = createNotificationStore({
+        now: () => clock,
+        live: () => live,
+        quiet: () => quiet,
+        pressed: () => pressed,
+        launchQuietMs: 60_000
+      })
+      fresh.setPopUpDoor(door)
+      return fresh
+    }
+
+    it('what Videorc finds in the first minute waits behind the bell, counted', () => {
+      const fresh = launching()
+      fresh.publish(problem({ key: 'host-overloaded', title: 'This computer is overloaded' }))
+      fresh.publish(problem({ key: 'global-shortcuts', title: "A shortcut didn't register" }))
+      fresh.publish({ key: 'saved', kind: kind('finished'), title: 'Recording saved' })
+      fresh.publish({ key: 'failed', kind: kind('failure'), title: 'Videorc needs a restart' })
+      expect(door.show).not.toHaveBeenCalled()
+      expect(fresh.count()).toMatchObject({ unread: 4, tone: 'urgent' })
+    })
+
+    it('a press does not let a startup check through, but its own answer speaks', () => {
+      const fresh = launching()
+      pressed = true
+      fresh.publish(problem({ key: 'host-overloaded', title: 'This computer is overloaded' }))
+      expect(door.show).not.toHaveBeenCalled()
+      fresh.publish({ key: 'clip', kind: kind('answer'), title: 'Clip saved' })
+      expect(door.show).toHaveBeenCalledTimes(1)
+      expect(door.show.mock.calls[0][0]).toMatchObject({ key: 'clip' })
+    })
+
+    it('an urgent problem pops up in a recording the streamer started in that minute', () => {
+      const fresh = launching()
+      fresh.publish({ key: 'early', kind: kind('failure'), title: 'Recording stopped' })
+      expect(door.show).not.toHaveBeenCalled()
+      pressed = true
+      live = true
+      fresh.publish({ key: 'late', kind: kind('failure'), title: 'Your stream stopped' })
+      expect(door.show).toHaveBeenCalledTimes(1)
+    })
+
+    it('after the first minute the plan 250 rules apply again; launch entries never pop up late', () => {
+      const fresh = launching()
+      fresh.publish(problem({ detail: 'No sound for 5 s.' }))
+      clock += 61_000
+      fresh.publish(problem({ detail: 'No sound for 66 s.' }))
+      expect(door.show).not.toHaveBeenCalled()
+      fresh.publish(problem({ key: 'disk-space', title: 'Recording space is low' }))
+      expect(door.show).toHaveBeenCalledTimes(1)
+    })
+  })
+
   describe('what pops up', () => {
-    it('idle: a warning pops up for 8 s with its first action', () => {
+    it('idle: nothing Videorc noticed pops up, at any time; it waits behind the bell', () => {
+      live = false
+      clock += 10 * 60_000
+      store.publish(problem())
+      store.publish(problem({ key: 'stream', tone: 'urgent', title: 'Videorc needs a restart' }))
+      store.publish({ key: 'saved', kind: kind('finished'), title: 'Recording saved' })
+      expect(door.show).not.toHaveBeenCalled()
+      expect(store.count()).toMatchObject({ unread: 3, tone: 'urgent' })
+      // The answer to a press still speaks.
+      store.publish({ key: 'clip:1', kind: kind('answer'), title: 'Clip saved' })
+      expect(door.show).toHaveBeenCalledTimes(1)
+    })
+
+    it('a livestream that failed pops up although it has just ended, never a warning', () => {
+      live = false
+      clock += 10 * 60_000
+      store.publish({ key: 'x', kind: kind('xEnded'), title: 'X is still preparing your stream' })
+      expect(door.show).not.toHaveBeenCalled()
+      store.publish({
+        key: 'x',
+        kind: kind('xEnded'),
+        tone: 'urgent',
+        title: 'X ended your broadcast'
+      })
+      expect(door.show).toHaveBeenCalledTimes(1)
+      expect(door.show.mock.calls[0][1]).toBe(15_000)
+    })
+
+    it('a warning pops up for 8 s with its first action', () => {
       const run = vi.fn()
       store.publish(problem({ actions: [{ id: 'open', label: 'Open Audio', kind: 'door', run }] }))
       expect(door.show).toHaveBeenCalledWith(
@@ -147,6 +235,7 @@ describe('the notification store (plan 250)', () => {
 
     it('recording or live with quiet on: only an urgent problem pops up, once', () => {
       live = true
+      quiet = true
       store.publish(problem())
       store.publish({ key: 'saved', kind: kind('finished'), title: 'Recording saved' })
       expect(door.show).not.toHaveBeenCalled()
@@ -171,12 +260,14 @@ describe('the notification store (plan 250)', () => {
 
     it('the late answer to a press pops up while live and quiet', () => {
       live = true
+      quiet = true
       store.publish({ key: 'clip:1', kind: kind('answer'), title: 'Clip saved' })
       expect(door.show.mock.calls[0][1]).toBe(4_000)
     })
 
     it('a warning that becomes urgent is one entry that pops up', () => {
       live = true
+      quiet = true
       store.publish(problem())
       store.markRead('microphone')
       store.publish(problem({ tone: 'urgent', title: 'Microphone lost' }))

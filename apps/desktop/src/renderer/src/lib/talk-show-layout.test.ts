@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 import type { CloudRoomStatus, CloudStageLayout } from '@/lib/backend'
+import { screensByOwner } from '@/lib/stage-screens'
 import {
   effectiveStageLayout,
   planStage,
@@ -10,6 +11,7 @@ import {
   shownScreens,
   stageRectPercent,
   type StageCanvas,
+  type StageInput,
   type StagePlan,
   type StageRect
 } from '@/lib/talk-show-layout'
@@ -103,6 +105,9 @@ describe('the two-screens layout (plan 251)', () => {
     canvas: StageCanvas
     layout: 'two-screens'
     people: string[]
+    /** Everyone on the stage, when the row draws fewer (someone is away). */
+    onStage?: string[]
+    /** As the stage names them: the first one put up first. */
     screens: string[]
     plan: StagePlan
   }
@@ -118,12 +123,15 @@ describe('the two-screens layout (plan 251)', () => {
   const input = (fixture: TwoScreensCase) => ({
     layout: 'screen-people' as const,
     people: fixture.people,
+    ...(fixture.onStage ? { onStage: fixture.onStage } : {}),
     screen: fixture.screens[0],
     screens: fixture.screens
   })
 
   it('covers 1 to 6 people on three canvases', () => {
-    expect(twoScreens).toHaveLength(18)
+    // And, on each canvas, the two owner-side cases: the guest's screen up
+    // first, and an owner away from the row.
+    expect(twoScreens).toHaveLength(24)
   })
 
   it.each(twoScreens.map((fixture) => [fixture.name, fixture] as const))(
@@ -138,7 +146,10 @@ describe('the two-screens layout (plan 251)', () => {
     for (const fixture of twoScreens) {
       const plan = planStage(fixture.canvas, input(fixture))
       expect(plan.tiles.slice(0, 2).map((tile) => [tile.kind, tile.identity])).toEqual(
-        fixture.screens.map((identity) => ['screen', identity])
+        screensByOwner(fixture.screens, fixture.onStage ?? fixture.people).map((identity) => [
+          'screen',
+          identity
+        ])
       )
       expect(plan.tiles.slice(2).map((tile) => tile.identity)).toEqual(fixture.people)
       const [first, second] = plan.tiles
@@ -154,6 +165,49 @@ describe('the two-screens layout (plan 251)', () => {
         }
       })
     }
+  })
+
+  // The owner, live on 2026-11-20: "My screen recording is above the guest
+  // and the guest's screen recording is above me." The guest had shared
+  // first, so the stage named the guest's screen first.
+  it("draws each screen above its owner's camera, whichever went up first", () => {
+    const centre = (tile: { rect: { x: number; w: number } }): number =>
+      tile.rect.x + tile.rect.w / 2
+    const people = ['host:sh', 'g_1']
+    for (const screens of [
+      ['g_1', 'host:sh'],
+      ['host:sh', 'g_1']
+    ]) {
+      const plan = planStage(
+        { width: 1920, height: 1080 },
+        { layout: 'screen-people', people, screen: screens[0], screens }
+      )
+      const tile = (kind: 'person' | 'screen', identity: string) =>
+        plan.tiles.find((entry) => entry.kind === kind && entry.identity === identity)!
+      for (const identity of people) {
+        expect(centre(tile('screen', identity))).toBe(centre(tile('person', identity)))
+        expect(tile('screen', identity).rect.y).toBeLessThan(tile('person', identity).rect.y)
+      }
+      expect(plan.tiles.slice(0, 2).map((entry) => entry.identity)).toEqual(people)
+    }
+    // Stacked on a portrait canvas: the first person's screen on top.
+    const portrait = planStage(
+      { width: 1080, height: 1920 },
+      { layout: 'screen-people', people, screen: 'g_1', screens: ['g_1', 'host:sh'] }
+    )
+    expect(portrait.tiles.slice(0, 2).map((entry) => entry.identity)).toEqual(people)
+    expect(portrait.tiles[0].rect.y).toBeLessThan(portrait.tiles[1].rect.y)
+  })
+
+  it('keeps each screen on its side while its owner is away from the row', () => {
+    const canvas = { width: 1920, height: 1080 }
+    const stage = { layout: 'screen-people' as const, screen: 'g_1', screens: ['g_1', 'host:sh'] }
+    const onStage = ['host:sh', 'g_1']
+    const both = planStage(canvas, { ...stage, people: onStage, onStage })
+    // The host was away for a minute: the row re-flows, the screens do not swap.
+    const hostAway = planStage(canvas, { ...stage, people: ['g_1'], onStage })
+    expect(hostAway.tiles.slice(0, 2)).toEqual(both.tiles.slice(0, 2))
+    expect(hostAway.tiles.slice(0, 2).map((entry) => entry.identity)).toEqual(onStage)
   })
 
   it('falls back to one screen and the people, then to the grid', () => {
@@ -197,11 +251,25 @@ describe('the two-screens layout (plan 251)', () => {
       live: false
     } satisfies CloudRoomStatus
     expect(showStageInput(base).screens).toEqual(['g_1', 'host:sh'])
+    // The Show stage draws them as the program does: the host's on the left,
+    // over the host, before the page reports and after.
+    const drawn = (input: StageInput): string[] =>
+      planStage({ width: 1920, height: 1080 }, input)
+        .tiles.filter((tile) => tile.kind === 'screen')
+        .map((tile) => tile.identity)
+    expect(drawn(showStageInput(base))).toEqual(['host:sh', 'g_1'])
     const both = showStageInput({
+      ...base,
+      shown: { onStage: ['host:sh', 'g_1'], screen: 'host:sh', screens: ['host:sh', 'g_1'] }
+    })
+    expect(effectiveStageLayout(both)).toBe('two-screens')
+    expect(drawn(both)).toEqual(['host:sh', 'g_1'])
+    // A page from before the fix reports them as the stage named them.
+    const older = showStageInput({
       ...base,
       shown: { onStage: ['host:sh', 'g_1'], screen: 'g_1', screens: ['g_1', 'host:sh'] }
     })
-    expect(effectiveStageLayout(both)).toBe('two-screens')
+    expect(drawn(older)).toEqual(['host:sh', 'g_1'])
     // The page shows only the host's (the guest's went stale).
     const one = showStageInput({
       ...base,
@@ -260,6 +328,7 @@ describe('showStageInput (review M2)', () => {
     expect(showStageInput(room())).toEqual({
       layout: 'screen-people',
       people: [HOST, 'g_ada', 'g_bo'],
+      onStage: [HOST, 'g_ada', 'g_bo'],
       spotlight: null,
       screen: 'g_ada'
     })

@@ -38,14 +38,19 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   // always the light variant, the stream is not themed.
   'src/lib/buddy-overlay.ts',
   // Chroma-key colours are the key itself.
+  'src/lib/camera-background.ts',
+  'src/lib/camera-background-migration.ts',
   'src/lib/capture.ts',
   'src/lib/green-screen.ts',
   // Published video content: key colours and the composited scene background.
   'src/lib/chroma-key-reference.ts',
   'src/lib/talk-show-camera-effects.ts',
   'src/components/tabs/layout-tab.tsx',
+  // Plan 258 S5: the Background tiles' pictures (the Orc over a room, the
+  // screen colours) are what the camera looks like on stream, not chrome.
+  'src/components/camera-background/camera-background-orc-art.tsx',
   // The privacy frost drawn over a shared screen is published video, not chrome.
-  'src/lib/room-screen-privacy.ts',
+  'src/lib/room-private-screen.ts',
   // Plan 254 S2: the shade over a portrait camera's fill, as the program
   // page draws it onto the stream: a picture's own pixels, not chrome.
   'src/lib/portrait-fill.ts',
@@ -593,6 +598,64 @@ describe('dialog anatomy (plan 174 S1.6b)', SOURCE_SCAN_TIMEOUT, () => {
       'obs.tsx:1: <DialogContent className=sm:max-w-xl>'
     ])
     expect(handSizedDialogs('ok.tsx', '<DialogContent size="lg" className="gap-4" />')).toEqual([])
+  })
+})
+
+// Alerts are never tinted (owner call 2026-11-22), the rule toasts already
+// follow: the tone colours the icon only. A call site never hands an Alert a
+// tone background, rim or ring of its own.
+const ALERT_TONE_SURFACE =
+  /(?:^|[\s'"`:])(?:bg|border|ring)-(?:destructive|warning|success|info|amber|yellow|red|orange|green|emerald|rose)\b/
+
+/** Every Alert (or `LockAlert`-style wrapper) whose className paints a tone surface. */
+function tintedAlerts(path: string, source: string): string[] {
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const found: string[] = []
+  const visit = (node: ts.Node): void => {
+    const parts = jsxParts(file, node)
+    if (parts && /(?:^|\.)\w*Alert$/.test(parts.tag)) {
+      const className = parts.attributes.get('className') ?? ''
+      if (ALERT_TONE_SURFACE.test(className)) {
+        const { line } = file.getLineAndCharacterOfPosition(node.getStart(file))
+        found.push(`${path}:${line + 1}: <${parts.tag} className=${className}>`)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return found
+}
+
+describe('alerts are never tinted', SOURCE_SCAN_TIMEOUT, () => {
+  it('keeps every Alert variant on one neutral fill: a tone colours its icon only', () => {
+    const alert = files.find(({ path }) => path === 'src/components/ui/alert.tsx')?.code ?? ''
+    expect(alert).toMatch(/\bbg-foreground\/4\b/)
+    expect(alert).not.toMatch(ALERT_TONE_SURFACE)
+  })
+
+  it('never hands an Alert a tone background, rim or ring', () => {
+    const offending = files
+      .filter(({ path, code }) => path.endsWith('.tsx') && /Alert\b/.test(code))
+      .flatMap(({ path }) => tintedAlerts(path, readFileSync(join(RENDERER_ROOT, path), 'utf8')))
+    expect(offending).toEqual([])
+  })
+
+  it('catches a tinted Alert however the props wrap, and leaves the icon colour alone', () => {
+    const tinted =
+      '<Alert\n  variant="warning"\n  className={cn("mb-2", paid && "bg-warning/10 dark:bg-amber-500/20")}\n/>'
+    expect(tintedAlerts('tinted.tsx', tinted)).toEqual([
+      'tinted.tsx:1: <Alert className=cn("mb-2", paid && "bg-warning/10 dark:bg-amber-500/20")>'
+    ])
+    expect(
+      tintedAlerts('lock.tsx', '<LockAlert className="border-destructive/40" reason="x" />')
+    ).toEqual(['lock.tsx:1: <LockAlert className=border-destructive/40>'])
+    expect(
+      tintedAlerts(
+        'ok.tsx',
+        '<Alert className="*:[svg]:text-destructive mt-2" variant="warning" />'
+      )
+    ).toEqual([])
+    expect(tintedAlerts('ok.tsx', '<AlertDialogContent className="bg-card" />')).toEqual([])
   })
 })
 

@@ -26,6 +26,9 @@ import {
   devAppSpawnSpec,
   launchDevApp,
   releaseBackendFakeOriginRefusal,
+  smokeAppIsGpui,
+  smokeAppKind,
+  smokeAppLaunchRefusal,
   macosAppBundlePath,
   macosLaunchServicesAppSpawnSpec,
   performanceAppSpawnSpec,
@@ -775,61 +778,53 @@ test(
   }
 )
 
-test(
-  'launchDevApp rejects a smoke command marker without a capability',
-  { skip: process.platform === 'win32' },
-  async () => {
-    const fixtureScript = `
+test('launchDevApp rejects a smoke command marker without a capability', async () => {
+  const fixtureScript = `
       console.log('[smoke] preview-motion-ready ' + JSON.stringify({ host: '127.0.0.1', port: 43210 }))
       setInterval(() => {}, 1_000)
     `
 
-    await assert.rejects(
-      launchDevApp({
-        timeoutMs: 2_000,
-        requiredMarkers: ['preview-motion-ready'],
-        spawnSpec: {
-          command: process.execPath,
-          args: ['-e', fixtureScript],
-          cwd: process.cwd()
-        }
-      }),
-      /Invalid \[smoke\] preview-motion-ready marker:.*per-run capability/
-    )
-  }
-)
-
-test(
-  'launchDevApp attaches a caller-held packaged capability before marker validation',
-  { skip: process.platform === 'win32' },
-  async () => {
-    const capability = 'x'.repeat(43)
-    const fixtureScript = `
-      console.log('[smoke] preview-motion-ready ' + JSON.stringify({ host: '127.0.0.1', port: 43210 }))
-      setInterval(() => {}, 1_000)
-    `
-    const launched = await launchDevApp({
+  await assert.rejects(
+    launchDevApp({
       timeoutMs: 2_000,
       requiredMarkers: ['preview-motion-ready'],
-      packagedSmokeCommandCapability: capability,
       spawnSpec: {
         command: process.execPath,
         args: ['-e', fixtureScript],
         cwd: process.cwd()
       }
-    })
+    }),
+    /Invalid \[smoke\] preview-motion-ready marker:.*per-run capability/
+  )
+})
 
-    try {
-      assert.deepEqual(launched.connections['preview-motion-ready'], {
-        host: '127.0.0.1',
-        port: 43210,
-        capability
-      })
-    } finally {
-      await launched.stop()
+test('launchDevApp attaches a caller-held packaged capability before marker validation', async () => {
+  const capability = 'x'.repeat(43)
+  const fixtureScript = `
+      console.log('[smoke] preview-motion-ready ' + JSON.stringify({ host: '127.0.0.1', port: 43210 }))
+      setInterval(() => {}, 1_000)
+    `
+  const launched = await launchDevApp({
+    timeoutMs: 2_000,
+    requiredMarkers: ['preview-motion-ready'],
+    packagedSmokeCommandCapability: capability,
+    spawnSpec: {
+      command: process.execPath,
+      args: ['-e', fixtureScript],
+      cwd: process.cwd()
     }
+  })
+
+  try {
+    assert.deepEqual(launched.connections['preview-motion-ready'], {
+      host: '127.0.0.1',
+      port: 43210,
+      capability
+    })
+  } finally {
+    await launched.stop()
   }
-)
+})
 
 test('stopProcess reports a graceful process-group stop', async () => {
   const child = fakeChild(123)
@@ -1075,7 +1070,7 @@ test('dev backend prebuild failures name the compile race instead of GPU noise',
   assert.match(missing, /could not start/)
 })
 
-test('a fake API origin refuses the release dev backend, which would call the real service', async () => {
+test('debug-only backend env refuses the release dev backend, which would call the real service or run signed out', async () => {
   const fake = { VIDEORC_DISCORD_API_BASE_URL: 'http://127.0.0.1:4555' }
   const refusal = releaseBackendFakeOriginRefusal(fake, { VIDEORC_DEV_BACKEND_PROFILE: 'release' })
   assert.match(refusal, /VIDEORC_DISCORD_API_BASE_URL only works with the debug backend/)
@@ -1089,6 +1084,35 @@ test('a fake API origin refuses the release dev backend, which would call the re
     ),
     /VIDEORC_YOUTUBE_API_BASE_URL/
   )
+  // The Videorc API origin and the mock account are debug-only too (videorc_api.rs, account.rs).
+  assert.match(
+    releaseBackendFakeOriginRefusal(
+      { VIDEORC_DEV_BACKEND_PROFILE: 'release', VIDEORC_API_BASE_URL: 'http://127.0.0.1:1' },
+      {}
+    ),
+    /VIDEORC_API_BASE_URL only works with the debug backend.*calls the real Videorc API/
+  )
+  assert.match(
+    releaseBackendFakeOriginRefusal(
+      { VIDEORC_MOCK_ACCOUNT: 'baseline' },
+      {
+        VIDEORC_DEV_BACKEND_PROFILE: 'release'
+      }
+    ),
+    /VIDEORC_MOCK_ACCOUNT only works with the debug backend.*runs signed out/
+  )
+  assert.match(
+    releaseBackendFakeOriginRefusal(
+      {
+        VIDEORC_DEV_BACKEND_PROFILE: 'release',
+        VIDEORC_API_BASE_URL: 'http://127.0.0.1:1',
+        VIDEORC_MOCK_ACCOUNT: 'baseline'
+      },
+      {}
+    ),
+    /VIDEORC_API_BASE_URL, VIDEORC_MOCK_ACCOUNT .*calls the real Videorc API and runs signed out/
+  )
+  assert.equal(releaseBackendFakeOriginRefusal({ VIDEORC_MOCK_ACCOUNT: 'baseline' }, {}), null)
   // Debug backend, or no fake origin: launch as before.
   assert.equal(releaseBackendFakeOriginRefusal(fake, {}), null)
   assert.equal(
@@ -1115,18 +1139,49 @@ test('the async dev backend prebuild keeps the event loop running and names its 
     cwd: tmpdir(),
     timeoutMs
   })
+  // A stand-in slot: the real one waits while other sessions hold both of this
+  // machine's build slots, and the file then never finishes. It still proves
+  // every build runs inside a slot, with the launch's env and log.
+  const slotCalls = []
+  let inSlot = false
+  const buildSlot = async (fn, options) => {
+    slotCalls.push(options)
+    inSlot = true
+    try {
+      return await fn()
+    } finally {
+      inSlot = false
+    }
+  }
+  const prebuild = (options) =>
+    prebuildDevBackend({
+      buildSlot,
+      ...options,
+      spec: {
+        ...options.spec,
+        // The child starts only inside the slot.
+        get command() {
+          assert.ok(inSlot, 'the prebuild runs inside a build slot')
+          return options.spec.command
+        }
+      }
+    })
   let ticks = 0
   const ticker = setInterval(() => {
     ticks += 1
   }, 20)
   const lines = []
+  const onLine = (line) => lines.push(line)
   try {
-    const built = await prebuildDevBackend({
+    const built = await prebuild({
       spec: nodeSpec('console.log("Finished dev profile"); setTimeout(() => {}, 300)'),
       env: process.env,
-      onLine: (line) => lines.push(line)
+      onLine
     })
     assert.equal(built, null)
+    assert.equal(slotCalls.length, 1)
+    assert.equal(slotCalls[0].env, process.env)
+    assert.equal(slotCalls[0].log, onLine)
     assert.ok(ticks >= 5, `the event loop ticked ${ticks} times while the prebuild ran`)
     assert.ok(lines.some((line) => line.includes('Finished dev profile')))
     assert.ok(lines.at(-1).startsWith('[smoke:prebuild] backend built in '))
@@ -1134,16 +1189,41 @@ test('the async dev backend prebuild keeps the event loop running and names its 
     clearInterval(ticker)
   }
 
-  const failed = await prebuildDevBackend({
+  const failed = await prebuild({
     spec: nodeSpec('console.error("error[E0425]: cannot find value"); process.exit(101)')
   })
   assert.match(failed, /Backend prebuild failed .*exited 101/)
   assert.match(failed, /E0425/)
-  const timedOut = await prebuildDevBackend({ spec: nodeSpec('setTimeout(() => {}, 10_000)', 200) })
+  const timedOut = await prebuild({ spec: nodeSpec('setTimeout(() => {}, 10_000)', 200) })
   assert.match(timedOut, /Backend still compiling after 0s/)
-  const missing = await prebuildDevBackend({
+  const missing = await prebuild({
     spec: { command: 'videorc-no-such-cargo', args: [], cwd: tmpdir(), timeoutMs: 5_000 }
   })
   assert.match(missing, /could not start/)
-  assert.equal(await prebuildDevBackend({ spec: null }), null, 'opted out')
+  assert.equal(slotCalls.length, 4, 'every build took a slot')
+  assert.equal(await prebuildDevBackend({ spec: null, buildSlot }), null, 'opted out')
+  assert.equal(slotCalls.length, 4, 'an opted-out prebuild takes no slot')
+})
+
+// Plan 260 S2.5: VIDEORC_APP picks the app; gpui is refused until S2.1 builds it.
+test('VIDEORC_APP picks electron or gpui, and gpui stops before launching until the app exists', async () => {
+  assert.equal(smokeAppKind({}), 'electron')
+  assert.equal(smokeAppKind({ VIDEORC_APP: '' }), 'electron')
+  assert.equal(smokeAppKind({ VIDEORC_APP: 'electron' }), 'electron')
+  assert.equal(smokeAppKind({ VIDEORC_APP: 'gpui' }), 'gpui')
+  assert.equal(smokeAppIsGpui({ VIDEORC_APP: 'gpui' }), true)
+  assert.throws(
+    () => smokeAppKind({ VIDEORC_APP: 'rust' }),
+    /must be "electron" \(the default\) or "gpui", not "rust"/
+  )
+  assert.equal(smokeAppLaunchRefusal({}, {}), null)
+  assert.match(
+    smokeAppLaunchRefusal({ VIDEORC_APP: 'gpui' }, {}),
+    /apps\/videorc\) does not exist yet/
+  )
+  assert.match(smokeAppLaunchRefusal({}, { VIDEORC_APP: 'gpui' }), /Plan 260 S2.1/)
+  await assert.rejects(
+    launchDevApp({ env: { VIDEORC_APP: 'gpui' }, timeoutMs: 1000 }),
+    /does not exist yet/
+  )
 })

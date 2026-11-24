@@ -81,4 +81,27 @@ describe('host speech RPC boundary', () => {
         validateBackendRpcParams('cloud.speech.overlay', { ...overlay, ...patch })
       ).toThrow()
   })
+  describe('guest captions boundary', () => {
+    const sync = { showId: 'show-a', sourceId: 'guests-a', generation: 1, guests: 2 }
+    it('accepts the guests mix and a captions-only status', () => {
+      expect(validateBackendRpcParams('cloud.speech.guests.sync', sync)).toEqual(sync)
+      expect(validateBackendRpcParams('cloud.speech.guests.audio', frame)).toEqual(frame)
+      const status = { uploadAllowed: true, captioning: true, reason: 'guests-captions-only' }
+      expect(validateBackendRpcResult('cloud.speech.guests.sync', status)).toEqual(status)
+    })
+    it('never carries a speaker identity, a command or more than a stage of guests', () => {
+      for (const value of [
+        { ...sync, guestId: 'guest:a' },
+        { ...sync, command: 'mark' },
+        { ...sync, guests: 17 },
+        { ...sync, guests: -1 },
+        { ...sync, guests: 1.5 }
+      ])
+        expect(() => validateBackendRpcParams('cloud.speech.guests.sync', value)).toThrow()
+      for (const samples of [[], [NaN], [1.01], new Array(4801).fill(0)])
+        expect(() =>
+          validateBackendRpcParams('cloud.speech.guests.audio', { ...frame, samples })
+        ).toThrow()
+    })
+  })
 })

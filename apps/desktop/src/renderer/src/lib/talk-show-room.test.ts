@@ -4,13 +4,16 @@ import type { RoomOptions } from 'livekit-client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import * as privacyModule from './room-screen-privacy'
+import * as privateScreenModule from './room-private-screen'
 import { CAPABILITY_TOPIC } from './room-media-v2'
 import { AVATAR_TOPIC, type AvatarLayer } from '../../../shared/cloud-avatar'
 import avatarFixture from '../../../../../..//protocol-fixtures/cloud-parity-avatar.json'
 import { setRoomFrameEncodeObserver } from './room-frame-test-state'
 import vectors from '../../../shared/chroma-key-vectors.json'
 import type { TalkShowCameraSettings } from './talk-show-camera-effects'
+import { ROOM_CAMERA_OFF_FOR_BACKGROUND } from './camera-background-view'
 import type { CloudOnAir, CloudRoomClientState, CloudRoomTokenAnswer } from '@/lib/backend'
+import { validateBackendRpcParams } from '../../../shared/backend-rpc-contract'
 import {
   TAKEN_OVER_DETAIL,
   TAKEN_OVER_GRACE_MS,
@@ -20,7 +23,8 @@ import {
   onAirElsewhere,
   stageMessage,
   talkShowRoomOptions,
-  type TalkShowRoomDeps
+  type TalkShowRoomDeps,
+  type TalkShowRoomSnapshot
 } from '@/lib/talk-show-room'
 
 // Plan 224 C-G4 and the review of 2026-11-09 (L4, L9's room client): the host
@@ -35,11 +39,13 @@ const frames = vi.hoisted(() => ({ create: vi.fn() }))
 vi.mock('./room-frame-source', () => ({ createRoomFrameTestSource: frames.create }))
 const encode = vi.hoisted(() => ({ attach: vi.fn() }))
 vi.mock('./room-frame-encode-observer', () => ({ attachEncodeObserver: encode.attach }))
-const frost = vi.hoisted(() => ({
-  keep: vi.fn((_into: unknown, _source: unknown) => true),
-  url: vi.fn((_page: unknown, _sample: unknown) => 'data:image/png;base64,STILL')
+const still = vi.hoisted(() => ({
+  url: vi.fn(
+    (_page: unknown, _width: number, _height: number, _rows?: number) =>
+      'data:image/png;base64,STILL'
+  )
 }))
-vi.mock('./frost-still', () => ({ keepFrostSample: frost.keep, frostedStillUrl: frost.url }))
+vi.mock('./hidden-still', () => ({ hiddenStillUrl: still.url }))
 
 const lk = vi.hoisted(() => {
   type Handler = (...args: unknown[]) => void
@@ -254,6 +260,200 @@ describe('the host in the room (C-G4)', () => {
       )
     ).toBe(false)
     await room.disconnect()
+  })
+
+  describe('a background effect before S8 (plan 258 S5)', () => {
+    const blur = { mode: 'blur' as const, blurPct: 70, edges: 'balanced' as const }
+    const withBackground = (cameraBackground?: typeof blur) => ({
+      layout: { ...vectors[0].settings, cameraChromaKeyEnabled: false, cameraBackground }
+    })
+    const publishedCamera = () =>
+      latestRoom().localParticipant.publishTrack.mock.calls.some(
+        (args: unknown[]) => (args[1] as { source?: string } | undefined)?.source === 'camera'
+      )
+
+    it('opens no camera at all when the room opens with an effect on, and says why', async () => {
+      const { room } = client(undefined, () => withBackground(blur))
+      await room.connect()
+      // Nothing of the room behind the streamer is captured, let alone sent.
+      expect(lk.video).not.toHaveBeenCalled()
+      expect(publishedCamera()).toBe(false)
+      expect(room.snapshot.local.camera).toBeNull()
+      expect(room.snapshot.local.cameraOff).toBe(true)
+      expect(room.snapshot.local.problem).toBe(ROOM_CAMERA_OFF_FOR_BACKGROUND)
+      // Turning the camera on in the room can't get around it.
+      await room.setCameraOff(false)
+      expect(lk.video).not.toHaveBeenCalled()
+      expect(room.snapshot.local.cameraOff).toBe(true)
+      await room.disconnect()
+    })
+
+    it('takes the camera out of the room when an effect is turned on, and back when it is off', async () => {
+      const camera = lk.fakeLocalTrack()
+      lk.video.mockResolvedValueOnce(camera)
+      let settings = withBackground()
+      const { room } = client(undefined, () => settings)
+      await room.connect()
+      expect(publishedCamera()).toBe(true)
+      settings = withBackground(blur)
+      await room.updateCameraSettings(settings)
+      expect(camera.stop).toHaveBeenCalled()
+      expect(latestRoom().localParticipant.unpublishTrack).toHaveBeenCalledWith(camera, true)
+      expect(room.snapshot.local.camera).toBeNull()
+      expect(room.snapshot.local.problem).toBe(ROOM_CAMERA_OFF_FOR_BACKGROUND)
+      // Off: the camera the streamer had on comes back, and the line goes.
+      settings = withBackground()
+      await room.updateCameraSettings(settings)
+      expect(lk.video).toHaveBeenCalledTimes(2)
+      expect(room.snapshot.local.cameraOff).toBe(false)
+      expect(room.snapshot.local.problem).toBeNull()
+      await room.disconnect()
+    })
+
+    it('never publishes a camera an effect was turned on over while it opened', async () => {
+      const camera = lk.fakeLocalTrack()
+      let settings = withBackground()
+      lk.video.mockImplementationOnce(async () => {
+        // The streamer picks Strong blur while the browser opens the camera.
+        settings = withBackground(blur)
+        return camera
+      })
+      const { room } = client(undefined, () => settings)
+      await room.connect()
+      expect(camera.stop).toHaveBeenCalled()
+      expect(publishedCamera()).toBe(false)
+      expect(room.snapshot.local.camera).toBeNull()
+      expect(room.snapshot.local.problem).toBe(ROOM_CAMERA_OFF_FOR_BACKGROUND)
+      await room.disconnect()
+    })
+
+    it('leaves a camera the streamer turned off, off, when the effect goes', async () => {
+      let settings = withBackground(blur)
+      const { room } = client(undefined, () => settings)
+      await room.connect()
+      await room.setCameraOff(true)
+      settings = withBackground()
+      await room.updateCameraSettings(settings)
+      expect(lk.video).not.toHaveBeenCalled()
+      expect(room.snapshot.local.cameraOff).toBe(true)
+      expect(room.snapshot.local.problem).toBeNull()
+      await room.disconnect()
+    })
+
+    it('never publishes a camera switched to whose own background is an effect', async () => {
+      const first = lk.fakeLocalTrack()
+      lk.video.mockResolvedValueOnce(first)
+      const { room } = client(undefined, () => withBackground())
+      await room.connect()
+      expect(publishedCamera()).toBe(true)
+      const publishes = latestRoom().localParticipant.publishTrack.mock.calls.length
+      // The Studio passes the new camera's own background before its
+      // settings reach the room.
+      await room.setCameraSelection('Camera', false, blur)
+      expect(latestRoom().localParticipant.publishTrack.mock.calls.length).toBe(publishes)
+      expect(room.snapshot.local.cameraOff).toBe(true)
+      expect(room.snapshot.local.problem).toBe(ROOM_CAMERA_OFF_FOR_BACKGROUND)
+      await room.disconnect()
+    })
+
+    it('says the camera is held by the effect, not off by the streamer', async () => {
+      let settings = withBackground(blur)
+      const { room } = client(undefined, () => settings)
+      await room.connect()
+      expect(room.snapshot.local).toMatchObject({ cameraOff: true, cameraHeld: true })
+      settings = withBackground()
+      await room.updateCameraSettings(settings)
+      expect(room.snapshot.local.cameraHeld).toBeUndefined()
+      await room.disconnect()
+    })
+
+    it('opens each queued camera switch with its own camera’s background', async () => {
+      const { room } = client(undefined, () => withBackground())
+      await room.connect()
+      const publishes = latestRoom().localParticipant.publishTrack.mock.calls.length
+      // B (blur) then C (no effect), queued back to back: B never goes out raw.
+      const first = room.setCameraSelection('Camera', false, blur)
+      const second = room.setCameraSelection('Camera', false, null)
+      await Promise.all([first, second])
+      const after = latestRoom().localParticipant.publishTrack.mock.calls.slice(publishes)
+      expect(
+        after.filter((args: unknown[]) => (args[1] as { source?: string })?.source === 'camera')
+      ).toHaveLength(1)
+      await room.disconnect()
+    })
+
+    it('keeps a queued switch’s own background through a settings update meanwhile', async () => {
+      const { room } = client(undefined, () => withBackground())
+      await room.connect()
+      const publishes = latestRoom().localParticipant.publishTrack.mock.calls.length
+      // The previous camera's settings arrive while the switch to a blurred
+      // camera waits in the queue: they must not let it open raw.
+      const switching = room.setCameraSelection('Camera', false, blur)
+      await room.updateCameraSettings(withBackground())
+      await switching
+      expect(latestRoom().localParticipant.publishTrack.mock.calls.length).toBe(publishes)
+      expect(room.snapshot.local.cameraHeld).toBe(true)
+      await room.disconnect()
+    })
+
+    it('keeps the camera held when an effect arrives after a no-effect switch was queued', async () => {
+      let settings = withBackground()
+      const { room } = client(undefined, () => settings)
+      await room.connect()
+      const publishes = latestRoom().localParticipant.publishTrack.mock.calls.length
+      // The switch to a camera with no effect waits in the queue; the
+      // streamer picks Strong blur for it before it opens.
+      const switching = room.setCameraSelection('Camera', false, null)
+      settings = withBackground(blur)
+      await room.updateCameraSettings(settings)
+      await switching
+      expect(latestRoom().localParticipant.publishTrack.mock.calls.length).toBe(publishes)
+      expect(room.snapshot.local.cameraHeld).toBe(true)
+      expect(room.snapshot.local.problem).toBe(ROOM_CAMERA_OFF_FOR_BACKGROUND)
+      await room.disconnect()
+    })
+
+    it('opens the camera after a reconnect when the effect went off while reconnecting', async () => {
+      let settings = withBackground(blur)
+      const { room } = client(undefined, () => settings)
+      await room.connect()
+      expect(publishedCamera()).toBe(false)
+      latestRoom().emit('Reconnecting')
+      settings = withBackground()
+      await room.updateCameraSettings(settings)
+      latestRoom().emit('Reconnected')
+      await vi.waitFor(() => expect(publishedCamera()).toBe(true))
+      expect(room.snapshot.local.cameraOff).toBe(false)
+      await room.disconnect()
+    })
+
+    it('opens the camera once connected when the effect went off while connecting', async () => {
+      let settings = withBackground(blur)
+      const { room } = client(undefined, () => settings)
+      await room.updateCameraSettings(settings)
+      settings = withBackground()
+      await room.updateCameraSettings(settings)
+      await room.connect()
+      expect(publishedCamera()).toBe(true)
+      expect(room.snapshot.local.cameraOff).toBe(false)
+      expect(room.snapshot.local.problem).toBeNull()
+      await room.disconnect()
+    })
+
+    it('keeps a green screen in the room: only effects wait for S8', async () => {
+      const camera = lk.fakeLocalTrack()
+      lk.video.mockResolvedValueOnce(camera)
+      const { room } = client(undefined, () => ({
+        layout: {
+          ...vectors[0].settings,
+          cameraBackground: { mode: 'green' as const, blurPct: 70, edges: 'balanced' as const }
+        }
+      }))
+      await room.connect()
+      expect(publishedCamera()).toBe(true)
+      expect(room.snapshot.local.problem).toBeNull()
+      await room.disconnect()
+    })
   })
 
   it('keeps adaptive stream off for the raw-track stage and dynacast on (plan 247 D1)', () => {
@@ -533,6 +733,61 @@ describe("LiveKit's recorder in the room (plan 234 T3)", () => {
     latestRoom().emit('ParticipantConnected', ada)
     await vi.advanceTimersByTimeAsync(0)
     expect(publishData).toHaveBeenCalledTimes(1)
+    await room.disconnect()
+  })
+})
+
+// PH-12 (perf hunt 11-20): LiveKit fires ActiveSpeakersChanged on every
+// speaker update, level-only ones too. A snapshot re-renders every room
+// reader, so only a change in which guests talk publishes one.
+describe('active speakers (PH-12)', () => {
+  const participant = (identity: string, name: string) => ({
+    identity,
+    name,
+    trackPublications: new Map(),
+    connectionQuality: 'good'
+  })
+
+  it('publishes when the talking guests change, never for levels or the host', async () => {
+    const snapshots: TalkShowRoomSnapshot[] = []
+    const { room } = client(undefined, undefined, { onSnapshot: (next) => snapshots.push(next) })
+    await room.connect()
+    const ada = participant('g_ada', 'Ada')
+    const bo = participant('g_bo', 'Bo')
+    for (const guest of [ada, bo]) {
+      latestRoom().remoteParticipants.set(guest.identity, guest)
+      latestRoom().emit('ParticipantConnected', guest)
+    }
+    const host = latestRoom().localParticipant
+    const speakers = (...people: { identity: string }[]): void =>
+      latestRoom().emit('ActiveSpeakersChanged', people)
+    const speaking = (): string[] =>
+      room.snapshot.people.filter((person) => person.speaking).map((person) => person.identity)
+
+    let before = snapshots.length
+    speakers(ada)
+    expect(snapshots.length).toBe(before + 1)
+    expect(speaking()).toEqual(['g_ada'])
+
+    // The same set again (a level update), in another order, or with the
+    // host in it: nothing the snapshot shows changed.
+    before = snapshots.length
+    speakers(ada)
+    speakers(host, ada)
+    speakers(ada, host)
+    expect(snapshots.length).toBe(before)
+
+    speakers(bo, ada)
+    expect(snapshots.length).toBe(before + 1)
+    expect(speaking()).toEqual(['g_ada', 'g_bo'])
+    speakers(ada, bo)
+    expect(snapshots.length).toBe(before + 1)
+
+    speakers(host)
+    expect(snapshots.length).toBe(before + 2)
+    expect(speaking()).toEqual([])
+    speakers()
+    expect(snapshots.length).toBe(before + 2)
     await room.disconnect()
   })
 })
@@ -880,7 +1135,7 @@ describe('S2 screen publication boundary', () => {
     )
     const raw = { stop: vi.fn(), addEventListener: vi.fn() } as unknown as MediaStreamTrack
     const outputs: { stop: ReturnType<typeof vi.fn>; kind: string }[] = []
-    const adapter = vi.spyOn(privacyModule, 'createPrivateScreen').mockImplementation(() => {
+    const adapter = vi.spyOn(privateScreenModule, 'createPrivateScreen').mockImplementation(() => {
       const output = { stop: vi.fn(), kind: 'video' }
       outputs.push(output)
       return {
@@ -914,12 +1169,7 @@ describe('S2 screen publication boundary', () => {
       getTracks: () => [raw]
     } as unknown as MediaStream)
     await share
-    expect(adapter).toHaveBeenCalledWith(
-      raw,
-      privacyModule.roomScreenPrivacy,
-      expect.any(Function),
-      expect.any(Function)
-    )
+    expect(adapter).toHaveBeenCalledWith(raw, privacyModule.roomScreenPrivacy, expect.any(Function))
     expect(room.snapshot.screenPrivacy?.hidden).toBe(true)
     expect(room.snapshot.local.screen).not.toBe(raw)
     expect(latestRoom().localParticipant.publishTrack).toHaveBeenCalledWith(
@@ -992,7 +1242,6 @@ describe('S2 screen publication boundary', () => {
     expect(adapter).toHaveBeenLastCalledWith(
       next,
       privacyModule.roomScreenPrivacy,
-      expect.any(Function),
       expect.any(Function)
     )
     expect(room.snapshot.screenPrivacy?.hidden).toBe(true)
@@ -1023,10 +1272,12 @@ describe('S2 screen publication boundary', () => {
     expect(room.snapshot.local.screen).not.toBeNull()
     await room.disconnect()
   })
-  // Plan 210 D8 in a room (owner, 2026-11-19): the Show stage draws a hidden
-  // screen frosted, as guests and the program do, never a flat grey box.
-  it('a hide after a shared frame shows its frosted still until Show; a late frost is dropped', async () => {
-    const { raw, adapter } = fixture()
+  // Hide screen in a room (owner, 2026-11-20): the Show stage draws the
+  // designed hidden still guests and the program draw, never a flat grey box
+  // and never anything of the screen.
+  it('a hide shows the hidden still at the screen size until Show; a late still is dropped', async () => {
+    const { raw } = fixture()
+    Object.assign(raw, { getSettings: () => ({ width: 2560, height: 1440 }) })
     vi.stubGlobal('navigator', {
       mediaDevices: {
         getDisplayMedia: async () => ({ getVideoTracks: () => [raw], getTracks: () => [raw] })
@@ -1035,32 +1286,24 @@ describe('S2 screen publication boundary', () => {
     const { room } = client(undefined, undefined, { cameraName: null, microphoneName: null })
     await room.connect()
     await room.startScreenShare()
-    const lastFrame = adapter.mock.calls.at(-1)?.[3]
-    expect(lastFrame).toBeTypeOf('function')
-    const published = { width: 1920, height: 1080 } as HTMLCanvasElement
     const show = () =>
       privacyModule.roomScreenPrivacy.apply(
         { hidden: false, generation: 0 },
         privacyModule.roomScreenPrivacy.showIntent(),
         true
       )
+    still.url.mockClear()
     privacyModule.roomScreenPrivacy.hide()
-    // What block() does with the frame the canvas last published.
-    lastFrame?.(published)
-    expect(frost.keep).toHaveBeenLastCalledWith(expect.anything(), {
-      image: published,
-      width: 1920,
-      height: 1080
-    })
-    // The frost runs after the hide, never inside it.
+    // The still is drawn after the hide, never inside it.
     expect(room.snapshot.local.screenStill).toBeUndefined()
     await vi.advanceTimersByTimeAsync(1)
+    // Rooms of earlier cases still listen to the shared gate: match this one's size.
+    expect(still.url).toHaveBeenCalledWith(expect.anything(), 2560, 1440, 720)
     expect(room.snapshot.local.screenStill).toBe('data:image/png;base64,STILL')
     show()
     expect(room.snapshot.local.screenStill).toBeUndefined()
-    // Shown again before a frost finished: it never lands.
+    // Shown again before the still was drawn: it never lands.
     privacyModule.roomScreenPrivacy.hide()
-    adapter.mock.calls.at(-1)?.[3]?.(published)
     show()
     await vi.advanceTimersByTimeAsync(1)
     expect(room.snapshot.local.screenStill).toBeUndefined()
@@ -1184,6 +1427,22 @@ describe('the stage message (plan 249 S6)', () => {
       screen: 'host:s'
     })
     expect(read(stageMessage(['host:s'], []))).toEqual({ v: 1, onStage: ['host:s'], screen: null })
+  })
+
+  // Guest captions: the guest page's "Live captions are on" line. Only while
+  // the guests are captioned; otherwise the message is byte-for-byte the old one.
+  it('says captions only while the guests are captioned', () => {
+    expect(read(stageMessage(['g_a'], null, true))).toEqual({
+      v: 1,
+      onStage: ['g_a'],
+      screen: null,
+      captions: true
+    })
+    expect(read(stageMessage(['g_a'], null, false))).toEqual({
+      v: 1,
+      onStage: ['g_a'],
+      screen: null
+    })
   })
 })
 
@@ -1779,6 +2038,62 @@ describe('latency in the room (plan 253 S4)', () => {
       from: [{ identity: HOST, audioMs: 45, videoMs: 30 }]
     })
     expect(room.snapshot.program).toBeUndefined()
+    await room.disconnect()
+  })
+
+  // Plan 253 S7: each sample goes to the backend's record, in the strict
+  // contract's own shape.
+  it("reports each sample to the backend for the show's record", async () => {
+    const reports: unknown[][] = []
+    const backend = {
+      requestTyped: vi.fn(async (...args: unknown[]) => {
+        reports.push(args)
+        return { kept: true }
+      })
+    } as never
+    const { room } = client(undefined, undefined, { measureLatency: () => true, backend })
+    await room.connect()
+    people()
+    latestRoom().emit('ParticipantConnected', latestRoom().remoteParticipants.get(ADA))
+    // Two samples 10 s apart make the host's first block: its own round
+    // trip is all there is to report until a guest's block arrives.
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(reports.at(-1)).toEqual([
+      'cloud.room.latency.report',
+      { showId: 'sh_talk', hostRttMs: 30, people: [] }
+    ])
+    // The relay alone reports nothing: the next sample does.
+    const before = reports.length
+    relay(ADA, adaBlock)
+    expect(room.snapshot.people[0]?.latency?.ms).toBe(161)
+    expect(reports).toHaveLength(before)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(reports).toHaveLength(before + 1)
+    const [method, report] = reports.at(-1)!
+    expect(method).toBe('cloud.room.latency.report')
+    expect(report).toEqual({
+      showId: 'sh_talk',
+      hostRttMs: 30,
+      people: [
+        { identity: ADA, name: 'Ada', ms: 161, partial: false, toGuestMs: 160, fromGuestMs: 161 }
+      ]
+    })
+    expect(() => validateBackendRpcParams('cloud.room.latency.report', report)).not.toThrow()
+    await room.disconnect()
+    const after = reports.length
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(reports).toHaveLength(after)
+  })
+
+  it('reports nothing on a show that does not measure', async () => {
+    const backend = { requestTyped: vi.fn(async () => ({ kept: true })) } as never
+    const { room } = client(undefined, undefined, { measureLatency: () => false, backend })
+    await room.connect()
+    people()
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(
+      (backend as { requestTyped: ReturnType<typeof vi.fn> }).requestTyped
+    ).not.toHaveBeenCalled()
     await room.disconnect()
   })
 

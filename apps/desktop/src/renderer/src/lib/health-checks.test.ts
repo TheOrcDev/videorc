@@ -11,6 +11,7 @@ import {
   destinationsCheck,
   encoderCheck,
   fileRepairCheck,
+  healthChecks,
   healthVerdict,
   logLevelLabel,
   logTruncationNote,
@@ -21,10 +22,13 @@ import {
   previewCheck,
   previewPathCheck,
   previewSourceCheck,
+  previewSpeedCheck,
+  type PreviewSpeedInput,
   slowdownAdvice,
   slowdownCheck,
   sourcesCheck,
-  type HealthCheck
+  type HealthCheck,
+  type HealthChecksInput
 } from './health-checks'
 
 // Plan 174 S3.18 (I-4, I-25, V-7): Health's checks are words with a tone,
@@ -206,6 +210,19 @@ describe('Health check words', () => {
     expect(previewPathCheck(undefined, undefined)).toEqual({ value: 'Off', tone: 'neutral' })
   })
 
+  // Plan 257 S3: the proof surface is the Linux Preview path; it is healthy
+  // there, but still never called native.
+  it('names the Linux proof surface the app window, healthy and not native', () => {
+    expect(
+      previewPathCheck(
+        'electron-proof-surface',
+        'electron-browser-window',
+        'proof-surface',
+        'linux'
+      )
+    ).toEqual({ value: 'App window', tone: 'good' })
+  })
+
   it('shows the placeholder for memory it could not read', () => {
     expect(memoryCheck(undefined)).toEqual({ value: '–', tone: 'neutral' })
     expect(memoryCheck(3 * 1024 * 1024 * 1024).tone).toBe('error')
@@ -278,6 +295,134 @@ describe('sourcesCheck', () => {
   it('still says Capture slow from the frame rate', () => {
     expect(sourcesCheck({ ...healthy, captureFps: 20 }, { capture: false })).toEqual({
       value: 'Capture slow',
+      tone: 'warn'
+    })
+  })
+})
+
+describe('healthChecks on Linux (plan 257 S18)', () => {
+  const input = (platform: string): HealthChecksInput => ({
+    diagnosticStats: {
+      bottleneck: 'none',
+      duplicateCaptureSources: []
+    } as unknown as DiagnosticStats,
+    expectsCamera: false,
+    expectsScreen: false,
+    nativePreviewSurfaceEnabled: false,
+    platform,
+    previewCameraStatus: { state: 'idle' } as unknown as HealthChecksInput['previewCameraStatus'],
+    previewLiveStatus: { state: 'idle' } as unknown as HealthChecksInput['previewLiveStatus'],
+    previewScreenStatus: { state: 'idle' } as unknown as HealthChecksInput['previewScreenStatus'],
+    previewSurfaceStatus: {} as HealthChecksInput['previewSurfaceStatus'],
+    recentStreamDrops: { capture: 0 } as unknown as HealthChecksInput['recentStreamDrops'],
+    streamHealth: null,
+    streamTargets: [],
+    linuxDesktop: {
+      keyring: { backend: 'basic_text', available: false, userPasswordStore: null },
+      desktop: {
+        secretService: 'missing',
+        portal: { frontend: 'missing', backends: [] },
+        groups: [{ name: 'video', exists: true, member: true, devices: 1, accessible: 1 }]
+      }
+    }
+  })
+
+  it('adds the keyring, groups and portal rows on Linux only, and the verdict counts them', () => {
+    const linux = healthChecks(input('linux'))
+    expect(linux.slice(-3).map(({ id, value, tone }) => ({ id, value, tone }))).toEqual([
+      { id: 'keyring', value: 'Not found', tone: 'error' },
+      { id: 'device-groups', value: 'In video', tone: 'good' },
+      { id: 'screen-portal', value: 'Not installed', tone: 'error' }
+    ])
+    const verdict = healthVerdict({ checks: linux })
+    expect(verdict.variant).toBe('destructive')
+    expect(verdict.title).toContain('Keyring')
+    expect(verdict.title).toContain('Screen portal')
+
+    for (const platform of ['darwin', 'win32']) {
+      const ids = healthChecks(input(platform)).map((row) => row.id)
+      expect(ids).not.toContain('keyring')
+      expect(ids).not.toContain('screen-portal')
+    }
+  })
+})
+
+// Plan 257 S3: the Linux Preview's speed is measured on the proof surface's
+// own presented rate instead of being called a fallback.
+describe('previewSpeedCheck on the Linux proof surface', () => {
+  function input(overrides: {
+    proofSourceFps?: number
+    cameraFps?: number
+    firstFrameContract?: string
+    liveState?: string
+    platform?: string
+  }): PreviewSpeedInput {
+    return {
+      diagnosticStats: {
+        previewTransport: 'electron-proof-surface',
+        previewSurfaceBacking: 'electron-browser-window',
+        previewTargetFps: 30
+      },
+      expectsCamera: true,
+      expectsScreen: false,
+      nativePreviewSurfaceEnabled: true,
+      platform: overrides.platform ?? 'linux',
+      previewCameraStatus: { state: 'live', sourceFps: overrides.cameraFps ?? 30 },
+      previewLiveStatus: { state: overrides.liveState ?? 'live' },
+      previewScreenStatus: { state: 'idle' },
+      previewSurfaceStatus: {
+        source: 'camera',
+        targetFps: 30,
+        proofSourceFps: overrides.proofSourceFps,
+        firstFrameContract: overrides.firstFrameContract ?? 'met',
+        nativePreviewHostKind: 'proof-surface'
+      }
+    } as unknown as PreviewSpeedInput
+  }
+
+  it('is smooth when every layer keeps up with its source', () => {
+    expect(previewSpeedCheck(input({ proofSourceFps: 29.5 }))).toEqual({
+      value: 'Smooth',
+      tone: 'good'
+    })
+  })
+
+  it('names a layer that shows fewer frames than its source sends', () => {
+    expect(previewSpeedCheck(input({ proofSourceFps: 22 }))).toEqual({
+      value: 'Slow display',
+      tone: 'warn'
+    })
+  })
+
+  it('names a slow camera before the display', () => {
+    expect(previewSpeedCheck(input({ proofSourceFps: 14.5, cameraFps: 15 }))).toEqual({
+      value: 'Camera slow',
+      tone: 'warn'
+    })
+  })
+
+  it('measures the display against what the source sends, not the target', () => {
+    expect(previewSpeedCheck(input({ proofSourceFps: 25.5, cameraFps: 28 }))).toEqual({
+      value: 'Smooth',
+      tone: 'good'
+    })
+  })
+
+  it('does not judge a hidden Preview, which fetches no frames', () => {
+    const hidden = input({ proofSourceFps: 0 })
+    hidden.previewSurfaceStatus = { ...hidden.previewSurfaceStatus, framePollingSuppressed: true }
+    expect(previewSpeedCheck(hidden)).toEqual({ value: 'Smooth', tone: 'good' })
+  })
+
+  it('calls a watchdog fallback a stalled picture', () => {
+    expect(previewSpeedCheck(input({ proofSourceFps: 0, firstFrameContract: 'fallback' }))).toEqual(
+      { value: 'Stalled', tone: 'warn' }
+    )
+  })
+
+  it('keeps the Windows proof surface a named fallback', () => {
+    expect(previewSpeedCheck(input({ proofSourceFps: 30, platform: 'win32' }))).toEqual({
+      value: 'Fallback',
       tone: 'warn'
     })
   })

@@ -62,7 +62,7 @@ function StatusBarAction({
       aria-label={label}
       aria-pressed={pressed}
       // An icon alone needs no side bearing for a word: a 22 px chip, so a
-      // full bar of them still fits (the Stream Manager's, plan 215 C).
+      // full bar of them still fits (the Stream Manager's).
       className={cn(STATUS_BAR_ACTION_CLASS, icon && !text && 'px-1', className)}
       type="button"
       {...props}

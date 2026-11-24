@@ -11,6 +11,10 @@ export const FIRST_RUN_SMOKE_LIMITS = Object.freeze({
   toneFlipWithinMs: 250,
   lookSampleAtLeastMs: 30000,
   clipsWatchMs: 10000,
+  // The owner, 2026-11-22: no toast in the first minute after launch.
+  launchQuietWatchMs: 60000,
+  // ...and none after it while idle: "everything inside of our notifications".
+  idleQuietWatchMs: 75000,
   // Plan 212's check took 6–50 s on the owner's Mac, depending on load (#973).
   performanceCheckSettleMs: 180000
 })
@@ -387,6 +391,40 @@ export function evaluateFirstRunSmokeStep(step, observation = {}) {
         'backend refused a session start'
       )
       break
+    case 'launch-quiet': {
+      // A returning user opens Videorc and touches nothing. What Videorc finds
+      // on its own (the owner's Mac at launch: overloaded, a silent
+      // microphone, a shortcut taken, the Cloud announcement; then, idle after
+      // the first minute, low space and a failed read) waits behind the bell;
+      // not one toast shows, at launch or after.
+      check(o.toastHook === true, 'the toast record is missing: nothing was read')
+      check(o.notificationHook === true, 'the notification hook is missing: nothing was read')
+      check(o.pressed === false, 'something pressed the window during the watch')
+      check(
+        o.watchMs >= FIRST_RUN_SMOKE_LIMITS.idleQuietWatchMs,
+        `the watch was shorter than ${FIRST_RUN_SMOKE_LIMITS.idleQuietWatchMs / 1000} s`
+      )
+      // After the store's own first minute, which starts when its chunk loads.
+      check(
+        (o.idleReportsAfterStoreMs ?? 0) >= FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs,
+        'the idle reports were not sent after the first minute'
+      )
+      const toasts = o.launchToasts ?? []
+      check(
+        toasts.length === 0,
+        `toasts with no input: ${toasts
+          .map((toast) => `${Math.round(toast.at)} ms ${toast.kind} "${toast.title}"`)
+          .join('; ')}`
+      )
+      const keys = new Set((o.entries ?? []).map((entry) => entry.key))
+      const missing = (o.expectedKeys ?? []).filter((key) => !keys.has(key))
+      check(missing.length === 0, `not behind the bell: ${missing.join(', ')}`)
+      check(
+        (o.expectedKeys ?? []).length === 0 || o.bellCount > 0,
+        'the bell does not count what waited behind it'
+      )
+      break
+    }
     case 'destinations':
       check(o.cardStep === 'destinations' && o.position === '5/5', 'streaming step is missing')
       check(

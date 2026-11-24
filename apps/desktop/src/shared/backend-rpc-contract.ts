@@ -12,7 +12,7 @@ import {
   cloudMarkerSchema,
   cloudMarkerLookupSchema
 } from './cloud-markers'
-import { parseGraphicsSource, type GraphicsSource } from './cloud-graphics'
+import { readGraphicsSource, type GraphicsSource } from './cloud-graphics'
 import { parseManagedOutputProfile } from './cloud-output-profile'
 import type {
   CloudArchiveView,
@@ -150,6 +150,7 @@ import type {
   CloudControllerFacts,
   CloudPresentationAccepted,
   CloudPresentationRestore,
+  CloudRoomLatencyReport,
   CloudTestParams,
   CloudGuestActParams,
   CloudGuestDecideParams,
@@ -272,7 +273,8 @@ import type {
   StreamPlatform,
   StreamTargetsSnapshot,
   VideorcAccountSnapshot,
-  VideoSettings
+  VideoSettings,
+  LinuxDesktopCheck
 } from './backend'
 import type {
   SessionMarker,
@@ -303,6 +305,8 @@ import {
   BANNER_OPACITY_MIN,
   HTML_OVERLAY_MAX_FPS,
   HTML_OVERLAY_MAX_TARGETS,
+  CAMERA_BACKGROUND_EDGES,
+  CAMERA_BACKGROUND_MODES,
   LAYOUT_PRESET_VALUES,
   SOUND_HOTKEYS,
   SOUND_LEVEL_DB_MAX,
@@ -532,6 +536,8 @@ export interface BackendRpcMethodMap {
   >
   'streamReport.email.sendLast': BackendRpcDefinition<undefined, StreamReportSendResult>
   // --- Discord go-live announcement (plan 187) ---
+  // --- Linux desktop setup (plan 257 S18) ---
+  'diagnostics.linuxDesktop': BackendRpcDefinition<undefined, LinuxDesktopCheck>
   'discord.announce.get': BackendRpcDefinition<undefined, DiscordAnnounceSnapshot>
   'discord.announce.update': BackendRpcDefinition<
     DiscordAnnounceUpdateParams,
@@ -640,7 +646,12 @@ export interface BackendRpcMethodMap {
   'cloud.room.token.refresh': BackendRpcDefinition<undefined, CloudRoomTokenAnswer>
   /** Renderer-only bounded raster source for the explicitly enabled public output. */
   'cloud.graphics.snapshot': BackendRpcDefinition<
-    { showId: string; known?: string },
+    {
+      showId: string
+      known?: string
+      /** PH-05: hashes of the pictures held from the last answer; those come back without `png`. */
+      held?: string[]
+    },
     GraphicsSource
   >
   /**
@@ -662,6 +673,8 @@ export interface BackendRpcMethodMap {
     CloudPresentationAccepted,
     { queued: boolean }
   >
+  /** Plan 253 S7: what the room renderer measured, for the show's record. */
+  'cloud.room.latency.report': BackendRpcDefinition<CloudRoomLatencyReport, { kept: boolean }>
   /** Plan 249 S24: this controller's output flags and what it switched on. */
   'cloud.controller.desired': BackendRpcDefinition<
     {
@@ -1021,6 +1034,14 @@ export interface BackendRpcMethodMap {
     import('./cloud-speech').CloudSpeechPcm,
     import('./cloud-speech').CloudSpeechStatus
   >
+  'cloud.speech.guests.sync': BackendRpcDefinition<
+    import('./cloud-speech').CloudSpeechGuestSync,
+    import('./cloud-speech').CloudSpeechGuestStatus
+  >
+  'cloud.speech.guests.audio': BackendRpcDefinition<
+    import('./cloud-speech').CloudSpeechGuestPcm,
+    import('./cloud-speech').CloudSpeechGuestStatus
+  >
   'captions.status.get': BackendRpcDefinition<undefined, import('./backend').CaptionsStatus>
   'session.marker.voice.configure': BackendRpcDefinition<
     { sessionId: string; consent: boolean },
@@ -1186,6 +1207,8 @@ const nonNegativeInteger = numberSchema({
   min: 0,
   max: Number.MAX_SAFE_INTEGER
 })
+// Plan 253 S7: a reported duration, the latency contract's `NET_MAX_MS`.
+const latencyReportMs = numberSchema({ integer: true, min: 0, max: 60_000 })
 const positiveSafeInteger = numberSchema({
   integer: true,
   min: 1,
@@ -1707,6 +1730,38 @@ const discordWebhookSnapshotSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+// --- Linux desktop setup (plan 257 S18): strict, small, no paths ---
+const linuxBusServiceStateSchema = enumSchema(['running', 'activatable', 'missing', 'unknown'])
+const linuxDeviceCountSchema = numberSchema({ integer: true, min: 0, max: 4096 })
+const linuxDesktopCheckSchema = objectSchema(
+  {
+    secretService: linuxBusServiceStateSchema,
+    portal: objectSchema(
+      {
+        frontend: linuxBusServiceStateSchema,
+        screenCastVersion: optionalSchema(numberSchema({ integer: true, min: 0, max: 1000 })),
+        backends: arraySchema(stringSchema({ minLength: 1, maxLength: 64 }), { maxLength: 32 }),
+        detail: optionalSchema(stringSchema({ maxLength: 1024 }))
+      },
+      { allowUnknown: false }
+    ),
+    groups: arraySchema(
+      objectSchema(
+        {
+          name: stringSchema({ minLength: 1, maxLength: 32 }),
+          exists: booleanSchema,
+          member: booleanSchema,
+          devices: linuxDeviceCountSchema,
+          accessible: linuxDeviceCountSchema
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 8 }
+    ),
+    currentDesktop: optionalSchema(stringSchema({ maxLength: 256 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<LinuxDesktopCheck>
 const discordAnnounceSnapshotSchema = objectSchema(
   {
     webhooks: arraySchema(discordWebhookSnapshotSchema, { maxLength: DISCORD_MAX_WEBHOOKS }),
@@ -2160,6 +2215,38 @@ const layoutSchema = objectSchema(
           brightness: numberSchema({ min: -0.25, max: 0.25 }),
           contrast: numberSchema({ min: 0.5, max: 1.5 }),
           saturation: numberSchema({ min: 0, max: 2 })
+        },
+        { allowUnknown: false }
+      )
+    ),
+    cameraBackground: optionalSchema(
+      objectSchema(
+        {
+          mode: enumSchema(CAMERA_BACKGROUND_MODES),
+          blurPct: numberSchema({ integer: true, min: 0, max: 100 }),
+          edges: enumSchema(CAMERA_BACKGROUND_EDGES),
+          assetId: optionalSchema(stringSchema({ minLength: 1, maxLength: 256 })),
+          key: optionalSchema(
+            objectSchema(
+              {
+                similarityPct: numberSchema({ integer: true, min: 0, max: 100 }),
+                smoothnessPct: numberSchema({ integer: true, min: 0, max: 100 }),
+                spillPct: numberSchema({ integer: true, min: 0, max: 100 }),
+                hideEdges: optionalSchema(
+                  objectSchema(
+                    {
+                      leftPct: numberSchema({ integer: true, min: 0, max: 25 }),
+                      topPct: numberSchema({ integer: true, min: 0, max: 25 }),
+                      rightPct: numberSchema({ integer: true, min: 0, max: 25 }),
+                      bottomPct: numberSchema({ integer: true, min: 0, max: 25 })
+                    },
+                    { allowUnknown: false }
+                  )
+                )
+              },
+              { allowUnknown: false }
+            )
+          )
         },
         { allowUnknown: false }
       )
@@ -2679,6 +2766,32 @@ const previewCameraStatusSchema = boundedSemanticValue(
       droppedFrames: nonNegativeInteger,
       frameAgeMs: optionalSchema(nonNegativeInteger),
       noVideo: optionalSchema(booleanSchema),
+      // Plan 258 S4: strict, so a renamed Rust field fails here, not in the Studio.
+      systemEffect: optionalSchema(
+        objectSchema({
+          provider: enumSchema(['macos-video-effects', 'windows-studio-effects']),
+          backgroundBlur: booleanSchema,
+          backgroundReplacement: booleanSchema,
+          studioLight: booleanSchema,
+          turnedOffByVideorc: booleanSchema
+        })
+      ),
+      // Plan 258 S3: strict, like systemEffect.
+      cameraBackground: optionalSchema(
+        objectSchema({
+          mode: enumSchema(['off', 'blur', 'image', 'video', 'cutout', 'green', 'blue']),
+          state: enumSchema(['running', 'cover', 'unavailable']),
+          maskAgeMs: optionalSchema(nonNegativeInteger),
+          segmentMsP95: optionalSchema(numberSchema({ min: 0 })),
+          composeMsP95: optionalSchema(numberSchema({ min: 0 })),
+          composeGpuMsP95: optionalSchema(numberSchema({ min: 0 })),
+          processedFrames: nonNegativeInteger,
+          coverFrames: nonNegativeInteger,
+          coverForMs: optionalSchema(nonNegativeInteger),
+          coverAfterMaskAgeMs: optionalSchema(nonNegativeInteger),
+          message: optionalSchema(stringSchema({ maxLength: 2000 }))
+        })
+      ),
       updatedAt: timestamp
     },
     { allowUnknown: true }
@@ -5241,6 +5354,22 @@ const cloudSpeechStatusSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+const cloudSpeechGuestStatusSchema = objectSchema(
+  {
+    uploadAllowed: booleanSchema,
+    captioning: booleanSchema,
+    reason: stringSchema({ maxLength: 128 })
+  },
+  { allowUnknown: false }
+)
+const boundedSpeechPcmSchema = runtimeSchema('bounded nonempty speech PCM', (value, path) => {
+  const samples = arraySchema(numberSchema({ min: -1, max: 1 }), { maxLength: 4800 }).parse(
+    value,
+    path
+  )
+  if (!samples.length) throw new RuntimeSchemaError(path, 'nonempty speech PCM')
+  return samples
+})
 const cloudSpeechOverlayTargetSchema = objectSchema(
   {
     active: booleanSchema,
@@ -6539,7 +6668,9 @@ const cloudRoomStatusSchema = objectSchema(
           // status; the renderer drops what it does not know (plan 249 S6).
           layout: optionalSchema(boundedString),
           stageKey: optionalSchema(boundedString),
-          at: optionalSchema(boundedString)
+          at: optionalSchema(boundedString),
+          // Plan 253 S7: the backend bounds it the same (`APPLY_MS_MAX`).
+          applyMs: optionalSchema(numberSchema({ integer: true, min: 0, max: 86_400_000 }))
         },
         { allowUnknown: false }
       )
@@ -6792,6 +6923,13 @@ const cloudStatusSchema = objectSchema(
     // Plan 224: the room and the cloud recording, on a talk show.
     room: optionalSchema(cloudRoomStatusSchema),
     recording: optionalSchema(cloudRecordingStatusSchema),
+    // Plan 253 S7: the web's command times on a managed talk show.
+    commandTimes: optionalSchema(
+      objectSchema(
+        { lastMs: nonNegativeInteger, slowestMs: nonNegativeInteger },
+        { allowUnknown: false }
+      )
+    ),
     // Plan 243: who is on air, and why a stop of this computer was no end (D7).
     onAir: optionalSchema(cloudOnAirSchema),
     stoppedBy: optionalSchema(enumSchema(['hand-off', 'taken-over'])),
@@ -7435,6 +7573,7 @@ const runtimeContracts = {
     params: undefinedSchema,
     result: streamReportSendResultSchema
   },
+  'diagnostics.linuxDesktop': { params: undefinedSchema, result: linuxDesktopCheckSchema },
   'discord.announce.get': { params: undefinedSchema, result: discordAnnounceSnapshotSchema },
   'discord.announce.update': {
     params: discordAnnounceUpdateParamsSchema,
@@ -7669,12 +7808,15 @@ const runtimeContracts = {
     params: objectSchema(
       {
         showId: stringSchema({ minLength: 1, maxLength: 128 }),
-        known: optionalSchema(stringSchema({ maxLength: 64 }))
+        known: optionalSchema(stringSchema({ maxLength: 64 })),
+        held: optionalSchema(
+          arraySchema(stringSchema({ minLength: 64, maxLength: 64 }), { maxLength: 32 })
+        )
       },
       { allowUnknown: false }
     ),
     result: runtimeSchema('a bounded public graphics snapshot', (value, path) => {
-      const result = parseGraphicsSource(value)
+      const result = readGraphicsSource(value)
       if (!result) throw new RuntimeSchemaError(path, 'a public graphics snapshot')
       return result
     })
@@ -7711,6 +7853,38 @@ const runtimeContracts = {
       { allowUnknown: false }
     ) as RuntimeSchema<CloudPresentationAccepted>,
     result: objectSchema({ queued: booleanSchema }, { allowUnknown: false })
+  },
+  'cloud.room.latency.report': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 128 }),
+        hostRttMs: optionalSchema(latencyReportMs),
+        people: arraySchema(
+          objectSchema(
+            {
+              identity: stringSchema({ minLength: 1, maxLength: 128 }),
+              name: optionalSchema(stringSchema({ maxLength: 200 })),
+              ms: latencyReportMs,
+              partial: booleanSchema,
+              toGuestMs: optionalSchema(latencyReportMs),
+              fromGuestMs: optionalSchema(latencyReportMs),
+              videoToGuestMs: optionalSchema(latencyReportMs),
+              videoFromGuestMs: optionalSchema(latencyReportMs)
+            },
+            { allowUnknown: false }
+          ),
+          { maxLength: 16 }
+        ),
+        program: optionalSchema(
+          objectSchema(
+            { ms: latencyReportMs, audioMs: optionalSchema(latencyReportMs) },
+            { allowUnknown: false }
+          )
+        )
+      },
+      { allowUnknown: false }
+    ) as RuntimeSchema<CloudRoomLatencyReport>,
+    result: objectSchema({ kept: booleanSchema }, { allowUnknown: false })
   },
   'cloud.controller.desired': {
     params: objectSchema(
@@ -8175,6 +8349,30 @@ const runtimeContracts = {
       { allowUnknown: false }
     ),
     result: cloudSpeechStatusSchema
+  },
+  'cloud.speech.guests.sync': {
+    params: objectSchema(
+      {
+        showId: stringSchema({ minLength: 1, maxLength: 160 }),
+        sourceId: stringSchema({ minLength: 1, maxLength: 160 }),
+        generation: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER }),
+        guests: numberSchema({ integer: true, min: 0, max: 16 })
+      },
+      { allowUnknown: false }
+    ),
+    result: cloudSpeechGuestStatusSchema
+  },
+  'cloud.speech.guests.audio': {
+    params: objectSchema(
+      {
+        sourceId: stringSchema({ minLength: 1, maxLength: 160 }),
+        sequence: numberSchema({ integer: true, min: 1, max: Number.MAX_SAFE_INTEGER }),
+        sampleRate: numberSchema({ integer: true, min: 16000, max: 48000 }),
+        samples: boundedSpeechPcmSchema
+      },
+      { allowUnknown: false }
+    ),
+    result: cloudSpeechGuestStatusSchema
   },
   'captions.status.get': { params: undefinedSchema, result: captionsStatusSchema },
   'session.marker.voice.configure': {

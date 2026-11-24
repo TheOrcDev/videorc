@@ -8,6 +8,10 @@ use std::time::Instant;
 const WINDOWS_DXGI_SCREEN_PREFIX: &str = "screen:dxgi:";
 const D3D11_MAX_TEXTURE_DIMENSION: u32 = 16_384;
 const D3D11_MAX_TEXTURES_PER_FORMAT: usize = 8;
+/// NV12 gets a deeper ceiling than BGRA: a Record encoder queues a time
+/// budget of inputs, 12 at 60 fps (#1042). 16 NV12 textures are about 50 MB
+/// at 1080p and 200 MB at 4K.
+pub(crate) const D3D11_MAX_NV12_TEXTURES: usize = 16;
 const D3D11_MAX_MEDIA_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -207,8 +211,8 @@ impl WindowsD3d11TexturePoolConfig {
         nv12: WindowsD3d11Nv12TextureDescriptor,
         nv12_slots: usize,
     ) -> Result<Self, WindowsD3d11Error> {
-        validate_pool_size("BGRA", bgra_slots)?;
-        validate_pool_size("NV12", nv12_slots)?;
+        validate_pool_size("BGRA", bgra_slots, D3D11_MAX_TEXTURES_PER_FORMAT)?;
+        validate_pool_size("NV12", nv12_slots, D3D11_MAX_NV12_TEXTURES)?;
         Ok(Self {
             bgra,
             bgra_slots,
@@ -231,18 +235,36 @@ impl WindowsD3d11TexturePoolConfig {
         primary_nv12_slots: usize,
         auxiliary_nv12: Option<(WindowsD3d11Nv12TextureDescriptor, usize)>,
     ) -> Result<Self, WindowsD3d11Error> {
-        validate_pool_size("capture BGRA", capture_bgra_slots)?;
-        validate_pool_size("preview BGRA", preview_bgra_slots)?;
-        validate_pool_size("primary NV12", primary_nv12_slots)?;
+        validate_pool_size(
+            "capture BGRA",
+            capture_bgra_slots,
+            D3D11_MAX_TEXTURES_PER_FORMAT,
+        )?;
+        validate_pool_size(
+            "preview BGRA",
+            preview_bgra_slots,
+            D3D11_MAX_TEXTURES_PER_FORMAT,
+        )?;
+        validate_pool_size("primary NV12", primary_nv12_slots, D3D11_MAX_NV12_TEXTURES)?;
         let (auxiliary_nv12, auxiliary_nv12_slots) = match auxiliary_nv12 {
             Some((descriptor, slots)) => {
-                validate_pool_size("auxiliary NV12", slots)?;
+                validate_pool_size("auxiliary NV12", slots, D3D11_MAX_NV12_TEXTURES)?;
                 (Some(descriptor), slots)
             }
             None => (None, 0),
         };
-        validate_combined_pool_size("BGRA", capture_bgra_slots, preview_bgra_slots)?;
-        validate_combined_pool_size("NV12", primary_nv12_slots, auxiliary_nv12_slots)?;
+        validate_combined_pool_size(
+            "BGRA",
+            capture_bgra_slots,
+            preview_bgra_slots,
+            D3D11_MAX_TEXTURES_PER_FORMAT,
+        )?;
+        validate_combined_pool_size(
+            "NV12",
+            primary_nv12_slots,
+            auxiliary_nv12_slots,
+            D3D11_MAX_NV12_TEXTURES,
+        )?;
         Ok(Self {
             bgra: capture_bgra,
             bgra_slots: capture_bgra_slots,
@@ -342,13 +364,11 @@ fn add_pool_bucket(
     }
 }
 
-fn validate_pool_size(label: &str, slots: usize) -> Result<(), WindowsD3d11Error> {
-    if !(1..=D3D11_MAX_TEXTURES_PER_FORMAT).contains(&slots) {
+fn validate_pool_size(label: &str, slots: usize, ceiling: usize) -> Result<(), WindowsD3d11Error> {
+    if !(1..=ceiling).contains(&slots) {
         return Err(WindowsD3d11Error::new(
             WindowsD3d11ErrorCode::InvalidTextureDescriptor,
-            format!(
-                "{label} texture pool size must be between 1 and {D3D11_MAX_TEXTURES_PER_FORMAT}"
-            ),
+            format!("{label} texture pool size must be between 1 and {ceiling}"),
         ));
     }
     Ok(())
@@ -358,6 +378,7 @@ fn validate_combined_pool_size(
     label: &str,
     first: usize,
     second: usize,
+    ceiling: usize,
 ) -> Result<(), WindowsD3d11Error> {
     let combined = first.checked_add(second).ok_or_else(|| {
         WindowsD3d11Error::new(
@@ -365,12 +386,10 @@ fn validate_combined_pool_size(
             format!("{label} texture pool size overflowed"),
         )
     })?;
-    if combined > D3D11_MAX_TEXTURES_PER_FORMAT {
+    if combined > ceiling {
         return Err(WindowsD3d11Error::new(
             WindowsD3d11ErrorCode::InvalidTextureDescriptor,
-            format!(
-                "combined {label} texture pool size must not exceed {D3D11_MAX_TEXTURES_PER_FORMAT}"
-            ),
+            format!("combined {label} texture pool size must not exceed {ceiling}"),
         ));
     }
     Ok(())
@@ -1918,6 +1937,9 @@ mod runtime {
         WindowsD3d11Presenter, WindowsD3d11PresenterStatus, WindowsD3d11PreviewFrameMetadata,
         WindowsD3d11PreviewPlacement,
     };
+    use crate::windows_d3d11_preview_handover::{
+        HandoverRetireReason, WindowsD3d11PreviewHandover, WindowsD3d11PreviewHandoverGrant,
+    };
     use crate::windows_d3d11_stage_timing::{
         WindowsD3d11ComposeBreakdown, WindowsD3d11EncoderStageTimers,
         WindowsD3d11MediaLoopBreakdown, WindowsD3d11MediaStageTimers,
@@ -3250,6 +3272,13 @@ mod runtime {
         encoder_registry: WindowsD3d11EncoderRegistry,
         presenter: Option<WindowsD3d11Presenter>,
         presenter_last_error: Option<WindowsD3d11Error>,
+        /// Plan 260 S0.2b: the preview handed to another process, beside
+        /// (or instead of) the presenter. One at a time.
+        preview_handover: Option<WindowsD3d11PreviewHandover>,
+        preview_handover_tokens: u64,
+        /// Shared with the clients: the session composes the preview while
+        /// it is set, even with no presenter configured.
+        preview_handover_active: Arc<AtomicBool>,
         /// Encoder ownership counters survive successful shutdown/removal so
         /// the final authority snapshot includes drain/flush timeout evidence.
         retired_encoder_counters: WindowsD3d11MediaRuntimeCounters,
@@ -3274,6 +3303,9 @@ mod runtime {
                 encoder_registry,
                 presenter: None,
                 presenter_last_error: None,
+                preview_handover: None,
+                preview_handover_tokens: 0,
+                preview_handover_active: Arc::new(AtomicBool::new(false)),
                 retired_encoder_counters: WindowsD3d11MediaRuntimeCounters::default(),
                 stage_timers: WindowsD3d11MediaStageTimers::default(),
             })
@@ -3307,7 +3339,9 @@ mod runtime {
                 | WindowsD3d11MediaCommand::CreateEncoder { .. }
                 | WindowsD3d11MediaCommand::ShutdownEncoder { .. }
                 | WindowsD3d11MediaCommand::ConfigurePreview { .. }
-                | WindowsD3d11MediaCommand::DestroyPreview { .. } => Self::Setup,
+                | WindowsD3d11MediaCommand::DestroyPreview { .. }
+                | WindowsD3d11MediaCommand::OpenPreviewHandover { .. }
+                | WindowsD3d11MediaCommand::ClosePreviewHandover { .. } => Self::Setup,
             }
         }
     }
@@ -3538,6 +3572,13 @@ mod runtime {
         DestroyPreview {
             reply: SyncSender<Result<bool, WindowsD3d11Error>>,
         },
+        OpenPreviewHandover {
+            route: crate::protocol::PreviewHandoverRoute,
+            consumer_pid: u32,
+            reply: SyncSender<Result<WindowsD3d11PreviewHandoverGrant, WindowsD3d11Error>>,
+        },
+        /// Closes the hand-over only if it is still the one `token` names.
+        ClosePreviewHandover { token: u64 },
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3555,6 +3596,7 @@ mod runtime {
         generation: u64,
         preview_slot: Arc<Mutex<Option<WindowsD3d11QueuedPreviewFrame>>>,
         preview_replaced_frames: Arc<AtomicU64>,
+        preview_handover_active: Arc<AtomicBool>,
         /// #1042: the live encoder workers. Polls, status reads and drains go
         /// straight to them; only submissions pass through the media thread,
         /// which owns the texture pool the tickets are checked against.
@@ -3931,7 +3973,7 @@ mod runtime {
                 || metadata.adapter_luid != self.selection.adapter_luid
                 || metadata.role != WindowsD3d11MediaRole::Preview
                 || metadata.format != WindowsD3d11TextureFormat::Bgra8Unorm
-                || preview_generation == 0
+                || (preview_generation == 0 && !self.preview_handover_active())
             {
                 return Err(WindowsD3d11Error::new(
                     WindowsD3d11ErrorCode::InvalidLease,
@@ -3972,6 +4014,35 @@ mod runtime {
             let (reply, response) = mpsc::sync_channel(1);
             self.enqueue(WindowsD3d11MediaCommand::DestroyPreview { reply })?;
             receive_response(response)
+        }
+
+        /// Plan 260 S0.2b: hands the preview to `consumer_pid` by `route`.
+        pub(crate) fn open_preview_handover(
+            &self,
+            route: crate::protocol::PreviewHandoverRoute,
+            consumer_pid: u32,
+        ) -> Result<WindowsD3d11PreviewHandoverGrant, WindowsD3d11Error> {
+            let (reply, response) = mpsc::sync_channel(1);
+            self.enqueue(WindowsD3d11MediaCommand::OpenPreviewHandover {
+                route,
+                consumer_pid,
+                reply,
+            })?;
+            receive_response(response)
+        }
+
+        /// Queued without waiting: a closing connection never blocks on the
+        /// media thread. A full or closed queue means the generation is going
+        /// away, and its hand-over with it.
+        pub(crate) fn close_preview_handover(&self, token: u64) {
+            let _ = self.enqueue(WindowsD3d11MediaCommand::ClosePreviewHandover { token });
+            let _ = self.wake();
+        }
+
+        /// Whether a process holds the preview hand-over (the session then
+        /// composes the preview with no presenter configured).
+        pub(crate) fn preview_handover_active(&self) -> bool {
+            self.preview_handover_active.load(Ordering::Acquire)
         }
 
         pub(crate) fn texture_ticket(
@@ -4362,6 +4433,8 @@ mod runtime {
             let thread_preview_slot = Arc::clone(&preview_slot);
             let preview_replaced_frames = Arc::new(AtomicU64::new(0));
             let thread_preview_replaced_frames = Arc::clone(&preview_replaced_frames);
+            let preview_handover_active = Arc::new(AtomicBool::new(false));
+            let thread_preview_handover_active = Arc::clone(&preview_handover_active);
             let encoders: WindowsD3d11EncoderRegistry = Arc::new(Mutex::new(BTreeMap::new()));
             let thread_encoders = Arc::clone(&encoders);
             let join = thread::Builder::new()
@@ -4375,6 +4448,7 @@ mod runtime {
                         release_receiver,
                         thread_preview_slot,
                         thread_preview_replaced_frames,
+                        thread_preview_handover_active,
                         thread_encoders,
                         startup_sender,
                         thread_cancel,
@@ -4406,6 +4480,7 @@ mod runtime {
                     generation,
                     preview_slot,
                     preview_replaced_frames,
+                    preview_handover_active,
                     encoders,
                 },
                 shutdown_requested: cancel_startup,
@@ -4456,6 +4531,7 @@ mod runtime {
         release_receiver: Receiver<WindowsD3d11LeaseRelease>,
         preview_slot: Arc<Mutex<Option<WindowsD3d11QueuedPreviewFrame>>>,
         preview_replaced_frames: Arc<AtomicU64>,
+        preview_handover_active: Arc<AtomicBool>,
         encoder_registry: WindowsD3d11EncoderRegistry,
         startup_sender: SyncSender<Result<MediaThreadStartup, WindowsD3d11Error>>,
         cancel_startup: Arc<AtomicBool>,
@@ -4470,6 +4546,7 @@ mod runtime {
             let mut media_runtime =
                 WindowsD3d11MediaRuntimeState::new(generation, compositor, encoder_registry)?;
             media_runtime.wake_event = Some(event.clone());
+            media_runtime.preview_handover_active = Arc::clone(&preview_handover_active);
             Ok::<_, WindowsD3d11Error>((apartment, event, device, texture_pool, media_runtime))
         })();
         let Ok((apartment, event, mut device, mut texture_pool, mut media_runtime)) = setup else {
@@ -4599,27 +4676,38 @@ mod runtime {
                 }
                 if let Some(frame) = preview_frame {
                     let present_started_at = Instant::now();
-                    let presented = present_preview_frame(
+                    hand_over_preview_frame(
                         generation,
-                        frame,
+                        &frame,
                         &device,
                         &texture_pool,
                         &mut media_runtime,
                     );
+                    // Generation 0 is a frame composed for the hand-over
+                    // alone (no presenter configured).
+                    if frame.preview_generation != 0 {
+                        let presented = present_preview_frame(
+                            generation,
+                            frame,
+                            &device,
+                            &texture_pool,
+                            &mut media_runtime,
+                        );
+                        if let Err(error) = presented {
+                            // Any failure before or during Present invalidates the
+                            // last canonical-ready status. Keeping the presenter
+                            // here would make PreviewStatus return stale success
+                            // and prevent the monitor from recreating resources.
+                            media_runtime.presenter = None;
+                            media_runtime.presenter_last_error = Some(error);
+                        } else {
+                            media_runtime.presenter_last_error = None;
+                        }
+                    }
                     breakdown.preview_present_micros = micros_since(present_started_at);
                     media_runtime
                         .stage_timers
                         .observe_preview_present(breakdown.preview_present_micros);
-                    if let Err(error) = presented {
-                        // Any failure before or during Present invalidates the
-                        // last canonical-ready status. Keeping the presenter
-                        // here would make PreviewStatus return stale success
-                        // and prevent the monitor from recreating resources.
-                        media_runtime.presenter = None;
-                        media_runtime.presenter_last_error = Some(error);
-                    } else {
-                        media_runtime.presenter_last_error = None;
-                    }
                     media_count += 1;
                 }
             }
@@ -4646,6 +4734,12 @@ mod runtime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
+        if let Some(handover) = media_runtime.preview_handover.as_mut() {
+            handover.retire_on_drop(HandoverRetireReason::MediaEnded);
+        }
+        media_runtime
+            .preview_handover_active
+            .store(false, AtomicOrdering::Release);
         drop(media_runtime);
         drop(texture_pool);
         drop(device);
@@ -4653,13 +4747,11 @@ mod runtime {
         mem::drop(_apartment);
     }
 
-    fn present_preview_frame(
+    fn validate_preview_frame(
         generation: u64,
-        frame: WindowsD3d11QueuedPreviewFrame,
+        frame: &WindowsD3d11QueuedPreviewFrame,
         device: &WindowsD3d11Device,
-        texture_pool: &WindowsD3d11TexturePoolOwner,
-        media_runtime: &mut WindowsD3d11MediaRuntimeState,
-    ) -> Result<WindowsD3d11PresenterStatus, WindowsD3d11Error> {
+    ) -> Result<(), WindowsD3d11Error> {
         let metadata = frame.ticket.metadata();
         if metadata.generation != generation
             || metadata.synchronization.generation != generation
@@ -4672,6 +4764,55 @@ mod runtime {
                 "latest-wins preview slot contained a stale or non-BGRA role ticket",
             ));
         }
+        Ok(())
+    }
+
+    /// Plan 260 S0.2b: publishes the frame to the process holding the
+    /// hand-over, if any. A failure retires the hand-over alone (its header
+    /// says so); the presenter and the session carry on.
+    fn hand_over_preview_frame(
+        generation: u64,
+        frame: &WindowsD3d11QueuedPreviewFrame,
+        device: &WindowsD3d11Device,
+        texture_pool: &WindowsD3d11TexturePoolOwner,
+        media_runtime: &mut WindowsD3d11MediaRuntimeState,
+    ) {
+        let Some(handover) = media_runtime.preview_handover.as_mut() else {
+            return;
+        };
+        let metadata = frame.ticket.metadata();
+        let published = validate_preview_frame(generation, frame, device)
+            .and_then(|()| texture_pool.texture_for_ticket(&frame.ticket))
+            .and_then(|texture| {
+                handover.publish(
+                    device.raw_device(),
+                    device.immediate_context(),
+                    texture,
+                    metadata.sequence,
+                    frame.scene_revision,
+                    metadata.width,
+                    metadata.height,
+                )
+            });
+        if let Err(error) = published {
+            tracing::warn!("preview hand-over retired after a failed publish: {error}");
+            handover.retire_on_drop(HandoverRetireReason::Failed);
+            media_runtime.preview_handover = None;
+            media_runtime
+                .preview_handover_active
+                .store(false, AtomicOrdering::Release);
+        }
+    }
+
+    fn present_preview_frame(
+        generation: u64,
+        frame: WindowsD3d11QueuedPreviewFrame,
+        device: &WindowsD3d11Device,
+        texture_pool: &WindowsD3d11TexturePoolOwner,
+        media_runtime: &mut WindowsD3d11MediaRuntimeState,
+    ) -> Result<WindowsD3d11PresenterStatus, WindowsD3d11Error> {
+        validate_preview_frame(generation, &frame, device)?;
+        let metadata = frame.ticket.metadata();
         let texture = texture_pool.texture_for_ticket(&frame.ticket)?;
         let presenter = media_runtime.presenter.as_mut().ok_or_else(|| {
             WindowsD3d11Error::new(
@@ -4969,6 +5110,49 @@ mod runtime {
                     )),
                 };
                 let _ = reply.try_send(response);
+                false
+            }
+            WindowsD3d11MediaCommand::OpenPreviewHandover {
+                route,
+                consumer_pid,
+                reply,
+            } => {
+                let response = if media_runtime.preview_handover.is_some() {
+                    Err(WindowsD3d11Error::new(
+                        WindowsD3d11ErrorCode::CompositorUnavailable,
+                        "windows-d3d11-preview-handover-busy: another lease holds the preview hand-over",
+                    ))
+                } else {
+                    media_runtime.preview_handover_tokens += 1;
+                    WindowsD3d11PreviewHandover::open(
+                        media_runtime.preview_handover_tokens,
+                        route,
+                        consumer_pid,
+                        generation,
+                        device.adapter_luid(),
+                    )
+                    .map(|(handover, grant)| {
+                        media_runtime.preview_handover = Some(handover);
+                        media_runtime
+                            .preview_handover_active
+                            .store(true, AtomicOrdering::Release);
+                        grant
+                    })
+                };
+                let _ = reply.try_send(response);
+                false
+            }
+            WindowsD3d11MediaCommand::ClosePreviewHandover { token } => {
+                if media_runtime
+                    .preview_handover
+                    .as_ref()
+                    .is_some_and(|handover| handover.token() == token)
+                {
+                    media_runtime.preview_handover = None;
+                    media_runtime
+                        .preview_handover_active
+                        .store(false, AtomicOrdering::Release);
+                }
                 false
             }
             WindowsD3d11MediaCommand::DestroyPreview { reply } => {
@@ -6263,6 +6447,42 @@ mod tests {
                 1,
             )
             .is_err()
+        );
+        // NV12 has its own, deeper ceiling (#1042): a Record queue sized in
+        // time fits, one more does not, and BGRA keeps the shallow one.
+        let bgra = WindowsD3d11BgraTextureDescriptor::new(1920, 1080).unwrap();
+        let nv12 = WindowsD3d11Nv12TextureDescriptor::new(1920, 1080).unwrap();
+        assert!(WindowsD3d11TexturePoolConfig::new(bgra, 5, nv12, D3D11_MAX_NV12_TEXTURES).is_ok());
+        assert!(
+            WindowsD3d11TexturePoolConfig::new(bgra, 5, nv12, D3D11_MAX_NV12_TEXTURES + 1).is_err()
+        );
+        assert!(
+            WindowsD3d11TexturePoolConfig::dimension_keyed(
+                bgra,
+                5,
+                bgra,
+                3,
+                nv12,
+                13,
+                Some((nv12, 3))
+            )
+            .is_ok()
+        );
+        assert!(
+            WindowsD3d11TexturePoolConfig::dimension_keyed(
+                bgra,
+                5,
+                bgra,
+                3,
+                nv12,
+                14,
+                Some((nv12, 3))
+            )
+            .is_err()
+        );
+        assert!(
+            WindowsD3d11TexturePoolConfig::dimension_keyed(bgra, 5, bgra, 4, nv12, 14, None)
+                .is_err()
         );
     }
 

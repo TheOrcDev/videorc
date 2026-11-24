@@ -349,6 +349,42 @@ function smokeEnvValue(env, name) {
 }
 
 /**
+ * Plan 260 S2.5 (from plan 220 S2.5b): which app the launcher runs.
+ * `VIDEORC_APP=electron` (the default, also when unset or empty) is the dev
+ * chain; `VIDEORC_APP=gpui` is the GPUI app (`apps/videorc`, plan 260 S2.1).
+ * It is the one switch every launcher-based smoke honours. Any other value is
+ * refused by name rather than silently running Electron.
+ */
+export function smokeAppKind(env = process.env) {
+  const value = env.VIDEORC_APP
+  if (value === undefined || value === '' || value === 'electron') return 'electron'
+  if (value === 'gpui') return 'gpui'
+  throw new Error(
+    `VIDEORC_APP must be "electron" (the default) or "gpui", not ${JSON.stringify(value)}.`
+  )
+}
+
+/** Whether the smokes drive the GPUI app (`VIDEORC_APP=gpui`). */
+export function smokeAppIsGpui(env = process.env) {
+  return smokeAppKind(env) === 'gpui'
+}
+
+/**
+ * Why `launchDevApp` must not start the app `VIDEORC_APP` names, or null.
+ * The GPUI app has no launch path until plan 260 S2.1 builds it; until then
+ * `VIDEORC_APP=gpui` stops here by name instead of running Electron. Pure for
+ * the unit test.
+ */
+export function smokeAppLaunchRefusal(env = {}, processEnv = process.env) {
+  const kind = smokeAppKind({ ...processEnv, ...env })
+  if (kind !== 'gpui') return null
+  return (
+    'VIDEORC_APP=gpui: the GPUI app (apps/videorc) does not exist yet. Plan 260 S2.1 ' +
+    'builds it and S2.5 gives it a launch path; unset VIDEORC_APP to run Electron.'
+  )
+}
+
+/**
  * Launch the dev app and resolve with the parsed handshake connections.
  *
  * @param {object} options
@@ -365,28 +401,34 @@ function smokeEnvValue(env, name) {
  *   `prebuildDevBackend` (asynchronously), so the synchronous one is skipped.
  * @returns {Promise<{connections:Record<string,object>, process:import('node:child_process').ChildProcess, stop:()=>Promise<void>}>}
  */
-// API origins the backend honours only in debug builds (`cfg!(debug_assertions)`
-// in discord_announce/client.rs and youtube_quota.rs). A release dev backend
-// logs "refused in packaged builds" and sends the smoke's fixture webhook or
-// token to the real service instead of the local fake.
-export const DEBUG_ONLY_API_ORIGIN_ENV = Object.freeze([
-  'VIDEORC_DISCORD_API_BASE_URL',
-  'VIDEORC_YOUTUBE_API_BASE_URL'
-])
+// Environment the backend honours only in debug builds (`cfg!(debug_assertions)`):
+// the fake API origins (discord_announce/client.rs, youtube_quota.rs,
+// videorc_api.rs) and the mock account (account.rs). A release dev backend
+// ignores them: it sends the smoke's fixture webhook, token or calls to the
+// real service instead of the local fake, or runs signed out.
+export const DEBUG_ONLY_BACKEND_ENV = Object.freeze({
+  VIDEORC_DISCORD_API_BASE_URL: 'calls the real service',
+  VIDEORC_YOUTUBE_API_BASE_URL: 'calls the real service',
+  VIDEORC_API_BASE_URL: 'calls the real Videorc API',
+  VIDEORC_MOCK_ACCOUNT: 'runs signed out'
+})
+export const DEBUG_ONLY_API_ORIGIN_ENV = Object.freeze(Object.keys(DEBUG_ONLY_BACKEND_ENV))
 
 /**
- * Why a dev-app launch must not start, or null: a fake API origin with the
- * release dev backend would reach the real service. Pure for the unit test.
+ * Why a dev-app launch must not start, or null: debug-only backend
+ * environment with the release dev backend would reach the real service or
+ * shoot a signed-out app. Pure for the unit test.
  */
 export function releaseBackendFakeOriginRefusal(env = {}, processEnv = process.env) {
   const profile = env.VIDEORC_DEV_BACKEND_PROFILE ?? processEnv.VIDEORC_DEV_BACKEND_PROFILE
   if (profile !== 'release') return null
   const names = DEBUG_ONLY_API_ORIGIN_ENV.filter((name) => env[name] ?? processEnv[name])
   if (names.length === 0) return null
+  const effects = [...new Set(names.map((name) => DEBUG_ONLY_BACKEND_ENV[name]))].join(' and ')
   return (
     `${names.join(', ')} only works with the debug backend; with ` +
-    'VIDEORC_DEV_BACKEND_PROFILE=release the backend ignores it and calls the real ' +
-    'service. Unset VIDEORC_DEV_BACKEND_PROFILE (or set it to debug) for this smoke.'
+    `VIDEORC_DEV_BACKEND_PROFILE=release the backend ignores it and ${effects}. ` +
+    'Unset VIDEORC_DEV_BACKEND_PROFILE (or set it to debug) for this smoke.'
   )
 }
 
@@ -423,6 +465,8 @@ export async function launchDevApp({
   skipPrebuild = false,
   spawnSpec: requestedSpawnSpec
 } = {}) {
+  const appRefusal = smokeAppLaunchRefusal(env)
+  if (appRefusal) return Promise.reject(new Error(appRefusal))
   const fakeOriginRefusal = requestedSpawnSpec ? null : releaseBackendFakeOriginRefusal(env)
   if (fakeOriginRefusal) return Promise.reject(new Error(fakeOriginRefusal))
   // `skipPrebuild`: the caller built the backend already (`prebuildDevBackend`,
@@ -1246,16 +1290,19 @@ export async function runDevBackendPrebuild(spec, { onLine, env } = {}) {
  *   to rebuild.
  * @param {(line:string)=>void} [options.onLine]
  * @param {ReturnType<typeof devBackendPrebuildSpec>} [options.spec]
+ * @param {typeof withBuildSlot} [options.buildSlot] - tests pass their own, so
+ *   they never wait on this machine's real build slots.
  * @returns {Promise<string|null>}
  */
 export async function prebuildDevBackend({
   env = process.env,
   onLine,
-  spec = devBackendPrebuildSpec({ env: process.env })
+  spec = devBackendPrebuildSpec({ env: process.env }),
+  buildSlot = withBuildSlot
 } = {}) {
   if (!spec) return null
   let failure = null
-  await withBuildSlot(
+  await buildSlot(
     async () => {
       failure = await runDevBackendPrebuild(spec, { onLine, env })
     },

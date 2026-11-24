@@ -20,13 +20,14 @@
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { hostname, loadavg, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { buildFixtureApps } from './fixtures/build-fixture-apps.mjs'
+import { buildFixtureApps, FIXTURE_SOURCE_PATH } from './fixtures/build-fixture-apps.mjs'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { reloadKeepingSeedJs } from './lib/renderer-profile-seed.mjs'
 import { decodeSceneFrames } from './lib/scene-artifact-frames.mjs'
@@ -56,14 +57,16 @@ import {
   SHARP_LIVE_MIN,
   followBudgetMs,
   followGate,
-  hideSpanVerdict,
+  frostRunVerdict,
+  hiddenContentVerdict,
   newScenesGate,
   passwordManagerGate,
   outOfSightGate,
   outOfSightRefusalCopyOk,
   relaunchGate,
   smartScenesVerdict,
-  switchGate
+  switchGate,
+  unwrapContentClockMs
 } from './lib/smart-scenes-gate.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -156,7 +159,16 @@ try {
       fail(`${tool} is not runnable; the smoke decodes every output with it.`)
     }
   }
-  const fixtures = buildFixtureApps({ outputDir: join(tmpdir(), 'videorc-fixture-apps') })
+  // Keyed by the fixture source: the build reuses any bundle newer than its
+  // source, and other worktrees on this Mac share the temp directory, so an
+  // unkeyed directory can hand this run a fixture without the content clock.
+  const fixtureSourceHash = createHash('sha256')
+    .update(readFileSync(FIXTURE_SOURCE_PATH))
+    .digest('hex')
+    .slice(0, 12)
+  const fixtures = buildFixtureApps({
+    outputDir: join(tmpdir(), `videorc-fixture-apps-${fixtureSourceHash}`)
+  })
   log(`fixture apps in ${fixtures.outputDir}`)
   // Beta sits above Alpha's motion strip, never over it: both strips stay
   // visible, so neither window goes still on screen.
@@ -1206,6 +1218,7 @@ try {
       },
       replay: { seconds: 60 }
     })
+    const sessionEventsFrom = events.length
     if (!['recording', 'streaming'].includes(started.state))
       fail(
         `expected a record+stream session after session.start, got ${started.state}: ${JSON.stringify(started).slice(0, 400)}`
@@ -1237,6 +1250,9 @@ try {
       5000
     )
     const hideAckMs = Date.now() - hideAtMs
+    // When the gate closed, on the backend's clock (this Mac's wall clock):
+    // a picture drawn after it must never reach a file.
+    const hideGateAtMs = parseSinceMs(hidden.since) ?? hideAtMs
     await sleep(HIDDEN_SPAN_MS)
     const showAtMs = Date.now()
     await renderer.togglePrivacy()
@@ -1270,6 +1286,15 @@ try {
     const combined = await resolveFinalRecordingPath({ started, stopped, timeoutMs })
     await waitForReceiverExit(receiver, 20_000)
     const screenFile = camera ? takeSiblingPaths(combined).screen : null
+    // Plan 200 D1: under load the separate files are shed so Combined keeps
+    // up, and they end there. A shed Screen file is judged for leaks only.
+    const shedEvent = events
+      .slice(sessionEventsFrom)
+      .find(
+        (entry) =>
+          entry.event === 'health.event' &&
+          entry.payload?.code === 'separate-source-recordings-shed'
+      )
     const files = {
       recording: combined,
       stream: receiver.path,
@@ -1300,7 +1325,15 @@ try {
         }
         continue
       }
-      const verdict = hideSpanVerdict({
+      // Privacy by content: no picture of the hidden span, at either edge.
+      const content = hiddenContentVerdict({
+        features: analysis.features,
+        ptsMs: analysis.ptsMs,
+        hideGateAtMs,
+        showAtMs
+      })
+      // The frost itself, in the file's own timeline.
+      const frost = frostRunVerdict({
         features: analysis.features,
         ptsMs: analysis.ptsMs,
         offsetMs: analysis.anchor.offsetMs,
@@ -1308,8 +1341,16 @@ try {
         showAtMs,
         untilMs
       })
+      const shed =
+        name === 'screenFile' && shedEvent && !frost.ok
+          ? `separate files shed under load (plan 200 D1) ${shedEvent.atMs - hideAtMs} ms from the hide; the file ends there, so only its leak check is judged`
+          : null
       outputs[name] = {
-        ...verdict,
+        ...frost,
+        ok: content.ok && (frost.ok || shed != null),
+        failures: [...content.failures, ...(shed ? [] : frost.failures)],
+        shed,
+        content,
         file,
         frameCount: analysis.features.length,
         anchor: analysis.anchor,
@@ -1324,7 +1365,13 @@ try {
             wall: Math.round((analysis.ptsMs[index] ?? 0) + analysis.anchor.offsetMs),
             c: feature.centre,
             sharp: feature.sharp,
-            rep: feature.repeated ? 1 : 0
+            rep: feature.repeated ? 1 : 0,
+            // The fixture's content clock: when this picture was drawn,
+            // relative to the hide gate (null: frost, flash, unreadable).
+            drawn:
+              feature.contentMs == null
+                ? null
+                : Math.round(unwrapContentClockMs(feature.contentMs, hideGateAtMs) - hideGateAtMs)
           }))
         )
       )
@@ -1337,6 +1384,7 @@ try {
       failures,
       outputs,
       hideAtMs,
+      hideGateAtMs,
       showAtMs,
       hideAckMs,
       showAckMs,
@@ -1351,8 +1399,8 @@ try {
         .map(([name, output]) =>
           output.skipped
             ? `${name}: SKIP (${output.reason})`
-            : output.hidden
-              ? `${name}: frosted ${output.hidden.frostedFrames}/${output.hidden.frames} (sharp max ${output.hidden.sharpMax}, live p50 ${output.liveBefore.sharpP50}→${output.liveAfter.sharpP50}), hide +${fmt(output.hideLatencyMs)} ms, show +${fmt(output.showLatencyMs)} ms${output.ok ? '' : ' FAIL'}`
+            : output.content
+              ? `${name}: ${output.content.leaks.length} hidden picture(s) (last live picture drawn ${fmt(output.content.lastBeforeHideMs)} ms before the hide, first ${fmt(output.content.firstAfterShowMs)} ms after the show; clock read on ${output.content.liveReadable}/${output.content.liveFrames} live frames), ${output.shed ? `frost not judged: ${output.shed}` : `frost ${output.hidden.frostedFrames}/${output.hidden.frames} over ${fmt(output.frost?.durationMs)} ms (sharp max ${output.hidden.sharpMax}, live p50 ${output.liveBefore.sharpP50}→${output.liveAfter.sharpP50}), anchored hide ${fmt(output.hideLatencyMs)} ms, show ${fmt(output.showLatencyMs)} ms`}${output.ok ? '' : ' FAIL'}`
               : `${name}: ${output.failures.join('; ')}`
         )
         .join('; ')
@@ -2331,6 +2379,17 @@ function fail(message) {
 
 function log(message) {
   console.log(`[smoke:smart-scenes] ${message}`)
+}
+
+/**
+ * Wall milliseconds of the backend's RFC 3339 `since` (it carries
+ * nanoseconds; `Date.parse` takes at most milliseconds), or null.
+ */
+function parseSinceMs(since) {
+  if (typeof since !== 'string') return null
+  const trimmed = since.replace(/(\.\d{3})\d+/, '$1')
+  const ms = Date.parse(trimmed)
+  return Number.isFinite(ms) ? ms : null
 }
 
 function fmt(value) {

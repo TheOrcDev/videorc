@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Plans 203 S7 and 207 S8. Real macOS dev app, isolated profile, CDP observations only.
 // No permission buttons are pressed. Cold TCC prompts need the owner's S0 pass.
+// It starts with the launch check (no toast in a returning user's first
+// minute); `VIDEORC_FIRST_RUN_SMOKE_ONLY=launch-quiet` runs that check alone.
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { get } from 'node:http'
@@ -415,10 +417,33 @@ const samePreviewSources = (before, after) =>
         before[kind].state === after[kind].state)
   )
 
-async function beginGuard(startMs = Date.now(), allowExistingSources = true) {
+// A guard the smoke opens itself (no launch time given) first lets the
+// workspace's own source starts go quiet. A capture session that just ended
+// restarts Preview about 500 ms later, and the next reload can follow at once:
+// that restart belongs to the workspace page, not to the setup about to open.
+const GUARD_QUIET_MS = 1500
+const GUARD_SETTLE_WITHIN_MS = 10000
+const WORKSPACE_SOURCE_ACTIVITY = /Capture session finalized/
+
+async function sourceStartsSettled() {
+  const deadline = Date.now() + GUARD_SETTLE_WITHIN_MS
+  for (;;) {
+    const last = appLines.findLast(
+      ({ line }) =>
+        WORKSPACE_SOURCE_ACTIVITY.test(line) || firstRunSourceStartLines([line]).length > 0
+    )
+    const quietMs = last ? Date.now() - last.at : Number.POSITIVE_INFINITY
+    if (quietMs >= GUARD_QUIET_MS || Date.now() >= deadline) return quietMs
+    await delay(Math.min(250, GUARD_QUIET_MS - quietMs))
+  }
+}
+
+async function beginGuard(startMs, allowExistingSources = true) {
+  const quietBeforeOpenMs = startMs === undefined ? await sourceStartsSettled() : null
   const previewAtOpen = await previewSnapshot()
   guard = {
-    startMs,
+    startMs: startMs ?? Date.now(),
+    quietBeforeOpenMs,
     previewAtOpen,
     allowExistingSources,
     previewIdleAtOpen: previewQuiet(previewAtOpen),
@@ -759,8 +784,130 @@ async function replay() {
   })
 }
 
-try {
-  console.log(`First-run smoke output: ${output}`)
+// The owner, 2026-11-22: "especially when you enter the app; the first thing
+// you see is a bunch of toasts". What the owner's Mac reports in its first
+// seconds (their backend.log): the app's own handlers for those reports,
+// called as the backend's events call them, with no input to the window.
+// Returns the notification keys each should land on.
+const OWNER_LAUNCH_REPORTS = `(async () => {
+  const runtime = await import('/src/lib/session-runtime-recovery.ts');
+  const app = await import('/src/lib/notifications/sources/app.ts');
+  const platforms = await import('/src/lib/notifications/sources/platforms.ts');
+  const cloud = await import('/src/lib/notifications/sources/cloud.ts');
+  const ring = { state: 'recording', sessionId: 'launch-ring', replayOnly: true };
+  const createdAt = new Date().toISOString();
+  const health = (code, message) => runtime.showSessionHealthEvent(
+    { id: code, sessionId: ring.sessionId, level: 'warn', code, message, createdAt }, false, ring);
+  health('host-overloaded', 'This computer is overloaded: a load of 20 on 10 cores and 8.2 GB of swap in use.');
+  health('recording-startup-cadence-unsteady', 'The first seconds may stutter.');
+  health('mic-silent', 'The microphone has sent only silence since 3.0 seconds into this session.');
+  app.publishGlobalShortcutsProblem({ title: "A global shortcut didn't register", description: 'Another app uses it.' });
+  app.publishVideorcCameraStopped({ title: 'Videorc Camera stopped', description: 'It has no picture yet.' });
+  app.publishBackgroundProblem({ title: "Couldn't load your YouTube channels" });
+  platforms.publishSignInExpired();
+  cloud.announceCloud({ requestTyped: () => Promise.resolve({}) }, () => {});
+  return ['host-overloaded', 'session-notice:recording-startup-cadence-unsteady', 'microphone',
+    'global-shortcuts', 'videorc-camera', "background-problem:Couldn't load your YouTube channels",
+    'account-session', 'cloud-announce'];
+})()`
+
+// The same idle Studio after its first minute (plan 250's idle row, the owner
+// 2026-11-22: "we said we are going to put everything inside of our
+// notifications"): new subjects, so each is a new entry and could pop up.
+const IDLE_REPORTS = `(async () => {
+  const runtime = await import('/src/lib/session-runtime-recovery.ts');
+  const app = await import('/src/lib/notifications/sources/app.ts');
+  const ring = { state: 'recording', sessionId: 'launch-ring', replayOnly: true };
+  runtime.showSessionHealthEvent({ id: 'disk-space-low', sessionId: ring.sessionId, level: 'warn',
+    code: 'disk-space-low', message: 'Recording space is low: 4 GB left.', createdAt: new Date().toISOString() }, false, ring);
+  app.publishBackgroundProblem({ title: "Couldn't refresh the device list" });
+  app.publishOutputTooHeavy({ title: '1440p60 is too heavy for this computer',
+    description: 'Recordings will stutter.', actionLabel: 'Use 1080p30' }, () => {});
+  return {
+    keys: ['disk-space', "background-problem:Couldn't refresh the device list", 'output-too-heavy'],
+    at: performance.now()
+  };
+})()`
+
+const launchObservation = `(() => {
+  const record = window.__videorcSmokeToasts;
+  const read = window.__videorcSmokeNotifications;
+  const bell = document.querySelector('[data-videorc-notification-bell]');
+  return {
+    toastHook: typeof record === 'function',
+    launchToasts: typeof record === 'function'
+      ? record().map(({ kind, title, at, stack }) => ({ kind, title, at, stack })) : [],
+    notificationHook: typeof read === 'function',
+    entries: typeof read === 'function'
+      ? read().entries.map(({ key, kind, tone, title }) => ({ key, kind, tone, title })) : [],
+    bellCount: bell ? Number(bell.getAttribute('data-videorc-notification-count') ?? 0) : null,
+    pressed: navigator.userActivation?.hasBeenActive ?? null,
+    watchMs: performance.now()
+  };
+})()`
+
+// A returning user (setup done) opens Videorc and touches nothing for a
+// minute: zero toasts, and what Videorc found is behind the bell.
+async function launchQuiet() {
+  await startApp('returning')
+  guard = null
+  const done = JSON.stringify({
+    version: 1,
+    status: 'done',
+    step: 'destinations',
+    goal: 'both',
+    updatedAt: new Date().toISOString()
+  })
+  // The reload is the launch the renderer sees: a new document, a new store.
+  await reloadWith({ 'videorc.firstRun': done, 'videorc.theme': 'dark' })
+  await waitFor('returning Studio', (s) => s.setup === null && s.sidebar)
+  await delay(4000)
+  let expectedKeys = []
+  for (let attempt = 0; attempt < 20 && expectedKeys.length === 0; attempt += 1) {
+    try {
+      expectedKeys = await evaluate(OWNER_LAUNCH_REPORTS)
+    } catch {
+      // A dev chunk may still be loading.
+      await delay(500)
+    }
+  }
+  // Without the reports the check would pass without testing anything.
+  if (expectedKeys.length === 0) throw new Error('the owner launch reports never ran')
+  await delay(2000)
+  await screenshot('launch-quiet-dark-6s')
+  // Past the first minute, still with no input: idle stays behind the bell.
+  const waitUntil = async (ms) => {
+    for (;;) {
+      const left = ms - (await evaluate('performance.now()'))
+      if (left <= 0) return
+      await delay(Math.min(5000, left))
+    }
+  }
+  // The store's minute counts from when its chunk loaded, a few seconds into
+  // the document: the idle batch waits for the end of that minute.
+  const storeStartedAt = await evaluate('window.__videorcSmokeNotifications?.().startedAt ?? null')
+  if (typeof storeStartedAt !== 'number') throw new Error('the store start was not read')
+  await waitUntil(storeStartedAt + FIRST_RUN_SMOKE_LIMITS.launchQuietWatchMs + 1000)
+  // The watch after them starts once they ran, on the renderer's clock.
+  const idle = await evaluate(IDLE_REPORTS)
+  const idleReportsAt = idle.at
+  expectedKeys = [...expectedKeys, ...idle.keys]
+  await waitUntil(Math.max(FIRST_RUN_SMOKE_LIMITS.idleQuietWatchMs, idleReportsAt + 14000) + 500)
+  const observed = await evaluate(launchObservation)
+  await screenshot('launch-quiet-dark')
+  await setTheme('light')
+  await settled()
+  await screenshot('launch-quiet-light')
+  await check('launch-quiet', {
+    ...observed,
+    expectedKeys,
+    idleReportsAt,
+    idleReportsAfterStoreMs: idleReportsAt - storeStartedAt
+  })
+}
+
+// Every setup profile after the launch check.
+async function setupProfiles() {
   await startApp('recordings')
   // CDP attaches after the untouched first mount; reload to measure mount to
   // first frame on a shared renderer clock, as plan 203 did.
@@ -948,8 +1095,17 @@ try {
     beforeConfigRaw: beforeSkip.configRaw,
     beforeRegistryRaw: beforeSkip.registryRaw
   })
+}
+
+try {
+  console.log(`First-run smoke output: ${output}`)
+  await launchQuiet()
+  const onlyLaunchQuiet = process.env.VIDEORC_FIRST_RUN_SMOKE_ONLY === 'launch-quiet'
+  if (!onlyLaunchQuiet) await setupProfiles()
   report.pass = true
-  console.log('PASS first-run smoke: all steps passed')
+  console.log(
+    `PASS first-run smoke: ${onlyLaunchQuiet ? 'the launch check passed (launch-quiet only)' : 'all steps passed'}`
+  )
 } catch (error) {
   report.pass = false
   report.error = error.stack ?? String(error)

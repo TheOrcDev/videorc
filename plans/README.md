@@ -1,5 +1,65 @@
 # Implementation Plans
 
+- 2026-11-23: [Plan 260](260-gpui-rewrite.md), the owner's ask: rewrite
+  the whole Electron app in GPUI (Zed's UI framework) instead of plan
+  220's Slint. DECIDED 2026-11-23, about 110 slices in seven phases, run
+  in at least four parallel lanes; D1-D13 taken the same day (D8 and D10
+  changed from the recommendation):
+  - Why GPUI: the ecosystem (the owner: "it's going forward, everyone is
+    using it"), not Slint's speed. Phase 0 checks smoothness, the look,
+    text and start-up on all three platforms against Electron.
+  - All three platforms switch together (D8): the Windows and Linux
+    preview routes are on the critical path. Windows is done by two
+    outside contributors on their own PCs, no waiver:
+    [testing](260-gpui-rewrite-windows-testing.md) and
+    [code](260-gpui-rewrite-windows-code.md) plans for them.
+  - The kit is the GPUI flavour of videorc-ui (D3, D10): same names and
+    tokens as the React components, published at ui.videorc.com and
+    synced with `ui:sync`/`ui:check`; ui.videorc.com is kept for both.
+  - Keep `videorc-rust`'s framework-free core, preview, updater and
+    contracts; drop the Slint crates; land the core in this repo first,
+    shipping in Electron (Phase 1 starts now).
+  - Seven lanes with their own files, worktrees and Cargo targets, at most
+    two heavy builds on the Mac at once; a dispatch table per phase.
+- 2026-11-22: [Plan 258](258-background-effects.md), the owner's ask:
+  background blur and replacement without a green screen, like Google Meet,
+  for recording, streaming, rooms and guests. PLANNED 2026-11-22, 13 slices
+  (S0-S12); D3-D11 DECIDED 2026-11-22 (the recommended defaults):
+  - Research across Meet, Zoom, Teams, macOS and Windows effects, OBS,
+    NVIDIA, StreamYard, Restream, Riverside, Camo and the libraries (Vision,
+    MediaPipe, ONNX models, LiveKit's processors).
+  - One camera effect stage at the camera publish point, so no raw frame
+    reaches any output, failing closed to a full blur; the browser processor
+    for the room's host and guests, before publishing.
+  - One Background control: the Scene page camera inspector (home) and the
+    Studio Camera row (mirror), with Green and Blue screen in the same pick;
+    a round button on the guest page. Mockup:
+    [258-background-effects-mockup.html](258-background-effects-mockup.html).
+- 2026-11-21: [Plan 257](257-linux-beta.md), the owner's ask: Linux from
+  Alpha to Beta with every Mac feature working, or an honest Linux
+  equivalent. PLANNED 2026-11-21, 23 slices (S0-S22), twelve owner checks:
+  - A 55-row parity matrix from the code and a spot check on ogre with the
+    0.36.0 build: 11 work as seen, 12 work in code, 11 degraded, 2 broke
+    (mic dropout and an FFmpeg hang at Stop, under host load), 11 missing,
+    5 OS-limited.
+  - Beta defined: Tier 1 desktops, AppImage with self-update, a Linux
+    physical acceptance checklist like the Windows one, two named boxes, no
+    waiver.
+  - First: lab lock detection, the recording repro, a lighter camera, the
+    preview transport, portal global shortcuts and PipeWire desktop audio.
+- 2026-11-21: [Plan 256](256-window-capture-on-windows.md), the plan
+  that plan 210 D12 promised: capturing one app window on Windows through
+  Windows Graphics Capture (`CreateForWindow`). PLANNED 2026-11-21 as a
+  research draft, a spike and seven slices:
+  - Windows lists displays only today, and every window path refuses or
+    silently drops a window id.
+  - The id is `window:wgc:<hwnd>:<pid>`. The Preview's WGC user grows a
+    window target that recreates its pool on resize, pauses while
+    minimized and reports a closed window.
+  - It records and streams through the compositor bridge first; the D3D11
+    media path learns windows in S6. Hide screen sizes its still from the
+    content, not the pool.
+  - A silent fixture-window smoke proves resize, minimize and close.
 - 2026-11-20: [Plan 254](254-live-test-2-fixes.md), the fixes from the
   owner's second live test on 0.34.0 (F1-F7): a departed guest leaves the
   stage at once, a portrait phone camera is drawn whole, the guest theme

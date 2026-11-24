@@ -92,6 +92,15 @@ second capture:
   that would say "Recording" treats it as idle (⌘K, the Stream Manager, the
   voice marker, the "Recording saved" toast) and main treats it as idle for
   quit, update and permission restarts.
+- **A camera without a frame**: an automatic start whose scene camera has
+  no frame yet is refused cheaply (`replay-sources-not-ready`, before the
+  probes). A camera still starting is waited for; its live edge starts the
+  ring. A camera that says live but sends nothing (blocked, dead, the dev
+  app without a camera grant) is asked again after 1, 2, 4 and 8 s, then no
+  more (2026-11-23: it was asked every half second, forever). The ring then
+  waits for the camera's first frame, a source or layout change or the
+  switch, and says so once behind the bell ("Clips couldn't start", never a
+  toast); the ring going on resolves it.
 - **The guard**: a buffer-only start the user never asked for carries
   `auto: true`. After the session's encoder decision and before anything is
   spawned, the backend refuses it with `replay-software-encoder` when that

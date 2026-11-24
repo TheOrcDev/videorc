@@ -22,6 +22,10 @@ import { RecordingTab, SAVE_RECORDING_OFF, SAVE_RECORDING_ON } from './recording
 // resolution picker: its Output row opens this page (S3.3, B-15).
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
+// Plan 258 S5: the Camera row's Background reads the Images library.
+vi.mock('@/hooks/use-background-assets', () => ({
+  useBackgroundAssets: () => ({ registry: { slots: [], assets: {} } })
+}))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
   // Plan 224 D10: no room is open; the local file's rows read as today.
@@ -39,6 +43,8 @@ vi.mock('@/hooks/use-studio', () => ({
     chatNewCount: 0
   }),
   useStudioRecordingState: () => ({ recording: { state: 'idle' } }),
+  // Plan 258 S4: the Camera row's system effect line reads the camera status.
+  useStudioPreview: () => ({ previewCameraStatus: {} }),
   useStudioShell: () => ({ openCommentsWindow: vi.fn(), runtimeInfo: { platform: 'darwin' } })
 }))
 const toast = vi.hoisted(() => ({ error: vi.fn(), warning: vi.fn() }))

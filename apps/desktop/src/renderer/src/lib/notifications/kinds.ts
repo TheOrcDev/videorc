@@ -16,9 +16,16 @@ export interface NotificationKind {
   answersAPress?: boolean
   /**
    * News Videorc tells once, outside a session (a feature switched on for
-   * the account): it pops up like an answer, or nobody would see it.
+   * the account). It never pops up, so it counts on the bell, or nobody
+   * would see it.
    */
   announcement?: boolean
+  /**
+   * Its urgent report says a livestream the streamer started has failed, and
+   * may arrive after the session ended ("X ended your broadcast"). Kinds that
+   * are urgent on their own are such reports already.
+   */
+  failsASession?: boolean
   /** How long that pop-up stays, when not the default. */
   popUpMs?: number
 }
@@ -59,13 +66,13 @@ const kinds = {
   // What Go Live did or still needs, said while the streamer waits for it.
   'go-live-step': { tone: 'news', life: 'event', answersAPress: true, popUpMs: 8_000 },
   // Urgent when X ended the broadcast itself.
-  'x-playback': { tone: 'warning', life: 'condition', mayBe: ['urgent'] },
+  'x-playback': { tone: 'warning', life: 'condition', mayBe: ['urgent'], failsASession: true },
   'x-live': { tone: 'done', life: 'event', answersAPress: true },
   'platform-news': { tone: 'news', life: 'event' },
   'youtube-thumbnail': { tone: 'warning', life: 'condition' },
   'cloud-status': { tone: 'warning', life: 'condition' },
   'cloud-news': { tone: 'news', life: 'event' },
-  'cloud-announce': { tone: 'news', life: 'event', announcement: true, popUpMs: 8_000 },
+  'cloud-announce': { tone: 'news', life: 'event', announcement: true },
   'cloud-controller': { tone: 'news', life: 'condition', answersAPress: true, popUpMs: 8_000 },
   // Back in the room by itself after a backend restart: runs, then done or failed.
   'cloud-rejoin': { tone: 'news', life: 'progress' },
@@ -79,8 +86,13 @@ const kinds = {
   backend: { tone: 'warning', life: 'condition', mayBe: ['urgent'] },
   'backend-error': { tone: 'warning', life: 'event' },
   'output-too-heavy': { tone: 'warning', life: 'event' },
+  // Sidekick stopped or failed on its own (a lapse, a quota, a sign-out).
+  sidekick: { tone: 'warning', life: 'event', mayBe: ['news'] },
+  // Live captions the Studio starts on its own with a session could not start.
+  captions: { tone: 'warning', life: 'event' },
   'app-news': { tone: 'news', life: 'event' },
-  'recording-saved': { tone: 'done', life: 'event' },
+  // The late answer to Stop: the take is saved, with Play and the Library.
+  'recording-saved': { tone: 'done', life: 'event', answersAPress: true, popUpMs: 8_000 },
   mp4: { tone: 'news', life: 'progress' },
   'work-done': { tone: 'done', life: 'event' },
   'work-failed': { tone: 'warning', life: 'event' },

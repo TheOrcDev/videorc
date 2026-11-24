@@ -1,3 +1,4 @@
+#[cfg(any(not(target_os = "windows"), test))]
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -2425,16 +2426,46 @@ fn collect_runtime_resource_snapshot() -> RuntimeResourceSnapshot {
     // ~40 ms of CPU, ~32 ms of it system time (measured), so forking it every second
     // burned ~4% of a core for as long as the app was open. On macOS libproc reads
     // the same rows for the backend's own process tree in ~35 µs, with `ps` kept as
-    // the fallback for any sample libproc cannot take. Every other platform keeps `ps`.
+    // the fallback for any sample libproc cannot take. Windows has no `ps` (every
+    // sample read zero FFmpeg processes and no memory, and a 0.36.0 tester's support
+    // bundle carried exactly that), so it reads Toolhelp instead and never forks.
+    // Linux keeps `ps`.
     #[cfg(target_os = "macos")]
     {
         if let Some(rows) = collect_native_process_rows() {
             return runtime_resource_snapshot_from_rows(&rows, backend_pid);
         }
     }
+    #[cfg(target_os = "windows")]
+    {
+        let sampled = collect_windows_process_rows();
+        let mut log = WINDOWS_SAMPLE_FAILURE_LOG
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match sampled {
+            Ok(rows) => {
+                if log.succeeded() {
+                    tracing::info!("Windows resource sampling works again");
+                }
+                runtime_resource_snapshot_from_rows(&rows, backend_pid)
+            }
+            Err(error) => {
+                // A failed sample reads as no memory and no FFmpeg processes;
+                // say so, so Diagnostics' zeros are not taken as the truth.
+                if let Some(skipped) = log.failed(std::time::Instant::now()) {
+                    tracing::warn!(
+                        "Windows resource sampling failed: {error} ({skipped} more since the last report)"
+                    );
+                }
+                RuntimeResourceSnapshot::default()
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
     collect_ps_runtime_resource_snapshot(backend_pid)
 }
 
+#[cfg(not(target_os = "windows"))]
 fn collect_ps_runtime_resource_snapshot(backend_pid: u32) -> RuntimeResourceSnapshot {
     let output = Command::new("ps")
         .args(["-axo", "pid=,ppid=,rss=,comm="])
@@ -2454,6 +2485,7 @@ struct ProcessSampleRow {
     command: String,
 }
 
+#[cfg(any(not(target_os = "windows"), test))]
 fn parse_runtime_resource_snapshot(output: &str, backend_pid: u32) -> RuntimeResourceSnapshot {
     let rows = output
         .lines()
@@ -2492,10 +2524,7 @@ fn runtime_resource_snapshot_from_rows(
         .iter()
         .filter(|row| row.pid != backend_pid && owned_pids.contains(&row.pid))
     {
-        let executable = std::path::Path::new(row.command.trim())
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
+        let executable = executable_stem(&row.command);
         if executable.eq_ignore_ascii_case("ffmpeg") {
             snapshot.active_ffmpeg_processes = snapshot.active_ffmpeg_processes.saturating_add(1);
         } else if executable.eq_ignore_ascii_case("ffprobe") {
@@ -2505,6 +2534,22 @@ fn runtime_resource_snapshot_from_rows(
     snapshot
 }
 
+/// The executable's name without its directory or a Windows `.exe` suffix:
+/// `ffmpeg` for `/opt/ffmpeg`, `ffmpeg.exe` and `C:\vendor\FFMPEG.EXE` alike.
+fn executable_stem(command: &str) -> &str {
+    let command = command.trim();
+    let name = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    match name.len().checked_sub(4) {
+        Some(stem_len)
+            if name.is_char_boundary(stem_len) && name[stem_len..].eq_ignore_ascii_case(".exe") =>
+        {
+            &name[..stem_len]
+        }
+        _ => name,
+    }
+}
+
+#[cfg(any(not(target_os = "windows"), test))]
 fn parse_process_sample_row(line: &str) -> Option<ProcessSampleRow> {
     let mut fields = line.split_whitespace();
     let pid = fields.next()?.parse().ok()?;
@@ -2517,6 +2562,230 @@ fn parse_process_sample_row(line: &str) -> Option<ProcessSampleRow> {
         rss_kib,
         command,
     })
+}
+
+/// This process and its live descendants on Windows, as the rows the `ps` collector
+/// parses. One Toolhelp snapshot lists every process with its parent pid and
+/// executable name (`ffmpeg.exe`). Only the backend's own row carries a resident
+/// size (its working set), the one size the snapshot needs. A Windows parent pid
+/// is never cleared when the parent exits, and the number can be reused, so a
+/// process joins the tree only when it is still running and started no earlier
+/// than the parent that names it. `None` when the snapshot or the backend's own
+/// row cannot be read.
+#[cfg(target_os = "windows")]
+fn collect_windows_process_rows() -> Result<Vec<ProcessSampleRow>, String> {
+    use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES};
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let backend_pid = std::process::id();
+    // SAFETY: a process snapshot has no preconditions; the handle is closed below.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
+        .map_err(|error| format!("the Toolhelp process snapshot failed: {error}"))?;
+    let mut listed = Vec::new();
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    // ERROR_NO_MORE_FILES is the end of the list; any other error means the
+    // list is incomplete, and a partial list must not pass for a sample.
+    let ended = |step: &str, result: windows::core::Result<()>| match result {
+        Ok(()) => Ok(false),
+        Err(error) if error.code() == ERROR_NO_MORE_FILES.to_hresult() => Ok(true),
+        Err(error) => Err(format!("listing processes failed at {step}: {error}")),
+    };
+    // SAFETY: `entry.dwSize` is set as the API requires.
+    let mut done = ended("Process32FirstW", unsafe {
+        Process32FirstW(snapshot, &mut entry)
+    });
+    while let Ok(false) = done {
+        let name_len = entry
+            .szExeFile
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(entry.szExeFile.len());
+        listed.push((
+            entry.th32ProcessID,
+            entry.th32ParentProcessID,
+            String::from_utf16_lossy(&entry.szExeFile[..name_len]),
+        ));
+        // SAFETY: as above.
+        done = ended("Process32NextW", unsafe {
+            Process32NextW(snapshot, &mut entry)
+        });
+    }
+    // SAFETY: the snapshot handle is owned here and closed once, on every path.
+    let _ = unsafe { CloseHandle(snapshot) };
+    done?;
+
+    let rss_kib = windows_own_working_set_bytes()
+        .map_err(|error| format!("reading the backend's working set failed: {error}"))?
+        / 1024;
+    windows_tree_rows(&listed, backend_pid, rss_kib, windows_running_process_start).ok_or_else(
+        || {
+            format!(
+                "the backend (pid {backend_pid}) is missing from the {} listed processes, or its start time could not be read",
+                listed.len()
+            )
+        },
+    )
+}
+
+/// The Windows sampler runs every second; a failure that persists would
+/// otherwise log every second.
+#[cfg(target_os = "windows")]
+static WINDOWS_SAMPLE_FAILURE_LOG: std::sync::Mutex<SampleFailureLog> =
+    std::sync::Mutex::new(SampleFailureLog::new());
+
+#[cfg(any(target_os = "windows", test))]
+const SAMPLE_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// When a failing resource sample is reported: the first failure at once, then
+/// at most once per [`SAMPLE_FAILURE_REPORT_INTERVAL`] with the count it held
+/// back, and one line when samples work again.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug)]
+struct SampleFailureLog {
+    last_reported: Option<std::time::Instant>,
+    held_back: u64,
+    failing: bool,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl SampleFailureLog {
+    const fn new() -> Self {
+        Self {
+            last_reported: None,
+            held_back: 0,
+            failing: false,
+        }
+    }
+
+    /// A failed sample. `Some(held back)` when it should be reported now.
+    fn failed(&mut self, now: std::time::Instant) -> Option<u64> {
+        self.failing = true;
+        if let Some(at) = self.last_reported
+            && now.saturating_duration_since(at) < SAMPLE_FAILURE_REPORT_INTERVAL
+        {
+            self.held_back += 1;
+            return None;
+        }
+        self.last_reported = Some(now);
+        Some(std::mem::take(&mut self.held_back))
+    }
+
+    /// A sample that worked. `true` when it ends a run of failures.
+    fn succeeded(&mut self) -> bool {
+        let recovered = self.failing;
+        *self = Self::new();
+        recovered
+    }
+}
+
+/// `root` and the descendants a Windows process list names, given each running
+/// process's start time (`running_start`, `None` once it has exited or cannot be
+/// read). A process whose parent pid names an owned process joins the tree only
+/// when it started no earlier than that parent: an older one names a parent pid
+/// that has since been reused. `None` when `root` is not listed or not running.
+#[cfg(any(target_os = "windows", test))]
+fn windows_tree_rows(
+    listed: &[(u32, u32, String)],
+    root: u32,
+    root_rss_kib: u64,
+    mut running_start: impl FnMut(u32) -> Option<u64>,
+) -> Option<Vec<ProcessSampleRow>> {
+    let (_, root_parent, root_name) = listed.iter().find(|(pid, ..)| *pid == root)?;
+    let mut rows = vec![ProcessSampleRow {
+        pid: root,
+        parent_pid: *root_parent,
+        rss_kib: root_rss_kib,
+        command: root_name.clone(),
+    }];
+    let mut started = std::collections::HashMap::from([(root, running_start(root)?)]);
+    let mut parents = std::collections::VecDeque::from([root]);
+    while let Some(parent) = parents.pop_front() {
+        let parent_start = started[&parent];
+        for (pid, _, name) in listed
+            .iter()
+            .filter(|(pid, parent_pid, _)| *parent_pid == parent && *pid != parent)
+        {
+            if started.contains_key(pid) {
+                continue;
+            }
+            // An exited or unreadable process, or one older than the parent it
+            // names, is not ours: leave it out, like a row missing from `ps`.
+            let Some(start) = running_start(*pid) else {
+                continue;
+            };
+            if start < parent_start {
+                continue;
+            }
+            started.insert(*pid, start);
+            rows.push(ProcessSampleRow {
+                pid: *pid,
+                parent_pid: parent,
+                rss_kib: 0,
+                command: name.clone(),
+            });
+            parents.push_back(*pid);
+        }
+    }
+    Some(rows)
+}
+
+/// The backend's working set in bytes, Windows' resident size.
+#[cfg(target_os = "windows")]
+fn windows_own_working_set_bytes() -> std::io::Result<u64> {
+    use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: the pseudo handle needs no closing, and `counters` is writable for `cb` bytes.
+    let filled =
+        unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
+    if filled.as_bool() {
+        Ok(counters.WorkingSetSize as u64)
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// When a still-running process started, in FILETIME ticks. `None` when it
+/// cannot be opened or has already exited (its handle is signaled).
+#[cfg(target_os = "windows")]
+fn windows_running_process_start(pid: u32) -> Option<u64> {
+    use windows::Win32::Foundation::{CloseHandle, FILETIME, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        WaitForSingleObject,
+    };
+
+    // SAFETY: opening a process for query and wait has no preconditions; the
+    // handle is closed below.
+    let process = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        )
+    }
+    .ok()?;
+    // SAFETY: a zero-timeout wait on an owned process handle only polls it.
+    let running = unsafe { WaitForSingleObject(process, 0) } == WAIT_TIMEOUT;
+    let (mut created, mut exited) = (FILETIME::default(), FILETIME::default());
+    let (mut kernel, mut user) = (FILETIME::default(), FILETIME::default());
+    // SAFETY: every out pointer is a writable FILETIME.
+    let times =
+        unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) };
+    // SAFETY: the handle is owned here and closed once.
+    let _ = unsafe { CloseHandle(process) };
+    times.ok()?;
+    running.then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
 }
 
 /// This process and its live descendants, read from libproc as the rows the `ps`
@@ -2689,6 +2958,101 @@ mod tests {
     }
 
     #[test]
+    fn windows_executable_names_count_as_ffmpeg_and_ffprobe() {
+        assert_eq!(executable_stem("ffmpeg.exe"), "ffmpeg");
+        assert_eq!(executable_stem(r"C:\vendor\bin\FFPROBE.EXE"), "FFPROBE");
+        assert_eq!(executable_stem("/opt/ffmpeg"), "ffmpeg");
+        assert_eq!(executable_stem(".exe"), "");
+        assert_eq!(executable_stem("ffmpeg-capture.exe"), "ffmpeg-capture");
+
+        let snapshot = runtime_resource_snapshot_from_rows(
+            &[
+                row(100, 4, 2048, "videorc-backend.exe"),
+                row(101, 100, 0, "ffmpeg.exe"),
+                row(102, 100, 0, "FFMPEG.EXE"),
+                row(103, 101, 0, "ffprobe.exe"),
+                // The capture worker is not an FFmpeg encoder process.
+                row(104, 100, 0, "ffmpeg-capture.exe"),
+                row(200, 4, 0, "ffmpeg.exe"),
+            ],
+            100,
+        );
+        assert_eq!(snapshot.backend_rss_bytes, Some(2048 * 1024));
+        assert_eq!(snapshot.active_ffmpeg_processes, 2);
+        assert_eq!(snapshot.active_ffprobe_processes, 1);
+    }
+
+    #[test]
+    fn sample_failures_report_at_once_then_once_a_minute_and_say_when_they_end() {
+        let start = std::time::Instant::now();
+        let mut log = SampleFailureLog::new();
+        assert!(!log.succeeded(), "no failure to recover from");
+        assert_eq!(log.failed(start), Some(0), "the first failure is reported");
+        for second in 1..60 {
+            assert_eq!(log.failed(start + Duration::from_secs(second)), None);
+        }
+        assert_eq!(
+            log.failed(start + Duration::from_secs(60)),
+            Some(59),
+            "a minute on, with the failures it held back"
+        );
+        assert_eq!(log.failed(start + Duration::from_secs(61)), None);
+        assert!(log.succeeded(), "the first good sample ends the run");
+        assert!(!log.succeeded(), "and only once");
+        assert_eq!(
+            log.failed(start + Duration::from_secs(62)),
+            Some(0),
+            "a new run of failures is reported at once"
+        );
+    }
+
+    #[test]
+    fn windows_tree_rows_leave_out_reused_parent_pids_and_exited_processes() {
+        let listed = [
+            (0, 0, "[System Process]".to_string()),
+            (100, 4, "videorc-backend.exe".to_string()),
+            // Ours: started after the backend, and its own child after it.
+            (101, 100, "ffmpeg.exe".to_string()),
+            (102, 101, "ffprobe.exe".to_string()),
+            // Names pid 100 but is older than the backend: an earlier process
+            // that held pid 100 started it.
+            (103, 100, "ffmpeg.exe".to_string()),
+            // Exited between the snapshot and the start-time read.
+            (104, 100, "ffmpeg.exe".to_string()),
+            (200, 4, "ffmpeg.exe".to_string()),
+        ];
+        let starts = std::collections::HashMap::from([
+            (100, 50),
+            (101, 60),
+            (102, 70),
+            (103, 10),
+            (200, 55),
+        ]);
+        let rows = windows_tree_rows(&listed, 100, 2048, |pid| starts.get(&pid).copied())
+            .expect("the backend is listed and running");
+
+        let pids = rows.iter().map(|row| row.pid).collect::<Vec<_>>();
+        assert_eq!(pids, vec![100, 101, 102]);
+        assert_eq!(rows[0].rss_kib, 2048);
+        assert_eq!(rows[2].parent_pid, 101);
+        let snapshot = runtime_resource_snapshot_from_rows(&rows, 100);
+        assert_eq!(snapshot.active_ffmpeg_processes, 1);
+        assert_eq!(snapshot.active_ffprobe_processes, 1);
+
+        assert!(windows_tree_rows(&listed, 300, 0, |_| Some(1)).is_none());
+        assert!(windows_tree_rows(&listed, 100, 0, |_| None).is_none());
+    }
+
+    fn row(pid: u32, parent_pid: u32, rss_kib: u64, command: &str) -> ProcessSampleRow {
+        ProcessSampleRow {
+            pid,
+            parent_pid,
+            rss_kib,
+            command: command.to_string(),
+        }
+    }
+
+    #[test]
     fn applying_a_cached_resource_sample_never_collects_processes() {
         let mut stats = idle_diagnostics();
         apply_runtime_resource_snapshot_value(
@@ -2707,13 +3071,13 @@ mod tests {
 
     /// Kills and reaps a test's child (and removes its scratch directory) even when an
     /// assertion fails first.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     struct OwnedTestChild {
         child: std::process::Child,
         scratch_dir: Option<std::path::PathBuf>,
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     impl Drop for OwnedTestChild {
         fn drop(&mut self) {
             let _ = self.child.kill();
@@ -2757,7 +3121,7 @@ mod tests {
     }
 
     /// Stands in for a bundled `ffmpeg` child: blocks until its parent test kills it.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     #[ignore = "ffmpeg-named child fixture launched explicitly by the native sampler test"]
     fn ffmpeg_named_child_fixture() {
@@ -2816,6 +3180,61 @@ mod tests {
         assert!(snapshot.backend_rss_bytes.is_some_and(|bytes| bytes > 0));
         // The sampler's own collection counts it too, beside any concurrent ones.
         assert!(collect_runtime_resource_snapshot().active_ffmpeg_processes >= 1);
+    }
+
+    /// Windows has no `ps`: before Toolhelp every sample read zero FFmpeg processes
+    /// and no memory. This test binary runs its fixture as `ffmpeg.exe`, the bundled
+    /// binary's file name.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_process_rows_read_own_working_set_and_count_an_ffmpeg_exe_child() {
+        let scratch_dir =
+            std::env::temp_dir().join(format!("videorc-windows-sampler-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch_dir).unwrap();
+        let ffmpeg = scratch_dir.join("ffmpeg.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &ffmpeg).unwrap();
+        let fixture = OwnedTestChild {
+            child: Command::new(&ffmpeg)
+                .args([
+                    "--exact",
+                    "diagnostics::tests::ffmpeg_named_child_fixture",
+                    "--ignored",
+                ])
+                .env("VIDEORC_FFMPEG_NAMED_CHILD_FIXTURE", "1")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn the ffmpeg.exe fixture"),
+            scratch_dir: Some(scratch_dir),
+        };
+        let own_pid = std::process::id();
+        let fixture_pid = fixture.child.id();
+
+        // CreateProcess has returned, so the child is already in the process list.
+        let rows = collect_windows_process_rows().expect("Toolhelp samples this process");
+
+        let own = rows.iter().find(|row| row.pid == own_pid).expect("own row");
+        assert!(own.rss_kib > 0, "own working set is sampled");
+        let row = rows
+            .iter()
+            .find(|row| row.pid == fixture_pid)
+            .expect("the fixture is sampled");
+        assert_eq!(row.parent_pid, own_pid);
+        assert_eq!(row.command, "ffmpeg.exe");
+        // Other tests in this binary may run real FFmpeg children at the same time, so
+        // the exact count aggregates only this test's own row and its fixture.
+        let ours = rows
+            .into_iter()
+            .filter(|row| row.pid == own_pid || row.pid == fixture_pid)
+            .collect::<Vec<_>>();
+        let snapshot = runtime_resource_snapshot_from_rows(&ours, own_pid);
+        assert_eq!(snapshot.active_ffmpeg_processes, 1);
+        assert_eq!(snapshot.active_ffprobe_processes, 0);
+        assert!(snapshot.backend_rss_bytes.is_some_and(|bytes| bytes > 0));
+        let sampled = collect_runtime_resource_snapshot();
+        assert!(sampled.active_ffmpeg_processes >= 1);
+        assert!(sampled.backend_rss_bytes.is_some_and(|bytes| bytes > 0));
     }
 
     #[test]
@@ -4035,6 +4454,8 @@ mod tests {
                 updated_at: "2026-06-08T00:00:00Z".to_string(),
                 message: Some("Live".to_string()),
                 no_video: None,
+                system_effect: None,
+                camera_background: None,
             },
         );
 
@@ -4103,6 +4524,8 @@ mod tests {
             updated_at: "2026-11-04T00:00:00Z".to_string(),
             message: Some("Live".to_string()),
             no_video: None,
+            system_effect: None,
+            camera_background: None,
         }
     }
 

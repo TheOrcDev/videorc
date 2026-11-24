@@ -84,7 +84,43 @@ export const RUST_READS_DESKTOP_PREFIXES = Object.freeze([
 ])
 export const RUST_READS_DESKTOP_FILES = Object.freeze([
   'apps/desktop/src/renderer/src/styles.css',
-  'apps/desktop/src/main/window-palette.ts'
+  'apps/desktop/src/main/window-palette.ts',
+  // videorc-app-core's desktop::permissions tests read these (plan 260 S1.6s).
+  'apps/desktop/src/main/media-access.ts',
+  'apps/desktop/src/main/runtime-info.ts',
+  // The typed client's deadline table is checked against it (S1.6s part 4).
+  'apps/desktop/src/renderer/src/backendClient.ts',
+  // desktop::system_access and desktop::camera_extension check their tables
+  // against these (S1.6s part 5).
+  'apps/desktop/src/renderer/src/lib/system-access.ts',
+  'apps/desktop/src/renderer/src/lib/system-access-view.ts',
+  'apps/desktop/src/renderer/src/lib/system-permission-orchestration.ts',
+  'apps/desktop/src/main/camera-extension.ts',
+  // videorc-app-core's nav tests read these (plan 260 S1.6f).
+  'apps/desktop/src/renderer/src/lib/settings-tabs.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-tabs.ts',
+  'apps/desktop/src/renderer/src/lib/avatar-tabs.ts',
+  'apps/desktop/src/renderer/src/lib/livestream-tabs.ts',
+  // buddy::copy's words are checked against these (S1.6e part 2).
+  'apps/desktop/src/renderer/src/components/buddy-avatar-section.tsx',
+  'apps/desktop/src/renderer/src/components/buddy-consent-dialog.tsx',
+  'apps/desktop/src/renderer/src/components/buddy-library-section.tsx',
+  'apps/desktop/src/renderer/src/components/buddy-look-section.tsx',
+  'apps/desktop/src/renderer/src/components/buddy-motion-section.tsx',
+  'apps/desktop/src/renderer/src/components/buddy-persona-section.tsx',
+  'apps/desktop/src/renderer/src/components/cohost-settings-section.tsx',
+  'apps/desktop/src/renderer/src/components/cohost-status.tsx',
+  'apps/desktop/src/renderer/src/components/tabs/avatar-tab.tsx',
+  'apps/desktop/src/renderer/src/components/tabs/buddy-tab.tsx',
+  'apps/desktop/src/renderer/src/lib/buddy-auto-chat-view.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-create-gate.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-library-view.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-onboarding-copy.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-persona-view.ts',
+  'apps/desktop/src/renderer/src/lib/buddy-tab-view.ts',
+  'apps/desktop/src/renderer/src/lib/cohost-view.ts',
+  // chat::highlight's shared words are checked against it (S1.6e part 1).
+  'apps/desktop/src/renderer/src/lib/studio-actions/studio-context.ts'
 ])
 
 export function isRustReachableDesktopPath(path) {

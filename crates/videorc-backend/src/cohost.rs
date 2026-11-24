@@ -14,6 +14,7 @@
 //! recording (plan 119 decision 6). It never holds chat text beyond the
 //! question wording, and nothing of it reaches a server.
 
+#[allow(unused_imports)] // BTreeMap: the tests below use it through `super::*`.
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,6 +24,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio::task::JoinHandle;
 
+#[allow(unused_imports)] // the tests use the motion types through `super::*`.
 pub use crate::buddy_pet::{BuddyAvatar, BuddyMotionSettings, BuddyTrigger};
 use crate::captions::{CaptionUpdateKind, CaptionsUpdate, ListenStop};
 use crate::cohost_ack::{
@@ -68,6 +70,17 @@ use crate::videorc_api::{
     CohostTickArrival, CohostTickIntent, CohostTickMessage, CohostTickMood, CohostTickOpenPromise,
     CohostTickOpenQuestion, CohostTickPersona, CohostTickPromise, CohostTickQuestion,
     CohostTickRequest, CohostTickResponse, CohostTickViewer, VideorcApiClient,
+};
+
+// Plan 260 S1.1: these wire types live in `videorc-protocol` now.
+#[allow(unused_imports)] // part of the module's API; some only the tests read.
+pub use videorc_protocol::cohost::{
+    COHOST_DEFAULT_PERSONA_ID, COHOST_DEFAULT_PERSONA_NAME, CohostActivityTemplateKind,
+    CohostAlertKind, CohostAutoChat, CohostAutoChatMode, CohostAvatarState, CohostBubbleStyle,
+    CohostCooldownBehaviour, CohostFlagKind, CohostFlagSeverity, CohostGreetingPlatform,
+    CohostGreetingTemplate, CohostGreetingsSettings, CohostPersona, CohostPersonaImages,
+    CohostPersonaSource, CohostPriority, CohostTalkMode, CohostTone, CohostUtteranceState,
+    CohostUtteranceTriggerKind, CohostWelcomes, WelcomeLine, default_banter,
 };
 
 pub const COHOST_STATE_EVENT: &str = "cohost.state";
@@ -213,15 +226,6 @@ const RECENTLY_RESOLVED_TTL: Duration = Duration::from_secs(60);
 
 // --- Wire enums --------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum CohostTone {
-    #[default]
-    Friendly,
-    Short,
-    Professional,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CohostStatus {
@@ -242,19 +246,6 @@ pub enum CohostReason {
     ServerUnconfigured,
     Network,
     GatewayError,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum CohostPriority {
-    High,
-    #[default]
-    Normal,
-    Low,
-    /// Forward tolerance: a priority this build does not know. Never reaches
-    /// the renderer — `apply_response` reads it as `normal`.
-    #[serde(other)]
-    Unknown,
 }
 
 /// When a promise reminder fires (plan 068 D8). `Unknown` is forward
@@ -278,39 +269,6 @@ pub enum CohostMood {
     Tense,
     Mixed,
     /// Forward tolerance; read as `mixed`, never sent to the renderer.
-    #[serde(other)]
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum CohostFlagKind {
-    Toxicity,
-    Spam,
-    SelfPromo,
-    PersonalInfo,
-    Hate,
-    Harassment,
-    Threat,
-    Sexual,
-    Scam,
-    SelfHarm,
-    Spoiler,
-    Impersonation,
-    Rule,
-    /// Forward tolerance: the vocabulary will grow. An unknown kind is kept
-    /// and reaches the renderer as `unknown`, which renders as "Flagged".
-    #[serde(other)]
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum CohostFlagSeverity {
-    High,
-    Medium,
-    Low,
-    /// Forward tolerance; read as `medium`, never sent to the renderer.
     #[serde(other)]
     Unknown,
 }
@@ -350,19 +308,6 @@ pub enum CohostHighlightType {
     #[default]
     Other,
     /// Forward tolerance; read as `other`.
-    #[serde(other)]
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "kebab-case")]
-pub enum CohostAlertKind {
-    Audio,
-    Video,
-    StreamHealth,
-    Game,
-    Other,
-    /// Forward tolerance; read as `other` ("something is wrong").
     #[serde(other)]
     Unknown,
 }
@@ -517,12 +462,6 @@ pub const COHOST_GREETING_TEXT_MAX_CHARS: usize = 200;
 /// A persona image path is `<personaId>/<state>.<ext>` under the managed
 /// buddy-assets root (plan 164 D20); the renderer turns it into a protocol URL.
 const COHOST_PERSONA_IMAGE_PATH_MAX_CHARS: usize = 256;
-/// The persona a fresh install has: the bundled default pack under this id.
-pub const COHOST_DEFAULT_PERSONA_ID: &str = "default";
-/// Plan 239 D2: the official stone golem's own name, "Flint". Sidekick is the
-/// helper's name since plan 239, so the default avatar has a name of its own
-/// (the renderer's `DEFAULT_AVATAR_NAME`, the catalog's golem entry).
-pub const COHOST_DEFAULT_PERSONA_NAME: &str = "Flint";
 /// The default name before plan 236, which the one-time settings migration
 /// renames (`migrate_cohost_settings`, version 1).
 const COHOST_OLD_DEFAULT_PERSONA_NAME: &str = "Buddy";
@@ -532,235 +471,6 @@ const COHOST_SIDEKICK_DEFAULT_PERSONA_NAME: &str = "Sidekick";
 /// The official stone golem's library id (plan 170 D10), the avatar a fresh
 /// install wears.
 const COHOST_DEFAULT_GOLEM_AVATAR_ID: &str = "official:golem";
-
-/// The avatar's state images (plan 164 D16). `idle` is required on stream;
-/// the others fall back to it when missing.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[serde(rename_all = "kebab-case")]
-pub enum CohostAvatarState {
-    Idle,
-    Talk,
-    Laugh,
-    Think,
-}
-
-impl CohostAvatarState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Talk => "talk",
-            Self::Laugh => "laugh",
-            Self::Think => "think",
-        }
-    }
-}
-
-/// How the comic bubble is drawn (plan 164 D17).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum CohostBubbleStyle {
-    #[default]
-    Speech,
-    Thought,
-    Shout,
-}
-
-/// Where the persona's images came from. `default` means the bundled pack.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum CohostPersonaSource {
-    #[default]
-    Default,
-    Uploaded,
-    Generated,
-}
-
-/// One relative asset path per state. Absent, never null (the renderer
-/// contract rejects null).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct CohostPersonaImages {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idle: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub talk: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub laugh: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub think: Option<String>,
-}
-
-impl CohostPersonaImages {
-    fn entries(&self) -> [(CohostAvatarState, Option<&str>); 4] {
-        [
-            (CohostAvatarState::Idle, self.idle.as_deref()),
-            (CohostAvatarState::Talk, self.talk.as_deref()),
-            (CohostAvatarState::Laugh, self.laugh.as_deref()),
-            (CohostAvatarState::Think, self.think.as_deref()),
-        ]
-    }
-}
-
-/// The user's creature (plan 164): its name, personality and looks. Lives in
-/// `cohostSettings.persona`; the images are relative paths under the managed
-/// buddy-assets root, owned by main (uploads) or the backend (generation).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CohostPersona {
-    /// Names the asset folder; regenerated by "Start over".
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub personality: String,
-    #[serde(default)]
-    pub bubble_style: CohostBubbleStyle,
-    #[serde(default)]
-    pub images: CohostPersonaImages,
-    #[serde(default)]
-    pub source: CohostPersonaSource,
-    /// Still or Alive (plan 168 D2). `default` so a row from before plan 168
-    /// loads as Still.
-    #[serde(default)]
-    pub avatar: BuddyAvatar,
-    /// How the Buddy moves on air (plan 168 D10, D13, D15).
-    #[serde(default)]
-    pub motion: BuddyMotionSettings,
-    /// Per-trigger reaction overrides (plan 168 D14); a reaction id or
-    /// `none`. Absent triggers use D14's defaults.
-    #[serde(default)]
-    pub reactions: BTreeMap<BuddyTrigger, String>,
-    /// The library avatar this Buddy is (plan 170 D12): a user avatar's uuid
-    /// or `official:<slug>`. Absent (never null) for a Buddy made only on
-    /// this computer and for the untouched default; library sync never
-    /// overwrites a Buddy without it unless it is the untouched default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub library_avatar_id: Option<String>,
-}
-
-impl Default for CohostPersona {
-    fn default() -> Self {
-        Self {
-            id: COHOST_DEFAULT_PERSONA_ID.to_string(),
-            name: COHOST_DEFAULT_PERSONA_NAME.to_string(),
-            personality: String::new(),
-            bubble_style: CohostBubbleStyle::Speech,
-            images: CohostPersonaImages::default(),
-            source: CohostPersonaSource::Default,
-            avatar: BuddyAvatar::Still,
-            motion: BuddyMotionSettings::default(),
-            reactions: BTreeMap::new(),
-            library_avatar_id: None,
-        }
-    }
-}
-
-/// How Buddy talks on its own (plan 211 D1): `off` says nothing, `bubble`
-/// speaks on stream in its bubble and never in chat, `suggest` proposes a
-/// card the streamer clicks to post as themself. This is the one truth
-/// (`autoChat.talk`); [`CohostAutoChatMode`] is only its projection for
-/// older apps. Bubble is the default (D4).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum CohostTalkMode {
-    Off,
-    #[default]
-    Bubble,
-    Suggest,
-}
-
-impl CohostTalkMode {
-    /// Whether Buddy says anything on its own: everything but Off.
-    pub(crate) fn speaks(self) -> bool {
-        !matches!(self, Self::Off)
-    }
-
-    /// The legacy `mode` an app from before plan 211 reads (D3): Bubble is
-    /// saved as `off`, so an older app on a Bubble profile stays quiet.
-    /// `auto` is never written again.
-    pub(crate) fn legacy(self) -> CohostAutoChatMode {
-        match self {
-            Self::Off | Self::Bubble => CohostAutoChatMode::Off,
-            Self::Suggest => CohostAutoChatMode::Suggest,
-        }
-    }
-
-    /// The talk mode a block saved without `talk` means (D3, D4): `auto`
-    /// becomes Bubble, which never posts.
-    fn from_legacy(mode: CohostAutoChatMode) -> Self {
-        match mode {
-            CohostAutoChatMode::Off => Self::Off,
-            CohostAutoChatMode::Suggest => Self::Suggest,
-            CohostAutoChatMode::Auto => Self::Bubble,
-        }
-    }
-}
-
-/// Legacy storage only (plan 211 D3): the `autoChat.mode` an app from before
-/// plan 211 reads, written by `CohostAutoChat::normalize_talk` as the
-/// projection of [`CohostTalkMode`]. `auto` is read as Bubble and never
-/// written again. Nothing in the engine reads it; `CohostAutoChat::talk()`
-/// is the mode.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum CohostAutoChatMode {
-    #[default]
-    Off,
-    Suggest,
-    Auto,
-}
-
-/// The activity kinds a greeting template answers (plan 164). Closed: an
-/// unknown kind is refused at the wire, never stored.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "kebab-case")]
-pub enum CohostActivityTemplateKind {
-    Follow,
-    Sub,
-    Resub,
-    SubGift,
-    CommunitySubGift,
-    Membership,
-    Cheer,
-    Kicks,
-    SuperChat,
-    SuperSticker,
-    Raid,
-    WatchStreak,
-    PowerUp,
-    Redemption,
-}
-
-/// The platforms a template may be limited to; omitted means any.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum CohostGreetingPlatform {
-    Twitch,
-    Youtube,
-    Kick,
-    X,
-}
-
-/// The avatar state an utterance shows (plan 164 D18); never `idle`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum CohostUtteranceState {
-    #[default]
-    Talk,
-    Laugh,
-    Think,
-}
-
-/// What made the Buddy speak (plan 164 D7).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum CohostUtteranceTriggerKind {
-    Greeting,
-    Answer,
-    Banter,
-    Manual,
-    /// Plan 225 D13, D4: a viewer's `!` command answered in the bubble.
-    Community,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -828,199 +538,6 @@ pub struct CohostUtteranceMilestone {
     pub platform: StreamPlatform,
     /// "10th stream", "5 in a row", "One year".
     pub label: String,
-}
-
-/// A greeting written by the user, with `{name}`-style fields resolved in
-/// Phase D (plan 164 S-D1).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CohostGreetingTemplate {
-    pub id: String,
-    pub kind: CohostActivityTemplateKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub platform: Option<CohostGreetingPlatform>,
-    pub text: String,
-    #[serde(default)]
-    pub state: CohostUtteranceState,
-    #[serde(default)]
-    pub enabled: bool,
-    /// The reaction this greeting plays (plan 168 D14): a reaction id of the
-    /// persona's pack, or `none`; it wins over the trigger's. Absent, never
-    /// null.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reaction: Option<String>,
-}
-
-/// One welcome line (plan 192 S1.1): what the Buddy says to a first-time or
-/// a returning chatter. `text` absent (never null) means the built-in line.
-/// The welcomes never live in `templates[]`: an app from before plan 192
-/// would meet an unknown kind there, fail to parse its settings and fall
-/// back to defaults.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct WelcomeLine {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// The user's own line, at most `COHOST_GREETING_TEXT_MAX_CHARS`,
-    /// trimmed; empty reads as absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(default)]
-    pub state: CohostUtteranceState,
-    /// The reaction this welcome plays (plan 168 D14), absent for the
-    /// trigger's default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reaction: Option<String>,
-}
-
-impl Default for WelcomeLine {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            text: None,
-            state: CohostUtteranceState::Talk,
-            reaction: None,
-        }
-    }
-}
-
-/// The welcomes (plan 192 D2; plan 225 D9 adds the regular, comeback and
-/// milestone lines), all on by default. Never in `templates[]`: an older
-/// app ignores a welcome it does not know and keeps its persona.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct CohostWelcomes {
-    #[serde(default)]
-    pub first_time: WelcomeLine,
-    #[serde(default)]
-    pub returning: WelcomeLine,
-    /// A regular's arrival (plan 225 D9).
-    #[serde(default)]
-    pub regular: WelcomeLine,
-    /// Back after 30 days or more.
-    #[serde(default)]
-    pub comeback: WelcomeLine,
-    /// The Nth stream, N in a row, or the anniversary.
-    #[serde(default)]
-    pub milestone: WelcomeLine,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CohostGreetingsSettings {
-    /// On by default since plan 192 (the mode, off by default, still gates
-    /// every post).
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// The user's lines for the Activity kinds; an empty list means the
-    /// built-in lines (plan 192 D1).
-    #[serde(default)]
-    pub templates: Vec<CohostGreetingTemplate>,
-    /// Plan 192 D3: the AI writes the greetings in the persona's voice.
-    /// Honoured only with Premium, consent and the web's `greet` capability;
-    /// the line goes out otherwise.
-    #[serde(default = "default_true")]
-    pub ai: bool,
-    /// Plan 192 S1.1: the first-time and returning welcomes.
-    #[serde(default)]
-    pub welcomes: CohostWelcomes,
-}
-
-impl Default for CohostGreetingsSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            templates: Vec::new(),
-            ai: true,
-            welcomes: CohostWelcomes::default(),
-        }
-    }
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CohostCooldownBehaviour {
-    #[serde(default)]
-    pub enabled: bool,
-    pub cooldown_seconds: u32,
-}
-
-/// The automatic behaviours (plan 164 D5), each behind its own switch under
-/// the talk mode (plan 211 D1). Phase A stores them; Phase D acts on them.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CohostAutoChat {
-    /// How Buddy talks (plan 211 D3): the one truth. Absent only in a block
-    /// saved by an app from before plan 211 (or saved by one afterwards,
-    /// which drops the field); `normalize_talk` fills it from `mode` on
-    /// every load and every patch, so the engine always reads `talk()`.
-    /// `skip_serializing_if` keeps `null` off the wire.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub talk: Option<CohostTalkMode>,
-    /// Legacy projection of `talk` for older apps (plan 211 D3): written by
-    /// `normalize_talk`, never read by the engine once `talk` is set.
-    #[serde(default)]
-    pub mode: CohostAutoChatMode,
-    #[serde(default)]
-    pub greetings: CohostGreetingsSettings,
-    #[serde(default = "default_answers")]
-    pub answers: CohostCooldownBehaviour,
-    #[serde(default = "default_banter")]
-    pub banter: CohostCooldownBehaviour,
-}
-
-/// Plan 192 D5: Answers on for a new install (a stored block keeps its own
-/// value; saved settings are never flipped).
-fn default_answers() -> CohostCooldownBehaviour {
-    CohostCooldownBehaviour {
-        enabled: true,
-        cooldown_seconds: 20,
-    }
-}
-
-fn default_banter() -> CohostCooldownBehaviour {
-    CohostCooldownBehaviour {
-        enabled: false,
-        cooldown_seconds: 240,
-    }
-}
-
-impl Default for CohostAutoChat {
-    /// A new install talks in its bubble (plan 211 D4); `mode` carries the
-    /// projection older apps read.
-    fn default() -> Self {
-        Self {
-            talk: Some(CohostTalkMode::Bubble),
-            mode: CohostTalkMode::Bubble.legacy(),
-            greetings: CohostGreetingsSettings::default(),
-            answers: default_answers(),
-            banter: default_banter(),
-        }
-    }
-}
-
-impl CohostAutoChat {
-    /// How Buddy talks (plan 211 D3): `talk` when the block carries it, else
-    /// what its legacy `mode` means (`auto` reads as Bubble).
-    pub fn talk(&self) -> CohostTalkMode {
-        self.talk
-            .unwrap_or_else(|| CohostTalkMode::from_legacy(self.mode))
-    }
-
-    /// Make `talk` and `mode` agree (plan 211 D3): `talk` wins when present,
-    /// otherwise it is taken from `mode`; then `mode` becomes the projection
-    /// older apps read (Bubble saves as `off`, nothing ever saves as `auto`).
-    /// Runs on every load and every patch, so a stored block always carries
-    /// both fields in agreement.
-    pub(crate) fn normalize_talk(&mut self) {
-        let talk = self.talk();
-        self.talk = Some(talk);
-        self.mode = talk.legacy();
-    }
 }
 
 /// Mood → avatar state (plan 164 D18, Phase A note): amused → laugh,

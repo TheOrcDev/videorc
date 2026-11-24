@@ -64,6 +64,9 @@ use crate::protocol::FeatureId;
 use crate::state::AppState;
 use crate::streaming::{StreamPlatform, stream_platform_label};
 
+// Plan 260 S1.1: these wire types live in `videorc-protocol` now.
+pub use videorc_protocol::live_chat_moderation::RemoveConfirmMode;
+
 /// Event name for every change of a `ModerationOperation`. Never a LAN event.
 pub const MODERATION_OPERATION_EVENT: &str = "liveChat.moderationOperation";
 
@@ -135,14 +138,6 @@ pub enum ModerationSource {
     /// the streamer's click on the removal card (YouTube API policy: express
     /// consent before a delete). Free, like `Manual`; no Buddy kill switch.
     Agent,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum RemoveConfirmMode {
-    #[default]
-    Confirm,
-    Countdown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

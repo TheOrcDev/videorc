@@ -1,0 +1,1551 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-23T06:10:40.755Z",
+  "contract": "linux-l1.5-1080p30",
+  "complete": true,
+  "tester": {
+    "name": "OrcDev lab (agent run, plan 257 S5)",
+    "machine": "ogre (T2 MacBook Pro MacBookPro15,1, Intel UHD 630 + Radeon Pro 555X)"
+  },
+  "host": {
+    "distribution": "Omarchy",
+    "osReleaseId": "omarchy",
+    "osReleaseVersion": "4.5.0",
+    "kernel": "7.2.11-arch1-Watanare-T2-1-t2",
+    "architecture": "x64",
+    "physicalHardwareAttested": true,
+    "cpu": "Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz",
+    "displaySession": "wayland",
+    "waylandDisplayPresent": true,
+    "videoDevices": [
+      "/dev/video0",
+      "/dev/video1"
+    ],
+    "renderDevices": [
+      "/dev/dri/renderD128",
+      "/dev/dri/renderD129"
+    ],
+    "renderNodes": [
+      {
+        "node": "/dev/dri/renderD128",
+        "driver": "i915"
+      },
+      {
+        "node": "/dev/dri/renderD129",
+        "driver": "amdgpu"
+      }
+    ],
+    "vaapiDevicePin": null
+  },
+  "ffmpeg": {
+    "path": "/home/orcdev/Projects/videorc-wt-257-s5/vendor/ffmpeg/linux-x64/bin/ffmpeg",
+    "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n8.1.2-34-g9b6c8969e0-linux64-lgpl-8.1.tar.xz",
+    "sha256": "8c8b2897f2a8093ae2d985f7f1867d218451d4c567c1b2437f86a7c73a950b9f"
+  },
+  "runs": [
+    {
+      "requestedBackend": "openh264",
+      "result": {
+        "combo": "1080p30",
+        "outputPath": "/home/orcdev/linux-beta/s5/acceptance/openh264/videorc-session-20261123-061002-4200e8dc-4a14-4426-b99a-901a1dc46938.mp4",
+        "sizeBytes": 314872,
+        "failures": [],
+        "warnings": [
+          "freeze segment 333ms exceeds 100ms (13 segment(s), exact-repeat corroborated) — motion not required for this run; inspect repeated-frame and pacing gates",
+          "repeated-frame burst of 8 consecutive identical frames exceeds 2 (13 burst(s)) — motion not required for this run; inspect bridge repeat and pacing gates"
+        ],
+        "softwareSkipWarning": null,
+        "metrics": {
+          "fileBytes": 314872,
+          "hasVideo": true,
+          "hasAudio": true,
+          "expectAudio": true,
+          "microphoneAvailable": true,
+          "intendedFps": 30,
+          "durationSeconds": 6.066667,
+          "frameCountDurationSeconds": 6.066667,
+          "codec": "h264",
+          "pixFmt": "yuv420p",
+          "profile": "High",
+          "level": 40,
+          "colorSpace": "bt709",
+          "colorPrimaries": "bt709",
+          "colorTransfer": "bt709",
+          "colorRange": "tv",
+          "encoderTag": "Lavf62.12.102",
+          "width": 1920,
+          "height": 1080,
+          "avgFps": 30,
+          "nominalFps": 30,
+          "observedFps": 30.000001657458657,
+          "duplicatePtsCount": 0,
+          "maxDuplicatePtsRun": 1,
+          "meanIntervalMs": 33.333331491712705,
+          "maxFrameGapMs": 33.33400000000009,
+          "frameJitterMs": 0.00047074935698436553,
+          "observedFrames": 182,
+          "expectedFrames": 182,
+          "observedFrameHashes": 182,
+          "uniqueFrameCount": 122,
+          "uniqueFrameRatio": 0.6703296703296703,
+          "frameDerivedDurationSeconds": 6.066666666666666,
+          "durationStretchRatio": 1.000000054945055,
+          "freezeCount": 16,
+          "longestFreezeMs": 333.33299999999997,
+          "corroboratedFreezeCount": 13,
+          "longestCorroboratedFreezeMs": 333.33299999999997,
+          "similarityOnlyFreezeCount": 3,
+          "longestSimilarityOnlyFreezeMs": 100,
+          "cadenceFps": 30,
+          "cadenceLabel": "30p",
+          "cadenceIntendedFps": 30,
+          "cadenceMismatchPct": null,
+          "maxRepeatedFrameRun": 8,
+          "repeatedBurstCount": 13,
+          "maxAudioGapMs": 0,
+          "audioGapCount": 0,
+          "silenceCount": 0,
+          "longestSilenceMs": 0,
+          "digitalZeroRunCount": 0,
+          "longestDigitalZeroMs": 0,
+          "firstDigitalZeroSeconds": null,
+          "silentTrackMs": 0,
+          "silentTrackCoverage": 0,
+          "avSkewMs": 7.666999999999646,
+          "startSkewMs": 0,
+          "tailMismatchMs": 7.666999999999646,
+          "keyframeCount": 10,
+          "maxKeyframeIntervalSeconds": 1
+        },
+        "bridgeDiagnostics": {
+          "encodeBackend": "software-open-h264",
+          "encoderBridgeInputFps": 12.876587782448064,
+          "encoderBridgeQueueDepth": 3,
+          "encoderBridgeOutputQueueOldestFrameAgeMs": 352,
+          "encoderBridgeOutputQueueCapacityPressureEvents": 33,
+          "encoderBridgeOutputQueueHighWaterFrames": 3,
+          "encoderBridgeOutputQueueOldestFrameAgeHighWaterMs": 497,
+          "encoderBridgeOutputLastProgressAgeMs": 17,
+          "encoderBridgeOutputPressureRecoveryEvents": 9,
+          "encoderBridgeOutputPreEncodeSkippedFrames": 33,
+          "encoderBridgeVideoToolboxPendingEncodeFrames": 0,
+          "encoderBridgeVideoToolboxPendingFifoFrames": 0,
+          "encoderBridgeEncodedAccessUnitDroppedFrames": 0,
+          "encoderBridgeOutputQueueDroppedFrames": 0,
+          "encoderBridgeDroppedFrames": 0,
+          "encoderBridgeRepeatedFrames": 12,
+          "encoderBridgeEncodedOutputFrames": 0,
+          "encoderBridgeEncodedOutputBytes": 0,
+          "encoderBridgeEncodedOutputErrors": 0,
+          "encoderBridgeActiveEncodedOutputEncoders": 0,
+          "encoderBridgeSeparateOutputEncodersActive": false,
+          "encoderBridgeEffectiveVideoOutput": "raw-yuv420p",
+          "encoderBridgeRecordingEncodedOutputFrames": 0,
+          "encoderBridgeRecordingEncodedOutputBytes": 0,
+          "encoderBridgeStreamEncodedOutputFrames": 0,
+          "encoderBridgeStreamEncodedOutputBytes": 0,
+          "streamOutputTotalBytes": 0,
+          "encoderBridgeEncodedSubmitP95Ms": null,
+          "encoderBridgeEncodedFifoWriteP95Ms": null,
+          "encoderBridgeCompositorWaitP95Ms": 33.084594,
+          "encoderBridgeWriterLoopP95Ms": 45.859611,
+          "encoderBridgeWriterActiveP95Ms": 29.231989,
+          "encoderBridgeDeadlineLagP95Ms": 2.337149,
+          "encoderBridgeDeadlineLagMaxMs": 2.337149,
+          "encoderBridgeError": null,
+          "compositorFallbackReason": null,
+          "encoderBridgeEncodedOutputFallbackReason": "OpenH264 software encoding was selected explicitly for this session."
+        },
+        "transientFifoPauseFiredCount": 0,
+        "transientFifoCleanFfmpegExitCount": 0,
+        "activeStatus": {
+          "acceptsLiveSceneEdits": true,
+          "audioTracks": [
+            {
+              "id": "microphone",
+              "label": "Microphone",
+              "source": "microphone"
+            }
+          ],
+          "outputPath": "/home/orcdev/linux-beta/s5/acceptance/openh264/videorc-session-20261123-061002-4200e8dc-4a14-4426-b99a-901a1dc46938.mkv",
+          "pipeline": {
+            "container": "mkv",
+            "finalization": "none",
+            "stages": [
+              {
+                "stage": "capture",
+                "state": "running"
+              },
+              {
+                "stage": "render",
+                "state": "running"
+              },
+              {
+                "stage": "video-encoder",
+                "state": "running"
+              },
+              {
+                "stage": "audio-encoder",
+                "state": "running"
+              },
+              {
+                "stage": "muxer",
+                "state": "running"
+              }
+            ]
+          },
+          "sessionId": "4200e8dc-4a14-4426-b99a-901a1dc46938",
+          "startedAt": "2026-11-23T06:10:02.375005510+00:00",
+          "state": "recording"
+        },
+        "stoppedStatus": {
+          "durationMs": 6779,
+          "message": "Recording saved; exporting the MP4 in the background.",
+          "outputPath": "/home/orcdev/linux-beta/s5/acceptance/openh264/videorc-session-20261123-061002-4200e8dc-4a14-4426-b99a-901a1dc46938.mkv",
+          "pipeline": {
+            "container": "mkv",
+            "finalization": "finalizing",
+            "stages": [
+              {
+                "stage": "capture",
+                "state": "finished"
+              },
+              {
+                "stage": "render",
+                "state": "finished"
+              },
+              {
+                "stage": "video-encoder",
+                "state": "finished"
+              },
+              {
+                "stage": "audio-encoder",
+                "state": "finished"
+              },
+              {
+                "detail": "Exporting MP4 in the background.",
+                "stage": "muxer",
+                "state": "finalizing"
+              }
+            ]
+          },
+          "sessionId": "4200e8dc-4a14-4426-b99a-901a1dc46938",
+          "state": "idle"
+        },
+        "diagnostics": {
+          "activeFfmpegProcesses": 1,
+          "activeFfprobeProcesses": 0,
+          "activeOutputMode": "record",
+          "activeSceneRevision": 1795414202599,
+          "backendRssBytes": 86921216,
+          "bottleneck": "preview",
+          "captureFps": 12.876587782448064,
+          "compositorBackend": "cpu",
+          "compositorCameraFrameFetchP95Ms": 0,
+          "compositorCameraSourceBlockingRefreshes": 0,
+          "compositorCameraSourceByteUploadFrames": 0,
+          "compositorCameraSourceCaptureTextureReuses": 0,
+          "compositorCameraSourceCvpixelbufferImportFrames": 0,
+          "compositorCameraSourceFreshServes": 0,
+          "compositorCameraSourceHeldServes": 0,
+          "compositorCameraSourceImportFailures": 0,
+          "compositorCameraSourceIosurfaceImportFrames": 0,
+          "compositorCameraSourceServedAgeMaxMs": 0,
+          "compositorCameraSourceTryLockMisses": 0,
+          "compositorCpuFallbackFrames": 0,
+          "compositorCpuFrames": 143,
+          "compositorFallbackReason": null,
+          "compositorFrameStorePublishP95Ms": 0.006587,
+          "compositorGpuCommandWaitP95Ms": 0,
+          "compositorGpuPrepareP95Ms": 0,
+          "compositorGpuSourceTextureP95Ms": 0,
+          "compositorGpuTotalP95Ms": 0,
+          "compositorLiveSourceRefreshP95Ms": 0.006194000000000001,
+          "compositorPreviewSurfaceLockContentions": 0,
+          "compositorPreviewSurfaceProgressP95Ms": 0.024861,
+          "compositorSceneSnapshotP95Ms": 0.049601,
+          "compositorScreenFrameFetchP95Ms": 0,
+          "compositorScreenSourceBlockingRefreshes": 0,
+          "compositorScreenSourceByteUploadFrames": 0,
+          "compositorScreenSourceCaptureTextureReuses": 0,
+          "compositorScreenSourceCvpixelbufferImportFrames": 0,
+          "compositorScreenSourceFreshServes": 0,
+          "compositorScreenSourceHeldServes": 0,
+          "compositorScreenSourceImportFailures": 0,
+          "compositorScreenSourceIosurfaceImportFrames": 0,
+          "compositorScreenSourceServedAgeMaxMs": 0,
+          "compositorScreenSourceTryLockMisses": 0,
+          "compositorSourceByteUploadFrames": 0,
+          "compositorSourceCaptureTextureReuses": 0,
+          "compositorSourceCvpixelbufferImportFrames": 0,
+          "compositorSourceFetchP95Ms": 0.051559,
+          "compositorSourceImportFailures": 0,
+          "compositorSourceImportP95Ms": 0,
+          "compositorSourceIosurfaceImportFrames": 0,
+          "compositorSourceTextureCacheFlushes": 0,
+          "compositorStatusLockContentions": 0,
+          "compositorStatusProgressP95Ms": 0.083496,
+          "compositorTickGapMaxMs": 80.90961300000001,
+          "compositorTickGapP95Ms": 64.41670300000001,
+          "compositorTickSkipped": 5,
+          "compositorTicks": 151,
+          "deviceDisconnected": false,
+          "droppedFrames": 0,
+          "duplicateCaptureSources": [],
+          "encodeBackend": "software-open-h264",
+          "encoderBridgeActiveEncodedOutputEncoders": 0,
+          "encoderBridgeActiveVideoToolboxOutputEncoders": 0,
+          "encoderBridgeCompositorWaitP95Ms": 33.084594,
+          "encoderBridgeDeadlineLagMaxMs": 2.337149,
+          "encoderBridgeDeadlineLagP95Ms": 2.337149,
+          "encoderBridgeDroppedFrames": 0,
+          "encoderBridgeEffectiveVideoOutput": "raw-yuv420p",
+          "encoderBridgeEncodedAccessUnitDroppedFrames": 0,
+          "encoderBridgeEncodedFifoWriteP95Ms": null,
+          "encoderBridgeEncodedOutputBackend": "software-open-h264",
+          "encoderBridgeEncodedOutputBytes": 0,
+          "encoderBridgeEncodedOutputEncoderIdentity": null,
+          "encoderBridgeEncodedOutputErrors": 0,
+          "encoderBridgeEncodedOutputFallbackReason": "OpenH264 software encoding was selected explicitly for this session.",
+          "encoderBridgeEncodedOutputFrames": 0,
+          "encoderBridgeEncodedOutputInputSubtype": null,
+          "encoderBridgeEncodedSubmitP95Ms": null,
+          "encoderBridgeError": null,
+          "encoderBridgeFreshFrames": 100,
+          "encoderBridgeInputFps": 12.876587782448064,
+          "encoderBridgeLateDeadlineTicks": 3,
+          "encoderBridgeMaxRepeatedFrameRun": 2,
+          "encoderBridgeMetalTargetCopiedFrames": 0,
+          "encoderBridgeMetalTargetFrames": 0,
+          "encoderBridgeMetalTargetHandleFrames": 0,
+          "encoderBridgeMfInputCreditTimeouts": 0,
+          "encoderBridgeMfSubmittedFrames": 0,
+          "encoderBridgeOutputLastProgressAgeMs": 17,
+          "encoderBridgeOutputPreEncodeSkippedFrames": 33,
+          "encoderBridgeOutputPressureRecoveryEvents": 9,
+          "encoderBridgeOutputQueueCapacityPressureEvents": 33,
+          "encoderBridgeOutputQueueDroppedFrames": 0,
+          "encoderBridgeOutputQueueHighWaterFrames": 3,
+          "encoderBridgeOutputQueueOldestFrameAgeHighWaterMs": 497,
+          "encoderBridgeOutputQueueOldestFrameAgeMs": 352,
+          "encoderBridgeQueueDepth": 3,
+          "encoderBridgeRawVideoCopiedFrames": 86,
+          "encoderBridgeRawVideoFifoWriteP95Ms": 287.861778,
+          "encoderBridgeRecordingDroppedFrames": 0,
+          "encoderBridgeRecordingEncodedOutputBytes": 0,
+          "encoderBridgeRecordingEncodedOutputFrames": 0,
+          "encoderBridgeRecordingEncoderSpeed": null,
+          "encoderBridgeRecordingInputFps": null,
+          "encoderBridgeRecordingQueueCapacityPressureEvents": 33,
+          "encoderBridgeRecordingQueueDepth": 3,
+          "encoderBridgeRecordingQueueDroppedFrames": 0,
+          "encoderBridgeRecordingQueueOldestFrameAgeMs": 352,
+          "encoderBridgeRecordingRawVideoCopiedFrames": 86,
+          "encoderBridgeRecordingVideoToolboxFifoEnqueueMaxMs": null,
+          "encoderBridgeRecordingVideoToolboxFifoEnqueueP95Ms": null,
+          "encoderBridgeRecordingVideoToolboxOutputBytes": 0,
+          "encoderBridgeRecordingVideoToolboxOutputFrames": 0,
+          "encoderBridgeRecordingWriterActiveP95Ms": null,
+          "encoderBridgeRecordingWriterLoopP95Ms": null,
+          "encoderBridgeRepeatedFrameAgeMaxMs": 95,
+          "encoderBridgeRepeatedFrameAgeP95Ms": 88,
+          "encoderBridgeRepeatedFrameBursts": 7,
+          "encoderBridgeRepeatedFrames": 12,
+          "encoderBridgeRequestedVideoOutput": "raw-yuv420p",
+          "encoderBridgeScheduleSkippedMs": 0,
+          "encoderBridgeSeparateOutputEncodersActive": false,
+          "encoderBridgeSourceAgeMs": 100,
+          "encoderBridgeSourceAgeP95Ms": 94,
+          "encoderBridgeStreamDroppedFrames": 0,
+          "encoderBridgeStreamEncodedOutputBytes": 0,
+          "encoderBridgeStreamEncodedOutputFrames": 0,
+          "encoderBridgeStreamEncoderSpeed": null,
+          "encoderBridgeStreamInputFps": null,
+          "encoderBridgeStreamQueueAgeTrips": 0,
+          "encoderBridgeStreamQueueCapacityPressureEvents": 0,
+          "encoderBridgeStreamQueueDepth": 0,
+          "encoderBridgeStreamQueueDepthTrips": 0,
+          "encoderBridgeStreamQueueDroppedFrames": 0,
+          "encoderBridgeStreamQueueOldestFrameAgeMs": null,
+          "encoderBridgeStreamRawVideoCopiedFrames": 0,
+          "encoderBridgeStreamVideoToolboxFifoEnqueueMaxMs": null,
+          "encoderBridgeStreamVideoToolboxFifoEnqueueP95Ms": null,
+          "encoderBridgeStreamVideoToolboxOutputBytes": 0,
+          "encoderBridgeStreamVideoToolboxOutputFrames": 0,
+          "encoderBridgeStreamWriterActiveP95Ms": null,
+          "encoderBridgeStreamWriterLoopP95Ms": null,
+          "encoderBridgeSyntheticFrames": 0,
+          "encoderBridgeVideoToolboxFifoEnqueueMaxMs": null,
+          "encoderBridgeVideoToolboxFifoEnqueueP95Ms": null,
+          "encoderBridgeVideoToolboxFifoWriteP95Ms": null,
+          "encoderBridgeVideoToolboxOutputBytes": 0,
+          "encoderBridgeVideoToolboxOutputEncodeMs": null,
+          "encoderBridgeVideoToolboxOutputFrames": 0,
+          "encoderBridgeVideoToolboxPendingEncodeFrames": 0,
+          "encoderBridgeVideoToolboxPendingFifoFrames": 0,
+          "encoderBridgeVideoToolboxProbeBytes": 0,
+          "encoderBridgeVideoToolboxProbeErrors": 0,
+          "encoderBridgeVideoToolboxProbeFrames": 0,
+          "encoderBridgeVideoToolboxSubmitP95Ms": null,
+          "encoderBridgeWriterActiveP95Ms": 29.231989,
+          "encoderBridgeWriterLoopP95Ms": 45.859611,
+          "encoderBridgeWriterSleepP95Ms": 36.89747,
+          "encoderBridgeZeroCopyFrames": 0,
+          "encoderSpeed": 0.655,
+          "ffmpegCaptureActive": true,
+          "ffmpegFinalizingActive": false,
+          "ffmpegMaintenanceCancelRequested": false,
+          "ffmpegMaintenanceDeferredReason": "Deferred while recording or streaming is active.",
+          "ffmpegMaintenanceRunning": false,
+          "firstEncodedFrameMs": 104,
+          "firstFullResolutionCompositorFrameMs": 49,
+          "firstSourceFrameMs": null,
+          "micCaptureCoverage": null,
+          "micCapturedFrames": null,
+          "micDroppedFrames": 0,
+          "micLiveLevel": null,
+          "micLivePeakDb": null,
+          "microphoneSyncOffsetMs": 0,
+          "previewCameraActualHeight": null,
+          "previewCameraActualWidth": null,
+          "previewCameraCapabilityDeviceId": null,
+          "previewCameraCapabilityError": null,
+          "previewCameraCapabilityFormats": [],
+          "previewCameraCaptureCallbackCount": 0,
+          "previewCameraCaptureGapMaxMs": null,
+          "previewCameraCaptureGapP95Ms": null,
+          "previewCameraCaptureGapP99Ms": null,
+          "previewCameraDeviceUniqueId": null,
+          "previewCameraDidDropCallbackCount": 0,
+          "previewCameraDropReasons": {
+            "discontinuity": 0,
+            "frameWasLate": 0,
+            "outOfBuffers": 0,
+            "unknown": 0
+          },
+          "previewCameraDroppedFrames": 0,
+          "previewCameraFrameAgeMs": null,
+          "previewCameraFrameBytes": 0,
+          "previewCameraFrameStorePublications": 0,
+          "previewCameraPixelBufferLockP95Ms": null,
+          "previewCameraPublishP95Ms": null,
+          "previewCameraRequestedHeight": null,
+          "previewCameraRequestedWidth": null,
+          "previewCameraRowCopyP95Ms": null,
+          "previewCameraSamplePtsGapMaxMs": null,
+          "previewCameraSamplePtsGapP95Ms": null,
+          "previewCameraSamplePtsGapP99Ms": null,
+          "previewCameraSelectedFormatHeight": null,
+          "previewCameraSelectedFormatMaxFps": null,
+          "previewCameraSelectedFormatMinFps": null,
+          "previewCameraSelectedFormatWidth": null,
+          "previewCameraSourceFps": null,
+          "previewCameraState": null,
+          "previewCameraStatusMessage": null,
+          "previewCameraSurfaceBacking": {
+            "estimatedBytes": 0,
+            "liveCount": 0,
+            "peakCount": 0,
+            "peakEstimatedBytes": 0
+          },
+          "previewCompositorFrameLag": 0,
+          "previewDroppedFrames": 36,
+          "previewFrameAgeMs": 6,
+          "previewFramePollingSuppressed": false,
+          "previewImagePollCounts": {
+            "cameraBmp": 0,
+            "cameraPng": 0,
+            "liveJpeg": 0,
+            "liveMjpeg": 0,
+            "productionPng": 0,
+            "screenBmp": 0,
+            "screenPng": 0
+          },
+          "previewInputToPresentLatencyMs": 6,
+          "previewInputToPresentLatencyP50Ms": 29,
+          "previewInputToPresentLatencyP95Ms": 47,
+          "previewInputToPresentLatencyP99Ms": 47,
+          "previewLatencyMs": 8,
+          "previewPresentFps": 13.903233494678153,
+          "previewRenderFrameTimeP50Ms": 38.459903,
+          "previewRenderFrameTimeP95Ms": 283.4000000000001,
+          "previewRenderFrameTimeP99Ms": 400,
+          "previewRepeatedFrames": 0,
+          "previewScreenActualHeight": null,
+          "previewScreenActualWidth": null,
+          "previewScreenCaptureCallbackCount": 0,
+          "previewScreenCaptureGapMaxMs": null,
+          "previewScreenCaptureGapP95Ms": null,
+          "previewScreenCaptureQueueDepth": 0,
+          "previewScreenD3d11TextureAvailable": null,
+          "previewScreenDroppedFrames": 0,
+          "previewScreenFrameAgeMs": null,
+          "previewScreenFrameBytes": 0,
+          "previewScreenFrameStatuses": {
+            "blank": 0,
+            "complete": 0,
+            "idle": 0,
+            "started": 0,
+            "stopped": 0,
+            "suspended": 0,
+            "unknown": 0
+          },
+          "previewScreenFrameStorePublications": 0,
+          "previewScreenIosurfaceAvailable": null,
+          "previewScreenMessage": null,
+          "previewScreenNativeHeight": null,
+          "previewScreenNativeWidth": null,
+          "previewScreenPixelBufferLockP95Ms": null,
+          "previewScreenPublishP95Ms": null,
+          "previewScreenRequestedHeight": null,
+          "previewScreenRequestedWidth": null,
+          "previewScreenRowCopyP95Ms": null,
+          "previewScreenSourceFps": null,
+          "previewScreenSurfaceBacking": {
+            "estimatedBytes": 0,
+            "liveCount": 0,
+            "peakCount": 0,
+            "peakEstimatedBytes": 0
+          },
+          "previewSourceFps": {
+            "synthetic-compositor": 24.438902072748323
+          },
+          "previewSourceFrameBufferCount": 0,
+          "previewSourceFrameBytes": 0,
+          "previewSourceFrameDroppedFrames": 0,
+          "previewSourcePixelsPresent": false,
+          "previewSurfaceBacking": "electron-browser-window",
+          "previewSurfaceResizeCount": 0,
+          "previewTargetFps": 30,
+          "previewTransport": "electron-proof-surface",
+          "recordingAtRisk": true,
+          "recordingMeasuredBitrateKbps": 481.7,
+          "recordingOutputBitrateKbps": 6000,
+          "recordingOutputFps": 30,
+          "recordingOutputHeight": 1080,
+          "recordingOutputTotalBytes": 158575,
+          "recordingOutputWidth": 1920,
+          "recordingProtected": true,
+          "recordingRiskReasons": [
+            "encoder behind real-time (0.66x)",
+            "capture video cadence 12.9fps below 24.0fps floor for 30fps target",
+            "12 duplicate frame(s) re-fed to the encoder across 7 burst(s), max run 2 (compositor under-run)"
+          ],
+          "recordingStartTimeline": {
+            "cold": true,
+            "kind": "start",
+            "marks": [
+              {
+                "atMs": 0,
+                "phase": "admission"
+              },
+              {
+                "atMs": 0,
+                "phase": "bridge-admission"
+              },
+              {
+                "atMs": 0,
+                "phase": "ffmpeg-work-permit"
+              },
+              {
+                "atMs": 0,
+                "phase": "recordable-video-probe"
+              },
+              {
+                "atMs": 68,
+                "phase": "preview-stop"
+              },
+              {
+                "atMs": 68,
+                "phase": "device-resolve"
+              },
+              {
+                "atMs": 68,
+                "phase": "audio-open"
+              },
+              {
+                "atMs": 68,
+                "phase": "mic-warm"
+              },
+              {
+                "atMs": 225,
+                "phase": "compositor-arm"
+              },
+              {
+                "atMs": 226,
+                "phase": "camera-cadence"
+              },
+              {
+                "atMs": 226,
+                "phase": "scene-commit"
+              },
+              {
+                "atMs": 380,
+                "phase": "startup-barrier"
+              },
+              {
+                "atMs": 381,
+                "phase": "starting-published"
+              },
+              {
+                "atMs": 383,
+                "phase": "ffmpeg-spawn"
+              },
+              {
+                "atMs": 456,
+                "phase": "bridge-fifo-open"
+              },
+              {
+                "atMs": 482,
+                "phase": "bridge-ready"
+              },
+              {
+                "atMs": 483,
+                "phase": "muxer-progress"
+              },
+              {
+                "atMs": 483,
+                "phase": "running"
+              }
+            ],
+            "outcome": "running",
+            "sessionId": "4200e8dc-4a14-4426-b99a-901a1dc46938",
+            "totalMs": 483
+          },
+          "recordingStartupBarrierState": "encoding",
+          "recordingStartupBarrierTimeoutReason": null,
+          "recordingStartupBarrierWaitMs": 104,
+          "renderFps": 24.438902072748323,
+          "sessionId": "4200e8dc-4a14-4426-b99a-901a1dc46938",
+          "skippedFrames": 0,
+          "sourceRegistry": {
+            "entries": []
+          },
+          "streamDuplicatedFrames": 0,
+          "streamMeasuredBitrateKbps": null,
+          "streamMeasuredBitrateMaxKbps": null,
+          "streamMeasuredBitrateMinKbps": null,
+          "streamOutputBitrateKbps": null,
+          "streamOutputFps": null,
+          "streamOutputHeight": null,
+          "streamOutputTotalBytes": 0,
+          "streamOutputWidth": null,
+          "targetFps": 30,
+          "updatedAt": "2026-11-23T06:10:08.915741194+00:00",
+          "websocketTransport": {
+            "coalescedTelemetryQueue": {
+              "coalescedCount": 2,
+              "currentDepth": 0,
+              "evictedOrDroppedCount": 0,
+              "maxDepth": 5
+            },
+            "commandLanes": {
+              "accountMaintenance": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 1
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "assetImport": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 1
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "cloudControl": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 0
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "durableChat": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 0
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "hostSpeech": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 0
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "liveControl": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 1
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "observation": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 5
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "stop": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 0
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "surfacePublish": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 1
+                },
+                "rejectedBeforeDispatchCount": 0
+              }
+            },
+            "incomingCommandQueue": {
+              "coalescedCount": 0,
+              "currentDepth": 0,
+              "evictedOrDroppedCount": 0,
+              "maxDepth": 6
+            },
+            "reliableResponseQueue": {
+              "coalescedCount": 0,
+              "currentDepth": 0,
+              "evictedOrDroppedCount": 0,
+              "maxDepth": 12
+            },
+            "slowPressureDisconnectCount": 0
+          },
+          "windowsD3d11Media": {
+            "adapterMismatches": 0,
+            "cameraUploadFrames": 0,
+            "captureReadbackFrames": 0,
+            "compositorCpuFallbackFrames": 0,
+            "cursorCompositedFrames": 0,
+            "cursorExclusionGuaranteed": false,
+            "cursorRequested": false,
+            "cursorShapeUploads": 0,
+            "deviceResets": 0,
+            "encoderGpuSamples": 0,
+            "encoderSystemMemorySamples": 0,
+            "maximumConsecutiveMediaBatch": 0,
+            "maximumConsecutiveMessageBatch": 0,
+            "previewBmpBytes": 0,
+            "previewBmpRequests": 0,
+            "previewDrops": 0,
+            "previewPresents": 0,
+            "protectedContentMaskedFrames": 0,
+            "rawVideoCopiedFrames": 0,
+            "renderTickOverruns": 0,
+            "requested": false,
+            "required": false,
+            "staleGenerationCallbacks": 0,
+            "state": "unavailable",
+            "synchronizationTimeouts": 0,
+            "textureImportFrames": 0,
+            "texturePoolCapacity": 0,
+            "texturePoolInUse": 0,
+            "texturePoolPressureEvents": 0
+          }
+        },
+        "sessionId": "4200e8dc-4a14-4426-b99a-901a1dc46938",
+        "streamTargetsSnapshot": null,
+        "lifecycleEntries": []
+      }
+    },
+    {
+      "requestedBackend": "vaapi",
+      "result": {
+        "combo": "1080p30",
+        "outputPath": "/home/orcdev/linux-beta/s5/acceptance/vaapi/videorc-session-20261123-061027-41a5eca8-a0e2-4a6e-b2a0-0010a421af43.mp4",
+        "sizeBytes": 569333,
+        "failures": [],
+        "warnings": [],
+        "softwareSkipWarning": null,
+        "metrics": {
+          "fileBytes": 569333,
+          "hasVideo": true,
+          "hasAudio": true,
+          "expectAudio": true,
+          "microphoneAvailable": true,
+          "intendedFps": 30,
+          "durationSeconds": 6.033333,
+          "frameCountDurationSeconds": 6.033333,
+          "codec": "h264",
+          "pixFmt": "yuv420p",
+          "profile": "High",
+          "level": 40,
+          "colorSpace": "bt709",
+          "colorPrimaries": "bt709",
+          "colorTransfer": "bt709",
+          "colorRange": "tv",
+          "encoderTag": "Lavf62.12.102",
+          "width": 1920,
+          "height": 1080,
+          "avgFps": 30,
+          "nominalFps": 30,
+          "observedFps": 30,
+          "duplicatePtsCount": 0,
+          "maxDuplicatePtsRun": 1,
+          "meanIntervalMs": 33.333333333333336,
+          "maxFrameGapMs": 33.33400000000009,
+          "frameJitterMs": 0.00047140452077711043,
+          "observedFrames": 181,
+          "expectedFrames": 181,
+          "observedFrameHashes": 181,
+          "uniqueFrameCount": 180,
+          "uniqueFrameRatio": 0.994475138121547,
+          "frameDerivedDurationSeconds": 6.033333333333333,
+          "durationStretchRatio": 0.9999999447513812,
+          "freezeCount": 4,
+          "longestFreezeMs": 100,
+          "corroboratedFreezeCount": 0,
+          "longestCorroboratedFreezeMs": 0,
+          "similarityOnlyFreezeCount": 4,
+          "longestSimilarityOnlyFreezeMs": 100,
+          "cadenceFps": 30,
+          "cadenceLabel": "30p",
+          "cadenceIntendedFps": 30,
+          "cadenceMismatchPct": null,
+          "maxRepeatedFrameRun": 2,
+          "repeatedBurstCount": 0,
+          "maxAudioGapMs": 0,
+          "audioGapCount": 0,
+          "silenceCount": 0,
+          "longestSilenceMs": 0,
+          "digitalZeroRunCount": 0,
+          "longestDigitalZeroMs": 0,
+          "firstDigitalZeroSeconds": null,
+          "silentTrackMs": 0,
+          "silentTrackCoverage": 0,
+          "avSkewMs": 17.33299999999982,
+          "startSkewMs": 0,
+          "tailMismatchMs": 17.33299999999982,
+          "keyframeCount": 4,
+          "maxKeyframeIntervalSeconds": 2
+        },
+        "bridgeDiagnostics": {
+          "encodeBackend": "hardware-vaapi",
+          "encoderBridgeInputFps": 29.78214036717865,
+          "encoderBridgeQueueDepth": 1,
+          "encoderBridgeOutputQueueOldestFrameAgeMs": 0,
+          "encoderBridgeOutputQueueCapacityPressureEvents": 0,
+          "encoderBridgeOutputQueueHighWaterFrames": 2,
+          "encoderBridgeOutputQueueOldestFrameAgeHighWaterMs": 37,
+          "encoderBridgeOutputLastProgressAgeMs": 14,
+          "encoderBridgeOutputPressureRecoveryEvents": 0,
+          "encoderBridgeOutputPreEncodeSkippedFrames": 0,
+          "encoderBridgeVideoToolboxPendingEncodeFrames": 0,
+          "encoderBridgeVideoToolboxPendingFifoFrames": 0,
+          "encoderBridgeEncodedAccessUnitDroppedFrames": 0,
+          "encoderBridgeOutputQueueDroppedFrames": 0,
+          "encoderBridgeDroppedFrames": 0,
+          "encoderBridgeRepeatedFrames": 11,
+          "encoderBridgeEncodedOutputFrames": 0,
+          "encoderBridgeEncodedOutputBytes": 0,
+          "encoderBridgeEncodedOutputErrors": 0,
+          "encoderBridgeActiveEncodedOutputEncoders": 0,
+          "encoderBridgeSeparateOutputEncodersActive": false,
+          "encoderBridgeEffectiveVideoOutput": "raw-yuv420p",
+          "encoderBridgeRecordingEncodedOutputFrames": 0,
+          "encoderBridgeRecordingEncodedOutputBytes": 0,
+          "encoderBridgeStreamEncodedOutputFrames": 0,
+          "encoderBridgeStreamEncodedOutputBytes": 0,
+          "streamOutputTotalBytes": 0,
+          "encoderBridgeEncodedSubmitP95Ms": null,
+          "encoderBridgeEncodedFifoWriteP95Ms": null,
+          "encoderBridgeCompositorWaitP95Ms": 33.440388,
+          "encoderBridgeWriterLoopP95Ms": 47.517469999999996,
+          "encoderBridgeWriterActiveP95Ms": 33.523969,
+          "encoderBridgeDeadlineLagP95Ms": 3.422056,
+          "encoderBridgeDeadlineLagMaxMs": 3.422056,
+          "encoderBridgeError": null,
+          "linuxVaapiArgProfile": "standard",
+          "linuxRenderNodes": [
+            {
+              "detail": "quarantined: a VAAPI probe of this GPU (then renderD129, amdgpu) started at unix 1790231077 and never returned (delete quarantined.json under the app data directory, or pin the node with VIDEORC_LINUX_VAAPI_DEVICE, to try it again)",
+              "driver": "amdgpu",
+              "node": "renderD129",
+              "state": "quarantined"
+            },
+            {
+              "detail": "standard argument profile",
+              "driver": "i915",
+              "node": "renderD128",
+              "state": "probed-ok"
+            }
+          ],
+          "compositorFallbackReason": null,
+          "encoderBridgeEncodedOutputFallbackReason": null
+        },
+        "transientFifoPauseFiredCount": 0,
+        "transientFifoCleanFfmpegExitCount": 0,
+        "activeStatus": {
+          "acceptsLiveSceneEdits": true,
+          "audioTracks": [
+            {
+              "id": "microphone",
+              "label": "Microphone",
+              "source": "microphone"
+            }
+          ],
+          "outputPath": "/home/orcdev/linux-beta/s5/acceptance/vaapi/videorc-session-20261123-061027-41a5eca8-a0e2-4a6e-b2a0-0010a421af43.mkv",
+          "pipeline": {
+            "container": "mkv",
+            "finalization": "none",
+            "stages": [
+              {
+                "stage": "capture",
+                "state": "running"
+              },
+              {
+                "stage": "render",
+                "state": "running"
+              },
+              {
+                "stage": "video-encoder",
+                "state": "running"
+              },
+              {
+                "stage": "audio-encoder",
+                "state": "running"
+              },
+              {
+                "stage": "muxer",
+                "state": "running"
+              }
+            ]
+          },
+          "sessionId": "41a5eca8-a0e2-4a6e-b2a0-0010a421af43",
+          "startedAt": "2026-11-23T06:10:27.271257018+00:00",
+          "state": "recording"
+        },
+        "stoppedStatus": {
+          "durationMs": 7533,
+          "message": "Recording saved; exporting the MP4 in the background.",
+          "outputPath": "/home/orcdev/linux-beta/s5/acceptance/vaapi/videorc-session-20261123-061027-41a5eca8-a0e2-4a6e-b2a0-0010a421af43.mkv",
+          "pipeline": {
+            "container": "mkv",
+            "finalization": "finalizing",
+            "stages": [
+              {
+                "stage": "capture",
+                "state": "finished"
+              },
+              {
+                "stage": "render",
+                "state": "finished"
+              },
+              {
+                "stage": "video-encoder",
+                "state": "finished"
+              },
+              {
+                "stage": "audio-encoder",
+                "state": "finished"
+              },
+              {
+                "detail": "Exporting MP4 in the background.",
+                "stage": "muxer",
+                "state": "finalizing"
+              }
+            ]
+          },
+          "sessionId": "41a5eca8-a0e2-4a6e-b2a0-0010a421af43",
+          "state": "idle"
+        },
+        "diagnostics": {
+          "activeFfmpegProcesses": 1,
+          "activeFfprobeProcesses": 0,
+          "activeOutputMode": "record",
+          "activeSceneRevision": 1795414228252,
+          "backendRssBytes": 73539584,
+          "bottleneck": "none",
+          "captureFps": 29.78214036717865,
+          "compositorBackend": "cpu",
+          "compositorCameraFrameFetchP95Ms": 0,
+          "compositorCameraSourceBlockingRefreshes": 0,
+          "compositorCameraSourceByteUploadFrames": 0,
+          "compositorCameraSourceCaptureTextureReuses": 0,
+          "compositorCameraSourceCvpixelbufferImportFrames": 0,
+          "compositorCameraSourceFreshServes": 0,
+          "compositorCameraSourceHeldServes": 0,
+          "compositorCameraSourceImportFailures": 0,
+          "compositorCameraSourceIosurfaceImportFrames": 0,
+          "compositorCameraSourceServedAgeMaxMs": 0,
+          "compositorCameraSourceTryLockMisses": 0,
+          "compositorCpuFallbackFrames": 0,
+          "compositorCpuFrames": 165,
+          "compositorFallbackReason": null,
+          "compositorFrameStorePublishP95Ms": 0.005345,
+          "compositorGpuCommandWaitP95Ms": 0,
+          "compositorGpuPrepareP95Ms": 0,
+          "compositorGpuSourceTextureP95Ms": 0,
+          "compositorGpuTotalP95Ms": 0,
+          "compositorLiveSourceRefreshP95Ms": 0.006286,
+          "compositorPreviewSurfaceLockContentions": 0,
+          "compositorPreviewSurfaceProgressP95Ms": 0.001802,
+          "compositorSceneSnapshotP95Ms": 0.034407,
+          "compositorScreenFrameFetchP95Ms": 0,
+          "compositorScreenSourceBlockingRefreshes": 0,
+          "compositorScreenSourceByteUploadFrames": 0,
+          "compositorScreenSourceCaptureTextureReuses": 0,
+          "compositorScreenSourceCvpixelbufferImportFrames": 0,
+          "compositorScreenSourceFreshServes": 0,
+          "compositorScreenSourceHeldServes": 0,
+          "compositorScreenSourceImportFailures": 0,
+          "compositorScreenSourceIosurfaceImportFrames": 0,
+          "compositorScreenSourceServedAgeMaxMs": 0,
+          "compositorScreenSourceTryLockMisses": 0,
+          "compositorSourceByteUploadFrames": 0,
+          "compositorSourceCaptureTextureReuses": 0,
+          "compositorSourceCvpixelbufferImportFrames": 0,
+          "compositorSourceFetchP95Ms": 0.036520000000000004,
+          "compositorSourceImportFailures": 0,
+          "compositorSourceImportP95Ms": 0,
+          "compositorSourceIosurfaceImportFrames": 0,
+          "compositorSourceTextureCacheFlushes": 0,
+          "compositorStatusLockContentions": 0,
+          "compositorStatusProgressP95Ms": null,
+          "compositorTickGapMaxMs": 55.819889999999994,
+          "compositorTickGapP95Ms": 47.430426999999995,
+          "compositorTickSkipped": 0,
+          "compositorTicks": 173,
+          "deviceDisconnected": false,
+          "droppedFrames": 0,
+          "duplicateCaptureSources": [],
+          "encodeBackend": "hardware-vaapi",
+          "encoderBridgeActiveEncodedOutputEncoders": 0,
+          "encoderBridgeActiveVideoToolboxOutputEncoders": 0,
+          "encoderBridgeCompositorWaitP95Ms": 33.440388,
+          "encoderBridgeDeadlineLagMaxMs": 3.422056,
+          "encoderBridgeDeadlineLagP95Ms": 3.422056,
+          "encoderBridgeDroppedFrames": 0,
+          "encoderBridgeEffectiveVideoOutput": "raw-yuv420p",
+          "encoderBridgeEncodedAccessUnitDroppedFrames": 0,
+          "encoderBridgeEncodedFifoWriteP95Ms": null,
+          "encoderBridgeEncodedOutputBackend": "hardware-vaapi",
+          "encoderBridgeEncodedOutputBytes": 0,
+          "encoderBridgeEncodedOutputEncoderIdentity": null,
+          "encoderBridgeEncodedOutputErrors": 0,
+          "encoderBridgeEncodedOutputFallbackReason": null,
+          "encoderBridgeEncodedOutputFrames": 0,
+          "encoderBridgeEncodedOutputInputSubtype": null,
+          "encoderBridgeEncodedSubmitP95Ms": null,
+          "encoderBridgeError": null,
+          "encoderBridgeFreshFrames": 164,
+          "encoderBridgeInputFps": 29.78214036717865,
+          "encoderBridgeLateDeadlineTicks": 5,
+          "encoderBridgeMaxRepeatedFrameRun": 2,
+          "encoderBridgeMetalTargetCopiedFrames": 0,
+          "encoderBridgeMetalTargetFrames": 0,
+          "encoderBridgeMetalTargetHandleFrames": 0,
+          "encoderBridgeMfInputCreditTimeouts": 0,
+          "encoderBridgeMfSubmittedFrames": 0,
+          "encoderBridgeOutputLastProgressAgeMs": 14,
+          "encoderBridgeOutputPreEncodeSkippedFrames": 0,
+          "encoderBridgeOutputPressureRecoveryEvents": 0,
+          "encoderBridgeOutputQueueCapacityPressureEvents": 0,
+          "encoderBridgeOutputQueueDroppedFrames": 0,
+          "encoderBridgeOutputQueueHighWaterFrames": 2,
+          "encoderBridgeOutputQueueOldestFrameAgeHighWaterMs": 37,
+          "encoderBridgeOutputQueueOldestFrameAgeMs": 0,
+          "encoderBridgeQueueDepth": 1,
+          "encoderBridgeRawVideoCopiedFrames": 120,
+          "encoderBridgeRawVideoFifoWriteP95Ms": 36.580477,
+          "encoderBridgeRecordingDroppedFrames": 0,
+          "encoderBridgeRecordingEncodedOutputBytes": 0,
+          "encoderBridgeRecordingEncodedOutputFrames": 0,
+          "encoderBridgeRecordingEncoderSpeed": null,
+          "encoderBridgeRecordingInputFps": null,
+          "encoderBridgeRecordingQueueCapacityPressureEvents": 0,
+          "encoderBridgeRecordingQueueDepth": 1,
+          "encoderBridgeRecordingQueueDroppedFrames": 0,
+          "encoderBridgeRecordingQueueOldestFrameAgeMs": 0,
+          "encoderBridgeRecordingRawVideoCopiedFrames": 120,
+          "encoderBridgeRecordingVideoToolboxFifoEnqueueMaxMs": null,
+          "encoderBridgeRecordingVideoToolboxFifoEnqueueP95Ms": null,
+          "encoderBridgeRecordingVideoToolboxOutputBytes": 0,
+          "encoderBridgeRecordingVideoToolboxOutputFrames": 0,
+          "encoderBridgeRecordingWriterActiveP95Ms": null,
+          "encoderBridgeRecordingWriterLoopP95Ms": null,
+          "encoderBridgeRepeatedFrameAgeMaxMs": 88,
+          "encoderBridgeRepeatedFrameAgeP95Ms": 88,
+          "encoderBridgeRepeatedFrameBursts": 7,
+          "encoderBridgeRepeatedFrames": 11,
+          "encoderBridgeRequestedVideoOutput": "raw-yuv420p",
+          "encoderBridgeScheduleSkippedMs": 0,
+          "encoderBridgeSeparateOutputEncodersActive": false,
+          "encoderBridgeSourceAgeMs": 88,
+          "encoderBridgeSourceAgeP95Ms": 80,
+          "encoderBridgeStreamDroppedFrames": 0,
+          "encoderBridgeStreamEncodedOutputBytes": 0,
+          "encoderBridgeStreamEncodedOutputFrames": 0,
+          "encoderBridgeStreamEncoderSpeed": null,
+          "encoderBridgeStreamInputFps": null,
+          "encoderBridgeStreamQueueAgeTrips": 0,
+          "encoderBridgeStreamQueueCapacityPressureEvents": 0,
+          "encoderBridgeStreamQueueDepth": 0,
+          "encoderBridgeStreamQueueDepthTrips": 0,
+          "encoderBridgeStreamQueueDroppedFrames": 0,
+          "encoderBridgeStreamQueueOldestFrameAgeMs": null,
+          "encoderBridgeStreamRawVideoCopiedFrames": 0,
+          "encoderBridgeStreamVideoToolboxFifoEnqueueMaxMs": null,
+          "encoderBridgeStreamVideoToolboxFifoEnqueueP95Ms": null,
+          "encoderBridgeStreamVideoToolboxOutputBytes": 0,
+          "encoderBridgeStreamVideoToolboxOutputFrames": 0,
+          "encoderBridgeStreamWriterActiveP95Ms": null,
+          "encoderBridgeStreamWriterLoopP95Ms": null,
+          "encoderBridgeSyntheticFrames": 0,
+          "encoderBridgeVideoToolboxFifoEnqueueMaxMs": null,
+          "encoderBridgeVideoToolboxFifoEnqueueP95Ms": null,
+          "encoderBridgeVideoToolboxFifoWriteP95Ms": null,
+          "encoderBridgeVideoToolboxOutputBytes": 0,
+          "encoderBridgeVideoToolboxOutputEncodeMs": null,
+          "encoderBridgeVideoToolboxOutputFrames": 0,
+          "encoderBridgeVideoToolboxPendingEncodeFrames": 0,
+          "encoderBridgeVideoToolboxPendingFifoFrames": 0,
+          "encoderBridgeVideoToolboxProbeBytes": 0,
+          "encoderBridgeVideoToolboxProbeErrors": 0,
+          "encoderBridgeVideoToolboxProbeFrames": 0,
+          "encoderBridgeVideoToolboxSubmitP95Ms": null,
+          "encoderBridgeWriterActiveP95Ms": 33.523969,
+          "encoderBridgeWriterLoopP95Ms": 47.517469999999996,
+          "encoderBridgeWriterSleepP95Ms": 36.264057,
+          "encoderBridgeZeroCopyFrames": 0,
+          "encoderSpeed": 0.962,
+          "ffmpegCaptureActive": true,
+          "ffmpegFinalizingActive": false,
+          "ffmpegMaintenanceCancelRequested": false,
+          "ffmpegMaintenanceDeferredReason": "Deferred while recording or streaming is active.",
+          "ffmpegMaintenanceRunning": false,
+          "firstEncodedFrameMs": 101,
+          "firstFullResolutionCompositorFrameMs": 42,
+          "firstSourceFrameMs": null,
+          "linuxRenderNodes": [
+            {
+              "detail": "quarantined: a VAAPI probe of this GPU (then renderD129, amdgpu) started at unix 1790231077 and never returned (delete quarantined.json under the app data directory, or pin the node with VIDEORC_LINUX_VAAPI_DEVICE, to try it again)",
+              "driver": "amdgpu",
+              "node": "renderD129",
+              "state": "quarantined"
+            },
+            {
+              "detail": "standard argument profile",
+              "driver": "i915",
+              "node": "renderD128",
+              "state": "probed-ok"
+            }
+          ],
+          "linuxVaapiArgProfile": "standard",
+          "micCaptureCoverage": null,
+          "micCapturedFrames": null,
+          "micDroppedFrames": 0,
+          "micLiveLevel": null,
+          "micLivePeakDb": null,
+          "microphoneSyncOffsetMs": 0,
+          "previewCameraActualHeight": null,
+          "previewCameraActualWidth": null,
+          "previewCameraCapabilityDeviceId": null,
+          "previewCameraCapabilityError": null,
+          "previewCameraCapabilityFormats": [],
+          "previewCameraCaptureCallbackCount": 0,
+          "previewCameraCaptureGapMaxMs": null,
+          "previewCameraCaptureGapP95Ms": null,
+          "previewCameraCaptureGapP99Ms": null,
+          "previewCameraDeviceUniqueId": null,
+          "previewCameraDidDropCallbackCount": 0,
+          "previewCameraDropReasons": {
+            "discontinuity": 0,
+            "frameWasLate": 0,
+            "outOfBuffers": 0,
+            "unknown": 0
+          },
+          "previewCameraDroppedFrames": 0,
+          "previewCameraFrameAgeMs": null,
+          "previewCameraFrameBytes": 0,
+          "previewCameraFrameStorePublications": 0,
+          "previewCameraPixelBufferLockP95Ms": null,
+          "previewCameraPublishP95Ms": null,
+          "previewCameraRequestedHeight": null,
+          "previewCameraRequestedWidth": null,
+          "previewCameraRowCopyP95Ms": null,
+          "previewCameraSamplePtsGapMaxMs": null,
+          "previewCameraSamplePtsGapP95Ms": null,
+          "previewCameraSamplePtsGapP99Ms": null,
+          "previewCameraSelectedFormatHeight": null,
+          "previewCameraSelectedFormatMaxFps": null,
+          "previewCameraSelectedFormatMinFps": null,
+          "previewCameraSelectedFormatWidth": null,
+          "previewCameraSourceFps": null,
+          "previewCameraState": null,
+          "previewCameraStatusMessage": null,
+          "previewCameraSurfaceBacking": {
+            "estimatedBytes": 0,
+            "liveCount": 0,
+            "peakCount": 0,
+            "peakEstimatedBytes": 0
+          },
+          "previewCompositorFrameLag": null,
+          "previewDroppedFrames": 0,
+          "previewFrameAgeMs": null,
+          "previewFramePollingSuppressed": false,
+          "previewImagePollCounts": {
+            "cameraBmp": 0,
+            "cameraPng": 0,
+            "liveJpeg": 0,
+            "liveMjpeg": 0,
+            "productionPng": 0,
+            "screenBmp": 0,
+            "screenPng": 0
+          },
+          "previewInputToPresentLatencyMs": null,
+          "previewInputToPresentLatencyP50Ms": null,
+          "previewInputToPresentLatencyP95Ms": null,
+          "previewInputToPresentLatencyP99Ms": null,
+          "previewLatencyMs": null,
+          "previewPresentFps": null,
+          "previewRenderFrameTimeP50Ms": null,
+          "previewRenderFrameTimeP95Ms": null,
+          "previewRenderFrameTimeP99Ms": null,
+          "previewRepeatedFrames": 0,
+          "previewScreenActualHeight": null,
+          "previewScreenActualWidth": null,
+          "previewScreenCaptureCallbackCount": 0,
+          "previewScreenCaptureGapMaxMs": null,
+          "previewScreenCaptureGapP95Ms": null,
+          "previewScreenCaptureQueueDepth": 0,
+          "previewScreenD3d11TextureAvailable": null,
+          "previewScreenDroppedFrames": 0,
+          "previewScreenFrameAgeMs": null,
+          "previewScreenFrameBytes": 0,
+          "previewScreenFrameStatuses": {
+            "blank": 0,
+            "complete": 0,
+            "idle": 0,
+            "started": 0,
+            "stopped": 0,
+            "suspended": 0,
+            "unknown": 0
+          },
+          "previewScreenFrameStorePublications": 0,
+          "previewScreenIosurfaceAvailable": null,
+          "previewScreenMessage": null,
+          "previewScreenNativeHeight": null,
+          "previewScreenNativeWidth": null,
+          "previewScreenPixelBufferLockP95Ms": null,
+          "previewScreenPublishP95Ms": null,
+          "previewScreenRequestedHeight": null,
+          "previewScreenRequestedWidth": null,
+          "previewScreenRowCopyP95Ms": null,
+          "previewScreenSourceFps": null,
+          "previewScreenSurfaceBacking": {
+            "estimatedBytes": 0,
+            "liveCount": 0,
+            "peakCount": 0,
+            "peakEstimatedBytes": 0
+          },
+          "previewSourceFps": {
+            "synthetic-compositor": 27.745609234919133
+          },
+          "previewSourceFrameBufferCount": 0,
+          "previewSourceFrameBytes": 0,
+          "previewSourceFrameDroppedFrames": 0,
+          "previewSourcePixelsPresent": false,
+          "previewSurfaceBacking": "none",
+          "previewSurfaceResizeCount": 0,
+          "previewTargetFps": null,
+          "previewTransport": "unavailable",
+          "recordingAtRisk": true,
+          "recordingMeasuredBitrateKbps": 367.9,
+          "recordingOutputBitrateKbps": 6000,
+          "recordingOutputFps": 30,
+          "recordingOutputHeight": 1080,
+          "recordingOutputTotalBytes": 177577,
+          "recordingOutputWidth": 1920,
+          "recordingProtected": true,
+          "recordingRiskReasons": [
+            "encoder behind real-time (0.96x)",
+            "11 duplicate frame(s) re-fed to the encoder across 7 burst(s), max run 2 (compositor under-run)"
+          ],
+          "recordingStartTimeline": {
+            "cold": true,
+            "kind": "start",
+            "marks": [
+              {
+                "atMs": 0,
+                "phase": "admission"
+              },
+              {
+                "atMs": 0,
+                "phase": "bridge-admission"
+              },
+              {
+                "atMs": 0,
+                "phase": "ffmpeg-work-permit"
+              },
+              {
+                "atMs": 0,
+                "phase": "recordable-video-probe"
+              },
+              {
+                "atMs": 70,
+                "phase": "preview-stop"
+              },
+              {
+                "atMs": 70,
+                "phase": "device-resolve"
+              },
+              {
+                "atMs": 70,
+                "phase": "audio-open"
+              },
+              {
+                "atMs": 70,
+                "phase": "mic-warm"
+              },
+              {
+                "atMs": 982,
+                "phase": "compositor-arm"
+              },
+              {
+                "atMs": 983,
+                "phase": "camera-cadence"
+              },
+              {
+                "atMs": 983,
+                "phase": "scene-commit"
+              },
+              {
+                "atMs": 1131,
+                "phase": "startup-barrier"
+              },
+              {
+                "atMs": 1134,
+                "phase": "starting-published"
+              },
+              {
+                "atMs": 1138,
+                "phase": "ffmpeg-spawn"
+              },
+              {
+                "atMs": 1225,
+                "phase": "bridge-fifo-open"
+              },
+              {
+                "atMs": 1270,
+                "phase": "bridge-ready"
+              },
+              {
+                "atMs": 1270,
+                "phase": "muxer-progress"
+              },
+              {
+                "atMs": 1272,
+                "phase": "running"
+              }
+            ],
+            "outcome": "running",
+            "sessionId": "41a5eca8-a0e2-4a6e-b2a0-0010a421af43",
+            "totalMs": 1272
+          },
+          "recordingStartupBarrierState": "encoding",
+          "recordingStartupBarrierTimeoutReason": null,
+          "recordingStartupBarrierWaitMs": 101,
+          "renderFps": 27.745609234919133,
+          "sessionId": "41a5eca8-a0e2-4a6e-b2a0-0010a421af43",
+          "skippedFrames": 0,
+          "sourceRegistry": {
+            "entries": []
+          },
+          "streamDuplicatedFrames": 0,
+          "streamMeasuredBitrateKbps": null,
+          "streamMeasuredBitrateMaxKbps": null,
+          "streamMeasuredBitrateMinKbps": null,
+          "streamOutputBitrateKbps": null,
+          "streamOutputFps": null,
+          "streamOutputHeight": null,
+          "streamOutputTotalBytes": 0,
+          "streamOutputWidth": null,
+          "targetFps": 30,
+          "updatedAt": "2026-11-23T06:10:34.570080381+00:00",
+          "websocketTransport": {
+            "coalescedTelemetryQueue": {
+              "coalescedCount": 2,
+              "currentDepth": 0,
+              "evictedOrDroppedCount": 0,
+              "maxDepth": 2
+            },
+            "commandLanes": {
+              "accountMaintenance": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 0
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "assetImport": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 0
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "cloudControl": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 0
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "durableChat": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 0
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "hostSpeech": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 0
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "liveControl": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 0
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "observation": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 2
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "stop": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 0
+                },
+                "rejectedBeforeDispatchCount": 0
+              },
+              "surfacePublish": {
+                "expiredBeforeDispatchCount": 0,
+                "queue": {
+                  "coalescedCount": 0,
+                  "currentDepth": 0,
+                  "evictedOrDroppedCount": 0,
+                  "maxDepth": 0
+                },
+                "rejectedBeforeDispatchCount": 0
+              }
+            },
+            "incomingCommandQueue": {
+              "coalescedCount": 0,
+              "currentDepth": 0,
+              "evictedOrDroppedCount": 0,
+              "maxDepth": 2
+            },
+            "reliableResponseQueue": {
+              "coalescedCount": 0,
+              "currentDepth": 0,
+              "evictedOrDroppedCount": 0,
+              "maxDepth": 8
+            },
+            "slowPressureDisconnectCount": 0
+          },
+          "windowsD3d11Media": {
+            "adapterMismatches": 0,
+            "cameraUploadFrames": 0,
+            "captureReadbackFrames": 0,
+            "compositorCpuFallbackFrames": 0,
+            "cursorCompositedFrames": 0,
+            "cursorExclusionGuaranteed": false,
+            "cursorRequested": false,
+            "cursorShapeUploads": 0,
+            "deviceResets": 0,
+            "encoderGpuSamples": 0,
+            "encoderSystemMemorySamples": 0,
+            "maximumConsecutiveMediaBatch": 0,
+            "maximumConsecutiveMessageBatch": 0,
+            "previewBmpBytes": 0,
+            "previewBmpRequests": 0,
+            "previewDrops": 0,
+            "previewPresents": 0,
+            "protectedContentMaskedFrames": 0,
+            "rawVideoCopiedFrames": 0,
+            "renderTickOverruns": 0,
+            "requested": false,
+            "required": false,
+            "staleGenerationCallbacks": 0,
+            "state": "unavailable",
+            "synchronizationTimeouts": 0,
+            "textureImportFrames": 0,
+            "texturePoolCapacity": 0,
+            "texturePoolInUse": 0,
+            "texturePoolPressureEvents": 0
+          }
+        },
+        "sessionId": "41a5eca8-a0e2-4a6e-b2a0-0010a421af43",
+        "streamTargetsSnapshot": null,
+        "lifecycleEntries": []
+      }
+    }
+  ]
+}

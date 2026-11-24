@@ -1,4 +1,6 @@
+import type { LayoutPreset, LayoutSettings } from './backend'
 import {
+  hydrateWorkingScene,
   normalizeSavedSceneCloud,
   normalizeSceneApp,
   normalizeSceneAudio,
@@ -7,7 +9,13 @@ import {
   type SceneOrientation,
   type SceneVisual
 } from './scene-presets'
-import { layoutPresetOrientation } from './capture'
+import {
+  defaultCaptureConfig,
+  HORIZONTAL_LAYOUT_PRESETS,
+  layoutPresetNeedsCamera,
+  layoutPresetNeedsScreen,
+  layoutPresetOrientation
+} from './capture'
 import { canonicalJson } from './scene-visibility-identity'
 import {
   DELETE_ON_STREAM_REASON,
@@ -150,7 +158,8 @@ export function hydrateScenes(raw: unknown): {
         : scenes[0]!.id,
       ...(pending && typeof pending === 'object' && !Array.isArray(pending)
         ? { pendingShortcuts: pending }
-        : {})
+        : {}),
+      ...(data.verticalLayoutsRepaired === true ? { verticalLayoutsRepaired: true } : {})
     },
     readOnly: false,
     error
@@ -203,6 +212,127 @@ export function displayShows(display: MainDisplay | null | undefined): SceneShow
     screenId: display?.id ?? '',
     ...(display?.name ? { screenName: display.name } : {}),
     ...(display?.displayUuid && display.id ? { screenUuid: display.displayUuid } : {})
+  }
+}
+
+/** The ids the migration gives the four default scenes: stable, so a second run names the same scenes. */
+export const defaultSceneId = (preset: LayoutPreset): string => `default-${preset}`
+
+/** Whether two built-in layouts put the same sources on stream: a screen or not, a camera or not. */
+export function presetsShowSameSources(a: LayoutPreset, b: LayoutPreset): boolean {
+  return (
+    layoutPresetNeedsScreen(a) === layoutPresetNeedsScreen(b) &&
+    layoutPresetNeedsCamera(a) === layoutPresetNeedsCamera(b)
+  )
+}
+
+/**
+ * The 9:16 layout that shows what a 16:9 built-in layout shows: Camera only
+ * and Screen only their own, a screen with a camera (Screen + camera, Side by
+ * side) the 9:16 layout a new user starts on, Camera top.
+ */
+export function verticalTwinPreset(preset: LayoutPreset): LayoutPreset {
+  if (layoutPresetOrientation(preset) === 'vertical') return preset
+  if (preset === 'camera-only') return 'vertical-camera-only'
+  if (preset === 'screen-only') return 'vertical-screen-only'
+  return defaultCaptureConfig.lastVerticalPreset
+}
+
+/** `layout` on its 9:16 twin, in preset arrangement, with its own look and framing. */
+function onVerticalTwin(layout: LayoutSettings, horizontal: LayoutPreset): LayoutSettings {
+  return {
+    ...layout,
+    layoutPreset: verticalTwinPreset(horizontal),
+    cameraTransformMode: 'preset',
+    cameraTransform: null,
+    arrangementMode: 'preset',
+    sourceTransformOverrides: {}
+  }
+}
+
+/**
+ * Owner report 2026-11-23 (0.37.0): plan 231's migration (0.34.0) gave every
+ * scene the 9:16 layout the vertical stream used to show for it, which for
+ * anything but Camera only and Screen only was the one remembered 9:16
+ * layout. A streamer whose last 9:16 pick was Camera only got a "Screen +
+ * camera" and a "Side by side" that show only the camera in 9:16 ("No
+ * screen"), with their screen still assigned.
+ *
+ * Once per library (`verticalLayoutsRepaired`), each default scene the
+ * migration made (its id, its own 16:9 layout, neither in Freeform) whose
+ * 9:16 layout shows other sources than its 16:9 one is put on its 9:16 twin
+ * (`verticalTwinPreset`), keeping its look and framing. Nothing else is
+ * touched: saved scenes, renamed defaults' names, screens, keys, audio and
+ * backgrounds stay, as do invalid entries a hydrate would drop. When the
+ * scene is the one a 9:16 studio shows right now, exactly as stored, the
+ * working setup is moved with it, so the program and its card never drift.
+ *
+ * Takes and returns what is stored (the raw JSON), so the caller writes the
+ * library and, when given, the working setup. Null when there is nothing to
+ * write: no usable library, or one already repaired.
+ */
+export function repairStoredSceneVerticals(
+  rawLibrary: unknown,
+  rawWorking: unknown
+): {
+  library: Record<string, unknown>
+  working: Record<string, unknown> | null
+  repaired: string[]
+} | null {
+  const { library } = hydrateScenes(rawLibrary)
+  if (!library || library.verticalLayoutsRepaired) return null
+  const repairedScenes = new Map<string, Scene>()
+  const before = new Map<string, LayoutSettings>()
+  for (const preset of HORIZONTAL_LAYOUT_PRESETS) {
+    const scene = library.scenes.find(({ id }) => id === defaultSceneId(preset))
+    if (!scene) continue
+    const { horizontal, vertical } = scene.layouts
+    if (
+      horizontal.layoutPreset !== preset ||
+      horizontal.arrangementMode === 'freeform' ||
+      vertical.arrangementMode === 'freeform' ||
+      presetsShowSameSources(preset, vertical.layoutPreset)
+    )
+      continue
+    before.set(scene.id, vertical)
+    repairedScenes.set(scene.id, {
+      ...scene,
+      layouts: { horizontal, vertical: onVerticalTwin(vertical, preset) }
+    })
+  }
+  const raw = rawLibrary as Record<string, unknown>
+  const entries: unknown[] = Array.isArray(raw.scenes) ? raw.scenes : []
+  const nextLibrary = {
+    ...raw,
+    scenes: entries.map((entry) => {
+      const id = (entry as { id?: unknown } | null)?.id
+      return (typeof id === 'string' && repairedScenes.get(id)) || entry
+    }),
+    verticalLayoutsRepaired: true
+  }
+  const working = hydrateWorkingScene(rawWorking)
+  const workingScene = working?.sceneId ? repairedScenes.get(working.sceneId) : undefined
+  const workingBefore = working?.sceneId ? before.get(working.sceneId) : undefined
+  const movesWorking =
+    !!working &&
+    !!workingScene &&
+    !!workingBefore &&
+    layoutPresetOrientation(working.visual.layout.layoutPreset) === 'vertical' &&
+    canonicalJson(working.visual.layout) === canonicalJson(workingBefore)
+  const rawWorkingData = rawWorking as Record<string, unknown> | null
+  return {
+    library: nextLibrary,
+    working:
+      movesWorking && rawWorkingData
+        ? {
+            ...rawWorkingData,
+            visual: {
+              ...(rawWorkingData.visual as Record<string, unknown>),
+              layout: workingScene.layouts.vertical
+            }
+          }
+        : null,
+    repaired: [...repairedScenes.keys()]
   }
 }
 

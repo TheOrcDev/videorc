@@ -8,20 +8,23 @@
 //! rasterizes each overlay to the rect's width and the compositor blits the
 //! bitmap inside the rect (see `overlay_blit_layout`).
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::comment_highlight::CommentHighlightAnchor;
 use crate::state::AppState;
 use crate::storage::Database;
 
+// Plan 260 S1.1: these wire types live in `videorc-protocol` now.
+pub use videorc_protocol::overlay_layout::{
+    OVERLAY_RECT_MIN_SIZE, OverlayHorizontalGravity, OverlayItem, OverlayOrientation, OverlayRect,
+    RECT_EPSILON,
+};
+
 pub const OVERLAY_LAYOUT_KEY: &str = "overlayLayout";
 /// Sibling row recording one-time migrations into the layout, so a wire
 /// shape with `allowUnknown: false` never carries bookkeeping.
 const OVERLAY_LAYOUT_MIGRATION_KEY: &str = "overlayLayoutMigration";
-/// Smallest side a placed rect may have (canvas units).
-pub const OVERLAY_RECT_MIN_SIZE: f64 = 0.02;
-pub(crate) const RECT_EPSILON: f64 = 1e-6;
 
 /// Landscape side margin: 4% of the canvas height, expressed against a 16:9
 /// width (43 px of 1920 at 1080p, the pre-plan-164 corner margin). The
@@ -34,61 +37,6 @@ pub(crate) const PORTRAIT_SIDE_MARGIN: f64 = 0.04 * 16.0 / 9.0;
 /// Portrait platform safe area (plan 077): 8% top, 22% bottom.
 pub(crate) const PORTRAIT_TOP_MARGIN: f64 = 0.08;
 pub(crate) const PORTRAIT_BOTTOM_MARGIN: f64 = 0.22;
-
-/// A normalized rect in canvas units: `x`/`w` over the width, `y`/`h` over the
-/// height.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct OverlayRect {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-}
-
-impl OverlayRect {
-    pub const fn new(x: f64, y: f64, w: f64, h: f64) -> Self {
-        Self { x, y, w, h }
-    }
-
-    pub fn validate(&self, item: OverlayItem, orientation: OverlayOrientation) -> Result<()> {
-        let fields = [self.x, self.y, self.w, self.h];
-        if fields.iter().any(|value| !value.is_finite()) {
-            bail!(
-                "{} {} rect must be finite.",
-                item.label(),
-                orientation.label()
-            );
-        }
-        if self.w < OVERLAY_RECT_MIN_SIZE - RECT_EPSILON
-            || self.h < OVERLAY_RECT_MIN_SIZE - RECT_EPSILON
-        {
-            bail!(
-                "{} {} rect must be at least {OVERLAY_RECT_MIN_SIZE} wide and tall.",
-                item.label(),
-                orientation.label()
-            );
-        }
-        if self.x < -RECT_EPSILON
-            || self.y < -RECT_EPSILON
-            || self.x + self.w > 1.0 + RECT_EPSILON
-            || self.y + self.h > 1.0 + RECT_EPSILON
-        {
-            bail!(
-                "{} {} rect must stay inside the canvas (0..1).",
-                item.label(),
-                orientation.label()
-            );
-        }
-        Ok(())
-    }
-
-    /// The rect's centre lies in the lower half of the canvas, so its content
-    /// hugs the rect's bottom edge (a caption bar grows upward, a corner card
-    /// keeps its bottom margin).
-    pub fn bottom_gravity(&self) -> bool {
-        self.y + self.h / 2.0 >= 0.5
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -112,62 +60,6 @@ pub struct OverlayLayout {
     pub buddy: OverlayItemLayout,
     #[serde(default = "default_chat_layout")]
     pub chat: OverlayItemLayout,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum OverlayItem {
-    Highlight,
-    Captions,
-    Buddy,
-    /// The chat box (plan 215 G): the last few chat messages, off by default
-    /// because it shows viewers' names.
-    Chat,
-}
-
-impl OverlayItem {
-    pub const ALL: [OverlayItem; 4] = [
-        OverlayItem::Highlight,
-        OverlayItem::Captions,
-        OverlayItem::Buddy,
-        OverlayItem::Chat,
-    ];
-
-    /// How the Go Live sheet names the item mid-sentence.
-    pub fn label(self) -> &'static str {
-        match self {
-            OverlayItem::Highlight => "highlights",
-            OverlayItem::Captions => "captions",
-            OverlayItem::Buddy => "the avatar",
-            OverlayItem::Chat => "chat",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum OverlayOrientation {
-    Horizontal,
-    Vertical,
-}
-
-impl OverlayOrientation {
-    pub fn label(self) -> &'static str {
-        match self {
-            OverlayOrientation::Horizontal => "horizontal",
-            OverlayOrientation::Vertical => "vertical",
-        }
-    }
-
-    /// A canvas taller than wide is the portrait leg (the vertical simulcast
-    /// leg or a vertical scene) and takes the item's vertical rect.
-    pub fn for_canvas(width: u32, height: u32) -> Self {
-        if height > width {
-            OverlayOrientation::Vertical
-        } else {
-            OverlayOrientation::Horizontal
-        }
-    }
 }
 
 /// The snap presets the Stream Manager menu and the Scene inspector write:
@@ -332,49 +224,6 @@ impl OverlayLayout {
 }
 
 // --- Blit layout -------------------------------------------------------------
-
-/// Which edge of its rect an overlay bitmap hugs horizontally. Decided by the
-/// rect's centre, so the three legacy anchors (left corner, centred bar,
-/// right corner) fall out of the rect alone and a rect dragged to the middle
-/// centres its content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverlayHorizontalGravity {
-    Left,
-    Center,
-    Right,
-}
-
-const CENTER_GRAVITY_BAND: f64 = 0.02;
-
-impl OverlayRect {
-    pub fn horizontal_gravity(&self) -> OverlayHorizontalGravity {
-        let center = self.x + self.w / 2.0;
-        if center < 0.5 - CENTER_GRAVITY_BAND {
-            OverlayHorizontalGravity::Left
-        } else if center > 0.5 + CENTER_GRAVITY_BAND {
-            OverlayHorizontalGravity::Right
-        } else {
-            OverlayHorizontalGravity::Center
-        }
-    }
-
-    /// The rect in canvas pixels: `(left, top, right, bottom)`, rounded and
-    /// clamped to the canvas.
-    pub fn pixels(
-        &self,
-        canvas_width: usize,
-        canvas_height: usize,
-    ) -> (usize, usize, usize, usize) {
-        let clamp = |value: f64, max: usize| -> usize {
-            (value * max as f64).round().clamp(0.0, max as f64) as usize
-        };
-        let left = clamp(self.x, canvas_width);
-        let right = clamp(self.x + self.w, canvas_width).max(left);
-        let top = clamp(self.y, canvas_height);
-        let bottom = clamp(self.y + self.h, canvas_height).max(top);
-        (left, top, right, bottom)
-    }
-}
 
 /// Where an overlay bitmap lands on a canvas: the single layout oracle shared
 /// by the CPU blit, the Metal source placement and the Windows D3D11 layer

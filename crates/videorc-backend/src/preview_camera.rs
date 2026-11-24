@@ -179,6 +179,52 @@ fn should_skip_camera_capture_cpu_copy(zero_copy_source_handle_available: bool) 
 #[cfg(target_os = "macos")]
 use crate::metal_compositor::source_zerocopy_enabled;
 
+/// Plan 258 S3: put the layout's camera background (the renderer injects
+/// the selected camera's at the output boundary) on a camera session's
+/// stage. A picture resolves through the managed background registry; one
+/// that does not resolve still arms, and its cover shows the neutral ground.
+pub(crate) fn apply_camera_background_to_shared(
+    state: &AppState,
+    shared: &Arc<StdMutex<PreviewCameraShared>>,
+    layout: &LayoutSettings,
+) {
+    let setting = layout.camera_background.as_ref();
+    let image_path = setting
+        .filter(|setting| setting.mode == crate::protocol::CameraBackgroundMode::Image)
+        .and_then(|setting| setting.asset_id.as_deref())
+        .and_then(|asset_id| {
+            state
+                .resource_authority
+                .resolve_managed_background(asset_id)
+                .map_err(|error| {
+                    tracing::warn!("Camera background picture {asset_id}: {error:#}");
+                })
+                .ok()
+        });
+    let look = effect_stage::EffectLook::from_setting(setting, image_path, layout.camera_mirror);
+    effect_stage::apply_look(shared, setting, look);
+}
+
+/// Plan 258 S3: a committed layout's camera background reaches the live
+/// camera even when the commit does not restart or reuse it (a scene
+/// switch mid-session leaves the camera alone).
+pub(crate) async fn apply_camera_background(state: &AppState, layout: &LayoutSettings) {
+    let shared = state
+        .preview_camera
+        .lock()
+        .await
+        .active
+        .as_ref()
+        .map(|active| Arc::clone(&active.shared));
+    if let Some(shared) = shared {
+        apply_camera_background_to_shared(state, &shared, layout);
+    }
+}
+
+/// Plan 258 S3: the camera effect stage at this module's publish points.
+#[path = "camera_effect_stage.rs"]
+pub(crate) mod effect_stage;
+
 pub type PreviewCameraSlot = Arc<tokio::sync::Mutex<PreviewCameraRuntime>>;
 
 #[derive(Debug)]
@@ -678,6 +724,12 @@ pub struct PreviewCameraShared {
     window_started_at: Option<Instant>,
     source_fps: Option<f64>,
     capture_timings: CameraCaptureTimingWindow,
+    /// Plan 258 S4: the system's own effects on this camera, as the camera
+    /// thread last read them from the device.
+    system_effect: Option<crate::protocol::CameraSystemEffect>,
+    /// Plan 258 S3: the camera effect stage. Kept behind this lock, so the
+    /// store's lock is the stage's: a raw publish and an arm never race.
+    effect: effect_stage::CameraEffectStage,
 }
 
 impl PreviewCameraShared {
@@ -728,11 +780,11 @@ impl PreviewCameraShared {
     }
 
     /// A frame read from the capture process pipe (Windows dshow, Linux v4l2)
-    /// is that platform's capture callback. Count it like the AVFoundation
-    /// sample-buffer callback: capture recovery verifies a restarted camera by
-    /// this counter, and a pipe camera that never advanced it was restarted
-    /// while live and latched Failed.
-    #[cfg(any(not(target_os = "macos"), test))]
+    /// or drawn by the plan 258 fixture camera is that source's capture
+    /// callback. Count it like the AVFoundation sample-buffer callback:
+    /// capture recovery verifies a restarted camera by this counter, and a
+    /// pipe camera that never advanced it was restarted while live and
+    /// latched Failed.
     fn record_pipe_frame_callback(&mut self, at: Instant) {
         self.capture_timings.record_callback_at(at);
         self.capture_callback_count = self.capture_callback_count.saturating_add(1);
@@ -1176,7 +1228,12 @@ async fn start_preview_camera_with_owner(
     let unique_id = camera_source.device_unique_id().to_string();
     let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path.clone());
     #[cfg(target_os = "windows")]
-    let unique_id = match resolve_windows_camera_target(&state, &ffmpeg_path, &unique_id).await {
+    let unique_id = match if crate::camera_fixture::is_fixture_unique_id(&unique_id) {
+        // Plan 258 S2: the fixture camera has no DirectShow device to resolve.
+        Ok(unique_id)
+    } else {
+        resolve_windows_camera_target(&state, &ffmpeg_path, &unique_id).await
+    } {
         Ok(target) => target,
         Err(error) => {
             // Inventory admission precedes old-owner retirement. A missing or
@@ -1215,6 +1272,8 @@ async fn start_preview_camera_with_owner(
         updated_at: Utc::now().to_rfc3339(),
         message: Some("Starting native camera preview.".to_string()),
         no_video: None,
+        system_effect: None,
+        camera_background: None,
     };
     let start_key = PreviewCameraStartKey {
         source_key: source_key.clone(),
@@ -1705,6 +1764,9 @@ async fn start_registered_preview_camera(
     let shared = Arc::new(StdMutex::new(
         PreviewCameraShared::with_surface_backing_tracker(surface_backing_tracker),
     ));
+    // Plan 258 S3: arm before the first frame, so a camera switch, a session
+    // start or a relaunch with an effect on starts on the cover (invariant 2).
+    apply_camera_background_to_shared(&state, &shared, &params.layout);
     let (stop_tx, stop_rx) = std_mpsc::channel();
     let (startup_tx, startup_rx) = std_mpsc::channel();
     let thread_shared = Arc::clone(&shared);
@@ -1717,6 +1779,14 @@ async fn start_registered_preview_camera(
         ffmpeg_path: ffmpeg_path.clone(),
         video: params.video.clone(),
         layout: params.layout.clone(),
+        // Plan 258 D12: Videorc's own background effect never runs on a
+        // Windows camera until the Windows stage (S10), so Studio Effects is
+        // only reported for now; S10 sets `turn_off_background_blur` while it
+        // processes this camera.
+        studio_effects: crate::camera_system_effect::StudioEffectsPolicy {
+            turn_off_background_blur: false,
+            restore_ledger: Some(state.database.clone()),
+        },
     };
 
     // Acquire the runtime before spawning so there is no suspension point
@@ -1838,6 +1908,8 @@ async fn start_registered_preview_camera(
                 updated_at: Utc::now().to_rfc3339(),
                 message,
                 no_video: None,
+                system_effect: None,
+                camera_background: None,
             };
             let capture_target = camera_capture_target_dimensions(&params.layout, &params.video);
             let installed = {
@@ -1931,6 +2003,8 @@ async fn start_registered_preview_camera(
                 updated_at: Utc::now().to_rfc3339(),
                 message: Some(message),
                 no_video: None,
+                system_effect: None,
+                camera_background: None,
             };
             if set_camera_status_for_start(&state, &start_lease, recovery_epoch, status.clone())
                 .await
@@ -1971,6 +2045,8 @@ async fn start_registered_preview_camera(
                 updated_at: Utc::now().to_rfc3339(),
                 message: Some(message),
                 no_video: None,
+                system_effect: None,
+                camera_background: None,
             };
             if set_camera_status_for_start(&state, &start_lease, recovery_epoch, status.clone())
                 .await
@@ -2606,6 +2682,8 @@ async fn begin_forced_camera_restart(
                 "Restarting native camera capture after verified degradation.".to_string(),
             ),
             no_video: None,
+            system_effect: None,
+            camera_background: None,
         };
         slot.status = starting.clone();
         slot.run_id = None;
@@ -2714,6 +2792,8 @@ async fn begin_failed_camera_recovery_retry(
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Retrying the failed native camera recovery generation.".to_string()),
             no_video: None,
+            system_effect: None,
+            camera_background: None,
         };
         slot.status = starting.clone();
         slot.run_id = None;
@@ -3386,8 +3466,9 @@ pub async fn latest_preview_camera_bmp(
     state: &AppState,
     requested_max_width: Option<u32>,
     cursor: Option<PreviewBmpCursor>,
+    format: crate::preview_bmp::PreviewFrameFormat,
 ) -> Option<LatestPreviewBmpPoll> {
-    let (generation, frame) = {
+    let (generation, frame, shared, raw_epoch) = {
         let slot = state.preview_camera.lock().await;
         let active = slot.active.as_ref()?;
         let generation = slot.run_id.clone()?;
@@ -3396,24 +3477,106 @@ pub async fn latest_preview_camera_bmp(
         let guard = shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (generation, guard.frame_store.latest()?)
+        let frame = guard.frame_store.latest()?;
+        let raw_epoch = guard.effect.raw_read_epoch();
+        drop(guard);
+        (generation, frame, shared, raw_epoch)
     };
+    // Plan 257 S3: a frame the client already has answers 204 here, without a
+    // blocking task, so a waiting request can look again every few ms.
+    if crate::preview_bmp::cursor_names_frame(cursor.as_ref(), &generation, frame.sequence) {
+        return Some(LatestPreviewBmpPoll::Unchanged {
+            generation,
+            sequence: frame.sequence,
+        });
+    }
 
+    let captured_at = frame.captured_at;
     let max_width = preview_camera_png_max_width(requested_max_width);
     tokio::task::spawn_blocking(move || {
-        encode_latest_bgra_bmp(
-            cursor.as_ref(),
-            generation,
-            frame.sequence,
-            frame.width,
-            frame.height,
-            &frame.bytes,
-            max_width,
-        )
+        let poll = camera_bmp_poll(&generation, &frame, cursor.as_ref(), max_width, format)?;
+        // Plan 258 S5 (D2): a frame read while the stage was off is raw. If
+        // an effect armed while it was being copied, arming replaced it in
+        // the store, so this copy must never be served: the next poll reads
+        // the cover. Checked after the copy, under the store's lock.
+        if let Some(epoch) = raw_epoch {
+            let guard = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.effect.raw_read_epoch() != Some(epoch) {
+                return None;
+            }
+        }
+        Some(poll)
     })
     .await
     .ok()
     .flatten()
+    .map(|poll| poll.captured_at(captured_at))
+}
+
+/// The BMP poll for one stored camera frame (`None` when it can't be read).
+fn camera_bmp_poll(
+    generation: &str,
+    frame: &FrameHandle<PreviewCameraPixelFormat>,
+    cursor: Option<&PreviewBmpCursor>,
+    max_width: u32,
+    format: crate::preview_bmp::PreviewFrameFormat,
+) -> Option<LatestPreviewBmpPoll> {
+    // Plan 258 S5: on macOS the store's frames are zero-copy pixel
+    // buffers with no CPU bytes (the stage's processed buffers too), so
+    // the Studio's "What viewers see" picture reads the buffer itself.
+    // Only for a frame the caller has not seen: an unchanged poll copies
+    // nothing.
+    let unchanged = cursor
+        .is_some_and(|cursor| cursor.generation == generation && frame.sequence <= cursor.sequence);
+    let surface_bytes = if frame.bytes.is_empty() && !unchanged {
+        camera_frame_surface_bgra(frame)
+    } else {
+        None
+    };
+    let bytes = surface_bytes.as_deref().unwrap_or(&frame.bytes);
+    match format {
+        crate::preview_bmp::PreviewFrameFormat::Bmp => encode_latest_bgra_bmp(
+            cursor,
+            generation.to_string(),
+            frame.sequence,
+            frame.width,
+            frame.height,
+            bytes,
+            max_width,
+        ),
+        // Plan 257 S3: the Linux Preview's planar frames.
+        crate::preview_bmp::PreviewFrameFormat::I420 => crate::preview_bmp::encode_latest_i420(
+            cursor,
+            generation.to_string(),
+            frame.sequence,
+            frame.width,
+            frame.height,
+            bytes,
+            max_width,
+        ),
+    }
+}
+
+/// A zero-copy camera frame's BGRA, read from its retained pixel buffer
+/// (locked read-only). `None` off macOS, for a frame without one, or for a
+/// buffer that is not the frame's size in BGRA.
+fn camera_frame_surface_bgra(frame: &FrameHandle<PreviewCameraPixelFormat>) -> Option<Vec<u8>> {
+    #[cfg(target_os = "macos")]
+    {
+        let expected = frame.width as usize * frame.height as usize * 4;
+        frame
+            .source_pixel_buffer
+            .as_ref()
+            .and_then(|buffer| crate::camera_effect_metal::read_bgra(buffer.pixel_buffer()))
+            .filter(|bytes| bytes.len() == expected)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = frame;
+        None
+    }
 }
 
 fn encode_preview_camera_png(
@@ -3650,6 +3813,7 @@ async fn begin_camera_start(
         registry.set_status(start_key.source_key.clone(), SourceLifecycleStatus::Live);
         if let Some(active) = slot.active.as_mut() {
             active.layout = layout.clone();
+            apply_camera_background_to_shared(state, &active.shared, layout);
         }
         let mut reused = slot.status.clone();
         reused.updated_at = Utc::now().to_rfc3339();
@@ -4268,6 +4432,7 @@ async fn reuse_current_camera_source(
 
     if let Some(active) = slot.active.as_mut() {
         active.layout = layout.clone();
+        apply_camera_background_to_shared(state, &active.shared, layout);
     }
     let mut status = slot.status.clone();
     status.updated_at = Utc::now().to_rfc3339();
@@ -4324,6 +4489,8 @@ async fn poll_camera_metrics(
                 latest_frame,
                 frame_store_stats: guard.frame_store.stats(),
                 capture_timings: guard.capture_timings.snapshot(),
+                system_effect: guard.system_effect,
+                camera_background: guard.effect.status(Instant::now()),
             }
         };
 
@@ -4335,6 +4502,8 @@ async fn poll_camera_metrics(
             slot.status.frames_captured = snapshot.frames_captured;
             slot.status.dropped_frames = snapshot.dropped_frames;
             slot.status.source_fps = snapshot.source_fps.or(Some(f64::from(target_fps)));
+            slot.status.system_effect = snapshot.system_effect;
+            slot.status.camera_background = snapshot.camera_background;
             if let Some(frame) = snapshot.latest_frame {
                 if slot.status.state != PreviewCameraState::Disconnected {
                     slot.status.state = PreviewCameraState::Live;
@@ -4373,6 +4542,8 @@ async fn poll_camera_metrics(
 
 #[derive(Debug)]
 struct CameraSharedSnapshot {
+    system_effect: Option<crate::protocol::CameraSystemEffect>,
+    camera_background: Option<crate::protocol::CameraBackgroundStatus>,
     frames_captured: u64,
     dropped_frames: u64,
     source_fps: Option<f64>,
@@ -4387,7 +4558,13 @@ fn camera_capture_pixel_format_label(pixel_format: Option<u32>) -> Option<String
     pixel_format.map(macos::format_fourcc)
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Plan 257 S2: the V4L2 fourcc of the mode the camera streams.
+#[cfg(target_os = "linux")]
+fn camera_capture_pixel_format_label(pixel_format: Option<u32>) -> Option<String> {
+    pixel_format.map(crate::linux_v4l2_camera::fourcc_label)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn camera_capture_pixel_format_label(_pixel_format: Option<u32>) -> Option<String> {
     None
 }
@@ -4416,6 +4593,8 @@ fn idle_status(message: Option<String>) -> PreviewCameraStatus {
         updated_at: Utc::now().to_rfc3339(),
         message,
         no_video: None,
+        system_effect: None,
+        camera_background: None,
     }
 }
 
@@ -4443,6 +4622,8 @@ fn status_for_missing_camera(camera_id: Option<String>, message: &str) -> Previe
         updated_at: Utc::now().to_rfc3339(),
         message: Some(message.to_string()),
         no_video: None,
+        system_effect: None,
+        camera_background: None,
     }
 }
 
@@ -4475,6 +4656,8 @@ fn failed_status(
         updated_at: Utc::now().to_rfc3339(),
         message: Some(message),
         no_video: None,
+        system_effect: None,
+        camera_background: None,
     }
 }
 
@@ -4523,7 +4706,7 @@ fn downscale_rgba_for_preview(
     (next.into_raw(), next_width, next_height)
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 fn fit_camera_source_in_target_box(
     source_width: u32,
     source_height: u32,
@@ -4547,7 +4730,7 @@ fn fit_camera_source_in_target_box(
     )
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 fn scale_preserving_aspect(source_dimension: u32, target_dimension: u32, source_basis: u32) -> u32 {
     if source_basis == 0 {
         return target_dimension;
@@ -4564,6 +4747,9 @@ struct NativeCameraPreviewConfig {
     ffmpeg_path: String,
     video: VideoSettings,
     layout: LayoutSettings,
+    /// Plan 258 S4: what to do with Windows Studio Effects on this camera.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    studio_effects: crate::camera_system_effect::StudioEffectsPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5428,6 +5614,121 @@ enum NativeCameraStartup {
     Failed(String),
 }
 
+/// The Linux and Windows pipe readers and the plan 258 fixture camera: one
+/// BGRA frame into the camera `FrameStore`, returning the next buffer.
+fn publish_bgra_frame(
+    shared: &Arc<StdMutex<PreviewCameraShared>>,
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+) -> Vec<u8> {
+    let callback_started_at = Instant::now();
+    let frame_len = bytes.len();
+    let mut guard = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.record_pipe_frame_callback(callback_started_at);
+    let now = Instant::now();
+    guard.frames_captured = guard.frames_captured.saturating_add(1);
+    guard.frames_in_window = guard.frames_in_window.saturating_add(1);
+    let window_started = *guard.window_started_at.get_or_insert(now);
+    let elapsed = window_started.elapsed();
+    if elapsed >= Duration::from_millis(500) {
+        guard.source_fps = Some(guard.frames_in_window as f64 / elapsed.as_secs_f64().max(0.001));
+        guard.frames_in_window = 0;
+        guard.window_started_at = Some(now);
+    }
+    let sequence = guard.frames_captured;
+    // Plan 258 S3 (D2): with an effect on, the stage takes the frame and the
+    // store only ever gets it processed or the cover.
+    if guard.effect.is_armed() {
+        let frame = effect_stage::EffectFrame {
+            width,
+            height,
+            pixels: effect_stage::EffectPixels::Bytes(bytes),
+        };
+        let pending = effect_stage::on_armed_capture(&mut guard, frame, sequence, now);
+        let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
+        drop(guard);
+        if let Some(pending) = pending {
+            effect_stage::finish_cover(shared, pending);
+        }
+        return next_buffer;
+    }
+    guard.frame_store.publish_with_metadata(
+        sequence,
+        width,
+        height,
+        PreviewCameraPixelFormat::Bgra8,
+        (),
+        now,
+        bytes,
+    );
+    let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
+    let publish_ms = callback_started_at.elapsed().as_secs_f64() * 1000.0;
+    guard
+        .capture_timings
+        .record_valid_frame(0.0, 0.0, publish_ms, frame_len as u64);
+    next_buffer
+}
+
+/// Plan 258 S2: the fixture camera's capture loop. It draws the fixture at
+/// the capture box and the requested rate and publishes each frame like a
+/// pipe camera, until the stop channel fires or its sender drops.
+fn run_fixture_camera_preview(
+    spec: crate::camera_fixture::FixtureSpec,
+    config: NativeCameraPreviewConfig,
+    shared: Arc<StdMutex<PreviewCameraShared>>,
+    stop_rx: std_mpsc::Receiver<()>,
+    startup_tx: std_mpsc::Sender<NativeCameraStartup>,
+) {
+    let (width, height) = camera_capture_target_dimensions(&config.layout, &config.video);
+    let (width, height) = (width.max(2), height.max(2));
+    let fps = config.video.fps.clamp(1, 120);
+    let renderer = crate::camera_fixture::FixtureRenderer::new(spec, width, height);
+    let mut buffer = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .frame_store
+        .checkout_overwrite_buffer(renderer.frame_len());
+    let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
+    let started = Instant::now();
+    let mut next = started;
+    let mut startup_sent = false;
+    loop {
+        renderer.render_into(started.elapsed().as_secs_f64(), &mut buffer);
+        buffer = publish_bgra_frame(&shared, width, height, buffer);
+        if !startup_sent {
+            startup_sent = true;
+            let _ = startup_tx.send(NativeCameraStartup::Live {
+                requested_width: width,
+                requested_height: height,
+                selected_format_width: width,
+                selected_format_height: height,
+                selected_format_min_fps: f64::from(fps),
+                selected_format_max_fps: f64::from(fps),
+                width,
+                height,
+                selected_fps: f64::from(fps),
+                message: Some(format!(
+                    "{} at {width}x{height}@{fps} (plan 258 S2).",
+                    crate::camera_fixture::FIXTURE_CAMERA_NAME
+                )),
+            });
+        }
+        // Keep the cadence; after a stall, resume from now instead of bursting.
+        next += interval;
+        let now = Instant::now();
+        if next < now {
+            next = now;
+        }
+        match stop_rx.recv_timeout(next - now) {
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(()) | Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
 fn run_native_camera_preview(
     config: NativeCameraPreviewConfig,
     shared: Arc<StdMutex<PreviewCameraShared>>,
@@ -5438,6 +5739,23 @@ fn run_native_camera_preview(
 
     if crate::srt_camera::is_srt_camera_id(&config.camera_id) {
         srt::run_srt_camera_preview(&config, shared, stop_rx, startup_tx);
+        return;
+    }
+
+    // Plan 258 S2: the dev-only fixture camera stands in for the device.
+    if crate::camera_fixture::is_fixture_unique_id(&config.unique_id) {
+        match crate::camera_fixture::active_fixture() {
+            Some((_, spec)) => {
+                run_fixture_camera_preview(spec.clone(), config, shared, stop_rx, startup_tx)
+            }
+            None => {
+                let _ = startup_tx.send(NativeCameraStartup::DeviceMissing(format!(
+                    "{} needs {} pointing at its fixture in a debug build.",
+                    crate::camera_fixture::FIXTURE_CAMERA_NAME,
+                    crate::camera_fixture::FIXTURE_CAMERA_ENV
+                )));
+            }
+        }
         return;
     }
 
@@ -5633,9 +5951,12 @@ mod srt {
     }
 }
 
-/// Linux (L3): an owned FFmpeg V4L2 child writes scaled BGRA frames to the
-/// camera frame store, the Windows DirectShow shape. The capture box is the
-/// full output canvas (`camera_capture_target_dimensions`), so a layout
+/// Linux (L3): an owned FFmpeg V4L2 child writes BGRA frames to the camera
+/// frame store, the Windows DirectShow shape. Plan 257 S2: the child asks
+/// for one of the camera's own modes (`-input_format`, size, rate) and pipes
+/// it at its native size, fitted into the output canvas and never enlarged;
+/// the compositor scales it like any other camera frame. The capture box
+/// stays the full canvas (`camera_capture_target_dimensions`), so a layout
 /// switch never restarts the device.
 #[cfg(target_os = "linux")]
 mod linux {
@@ -5645,7 +5966,9 @@ mod linux {
 
     use super::*;
     use crate::linux_v4l2_camera::{
-        V4l2StartFailure, classify_v4l2_failure, v4l2_preview_ffmpeg_args,
+        V4l2CaptureRequest, V4l2Mode, V4l2StartFailure, cached_v4l2_modes, choose_v4l2_mode,
+        classify_v4l2_failure, forget_v4l2_modes, fourcc_label, largest_v4l2_size,
+        v4l2_preview_ffmpeg_args,
     };
     use crate::process_job::spawn_owned_std;
 
@@ -5655,23 +5978,59 @@ mod linux {
         FailedBeforeFirstFrame(String),
     }
 
+    /// The size an attempt pipes at: a listed mode keeps its own size and
+    /// shape, fitted into the canvas; the fallbacks don't know the mode the
+    /// driver will pick, so they keep the canvas shape, shrunk to the
+    /// camera's largest listed size (the Windows rule, issue #1271).
+    pub(super) fn linux_camera_attempt_output(
+        request: &V4l2CaptureRequest,
+        target: (u32, u32),
+        modes: Option<&[V4l2Mode]>,
+    ) -> (u32, u32) {
+        match request {
+            V4l2CaptureRequest::Mode(mode) => {
+                fit_camera_source_in_target_box(mode.width, mode.height, target.0, target.1)
+            }
+            V4l2CaptureRequest::Size { .. } | V4l2CaptureRequest::DeviceDefault => {
+                match modes.and_then(largest_v4l2_size) {
+                    Some((width, height)) => {
+                        fit_camera_source_in_target_box(target.0, target.1, width, height)
+                    }
+                    None => target,
+                }
+            }
+        }
+    }
+
+    /// The start ladder: the camera's own mode when it lists one, then the
+    /// canvas size at the session rate (the driver settles on its nearest
+    /// mode), then the device default.
+    pub(super) fn linux_camera_attempts(
+        target: (u32, u32),
+        fps: u32,
+        modes: Option<&[V4l2Mode]>,
+    ) -> Vec<V4l2CaptureRequest> {
+        let mut attempts = Vec::new();
+        if let Some(mode) = modes.and_then(|modes| choose_v4l2_mode(modes, target, fps)) {
+            attempts.push(V4l2CaptureRequest::Mode(mode));
+        }
+        attempts.push(V4l2CaptureRequest::Size {
+            width: target.0,
+            height: target.1,
+            fps,
+        });
+        attempts.push(V4l2CaptureRequest::DeviceDefault);
+        attempts
+    }
+
     pub fn run_native_camera_preview(
         config: NativeCameraPreviewConfig,
         shared: Arc<StdMutex<PreviewCameraShared>>,
         stop_rx: std_mpsc::Receiver<()>,
         startup_tx: std_mpsc::Sender<NativeCameraStartup>,
     ) {
-        let (width, height) = camera_capture_target_dimensions(&config.layout, &config.video);
+        let target = camera_capture_target_dimensions(&config.layout, &config.video);
         let fps = config.video.fps.clamp(1, 120);
-        let Some(frame_len) = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|pixels| pixels.checked_mul(4))
-        else {
-            let _ = startup_tx.send(NativeCameraStartup::Failed(
-                "Linux camera preview dimensions are too large.".to_string(),
-            ));
-            return;
-        };
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         {
@@ -5682,24 +6041,81 @@ mod linux {
             });
         }
 
-        // Ask for the canvas size at the session rate (the driver settles on
-        // its nearest mode), then fall back to the device default.
-        let attempts = [Some((width, height, fps)), None];
+        let probe_started_at = Instant::now();
+        let modes = match cached_v4l2_modes(&config.unique_id) {
+            Ok(modes) => {
+                tracing::info!(
+                    camera = %config.unique_id,
+                    probe_ms = probe_started_at.elapsed().as_millis() as u64,
+                    "[camera-modes] V4L2 lists {} mode(s): {}",
+                    modes.len(),
+                    modes
+                        .iter()
+                        .map(|mode| format!(
+                            "{} {}x{}@{:.0}",
+                            fourcc_label(mode.fourcc),
+                            mode.width,
+                            mode.height,
+                            mode.max_fps
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                Some(modes)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    camera = %config.unique_id,
+                    "[camera-modes] V4L2 mode probe failed; negotiating instead: {error}"
+                );
+                None
+            }
+        };
+
+        // Every rung must answer inside LINUX_CAMERA_PREVIEW_STARTUP_TIMEOUT:
+        // a mode that opens but never delivers is killed at its deadline so
+        // the next rung still runs.
+        let start_deadline = Instant::now() + LINUX_CAMERA_START_BUDGET;
         let mut last_stderr = String::new();
-        for request in attempts {
+        for request in linux_camera_attempts(target, fps, modes.as_deref()) {
             if stop_flag.load(Ordering::Acquire) {
                 return;
             }
+            let Some(first_frame_timeout) = linux_camera_attempt_first_frame_timeout(
+                start_deadline.saturating_duration_since(Instant::now()),
+            ) else {
+                last_stderr = format!(
+                    "{last_stderr}\nstart budget of {} s spent before {request:?}",
+                    LINUX_CAMERA_START_BUDGET.as_secs()
+                );
+                break;
+            };
+            let output = linux_camera_attempt_output(&request, target, modes.as_deref());
+            let Some(frame_len) = (output.0 as usize)
+                .checked_mul(output.1 as usize)
+                .and_then(|pixels| pixels.checked_mul(4))
+            else {
+                let _ = startup_tx.send(NativeCameraStartup::Failed(
+                    "Linux camera preview dimensions are too large.".to_string(),
+                ));
+                return;
+            };
             match run_attempt(
                 &config,
                 &shared,
                 &startup_tx,
                 &stop_flag,
-                (width, height, fps, frame_len),
-                request,
+                (target, output, fps, frame_len),
+                &request,
+                first_frame_timeout,
             ) {
                 Attempt::ProducedFrames | Attempt::Stopped => return,
                 Attempt::FailedBeforeFirstFrame(stderr) => {
+                    tracing::warn!(
+                        camera = %config.unique_id,
+                        "Linux camera preview attempt {request:?} produced no frame: {}",
+                        stderr.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("")
+                    );
                     let fatal = matches!(
                         classify_v4l2_failure(&config.unique_id, &stderr),
                         V4l2StartFailure::PermissionNeeded(_) | V4l2StartFailure::DeviceMissing(_)
@@ -5711,6 +6127,9 @@ mod linux {
                 }
             }
         }
+        // The modes may be what failed (another driver, a replugged
+        // device): probe again next time.
+        forget_v4l2_modes(Some(&config.unique_id));
         let _ = startup_tx.send(
             match classify_v4l2_failure(&config.unique_id, &last_stderr) {
                 V4l2StartFailure::PermissionNeeded(message) => {
@@ -5729,15 +6148,17 @@ mod linux {
         shared: &Arc<StdMutex<PreviewCameraShared>>,
         startup_tx: &std_mpsc::Sender<NativeCameraStartup>,
         stop_flag: &Arc<AtomicBool>,
-        (width, height, fps, frame_len): (u32, u32, u32, usize),
-        request: Option<(u32, u32, u32)>,
+        (target, (width, height), fps, frame_len): ((u32, u32), (u32, u32), u32, usize),
+        request: &V4l2CaptureRequest,
+        first_frame_timeout: Duration,
     ) -> Attempt {
+        let first_frame_deadline = Instant::now() + first_frame_timeout;
         let mut command = Command::new(&config.ffmpeg_path);
         command
             .args(v4l2_preview_ffmpeg_args(
                 &config.unique_id,
-                width,
-                height,
+                (width, height),
+                fps,
                 request,
             ))
             .stdin(Stdio::null())
@@ -5760,48 +6181,58 @@ mod linux {
         let stderr = collect_stderr(child.stderr.take());
         let child = Arc::new(StdMutex::new(child));
         let done = Arc::new(AtomicBool::new(false));
-        let killer =
-            spawn_stop_flag_killer(Arc::clone(&child), Arc::clone(&done), Arc::clone(stop_flag));
+        let race = Arc::new(FirstFrameRace::default());
+        let killer = spawn_stop_flag_killer(
+            Arc::clone(&child),
+            Arc::clone(&done),
+            Arc::clone(stop_flag),
+            (first_frame_deadline, Arc::clone(&race)),
+        );
 
-        let mut buffer = shared
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .frame_store
-            .checkout_overwrite_buffer(frame_len);
+        let mut buffer = {
+            let mut guard = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Health names the format the camera streams; the fallbacks
+            // don't know it.
+            guard.capture_pixel_format = match request {
+                V4l2CaptureRequest::Mode(mode) => Some(mode.fourcc),
+                _ => None,
+            };
+            guard.frame_store.checkout_overwrite_buffer(frame_len)
+        };
         let mut startup_sent = false;
         loop {
             if stdout.read_exact(&mut buffer).is_err() {
                 break;
             }
+            if !startup_sent && !race.claim_live() {
+                // The deadline passed while this frame was in the pipe: the
+                // killer owns the attempt, and reporting Live now would hand
+                // the ladder a preview that is already dead.
+                let _ = child
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .kill();
+                break;
+            }
             buffer = publish_bgra_frame(shared, width, height, buffer);
             if !startup_sent {
-                let _ = startup_tx.send(NativeCameraStartup::Live {
-                    requested_width: width,
-                    requested_height: height,
-                    selected_format_width: request.map_or(width, |request| request.0),
-                    selected_format_height: request.map_or(height, |request| request.1),
-                    selected_format_min_fps: fps as f64,
-                    selected_format_max_fps: fps as f64,
-                    width,
-                    height,
-                    selected_fps: fps as f64,
-                    message: Some(if request.is_some() {
-                        format!(
-                            "Linux V4L2 camera preview requested {width}x{height}@{fps} from {}; the driver streams its nearest mode, scaled to fit.",
-                            config.unique_id
-                        )
-                    } else {
-                        format!(
-                            "Linux V4L2 camera preview is using the device default mode of {}, scaled to {width}x{height}.",
-                            config.unique_id
-                        )
-                    }),
-                });
+                let _ = startup_tx.send(linux_camera_live_startup(
+                    &config.unique_id,
+                    target,
+                    (width, height),
+                    fps,
+                    request,
+                ));
                 startup_sent = true;
             }
         }
 
         done.store(true, Ordering::Release);
+        // Nothing reads the pipe any more; closing it lets an FFmpeg still
+        // writing exit instead of blocking the `wait`.
+        drop(stdout);
         let _ = child
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -5811,6 +6242,11 @@ mod linux {
             Attempt::ProducedFrames
         } else if stop_flag.load(Ordering::Acquire) {
             Attempt::Stopped
+        } else if race.timed_out() {
+            Attempt::FailedBeforeFirstFrame(format!(
+                "no frame within {} ms",
+                first_frame_timeout.as_millis()
+            ))
         } else {
             Attempt::FailedBeforeFirstFrame(
                 String::from_utf8_lossy(
@@ -5820,6 +6256,82 @@ mod linux {
                 )
                 .into_owned(),
             )
+        }
+    }
+
+    /// What the first frame reports: the mode the camera streams (Health's
+    /// format line and the Sources shortfall warning, in the words the
+    /// Windows start uses) and the size frames are piped at.
+    pub(super) fn linux_camera_live_startup(
+        device: &str,
+        (target_width, target_height): (u32, u32),
+        (width, height): (u32, u32),
+        fps: u32,
+        request: &V4l2CaptureRequest,
+    ) -> NativeCameraStartup {
+        let (selected_format, selected_fps, message) = match request {
+            V4l2CaptureRequest::Mode(mode) => {
+                let rate = if mode.max_fps >= 1.0 {
+                    mode.max_fps.min(f64::from(fps))
+                } else {
+                    f64::from(fps)
+                };
+                let label = format!(
+                    "{} {}x{}@{rate:.0}",
+                    fourcc_label(mode.fourcc),
+                    mode.width,
+                    mode.height
+                );
+                let short = mode.max_fps + 0.5 < f64::from(fps)
+                    || mode.width < target_width
+                    || mode.height < target_height;
+                let message = if short {
+                    format!(
+                        "Requested {target_width}x{target_height}@{fps} was not available; selected native {}x{} at {:.0}-{:.0} fps. Linux V4L2 camera preview is using {label} from {device}, piped at {width}x{height}.",
+                        mode.width, mode.height, mode.min_fps, mode.max_fps
+                    )
+                } else {
+                    format!(
+                        "Linux V4L2 camera preview is using the camera's native {label} from {device}, piped at {width}x{height}."
+                    )
+                };
+                (
+                    (mode.width, mode.height, mode.min_fps, mode.max_fps),
+                    rate,
+                    message,
+                )
+            }
+            V4l2CaptureRequest::Size {
+                width: asked_width,
+                height: asked_height,
+                ..
+            } => (
+                (width, height, f64::from(fps), f64::from(fps)),
+                f64::from(fps),
+                format!(
+                    "Linux V4L2 camera preview requested {asked_width}x{asked_height}@{fps} from {device}; the driver streams its nearest mode, piped at {width}x{height}."
+                ),
+            ),
+            V4l2CaptureRequest::DeviceDefault => (
+                (width, height, f64::from(fps), f64::from(fps)),
+                f64::from(fps),
+                format!(
+                    "Linux V4L2 camera preview is using the device default mode of {device}, piped at {width}x{height}."
+                ),
+            ),
+        };
+        let (selected_format_width, selected_format_height, min_fps, max_fps) = selected_format;
+        NativeCameraStartup::Live {
+            requested_width: target_width,
+            requested_height: target_height,
+            selected_format_width,
+            selected_format_height,
+            selected_format_min_fps: min_fps,
+            selected_format_max_fps: max_fps,
+            width,
+            height,
+            selected_fps,
+            message: Some(message),
         }
     }
 
@@ -5846,14 +6358,21 @@ mod linux {
         bytes
     }
 
+    /// Kills the attempt's FFmpeg on Stop, or when it has produced no frame by
+    /// the deadline: a V4L2 mode that opens but never delivers would
+    /// otherwise block `read_exact` past the whole start budget.
     fn spawn_stop_flag_killer(
         child: Arc<StdMutex<Child>>,
         done: Arc<AtomicBool>,
         stop_flag: Arc<AtomicBool>,
+        (first_frame_deadline, race): (Instant, Arc<FirstFrameRace>),
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             while !done.load(Ordering::Acquire) {
-                if stop_flag.load(Ordering::Acquire) {
+                // Past the deadline the killer acts only if it wins the race;
+                // a reader that already claimed Live keeps its child.
+                let stalled = Instant::now() >= first_frame_deadline && race.claim_timed_out();
+                if stop_flag.load(Ordering::Acquire) || stalled {
                     let _ = child
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -5865,45 +6384,222 @@ mod linux {
         })
     }
 
-    fn publish_bgra_frame(
-        shared: &Arc<StdMutex<PreviewCameraShared>>,
-        width: u32,
-        height: u32,
-        bytes: Vec<u8>,
-    ) -> Vec<u8> {
-        let callback_started_at = Instant::now();
-        let frame_len = bytes.len();
-        let mut guard = shared
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.record_pipe_frame_callback(callback_started_at);
-        let now = Instant::now();
-        guard.frames_captured = guard.frames_captured.saturating_add(1);
-        guard.frames_in_window = guard.frames_in_window.saturating_add(1);
-        let window_started = *guard.window_started_at.get_or_insert(now);
-        let elapsed = window_started.elapsed();
-        if elapsed >= Duration::from_millis(500) {
-            guard.source_fps =
-                Some(guard.frames_in_window as f64 / elapsed.as_secs_f64().max(0.001));
-            guard.frames_in_window = 0;
-            guard.window_started_at = Some(now);
+    /// The whole ladder's share of LINUX_CAMERA_PREVIEW_STARTUP_TIMEOUT, with
+    /// a second left for the start to report.
+    const LINUX_CAMERA_START_BUDGET: Duration = Duration::from_secs(11);
+    /// One rung's wait for its first frame; a camera that streams starts well
+    /// inside it (the FaceTime HD's first frame lands in ~1.8 s).
+    const LINUX_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(4);
+    const LINUX_CAMERA_MIN_ATTEMPT: Duration = Duration::from_secs(1);
+
+    /// A rung's first-frame deadline from what is left of the start budget;
+    /// `None` when too little is left to try it.
+    pub(super) fn linux_camera_attempt_first_frame_timeout(
+        remaining: Duration,
+    ) -> Option<Duration> {
+        let timeout = remaining.min(LINUX_CAMERA_ATTEMPT_FIRST_FRAME_TIMEOUT);
+        (timeout >= LINUX_CAMERA_MIN_ATTEMPT).then_some(timeout)
+    }
+
+    const FIRST_FRAME_IDLE: u8 = 0;
+    const FIRST_FRAME_LIVE: u8 = 1;
+    const FIRST_FRAME_TIMED_OUT: u8 = 2;
+
+    /// The attempt's first-frame race, settled exactly once (the Windows
+    /// ladder's rule): the reader claims Live when `read_exact` hands it a
+    /// frame, the killer claims TimedOut when the deadline passes first, and
+    /// only the winner acts.
+    #[derive(Debug, Default)]
+    pub(super) struct FirstFrameRace(std::sync::atomic::AtomicU8);
+
+    impl FirstFrameRace {
+        pub(super) fn claim_live(&self) -> bool {
+            self.0
+                .compare_exchange(
+                    FIRST_FRAME_IDLE,
+                    FIRST_FRAME_LIVE,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
         }
-        let sequence = guard.frames_captured;
-        guard.frame_store.publish_with_metadata(
-            sequence,
-            width,
-            height,
-            PreviewCameraPixelFormat::Bgra8,
-            (),
-            now,
-            bytes,
-        );
-        let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
-        let publish_ms = callback_started_at.elapsed().as_secs_f64() * 1000.0;
-        guard
-            .capture_timings
-            .record_valid_frame(0.0, 0.0, publish_ms, frame_len as u64);
-        next_buffer
+
+        pub(super) fn claim_timed_out(&self) -> bool {
+            self.0
+                .compare_exchange(
+                    FIRST_FRAME_IDLE,
+                    FIRST_FRAME_TIMED_OUT,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        }
+
+        pub(super) fn timed_out(&self) -> bool {
+            self.0.load(Ordering::Acquire) == FIRST_FRAME_TIMED_OUT
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::linux_v4l2_camera::fourcc;
+
+        fn mode(code: &[u8; 4], width: u32, height: u32, max_fps: f64) -> V4l2Mode {
+            V4l2Mode {
+                fourcc: fourcc(code),
+                width,
+                height,
+                min_fps: 1.0,
+                max_fps,
+            }
+        }
+
+        #[test]
+        fn the_ladder_tries_the_native_mode_first_and_pipes_it_unscaled() {
+            let facetime = [
+                mode(b"NV12", 1280, 720, 30.0),
+                mode(b"NV12", 640, 480, 30.0),
+            ];
+            let attempts = linux_camera_attempts((1920, 1080), 30, Some(&facetime));
+            assert_eq!(
+                attempts,
+                [
+                    V4l2CaptureRequest::Mode(mode(b"NV12", 1280, 720, 30.0)),
+                    V4l2CaptureRequest::Size {
+                        width: 1920,
+                        height: 1080,
+                        fps: 30
+                    },
+                    V4l2CaptureRequest::DeviceDefault,
+                ]
+            );
+            // 720p native on a 1080p canvas: 3.7 MB frames, not 8.3 MB.
+            assert_eq!(
+                linux_camera_attempt_output(&attempts[0], (1920, 1080), Some(&facetime)),
+                (1280, 720)
+            );
+            // The fallbacks keep the canvas shape, no bigger than the camera.
+            assert_eq!(
+                linux_camera_attempt_output(&attempts[1], (1920, 1080), Some(&facetime)),
+                (1280, 720)
+            );
+            // A 4K mode on a 1080p canvas is fitted down.
+            assert_eq!(
+                linux_camera_attempt_output(
+                    &V4l2CaptureRequest::Mode(mode(b"MJPG", 3840, 2160, 30.0)),
+                    (1920, 1080),
+                    None
+                ),
+                (1920, 1080)
+            );
+        }
+
+        #[test]
+        fn every_rung_gets_a_first_frame_deadline_inside_the_start_budget() {
+            // A stalled native mode can no longer eat the whole 12 s start.
+            assert_eq!(
+                linux_camera_attempt_first_frame_timeout(LINUX_CAMERA_START_BUDGET),
+                Some(Duration::from_secs(4))
+            );
+            assert_eq!(
+                linux_camera_attempt_first_frame_timeout(Duration::from_millis(2500)),
+                Some(Duration::from_millis(2500))
+            );
+            assert_eq!(
+                linux_camera_attempt_first_frame_timeout(Duration::from_millis(900)),
+                None
+            );
+            assert!(LINUX_CAMERA_START_BUDGET < super::super::LINUX_CAMERA_PREVIEW_STARTUP_TIMEOUT);
+            // Three stalled rungs: 4 s + 4 s + 3 s fit the budget.
+            let mut remaining = LINUX_CAMERA_START_BUDGET;
+            let mut rungs = 0;
+            while let Some(timeout) = linux_camera_attempt_first_frame_timeout(remaining) {
+                remaining -= timeout;
+                rungs += 1;
+            }
+            assert_eq!(rungs, 3);
+        }
+
+        #[test]
+        fn the_first_frame_race_settles_once() {
+            let race = FirstFrameRace::default();
+            assert!(race.claim_live());
+            assert!(!race.claim_timed_out());
+            assert!(!race.timed_out());
+            let race = FirstFrameRace::default();
+            assert!(race.claim_timed_out());
+            assert!(!race.claim_live());
+            assert!(race.timed_out());
+        }
+
+        #[test]
+        fn an_unreadable_camera_keeps_the_old_negotiated_ladder() {
+            let attempts = linux_camera_attempts((1920, 1080), 30, None);
+            assert_eq!(attempts.len(), 2);
+            assert_eq!(
+                linux_camera_attempt_output(&attempts[0], (1920, 1080), None),
+                (1920, 1080)
+            );
+        }
+
+        #[test]
+        fn the_first_frame_reports_the_native_mode_and_any_shortfall() {
+            let NativeCameraStartup::Live {
+                requested_width,
+                selected_format_width,
+                selected_format_height,
+                selected_format_max_fps,
+                width,
+                height,
+                selected_fps,
+                message,
+                ..
+            } = linux_camera_live_startup(
+                "/dev/video0",
+                (1920, 1080),
+                (1280, 720),
+                30,
+                &V4l2CaptureRequest::Mode(mode(b"NV12", 1280, 720, 30.0)),
+            )
+            else {
+                panic!("live");
+            };
+            assert_eq!(requested_width, 1920);
+            assert_eq!(
+                (
+                    selected_format_width,
+                    selected_format_height,
+                    selected_format_max_fps
+                ),
+                (1280, 720, 30.0)
+            );
+            assert_eq!((width, height, selected_fps), (1280, 720, 30.0));
+            let message = message.unwrap();
+            // The Sources shortfall warning reads these words.
+            assert!(
+                message.starts_with(
+                    "Requested 1920x1080@30 was not available; selected native 1280x720"
+                ),
+                "{message}"
+            );
+            assert!(message.contains("NV12 1280x720@30"), "{message}");
+
+            let NativeCameraStartup::Live { message, .. } = linux_camera_live_startup(
+                "/dev/video0",
+                (1280, 720),
+                (1280, 720),
+                30,
+                &V4l2CaptureRequest::Mode(mode(b"NV12", 1280, 720, 30.0)),
+            ) else {
+                panic!("live");
+            };
+            assert!(
+                message
+                    .unwrap()
+                    .contains("the camera's native NV12 1280x720@30")
+            );
+        }
     }
 }
 
@@ -5931,9 +6627,37 @@ mod windows {
         let stop_flag = Arc::new(AtomicBool::new(false));
         {
             let stop_flag = Arc::clone(&stop_flag);
+            // Plan 258 S4: Windows Studio Effects is watched on a thread of
+            // its own. The stop reaches FFmpeg first, from this thread, and
+            // only then the watch (which puts back anything it turned off):
+            // a driver call stalled in the watch can never hold up the stop.
+            let (effects_stop_tx, effects_stop_rx) = std_mpsc::channel::<()>();
+            let camera_id = config.camera_id.clone();
+            let policy = config.studio_effects.clone();
+            let effect_shared = Arc::clone(&shared);
+            let spawned = thread::Builder::new()
+                .name("videorc-camera-studio-effects".to_string())
+                .spawn(move || {
+                    crate::camera_system_effect::windows_device::watch_session(
+                        &camera_id,
+                        &policy,
+                        &effects_stop_rx,
+                        |effect| {
+                            effect_shared
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .system_effect = effect;
+                        },
+                    );
+                });
+            if let Err(error) = spawned {
+                tracing::warn!("Studio Effects watch did not start: {error}");
+            }
             thread::spawn(move || {
                 let _ = stop_rx.recv();
                 stop_flag.store(true, Ordering::Release);
+                // The watch may have ended already; nothing to tell then.
+                let _ = effects_stop_tx.send(());
             });
         }
 
@@ -6383,49 +7107,6 @@ mod windows {
         })
     }
 
-    fn publish_bgra_frame(
-        shared: &Arc<StdMutex<PreviewCameraShared>>,
-        width: u32,
-        height: u32,
-        bytes: Vec<u8>,
-    ) -> Vec<u8> {
-        let callback_started_at = Instant::now();
-        let publish_started_at = Instant::now();
-        let frame_len = bytes.len();
-        let frame_bytes = frame_len as u64;
-        let mut guard = shared
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.record_pipe_frame_callback(callback_started_at);
-        let now = Instant::now();
-        guard.frames_captured = guard.frames_captured.saturating_add(1);
-        guard.frames_in_window = guard.frames_in_window.saturating_add(1);
-        let window_started = *guard.window_started_at.get_or_insert(now);
-        let elapsed = window_started.elapsed();
-        if elapsed >= Duration::from_millis(500) {
-            guard.source_fps =
-                Some(guard.frames_in_window as f64 / elapsed.as_secs_f64().max(0.001));
-            guard.frames_in_window = 0;
-            guard.window_started_at = Some(now);
-        }
-        let sequence = guard.frames_captured;
-        guard.frame_store.publish_with_metadata(
-            sequence,
-            width,
-            height,
-            PreviewCameraPixelFormat::Bgra8,
-            (),
-            now,
-            bytes,
-        );
-        let next_buffer = guard.frame_store.checkout_overwrite_buffer(frame_len);
-        let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
-        guard
-            .capture_timings
-            .record_valid_frame(0.0, 0.0, publish_ms, frame_bytes);
-        next_buffer
-    }
-
     /// How long a failed attempt waits for FFmpeg's last stderr lines.
     const STDERR_TAIL_WAIT: Duration = Duration::from_millis(300);
 
@@ -6696,7 +7377,7 @@ mod macos {
                     selected_fps: session.selected_fps,
                     message: session.message,
                 });
-                let _ = stop_rx.recv();
+                watch_system_effects_until_stop(&session.device, &shared, &stop_rx);
                 unsafe {
                     session.session.stopRunning();
                     session.output.setSampleBufferDelegate_queue(None, None);
@@ -6708,7 +7389,55 @@ mod macos {
         });
     }
 
+    /// Plan 258 S4: until the camera is told to stop, reads macOS Video
+    /// Effects on the device every `MACOS_POLL_INTERVAL` into the shared
+    /// state the status poll publishes. Apps can't turn these off, so this
+    /// only reports them.
+    fn watch_system_effects_until_stop(
+        device: &AVCaptureDevice,
+        shared: &Arc<StdMutex<PreviewCameraShared>>,
+        stop_rx: &std_mpsc::Receiver<()>,
+    ) {
+        loop {
+            let effect = autoreleasepool(|_| read_system_effect(device));
+            shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .system_effect = effect;
+            match stop_rx.recv_timeout(crate::camera_system_effect::MACOS_POLL_INTERVAL) {
+                Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+                Ok(()) | Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+    }
+
+    /// The device's Video Effects flags. Each getter is asked only when the
+    /// running macOS has it (Portrait 12, Studio Light 13, background
+    /// replacement 15); a missing one reads as off. `None` when the system
+    /// has none of them, so the status stays absent.
+    fn read_system_effect(device: &AVCaptureDevice) -> Option<crate::protocol::CameraSystemEffect> {
+        let responds = |selector: objc2::runtime::Sel| -> bool {
+            let responds: bool = unsafe { msg_send![device, respondsToSelector: selector] };
+            responds
+        };
+        let portrait_known = responds(objc2::sel!(isPortraitEffectActive));
+        let studio_light_known = responds(objc2::sel!(isStudioLightActive));
+        let replacement_known = responds(objc2::sel!(isBackgroundReplacementActive));
+        if !portrait_known && !studio_light_known && !replacement_known {
+            return None;
+        }
+        let portrait = portrait_known && unsafe { device.isPortraitEffectActive() };
+        let studio_light = studio_light_known && unsafe { device.isStudioLightActive() };
+        let replacement = replacement_known && unsafe { device.isBackgroundReplacementActive() };
+        Some(crate::camera_system_effect::macos_effect(
+            portrait,
+            replacement,
+            studio_light,
+        ))
+    }
+
     struct CameraSession {
+        device: Retained<AVCaptureDevice>,
         session: Retained<AVCaptureSession>,
         output: Retained<AVCaptureVideoDataOutput>,
         _input: Retained<AVCaptureDeviceInput>,
@@ -6881,6 +7610,7 @@ mod macos {
             });
 
         Ok(CameraSession {
+            device,
             session,
             output,
             _input: input,
@@ -7181,7 +7911,9 @@ mod macos {
         let callback_started_at = Instant::now();
         let sample_pts_seconds =
             cm_time_seconds(unsafe { sample_buffer.presentation_time_stamp() });
-        {
+        // Plan 258 S3: read once here so an armed BGRA frame skips the CPU
+        // copy; the publish below checks again under the same lock as arming.
+        let effect_armed = {
             let mut guard = shared
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -7190,7 +7922,8 @@ mod macos {
                 .record_callback_at(callback_started_at);
             guard.capture_timings.record_sample_pts(sample_pts_seconds);
             guard.capture_callback_count = guard.capture_callback_count.saturating_add(1);
-        }
+            guard.effect.is_armed()
+        };
 
         let Some(pixel_buffer) = (unsafe { sample_buffer.image_buffer() }) else {
             let mut guard = shared
@@ -7233,7 +7966,10 @@ mod macos {
             } else {
                 None
             };
-        let skip_cpu_copy = should_skip_camera_capture_cpu_copy(source_pixel_buffer.is_some());
+        let raw_skip_cpu_copy = should_skip_camera_capture_cpu_copy(source_pixel_buffer.is_some());
+        // The stage reads a BGRA camera buffer in place (Vision and Metal).
+        let effect_takes_buffer = effect_armed && pixel_format == kCVPixelFormatType_32BGRA;
+        let skip_cpu_copy = raw_skip_cpu_copy || effect_takes_buffer;
         let (bytes, pixel_buffer_lock_ms, row_copy_ms) = if skip_cpu_copy {
             (Vec::new(), 0.0, 0.0)
         } else {
@@ -7307,6 +8043,37 @@ mod macos {
             guard.window_started_at = Some(now);
         }
         let sequence = guard.frames_captured;
+        // Plan 258 S3 (D2): with an effect on, the stage takes the frame and
+        // the store only ever gets it processed or the cover.
+        if guard.effect.is_armed() {
+            let pixels = if pixel_format == kCVPixelFormatType_32BGRA {
+                effect_stage::EffectPixels::PixelBuffer(
+                    crate::frame_store::RetainedPixelBuffer::new(pixel_buffer.clone()),
+                )
+            } else if !bytes.is_empty() {
+                effect_stage::EffectPixels::Bytes(bytes)
+            } else {
+                guard.dropped_frames = guard.dropped_frames.saturating_add(1);
+                return;
+            };
+            let frame = effect_stage::EffectFrame {
+                width,
+                height,
+                pixels,
+            };
+            let pending = effect_stage::on_armed_capture(&mut guard, frame, sequence, now);
+            drop(guard);
+            if let Some(pending) = pending {
+                effect_stage::finish_cover(shared, pending);
+            }
+            return;
+        }
+        if skip_cpu_copy && !raw_skip_cpu_copy {
+            // Armed when the callback began and Off now: this frame has no
+            // copied bytes for the raw path; the next one does.
+            guard.dropped_frames = guard.dropped_frames.saturating_add(1);
+            return;
+        }
         guard.frame_store.publish_with_source_handles(
             sequence,
             width,
@@ -7561,6 +8328,7 @@ mod tests {
             source_transform_overrides: std::collections::BTreeMap::new(),
             source_visibility: Default::default(),
             camera_look: Default::default(),
+            camera_background: None,
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,
@@ -7621,6 +8389,8 @@ mod tests {
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Starting fake native camera.".to_string()),
             no_video: None,
+            system_effect: None,
+            camera_background: None,
         }
     }
 
@@ -7814,6 +8584,8 @@ mod tests {
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Fake native camera live.".to_string()),
             no_video: None,
+            system_effect: None,
+            camera_background: None,
         };
         slot.active = Some(NativeCameraPreviewThread {
             stop_tx,
@@ -9401,6 +10173,8 @@ mod tests {
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Live".to_string()),
             no_video: None,
+            system_effect: None,
+            camera_background: None,
         };
         slot.active = Some(NativeCameraPreviewThread {
             stop_tx,
@@ -10531,6 +11305,7 @@ mod tests {
             ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
             video: test_video(),
             layout: test_layout(false),
+            studio_effects: Default::default(),
         };
         let (width, height) = windows_camera_preview_output_dimensions(&config);
         let args = windows_camera_preview_ffmpeg_args_for(
@@ -10566,6 +11341,7 @@ mod tests {
             ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
             video: test_video(),
             layout: test_layout(false),
+            studio_effects: Default::default(),
         };
         let attempt = WindowsCameraCaptureAttempt::Mode {
             mode: test_dshow_mode(DshowModeFormat::Mjpeg, 1280, 720, 5.0, 30.0),
@@ -10631,6 +11407,7 @@ mod tests {
             ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
             video: test_video(),
             layout: test_layout(false),
+            studio_effects: Default::default(),
         };
         // A mode listed at 29.97 is asked for at 29.97: DirectShow refuses
         // a rate outside the mode's range, so 30 would fail the rung.
@@ -11298,6 +12075,7 @@ Error opening input file video=HP HD Camera."#;
             ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
             video: test_video(),
             layout: test_layout(false),
+            studio_effects: Default::default(),
         };
 
         let args = windows_camera_preview_ffmpeg_args_for(
@@ -11434,6 +12212,7 @@ Error opening input file video=HP HD Camera."#;
             ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe".to_string(),
             video: test_video(),
             layout,
+            studio_effects: Default::default(),
         };
         let camera_only = test_layout(false);
         let mut inset = test_layout(false);
@@ -11588,6 +12367,8 @@ Error opening input file video=HP HD Camera."#;
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Starting native camera preview.".to_string()),
             no_video: None,
+            system_effect: None,
+            camera_background: None,
         };
 
         let lease = match begin_camera_start(&state, start_key, &layout, starting, None).await {
@@ -11651,6 +12432,8 @@ Error opening input file video=HP HD Camera."#;
                 updated_at: Utc::now().to_rfc3339(),
                 message: Some("Live".to_string()),
                 no_video: None,
+                system_effect: None,
+                camera_background: None,
             };
             slot.start_generation = 1;
             slot.active_generation = Some(1);
@@ -12000,5 +12783,59 @@ Error opening input file video=HP HD Camera."#;
             slot.live_acked_at = None;
         }
         assert!(camera_live_session_is_frameless_zombie(&state).await);
+    }
+
+    /// Plan 258 S5: the Studio's "What viewers see" picture reads the
+    /// camera store, and on macOS a zero-copy frame has no CPU bytes, so
+    /// the BMP transport reads the retained pixel buffer instead.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_zero_copy_camera_frame_reads_its_pixels_from_the_buffer() {
+        use crate::frame_store::RetainedPixelBuffer;
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferLockBaseAddress,
+            CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        };
+        let (width, height) = (8usize, 4usize);
+        let Some(pixel_buffer) =
+            crate::metal_compositor::make_test_iosurface_bgra_pixel_buffer(width, height)
+        else {
+            eprintln!("skipped: no local IOSurface allocation");
+            return;
+        };
+        unsafe {
+            assert_eq!(
+                CVPixelBufferLockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags(0)),
+                0
+            );
+            let base = CVPixelBufferGetBaseAddress(&pixel_buffer).cast::<u8>();
+            let stride = CVPixelBufferGetBytesPerRow(&pixel_buffer);
+            for y in 0..height {
+                for x in 0..width {
+                    let pixel = base.add(y * stride + x * 4);
+                    std::ptr::copy_nonoverlapping([10u8, 20, 30, 255].as_ptr(), pixel, 4);
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags(0));
+        }
+        let mut store = FrameStore::<PreviewCameraPixelFormat>::new(1);
+        let frame = store.publish_with_source_handles(
+            1,
+            width as u32,
+            height as u32,
+            PreviewCameraPixelFormat::Bgra8,
+            Instant::now(),
+            Vec::new(),
+            None,
+            Some(RetainedPixelBuffer::new(pixel_buffer)),
+        );
+        assert!(frame.bytes.is_empty());
+        let bytes = camera_frame_surface_bgra(&frame).expect("the buffer's pixels");
+        assert_eq!(bytes.len(), width * height * 4);
+        assert!(
+            bytes
+                .chunks_exact(4)
+                .all(|pixel| pixel == [10, 20, 30, 255])
+        );
     }
 }

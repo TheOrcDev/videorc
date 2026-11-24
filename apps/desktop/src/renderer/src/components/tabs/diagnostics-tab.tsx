@@ -3,6 +3,7 @@ import { useEffect, useId, useMemo, useState, type ReactElement, type ReactNode 
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { CloudProgramHealth } from '@/components/tabs/cloud-program-health'
+import { LinuxSetupAlert } from '@/components/linux-setup-alert'
 import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge } from '@/components/status-badge'
@@ -50,7 +51,10 @@ import {
   type PermissionWarning
 } from '@/lib/health-checks'
 import { isMacPlatform } from '@/lib/platform'
+import { linuxDesktopIssues } from '@/lib/linux-desktop-check'
+import { useLinuxDesktopCheck } from '@/hooks/use-linux-desktop-check'
 import { formatLatencyMs, formatTimelineSummary, slowestTimelinePhase } from '@/lib/record-latency'
+import { cameraFormatFacts } from '@/lib/source-facts'
 import { unknownDeviceWarnings } from '@/lib/source-status'
 import { previewSourceStateLabel } from '@/lib/state-labels'
 import { statusWordFromValue } from '@/lib/status-word'
@@ -110,6 +114,9 @@ export function DiagnosticsTab(): ReactElement {
   const camera = useVirtualCamera()
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
   const platform = runtimeInfo?.platform
+  // Plan 257 S18: the keyring, device groups and portal on Linux.
+  const linuxDesktop = useLinuxDesktopCheck(runtimeInfo)
+  const linuxIssues = useMemo(() => linuxDesktopIssues(linuxDesktop), [linuxDesktop])
   const currentSession = sessions.find((session) => session.id === recording.sessionId) ?? null
   const logSession = currentSession ?? sessions[0] ?? null
   const logSessionId = logSession?.id
@@ -154,9 +161,11 @@ export function DiagnosticsTab(): ReactElement {
         previewSurfaceStatus,
         recentStreamDrops,
         streamHealth,
-        streamTargets
+        streamTargets,
+        linuxDesktop
       }),
     [
+      linuxDesktop,
       diagnosticStats,
       captureConfig.sources.cameraId,
       captureConfig.sources.screenId,
@@ -227,6 +236,9 @@ export function DiagnosticsTab(): ReactElement {
             onFix={() => void handleSystemPermission(warning.pane)}
           />
         ))}
+        {linuxIssues.map((issue) => (
+          <LinuxSetupAlert key={issue.id} issue={issue} />
+        ))}
         {ffmpegMissing ? (
           <Alert data-testid="health-ffmpeg-missing" variant="warning">
             <AlertTitle>Videorc&apos;s recorder isn&apos;t available</AlertTitle>
@@ -294,7 +306,10 @@ export function DiagnosticsTab(): ReactElement {
           attention={needs('camera', 'screen', 'preview', 'preview-speed', 'preview-path')}
           title="Preview"
         >
-          <PreviewMetrics macOS={isMacPlatform(platform ?? 'darwin')} />
+          <PreviewMetrics
+            macOS={isMacPlatform(platform ?? 'darwin')}
+            linux={platform === 'linux'}
+          />
         </MetricGroup>
         <MetricGroup
           attention={needs('recording', 'encoder') || ffmpegMissing}
@@ -789,15 +804,36 @@ function ConnectionMetrics({
   )
 }
 
-function PreviewMetrics({ macOS }: { macOS: boolean }): ReactElement {
+function PreviewMetrics({ macOS, linux }: { macOS: boolean; linux: boolean }): ReactElement {
   const { previewCameraStatus, previewScreenStatus } = useStudioPreview()
   const { diagnosticStats: stats, previewSurfaceStatus } = useStudioDiagnostics()
+  const linuxProof = linux && stats.previewTransport === 'electron-proof-surface'
   return (
     <MetricGrid>
       <DiagnosticMetric
         label="Preview mode"
-        value={formatPreviewTransport(stats.previewTransport)}
+        value={formatPreviewTransport(stats.previewTransport, linux)}
       />
+      {linuxProof ? (
+        <>
+          <DiagnosticMetric
+            label="Preview frames shown"
+            value={
+              typeof previewSurfaceStatus.proofSourceFps === 'number'
+                ? `${previewSurfaceStatus.proofSourceFps.toFixed(1)} fps`
+                : '–'
+            }
+          />
+          <DiagnosticMetric
+            label="Preview latency (p95)"
+            value={
+              typeof previewSurfaceStatus.proofFrameLatencyP95Ms === 'number'
+                ? `${Math.round(previewSurfaceStatus.proofFrameLatencyP95Ms)} ms`
+                : '–'
+            }
+          />
+        </>
+      ) : null}
       <DiagnosticMetric label="Graphics" value={formatGraphicsPath(stats)} />
       <DiagnosticMetric
         label="Preview source FPS"
@@ -846,6 +882,7 @@ function PreviewMetrics({ macOS }: { macOS: boolean }): ReactElement {
         label="Surface resizes"
         value={stats.previewSurfaceResizeCount.toString()}
       />
+      <DiagnosticMetric label="Camera format" value={cameraFormatFacts(stats) ?? NO_VALUE} />
       <DiagnosticMetric
         label="Camera source"
         value={formatPreviewSourceStatus(
@@ -1235,14 +1272,15 @@ function formatSourceRegistry(registry?: DiagnosticStats['sourceRegistry']): str
     .join('; ')
 }
 
-function formatPreviewTransport(transport?: string): string {
+function formatPreviewTransport(transport?: string, linux = false): string {
   switch (transport) {
     case 'native-surface':
       return 'Native'
     case 'd3d11-shared-texture':
       return 'D3D11'
     case 'electron-proof-surface':
-      return 'Fallback window'
+      // Plan 257 S3: Linux's own Preview path, never called native.
+      return linux ? 'App window' : 'Fallback window'
     case 'latest-jpeg-polling':
       return 'JPEG'
     case 'mjpeg-stream':

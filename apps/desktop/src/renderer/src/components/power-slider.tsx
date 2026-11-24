@@ -115,7 +115,7 @@ function PowerSlider({
   const range: SliderRange = { max, min, step }
   const commit = onCommit ?? onChange
   const [draft, setDraft] = useState<string | null>(null)
-  // Escape blurs the field, and that blur must not commit (QA F23).
+  // Escape blurs the field, and that blur must not commit.
   const cancelledRef = useRef(false)
 
   const display = formatValue(value, { bipolar, decimals, step, suffix })
@@ -124,7 +124,7 @@ function PowerSlider({
 
   const emit = (next: number, withCommit: boolean): void => {
     // Nothing changes a disabled slider: not a double-click, a typed number
-    // or a reset (QA F24).
+    // or a reset.
     if (disabled) {
       return
     }

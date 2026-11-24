@@ -5,6 +5,8 @@ edition = "2024"
 license = "AGPL-3.0-only"
 
 [dependencies]
+# Plan 260 S1.1: the wire types, extracted from src/protocol.rs.
+videorc-protocol = { workspace = true }
 anyhow = "1.0"
 # Plan 190: optional here only for the `live-background-gl-check` feature; the
 # Linux target table below always enables them.
@@ -25,6 +27,15 @@ if-addrs = "0.15"
 # importer accepts PNG/JPG/WebP, so the backend must decode all three (pure-Rust
 # decoders; no native deps, Windows cross-check safe).
 image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg"] }
+# Plan 260 S1.2 (plan 220 S1.2a): the overlay rasteriser (`overlay_raster/`).
+# parley lays text out over fontique's system fonts (fallback, colour emoji),
+# swash rasterises the glyphs (outlines, sbix/CBDT bitmaps, COLR), tiny-skia
+# draws the shapes. Pure Rust, no system library at build time.
+parley = "0.11.1"
+swash = "0.2.10"
+tiny-skia = "0.12.0"
+# The platforms' own marks on the highlight and milestone cards (SVG files).
+resvg = { version = "0.48.1", default-features = false }
 libc = "0.2"
 rayon = "1"
 rnnoise = { package = "rnnoise-rs", git = "https://github.com/TheOrcDev/rnnoise-rs", rev = "c915940e94e2ec1ca07a1af22c769a33c3fb1ce6", default-features = false }
@@ -64,6 +75,8 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGBitmapContext", "CGColorSpace", "CGContext", "CGDirectDisplay", "CGDisplayConfiguration", "CGError", "CGWindow", "CGImage"] }
 # Plan 255: the SRT Camera's stills draw their text with CoreText and the
 # system font, so Videorc ships no font file.
+# Plan 260 S1.2: the overlay rasteriser asks CoreText for the system UI font's
+# per-script fallback, as Chromium does (`overlay_raster/text.rs`).
 objc2-core-text = { version = "0.3.2", default-features = false, features = ["std", "CTFont", "CTLine", "CTStringAttributes", "objc2-core-graphics"] }
 # The device UID (`kAudioDevicePropertyDeviceUID`): what a saved microphone
 # is found by once CoreAudio hands it a new id (plan 254 S7).
@@ -82,6 +95,9 @@ objc2-screen-capture-kit = { version = "0.3.2", default-features = false, featur
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession", "block2", "objc2", "objc2-core-media", "objc2-core-video"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Plan 260 S1.2: fontique (through parley) loads fontconfig with dlopen, so the
+# overlay rasteriser links no system library.
+fontique = { version = "0.11.1", default-features = false, features = ["fontconfig-dlopen"] }
 # L4 portal screen capture (Plan 0006): org.freedesktop.portal.ScreenCast over
 # zbus, and the PipeWire stream the portal grants.
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
@@ -93,7 +109,7 @@ khronos-egl = { version = "6", features = ["dynamic"] }
 glow = "0.16"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62.2", features = ["Foundation", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11", "Wdk_System_SystemServices", "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_MediaFoundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Performance", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Variant", "Win32_System_WinRT", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Foundation", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11", "Wdk_System_SystemServices", "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_MediaFoundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Performance", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Variant", "Win32_System_WinRT", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
 windows-core = "0.62.2"
 # Registered at startup so WER dumps crashes the in-process filter never sees.
 videorc-wer-helper = { path = "../videorc-wer-helper" }

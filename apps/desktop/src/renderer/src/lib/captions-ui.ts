@@ -80,6 +80,28 @@ export function captionsStatusIsActive(status: CaptionsStatus): boolean {
   return ['starting', 'listening', 'reconnecting', 'degraded', 'live'].includes(status.state)
 }
 
+/** Guest captions: the backend's captions-only guest stream names its lines `guests-…`. */
+export const GUEST_CAPTION_SESSION_PREFIX = 'guests-'
+
+export function isGuestCaptionLine(line: CaptionsUpdate | undefined): boolean {
+  return Boolean(line?.sessionClientId.startsWith(GUEST_CAPTION_SESSION_PREFIX))
+}
+
+/**
+ * Whether the on-air caption bar runs. The host's provider session decides,
+ * except in a talk show room: a muted host's session rests in `ready` while
+ * the guests' stream keeps captioning, so a guest line keeps the bar. Off and
+ * blocked never run it (the backend refuses those guest lines too).
+ */
+export function captionsBarRunning(input: {
+  status: CaptionsStatus
+  latest: CaptionsUpdate | undefined
+  roomOpen: boolean
+}): boolean {
+  if (captionsStatusIsActive(input.status)) return true
+  return input.roomOpen && input.status.state === 'ready' && isGuestCaptionLine(input.latest)
+}
+
 /**
  * Reconciles persisted caption consent with backend-owned desired intent.
  * Attempts are tracked by StudioProvider per toggle/capture/client scope so a

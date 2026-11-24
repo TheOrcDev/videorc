@@ -199,3 +199,28 @@ which the commit then needs (started, or switched to, and kept).
 Rust: `cargo test -p videorc-backend retain_screen` and `vertical_leg_screen`;
 TypeScript:
 `pnpm --filter @videorc/desktop exec vitest run src/shared/backend-rpc-contract.test.ts`.
+
+## `camera-background.json`
+
+A camera's background (plan 258 S1, D3/D4): one pick per camera, stored by the
+renderer beside the camera look and put on `LayoutSettings.cameraBackground` at
+the output boundary (absent while Off). `full` carries every field, `everyMode`
+one of each pick, `rejectedEverywhere` the shapes both serde and the strict
+contracts refuse, and `rejectedByContract` the bounds only the RPC and IPC
+contracts check (the renderer clamps them before they are sent).
+
+- Rust: `cargo test -p videorc-backend camera_background_fixture`
+- TypeScript: `pnpm --filter @videorc/desktop test -- camera-background.test.ts`
+
+## `camera-background-status.json`
+
+The camera effect stage on `preview.camera.status` (plan 258 S3):
+`cameraBackground` while a blur or a picture is on, absent while Off or a
+screen key. `running`, `cover` and `unavailable` are what the backend sends;
+`rejectedCameraBackground` the shapes the strict contract refuses (an unknown
+state or mode, a missing or negative counter, `null` for an absent field, a
+field it does not know).
+
+- Rust: `cargo test -p videorc-backend camera_background_status_fixture`
+- TypeScript:
+  `pnpm --filter @videorc/desktop exec vitest run src/shared/backend-rpc-contract.test.ts`

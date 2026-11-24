@@ -14,6 +14,7 @@ import {
   readObsSetup,
   readObsStreamKey
 } from './obs-import'
+import { symlinkOrSkip } from './symlink.test-helper'
 
 const FIXTURES = join(__dirname, 'obs-fixtures')
 const collectionJson = readFileSync(join(FIXTURES, 'collection.json'), 'utf8')
@@ -197,34 +198,31 @@ describe('filesystem discovery + full read', () => {
     expect(readObsStreamKey('../Fixture Profile', root)).toBeNull()
   })
 
-  it.skipIf(process.platform === 'win32')(
-    'does not discover or follow symlinked collection/profile entries',
-    () => {
-      const root = fakeObsRoot()
-      const outside = mkdtempSync(join(tmpdir(), 'videorc-obs-outside-'))
-      const outsideCollection = join(outside, 'outside.json')
-      const outsideProfile = join(outside, 'outside-profile')
-      writeFileSync(outsideCollection, collectionJson)
-      mkdirSync(outsideProfile)
-      writeFileSync(join(outsideProfile, 'basic.ini'), basicIni)
-      writeFileSync(join(outsideProfile, 'service.json'), serviceJson)
-      symlinkSync(outsideCollection, join(root, 'basic', 'scenes', 'Linked.json'))
-      symlinkSync(outsideProfile, join(root, 'basic', 'profiles', 'Linked Profile'))
+  it('does not discover or follow symlinked collection/profile entries', (ctx) => {
+    const root = fakeObsRoot()
+    const outside = mkdtempSync(join(tmpdir(), 'videorc-obs-outside-'))
+    const outsideCollection = join(outside, 'outside.json')
+    const outsideProfile = join(outside, 'outside-profile')
+    writeFileSync(outsideCollection, collectionJson)
+    mkdirSync(outsideProfile)
+    writeFileSync(join(outsideProfile, 'basic.ini'), basicIni)
+    writeFileSync(join(outsideProfile, 'service.json'), serviceJson)
+    symlinkOrSkip(ctx, outsideCollection, join(root, 'basic', 'scenes', 'Linked.json'))
+    symlinkSync(outsideProfile, join(root, 'basic', 'profiles', 'Linked Profile'))
 
-      const discovery = discoverObs(root)
-      expect(discovery.collections).not.toContain('Linked')
-      expect(discovery.profiles).not.toContain('Linked Profile')
-      expect(readObsSetup('Linked', 'Fixture Profile', root)).toBeNull()
-      expect(readObsStreamKey('Linked Profile', root)).toBeNull()
+    const discovery = discoverObs(root)
+    expect(discovery.collections).not.toContain('Linked')
+    expect(discovery.profiles).not.toContain('Linked Profile')
+    expect(readObsSetup('Linked', 'Fixture Profile', root)).toBeNull()
+    expect(readObsStreamKey('Linked Profile', root)).toBeNull()
 
-      // Revalidation at read time also rejects a once-valid entry that was
-      // replaced by a symlink after the first discovery pass.
-      const fixturePath = join(root, 'basic', 'scenes', 'Fixture Collection.json')
-      unlinkSync(fixturePath)
-      symlinkSync(outsideCollection, fixturePath)
-      expect(readObsSetup('Fixture Collection', 'Fixture Profile', root)).toBeNull()
-    }
-  )
+    // Revalidation at read time also rejects a once-valid entry that was
+    // replaced by a symlink after the first discovery pass.
+    const fixturePath = join(root, 'basic', 'scenes', 'Fixture Collection.json')
+    unlinkSync(fixturePath)
+    symlinkSync(outsideCollection, fixturePath)
+    expect(readObsSetup('Fixture Collection', 'Fixture Profile', root)).toBeNull()
+  })
 
   it.skipIf(process.platform !== 'win32')(
     'does not discover Windows profile junctions that escape the OBS root',

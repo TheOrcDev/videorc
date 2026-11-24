@@ -187,6 +187,10 @@ for the owner, not a design choice.
   "Latest") goes back.
 - **Toasts are never tinted** (2026-09-29). A toast's type colours its icon
   only, never the panel, its rim or its text.
+- **Alerts are never tinted** (2026-11-22). Same rule as toasts: an `Alert`
+  is one neutral fill for every variant, and the type colours its icon only,
+  never the row's background, its rim or its text. A call site never passes
+  its own `bg-destructive/…`, `bg-warning/…` or `bg-success/…` to an Alert.
 - **No success toast for a scene, layout or source change** (2026-07-16):
   the stage is the confirmation. One exception, the owner's call on
   2026-11-15 (plan 231 D20): the off-stream key HUD. When a key, the Stream
@@ -598,7 +602,37 @@ links home.
   shown while the host shares a screen or while it is hidden. Agents and
   Sidekick hide, never show. While hidden, the Screen row, the Show stage's
   Screens and the Stream Manager show a "Screen hidden" chip and nothing
-  toasts.
+  toasts. What the hidden screen shows (owner 2026-11-20: "gradients, like a
+  glassy thing, but without transparency"): one designed, fully opaque still
+  everywhere it is drawn (every output, the Show stage, the program and guest
+  pages): a calm navy-to-violet gradient, a soft diagonal sheen and a glass
+  disc with the eye-slash. Never a blur of the screen and never grey. It is
+  on-stream pixels, so it does not follow the app theme.
+- **The camera's Background** (plan 258 S5): one pick per camera, kept in
+  every scene (Off, Slight blur, Strong blur, a picture from the Images
+  library, Green screen, Blue screen; never two at once). Home: the Scene
+  page's camera inspector, the Background section right under the camera's
+  name where Green screen was (tiles in `MediaCard`'s look, then the tuning
+  for the pick: Blur strength with Slight and Strong marks, or the key's
+  Similarity, Smoothness, Spill removal and Hide edges). Mirror: the Studio
+  Camera row's "Background · Strong blur" trigger, opening a 320 px popover
+  with the live "What viewers see" picture (the processed camera from the
+  store, never a raw feed), the tiles in Blur, Images and Screen behind you,
+  the lock line and Settings (the home); the Retro LCD shows the pick on the
+  screen and opens the same picker. ⌘K: "Blur background" or "Turn off
+  background effect", the green-screen switch and "Background settings". A
+  pick applies at once and the stage confirms it, so no toast; the stage's
+  cover and system effects are lines under the trigger, never toasts. The
+  tile pictures are on-stream pixels and don't follow the theme: the Orc
+  (owner 2026-11-23, from orc.pictures' Videorc category; one cutout drawn
+  over his studio, sharp or blurred, the picture, or the screen colour,
+  `camera-background-orc-art.tsx`), never a cartoon person; the Camera row's
+  16 px trigger picture draws the same art for the current pick, from a lazy
+  chunk (an empty ground until it loads), so the Orc's WebPs stay out of the
+  launch bundle. The Retro LCD row is text on the screen, with no picture. While a
+  room is open (until plan 258 S8) the effect tiles are disabled with
+  "Background effects come to rooms in a later update."; Off and the two
+  screens stay.
 - **The local file**: Output ("Where recordings go", quality). Recordings
   themselves live in Library.
 - **Avatar** (plan 239, owner 2026-11-15): the Avatar page (Livestream, ⌘8;
@@ -944,8 +978,8 @@ registry is moved onto the utility there.
   inverted pill. They open after 600 ms. A tooltip is never the only place
   a fact lives, and `title=` is not an information channel: use `Tooltip`,
   `ShortcutTooltip` or `DisabledReason`.
-- **`Alert`**: a flush inline status row (a faint tone tint, the icon in the
-  tone, monochrome text), never a card. `variant` is the tone and brings its
+- **`Alert`**: a flush inline status row (one neutral fill for every tone, the
+  icon in the tone, monochrome text, never a tinted background), never a card. `variant` is the tone and brings its
   own icon: `default`, `quiet` (a neutral note in secondary text), `locked`
   (via `LockAlert`), `warning`, `success`, `destructive`. Never put an icon
   child inside it; `icon` swaps in a subject's own mark, `icon={null}` drops
@@ -979,7 +1013,7 @@ registry is moved onto the utility there.
 - The guards (`renderer-style-guards.test.ts`) fail on: any CSS backdrop
   blur or filter, any import of the removed chrome ground's stills, a
   hand-rolled gradient on a screen, a chrome material outside the
-  primitives, `bg-popover`, a tinted toast, `cursor-pointer`, a colour
+  primitives, `bg-popover`, a tinted toast or Alert, `cursor-pointer`, a colour
   literal outside its short content allowlist, a coloured status word, text
   below 11 px, a hand-sized dialog, an unnamed `SelectTrigger`, `Slider` or
   `SegmentedControl`, a Field control its `FieldLabel` doesn't name, and a

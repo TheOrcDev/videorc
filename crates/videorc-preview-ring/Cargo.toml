@@ -1,0 +1,17 @@
+[package]
+name = "videorc-preview-ring"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "Plan 260 S1.7 (from plan 220 S4.1d): the CPU preview's frames over shared memory. A latest-wins ring of BGRA frames in a memory file (memfd on Linux, a file mapping on Windows) with a frame-id lease, written by the backend and read by the app; the layout is one implementation on both sides."
+
+[dependencies]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Win32_Security: CreateFileMappingW and CreateEventW take SECURITY_ATTRIBUTES.
+# In videorc-rust another crate turned it on through feature unification.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Memory", "Win32_System_Threading"] }

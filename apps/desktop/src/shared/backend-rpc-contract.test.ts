@@ -4042,6 +4042,65 @@ it('keeps a live camera that sends no video (plan 216 D2)', () => {
   ).toThrow()
 })
 
+describe('Camera system effect on the camera status (plan 258 S4)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/camera-system-effect.json', import.meta.url),
+      'utf8'
+    )
+  )
+
+  it('accepts what the backend sends, field for field', () => {
+    for (const name of ['macosPortrait', 'windowsTurnedOff']) {
+      expect(validateBackendEventPayload('preview.camera.status', fixture[name])).toEqual(
+        fixture[name]
+      )
+    }
+  })
+
+  it('rejects a system effect it does not know', () => {
+    for (const systemEffect of fixture.rejectedSystemEffects) {
+      expect(() =>
+        validateBackendEventPayload('preview.camera.status', {
+          ...fixture.macosPortrait,
+          systemEffect
+        })
+      ).toThrow()
+    }
+  })
+})
+
+describe('Camera effect stage on the camera status (plan 258 S3)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../protocol-fixtures/camera-background-status.json', import.meta.url),
+      'utf8'
+    )
+  )
+
+  it('accepts what the backend sends, field for field', () => {
+    for (const name of ['running', 'cover', 'unavailable']) {
+      expect(validateBackendEventPayload('preview.camera.status', fixture[name])).toEqual(
+        fixture[name]
+      )
+      expect(validateBackendRpcResult('preview.camera.status', fixture[name])).toEqual(
+        fixture[name]
+      )
+    }
+  })
+
+  it('rejects a stage status it does not know', () => {
+    for (const cameraBackground of fixture.rejectedCameraBackground) {
+      expect(() =>
+        validateBackendEventPayload('preview.camera.status', {
+          ...fixture.cover,
+          cameraBackground
+        })
+      ).toThrow()
+    }
+  })
+})
+
 describe('Camera low-light compensation wire contract (issue #1066)', () => {
   const fixture = JSON.parse(
     readFileSync(
@@ -4744,5 +4803,36 @@ describe('Retirement-only screen retention (plan 231 D18)', () => {
           verticalLegScreen
         })
       ).toThrow()
+  })
+})
+
+describe('diagnostics.linuxDesktop (plan 257 S18)', () => {
+  const answer = {
+    secretService: 'missing',
+    portal: { frontend: 'running', screenCastVersion: 5, backends: ['gtk', 'hyprland'] },
+    groups: [{ name: 'video', exists: true, member: false, devices: 2, accessible: 0 }],
+    currentDesktop: 'Hyprland'
+  }
+
+  it('accepts what Rust sends, with its optional fields omitted', () => {
+    expect(validateBackendRpcResult('diagnostics.linuxDesktop', answer)).toStrictEqual(answer)
+    const bare = {
+      secretService: 'unknown',
+      portal: { frontend: 'unknown', backends: [], detail: 'session bus: no address' },
+      groups: []
+    }
+    expect(validateBackendRpcResult('diagnostics.linuxDesktop', bare)).toStrictEqual(bare)
+  })
+
+  it('refuses unknown states, nulls and extra fields', () => {
+    for (const bad of [
+      { ...answer, secretService: 'locked' },
+      { ...answer, currentDesktop: null },
+      { ...answer, portal: { ...answer.portal, screenCastVersion: null } },
+      { ...answer, groups: [{ ...answer.groups[0], path: '/dev/video0' }] },
+      { ...answer, extra: true }
+    ]) {
+      expect(() => validateBackendRpcResult('diagnostics.linuxDesktop', bad)).toThrow()
+    }
   })
 })

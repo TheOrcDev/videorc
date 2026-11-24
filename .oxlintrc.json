@@ -289,6 +289,8 @@
         "apps/desktop/src/renderer/src/components/stream-manager/activity-icons.tsx",
         "apps/desktop/src/renderer/src/components/avatar-page-icon.tsx",
         "apps/desktop/src/renderer/src/components/sounds-page-icon.tsx",
+        "apps/desktop/src/renderer/src/components/page-row-icons.tsx",
+        "apps/desktop/src/renderer/src/components/settings-icon.tsx",
         "apps/desktop/src/renderer/src/components/notifications-icon.tsx"
       ],
       "rules": {

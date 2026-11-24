@@ -1,0 +1,9 @@
+[package]
+name = "videorc-updater"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "Plan 260: Electron's update rules in Rust, on today's feed format (plan 220 P5-D3), for the GPUI app's second feed (P5-D6)."
+
+[dependencies]

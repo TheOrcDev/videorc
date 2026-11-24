@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "room": {
+    "cellsPerHeight": 54,
+    "magenta": [255, 0, 255],
+    "cyan": [0, 255, 255],
+    "seed": 258
+  },
+  "person": {
+    "centreX": 0.5,
+    "sway": 0.02,
+    "swayPeriodSeconds": 2.0,
+    "skin": [222, 170, 138],
+    "hair": [58, 40, 30],
+    "shirt": [240, 128, 32]
+  }
+}

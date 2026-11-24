@@ -10,6 +10,7 @@ import {
   liveBackgroundSampleMismatches,
   proofSurfaceLiveBackgroundVerdict,
   sceneCarriesBackground,
+  smokeMicrophoneEnv,
   smokeMicrophoneId
 } from './live-background-smoke.mjs'
 
@@ -151,4 +152,11 @@ test('a Linux take selects no microphone: the CoreAudio fixture id names none th
   assert.equal(smokeMicrophoneId('linux'), undefined)
   assert.equal(smokeMicrophoneId('darwin'), 'microphone:coreaudio:4294967295')
   assert.equal(smokeMicrophoneId('win32'), 'microphone:coreaudio:4294967295')
+})
+
+test('the synthetic microphone brings the flags that open it and give it a tone', () => {
+  const flags = { VIDEORC_CAPTION_CONTRACT_TEST: '1', VIDEORC_LIVE_SOURCE_SWITCH_TEST: '1' }
+  assert.deepEqual(smokeMicrophoneEnv('darwin'), flags)
+  assert.deepEqual(smokeMicrophoneEnv('win32'), flags)
+  assert.deepEqual(smokeMicrophoneEnv('linux'), {})
 })

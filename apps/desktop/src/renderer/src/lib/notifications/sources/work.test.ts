@@ -55,8 +55,8 @@ describe('finished work as notifications (plan 250 S7)', () => {
         detail: undefined,
         actions: [{ id: 'reveal', kind: 'fix' }]
       })
-      expect(door.show).toHaveBeenCalledTimes(1)
-      expect(door.show.mock.calls[0][1]).toBe(8_000)
+      // Idle, it waits behind the bell (the owner, 2026-11-22).
+      expect(door.show).not.toHaveBeenCalled()
       expect(store.count().unread).toBe(1)
     })
 

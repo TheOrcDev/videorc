@@ -1,6 +1,40 @@
 [workspace]
-members = ["crates/videorc-backend", "crates/videorc-native-preview-addon", "crates/videorc-wer-helper"]
+members = [
+    "crates/videorc-backend",
+    "crates/videorc-native-preview-addon",
+    "crates/videorc-wer-helper",
+    # Plan 260 (the desktop app in GPUI). S1.0 adds every crate the plan adds,
+    # empty, so no later slice edits this manifest; each crate's README names
+    # the lane that owns it.
+    "crates/videorc-protocol",
+    "crates/videorc-app-core",
+    "crates/videorc-preview",
+    "crates/videorc-gpu-import",
+    "crates/videorc-preview-ring",
+    "crates/videorc-updater",
+    "crates/videorc-page-host",
+    "crates/videorc-kit",
+    "apps/videorc",
+]
 resolver = "3"
+
+# Plan 260: depend on a plan crate with `<name> = { workspace = true }`.
+[workspace.dependencies]
+videorc-protocol = { path = "crates/videorc-protocol" }
+videorc-app-core = { path = "crates/videorc-app-core" }
+videorc-preview = { path = "crates/videorc-preview" }
+videorc-gpu-import = { path = "crates/videorc-gpu-import" }
+videorc-preview-ring = { path = "crates/videorc-preview-ring" }
+videorc-updater = { path = "crates/videorc-updater" }
+videorc-page-host = { path = "crates/videorc-page-host" }
+videorc-kit = { path = "crates/videorc-kit" }
+# Plan 260 D1: GPUI as the weekly gpui-pre snapshot, pinned exactly, one pin
+# for the kit and the app (`pnpm ui:check` compares it with videorc-ui's).
+# A bump is its own PR. Features are the user's: `runtime_shaders` for builds
+# without Xcode's Metal Toolchain (development only), `font-kit` on macOS,
+# `wayland`/`x11` on Linux.
+gpui = { package = "gpui-pre", version = "=0.3.14" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.14" }
 
 # Disable incremental codegen for dev builds. On macOS arm64, stale incremental
 # serde codegen artifacts have produced invalid links for the backend binary.
@@ -15,6 +49,17 @@ incremental = false
 opt-level = 2
 
 [profile.dev.package.videorc-native-preview-addon]
+opt-level = 2
+
+# Plan 260: the preview presents every video frame on its own thread (plan
+# 220 measured its dev build at opt-level 2); optimise it as the addon is.
+[profile.dev.package.videorc-preview]
+opt-level = 2
+
+[profile.dev.package.videorc-gpu-import]
+opt-level = 2
+
+[profile.dev.package.videorc-preview-ring]
 opt-level = 2
 
 # The per-frame heavy lifting also runs inside dependencies (serde event

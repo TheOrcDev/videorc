@@ -7,6 +7,7 @@ const toastSpies = vi.hoisted(() => ({
 }))
 vi.mock('sonner', () => ({ toast: { ...toastSpies, dismiss: vi.fn() } }))
 
+import { ENGINE_NOT_CONNECTED } from '@/backendClient'
 import type { HealthEvent, SessionSummary } from '@/lib/backend'
 import { notifications } from '@/lib/notifications'
 import { sessionRuntimeNoticeTitle } from '@/lib/session-runtime-notice'
@@ -18,6 +19,7 @@ import {
   sessionModeActivity,
   sessionRuntimeContinuationIsCurrent,
   sessionRuntimeRecoveryPlan,
+  noteBackgroundError,
   showBackendError,
   showMicrophoneLoss,
   showOAuthCallbackExhausted,
@@ -29,6 +31,11 @@ import {
   showXPlaybackEvent,
   sourceFallbackTitle
 } from '@/lib/session-runtime-recovery'
+
+// These reports arrive while a recording runs, with "Quiet while recording or
+// live" off: the row of plan 250's table where a warning pops up, so the
+// tests see each pop-up's words. Idle is the bell only (store tests).
+notifications.configure({ live: () => true, quiet: () => false })
 
 function failedSession(mode: string): SessionSummary {
   return {
@@ -335,7 +342,7 @@ describe('audio-loss provenance', () => {
   // Issue 1064: the microphone never stopped; its frames hold no sound.
   it('says the microphone is silent, per activity, and ends the notice honestly', () => {
     const message =
-      'Microphone "HD Pro Webcam C920" has sent only silence since 12.3 seconds into this session. Try choosing it again.'
+      "HD Pro Webcam C920 is sending only silence. Check its own mute button or switch, and its cable. If it's still silent, choose it again."
     const recording = microphoneLossPresentation({
       event: event('microphone-silent', message),
       recording: { state: 'recording' as const, sessionId: 'take' },
@@ -736,6 +743,16 @@ describe('session health events are notifications (plans 076, 087, 218, 250)', (
     )
   })
 
+  it('the Clips ring that could not start at launch is its entry, never "Couldn\'t start"', () => {
+    showSessionHealthEvent(healthEvent('recording-startup-barrier-timeout', 'error'), false, {
+      state: 'starting',
+      sessionId: 'live',
+      replayOnly: true
+    })
+    expect(toastSpies.error).not.toHaveBeenCalled()
+    expect(entry('clips')).toMatchObject({ title: "Clips couldn't start", tone: 'warning' })
+  })
+
   it('a quality notice is one entry per recording, with the way to its row', () => {
     const event = { ...healthEvent('recording-quality-not-100'), sessionId: 'take' }
     expect(showSessionHealthEvent(event, false)).toBe('take')
@@ -1059,6 +1076,29 @@ describe('the rebuild after a reload mid-session (plan 250 S9)', () => {
 describe('backend error toasts', () => {
   beforeEach(() => vi.clearAllMocks())
   afterEach(() => vi.unstubAllGlobals())
+
+  it('a failure nobody pressed for is one counted entry behind the bell, not an error toast', () => {
+    notifications.reset()
+    noteBackgroundError(new Error('engine said no'), 'connected')
+    noteBackgroundError(new Error('engine said no again'), 'connected')
+    // Past the launch the store may pop the entry up once (plan 250); it is
+    // never the error toast with its Copy, and never two.
+    expect(toastSpies.error).not.toHaveBeenCalled()
+    expect(toastSpies.warning.mock.calls.length).toBeLessThanOrEqual(1)
+    const entries = notifications.snapshot()
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({
+      kind: 'backend-error',
+      occurrences: 2,
+      actions: [{ label: 'Open Health', kind: 'door' }]
+    })
+  })
+
+  it('a background failure while reconnecting adds nothing: the badge says so', () => {
+    notifications.reset()
+    noteBackgroundError(new Error(ENGINE_NOT_CONNECTED), 'connecting')
+    expect(notifications.snapshot()).toEqual([])
+  })
 
   it('gives an unexplained failure an Open Health door on a timed toast', () => {
     const dispatchEvent = vi.fn()
