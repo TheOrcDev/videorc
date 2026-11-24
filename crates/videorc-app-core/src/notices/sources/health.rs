@@ -327,6 +327,17 @@ pub fn recording_failure(notice: &RecordingFailedNotice) -> Input {
     }
 }
 
+/// `sessionEndedNotifications`: the local session's open problems end with
+/// it and stay in the list as what happened. A Videorc Cloud show can
+/// outlive this computer's session, so its own condition is left alone.
+pub fn session_ended_notifications(store: &mut Store, livestream: bool, now: u64) {
+    store.session_ended_where(
+        livestream,
+        |id| !id.starts_with(super::cloud::CLOUD_SESSION_PREFIX),
+        now,
+    );
+}
+
 fn words(message: &str) -> Option<String> {
     (!message.is_empty()).then(|| message.to_string())
 }
@@ -735,6 +746,38 @@ mod tests {
         ));
         assert_eq!(quality.key, "recording-quality:take-1");
         assert!(quality.once);
+    }
+
+    #[test]
+    fn the_session_end_leaves_a_cloud_show_alone() {
+        let mut store = Store::new(0, 0);
+        let context = HealthContext::default();
+        publish_health_event(
+            &mut store,
+            &health("1", "host-overloaded", HealthLevel::Warn, "a"),
+            &context,
+            1_000,
+        );
+        store.publish(
+            Input {
+                key: "cloud-status".into(),
+                kind: "cloud-status".into(),
+                title: "Videorc Cloud lost your stream".into(),
+                session_id: Some("cloud:s1".into()),
+                ..Input::default()
+            },
+            1_000,
+        );
+        session_ended_notifications(&mut store, true, 5_000);
+        let state = |key: &str| {
+            store
+                .snapshot()
+                .iter()
+                .find(|entry| entry.key == key)
+                .map(|entry| entry.state)
+        };
+        assert_eq!(state("host-overloaded"), Some(State::Resolved));
+        assert_eq!(state("cloud-status"), Some(State::Open));
     }
 
     /// The words are Electron's.

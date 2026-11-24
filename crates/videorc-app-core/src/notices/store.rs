@@ -671,16 +671,28 @@ impl Store {
     /// ("Ended with the livestream."). `session` is its id; none, every
     /// session.
     pub fn session_ended(&mut self, livestream: bool, session: Option<&str>, now: u64) {
+        self.session_ended_where(
+            livestream,
+            |id| session.is_none_or(|session| session == id),
+            now,
+        );
+    }
+
+    /// `sessionEnded` with Electron's predicate form: the conditions whose
+    /// session `belongs` names resolve (a cloud show's are left alone when
+    /// this computer's session ends).
+    pub fn session_ended_where(
+        &mut self,
+        livestream: bool,
+        belongs_to: impl Fn(&str) -> bool,
+        now: u64,
+    ) {
         let mut changed = false;
         let mut index = 0;
         while index < self.held.len() {
             let item = &self.held[index];
             let belongs = item.entry.life == Life::Condition
-                && item
-                    .entry
-                    .session_id
-                    .as_deref()
-                    .is_some_and(|id| session.is_none_or(|session| session == id));
+                && item.entry.session_id.as_deref().is_some_and(&belongs_to);
             if !belongs {
                 index += 1;
                 continue;
