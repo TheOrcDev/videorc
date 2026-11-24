@@ -4,8 +4,6 @@
     "src/main/account-refresh-broker.test.ts": 110,
     "src/main/account-sign-in-transactions.test.ts": 220,
     "src/main/agent-bridge.test.ts": 150,
-    "src/main/agent-config-install.test.ts": 470,
-    "src/main/agent-config-toml.test.ts": 110,
     "src/main/app-icons.test.ts": 90,
     "src/main/app-menu.test.ts": 110,
     "src/main/avatar-cache.test.ts": 120,

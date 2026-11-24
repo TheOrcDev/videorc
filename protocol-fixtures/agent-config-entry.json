@@ -1,0 +1,56 @@
+{
+  "connection": {
+    "bridgePath": "C:\\Users\\Ana \"Lee\"\\AppData\\Local\\Programs\\Videorc\\resources\\videorc-mcp.exe",
+    "token": "vrc_agent_0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "json": {
+    "claude-desktop": {
+      "rootKey": "mcpServers",
+      "entry": {
+        "command": "C:\\Users\\Ana \"Lee\"\\AppData\\Local\\Programs\\Videorc\\resources\\videorc-mcp.exe",
+        "args": [],
+        "env": {
+          "VIDEORC_AGENT_TOKEN": "vrc_agent_0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    },
+    "cursor": {
+      "rootKey": "mcpServers",
+      "entry": {
+        "command": "C:\\Users\\Ana \"Lee\"\\AppData\\Local\\Programs\\Videorc\\resources\\videorc-mcp.exe",
+        "args": [],
+        "env": {
+          "VIDEORC_AGENT_TOKEN": "vrc_agent_0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    },
+    "vs-code": {
+      "rootKey": "servers",
+      "entry": {
+        "type": "stdio",
+        "command": "C:\\Users\\Ana \"Lee\"\\AppData\\Local\\Programs\\Videorc\\resources\\videorc-mcp.exe",
+        "args": [],
+        "env": {
+          "VIDEORC_AGENT_TOKEN": "vrc_agent_0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    }
+  },
+  "codexTomlLines": [
+    "[mcp_servers.videorc]",
+    "command = \"C:\\\\Users\\\\Ana \\\"Lee\\\"\\\\AppData\\\\Local\\\\Programs\\\\Videorc\\\\resources\\\\videorc-mcp.exe\"",
+    "args = []",
+    "env = { VIDEORC_AGENT_TOKEN = \"vrc_agent_0000000000000000000000000000000000000000000000000000000000000000\" }"
+  ],
+  "claudeCodeAddArgs": [
+    "mcp",
+    "add",
+    "--scope",
+    "user",
+    "videorc",
+    "--env",
+    "VIDEORC_AGENT_TOKEN=vrc_agent_0000000000000000000000000000000000000000000000000000000000000000",
+    "--",
+    "C:\\Users\\Ana \"Lee\"\\AppData\\Local\\Programs\\Videorc\\resources\\videorc-mcp.exe"
+  ]
+}
