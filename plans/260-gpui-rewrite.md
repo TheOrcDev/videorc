@@ -980,6 +980,9 @@ stays in the renderer too and hands each message to the backend through
 `cloud.room.avatar.motion`; the backend picks the pages that animate and
 sends it on the motion topic. The model moves to `videorc-app-core` with the
 builders, with parity fixtures generated from its TypeScript tests then.
+The HTML layers' manifest names the sheet video track (its `trackSid`,
+generation, size and frame rate), so it moves with that track in S1.8c,
+not S1.8b.
 
 ### Phase 2: the shell, on all three platforms
 
