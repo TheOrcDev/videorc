@@ -146,7 +146,8 @@ primitives and the same words. Only the tools differ.
   owner call 2026-11-24), and stops under Reduce Motion. Never a
   `request_animation_frame` loop: it redraws the whole window every frame.
   The one short burst allowed is an overlay's 100 ms fade in and out
-  (`motion::presence`), which asks for frames only while it moves.
+  (`motion::presence`), which asks for frames only while it moves
+  (coordinator call 2026-11-24).
 - **Lit Record's glow holds steady at 85% in GPUI; it does not breathe**
   (owner call 2026-11-24). A breath would redraw the window every frame for
   the whole session (S0.4 measured 24% of a core). The Electron flavour's
