@@ -1,5 +1,6 @@
 //! The screens (plan 260 Phase 3), one folder each, owned by their lane.
 
+pub mod settings;
 pub mod sources;
 
 // The tabs, badges and Sidekick's cards are read by the kit's Tabs and Badge

@@ -4,9 +4,15 @@
 //! line. The screens fill the pages in Phase 3; the kit (`videorc-kit`)
 //! replaces these plain elements when it lands.
 
-use gpui::{Context, Entity, FontWeight, SharedString, Window, div, prelude::*, px, rgb};
+use crate::screens::settings::{Navigate, SettingsScreen};
+use gpui::{Context, Entity, Window, div, prelude::*, px};
 use videorc_app_core::nav::{self, PageId, ZONES};
 use videorc_app_core::{BackendState, ConnectionState, Tone};
+use videorc_kit::{
+    shortcut_keys::ShortcutKeys,
+    theme::{self, FONT, TypeScale, hsla},
+    tokens::{Theme, radius, size, text},
+};
 
 use super::bridge::Mirror;
 use super::session::SessionPanel;
@@ -43,20 +49,12 @@ pub fn connection_text(state: &ConnectionState) -> String {
     }
 }
 
-// Plain colours until the kit's tokens land (dark, the app's default look).
-const GROUND: u32 = 0x161618;
-const SIDEBAR: u32 = 0x1c1c1f;
-const HAIRLINE: u32 = 0x2c2c30;
-const TEXT: u32 = 0xe8e8ea;
-const MUTED: u32 = 0x8e8e93;
-const SELECTED: u32 = 0x2f2f35;
-
-fn tone_colour(tone: Tone) -> u32 {
+fn tone_colour(tone: Tone, t: &Theme) -> u32 {
     match tone {
-        Tone::Ready => 0x30d158,
-        Tone::Busy => 0xffd60a,
-        Tone::Failed => 0xff453a,
-        Tone::Stopped => 0x8e8e93,
+        Tone::Ready => t.success,
+        Tone::Busy => t.warning,
+        Tone::Failed => t.destructive,
+        Tone::Stopped => t.muted_foreground,
     }
 }
 
@@ -70,6 +68,7 @@ pub struct Shell {
     preview: Entity<Preview>,
     /// Phase 3: Sources ⌘2.
     sources: Entity<SourcesPanel>,
+    settings: Entity<SettingsScreen>,
 }
 
 impl Shell {
@@ -79,6 +78,7 @@ impl Shell {
         session: Entity<SessionPanel>,
         preview: Entity<Preview>,
         sources: Entity<SourcesPanel>,
+        settings: Entity<SettingsScreen>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&backend, |_, _, cx| cx.notify()).detach();
@@ -87,6 +87,14 @@ impl Shell {
         // change, never per video frame.
         cx.observe(&preview, |_, _, cx| cx.notify()).detach();
         cx.observe(&sources, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&settings, |this, _, Navigate(page), cx| {
+            this.page = *page;
+            this.preview.update(cx, |preview, _| {
+                preview.set_docked_shown(*page == PageId::Studio)
+            });
+            cx.notify();
+        })
+        .detach();
         Self {
             page: PageId::Studio,
             backend,
@@ -94,7 +102,25 @@ impl Shell {
             session,
             preview,
             sources,
+            settings,
         }
+    }
+
+    pub fn open_settings(
+        &mut self,
+        tab: Option<videorc_app_core::settings_page::SettingsTab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.update(cx, |settings, cx| {
+            if let Some(tab) = tab {
+                settings.select(tab, cx);
+            } else {
+                settings.refresh(cx);
+            }
+        });
+        self.open_page(PageId::Settings, window, cx);
+        window.activate_window();
     }
 
     pub fn page(&self) -> PageId {
@@ -104,6 +130,10 @@ impl Shell {
     pub fn open_page(&mut self, page: PageId, window: &mut Window, cx: &mut Context<Self>) {
         if self.page != page {
             self.page = page;
+            if page == PageId::Settings {
+                self.settings
+                    .update(cx, |settings, cx| settings.refresh(cx));
+            }
             window.set_window_title(&nav::window_title(page));
             // A docked slot that is not on screen presents nothing.
             self.preview.update(cx, |preview, _| {
@@ -117,15 +147,14 @@ impl Shell {
     /// the button that moves the Preview into its own window and back
     /// (`preview-stage.tsx`'s "Pop out" and "Show here"), and the session
     /// controls.
-    fn studio_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn studio_page(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let (floating, can_float) = {
             let preview = self.preview.read(cx);
             (preview.mode() == WindowMode::Floating, preview.can_float())
         };
         let mut header = div().flex().justify_between().items_center().child(
             div()
-                .text_size(px(20.))
-                .font_weight(FontWeight::SEMIBOLD)
+                .type_scale(text::SECTION)
                 .child(PageId::Studio.label()),
         );
         if can_float {
@@ -134,9 +163,9 @@ impl Shell {
                     .id("preview-pop-out")
                     .px(px(10.))
                     .py(px(4.))
-                    .rounded(px(6.))
-                    .bg(rgb(SELECTED))
-                    .text_size(px(12.))
+                    .rounded(px(radius::ROW))
+                    .bg(hsla(t.accent))
+                    .type_scale(text::META)
                     .cursor_pointer()
                     .child(if floating { "Show here" } else { "Pop out" })
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -161,7 +190,7 @@ impl Shell {
             .child(self.session.clone())
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sidebar(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let mut column = div()
             .w(px(220.))
             .h_full()
@@ -170,9 +199,9 @@ impl Shell {
             .gap(px(2.))
             .px(px(8.))
             .pt(px(40.))
-            .bg(rgb(SIDEBAR))
+            .bg(hsla(t.glass_solid))
             .border_r_1()
-            .border_color(rgb(HAIRLINE));
+            .border_color(hsla(t.border));
         for (group, pages) in ZONES {
             if let Some(label) = group.label() {
                 column = column.child(
@@ -180,18 +209,17 @@ impl Shell {
                         .pt(px(10.))
                         .pb(px(4.))
                         .px(px(8.))
-                        .text_size(px(11.))
-                        .text_color(rgb(MUTED))
+                        .type_scale(text::LABEL)
+                        .text_color(hsla(t.muted_foreground))
                         .child(label),
                 );
             }
             for &page in pages {
                 let selected = page == self.page;
-                let shortcut: SharedString = page
-                    .shortcut_key()
-                    .map(|key| format!("⌘{}", key.to_ascii_uppercase()))
-                    .unwrap_or_default()
-                    .into();
+                let shortcut = page
+                    .key()
+                    .and_then(super::menus::page_action)
+                    .map(|action| ShortcutKeys::for_action(action.as_ref()));
                 column =
                     column.child(
                         div()
@@ -201,18 +229,13 @@ impl Shell {
                             .items_center()
                             .px(px(8.))
                             .py(px(5.))
-                            .rounded(px(6.))
-                            .text_size(px(13.))
-                            .text_color(rgb(TEXT))
-                            .when(selected, |row| row.bg(rgb(SELECTED)))
+                            .rounded(px(radius::ROW))
+                            .type_scale(text::SECTION)
+                            .text_color(hsla(t.foreground))
+                            .when(selected, |row| row.bg(hsla(t.accent)))
                             .cursor_pointer()
                             .child(page.label())
-                            .child(
-                                div()
-                                    .text_color(rgb(MUTED))
-                                    .text_size(px(11.))
-                                    .child(shortcut),
-                            )
+                            .children(shortcut)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_page(page, window, cx)
                             })),
@@ -224,31 +247,37 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme::current(window, cx).theme();
+        window.set_window_title(&nav::window_title(self.page));
         let status = self.backend.read(cx).value().clone();
         let connection = self.connection.read(cx).value().clone();
         let page = self.page;
         let sources = self.sources.clone();
         div()
             .size_full()
+            .font_family(FONT)
             .flex()
             .flex_col()
-            .bg(rgb(GROUND))
-            .text_color(rgb(TEXT))
+            .bg(hsla(t.glass_solid))
+            .text_color(hsla(t.foreground))
             .child(
                 div()
                     .flex_1()
+                    .min_h(px(0.))
                     .flex()
                     .flex_row()
-                    .child(self.sidebar(cx))
+                    .child(self.sidebar(t, cx))
                     .child(if page == PageId::Studio {
                         div()
                             .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
                             .flex()
                             .flex_col()
                             .pt(px(40.))
                             .px(px(24.))
-                            .child(self.studio_page(cx))
+                            .child(self.studio_page(t, cx))
                     } else if page == PageId::Sources {
                         div()
                             .flex_1()
@@ -257,53 +286,51 @@ impl Render for Shell {
                             .pt(px(40.))
                             .px(px(24.))
                             .gap(px(8.))
-                            .child(
-                                div()
-                                    .text_size(px(20.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(page.label()),
-                            )
+                            .child(div().type_scale(text::SECTION).child(page.label()))
                             .child(sources)
                     } else {
                         div()
                             .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
                             .flex()
                             .flex_col()
                             .pt(px(40.))
                             .px(px(24.))
                             .gap(px(8.))
-                            .child(
-                                div()
-                                    .text_size(px(20.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(page.label()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .text_color(rgb(MUTED))
-                                    .child("This page comes in plan 260's Phase 3."),
-                            )
+                            .child(div().type_scale(text::SECTION).child(page.label()))
+                            .map(|body| {
+                                if page == PageId::Settings {
+                                    body.child(self.settings.clone())
+                                } else {
+                                    body.child(
+                                        div()
+                                            .type_scale(text::META)
+                                            .text_color(hsla(t.muted_foreground))
+                                            .child("This page comes in plan 260's Phase 3."),
+                                    )
+                                }
+                            })
                     }),
             )
             .child(
                 div()
-                    .h(px(28.))
+                    .h(px(size::STATUS_BAR))
                     .px(px(12.))
                     .flex()
                     .items_center()
                     .gap(px(8.))
                     .border_t_1()
-                    .border_color(rgb(HAIRLINE))
-                    .text_size(px(12.))
+                    .border_color(hsla(t.border))
+                    .type_scale(text::META)
                     .child(
                         div()
                             .size(px(8.))
-                            .rounded(px(4.))
-                            .bg(rgb(tone_colour(status.tone))),
+                            .rounded_full()
+                            .bg(hsla(tone_colour(status.tone, t))),
                     )
                     .child(status.text)
-                    .child(div().text_color(rgb(MUTED)).child(connection)),
+                    .child(div().text_color(hsla(t.muted_foreground)).child(connection)),
             )
     }
 }

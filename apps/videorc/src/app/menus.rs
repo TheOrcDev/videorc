@@ -51,6 +51,7 @@ actions!(
         ShowImages,
         ShowSounds,
         ShowSettings,
+        ShowShortcuts,
         TogglePreview,
         ToggleNotes,
         ToggleStreamManager,
@@ -84,7 +85,7 @@ pub fn keystroke(accelerator: &str) -> String {
 }
 
 /// The page key's action.
-fn page_action(key: PageKey) -> Option<Box<dyn Action>> {
+pub(crate) fn page_action(key: PageKey) -> Option<Box<dyn Action>> {
     Some(match key {
         PageKey::Digit(1) => Box::new(ShowPage1),
         PageKey::Digit(2) => Box::new(ShowPage2),
@@ -233,7 +234,8 @@ fn items(cx: &App, entries: &[MenuEntry], bindings: &mut Vec<KeyBinding>) -> Vec
 /// The menu bar for this platform (`None` off macOS, where the window
 /// carries no menu bar, as Electron's).
 pub fn menu_bar(cx: &App, windows: &[WindowId]) -> Option<MenuBar> {
-    let availability = nav::menu_availability(windows);
+    let mut availability = nav::menu_availability(windows);
+    availability.pages.insert(PageKey::Settings);
     let template = app_menu_template(MenuPlatform::current(), APP_NAME, &availability)?;
     let mut bindings = Vec::new();
     let mut menus = Vec::new();
@@ -259,6 +261,10 @@ const WINDOWS: &[WindowId] = &[WindowId::StreamManager];
 /// The roles' handlers, and the commands that work now. Pages and windows
 /// get theirs as they are ported.
 pub fn install(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("secondary-,", ShowSettings, None),
+        KeyBinding::new("secondary-/", ShowShortcuts, None),
+    ]);
     if let Some(bar) = menu_bar(cx, WINDOWS) {
         cx.bind_keys(bar.bindings);
         cx.set_menus(bar.menus);
