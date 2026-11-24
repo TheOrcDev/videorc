@@ -72,6 +72,7 @@ pub mod sources;
 pub mod timecode;
 pub mod ui_local;
 pub mod ui_settings_wire;
+pub mod vertical_stream;
 pub mod virtual_camera;
 
 use std::path::PathBuf;

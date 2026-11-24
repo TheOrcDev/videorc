@@ -381,3 +381,75 @@ fn a_draft_shows_for_its_camera_and_a_stale_drop_commits_nothing() {
     );
     assert_eq!(draft, BackgroundDraft::default());
 }
+
+#[test]
+fn the_background_section_shows_the_pick_its_tuning_and_its_hint() {
+    let images = images();
+    let blur = with(json!({"mode": "blur", "blurPct": 55}));
+    let view = background_section_view(&blur, &images, true, false, Some("darwin"));
+    assert_eq!(view.label, "Background");
+    assert_eq!(view.selected, Some(ChoiceId::StrongBlur));
+    assert_eq!(view.blur_pct, Some(55.0));
+    assert_eq!(view.screen, None);
+    assert_eq!(
+        view.hint.as_deref(),
+        Some(format!("{HINT} {BLUR_CAVEAT}").as_str())
+    );
+    // Two pictures in the row.
+    assert_eq!(
+        view.tiles
+            .iter()
+            .filter(|tile| tile.group == Group::Images)
+            .count(),
+        2
+    );
+    // The picked picture comes first, even past the row's two.
+    let office = with(json!({"mode": "image", "assetId": "imported-1"}));
+    let picked = background_section_view(&office, &images, true, false, Some("darwin"));
+    let first_image = picked
+        .tiles
+        .iter()
+        .find(|tile| tile.group == Group::Images)
+        .unwrap();
+    assert_eq!(first_image.label, "My office");
+    assert_eq!(picked.hint.as_deref(), Some(HINT));
+    // A screen shows its tuning with the defaults, and the screen hint.
+    let green = background_section_view(
+        &with(json!({"mode": "green"})),
+        &images,
+        true,
+        false,
+        Some("darwin"),
+    );
+    let tuning = green.screen.unwrap();
+    assert_eq!(
+        (
+            tuning.similarity_pct,
+            tuning.smoothness_pct,
+            tuning.spill_pct
+        ),
+        (40.0, 8.0, 10.0)
+    );
+    assert_eq!(tuning.hide_edges["leftPct"], 0);
+    assert_eq!(green.hint.as_deref(), Some(SCREEN_HINT));
+    // No camera: nothing can be picked, and no hint.
+    let none = background_section_view(&off(), &images, false, false, Some("darwin"));
+    assert_eq!(none.reason, Some(NO_CAMERA));
+    assert!(!none.choose_image);
+    assert_eq!(none.hint, None);
+    // Off the Mac the effects wait for their stage.
+    let windows = background_section_view(&off(), &images, true, false, Some("win32"));
+    assert_eq!(
+        windows.reason,
+        Some("Background effects come to Windows in a later update.")
+    );
+    // A key's tuning changes in place.
+    let keyed = background_with_key(
+        &with(json!({"mode": "blue"})),
+        &json!({"spillPct": 30}).as_object().cloned().unwrap(),
+    );
+    assert_eq!(
+        keyed["key"],
+        json!({"similarityPct": 40, "smoothnessPct": 8, "spillPct": 30})
+    );
+}
