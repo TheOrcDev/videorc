@@ -17,6 +17,20 @@ pub(crate) fn base64url(bytes: &[u8]) -> String {
     out
 }
 
+/// `encodeURIComponent`: every byte but the unreserved marks as `%XX`.
+pub(crate) fn encode_uri_component(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        let c = char::from(byte);
+        if c.is_ascii_alphanumeric() || "-_.!~*'()".contains(c) {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

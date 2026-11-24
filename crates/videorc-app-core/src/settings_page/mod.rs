@@ -23,6 +23,7 @@
 
 pub mod about;
 pub mod agents;
+pub mod obs_import;
 pub mod remote;
 
 /// The events the page follows: the chat rows' backend row
