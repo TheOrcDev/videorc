@@ -2,6 +2,7 @@
 
 pub mod command_palette;
 pub mod destinations;
+pub mod dialogs;
 pub mod go_live;
 pub mod guests;
 pub mod health;
