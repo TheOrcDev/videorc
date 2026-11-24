@@ -351,6 +351,129 @@ pub fn shortcut_recorder_step(
     }
 }
 
+// ── Settings → Shortcuts (`shortcuts-settings.tsx`) ─────────────────────
+
+pub const GLOBAL_TITLE: &str = "Global shortcuts";
+pub const GLOBAL_DESCRIPTION: &str = "Work system-wide, even when Videorc is in the background. Click a field and press the keys. Stream Deck hotkeys and F13 to F24 work too.";
+/// Linux on Wayland: the keys are kept for sessions that allow them.
+pub const GLOBAL_DESCRIPTION_UNAVAILABLE: &str =
+    "Kept for sessions that allow them, such as X11. Click a field and press the keys.";
+pub const SCENES_LABEL: &str = "Scenes";
+pub const APP_TITLE: &str = "App shortcuts";
+pub const APP_DESCRIPTION: &str = "Keys that work while Videorc is in front.";
+
+/// One recorder row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecorderRow {
+    pub action: String,
+    pub label: String,
+    /// The key set now (`None`: unassigned).
+    pub value: Option<String>,
+    /// Videorc's own key for the action, shown while nothing is set.
+    pub app_key: Option<AppKey>,
+    /// The OS refused the key: "Another app uses ⇧⌘R" under the field.
+    pub conflict: Option<String>,
+}
+
+/// The page as one value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortcutsView {
+    pub global_description: &'static str,
+    /// Why this session holds no global key (Linux on Wayland).
+    pub unavailable: Option<String>,
+    pub action_rows: Vec<RecorderRow>,
+    pub scene_rows: Vec<RecorderRow>,
+    /// The reference list: each group's rows with their keys as labels.
+    pub app_groups: Vec<(&'static str, Vec<(String, Vec<String>)>)>,
+}
+
+/// What the page reads.
+#[derive(Debug, Clone, Copy)]
+pub struct ShortcutsInput<'a> {
+    pub config: &'a crate::desktop::global_shortcuts::GlobalShortcutsConfig,
+    pub platform: Option<&'a str>,
+    /// `runtimeInfo.globalShortcutsUnavailable`.
+    pub unavailable: Option<&'a str>,
+    /// The system-audio device exists and is not unavailable.
+    pub system_audio_available: bool,
+    /// The saved scenes in order, as (id, name) (L7's list).
+    pub scenes: &'a [(String, String)],
+    /// The last registration: each action, true when its key took.
+    pub registered: &'a std::collections::BTreeMap<String, bool>,
+}
+
+/// `ShortcutsSettings`: the global shortcuts you record, beside every key
+/// that works inside Videorc. The recorders are the only home of a global
+/// binding, so the in-app list does not repeat them.
+pub fn shortcuts_view(input: ShortcutsInput<'_>) -> ShortcutsView {
+    use crate::desktop::accelerator::global_shortcut_conflict_reason;
+    use crate::desktop::global_shortcuts::{
+        global_shortcut_entries, global_shortcut_label, global_shortcut_rows, scene_shortcut_rows,
+    };
+    let entries = global_shortcut_entries(input.config, input.platform);
+    let value_of = |action: &str| {
+        entries
+            .iter()
+            .find(|(id, _)| id == action)
+            .and_then(|(_, value)| value.clone())
+    };
+    let failed = |action: &str| input.registered.get(action) == Some(&false);
+    let row = |action: &str, label: String, value: Option<String>| RecorderRow {
+        action: action.to_string(),
+        label,
+        conflict: global_shortcut_conflict_reason(value.as_deref(), input.platform, failed(action)),
+        app_key: global_row_app_key(action),
+        value,
+    };
+    let system_audio_bound = input
+        .config
+        .system_audio_toggle
+        .as_deref()
+        .is_some_and(|key| !key.is_empty());
+    let action_rows: Vec<RecorderRow> =
+        global_shortcut_rows(input.system_audio_available, system_audio_bound)
+            .into_iter()
+            .map(|action| row(action, global_shortcut_label(action), value_of(action)))
+            .collect();
+    let scene_rows: Vec<RecorderRow> =
+        scene_shortcut_rows(input.scenes, input.config, input.platform)
+            .into_iter()
+            .map(|scene| {
+                let mut scene_row = row(&scene.action, scene.label, Some(scene.accelerator));
+                scene_row.app_key = None;
+                scene_row
+            })
+            .collect();
+    let app_groups: Vec<(&'static str, Vec<(String, Vec<String>)>)> = shortcuts_by_group()
+        .into_iter()
+        .map(|(group, rows)| {
+            let rows: Vec<(String, Vec<String>)> = rows
+                .into_iter()
+                .map(|entry| {
+                    let keys: Vec<String> = entry
+                        .accelerators
+                        .iter()
+                        .map(|key| accelerator_label(Some(key.as_str()), input.platform))
+                        .collect();
+                    (entry.label, keys)
+                })
+                .collect();
+            (group.label(), rows)
+        })
+        .collect();
+    ShortcutsView {
+        global_description: if input.unavailable.is_some() {
+            GLOBAL_DESCRIPTION_UNAVAILABLE
+        } else {
+            GLOBAL_DESCRIPTION
+        },
+        unavailable: input.unavailable.map(str::to_string),
+        action_rows,
+        scene_rows,
+        app_groups,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,5 +656,85 @@ mod tests {
         ] {
             assert!(recorder.contains(line), "{line}");
         }
+    }
+
+    #[test]
+    fn the_settings_page_lists_recorders_then_the_reference() {
+        use crate::desktop::global_shortcuts::GlobalShortcutsConfig;
+        use std::collections::BTreeMap;
+        let config: GlobalShortcutsConfig = serde_json::from_value(serde_json::json!({
+            "recordToggle": "Cmd+Shift+R",
+            "scenes": { "b": "F15" }
+        }))
+        .unwrap();
+        let scenes = vec![
+            ("a".to_string(), "Intro".to_string()),
+            ("b".to_string(), "Talk".to_string()),
+        ];
+        let registered = BTreeMap::from([("record-toggle".to_string(), false)]);
+        let view = shortcuts_view(ShortcutsInput {
+            config: &config,
+            platform: MAC,
+            unavailable: None,
+            system_audio_available: false,
+            scenes: &scenes,
+            registered: &registered,
+        });
+        assert_eq!(view.global_description, GLOBAL_DESCRIPTION);
+        // System audio is not here and nothing is bound to it.
+        assert_eq!(view.action_rows.len(), 8);
+        let record = &view.action_rows[1];
+        assert_eq!(record.label, "Record / stop recording");
+        assert_eq!(record.value.as_deref(), Some("Cmd+Shift+R"));
+        assert_eq!(record.conflict.as_deref(), Some("Another app uses ⇧⌘R"));
+        assert_eq!(
+            record.app_key.as_ref().map(|key| key.accelerator.as_str()),
+            Some("Space")
+        );
+        let hide = &view.action_rows[0];
+        assert_eq!(hide.value.as_deref(), Some("Control+Alt+H"));
+        assert_eq!(hide.conflict, None);
+        assert_eq!(view.scene_rows.len(), 10);
+        assert_eq!(view.scene_rows[0].label, "Scene 1 · Intro");
+        assert_eq!(view.scene_rows[9].label, "Talk");
+        assert_eq!(view.app_groups[0].0, "Navigation");
+        assert_eq!(
+            view.app_groups[0].1[0],
+            ("Studio".to_string(), vec!["⌘1".to_string()])
+        );
+
+        let wayland = shortcuts_view(ShortcutsInput {
+            config: &config,
+            platform: Some("linux"),
+            unavailable: Some("No key grab here."),
+            system_audio_available: true,
+            scenes: &[],
+            registered: &BTreeMap::new(),
+        });
+        assert_eq!(wayland.global_description, GLOBAL_DESCRIPTION_UNAVAILABLE);
+        assert_eq!(wayland.unavailable.as_deref(), Some("No key grab here."));
+        assert_eq!(wayland.action_rows.len(), 9);
+        assert_eq!(
+            wayland.scene_rows[0].value.as_deref(),
+            Some("Control+Alt+Shift+1")
+        );
+    }
+
+    #[test]
+    fn the_pages_words_are_the_renderers() {
+        let page = include_str!(
+            "../../../apps/desktop/src/renderer/src/components/settings/shortcuts-settings.tsx"
+        );
+        for line in [
+            GLOBAL_TITLE,
+            GLOBAL_DESCRIPTION,
+            GLOBAL_DESCRIPTION_UNAVAILABLE,
+            SCENES_LABEL,
+            APP_TITLE,
+            APP_DESCRIPTION,
+        ] {
+            assert!(page.contains(line), "{line}");
+        }
+        assert!(page.contains("where: 'in Studio'"));
     }
 }
