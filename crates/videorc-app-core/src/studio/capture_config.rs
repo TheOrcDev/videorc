@@ -166,7 +166,7 @@ pub const SYSTEM_AUDIO_GAIN_DB_MAX: f64 = 12.0;
 
 const DEFAULT_VIDEO_PRESET: &str = "tutorial-1080p30";
 const DEFAULT_LAST_HORIZONTAL_PRESET: &str = "screen-camera";
-const DEFAULT_LAST_VERTICAL_PRESET: &str = "vertical-camera-top";
+pub const DEFAULT_LAST_VERTICAL_PRESET: &str = "vertical-camera-top";
 
 fn video_preset_spec(name: &str) -> Option<(&'static str, u32, u32, u32, u32)> {
     VIDEO_PRESETS
@@ -1741,6 +1741,12 @@ impl CaptureConfigView {
         };
         Self { config, issues }
     }
+}
+
+/// A built-in layout's wire id as the protocol's `LayoutPreset`, or none
+/// for an id this build doesn't know.
+pub fn parse_preset(id: &str) -> Option<videorc_protocol::LayoutPreset> {
+    serde_json::from_value(Value::String(id.to_string())).ok()
 }
 
 #[cfg(test)]
