@@ -975,7 +975,7 @@ mod tests {
         assert_eq!(cached, first);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         // A publish of that broadcast makes its END due again.
-        lifecycle.forget_x_end(&key);
+        lock(&lifecycle.book).x_end.forget(&key);
         let _ = lifecycle
             .once(|book| &mut book.x_end, key, start(Arc::clone(&calls)))
             .await;

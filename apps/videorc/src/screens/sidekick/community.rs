@@ -675,7 +675,7 @@ fn render_person_card(
         .into_any_element()
 }
 
-fn forget_dialog(state: &CommunityState, cx: &mut Context<SidekickScreen>) -> impl IntoElement {
+fn forget_dialog(state: &CommunityState, cx: &mut Context<SidekickScreen>) -> Dialog {
     let entity = cx.entity();
     let copy = forget_copy(&state.forget_name);
     Dialog::new("forget-person", &state.forget, copy.title.clone())
@@ -709,10 +709,7 @@ fn forget_dialog(state: &CommunityState, cx: &mut Context<SidekickScreen>) -> im
         )
 }
 
-fn forget_everyone_dialog(
-    state: &CommunityState,
-    cx: &mut Context<SidekickScreen>,
-) -> impl IntoElement {
+fn forget_everyone_dialog(state: &CommunityState, cx: &mut Context<SidekickScreen>) -> Dialog {
     let entity = cx.entity();
     Dialog::new(
         "forget-everyone",
