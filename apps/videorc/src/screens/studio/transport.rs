@@ -29,11 +29,12 @@ use videorc_app_core::studio::session::{END_LIVESTREAM_LABEL, StopConfirmation};
 use videorc_app_core::studio::transport::{RecordButtonState, TransportView, stop_overrun_copy};
 use videorc_app_core::{BackendClient, StopOrigin, Studio, StudioSnapshot};
 use videorc_kit::icon::{IconName, icon};
-use videorc_kit::theme::{self, TypeScale, hsla};
+use videorc_kit::shortcut_keys::ShortcutStyle;
+use videorc_kit::theme::{self, TypeScale, faded_over, hsla};
 use videorc_kit::tokens::{size, text};
 use videorc_kit::{Alert, AlertVariant, Button, ButtonSize, ButtonVariant, ShortcutKeys};
 
-use super::space::ToggleRecord;
+use super::space::SPACE;
 use crate::app::bridge::Mirror;
 use crate::lcd;
 
@@ -285,6 +286,33 @@ impl Transport {
     }
 }
 
+/// The glyph before a transport button's words (`record-button.tsx`,
+/// `go-live-button.tsx`): Record or Broadcast while it starts, Stop once it
+/// stops a session. Electron draws them at Phosphor's fill weight; the kit
+/// has the filled Stop only.
+fn record_glyph(face: &RecordFace) -> IconName {
+    if face.shortcut {
+        IconName::Record
+    } else {
+        IconName::StopFill
+    }
+}
+
+fn go_live_glyph(face: &GoLiveFace) -> IconName {
+    if face.ends_livestream {
+        IconName::StopFill
+    } else {
+        IconName::Broadcast
+    }
+}
+
+/// Space's chip on Record. The page binds [`SPACE`] to `ToggleRecord` in its
+/// own key context, which the keymap only reports while the page holds the
+/// focus, so the chip reads the same constant the binding is made from.
+fn space_keys() -> ShortcutKeys {
+    ShortcutKeys::keystrokes(SPACE)
+}
+
 impl Transport {
     fn render_default(
         &self,
@@ -297,16 +325,35 @@ impl Transport {
         let record = RecordFace::of(view, outputs);
         let stops = record.stops;
         let stops_cloud = record.stops_cloud;
+        // The glyph takes the metal's ink, pre-blended like the words when
+        // the button is off.
+        let ink = |color, disabled: bool| {
+            hsla(if disabled {
+                faded_over(color, theme.glass_solid, 0.5)
+            } else {
+                color
+            })
+        };
+        let record_ink = theme.live_foreground;
         let record_button = Button::new("session-record")
             .variant(ButtonVariant::Record)
             .size(ButtonSize::Lg)
             .lit(record.lit)
             .disabled(record.disabled)
-            .label(record.label)
+            .accessibility_label(record.label)
+            .child(icon(
+                record_glyph(&record),
+                16.,
+                ink(record_ink, record.disabled),
+            ))
+            .child(record.label)
+            // `ml-0.5` beside the words.
             .when(record.shortcut, |button| {
-                button.child(ShortcutKeys::for_action(&ToggleRecord))
+                button.child(div().ml(px(2.)).child(space_keys().on_filled(record_ink)))
             })
-            .when_some(record.reason, |button, reason| button.tooltip(reason))
+            .when_some(record.reason.clone(), |button, reason| {
+                button.tooltip(reason)
+            })
             .on_click(cx.listener(move |this, _, _, _| {
                 if stops_cloud {
                     this.stop_cloud_recording();
@@ -323,13 +370,20 @@ impl Transport {
             .child(div().flex_1().min_w_0().child(record_button));
         if let Some(go_live) = GoLiveFace::of(view, outputs) {
             let ends = go_live.ends_livestream;
+            let glyph = go_live_glyph(&go_live);
             buttons = buttons.child(
                 div().flex_1().min_w_0().child(
                     Button::new("go-live-button")
                         .variant(ButtonVariant::GoLive)
                         .size(ButtonSize::Lg)
                         .disabled(go_live.disabled)
-                        .label(go_live.label)
+                        .accessibility_label(go_live.label)
+                        .child(icon(
+                            glyph,
+                            16.,
+                            ink(theme.chrome_copper_ink, go_live.disabled),
+                        ))
+                        .child(go_live.label)
                         .when_some(go_live.reason, |button, reason| button.tooltip(reason))
                         .on_click(cx.listener(move |this, _, _, _| {
                             if ends {
@@ -433,19 +487,20 @@ impl Transport {
                     record.label,
                     lcd::KeyTone::Record,
                     record.disabled,
-                    Some(icon(IconName::Stop, 14., record_ink).into_any_element()),
+                    Some(icon(IconName::StopFill, 14., record_ink).into_any_element()),
                     None,
                     cx.listener(move |this, _, _, _| this.stop(StopOrigin::Button)),
                 ))
         } else {
-            let shortcut = record
-                .shortcut
-                .then(|| ShortcutKeys::for_action(&ToggleRecord).into_any_element());
-            let record_icon = if record.stops || record.stops_cloud {
-                IconName::Stop
-            } else {
-                IconName::Record
-            };
+            // `ShortcutKeys variant="text"` at 70 %: the key in the key's
+            // own ink, quieter than its words.
+            let shortcut = record.shortcut.then(|| {
+                div()
+                    .opacity(0.7)
+                    .child(space_keys().style(ShortcutStyle::Text))
+                    .into_any_element()
+            });
+            let record_icon = record_glyph(&record);
             let mut row = div()
                 .flex()
                 .flex_wrap()
@@ -471,13 +526,14 @@ impl Transport {
                 ));
             if let Some(go_live) = go_live {
                 let ends = go_live.ends_livestream;
+                let glyph = go_live_glyph(&go_live);
                 row = row.child(lcd::key(
                     "go-live-button",
                     theme,
                     go_live.label,
                     lcd::KeyTone::Ink,
                     go_live.disabled,
-                    Some(icon(IconName::Broadcast, 14., ink).into_any_element()),
+                    Some(icon(glyph, 14., ink).into_any_element()),
                     None,
                     cx.listener(move |this, _, _, _| {
                         if ends {

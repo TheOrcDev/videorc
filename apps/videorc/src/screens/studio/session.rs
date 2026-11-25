@@ -508,12 +508,17 @@ impl SessionSection {
                 .items_center()
                 .gap(px(6.))
                 .child(StatusDot::new((fact.id, 0usize)).tone(tone))
-                .child(div().min_w_0().truncate().child(fact.value.clone()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(lcd::caps(fact.value.clone())),
+                )
                 .into_any_element(),
             None => div()
                 .min_w_0()
                 .truncate()
-                .child(fact.value.clone())
+                .child(lcd::caps(fact.value.clone()))
                 .into_any_element(),
         };
         if let Some(page) = fact.opens {
@@ -539,7 +544,7 @@ impl SessionSection {
                     div()
                         .flex_shrink_0()
                         .text_color(lcd::dim(theme))
-                        .child(fact.label.clone()),
+                        .child(lcd::caps(fact.label.clone())),
                 )
                 .child(div().min_w_0().text_color(lcd::lit(theme)).child(value))
                 .into_any_element()

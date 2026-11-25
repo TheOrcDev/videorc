@@ -96,6 +96,10 @@ pub fn columns(width: f32) -> usize {
     (((width + CARD_GAP_PX) / (CARD_MIN_PX + CARD_GAP_PX)).floor() as usize).max(1)
 }
 
+/// A card's name: `text-sm font-medium` (`scene-card.tsx`
+/// `scene-card-label`).
+const NAME_TEXT_PX: f32 = 14.;
+
 /// Each card's width: the row shared out (`1fr`), never under the minimum.
 pub fn card_width(width: f32) -> f32 {
     let count = columns(width);
@@ -215,7 +219,8 @@ impl Render for SceneDrag {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .type_scale(text::LABEL)
+                    .text_size(px(NAME_TEXT_PX))
+                    .line_height(px(20.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(name_ink)
                     .child(card.name.clone()),
@@ -1209,7 +1214,8 @@ impl ScenesSection {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .type_scale(text::LABEL)
+                    .text_size(px(NAME_TEXT_PX))
+                    .line_height(px(20.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(name_ink)
                     .child(card.name.clone())
@@ -1278,7 +1284,7 @@ impl ScenesSection {
             && text_width(
                 window,
                 &card.name,
-                text::LABEL.size,
+                NAME_TEXT_PX,
                 FontWeight::MEDIUM,
                 name_ink,
             ) > name_room + 0.5;
