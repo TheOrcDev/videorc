@@ -259,6 +259,8 @@ pub enum IconName {
     PauseFill,
     /// `ZoomInIcon` (Phosphor's MagnifyingGlassPlus): the Bubble zoom.
     MagnifyingGlassPlus,
+    /// `LinkIcon` (Phosphor's LinkSimple): Guests' invite link.
+    LinkSimple,
 }
 
 impl IconName {
@@ -429,6 +431,7 @@ impl IconName {
             IconName::Pause => include_bytes!("../icons/pause.svg"),
             IconName::PauseFill => include_bytes!("../icons/pause-fill.svg"),
             IconName::MagnifyingGlassPlus => include_bytes!("../icons/magnifying-glass-plus.svg"),
+            IconName::LinkSimple => include_bytes!("../icons/link-simple.svg"),
         }
     }
 }
