@@ -31,6 +31,8 @@ const PORTAL_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// the first capture ended, so every later portal call waited forever on a
 /// dead connection (ogre, 2026-09-27: the second start hung, and
 /// `session.start` queued behind that screen transition until it timed out).
+/// ashpd now runs on `async-io` (zbus's own executor thread, plan 260), which
+/// takes that hazard away; the one runtime stays, as it costs nothing.
 pub fn portal_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
     static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
     RUNTIME
