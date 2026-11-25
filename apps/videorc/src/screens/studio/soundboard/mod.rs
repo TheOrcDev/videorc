@@ -397,11 +397,13 @@ impl SoundboardSection {
 
     pub(crate) fn toggle_speech_mute(&mut self, cx: &mut Context<Self>) {
         self.room_routing.program.speech_muted = !self.room_routing.program.speech_muted;
+        self.push_program();
         cx.notify();
     }
 
     pub(crate) fn toggle_auxiliary_mute(&mut self, cx: &mut Context<Self>) {
         self.room_routing.program.auxiliary_muted = !self.room_routing.program.auxiliary_muted;
+        self.push_program();
         cx.notify();
     }
 
@@ -413,12 +415,32 @@ impl SoundboardSection {
 
     pub(crate) fn set_speech_gain(&mut self, gain: f32, cx: &mut Context<Self>) {
         self.room_routing.program.speech_gain = gain.clamp(0., 1.);
+        self.push_program();
         cx.notify();
     }
 
     pub(crate) fn set_auxiliary_gain(&mut self, gain: f32, cx: &mut Context<Self>) {
         self.room_routing.program.auxiliary_gain = gain.clamp(0., 1.);
+        self.push_program();
         cx.notify();
+    }
+
+    /// Plan 260 S1.8 (L1): the program audio routing goes to the backend's
+    /// room while it is open (`cloud.room.routing.set`, as the renderer's
+    /// room sent it on to the program pages that route).
+    fn push_program(&self) {
+        if self.room_aux.is_none() {
+            return;
+        }
+        let params =
+            videorc_app_core::studio::room_media::routing_params(&self.room_routing.program);
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            let _ = studio
+                .backend()
+                .livestream_request(videorc_app_core::studio::room_media::ROUTING_SET, params)
+                .await;
+        });
     }
 
     fn push_aux(&self, _cx: &mut Context<Self>) {

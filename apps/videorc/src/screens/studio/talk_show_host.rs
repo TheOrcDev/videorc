@@ -24,7 +24,8 @@ use videorc_app_core::guests::session::ControllerFacts;
 use videorc_app_core::library::cloud::{CloudRecordingStop, CloudRecordingWatch};
 use videorc_app_core::studio::room_frames::{self, FrameCursor, FramePoll, RemoteSource};
 use videorc_app_core::studio::room_media::{
-    self, CAMERA_SET, HTML_SET, MICROPHONE_SET, PRESENTATION_EVENT, RoomMedia,
+    self, CAMERA_SET, HTML_SET, MICROPHONE_SET, MONITOR_SET, PRESENTATION_EVENT, RETURN_SET,
+    RoomMedia, SCREEN_SET,
 };
 use videorc_app_core::studio::screen_views::TalkShowRoomView;
 use videorc_app_core::{BackendEvent, ConnectionState};
@@ -64,6 +65,9 @@ pub struct TalkShowRoomHost {
     /// R3: each person's latest picture (camera or screen) and the Program
     /// monitor's, with its cursor, while the room publishes them.
     frames: HashMap<(String, RemoteSource), (FrameCursor, Arc<Image>)>,
+    /// R4: the Program monitor takes the runner's return, and Listen.
+    monitor: bool,
+    listening: bool,
 }
 
 impl TalkShowRoomHost {
@@ -182,6 +186,8 @@ impl TalkShowRoomHost {
             enabled_epoch: 0,
             sent: [None, None, None],
             frames: HashMap::new(),
+            monitor: false,
+            listening: false,
         };
         host.on_talk_show(&initial);
         host
@@ -279,6 +285,101 @@ impl TalkShowRoomHost {
             }
             FramePoll::Unchanged => {}
         }
+    }
+
+    // --- R4: the Show stage's room controls (`useTalkShowRoom`'s) ---
+
+    /// Shares a screen or window into the room, by its native id (the
+    /// device list's `screen:…` / `window:…`; the backend shares it while
+    /// the preview runs it, behind Hide screen). The Show stage puts it on
+    /// stage after (`addScreen`). Answers why not.
+    pub fn share_screen(
+        &self,
+        source_id: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Result<(), String>> {
+        let Some(params) = room_media::screen_params(source_id) else {
+            return gpui::Task::ready(
+                Err("This screen can't be shared into the room here.".into()),
+            );
+        };
+        let request = self.request(SCREEN_SET, params);
+        cx.background_executor().spawn(async move {
+            match request.await {
+                Ok(Ok(answer)) if room_media::held(&answer) => Ok(()),
+                Ok(Ok(_)) => Err("The room is not open.".into()),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err("The room is not open.".into()),
+            }
+        })
+    }
+
+    /// Takes the host's screen share down (the Show stage takes it off
+    /// stage).
+    pub fn stop_screen_share(&self) {
+        let _ = self.request(SCREEN_SET, room_media::stop_screen_params());
+    }
+
+    /// The Program monitor on or off: the backend's room takes the runner's
+    /// return (heard only with Listen), and the runner opens it. A managed
+    /// show has no return: its monitor draws the stage (plan 234 D6).
+    pub fn set_monitor(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.managed_show() {
+            return;
+        }
+        self.monitor = enabled;
+        let _ = self.request(
+            MONITOR_SET,
+            room_media::monitor_params(enabled, self.listening),
+        );
+        let _ = self.request(RETURN_SET, room_media::return_params(enabled));
+        cx.notify();
+    }
+
+    /// Listen to the Program monitor's return (S1.8d d5).
+    pub fn set_monitor_listening(&mut self, listening: bool, cx: &mut Context<Self>) {
+        self.listening = listening;
+        if self.monitor {
+            let _ = self.request(MONITOR_SET, room_media::monitor_params(true, listening));
+        }
+        cx.notify();
+    }
+
+    pub fn monitor(&self) -> bool {
+        self.monitor
+    }
+
+    pub fn monitor_listening(&self) -> bool {
+        self.listening
+    }
+
+    fn managed_show(&self) -> bool {
+        let node = self
+            .studio
+            .cloud_now()
+            .status
+            .and_then(|status| status.show)
+            .map(|show| show.node_id);
+        videorc_app_core::guests::program::is_managed_show(node.as_deref())
+    }
+
+    /// One room request on the core's runtime; the answer, or why not.
+    fn request(
+        &self,
+        method: &'static str,
+        params: Value,
+    ) -> tokio::task::JoinHandle<Result<Value, String>> {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            studio
+                .backend()
+                .request(method, params)
+                .await
+                .map_err(|error| {
+                    eprintln!("[videorc-app] Talk-show host: {method}: {error}");
+                    error.to_string()
+                })
+        })
     }
 
     /// The devices are held after a takeover from another device (plan 249
