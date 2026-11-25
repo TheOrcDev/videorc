@@ -11,6 +11,7 @@
 //! inspector beside them from 940 px of page width (`@min-[940px]/page`).
 
 mod dialogs;
+mod guests;
 mod hide_screen;
 mod layout;
 mod list;
@@ -68,6 +69,9 @@ pub struct ScenePage {
     picker: DialogHandle,
     picker_search: Entity<InputState>,
     picking: Option<picker::Picking>,
+    /// Guests in the room….
+    guests: DialogHandle,
+    guesting: Option<guests::Guesting>,
     /// Draws again when the switch status line is due (no timer lives in
     /// the Studio).
     status_timer: Option<Task<()>>,
@@ -155,6 +159,8 @@ impl ScenePage {
             picker: DialogHandle::new(false),
             picker_search,
             picking: None,
+            guests: DialogHandle::new(false),
+            guesting: None,
             status_timer: None,
         };
         let snapshot = page.studio.watch().borrow().clone();
@@ -231,5 +237,6 @@ impl Render for ScenePage {
             .child(self.rename_dialog(window, cx))
             .child(self.delete_dialog(cx))
             .child(self.picker_dialog(window, cx))
+            .child(self.guests_dialog(window, cx))
     }
 }

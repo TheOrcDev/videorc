@@ -312,6 +312,21 @@ impl ScenePage {
         }
         items.push(save_audio);
 
+        let guests_id = row.id.clone();
+        let guests_page = page.clone();
+        let mut guests = KebabMenuItem::new(
+            "guests",
+            super::guests::copy::MENU_ITEM,
+            move |window, cx| {
+                let _ = guests_page.update(cx, |page, cx| page.open_guests(&guests_id, window, cx));
+            },
+        )
+        .group("keeps");
+        if let Some(reason) = read_only_reason {
+            guests = guests.disabled(true).disabled_reason(reason);
+        }
+        items.push(guests);
+
         let duplicate_id = row.id.clone();
         let duplicate_page = page.clone();
         let mut duplicate = KebabMenuItem::new("duplicate", copy::DUPLICATE, move |_, cx| {
