@@ -6,7 +6,9 @@
 //! - **mode** and **open**: a Preview left floating floats again at launch
 //!   (`restorePreviewWindowOnLaunch`, `initialPreviewWindowMode`: a saved
 //!   mode wins; without one an install that ran before floats and a new one
-//!   docks). Show here, or closing the window, docks it.
+//!   docks). Show here docks it. Close Preview, closing the window, or
+//!   Window → Preview closes it (P131, P1506, `open: false`): the Studio
+//!   says so, and the next launch opens it closed, docked or floating.
 //! - **alwaysOnTop**: Keep on top of other apps, off unless turned on.
 //!
 //! Smoke and probe runs neither restore nor save (`persistence_enabled`).
@@ -20,7 +22,7 @@ use gpui::{App, Bounds, Pixels, Window, WindowBounds, px, size};
 use serde_json::{Map, Value};
 use videorc_app_core::desktop::window_frames::{
     PREVIEW_WINDOW_PREFS_FILE, PreviewWindowPrefs, Rect, WindowPrefsFile, clamp_frame_to_work_area,
-    persistence_enabled,
+    close_prefs, persistence_enabled,
 };
 use videorc_app_core::{Level, Logger};
 
@@ -35,12 +37,24 @@ pub const MIN_HEIGHT: f32 = 208.;
 /// `initialPreviewWindowMode` and `restorePreviewWindowOnLaunch`: whether a
 /// launch opens the Preview in its own window.
 pub fn floats_at_launch(prefs: &PreviewWindowPrefs) -> bool {
-    let floating = match prefs.mode.as_deref() {
+    starts_floating(prefs) && prefs.restore_on_launch()
+}
+
+/// A Preview left closed (`open: false`): the launch shows it closed, as
+/// Electron's Studio does when `restorePreviewWindowOnLaunch` opens
+/// nothing, docked or floating.
+pub fn closed_at_launch(prefs: &PreviewWindowPrefs) -> bool {
+    !prefs.restore_on_launch()
+}
+
+/// The mode a launch starts in (`initialPreviewWindowMode`): a saved mode
+/// wins; without one an install that ran before floats and a new one docks.
+pub fn starts_floating(prefs: &PreviewWindowPrefs) -> bool {
+    match prefs.mode.as_deref() {
         Some("floating") => true,
         Some("docked") => false,
         _ => prefs.existing_install,
-    };
-    floating && prefs.restore_on_launch()
+    }
 }
 
 /// The Preview window's file, and the last windowed frame it had.
@@ -74,6 +88,16 @@ impl PreviewFrame {
     /// Whether this launch floats the Preview (never in a smoke run).
     pub fn floats_at_launch(&self) -> bool {
         self.inner.borrow().prefs.enabled() && floats_at_launch(&self.load())
+    }
+
+    /// Whether this launch shows the Preview closed (never in a smoke run).
+    pub fn closed_at_launch(&self) -> bool {
+        self.inner.borrow().prefs.enabled() && closed_at_launch(&self.load())
+    }
+
+    /// Whether a Preview closed at launch opens again in its own window.
+    pub fn reopens_floating(&self) -> bool {
+        starts_floating(&self.load())
     }
 
     /// Keep on top of other apps.
@@ -119,12 +143,20 @@ impl PreviewFrame {
         }
     }
 
-    /// Show here, or the window closed: the Preview is docked, and the
-    /// floating frame it had is kept for next time.
+    /// Show here: the Preview is docked and open, and the floating frame it
+    /// had is kept for next time.
     pub fn docked(&self) {
         let mut patch = self.frame_patch();
         patch.insert("mode".into(), Value::from("docked"));
+        patch.insert("open".into(), Value::Bool(true));
         self.write(patch);
+    }
+
+    /// Close Preview, or the window closed by hand (P131): the frame it had
+    /// and `open: false` (`previewWindowClosePrefs`); the mode stays.
+    pub fn closed(&self) {
+        let last = self.inner.borrow().last;
+        self.write(close_prefs(last, false));
     }
 
     /// The app quits with the Preview floating: its frame is saved, and
@@ -178,8 +210,13 @@ mod tests {
 
     #[test]
     fn a_preview_closed_by_hand_stays_closed() {
-        assert!(!floats_at_launch(&prefs(
-            json!({ "mode": "floating", "open": false })
-        )));
+        let closed = prefs(json!({ "mode": "floating", "open": false }));
+        assert!(!floats_at_launch(&closed));
+        assert!(closed_at_launch(&closed));
+        assert!(starts_floating(&closed));
+        let docked = prefs(json!({ "mode": "docked", "open": false }));
+        assert!(closed_at_launch(&docked));
+        assert!(!starts_floating(&docked));
+        assert!(!closed_at_launch(&prefs(json!({ "mode": "floating" }))));
     }
 }

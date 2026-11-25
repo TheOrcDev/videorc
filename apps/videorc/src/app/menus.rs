@@ -14,8 +14,10 @@
 //! Copy, Paste and Select All also carry GPUI's `OsAction` (AppKit's
 //! `cut:` and the rest, which save panels need). Paste and Match Style is
 //! Paste: a GPUI field only ever takes plain text. Edit → Speech (Start and
-//! Stop Speaking) has no GPUI form yet, so the empty submenu is left out
-//! (`docs/gpui/parity.md`, P1498).
+//! Stop Speaking, P1498) speaks the focused field's selection, or all its
+//! text, with macOS's speech synthesizer (`super::speech`,
+//! `platform::macos::speech`): a GPUI field is not the AppKit text view the
+//! roles' selectors would reach.
 
 use gpui::{Action, App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, actions};
 use gpui_base::input as text;
@@ -38,6 +40,8 @@ actions!(
         Zoom,
         CloseWindow,
         BringAllToFront,
+        StartSpeaking,
+        StopSpeaking,
         ShowPage1,
         ShowPage2,
         ShowPage3,
@@ -144,6 +148,8 @@ fn role_item(role: MenuRole) -> RoleItem {
         MenuRole::Zoom => RoleItem::Action(Box::new(Zoom)),
         MenuRole::Close => RoleItem::Action(Box::new(CloseWindow)),
         MenuRole::Front => RoleItem::Action(Box::new(BringAllToFront)),
+        MenuRole::StartSpeaking => RoleItem::Action(Box::new(StartSpeaking)),
+        MenuRole::StopSpeaking => RoleItem::Action(Box::new(StopSpeaking)),
         _ => RoleItem::Skip,
     }
 }
@@ -223,7 +229,7 @@ fn items(cx: &App, entries: &[MenuEntry], bindings: &mut Vec<KeyBinding>) -> Vec
             MenuEntry::Submenu {
                 items: children, ..
             } => {
-                // A submenu with nothing GPUI can show (Speech) stays out.
+                // A submenu with nothing GPUI can show stays out.
                 let children = items(cx, children, bindings);
                 if !children.is_empty() {
                     out.push(MenuItem::submenu(Menu {
@@ -315,6 +321,9 @@ fn windows() -> Vec<WindowId> {
 /// The roles' handlers, and the commands that work now. Pages and windows
 /// get theirs as they are ported.
 pub fn install(cx: &mut App) {
+    // Before any window: Start Speaking reads the text fields it follows.
+    #[cfg(target_os = "macos")]
+    super::speech::install(cx);
     cx.bind_keys([
         KeyBinding::new(
             "secondary-k",
@@ -347,6 +356,23 @@ pub fn install(cx: &mut App) {
     cx.on_action(|_: &OpenReleaseNotes, cx| {
         cx.open_url(&release_notes_url(env!("CARGO_PKG_VERSION")))
     });
+    #[cfg(target_os = "macos")]
+    {
+        cx.on_action(|_: &StartSpeaking, cx| {
+            let text = cx.active_window().and_then(|window| {
+                window
+                    .update(cx, |_, window, cx| super::speech::focused_text(window, cx))
+                    .ok()
+                    .flatten()
+            });
+            if let Some(text) = text
+                && let Err(error) = crate::platform::macos::speech::start_speaking(&text)
+            {
+                eprintln!("[videorc-app] Start Speaking: {error}");
+            }
+        });
+        cx.on_action(|_: &StopSpeaking, _| crate::platform::macos::speech::stop_speaking());
+    }
 }
 
 fn with_active_window(cx: &mut App, f: impl FnOnce(&mut gpui::Window)) {

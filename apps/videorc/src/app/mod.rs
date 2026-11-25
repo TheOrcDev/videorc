@@ -19,3 +19,5 @@ pub mod menus;
 pub mod permissions;
 pub mod shell;
 pub mod sleep;
+#[cfg(target_os = "macos")]
+pub mod speech;

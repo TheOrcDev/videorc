@@ -2213,11 +2213,12 @@ To fix before Phase 3 ticks these lines on macOS:
   what its key does there; before this, they dispatched app actions nothing
   handled, so the menu showed them disabled. Paste and Match Style is Paste
   (a GPUI field only takes plain text); Delete is the field's Delete.
-- **P1498, Edit → Speech (Start Speaking, Stop Speaking): left out.** GPUI
-  0.3.14 has no form for `startSpeaking:`, and a GPUI field is not an
-  AppKit text view the selector could reach. Planned fix: speak the focused
-  field's selection with `AVSpeechSynthesizer` once the kit's field exposes
-  its selected text. The empty Speech submenu is no longer shown.
+- **P1498, Edit → Speech (Start Speaking, Stop Speaking): in code, not
+  yet checked by eye** (plan 260 Phase 4, L4). GPUI 0.3.14 has no form for
+  `startSpeaking:`, and a GPUI field is not an AppKit text view the selector
+  could reach, so Start Speaking speaks the focused field's selection (or
+  all its text) with `NSSpeechSynthesizer`, the synthesizer the roles use;
+  Stop Speaking stops it (`app/speech.rs`, `platform/macos/speech.rs`).
 - **P1494, "About Videorc": in code, not yet checked by eye.** It shows
   macOS's standard About panel (`orderFrontStandardAboutPanel:`, the
   bundle's name, version and credits), as Electron's `about` role.

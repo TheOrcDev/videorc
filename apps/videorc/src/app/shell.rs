@@ -282,6 +282,12 @@ impl Shell {
                     this.first_run
                         .update(cx, |setup, cx| setup.open_replay(return_to, cx));
                 }
+                // Open/Close Preview (macOS only, as the row is).
+                #[cfg(target_os = "macos")]
+                Command::Preview => this
+                    .preview
+                    .update(cx, |preview, cx| preview.toggle_open(cx)),
+                #[cfg(not(target_os = "macos"))]
                 Command::Preview => this
                     .preview
                     .update(cx, |preview, cx| preview.toggle_floating(cx)),
