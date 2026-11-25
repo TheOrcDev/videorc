@@ -242,6 +242,8 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     // L6: the session player's layer (set, displayed, slot), as the live
     // preview's geometry oracle reads it.
     "session-player-geometry",
+    // L6: open a recording in the Library's player (its Markers item).
+    "session-player-open",
     // S2.3b: the Studio slot's rect, which Electron's probes read from the
     // DOM with `eval-js`.
     "studio-dock-slot",
