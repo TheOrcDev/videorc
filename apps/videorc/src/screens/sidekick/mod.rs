@@ -633,11 +633,11 @@ impl SidekickScreen {
 
     pub(crate) fn refresh_community(&mut self, cx: &mut Context<Self>) {
         let backend = self.studio.backend().clone();
-        let query = self
+        let (query, filter, sort) = self
             .community
             .as_ref()
-            .map(|c| c.search.read(cx).value().to_string())
-            .unwrap_or_default();
+            .map(|c| (c.search.read(cx).value().to_string(), c.filter, c.sort))
+            .unwrap_or((String::new(), "regulars", "streams"));
         let query = query.trim().to_string();
         let job = self.runtime.spawn(async move {
             let summary = backend
@@ -645,7 +645,7 @@ impl SidekickScreen {
                 .await
                 .ok()
                 .and_then(|value| serde_json::from_value::<CommunitySummary>(value).ok());
-            let mut list_params = json!({ "filter": "everyone", "sort": "streams", "limit": 100 });
+            let mut list_params = json!({ "filter": filter, "sort": sort, "limit": 100 });
             if !query.is_empty() {
                 list_params["query"] = json!(query);
             }
@@ -729,8 +729,14 @@ impl SidekickScreen {
         .detach();
     }
 
-    pub(crate) fn select_community_person(&mut self, person_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn select_community_person(
+        &mut self,
+        person_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let backend = self.studio.backend().clone();
+        let asked = person_id.clone();
         let job = self.runtime.spawn(async move {
             backend
                 .request("cohost.community.person", json!({ "personId": person_id }))
@@ -738,17 +744,20 @@ impl SidekickScreen {
                 .ok()
                 .and_then(|value| serde_json::from_value::<PersonDetail>(value).ok())
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(person) = job.await else {
                 return;
             };
-            let _ = this.update(cx, |screen, cx| {
-                if let Some(community) = screen.community.as_mut() {
-                    community.selected = person;
-                    community.linking = false;
-                    community.link_hits.clear();
+            let _ = this.update_in(cx, |screen, window, cx| {
+                // A card opened on someone else since: this answer is stale.
+                let current = screen
+                    .community
+                    .as_ref()
+                    .and_then(|community| community.opening.as_ref())
+                    .is_some_and(|(id, _)| *id == asked);
+                if current {
+                    screen.show_community_person(person, window, cx);
                 }
-                cx.notify();
             });
         })
         .detach();
@@ -758,34 +767,21 @@ impl SidekickScreen {
         &mut self,
         person_id: String,
         is_bot: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let status = if is_bot { "normal" } else { "bot" };
-        let backend = self.studio.backend().clone();
-        let job = self.runtime.spawn(async move {
-            backend
-                .request(
-                    "cohost.community.update",
-                    json!({ "personId": person_id, "status": status }),
-                )
-                .await
-                .ok()
-                .and_then(|value| serde_json::from_value::<PersonDetail>(value).ok())
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(person) = job.await else {
-                return;
-            };
-            let _ = this.update(cx, |screen, cx| {
-                if let Some(community) = screen.community.as_mut() {
-                    if let Some(person) = person {
-                        community.selected = Some(person);
-                    }
-                }
-                screen.refresh_community(cx);
-            });
-        })
-        .detach();
+        self.community_card_request(
+            community::CardCall {
+                method: "cohost.community.update",
+                params: json!({ "personId": person_id, "status": status }),
+                action: "update",
+                object: None,
+                then: community::CardThen::Person,
+            },
+            window,
+            cx,
+        );
     }
 
     pub(crate) fn ask_forget_person(
@@ -798,6 +794,8 @@ impl SidekickScreen {
         if let Some(community) = self.community.as_mut() {
             community.forget_id = Some(person_id);
             community.forget_name = name;
+            // The question takes the card's place (kit dialogs don't stack).
+            community.person.close(window, cx);
             community.forget.open(window, cx);
         }
         cx.notify();
@@ -856,35 +854,20 @@ impl SidekickScreen {
         &mut self,
         person_id: String,
         other_person_id: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let backend = self.studio.backend().clone();
-        let job = self.runtime.spawn(async move {
-            backend
-                .request(
-                    "cohost.community.link",
-                    json!({ "personId": person_id, "otherPersonId": other_person_id }),
-                )
-                .await
-                .ok()
-                .and_then(|value| serde_json::from_value::<PersonDetail>(value).ok())
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(person) = job.await else {
-                return;
-            };
-            let _ = this.update(cx, |screen, cx| {
-                if let Some(community) = screen.community.as_mut() {
-                    community.linking = false;
-                    community.link_hits.clear();
-                    if let Some(person) = person {
-                        community.selected = Some(person);
-                    }
-                }
-                screen.refresh_community(cx);
-            });
-        })
-        .detach();
+        self.community_card_request(
+            community::CardCall {
+                method: "cohost.community.link",
+                params: json!({ "personId": person_id, "otherPersonId": other_person_id }),
+                action: "link",
+                object: None,
+                then: community::CardThen::Person,
+            },
+            window,
+            cx,
+        );
     }
 
     pub(crate) fn community_accept_suggestion(
@@ -1246,13 +1229,7 @@ impl Render for SidekickScreen {
         self.ensure_clean_cut(window, cx);
         let view = self.view();
         let listen = self.settings.as_ref().map(|s| s.listen).unwrap_or(false);
-        let remember = self
-            .settings
-            .as_ref()
-            .and_then(|s| s.raw.get("community"))
-            .and_then(|c| c.get("remember"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let community_settings = community::community_settings(self.settings.as_ref());
         let overview = OverviewState {
             view: &view,
             listen,
@@ -1278,9 +1255,14 @@ impl Render for SidekickScreen {
                 );
                 render_chat(&view, settings, widgets, errors, window, cx)
             }
-            Tab::Community => {
-                render_community(&view, self.entitled, community, remember, window, cx)
-            }
+            Tab::Community => render_community(
+                &view,
+                self.entitled,
+                community,
+                &community_settings,
+                window,
+                cx,
+            ),
             Tab::Voice => {
                 let paused = command_availability_lines(self.state.command_availability.as_ref());
                 let rows = remove_messages_rows(&self.studio.platforms_now());
