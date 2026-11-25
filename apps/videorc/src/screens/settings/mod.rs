@@ -532,8 +532,11 @@ impl Render for SettingsScreen {
             .text_color(hsla(t.foreground))
             .type_scale(text::META)
             .child(
+                // A flex strip, so the tab list hugs its labels (`w-fit`,
+                // sitting left) instead of stretching as a block child.
                 div()
                     .flex_none()
+                    .flex()
                     .px(px(size::GUTTER))
                     .py(px(8.))
                     .border_b_1()
