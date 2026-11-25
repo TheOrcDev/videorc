@@ -6,28 +6,49 @@
 //! and Camera only / No screen.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use gpui::{AnyElement, Context, FontWeight, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, FontWeight, Image, ImageFormat, ObjectFit, SharedString, Window, div, img,
+    prelude::*, px,
+};
 use serde_json::Value;
-use videorc_app_core::editor::inspector::layout_preset_label;
+use videorc_app_core::client::methods::ScenePicturesGet;
+use videorc_app_core::desktop::permissions::{PermissionPlatform, SystemPermissionPane};
+use videorc_app_core::editor::inspector::{copy as inspector_copy, layout_preset_label};
 use videorc_app_core::scenes::picker::{
     AppChoice, ScreenPick, add_scenes_label, app_choices_from_devices, display_choices,
     matches_search, new_scenes, pick_key, scene_showing_pick, search_app_choices, shows_pick,
     window_choices, window_count_label, window_label,
 };
+use videorc_app_core::scenes::pictures::{
+    PictureInputs, PicturesAnswer, picture_key, pictures_answer, pictures_eligible,
+};
 use videorc_app_core::scenes::v2::{Scene, SceneShows};
-use videorc_app_core::studio::source_selection::SourceKind;
+use videorc_app_core::studio::Connection;
+use videorc_app_core::studio::scene_on_stream::{
+    SCREEN_PRIVACY_GET_METHOD, ScreenRecordingAlert, screen_recording_alert,
+};
+use videorc_app_core::studio::source_selection::{SourceKind, capture_picker_devices};
+use videorc_app_core::studio::sources_page::GrantAction;
+use videorc_app_core::studio::transport::transport_active;
+use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogSize};
 use videorc_kit::empty::Empty;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
+use videorc_kit::spinner::Spinner;
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{Theme, radius, text};
+use videorc_protocol::scene_pictures::ScenePictureTarget;
+use videorc_protocol::{DeviceStatus, ScreenPrivacy};
 
 use super::super::{now_iso, platform};
 use super::SceneDialogs;
+use crate::app::hotkeys::node_platform;
+use crate::app::permissions::PermissionsGlobal;
 
 /// Electron's app id: Videorc's own windows are never offered.
 const OWN_BUNDLE_IDS: [&str; 1] = ["dev.theorcdev.videorc"];
@@ -112,6 +133,11 @@ pub(super) struct Picking {
     pub chosen: Vec<ScreenPick>,
     pub windows_open: bool,
     pub busy: bool,
+    /// Each display's still while the picker is open (D7, by
+    /// `picture_key`).
+    pub stills: HashMap<String, Arc<Image>>,
+    /// The Screen Recording alert's action is running.
+    pub alert_pending: bool,
 }
 
 /// A display's name without its " · 1920 × 1080" tail.
@@ -177,9 +203,111 @@ impl SceneDialogs {
             chosen,
             windows_open,
             busy: false,
+            stills: HashMap::new(),
+            alert_pending: false,
         });
         self.picker.open(window, cx);
+        self.ask_display_stills(cx);
         cx.notify();
+    }
+
+    /// D7, D17: a still of each display while the picker is open (macOS;
+    /// never while recording or live, none while Hide screen holds). One
+    /// ask per opening.
+    fn ask_display_stills(&mut self, cx: &mut Context<Self>) {
+        let snapshot = self.studio.snapshot();
+        let connected = matches!(snapshot.connection, Connection::Connected { .. });
+        let targets: Vec<ScenePictureTarget> =
+            display_choices(&snapshot.sources.devices.devices, platform())
+                .into_iter()
+                .map(|device| ScenePictureTarget::Display {
+                    screen_id: device.id.clone(),
+                })
+                .collect();
+        let busy = transport_active(&snapshot.session);
+        // Hide screen is read just before the ask.
+        let open = PictureInputs::of(targets.clone(), false, busy);
+        if !pictures_eligible(Some(node_platform()), connected, false, &open) {
+            return;
+        }
+        let studio = self.studio.clone();
+        let job = self.runtime.spawn(async move {
+            let hidden = studio
+                .backend()
+                .request(SCREEN_PRIVACY_GET_METHOD, Value::Null)
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<ScreenPrivacy>(value).ok())
+                .is_some_and(|privacy| privacy.hidden);
+            let inputs = PictureInputs::of(targets, hidden, busy);
+            if inputs.hidden {
+                return None;
+            }
+            studio
+                .backend()
+                .call::<ScenePicturesGet>(&inputs.params())
+                .await
+                .ok()
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(result)) = job.await else {
+                return;
+            };
+            let PicturesAnswer::Pictures(pictures) = pictures_answer(&result) else {
+                return;
+            };
+            let _ = this.update(cx, |dialogs, cx| {
+                if let Some(picking) = &mut dialogs.picking {
+                    picking.stills = pictures
+                        .into_iter()
+                        .map(|(key, jpeg)| {
+                            (key, Arc::new(Image::from_bytes(ImageFormat::Jpeg, jpeg)))
+                        })
+                        .collect();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// P488's action, as the Sources page runs it.
+    fn run_screen_alert(&mut self, alert: &ScreenRecordingAlert, cx: &mut Context<Self>) {
+        let Some(permissions) = cx.try_global::<PermissionsGlobal>().map(|g| g.0.clone()) else {
+            return;
+        };
+        let pane = SystemPermissionPane::ScreenRecording;
+        match alert.action {
+            GrantAction::RequestMediaAccess | GrantAction::Relaunch => {
+                let task = if alert.action == GrantAction::Relaunch {
+                    permissions.relaunch(cx)
+                } else {
+                    permissions.request(cx, pane)
+                };
+                if let Some(picking) = &mut self.picking {
+                    picking.alert_pending = true;
+                }
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    if let Err(error) = task.await {
+                        eprintln!("[videorc-app] Scene picker: Screen Recording: {error}");
+                    }
+                    let _ = this.update(cx, |dialogs, cx| {
+                        if let Some(picking) = &mut dialogs.picking {
+                            picking.alert_pending = false;
+                        }
+                        dialogs.refresh_devices();
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            GrantAction::OpenSettings => {
+                if let Err(error) = permissions.open_settings(cx, pane) {
+                    eprintln!("[videorc-app] Scene picker: Screen Recording: {error}");
+                }
+            }
+        }
     }
 
     /// The pick that stands for what a scene shows now, when the device
@@ -391,6 +519,7 @@ impl SceneDialogs {
         selected: bool,
         pick: ScreenPick,
         well: Option<IconName>,
+        picture: Option<Arc<Image>>,
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -413,8 +542,16 @@ impl SceneDialogs {
                     .items_center()
                     .justify_center()
                     .rounded(px(radius::ROW))
+                    .overflow_hidden()
                     .bg(hsla(t.inset))
-                    .children(well.map(|name| icon(name, 32., hsla(t.muted_foreground)))),
+                    // A quiet still of the whole display, else its glyph.
+                    .map(|area| match picture {
+                        Some(picture) => {
+                            area.child(img(picture).size_full().object_fit(ObjectFit::Cover))
+                        }
+                        None => area
+                            .children(well.map(|name| icon(name, 32., hsla(t.muted_foreground)))),
+                    }),
             )
             .child(
                 div()
@@ -462,10 +599,27 @@ impl SceneDialogs {
         let blocked = self.picker_blocked(picking);
         let chosen_count = picking.chosen.len();
         let first_pick = picking.chosen.first().cloned();
+        let stills = picking.stills.clone();
+        let alert_pending = picking.alert_pending;
 
         let snapshot = self.studio.watch().borrow().clone();
         let devices = &snapshot.sources.devices.devices;
         let mac = platform() == Some("darwin");
+        // P488: every capture device waits for Screen Recording: the alert,
+        // and no apps, windows or displays.
+        let capture = capture_picker_devices(devices);
+        let grant_missing = !capture.is_empty()
+            && capture
+                .iter()
+                .all(|device| device.status == DeviceStatus::PermissionRequired);
+        let screen_alert = if grant_missing {
+            let media = cx
+                .try_global::<PermissionsGlobal>()
+                .map(|global| global.0.snapshot());
+            screen_recording_alert(devices, PermissionPlatform::current(), media.as_ref())
+        } else {
+            None
+        };
         let own: Vec<String> = OWN_BUNDLE_IDS.iter().map(|id| id.to_string()).collect();
         let query = self.picker_search.read(cx).value().trim().to_string();
         let change = matches!(mode, PickerMode::Change { .. });
@@ -531,7 +685,7 @@ impl SceneDialogs {
         };
 
         let mut body = div().flex().flex_col().gap(px(16.));
-        if mac && !apps.is_empty() {
+        if mac && !grant_missing && !apps.is_empty() {
             body = body.child(
                 Input::new("scene-picker-search", &self.picker_search).accessibility_label(
                     if change {
@@ -548,12 +702,30 @@ impl SceneDialogs {
             && windows.is_empty()
             && displays.is_empty()
             && !camera_shown;
+        if let Some(alert) = screen_alert {
+            let action = alert.clone();
+            body = body.child(
+                Alert::new("scene-picker-screen-recording-alert")
+                    .variant(AlertVariant::Warning)
+                    .title(alert.alert.title)
+                    .description(div().child(alert.alert.description))
+                    .action(
+                        Button::new("scene-picker-screen-recording-action")
+                            .variant(ButtonVariant::Outline)
+                            .label(alert.alert.action_label)
+                            .disabled(alert_pending)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.run_screen_alert(&action, cx)
+                            })),
+                    ),
+            );
+        }
         if nothing {
             body = body.child(Empty::new().description(copy::nothing_matches(&query)));
         }
 
         // P490–P492: the apps (macOS).
-        if mac && (!shown_apps.is_empty() || query.is_empty()) {
+        if mac && !grant_missing && (!shown_apps.is_empty() || query.is_empty()) {
             let mut group = div().flex().flex_col().gap(px(8.)).child(
                 div()
                     .type_scale(text::META)
@@ -561,7 +733,24 @@ impl SceneDialogs {
                     .font_weight(FontWeight::MEDIUM)
                     .child(copy::APPS),
             );
-            if apps.is_empty() {
+            // P491: the device list hasn't answered yet.
+            if apps.is_empty() && !snapshot.sources.devices_known {
+                group = group.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(8.))
+                        .py(px(16.))
+                        .child(Spinner::new("scene-picker-finding-apps").size(16.))
+                        .child(
+                            div()
+                                .type_scale(text::META)
+                                .text_color(muted)
+                                .child(inspector_copy::FINDING_APPS),
+                        ),
+                );
+            } else if apps.is_empty() {
                 group = group.child(
                     div()
                         .flex()
@@ -594,6 +783,7 @@ impl SceneDialogs {
                         selected,
                         pick,
                         None,
+                        None,
                         t,
                         cx,
                     ));
@@ -604,7 +794,7 @@ impl SceneDialogs {
         }
 
         // P493: A specific window (Change screen…, macOS).
-        if change && mac && (!windows.is_empty() || query.is_empty()) {
+        if change && mac && !grant_missing && (!windows.is_empty() || query.is_empty()) {
             let open = windows_open || !query.is_empty();
             let mut group = div().flex().flex_col().gap(px(8.)).child(
                 Button::new("scene-picker-specific-window")
@@ -670,7 +860,7 @@ impl SceneDialogs {
         }
 
         // P494/P495: the displays.
-        if !displays.is_empty() || query.is_empty() {
+        if !grant_missing && (!displays.is_empty() || query.is_empty()) {
             let mut group = div().flex().flex_col().gap(px(8.)).child(
                 div()
                     .type_scale(text::META)
@@ -691,6 +881,11 @@ impl SceneDialogs {
                         .width
                         .zip(device.height)
                         .map(|(width, height)| format!("{width} × {height}"));
+                    let still = stills
+                        .get(&picture_key(&ScenePictureTarget::Display {
+                            screen_id: device.id.clone(),
+                        }))
+                        .cloned();
                     let pick = ScreenPick::Display(device.clone());
                     let selected = chosen_keys.contains(&pick_key(&pick));
                     grid = grid.child(self.card(
@@ -700,6 +895,7 @@ impl SceneDialogs {
                         selected,
                         pick,
                         Some(IconName::Monitor),
+                        still,
                         t,
                         cx,
                     ));
@@ -758,6 +954,7 @@ impl SceneDialogs {
                         Some(meta),
                         selected,
                         pick,
+                        None,
                         None,
                         t,
                         cx,
