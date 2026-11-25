@@ -2,6 +2,7 @@
 //! pagination and finalization; this entity owns only the window's choices.
 mod actions;
 mod cloud;
+mod cloud_markers;
 pub mod files;
 mod render;
 
@@ -48,6 +49,9 @@ pub struct LibraryScreen {
     cloud_busy: BTreeSet<String>,
     cloud_epoch: u64,
     posters: BTreeMap<(String, Option<i64>), Option<Arc<gpui::Image>>>,
+    /// Cloud → a row's Show markers (P1363).
+    markers_dialog: DialogHandle,
+    markers: Option<cloud_markers::MarkersState>,
 }
 impl gpui::EventEmitter<Navigate> for LibraryScreen {}
 impl Focusable for LibraryScreen {
@@ -174,6 +178,8 @@ impl LibraryScreen {
             cloud_busy: BTreeSet::new(),
             cloud_epoch: 0,
             posters: BTreeMap::new(),
+            markers_dialog: DialogHandle::new(false),
+            markers: None,
         }
     }
     fn view(&self) -> LibraryView {

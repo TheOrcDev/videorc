@@ -233,6 +233,7 @@ fn main() -> Result<()> {
                     .chain(screens::studio::chat::EVENTS)
                     .chain(screens::studio::soundboard::EVENTS)
                     .chain(videorc_app_core::library::LIBRARY_EVENTS)
+                    .chain([videorc_app_core::library::cloud_markers::CREATED_EVENT])
                     .chain(["session.log"])
                     // The hide state: Follow the app in front, and Studio's
                     // Scenes section (Hide screen).

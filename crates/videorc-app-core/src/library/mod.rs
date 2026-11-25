@@ -33,6 +33,7 @@
 
 pub mod cloud;
 pub mod cloud_archive;
+pub mod cloud_markers;
 pub mod cloud_takes;
 pub mod copy;
 pub mod markers;
