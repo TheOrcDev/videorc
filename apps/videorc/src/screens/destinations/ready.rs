@@ -104,7 +104,7 @@ impl DestinationsPanel {
         section.child(list).into_any_element()
     }
 
-    fn open_destination(&mut self, id: String, cx: &mut Context<Self>) {
+    pub(crate) fn open_destination(&mut self, id: String, cx: &mut Context<Self>) {
         self.memory.expanded.insert(id, true);
         self.tab = super::DestinationsTab::Setup;
         self.rebuild(cx);

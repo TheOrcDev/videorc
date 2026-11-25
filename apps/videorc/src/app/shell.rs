@@ -123,6 +123,8 @@ pub struct Shell {
     scene: Entity<ScenePage>,
     /// S1.6f (L4): the Videorc account, for the sidebar's account row.
     account: Option<Entity<Mirror<videorc_app_core::accounts::AccountsState>>>,
+    /// P025: a chat destination waits on the Videorc sign-in.
+    chat_waits: Option<Entity<Mirror<bool>>>,
 }
 
 impl Shell {
@@ -166,6 +168,17 @@ impl Shell {
         });
         if let Some(account) = &account {
             cx.observe(account, |_, _, cx| cx.notify()).detach();
+        }
+        let chat_store = cx
+            .try_global::<super::accounts::Shared>()
+            .map(|shared| shared.studio.live_chat());
+        let chat_waits = chat_store.map(|store| {
+            super::bridge::mirror(cx, store, |chat: &videorc_app_core::chat::LiveChat| {
+                videorc_app_core::accounts::chat_waits_on_sign_in(&chat.providers)
+            })
+        });
+        if let Some(chat_waits) = &chat_waits {
+            cx.observe(chat_waits, |_, _, cx| cx.notify()).detach();
         }
         palette.update(cx, |palette, _| palette.set_notifications_available());
         let captions = crate::screens::captions::page(cx);
@@ -372,7 +385,24 @@ impl Shell {
             notice_hub,
             scene,
             account,
+            chat_waits,
         }
+    }
+
+    /// The Stream Manager's "Use Sign in" (P962): Destinations → Setup with
+    /// that destination open, in this window.
+    pub fn open_destination(
+        &mut self,
+        target_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_page(PageId::Live, window, cx);
+        let target = target_id.to_string();
+        self.destinations.update(cx, |destinations, cx| {
+            destinations.open_destination(target, cx)
+        });
+        window.activate_window();
     }
 
     pub fn dialogs(&self) -> Entity<DialogsHost> {
@@ -611,8 +641,17 @@ impl Shell {
                         .flex_1()
                         .min_w(px(0.))
                         .children(self.account.as_ref().map(|account| {
+                            let state = account.read(cx).value();
+                            let needs_sign_in = videorc_app_core::accounts::needs_sign_in(
+                                &state.account,
+                                self.chat_waits
+                                    .as_ref()
+                                    .is_some_and(|waits| *waits.read(cx).value()),
+                                self.sidekick.read(cx).cohost_reason(),
+                            );
                             super::account_menu::row(
-                                account.read(cx).value(),
+                                state,
+                                needs_sign_in,
                                 cx.entity().downgrade(),
                                 t,
                             )
@@ -953,4 +992,19 @@ impl Render for Shell {
             .child(self.dialogs.clone())
             .child(self.notices.read(cx).toasts())
     }
+}
+
+/// The Stream Manager's "Use Sign in" (P962), from any window: the main
+/// window comes up on Destinations → Setup with the destination open.
+pub fn open_destination_in_main(target_id: String, cx: &mut gpui::App) {
+    let Some(main) = super::exit::ExitGuard::main_window(cx) else {
+        return;
+    };
+    let Some(main) = main.downcast::<Shell>() else {
+        return;
+    };
+    let _ = main.update(cx, |shell, window, cx| {
+        shell.open_destination(&target_id, window, cx)
+    });
+    cx.activate(true);
 }

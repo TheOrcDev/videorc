@@ -247,6 +247,21 @@ pub fn sign_out_disabled(account: &Account, live: bool) -> bool {
     account.is_signed_in() && live
 }
 
+/// A chat destination parked on the Videorc sign-in (`needs-videorc-sign-in`,
+/// plan 215 A1).
+pub fn chat_waits_on_sign_in(providers: &[crate::chat::model::LiveChatProviderState]) -> bool {
+    providers
+        .iter()
+        .any(|provider| provider.read == "needs-videorc-sign-in")
+}
+
+/// `accountNeedsSignIn` (plan 215 A5, D7): the account row's warning dot
+/// (P025) while chat or Sidekick waits on the Videorc sign-in.
+pub fn needs_sign_in(account: &Account, chat_waits: bool, cohost_reason: Option<&str>) -> bool {
+    !account.is_signed_in()
+        && (chat_waits || matches!(cohost_reason, Some("signed-out" | "session-expired")))
+}
+
 /// The account menu's words.
 pub mod copy {
     pub const SIGN_IN: &str = "Sign in";
@@ -864,6 +879,25 @@ mod tests {
         assert!(sign_out_disabled(&signed_in, true));
         assert!(!sign_out_disabled(&signed_in, false));
         assert!(!sign_out_disabled(&Account::SignedOut, true));
+    }
+
+    #[test]
+    fn the_dot_shows_only_while_signed_out_and_something_waits() {
+        let signed_in = Account::from_snapshot(Some(&snapshot(AccountStatus::SignedIn, Some("o"))));
+        assert!(needs_sign_in(&Account::SignedOut, true, None));
+        assert!(needs_sign_in(
+            &Account::SignedOut,
+            false,
+            Some("session-expired")
+        ));
+        assert!(needs_sign_in(
+            &Account::SignedOut,
+            false,
+            Some("signed-out")
+        ));
+        assert!(!needs_sign_in(&Account::SignedOut, false, Some("not-live")));
+        assert!(!needs_sign_in(&Account::SignedOut, false, None));
+        assert!(!needs_sign_in(&signed_in, true, Some("signed-out")));
     }
 
     #[test]
