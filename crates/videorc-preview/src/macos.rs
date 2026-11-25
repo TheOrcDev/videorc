@@ -196,11 +196,17 @@ impl VideoLayer {
     pub fn set_frame(&mut self, rect: LayerRect) -> bool {
         let rect = rect.snapped(self.scale);
         let first = self.frame.is_none();
-        if !first && self.frame.is_some_and(|previous| previous == rect) {
-            return false;
-        }
         let (host_height, host_flipped) = self.host_geometry();
         let frame = frame_in_host(rect, host_height, host_flipped);
+        // The cache alone is not the truth: Core Animation may have moved or
+        // resized the layer since the last call (its host resized under it,
+        // L6 11-25). Nothing to do only when the layer really is there.
+        if !first
+            && self.frame.is_some_and(|previous| previous == rect)
+            && same_frame(self.layer.as_super().frame(), frame)
+        {
+            return false;
+        }
         let drawable = CGSize {
             width: (rect.width * self.scale).round().max(1.0),
             height: (rect.height * self.scale).round().max(1.0),
@@ -305,6 +311,15 @@ fn without_implicit_actions(mutate: impl FnOnce()) {
 /// A top-left rect in the host layer's own coordinate space: AppKit measures
 /// a sublayer's origin from the bottom unless the host is geometry-flipped
 /// (the addon's `layer_frame_in_host`).
+/// Two layer frames are the same to a hundredth of a point.
+fn same_frame(a: CGRect, b: CGRect) -> bool {
+    const EPSILON: f64 = 0.01;
+    (a.origin.x - b.origin.x).abs() < EPSILON
+        && (a.origin.y - b.origin.y).abs() < EPSILON
+        && (a.size.width - b.size.width).abs() < EPSILON
+        && (a.size.height - b.size.height).abs() < EPSILON
+}
+
 fn frame_in_host(rect: LayerRect, host_height: f64, host_flipped: bool) -> CGRect {
     let y = if host_flipped {
         rect.y
@@ -897,6 +912,20 @@ fn encode_present(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn same_frame_holds_to_a_hundredth_of_a_point() {
+        let at = |x: f64, width: f64| CGRect {
+            origin: CGPoint { x, y: 0.0 },
+            size: CGSize {
+                width,
+                height: 360.0,
+            },
+        };
+        assert!(same_frame(at(0.0, 607.0), at(0.004, 607.004)));
+        // L6 11-25: the layer Core Animation shows vs the slot the app set.
+        assert!(!same_frame(at(0.0, 574.0), at(0.0, 607.0)));
+    }
     use super::*;
 
     #[test]

@@ -82,8 +82,9 @@ fn make_host_view(mtm: MainThreadMarker) -> Retained<NSView> {
 }
 
 /// After `PreviewElement::attach` (or a native path reset): the element's
-/// `CAMetalLayer` follows the host's bounds in the transaction GPUI moves
-/// the view in, and gets the host's corner radius. False when no layer was
+/// `CAMetalLayer` keeps the frame the element gives it (the slot) and its
+/// top-left corner when GPUI resizes the view, and gets the host's corner
+/// radius. False when no layer was
 /// found (the element is not attached here).
 pub fn tune_video_layer(host: &NSView, radius: f64) -> bool {
     let Some(root) = host.layer() else {
@@ -94,14 +95,23 @@ pub fn tune_video_layer(host: &NSView, radius: f64) -> bool {
     let Some(sublayers) = (unsafe { root.sublayers() }) else {
         return false;
     };
+    // The layer keeps its size and its top-left corner when the host view
+    // resizes: the element sets its frame to the slot, often while the host
+    // still has its old size, so a width/height-sizable layer took the
+    // host's resize on top of that (L6 11-25: 574 shown for a 607 slot, 1280
+    // in a 960 window). Unflipped, the origin is the bottom-left, so the
+    // bottom margin flexes to hold the top.
+    let mask = if root.isGeometryFlipped() {
+        CAAutoresizingMask::LayerNotSizable
+    } else {
+        CAAutoresizingMask::LayerMinYMargin
+    };
     let mut found = false;
     for layer in sublayers.iter() {
         if layer.isKindOfClass(CAMetalLayer::class()) {
             CATransaction::begin();
             CATransaction::setDisableActions(true);
-            layer.setAutoresizingMask(
-                CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
-            );
+            layer.setAutoresizingMask(mask);
             layer.setCornerRadius(radius);
             layer.setMasksToBounds(radius > 0.0);
             CATransaction::commit();
