@@ -195,6 +195,10 @@ export const COLOUR_LITERAL_ALLOWLIST = new Map([
   [
     'crates/videorc-kit/src/qr_code.rs',
     'QR codes stay black on white for scanners in both themes (Electron Phone Pair / watchdog)'
+  ],
+  [
+    'crates/videorc-kit/src/toast.rs',
+    "sonner toast description / close-button ink (Electron sonner styles.css; near-title strength, not muted-foreground)"
   ]
 ])
 
