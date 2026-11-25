@@ -29,6 +29,7 @@ use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::kebab_menu::{KEBAB_HOST, KebabMenu, KebabMenuItem, KebabReveal};
 use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
+use videorc_kit::page::Gallery;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::section_label::SectionLabel;
@@ -703,11 +704,6 @@ fn picture_tile(
         )
 }
 
-/// `Gallery rowsOfFive`: five 16:9 tiles a row, `gap-3`.
-fn gallery() -> gpui::Div {
-    div().grid().grid_cols(5).gap(px(12.))
-}
-
 impl Render for ImagesPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme::current(window, cx).theme();
@@ -766,7 +762,8 @@ impl Render for ImagesPanel {
                 .child(bg_import_btn("images-import-bg-empty"))
                 .into_any_element()
         } else {
-            let mut grid = gallery();
+            // `<Gallery rowsOfFive>`: at most five 16:9 tiles a row, by width.
+            let mut grid = Gallery::new("images-gallery-pictures").rows_of_five(true);
             for (id, name, path) in presets {
                 grid = grid.child(picture_tile(
                     SharedString::from(format!("bg-asset-{id}")),
@@ -789,7 +786,7 @@ impl Render for ImagesPanel {
         };
         // Backgrounds: the Live group, then the Images group, each a label
         // over its gallery (`flex flex-col gap-2`).
-        let mut live_grid = gallery();
+        let mut live_grid = Gallery::new("images-gallery-live").rows_of_five(true);
         for id in assets::live_backgrounds_offered() {
             // The default look's thumbnail (`liveBackgroundThumbnail`), the
             // same embedded still first-run shows.
