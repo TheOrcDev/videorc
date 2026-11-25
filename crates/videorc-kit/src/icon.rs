@@ -75,6 +75,70 @@ pub enum IconName {
     UploadSimple,
     /// `SyncIcon` (Phosphor's ArrowsClockwise).
     ArrowsClockwise,
+    /// `CohostIcon` (Phosphor's Robot).
+    Robot,
+    /// `DeleteIcon` (Phosphor's Trash).
+    Trash,
+    /// `ImageBrokenIcon` (Phosphor's ImageBroken).
+    ImageBroken,
+    /// `MicrophoneIcon` (Phosphor's Microphone).
+    Microphone,
+    /// `RecordIcon` / `OutputIcon` (Phosphor's Record).
+    Record,
+    /// `SaveIcon` (Phosphor's FloppyDisk).
+    FloppyDisk,
+    /// `SpeakerOnIcon` (Phosphor's SpeakerHigh).
+    SpeakerHigh,
+    /// `SpeakerOffIcon` (Phosphor's SpeakerSlash).
+    SpeakerSlash,
+    /// `StopIcon` (Phosphor's Stop).
+    Stop,
+    /// `PlayIcon` (Phosphor's Play).
+    Play,
+    /// `BrainIcon` (Phosphor's Brain).
+    Brain,
+    /// `ClipIcon` (Phosphor's Scissors).
+    Scissors,
+    /// `CopyIcon` (Phosphor's Copy).
+    Copy,
+    /// `CrosshairIcon` (Phosphor's Crosshair).
+    Crosshair,
+    /// `DownloadIcon` (Phosphor's DownloadSimple).
+    DownloadSimple,
+    /// `FastIcon` (Phosphor's Lightning).
+    Lightning,
+    /// `VerifiedIcon` (Phosphor's ShieldCheck).
+    ShieldCheck,
+    /// `VideoFileIcon` (Phosphor's FileVideo).
+    FileVideo,
+    /// `WaveformIcon` (Phosphor's Waveform).
+    Waveform,
+    /// `CaptionsIcon` (Phosphor's ClosedCaptioning).
+    ClosedCaptioning,
+    /// `ResetIcon` (Phosphor's ArrowCounterClockwise).
+    ArrowCounterClockwise,
+    /// `SignInIcon` (Phosphor's SignIn).
+    SignIn,
+    /// `EditIcon` (Phosphor's PencilSimple).
+    PencilSimple,
+    /// `PreviewIcon` (Phosphor's Eye).
+    Eye,
+    /// `ChevronUpIcon` (Phosphor's CaretUp).
+    CaretUp,
+    /// `ArrowLeftIcon` (Phosphor's ArrowLeft).
+    ArrowLeft,
+    /// `ArrowRightIcon` (Phosphor's ArrowRight).
+    ArrowRight,
+    /// `ChatIcon` (Phosphor's ChatCircle).
+    ChatCircle,
+    /// `AccountIcon` (Phosphor's UserCircle).
+    UserCircle,
+    /// `FolderIcon` (Phosphor's FolderOpen).
+    FolderOpen,
+    /// `WaveformMutedIcon` (Phosphor's WaveformSlash).
+    WaveformSlash,
+    /// `DesktopIcon` (Phosphor's Desktop).
+    Desktop,
 }
 
 impl IconName {
@@ -114,6 +178,40 @@ impl IconName {
             IconName::Sparkle => include_bytes!("../icons/sparkle.svg"),
             IconName::UploadSimple => include_bytes!("../icons/upload-simple.svg"),
             IconName::ArrowsClockwise => include_bytes!("../icons/arrows-clockwise.svg"),
+            IconName::Robot => include_bytes!("../icons/robot.svg"),
+            IconName::Trash => include_bytes!("../icons/trash.svg"),
+            IconName::ImageBroken => include_bytes!("../icons/image-broken.svg"),
+            IconName::Microphone => include_bytes!("../icons/microphone.svg"),
+            IconName::Record => include_bytes!("../icons/record.svg"),
+            IconName::FloppyDisk => include_bytes!("../icons/floppy-disk.svg"),
+            IconName::SpeakerHigh => include_bytes!("../icons/speaker-high.svg"),
+            IconName::SpeakerSlash => include_bytes!("../icons/speaker-slash.svg"),
+            IconName::Stop => include_bytes!("../icons/stop.svg"),
+            IconName::Play => include_bytes!("../icons/play.svg"),
+            IconName::Brain => include_bytes!("../icons/brain.svg"),
+            IconName::Scissors => include_bytes!("../icons/scissors.svg"),
+            IconName::Copy => include_bytes!("../icons/copy.svg"),
+            IconName::Crosshair => include_bytes!("../icons/crosshair.svg"),
+            IconName::DownloadSimple => include_bytes!("../icons/download-simple.svg"),
+            IconName::Lightning => include_bytes!("../icons/lightning.svg"),
+            IconName::ShieldCheck => include_bytes!("../icons/shield-check.svg"),
+            IconName::FileVideo => include_bytes!("../icons/file-video.svg"),
+            IconName::Waveform => include_bytes!("../icons/waveform.svg"),
+            IconName::ClosedCaptioning => include_bytes!("../icons/closed-captioning.svg"),
+            IconName::ArrowCounterClockwise => {
+                include_bytes!("../icons/arrow-counter-clockwise.svg")
+            }
+            IconName::SignIn => include_bytes!("../icons/sign-in.svg"),
+            IconName::PencilSimple => include_bytes!("../icons/pencil-simple.svg"),
+            IconName::Eye => include_bytes!("../icons/eye.svg"),
+            IconName::CaretUp => include_bytes!("../icons/caret-up.svg"),
+            IconName::ArrowLeft => include_bytes!("../icons/arrow-left.svg"),
+            IconName::ArrowRight => include_bytes!("../icons/arrow-right.svg"),
+            IconName::ChatCircle => include_bytes!("../icons/chat-circle.svg"),
+            IconName::UserCircle => include_bytes!("../icons/user-circle.svg"),
+            IconName::FolderOpen => include_bytes!("../icons/folder-open.svg"),
+            IconName::WaveformSlash => include_bytes!("../icons/waveform-slash.svg"),
+            IconName::Desktop => include_bytes!("../icons/desktop.svg"),
         }
     }
 }
