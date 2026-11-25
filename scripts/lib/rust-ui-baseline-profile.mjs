@@ -342,6 +342,18 @@ export async function seedBaselineBackend({ rpc, smoke, fixtures, recordingsDir,
     }
   })
   await step('sounds', async () => {
+    // The app seeds its twelve starter sounds on connection (plan 189); the
+    // fixtures go in after, as in a real profile, so the starters keep keys
+    // 1 to 9 and the fixtures come last. Racing it interleaves the order
+    // and hands a fixture a starter's key.
+    const until = Date.now() + 45_000
+    while (!(await rpc('sounds.list', {}).catch(() => null))?.startersSeeded) {
+      if (Date.now() > until) {
+        log('the starter sounds were not seeded within 45 s; seeding the fixtures anyway')
+        break
+      }
+      await sleep(500)
+    }
     for (const name of ['sound-ding.wav', 'sound-low.wav']) {
       const sourceCapability = await authorize(fixtures[name])
       await importWhenFree(() => rpc('sounds.import', { sourceCapability }))
