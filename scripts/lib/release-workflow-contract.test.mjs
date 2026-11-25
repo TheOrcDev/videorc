@@ -12,7 +12,9 @@ test('D3 real Actions upload exports controller flag, quiescence and read-only s
   const upload = workflow.jobs.promote.steps.find(
     (step) => step.run === 'pnpm release:upload:macos'
   )
-  assert.equal(workflow.concurrency.group, 'release-publication')
+  assert.equal(workflow.jobs.promote.concurrency.group, 'release-publication')
+  assert.equal(workflow.jobs.promote.concurrency['cancel-in-progress'], false)
+  assert.equal(workflow.concurrency['cancel-in-progress'], true)
   assert.equal(
     upload.env.VIDEORC_RELEASE_CONTROLLER_ENABLED,
     '${{ vars.VIDEORC_RELEASE_CONTROLLER_ENABLED }}'

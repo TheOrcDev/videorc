@@ -37,6 +37,13 @@ on:
       windows_installer:
         description: Whether the Windows installer and its packaged-app smokes must run
         value: ${{ jobs.scope.outputs.windows_installer }}
+      electron_tests:
+        description: Whether this diff requires the Electron build and desktop/Node suites
+        value: ${{ jobs.scope.outputs.electron_tests }}
+
+concurrency:
+  group: ci-change-scope-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   scope:
@@ -53,6 +60,7 @@ jobs:
       macos_sentinel: ${{ steps.classify.outputs.macos_sentinel }}
       windows_js: ${{ steps.classify.outputs.windows_js }}
       windows_installer: ${{ steps.classify.outputs.windows_installer }}
+      electron_tests: ${{ steps.electron.outputs.required }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -75,3 +83,31 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           CI_HEAD_SHA: ${{ github.sha }}
+
+      - name: Scope Electron suites
+        id: electron
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_HEAD_SHA: ${{ github.sha }}
+        # Keep the workflow running so required check names resolve. Unknown,
+        # empty and unreadable diffs retain every gate; pushes retain them too.
+        run: |
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process'
+          import { appendFileSync } from 'node:fs'
+          let required = true
+          if (process.env.GITHUB_EVENT_NAME === 'pull_request') {
+            const prefixes = ['apps/videorc/', 'crates/videorc-kit/', 'crates/videorc-app-core/', 'docs/', 'plans/']
+            try {
+              const base = process.env.CI_BASE_SHA
+              const head = process.env.CI_HEAD_SHA
+              if (!/^[0-9a-f]{40}$/.test(base ?? '') || !/^[0-9a-f]{40}$/.test(head ?? '')) throw new Error('Missing diff SHA')
+              const files = execFileSync('git', ['diff', '--name-only', '--no-renames', '-z', `${base}...${head}`], { encoding: 'utf8' }).split('\0').filter(Boolean)
+              required = files.length === 0 || !files.every(file => prefixes.some(prefix => file.startsWith(prefix)))
+            } catch {
+              required = true
+            }
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, `required=${required}\n`)
+          console.log(`Electron suites required: ${required}`)
+          JS

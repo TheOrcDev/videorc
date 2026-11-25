@@ -1,0 +1,49 @@
+name: GPUI compile
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpui-compile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: gpui compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install GPUI platform headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config libssl-dev \
+            libasound2-dev libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libx11-dev libx11-xcb-dev libxi-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libegl1-mesa-dev \
+            libvulkan-dev
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache GPUI check dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gpui-compile-linux
+          cache-on-failure: true
+
+      - name: Compile GPUI and test targets without running tests
+        run: cargo check --locked -p videorc-app-core -p videorc-kit -p videorc-protocol -p videorc-app --all-targets

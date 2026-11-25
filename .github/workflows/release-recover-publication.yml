@@ -21,6 +21,10 @@ name: Recover release publication
 permissions:
   contents: read
   actions: write
+concurrency:
+  group: release-recover-publication-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   recover:
     name: Reconcile and resume exact publication generation
