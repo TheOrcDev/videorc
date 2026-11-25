@@ -7,7 +7,14 @@ import { mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
+
+// Plan 260 Phase 3: VIDEORC_APP=gpui runs the GPUI app's own version
+// (docs/gpui/native-preview-probes.md).
+if (smokeAppIsGpui()) {
+  const { runGpuiPreviewPumpDiagnostics } = await import('./gpui-preview-pump-diagnostics.mjs')
+  process.exit(await runGpuiPreviewPumpDiagnostics())
+}
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 const outputDirectory = join(tmpdir(), `videorc-preview-pump-diagnostics-${Date.now()}`)
