@@ -109,6 +109,8 @@ pub struct ScenePage {
     model: SceneModel,
     /// The scene dialogs, shared with the Studio's Scenes section.
     dialogs: Entity<SceneDialogs>,
+    /// The global keys: a key the OS refused shows why on its chip (P461).
+    hotkeys: crate::app::hotkeys::Hotkeys,
     /// Hide screen's Add app… popover, and its search.
     add_app_open: bool,
     add_app_search: Entity<InputState>,
@@ -160,8 +162,9 @@ impl ScenePage {
         // The canvas follows the preview between docked and its own window.
         cx.observe(&preview, |_, _, cx| cx.notify()).detach();
         let model = SceneModel::of(&studio.watch().borrow(), platform(), wayland());
-        let dialogs =
-            cx.new(|cx| SceneDialogs::new(studio.clone(), runtime.clone(), hotkeys, window, cx));
+        let dialogs = cx.new(|cx| {
+            SceneDialogs::new(studio.clone(), runtime.clone(), hotkeys.clone(), window, cx)
+        });
         let controls = Controls::new(window, cx);
         let add_app_search =
             cx.new(|cx| InputState::new(window, cx).placeholder(model::copy::SEARCH_OPEN_APPS));
@@ -213,6 +216,7 @@ impl ScenePage {
             background_reveal: Rc::new(Cell::new(false)),
             model,
             dialogs,
+            hotkeys,
             add_app_open: false,
             add_app_search,
             status_timer: None,

@@ -9,7 +9,9 @@ use gpui::{
     AnyElement, Context, FontWeight, KeyDownEvent, SharedString, Window, div, prelude::*, px,
 };
 use serde_json::Value;
-use videorc_app_core::desktop::accelerator::{accelerator_display_keys, accelerator_label};
+use videorc_app_core::desktop::accelerator::{
+    accelerator_display_keys, accelerator_label, global_shortcut_conflict_reason,
+};
 use videorc_app_core::nav::PageId;
 use videorc_app_core::scenes::list::{duplicated_scene, scene_with_audio, scene_with_follow};
 use videorc_app_core::scenes::model::scene_audio;
@@ -188,16 +190,23 @@ impl ScenePage {
         if row.follows == Some(true) {
             line = line.child(Badge::new(copy::FOLLOWS).variant(BadgeVariant::Outline));
         }
-        for (index, accelerator) in row.keys.iter().enumerate() {
-            line = line.child(
-                div()
-                    .id(SharedString::from(format!("scene-key-{id}-{index}")))
-                    .child(kbd_group(
-                        accelerator_display_keys(Some(accelerator.as_str()), platform)
-                            .into_iter()
-                            .map(Kbd::new),
-                    )),
+        // P461: each key, or why the OS refused it (Settings' words).
+        let registered = self.hotkeys.registration().registered;
+        for (index, (action, accelerator)) in row.keys.iter().enumerate() {
+            let chip = div().id(SharedString::from(format!("scene-key-{id}-{index}")));
+            let conflict = global_shortcut_conflict_reason(
+                Some(accelerator.as_str()),
+                platform,
+                registered.get(action) == Some(&false),
             );
+            line = line.child(match conflict {
+                Some(reason) => chip.type_scale(text::META).text_color(muted).child(reason),
+                None => chip.child(kbd_group(
+                    accelerator_display_keys(Some(accelerator.as_str()), platform)
+                        .into_iter()
+                        .map(Kbd::new),
+                )),
+            });
         }
         line = line.child(
             KebabMenu::new(

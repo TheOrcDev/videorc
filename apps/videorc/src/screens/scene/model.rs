@@ -126,8 +126,9 @@ pub struct SceneRow {
     pub meta: RowMeta,
     /// An app scene: whether it follows the app's front window.
     pub follows: Option<bool>,
-    /// The position key, then the custom key (Electron accelerators).
-    pub keys: Vec<String>,
+    /// The position key, then the custom key: (action, Electron
+    /// accelerator).
+    pub keys: Vec<(String, String)>,
     /// Why Change screen… waits (other than read-only): the scene on
     /// stream's live screen switch (`sourceSwitchReason('capture')`).
     pub change_screen_reason: Option<String>,
@@ -271,10 +272,7 @@ impl SceneModel {
                     disabled_reason,
                     meta,
                     follows: app.map(|app| app.get("follows") == Some(&Value::Bool(true))),
-                    keys: scene_shortcut_bindings(&scene.id, index + 1, &shortcuts, platform)
-                        .into_iter()
-                        .map(|(_, accelerator)| accelerator)
-                        .collect(),
+                    keys: scene_shortcut_bindings(&scene.id, index + 1, &shortcuts, platform),
                     // Electron's menu rule, the Studio's too: off only when
                     // the saved audio is exactly the working audio (a scene
                     // with none saved can save it).
