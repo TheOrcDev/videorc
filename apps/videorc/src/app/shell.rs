@@ -252,6 +252,8 @@ impl Shell {
         cx.subscribe_in(&studio, window, |this, _, open: &OpenPage, window, cx| {
             if let Some(tab) = open.settings_tab {
                 this.open_settings(Some(tab), window, cx);
+            } else if open.scene_background {
+                this.open_scene_background(window, cx);
             } else {
                 this.open_page(open.page, window, cx);
             }
@@ -310,6 +312,7 @@ impl Shell {
                     this.studio
                         .update(cx, |studio, cx| studio.open_add_scene(window, cx));
                 }
+                Command::SceneBackground => this.open_scene_background(window, cx),
                 _ => {}
             },
         )
@@ -439,6 +442,14 @@ impl Shell {
         Ok(())
     }
 
+    /// P575: Scene opens on the camera, its Background in view and the pick
+    /// focused (⌘K's Background settings, the Studio popover's Settings).
+    fn open_scene_background(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_page(PageId::Layouts, window, cx);
+        self.scene
+            .update(cx, |scene, cx| scene.reveal_background(window, cx));
+    }
+
     pub fn open_page(&mut self, page: PageId, window: &mut Window, cx: &mut Context<Self>) {
         if self.page != page {
             self.settings
@@ -493,6 +504,7 @@ impl Shell {
             if page == PageId::Layouts {
                 let focus = self.scene.read(cx).focus_handle();
                 window.focus(&focus, cx);
+                self.scene.update(cx, |scene, cx| scene.entered(cx));
             }
             cx.notify();
         }

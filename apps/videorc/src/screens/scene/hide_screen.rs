@@ -13,6 +13,7 @@ use videorc_app_core::settings_page::SettingsTab;
 use videorc_app_core::studio::families::{PrivacySettings, add_password_manager};
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::icon::{IconName, icon};
+use videorc_kit::input_group::{InputGroup, InputGroupAddon};
 use videorc_kit::kbd::{Kbd, kbd_group};
 use videorc_kit::kebab_menu::{KEBAB_HOST, KebabMenu, KebabMenuItem, KebabReveal};
 use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
@@ -141,9 +142,17 @@ impl ScenePage {
                         .label(copy::ADD_APP)
                         .variant(ButtonVariant::Outline),
                 )
-                .on_open_change(move |open, _, cx| {
+                .on_open_change(move |open, window, cx| {
                     let _ = open_page.update(cx, |page, cx| {
                         page.add_app_open = open;
+                        // Each opening starts a fresh search, focused
+                        // (`autoFocus`).
+                        if open {
+                            page.add_app_search.update(cx, |search, cx| {
+                                search.set_value("", window, cx);
+                                search.focus(window, cx);
+                            });
+                        }
                         cx.notify();
                     });
                 })
@@ -188,6 +197,17 @@ impl ScenePage {
             .into_iter()
             .filter(|app| !listed.contains(&app.bundle_id.to_lowercase()))
             .collect();
+        // The search matches the name or the bundle id (`keywords`).
+        let query = self.add_app_search.read(cx).value().trim().to_lowercase();
+        let matching: Vec<_> = offered
+            .iter()
+            .filter(|app| {
+                query.is_empty()
+                    || app.name.to_lowercase().contains(&query)
+                    || app.bundle_id.to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect();
         let status = if !snapshot.sources.devices_known {
             Some(inspector_copy::FINDING_APPS)
         } else if offered.is_empty() {
@@ -195,8 +215,13 @@ impl ScenePage {
         } else {
             None
         };
+        let empty =
+            (!offered.is_empty() && matching.is_empty()).then_some(inspector_copy::NO_APP_MATCHES);
+        let search = InputGroup::new("add-app-search", &self.add_app_search)
+            .accessibility_label(copy::SEARCH_OPEN_APPS_LABEL)
+            .start(InputGroupAddon::start().child(icon(IconName::MagnifyingGlass, 14., muted)));
         let mut list = GroupedList::new().label(copy::OPEN_APPS);
-        for app in offered {
+        for app in matching {
             let (bundle_id, name) = (app.bundle_id.clone(), app.name.clone());
             list = list.row(
                 ListRow::new(
@@ -215,11 +240,14 @@ impl ScenePage {
             );
         }
         div()
+            .w(px(288.))
             .flex()
             .flex_col()
             .gap(px(8.))
-            .children(status.map(|line| div().text_color(muted).child(line)))
+            .child(search)
+            .children(empty.map(|line| div().text_color(muted).child(line)))
             .child(list)
+            .children(status.map(|line| div().text_color(muted).child(line)))
             .into_any_element()
     }
 

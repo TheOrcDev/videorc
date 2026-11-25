@@ -5,7 +5,9 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use std::sync::Arc;
-use videorc_app_core::studio::{families, inspector::StartGates, transport::TransportView};
+use videorc_app_core::studio::{
+    camera_background_view, families, inspector::StartGates, transport::TransportView,
+};
 use videorc_app_core::{BackendClient, StopOrigin, Studio};
 use videorc_app_core::{
     nav::{self, PageId, ThemeChoice},
@@ -35,6 +37,8 @@ pub enum Command {
     Scene(String),
     /// Studio's Add scene… (plan 231 D14): the Studio page opens its picker.
     AddScene,
+    /// Background settings (P575): Scene opens on the camera's Background.
+    SceneBackground,
     Theme(ThemeChoice),
     Chat,
     Unavailable,
@@ -236,6 +240,22 @@ impl CommandPalette {
                 )
                 .keywords(page_keywords(page)),
             );
+            // `command-palette.tsx:471-487`: Background settings under Scene.
+            if page == PageId::Layouts {
+                let mut words: Vec<&str> = camera_background_view::KEYWORDS.to_vec();
+                words.extend(camera_background_view::GREEN_SCREEN_KEYWORDS);
+                words.extend(["blur strength", "similarity", "spill", "smoothness"]);
+                rows.push(
+                    Row::new(
+                        "scene-background",
+                        "Pages",
+                        camera_background_view::SETTINGS_LABEL,
+                        Command::SceneBackground,
+                        page.ported(),
+                    )
+                    .keywords(&words),
+                );
+            }
         }
         rows.push(Row::new(
             "notifications",
@@ -391,6 +411,7 @@ impl CommandPalette {
             | Command::Notes
             | Command::CaptionsReader
             | Command::AddScene
+            | Command::SceneBackground
             | Command::Notifications => cx.emit(command),
             _ => {
                 if command == Command::Stop {

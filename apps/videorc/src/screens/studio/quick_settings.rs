@@ -405,9 +405,8 @@ impl QuickSettingsSection {
                 let _ = settings_entity.update(cx, |section, cx| {
                     section.popover_open = false;
                     // Scene page is Background's home (Electron
-                    // `openSceneBackground`). Focus on the section waits
-                    // for Scene's P575 focus hook.
-                    cx.emit(OpenPage::of(PageId::Layouts));
+                    // `openSceneBackground`, P575).
+                    cx.emit(OpenPage::scene_background());
                     cx.notify();
                 });
             },
