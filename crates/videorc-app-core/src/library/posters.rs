@@ -9,7 +9,9 @@
 //!   its read is on its way or when there is none. Each page that wants a
 //!   key is its user; a page lets go of the sessions it no longer lists
 //!   ([`PosterCache::keep`]), and a key goes when no page wants it. It is
-//!   bounded: past [`POSTER_CACHE_LIMIT`] the next new want starts it again.
+//!   bounded per page: past [`POSTER_CACHE_LIMIT`] of a page's keys, that
+//!   page's next new want starts its own keys again, so one page's long
+//!   list never clears another's.
 //! - **The read** ([`Library::load_posters`]) is the loopback server's
 //!   poster, else one `sessions.poster` backfill and a second read, off the
 //!   main thread on the core's runtime.
@@ -24,7 +26,8 @@ use super::{Library, LibraryBackend, LibraryFiles};
 /// A poster: the session and its backend version (the duration).
 pub type PosterKey = (String, Option<i64>);
 
-/// The most entries kept before the next new want starts the cache again.
+/// The most keys one page holds before its next new want starts its keys
+/// again.
 pub const POSTER_CACHE_LIMIT: usize = 200;
 
 #[derive(Debug, Clone)]
@@ -74,8 +77,9 @@ impl<T> PosterCache<T> {
     /// `user` wants these posters. Returns the keys nobody asked for yet, in
     /// order and once each: the caller reads them and [`fill`](Self::fill)s
     /// them. They wait as `None` meanwhile, so a second want doesn't read
-    /// them again. Past [`POSTER_CACHE_LIMIT`] the cache starts again before
-    /// they go in.
+    /// them again. Past [`POSTER_CACHE_LIMIT`] of `user`'s keys (counting
+    /// answers no page holds, which any restart drops), `user` lets go of
+    /// all of them before the new ones go in; another page's keys stay.
     pub fn want(
         &mut self,
         user: &'static str,
@@ -94,8 +98,16 @@ impl<T> PosterCache<T> {
         if needed.is_empty() {
             return needed;
         }
-        if self.entries.len() > POSTER_CACHE_LIMIT {
-            self.entries.clear();
+        let held = self
+            .entries
+            .values()
+            .filter(|entry| entry.users.is_empty() || entry.users.contains(user))
+            .count();
+        if held > POSTER_CACHE_LIMIT {
+            self.entries.retain(|_, entry| {
+                entry.users.remove(user);
+                !entry.users.is_empty()
+            });
         }
         for key in &needed {
             self.entries.insert(
@@ -239,6 +251,58 @@ mod tests {
         );
         assert_eq!(cache.len(), 1);
         assert!(cache.contains(&key("new", None)));
+    }
+
+    #[test]
+    fn one_pages_long_list_never_clears_another_pages_keys() {
+        let mut cache = PosterCache::<u32>::default();
+        let library = (0..150).map(|n| key(&format!("lib-{n}"), None));
+        cache.want(LIBRARY, library);
+        cache.fill(key("lib-0", None), Some(1));
+        // Clean cut's Show all: past the limit of its own keys, one shared
+        // with the Library.
+        let clean_cut = (0..=POSTER_CACHE_LIMIT)
+            .map(|n| key(&format!("cut-{n}"), None))
+            .chain([key("lib-0", None)]);
+        cache.want(CLEAN_CUT, clean_cut);
+        assert_eq!(cache.len(), 150 + POSTER_CACHE_LIMIT + 1);
+
+        // The Library's next new key: it holds 150, so nothing restarts.
+        assert_eq!(
+            cache.want(LIBRARY, [key("lib-new", None)]),
+            vec![key("lib-new", None)]
+        );
+        assert_eq!(cache.len(), 150 + POSTER_CACHE_LIMIT + 2);
+
+        // Clean cut's next new key restarts only its own keys: the
+        // Library's stay, the shared one with its picture too.
+        assert_eq!(
+            cache.want(CLEAN_CUT, [key("cut-new", None)]),
+            vec![key("cut-new", None)]
+        );
+        assert_eq!(cache.len(), 151 + 1);
+        assert_eq!(cache.get("lib-0", None), Some(&1));
+        assert!(cache.contains(&key("lib-149", None)));
+        assert!(cache.contains(&key("lib-new", None)));
+        assert!(!cache.contains(&key("cut-0", None)));
+        // The Library no longer lists lib-0: Clean cut let go of it too.
+        cache.keep(LIBRARY, |id| id != "lib-0");
+        assert!(!cache.contains(&key("lib-0", None)));
+    }
+
+    #[test]
+    fn a_restart_drops_answers_no_page_holds() {
+        let mut cache = PosterCache::<u32>::default();
+        cache.want(CLEAN_CUT, [key("cut", None)]);
+        cache.fill(key("orphan", None), Some(1));
+        let many = (0..POSTER_CACHE_LIMIT).map(|n| key(&n.to_string(), None));
+        cache.want(LIBRARY, many);
+        // 200 of the Library's and the orphan: past the limit.
+        cache.want(LIBRARY, [key("new", None)]);
+        assert!(!cache.contains(&key("orphan", None)));
+        assert!(cache.contains(&key("cut", None)));
+        assert!(cache.contains(&key("new", None)));
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]

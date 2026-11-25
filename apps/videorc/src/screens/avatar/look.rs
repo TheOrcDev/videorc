@@ -33,7 +33,7 @@ use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
 use videorc_kit::empty::Empty;
-use videorc_kit::icon::IconName;
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::kbd::Kbd;
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
@@ -1091,15 +1091,24 @@ fn preview_column(
                         .child("Click it to react"),
                 )
                 .child(
+                    // `icon-xs`: the glyph alone, its words for assistive tech.
                     Button::new("avatar-preview-pause")
                         .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::Xs)
+                        .size(ButtonSize::IconXs)
                         .accessibility_label(if paused {
                             format!("Play {name}")
                         } else {
                             format!("Pause {name}")
                         })
-                        .label(if paused { "Play" } else { "Pause" })
+                        .child(icon(
+                            if paused {
+                                IconName::Play
+                            } else {
+                                IconName::Pause
+                            },
+                            12.,
+                            hsla(t.foreground),
+                        ))
                         .on_click(move |_, _, cx| {
                             pause.update(cx, |screen, cx| {
                                 screen
