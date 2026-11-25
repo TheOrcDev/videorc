@@ -135,12 +135,17 @@ impl RenderOnce for PlatformGlyph {
                         .w(px(YT_W))
                         .h(px(YT_H))
                         .flex_none()
-                        .child(canvas(
-                            move |_, _, _| (),
-                            move |bounds, _, window, _| {
-                                paint_mark(window, bounds, image.clone());
-                            },
-                        ))
+                        // A canvas has no children: without a size it lays
+                        // out at 0×0 and the mark paints nothing.
+                        .child(
+                            canvas(
+                                move |_, _, _| (),
+                                move |bounds, _, window, _| {
+                                    paint_mark(window, bounds, image.clone());
+                                },
+                            )
+                            .size_full(),
+                        )
                         .into_any_element(),
                     None => icon(IconName::YoutubeLogo, YT_H, hsla(fixed::PLATFORM_YOUTUBE))
                         .into_any_element(),
@@ -156,12 +161,17 @@ impl RenderOnce for PlatformGlyph {
                         .flex_none()
                         .overflow_hidden()
                         .rounded(px(radius::CHIP))
-                        .child(canvas(
-                            move |_, _, _| (),
-                            move |bounds, _, window, _| {
-                                paint_mark(window, bounds, image.clone());
-                            },
-                        ))
+                        // A canvas has no children: without a size it lays
+                        // out at 0×0 and the mark paints nothing.
+                        .child(
+                            canvas(
+                                move |_, _, _| (),
+                                move |bounds, _, window, _| {
+                                    paint_mark(window, bounds, image.clone());
+                                },
+                            )
+                            .size_full(),
+                        )
                         .into_any_element(),
                     None => div()
                         .size(px(TILE))
