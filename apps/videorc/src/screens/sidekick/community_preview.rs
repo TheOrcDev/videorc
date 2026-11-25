@@ -407,10 +407,7 @@ mod tests {
             ("since", "March 2026"),
         ];
         assert_eq!(
-            fill_sample(
-                "Welcome { name } · {streams}/{row} since {since}",
-                ada
-            ),
+            fill_sample("Welcome { name } · {streams}/{row} since {since}", ada),
             "Welcome Ada · 14/5 since March 2026"
         );
         assert_eq!(

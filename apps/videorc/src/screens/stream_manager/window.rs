@@ -257,7 +257,10 @@ impl StreamManager {
             )
         });
         let activity = cx.new(|cx| ActivityPane::new(studio.live_chat(), dashboard.clone(), cx));
-        let sidekick = cx.new(|cx| SidekickPane::new(studio.clone(), runtime.clone(), window, cx));
+        let user_data_dir = frame.user_data_dir();
+        let sidekick = cx.new(|cx| {
+            SidekickPane::new(studio.clone(), runtime.clone(), user_data_dir, window, cx)
+        });
         let sidekick_events = cx.subscribe_in(
             &sidekick,
             window,

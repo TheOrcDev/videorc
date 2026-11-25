@@ -741,8 +741,7 @@ impl SidekickScreen {
         if let Some(community) = self.community.as_mut() {
             community.forget_id = Some(person_id);
             community.forget_name = name;
-            // The question takes the card's place (kit dialogs don't stack).
-            community.person.close(window, cx);
+            // The question stacks over the card (`Dialog::layer(1)`).
             community.forget.open(window, cx);
         }
         cx.notify();
@@ -755,6 +754,8 @@ impl SidekickScreen {
         if let Some(community) = self.community.as_mut() {
             community.forget.close(window, cx);
             community.forget_id = None;
+            // The person is gone, so their card goes with the question.
+            community.person.close(window, cx);
         }
         let backend = self.studio.backend().clone();
         let job = self.runtime.spawn(async move {

@@ -617,7 +617,8 @@ impl SidekickScreen {
         );
     }
 
-    /// A memory's "Forget …": the confirm takes the card's place.
+    /// A memory's "Forget …": the confirm stacks over the card
+    /// (`Dialog::layer(1)`).
     pub(super) fn ask_forget_memory(
         &mut self,
         memory: PersonMemory,
@@ -626,7 +627,6 @@ impl SidekickScreen {
     ) {
         if let Some(community) = self.community.as_mut() {
             community.memory_target = Some(memory);
-            community.person.close(window, cx);
             community.memory_forget.open(window, cx);
         }
         cx.notify();
@@ -636,7 +636,6 @@ impl SidekickScreen {
         if let Some(community) = self.community.as_mut() {
             community.memory_forget.close(window, cx);
             community.memory_target = None;
-            community.person.open(window, cx);
         }
         cx.notify();
     }
@@ -650,7 +649,6 @@ impl SidekickScreen {
             return;
         };
         community.memory_forget.close(window, cx);
-        community.person.open(window, cx);
         self.community_card_request(
             CardCall {
                 method: "cohost.community.memory.delete",
@@ -1717,6 +1715,7 @@ fn forget_dialog(state: &CommunityState, cx: &mut Context<SidekickScreen>) -> Di
     let entity = cx.entity();
     let copy = forget_copy(&state.forget_name);
     Dialog::new("forget-person", &state.forget, copy.title.clone())
+        .layer(1)
         .description(copy.description.clone())
         .footer(
             Button::new("forget-cancel")
@@ -1727,12 +1726,9 @@ fn forget_dialog(state: &CommunityState, cx: &mut Context<SidekickScreen>) -> Di
                     move |_, window, cx| {
                         entity.update(cx, |screen, cx| {
                             if let Some(community) = screen.community.as_mut() {
+                                // The card it was asked from stays open below.
                                 community.forget.close(window, cx);
                                 community.forget_id = None;
-                                // Back to the card it was asked from.
-                                if community.selected.is_some() {
-                                    community.person.open(window, cx);
-                                }
                             }
                             cx.notify();
                         });
@@ -1751,7 +1747,7 @@ fn forget_dialog(state: &CommunityState, cx: &mut Context<SidekickScreen>) -> Di
         )
 }
 
-/// "Forget this memory?" (D10), asked in the card's place.
+/// "Forget this memory?" (D10), stacked over the card.
 fn memory_forget_dialog(state: &CommunityState, cx: &mut Context<SidekickScreen>) -> Dialog {
     let entity = cx.entity();
     let name = state
@@ -1766,6 +1762,7 @@ fn memory_forget_dialog(state: &CommunityState, cx: &mut Context<SidekickScreen>
         .unwrap_or_default();
     let copy = memory_forget_copy(name, text);
     Dialog::new("forget-memory", &state.memory_forget, copy.title)
+        .layer(1)
         .description(copy.description)
         .footer(
             Button::new("forget-memory-cancel")
