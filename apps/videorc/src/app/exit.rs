@@ -101,13 +101,61 @@ impl ExitGuard {
         }
     }
 
-    /// The main window: its close button asks while on air.
+    /// The main window: its close button asks while on air, and on macOS
+    /// it hides instead of closing ([`Self::close_main`]).
     pub fn watch_main_window(window: &Window, cx: &mut App) {
         if !cx.has_global::<Self>() {
             return;
         }
-        cx.global_mut::<Self>().main_window = Some(window.window_handle());
-        window.on_window_should_close(cx, |_, cx| Self::may_exit(AppExitKind::Close, cx));
+        let main = window.window_handle();
+        cx.global_mut::<Self>().main_window = Some(main);
+        window.on_window_should_close(cx, move |_, cx| {
+            if !Self::may_exit(AppExitKind::Close, cx) {
+                return false;
+            }
+            if cfg!(target_os = "macos") {
+                // Not inside the window's own close: the other windows and
+                // this one go once the callback returns.
+                cx.defer(move |cx| Self::close_main(main, cx));
+                return false;
+            }
+            true
+        });
+    }
+
+    /// The main window goes (P1513, P1514). On macOS the app stays in the
+    /// Dock, as Electron's does (`window-all-closed` quits only elsewhere):
+    /// the other windows close with it, as Electron's Studio `closed`
+    /// handler closes the detached ones, and the main window hides until
+    /// the Dock brings it back ([`Self::show_main_window`]). Elsewhere it
+    /// closes, and the last window closing quits (`main.rs`).
+    fn close_main(main: AnyWindowHandle, cx: &mut App) {
+        #[cfg(target_os = "macos")]
+        {
+            for other in cx.windows() {
+                if other != main {
+                    let _ = other.update(cx, |_, window, _| window.remove_window());
+                }
+            }
+            let _ = main.update(cx, |_, window, _| {
+                crate::platform::macos::hide_window(window)
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = main.update(cx, |_, window, _| window.remove_window());
+    }
+
+    /// The Dock's click with no window showing (Electron's `activate`,
+    /// P1513): the main window comes back where it was.
+    pub fn show_main_window(cx: &mut App) {
+        let main = cx
+            .has_global::<Self>()
+            .then(|| cx.global::<Self>().main_window)
+            .flatten();
+        if let Some(main) = main {
+            let _ = main.update(cx, |_, window, _| window.activate_window());
+            cx.activate(true);
+        }
     }
 
     /// The End livestream question's owner (the Studio's stop request).
@@ -129,7 +177,7 @@ impl ExitGuard {
             AppExitKind::Quit => cx.quit(),
             AppExitKind::Close => {
                 if let Some(main) = main.flatten() {
-                    let _ = main.update(cx, |_, window, _| window.remove_window());
+                    Self::close_main(main, cx);
                 }
             }
         }
@@ -180,14 +228,17 @@ impl ExitGuard {
         cx.quit();
     }
 
-    /// Close Window (⌘W): the main window asks first; any other window
-    /// closes.
+    /// Close Window (⌘W): the main window asks first and goes as its close
+    /// button does ([`Self::close_main`]); any other window closes.
     pub fn close_active_window(cx: &mut App) {
         let Some(active) = cx.active_window() else {
             return;
         };
         let is_main = cx.has_global::<Self>() && cx.global::<Self>().main_window == Some(active);
-        if is_main && !Self::may_exit(AppExitKind::Close, cx) {
+        if is_main {
+            if Self::may_exit(AppExitKind::Close, cx) {
+                Self::close_main(active, cx);
+            }
             return;
         }
         let _ = active.update(cx, |_, window, _| window.remove_window());

@@ -88,6 +88,21 @@ pub fn show_about_panel() {
     }
 }
 
+/// Takes the window off screen without closing it (`orderOut:`); GPUI's
+/// `activate_window` (`makeKeyAndOrderFront:`) brings it back.
+pub fn hide_window(window: &Window) {
+    if let Ok(ns_window) = ns_window(window) {
+        // SAFETY: a live NSWindow and a documented selector with a nil
+        // sender, on the main thread.
+        let _: () = unsafe {
+            objc2::msg_send![
+                &*ns_window,
+                orderOut: std::ptr::null_mut::<objc2::runtime::AnyObject>()
+            ]
+        };
+    }
+}
+
 pub struct MacOs;
 
 impl Platform for MacOs {
