@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnyElement, ColorSpace, Context, Entity, EventEmitter, FontWeight, Image, ImageFormat,
-    ObjectFit, Role, SharedString, Window, WindowControlArea, div, img, linear_color_stop,
+    AnyElement, ColorSpace, Context, Entity, EventEmitter, FocusHandle, FontWeight, Image,
+    ImageFormat, ObjectFit, SharedString, Window, WindowControlArea, div, img, linear_color_stop,
     linear_gradient, prelude::*, px, relative,
 };
 use videorc_app_core::assets;
@@ -234,6 +234,13 @@ pub struct FirstRunScreen {
     /// main thread the first time setup opens.
     inverted_poster: Option<Arc<Image>>,
     poster_started: bool,
+    /// Keyboard focus (`first-run-setup.tsx`): the Goal rows, Up and Down
+    /// moving between them, and Look's first background card.
+    goal_focus: [FocusHandle; 3],
+    look_focus: FocusHandle,
+    /// The step that already took the keyboard (`shownStep`), so a step
+    /// focuses its control once, when it appears.
+    focused_step: Option<Step>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,6 +324,9 @@ impl FirstRunScreen {
             settling: false,
             inverted_poster: None,
             poster_started: false,
+            goal_focus: std::array::from_fn(|_| cx.focus_handle()),
+            look_focus: cx.focus_handle(),
+            focused_step: None,
         };
         screen.try_auto_show(cx);
         screen
@@ -399,6 +409,7 @@ impl FirstRunScreen {
             .and_then(|record| record.goal);
         self.step = fr::steps_for(self.goal, platform)[0];
         self.open = true;
+        self.focused_step = None;
         self.opened_at = Some(Instant::now());
         self.samples.clear();
         self.studio.set_clips_first_run_setup_open(true);
@@ -416,6 +427,7 @@ impl FirstRunScreen {
             .find(|candidate| *candidate >= step)
             .unwrap_or(Step::Permissions);
         self.open = true;
+        self.focused_step = None;
         self.opened_at = Some(Instant::now());
         self.samples.clear();
         self.studio.set_clips_first_run_setup_open(true);
@@ -776,14 +788,19 @@ fn needs_screen(preset: &str) -> bool {
 
 /// `MediaCard`: the row radius, a 4% fill and a hairline; selected, the
 /// chrome plate with a brighter rim, never a colour.
+/// A Look card: a real button (`<button>` in Electron), so Tab reaches it,
+/// Enter and Space pick it and the focus ring shows. `focus` is the step's
+/// autofocus target (the first background card).
 fn media_card(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
     selected: bool,
     disabled: bool,
+    focus: Option<&FocusHandle>,
     t: &Theme,
-) -> gpui::Stateful<gpui::Div> {
+) -> gpui_base::Button {
     let accent = hsla(t.accent);
+    let ring = focus_ring(t);
     let plate = vec![
         box_shadow(&Shadow {
             inset: true,
@@ -802,14 +819,12 @@ fn media_card(
             color: t.chrome_plate_rim,
         }),
     ];
-    div()
-        .id(id)
-        .role(Role::Button)
-        .aria_label(label)
+    gpui_base::Button::new(id)
+        .when_some(focus, |card, focus| card.track_focus(focus))
+        .disabled(disabled)
+        .accessibility_label(label)
         .relative()
         .min_w(px(0.))
-        .flex()
-        .flex_col()
         .rounded(px(radius::ROW))
         .border_1()
         .map(|card| {
@@ -831,6 +846,7 @@ fn media_card(
             card.cursor_pointer().hover(move |style| style.bg(accent))
         })
         .when(disabled, |card| card.opacity(0.5))
+        .focus_visible(move |style| style.shadow(vec![ring]))
 }
 
 /// A diagram corner on the radius tiers, as the scene cards draw it.
@@ -1004,9 +1020,33 @@ impl Render for FirstRunScreen {
             .child(top)
             .child(heading);
 
+        // A new step takes the keyboard (`first-run-setup.tsx`): its marked
+        // control, else its first one. Goal marks the chosen row (the first
+        // when none is chosen); Look's first card is No background. The
+        // other steps' first controls are kit Buttons and Selects, which
+        // take a focus handle once K-L4-4 lands.
+        if self.focused_step != Some(self.step) {
+            self.focused_step = Some(self.step);
+            let target = match self.step {
+                Step::Goal => {
+                    let index = match self.goal {
+                        Some(Goal::Stream) => 1,
+                        Some(Goal::Both) => 2,
+                        _ => 0,
+                    };
+                    Some(self.goal_focus[index].clone())
+                }
+                Step::Look if !locked => Some(self.look_focus.clone()),
+                _ => None,
+            };
+            if let Some(target) = target {
+                cx.on_next_frame(window, move |_, window, cx| window.focus(&target, cx));
+            }
+        }
+
         let body = match self.step {
             Step::Permissions => permissions_body(self, &entity, locked, t),
-            Step::Goal => goal_body(noun, self.goal, &entity, locked, t),
+            Step::Goal => goal_body(noun, self.goal, &self.goal_focus, &entity, locked, t),
             Step::Look => look_body(self, &snapshot, &entity, locked, t),
             Step::Sound => sound_body(self, &snapshot, &entity, locked, offline, noun, t),
             Step::Destinations => destinations_body(self, &entity, locked, offline, t),
@@ -1330,6 +1370,7 @@ fn permissions_body(
 fn goal_body(
     noun: &str,
     goal: Option<Goal>,
+    focus: &[FocusHandle; 3],
     entity: &Entity<FirstRunScreen>,
     locked: bool,
     t: &Theme,
@@ -1363,6 +1404,7 @@ fn goal_body(
         // One click (or Enter) picks the choice and moves on.
         list = list.item(
             gpui_base::Button::new(("first-run-goal", index))
+                .track_focus(&focus[index])
                 .disabled(locked)
                 .w_full()
                 .accessibility_label(title)
@@ -1405,7 +1447,25 @@ fn goal_body(
                 ),
         );
     }
-    list.into_any_element()
+    // `moveFocus`: Up and Down move between the choices, as in a menu,
+    // wrapping at either end.
+    let rows = focus.clone();
+    div()
+        .on_key_down(move |event, window, cx| {
+            let step: isize = match event.keystroke.key.as_str() {
+                "down" => 1,
+                "up" => -1,
+                _ => return,
+            };
+            let Some(index) = rows.iter().position(|row| row.is_focused(window)) else {
+                return;
+            };
+            cx.stop_propagation();
+            let next = (index as isize + step).rem_euclid(rows.len() as isize) as usize;
+            window.focus(&rows[next], cx);
+        })
+        .child(list)
+        .into_any_element()
 }
 
 fn look_body(
@@ -1621,7 +1681,8 @@ fn look_body(
                 .text_color(hsla(t.muted_foreground))
                 .child(label),
         };
-        let mut tile = media_card(("first-run-bg", index), label, selected, locked, t)
+        let focus = (index == 0).then_some(&screen.look_focus);
+        let mut tile = media_card(("first-run-bg", index), label, selected, locked, focus, t)
             .p(px(4.))
             .tooltip(tooltip(label))
             .child(well);
@@ -1674,29 +1735,45 @@ fn look_body(
                         .border_color(hsla(t.foreground)),
                 )
             });
-        let mut card = media_card(("first-run-layout", index), *label, selected, disabled, t)
-            .gap(px(6.))
-            .p(px(8.))
-            .child(well)
-            .child(
-                div()
-                    .min_w(px(0.))
-                    .text_size(px(12.))
-                    .line_height(px(16.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(hsla(t.foreground))
-                    .line_clamp(2)
-                    .child(*label),
-            )
-            .when(selected, |card| {
-                card.child(
+        // The button centres its content, so the thumb and the name sit in
+        // one left-aligned column inside it.
+        let mut card = media_card(
+            ("first-run-layout", index),
+            *label,
+            selected,
+            disabled,
+            None,
+            t,
+        )
+        .p(px(8.))
+        .child(
+            div()
+                .w_full()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(well)
+                .child(
                     div()
-                        .absolute()
-                        .top(px(4.))
-                        .left(px(4.))
-                        .child(Badge::new("").icon(icon(IconName::Check, 12., hsla(t.foreground)))),
-                )
-            });
+                        .min_w(px(0.))
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(hsla(t.foreground))
+                        .line_clamp(2)
+                        .child(*label),
+                ),
+        )
+        .when(selected, |card| {
+            card.child(
+                div()
+                    .absolute()
+                    .top(px(4.))
+                    .left(px(4.))
+                    .child(Badge::new("").icon(icon(IconName::Check, 12., hsla(t.foreground)))),
+            )
+        });
         if !disabled {
             card = card.on_click({
                 let entity = entity.clone();
