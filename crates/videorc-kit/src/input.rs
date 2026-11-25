@@ -23,6 +23,8 @@ pub struct Input {
     state: Entity<InputState>,
     disabled: bool,
     invalid: bool,
+    /// No own rim, fill or focus ring: an [`crate::input_group::InputGroup`] owns them.
+    plain: bool,
     ground: Option<Color>,
     accessibility_label: Option<SharedString>,
     appearance: Option<Appearance>,
@@ -35,6 +37,7 @@ impl Input {
             state: state.clone(),
             disabled: false,
             invalid: false,
+            plain: false,
             ground: None,
             accessibility_label: None,
             appearance: None,
@@ -49,6 +52,12 @@ impl Input {
     /// `aria-invalid`: the destructive rim and ring.
     pub fn invalid(mut self, invalid: bool) -> Self {
         self.invalid = invalid;
+        self
+    }
+
+    /// Transparent control for an [`crate::input_group::InputGroup`] shell.
+    pub fn plain(mut self, plain: bool) -> Self {
+        self.plain = plain;
         self
     }
 
@@ -124,7 +133,7 @@ impl RenderOnce for Input {
         };
         let mut frame = gpui_base::InputBase::new(self.id)
             .semantic_owner(self.state.entity_id())
-            .focused(focused)
+            .focused(focused && !self.plain)
             .disabled(disabled)
             .role(gpui_base::RoleOverride::Presentational)
             .flex()
@@ -132,23 +141,31 @@ impl RenderOnce for Input {
             .w_full()
             .min_w(px(0.0))
             .h(px(size::CONTROL))
-            .px(px(10.0))
+            .px(if self.plain { px(4.0) } else { px(10.0) })
             .py(px(4.0))
             .rounded(px(radius::CHIP))
-            .border_1()
-            .border_color(hsla(rim))
-            .bg(hsla(fade(with_alpha(t.input, 0.5))))
             .font_family(FONT)
             .text_size(px(14.0))
             .line_height(px(20.0))
-            .text_color(hsla(fade(t.foreground)))
-            .styles(|styles| {
-                styles.focused(|style| {
-                    style
-                        .border_color(hsla(focus_rim))
-                        .shadow(vec![ring(focus_ring)])
-                })
-            });
+            .text_color(hsla(fade(t.foreground)));
+        if self.plain {
+            frame = frame
+                .border_0()
+                .border_color(gpui::transparent_black())
+                .bg(gpui::transparent_black());
+        } else {
+            frame = frame
+                .border_1()
+                .border_color(hsla(rim))
+                .bg(hsla(fade(with_alpha(t.input, 0.5))))
+                .styles(|styles| {
+                    styles.focused(|style| {
+                        style
+                            .border_color(hsla(focus_rim))
+                            .shadow(vec![ring(focus_ring)])
+                    })
+                });
+        }
         if let Some(label) = self.accessibility_label {
             frame = frame.accessibility_label(label);
         }
