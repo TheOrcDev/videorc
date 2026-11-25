@@ -101,6 +101,7 @@ mod recordings_folder_actions;
 pub mod scene_editor;
 pub mod scene_switch;
 pub mod scenes;
+pub mod scenes_section;
 pub mod scheduled;
 pub mod screen_views;
 pub mod session;
