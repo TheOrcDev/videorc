@@ -8,6 +8,7 @@
 //! right; narrower, the transport leads, then the preview, then the
 //! inspector.
 
+pub mod alerts;
 pub mod audio;
 pub mod chat;
 pub mod layout;
@@ -34,6 +35,7 @@ use videorc_preview::lifecycle::WindowMode;
 
 use crate::preview::Preview;
 
+use alerts::{CloudResumeSlot, StudioRequest};
 use audio::AudioSection;
 use chat::ChatSection;
 use layout::{INSPECTOR_MAX_PX, StudioLayout};
@@ -53,6 +55,9 @@ pub struct StudioPage {
     focus: FocusHandle,
     transport: Entity<Transport>,
     preview: Entity<Preview>,
+    /// The cloud's Resume notice above Session; draws nothing until a show
+    /// waits.
+    cloud_resume: Entity<CloudResumeSlot>,
     session: Entity<SessionSection>,
     /// Chat in Studio (P188): draws nothing until it shows.
     chat: Entity<ChatSection>,
@@ -81,6 +86,7 @@ impl StudioPage {
     pub fn new(
         transport: Entity<Transport>,
         preview: Entity<Preview>,
+        cloud_resume: Entity<CloudResumeSlot>,
         session: Entity<SessionSection>,
         chat: Entity<ChatSection>,
         audio: Entity<AudioSection>,
@@ -93,6 +99,22 @@ impl StudioPage {
             .detach();
         cx.subscribe(&session, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
+        // A watchdog fix's doors on this page: the Microphone strip, and the
+        // Takeover section after End takeover.
+        cx.subscribe_in(
+            &session,
+            window,
+            |page, _, request: &StudioRequest, window, cx| match request {
+                StudioRequest::FocusAudio => {
+                    let strip = page.audio.read(cx).focus_handle(cx);
+                    strip.focus(window, cx);
+                }
+                StudioRequest::TakeoverEnded => page
+                    .takeover
+                    .update(cx, |takeover, cx| takeover.refresh(cx)),
+            },
+        )
+        .detach();
         cx.subscribe(&audio, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
         cx.subscribe(&takeover, |_, _, open: &OpenPage, cx| cx.emit(*open))
@@ -110,6 +132,7 @@ impl StudioPage {
             focus,
             transport,
             preview,
+            cloud_resume,
             session,
             chat,
             audio,
@@ -315,6 +338,7 @@ impl Render for StudioPage {
             .flex_col()
             .min_w_0()
             .min_h_0()
+            .child(self.cloud_resume.clone())
             .child(self.session.clone())
             .child(self.chat.clone())
             .child(self.audio.clone())

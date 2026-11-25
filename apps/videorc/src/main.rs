@@ -583,10 +583,18 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let cloud_resume = cx.new(|cx| {
+                    screens::studio::alerts::CloudResumeSlot::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        cx,
+                    )
+                });
                 let studio_page = cx.new(|cx| {
                     StudioPage::new(
                         transport.clone(),
                         preview.clone(),
+                        cloud_resume.clone(),
                         session,
                         chat,
                         audio,
@@ -624,6 +632,7 @@ fn main() -> Result<()> {
                     )
                 });
                 palette.update(cx, |palette, _| palette.bind_dialogs(dialogs.clone()));
+                cloud_resume.update(cx, |slot, _| slot.bind_dialogs(dialogs.clone()));
                 let sounds =
                     cx.new(|cx| SoundsPanel::new(studio.clone(), core_handle.clone(), window, cx));
                 // Plan 260 Phase 3 (L1): the Scene page ⌘3.

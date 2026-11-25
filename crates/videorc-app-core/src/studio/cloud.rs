@@ -382,6 +382,14 @@ impl<B: StudioBackend> Studio<B> {
             .await;
     }
 
+    /// `talkShow.resumeRoom` (plan 224 C-G8): the Studio's Resume notice for
+    /// a talk show rejoins its room (`cloud.room.resume`). No local session
+    /// starts, so no local source can block it.
+    pub async fn resume_talk_room(&self) {
+        self.cloud_action("cloud.room.resume", Value::Null, "resume", "the show")
+            .await;
+    }
+
     /// `cloud.room.close`.
     pub async fn close_talk_room(&self) {
         self.cloud_action("cloud.room.close", Value::Null, "close", "the room")
