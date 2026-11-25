@@ -302,6 +302,7 @@ export function createUiDriver(
     if (gpui) {
       const params = { x, y, timeoutMs: ms }
       if (options.modifiers) params.modifiers = options.modifiers
+      if (options.window) params.window = options.window
       return send('ui-click', params, ms)
     }
     return page(

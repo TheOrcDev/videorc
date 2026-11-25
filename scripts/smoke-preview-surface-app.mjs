@@ -5,10 +5,23 @@ import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
-import { appSpawnSpec, devAppSpawnSpec, smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import {
+  appSpawnSpec,
+  devAppSpawnSpec,
+  smokeAppEnv,
+  smokeAppIsGpui,
+  stopProcess
+} from './lib/app-launcher.mjs'
 import { assertSmokeCommandConnection } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
+
+// Plan 260 Phase 3: VIDEORC_APP=gpui runs the GPUI app's own version
+// (docs/gpui/native-preview-probes.md).
+if (smokeAppIsGpui()) {
+  const { runGpuiPreviewSurface } = await import('./gpui-preview-surface.mjs')
+  process.exit(await runGpuiPreviewSurface())
+}
 
 const repoRoot = resolve(import.meta.dirname, '..')
 

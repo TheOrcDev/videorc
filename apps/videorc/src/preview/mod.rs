@@ -599,6 +599,13 @@ impl Preview {
                 "frameWidth": telemetry.frame_width,
                 "frameHeight": telemetry.frame_height,
                 "presentedSceneRevision": telemetry.presented_scene_revision,
+                // Why frames didn't show, counted (pump diagnostics).
+                "skipped": telemetry.skipped,
+                "refused": telemetry.refused,
+                "dropped": telemetry.dropped,
+                // The surface bounds the element last sent the backend.
+                "lastBounds": native.element.last_bounds()
+                    .and_then(|bounds| serde_json::to_value(bounds).ok()),
                 "message": status.reason.or(telemetry.surface_message),
                 // The window probe's geometry oracle: the rect the app set on
                 // the layer, the one Core Animation displays, and the slot it

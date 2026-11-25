@@ -7,7 +7,12 @@ import { join, resolve } from 'node:path'
 
 import { assertEncoderBridgeVideoOutputHealthy } from './lib/encoder-bridge-output-gates.mjs'
 import { resolveExistingSiblingFfprobe } from './lib/ffmpeg-sibling-paths.mjs'
-import { performanceAppSpawnSpec, smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import {
+  performanceAppSpawnSpec,
+  smokeAppEnv,
+  smokeAppIsGpui,
+  stopProcess
+} from './lib/app-launcher.mjs'
 import { assertSmokeCommandConnection } from './lib/smoke-command-client.mjs'
 import { assertSourceCompleteCompositorHealthy } from './lib/native-preview-source-gates.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
@@ -37,6 +42,13 @@ import {
   writeStartupReports
 } from './lib/startup-resolution-analyzer.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+
+// Plan 260 Phase 3: VIDEORC_APP=gpui runs the GPUI app's own version
+// (docs/gpui/native-preview-probes.md).
+if (smokeAppIsGpui()) {
+  const { runGpuiRecordingNativePreview } = await import('./gpui-recording-native-preview.mjs')
+  process.exit(await runGpuiRecordingNativePreview())
+}
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const windowsPreviewOptions = parseWindowsNativeScreenArgs(process.argv.slice(2))
