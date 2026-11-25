@@ -318,8 +318,9 @@ impl ScenePage {
             caret = caret.with_transformation(Transformation::rotate(percentage(0.5)));
         }
         let summary = banner.timing_summary.clone().unwrap_or_default();
-        // A heading's text never names the button it sits in, so the
-        // header carries Electron's name: the title, then the summary.
+        // The trigger isn't plain text, so the header button and its
+        // `<h3>` (`heading_level`) carry Electron's name: the title, then
+        // the summary.
         let timing_name = if summary.is_empty() {
             copy::TIMING.to_string()
         } else {
@@ -329,9 +330,6 @@ impl ScenePage {
         // `-mx-2 px-2 py-1.5 rounded-row hover:bg-accent`: the label keeps
         // the other fields' left edge, the hover block reaches past it.
         let trigger = div()
-            .id("scene-banner-timing")
-            .role(gpui::Role::Heading)
-            .aria_level(3)
             .flex()
             .items_center()
             .w_full()
@@ -355,6 +353,9 @@ impl ScenePage {
         let timing_page = cx.entity().downgrade();
         let mut timing = Collapsible::new("scene-banner-timing-toggle")
             .unstyled(true)
+            .heading_level(3)
+            // `rounded-row`: the focus ring follows the hover block.
+            .header_radius(radius::ROW)
             .open(open)
             .accessibility_label(timing_name)
             .trigger(trigger)

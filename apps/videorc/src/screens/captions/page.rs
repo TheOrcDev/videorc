@@ -24,6 +24,7 @@ use videorc_kit::{
     icon::{IconName, icon},
     list_row::GroupedList,
     navigable_row::NavigableRow,
+    page::{CAPTIONS_GRID, CONFIG_GRID_TWO_COLUMNS, ConfigColumn, ConfigGrid},
     panel_section::PanelSection,
     scroll_area::ScrollArea,
     segmented_control::{Segment, SegmentedControl},
@@ -37,9 +38,6 @@ use videorc_kit::{
     tokens::{Color, Theme, radius, size, text},
 };
 
-/// `CAPTIONS_GRID` (`lib/page-layout.ts`): the preview beside the controls
-/// from 940 px of page width (`@min-[940px]/page`), stacked below it.
-const CAPTIONS_GRID_MIN_WIDTH: f32 = 940.;
 /// `minmax(380px,0.8fr)`: the controls column's floor.
 const CONTROLS_MIN_WIDTH: f32 = 380.;
 /// `grid-cols-2 gap-2`: the Style chips' gap.
@@ -111,8 +109,11 @@ impl CaptionsPanel {
         }
     }
 
+    /// `CAPTIONS_GRID` (`lib/page-layout.ts`): the preview beside the
+    /// controls from the page breakpoint (`@min-[940px]/page`), stacked
+    /// below it.
     fn wide(&self) -> bool {
-        self.width >= CAPTIONS_GRID_MIN_WIDTH
+        self.width >= CONFIG_GRID_TWO_COLUMNS
     }
 
     /// One Style chip's body width: two chips to a row of the controls
@@ -375,6 +376,7 @@ impl CaptionsPanel {
         let backdrop_control = PreviewBackdrop::ALL.into_iter().fold(
             SegmentedControl::new("caption-preview-background")
                 .small(true)
+                .fit(true)
                 .accessibility_label(c::PREVIEW_BACKGROUND)
                 .value(Some(self.backdrop.id())),
             |control, backdrop| control.option(Segment::new(backdrop.id(), backdrop.label())),
@@ -1026,51 +1028,33 @@ impl Render for CaptionsPanel {
         .absolute()
         .size_full();
 
-        // `CAPTIONS_GRID`: flush columns split by a hairline, never a gap.
+        // `CAPTIONS_GRID`: the preview | the controls, flush columns split
+        // by the grid's hairline. In two columns the preview stays in view
+        // (`CAPTIONS_PREVIEW_PIN`) while the controls scroll beside it, and
+        // the grid fills the page's height; stacked, the page scrolls as one
+        // with a hairline above the controls (`PAGE_TRAIL_COLUMN`).
+        let wide = self.wide();
         let trail = div()
             .flex()
             .flex_col()
             .min_w(px(0.))
+            .when(!wide, |trail| {
+                trail.border_t_1().border_color(hsla(t.border))
+            })
             .child(controls)
             .children(transcript);
-        let body = if self.wide() {
-            // The preview stays in view (`CAPTIONS_PREVIEW_PIN`) while the
-            // controls beside it scroll: `minmax(0,1.2fr)` |
-            // `minmax(380px,0.8fr)`.
-            div()
-                .flex()
-                .size_full()
-                .child(
-                    div()
-                        .flex_1()
-                        .flex_grow(1.2)
-                        .min_w(px(0.))
-                        .h_full()
-                        .flex()
-                        .flex_col()
-                        .border_r_1()
-                        .border_color(hsla(t.border))
-                        .child(preview),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .flex_grow(0.8)
-                        .min_w(px(CONTROLS_MIN_WIDTH))
-                        .h_full()
-                        .child(ScrollArea::new("captions-scroll").child(trail)),
-                )
+        let grid = ConfigGrid::new("captions-grid")
+            .tracks(CAPTIONS_GRID)
+            .scroll_column(ConfigColumn::Trail)
+            .two_columns(wide)
+            .child(preview)
+            .child(trail);
+        let body = if wide {
+            grid.into_any_element()
         } else {
-            // Stacked in one column, a hairline above the controls.
-            div().size_full().child(
-                ScrollArea::new("captions-scroll").child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(preview)
-                        .child(trail.border_t_1().border_color(hsla(t.border))),
-                ),
-            )
+            ScrollArea::new("captions-scroll")
+                .child(grid)
+                .into_any_element()
         };
         div()
             .id("captions-page")

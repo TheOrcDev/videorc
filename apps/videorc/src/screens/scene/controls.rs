@@ -155,8 +155,6 @@ pub(super) struct Controls {
     pub timing_open_for: Option<String>,
     /// The connection the banners and the overlay layout were read on.
     pub lists_generation: Option<u64>,
-    /// The page's measured width (`@min-[940px]/page`).
-    pub width: f32,
 }
 
 impl Controls {
@@ -202,7 +200,6 @@ impl Controls {
             choose_image: DialogHandle::new(false),
             timing_open_for: None,
             lists_generation: None,
-            width: 0.,
         }
     }
 

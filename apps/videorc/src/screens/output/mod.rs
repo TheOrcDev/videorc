@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, Entity, Focusable, FontWeight, Keystroke,
-    PathPromptOptions, SharedString, Subscription, WeakEntity, Window, div, prelude::*, px,
+    AnyElement, App, ClipboardItem, Context, Entity, Focusable, Keystroke, PathPromptOptions,
+    SharedString, Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use serde_json::{Value, json};
 use videorc_app_core::account::entitlements::{
@@ -328,6 +328,9 @@ struct Recorder {
     interceptor: Option<Subscription>,
     generation: u64,
     message: Option<(String, String)>,
+    /// The modifiers held while armed (`acceleratorModifiersLabel`, "⇧⌘"),
+    /// shown before the key lands; empty when none are.
+    held: String,
 }
 
 /// Cloud Clips while a room is open: the show it reads, what it read, and
@@ -717,6 +720,7 @@ impl OutputPanel {
         if self.recorder.action.take().is_some() {
             self.recorder.interceptor = None;
             self.recorder.generation += 1;
+            self.recorder.held.clear();
             self.hotkeys.set_recorder_armed(false);
             cx.notify();
         }
@@ -754,6 +758,33 @@ impl OutputPanel {
         cx.notify();
     }
 
+    /// The modifiers held while armed, as the recorder shows them ("⇧⌘…").
+    fn hold_modifiers(&mut self, modifiers: &gpui::Modifiers, cx: &mut Context<Self>) {
+        if self.recorder.action.is_none() {
+            return;
+        }
+        let platform = Some(hotkeys::node_platform());
+        // A key-up reads as the modifiers alone (`shortcutRecorderStep`).
+        let input = accel::KeyInput {
+            code: String::new(),
+            meta: modifiers.platform,
+            control: modifiers.control,
+            alt: modifiers.alt,
+            shift: modifiers.shift,
+            key_up: true,
+        };
+        let held = match recorder::shortcut_recorder_step(&input, platform, |_| None) {
+            recorder::RecorderStep::Held(held) => {
+                accel::accelerator_modifiers_label(&held, platform)
+            }
+            _ => String::new(),
+        };
+        if held != self.recorder.held {
+            self.recorder.held = held;
+            cx.notify();
+        }
+    }
+
     fn record_key(&mut self, key: &Keystroke, cx: &mut Context<Self>) {
         let Some(action) = self.recorder.action.clone() else {
             return;
@@ -779,7 +810,10 @@ impl OutputPanel {
                 self.disarm_recorder(cx);
                 return;
             }
-            recorder::RecorderStep::Held(_) => return,
+            recorder::RecorderStep::Held(_) => {
+                self.hold_modifiers(&key.modifiers, cx);
+                return;
+            }
             recorder::RecorderStep::Reject(message) => {
                 self.recorder.message = Some((action, message));
                 cx.notify();
@@ -1560,6 +1594,9 @@ impl OutputPanel {
                 if let Some(keys) = keys {
                     control = control.keys(keys);
                 }
+                if armed {
+                    control = control.armed_preview(self.recorder.held.clone());
+                }
                 if value.is_some() {
                     control = control.on_clear(cx.listener(move |this, _, _, cx| {
                         this.save_clip_key(clear_action.clone(), String::new(), cx)
@@ -1859,49 +1896,20 @@ impl Render for OutputPanel {
                     entity.update(cx, |this, cx| this.set_encoder_preference(preference, cx));
                 }
             });
-            // `EncoderPreferenceField`: the label with its Beta badge and the
-            // line under it on the left, the select on the right.
+            // `EncoderPreferenceField`: a plain Field around its own row, the
+            // label with its Beta badge (`gap-2`) and the line 2 px under it
+            // (`gap-0.5`, `text-xs`) on the left, the select on the right.
             quality_fields = quality_fields.child(
-                div()
-                    .id("output-encoder-preference")
-                    .role(gpui::Role::Group)
-                    .aria_label(ENCODER_LABEL)
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .flex()
-                            .min_w(px(0.))
-                            .flex_col()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.))
-                                    .child(
-                                        div()
-                                            .text_size(px(14.))
-                                            .line_height(px(20.))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(hsla(t.foreground))
-                                            .child(ENCODER_LABEL),
-                                    )
-                                    .child(Badge::new("Beta").variant(BadgeVariant::Outline)),
-                            )
-                            .child(
-                                div()
-                                    .type_scale(text::META)
-                                    .text_color(hsla(t.muted_foreground))
-                                    .child(if env_override {
-                                        ENCODER_ENV_DESCRIPTION
-                                    } else {
-                                        ENCODER_DESCRIPTION
-                                    }),
-                            ),
-                    )
+                Field::new("output-encoder-preference")
+                    .horizontal()
+                    .compact(true)
+                    .label(ENCODER_LABEL)
+                    .label_after(Badge::new("Beta").variant(BadgeVariant::Outline))
+                    .description(if env_override {
+                        ENCODER_ENV_DESCRIPTION
+                    } else {
+                        ENCODER_DESCRIPTION
+                    })
                     .child(div().flex_none().child(select)),
             );
         }
@@ -2137,6 +2145,13 @@ impl Render for OutputPanel {
 
         div()
             .id("output-page")
+            // While a clip key is armed (its field holds focus), the
+            // modifiers held so far show in it.
+            .on_modifiers_changed(cx.listener(
+                |this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                    this.hold_modifiers(&event.modifiers, cx)
+                },
+            ))
             .flex()
             .flex_col()
             .size_full()

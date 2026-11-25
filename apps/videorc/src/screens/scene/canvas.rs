@@ -121,6 +121,7 @@ impl ScenePage {
                         SegmentedControl::new("scene-overlay-orientation")
                             .accessibility_label(copy::OVERLAYS_ON)
                             .small(true)
+                            .fit(true)
                             .option(Segment::new(HORIZONTAL, copy::HORIZONTAL))
                             .option(Segment::new(VERTICAL, copy::VERTICAL))
                             .value(Some(if vertical { VERTICAL } else { HORIZONTAL }))

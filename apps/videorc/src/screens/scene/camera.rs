@@ -54,6 +54,9 @@ struct Row {
     options: &'static [(&'static str, &'static str)],
     checked: Option<usize>,
     pick: Pick,
+    /// `w-fit` (Electron's default): the track hugs its words (Fit); the
+    /// placement rows are `w-full`.
+    fit: bool,
 }
 
 /// One background tile.
@@ -107,9 +110,11 @@ impl ScenePage {
             options,
             checked,
             pick,
+            fit,
         } = row;
         let mut control = SegmentedControl::new(id)
             .accessibility_label(label)
+            .fit(fit)
             .value(
                 checked
                     .and_then(|index| options.get(index))
@@ -185,6 +190,7 @@ impl ScenePage {
                         options: &copy::SPLITS,
                         checked: Some(split),
                         pick: pick_split,
+                        fit: false,
                     },
                     cx,
                 ));
@@ -197,6 +203,7 @@ impl ScenePage {
                         options: &copy::SIDES,
                         checked: Some(side),
                         pick: pick_side,
+                        fit: false,
                     },
                     cx,
                 ));
@@ -209,6 +216,7 @@ impl ScenePage {
                         options: &copy::CORNERS,
                         checked: corner,
                         pick: pick_corner,
+                        fit: false,
                     },
                     cx,
                 ));
@@ -223,6 +231,7 @@ impl ScenePage {
                         options: &copy::SIZES,
                         checked: Some(size),
                         pick: pick_size,
+                        fit: false,
                     },
                     cx,
                 ));
@@ -235,6 +244,7 @@ impl ScenePage {
                         options: &copy::SHAPES,
                         checked: Some(shape),
                         pick: pick_shape,
+                        fit: false,
                     },
                     cx,
                 ));
@@ -258,6 +268,7 @@ impl ScenePage {
                             options: &copy::ASPECTS,
                             checked: Some(aspect),
                             pick: pick_aspect,
+                            fit: false,
                         },
                         cx,
                     ))
@@ -289,6 +300,7 @@ impl ScenePage {
                         options: &copy::FITS,
                         checked: Some(fit),
                         pick: pick_fit,
+                        fit: true,
                     },
                     cx,
                 ));
