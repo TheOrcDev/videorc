@@ -235,10 +235,13 @@ impl ShellSmoke for ShellWindows {
 
 impl ShellWindows {}
 
-/// Whether this binary is a shipped app rather than a dev build. A dev build
-/// runs from cargo's `target/<profile>/`; anything else is treated as
+/// Debug binaries stay dev builds when the sentinel copies them for the
+/// gallery. Release binaries outside cargo's `target/<profile>/` are
 /// packaged, so the server needs the harness's capability there.
 pub fn packaged() -> bool {
+    if cfg!(debug_assertions) {
+        return false;
+    }
     std::env::current_exe().ok().is_none_or(|exe| {
         let profile = exe.parent();
         let target = profile.and_then(|dir| dir.parent());

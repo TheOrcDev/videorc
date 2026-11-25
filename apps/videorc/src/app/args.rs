@@ -17,7 +17,7 @@ OPTIONS:
     --profile DIR        Isolated data directory (sqlite, secrets, recordings, logs all inside it).
                          Default: the real Videorc data directory, or VIDEORC_USER_DATA_DIR /
                          VIDEORC_APP_DATA_DIR when set.
-    --backend PATH       Backend executable (default <workspace>/target/<this binary's profile>/videorc-backend)
+    --backend PATH       Backend executable (default: sibling videorc-backend, then workspace target)
     --cargo-run          Run the backend through `cargo run -p videorc-backend` instead (the dev chain)
     --workspace PATH     Workspace root (default: derived from the executable, or VIDEORC_WORKSPACE_ROOT)
     --quiet              Do not echo the backend's log lines to stderr (the log file still gets them)
