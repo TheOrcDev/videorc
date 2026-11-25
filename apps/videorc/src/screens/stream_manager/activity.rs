@@ -4,13 +4,13 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, AnyElement, Context, FontWeight, IntoElement, SharedString, Window,
+    AnyElement, Context, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px,
 };
 use tokio::sync::watch;
+use videorc_app_core::chat::LiveChat;
 use videorc_app_core::chat::model::LiveChatMessage;
 use videorc_app_core::chat::view::platform_label;
-use videorc_app_core::chat::LiveChat;
-use videorc_app_core::stream_manager::activity::{activity_items, ActivityFilter, ActivityItem};
+use videorc_app_core::stream_manager::activity::{ActivityFilter, ActivityItem, activity_items};
 use videorc_app_core::stream_manager::dashboard::LiveDashboard;
 use videorc_kit::empty::Empty;
 use videorc_kit::switch::Switch;
@@ -58,33 +58,35 @@ impl ActivityPane {
         let destination_events = board.destination_events.clone();
         let audience = board.audience.clone();
         let items = activity_items(&messages, &destination_events, audience.as_ref());
-        cx.spawn(async move |this, cx| loop {
-            tokio::select! {
-                changed = live_chat.changed() => {
-                    if changed.is_err() {
-                        break;
+        cx.spawn(async move |this, cx| {
+            loop {
+                tokio::select! {
+                    changed = live_chat.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        let chat = live_chat.borrow().clone();
+                        let alive = this.update(cx, |pane, cx| {
+                            pane.messages = chat.messages.iter().cloned().collect();
+                            pane.rebuild(cx);
+                        });
+                        if alive.is_err() {
+                            break;
+                        }
                     }
-                    let chat = live_chat.borrow().clone();
-                    let alive = this.update(cx, |pane, cx| {
-                        pane.messages = chat.messages.iter().cloned().collect();
-                        pane.rebuild(cx);
-                    });
-                    if alive.is_err() {
-                        break;
-                    }
-                }
-                changed = dashboard.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                    let board = dashboard.borrow().clone();
-                    let alive = this.update(cx, |pane, cx| {
-                        pane.destination_events = board.destination_events.clone();
-                        pane.audience = board.audience.clone();
-                        pane.rebuild(cx);
-                    });
-                    if alive.is_err() {
-                        break;
+                    changed = dashboard.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        let board = dashboard.borrow().clone();
+                        let alive = this.update(cx, |pane, cx| {
+                            pane.destination_events = board.destination_events.clone();
+                            pane.audience = board.audience.clone();
+                            pane.rebuild(cx);
+                        });
+                        if alive.is_err() {
+                            break;
+                        }
                     }
                 }
             }

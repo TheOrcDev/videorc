@@ -3,21 +3,21 @@
 //! Card bodies (removal / utterance / command) land in a later slice once
 //! the live drivers are wired; the shell and talk consent are here.
 
-use gpui::{div, prelude::*, px, AnyElement, Context, IntoElement, SharedString, Window};
+use gpui::{AnyElement, Context, IntoElement, SharedString, Window, div, prelude::*, px};
 use serde_json::json;
+use videorc_app_core::BackendEvent;
 use videorc_app_core::buddy::copy as words;
 use videorc_app_core::stream_manager::buddy::{
-    self as buddy, cards_waiting, mode_change_needs_consent, posting_consent_sentence,
-    posting_consent_title, talk_hint, talk_label, talk_mode_label, CohostSettingsView, CohostState,
-    TALK_MODES,
+    self as buddy, CohostSettingsView, CohostState, TALK_MODES, cards_waiting,
+    mode_change_needs_consent, posting_consent_sentence, posting_consent_title, talk_hint,
+    talk_label, talk_mode_label,
 };
 use videorc_app_core::studio::families::{self, write_ai_consent, write_buddy_auto_chat_consent};
-use videorc_app_core::BackendEvent;
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
 use videorc_kit::empty::Empty;
-use videorc_kit::icon::{icon, IconName};
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, hsla};
@@ -58,43 +58,45 @@ impl SidekickPane {
         let posting_consented = studio.read_ui_settings(families::buddy_auto_chat_consent);
         let mut events = studio.backend().subscribe();
         let studio_for_events = studio.clone();
-        cx.spawn(async move |this, cx| loop {
-            match events.recv().await {
-                Ok(BackendEvent::Untyped { event, payload }) => {
-                    let alive = this.update(cx, |pane, cx| match event.as_str() {
-                        "cohost.state" => {
-                            if let Ok(state) =
-                                serde_json::from_value::<CohostState>(payload.clone())
-                            {
-                                pane.state = state;
+        cx.spawn(async move |this, cx| {
+            loop {
+                match events.recv().await {
+                    Ok(BackendEvent::Untyped { event, payload }) => {
+                        let alive = this.update(cx, |pane, cx| match event.as_str() {
+                            "cohost.state" => {
+                                if let Ok(state) =
+                                    serde_json::from_value::<CohostState>(payload.clone())
+                                {
+                                    pane.state = state;
+                                    cx.notify();
+                                }
+                            }
+                            "cohost.settings.changed" => {
+                                if let Some(settings) = CohostSettingsView::from_json(&payload) {
+                                    pane.settings = settings;
+                                }
+                                pane.consented = pane.studio.read_ui_settings(families::ai_consent);
+                                pane.posting_consented = pane
+                                    .studio
+                                    .read_ui_settings(families::buddy_auto_chat_consent);
                                 cx.notify();
                             }
-                        }
-                        "cohost.settings.changed" => {
-                            if let Some(settings) = CohostSettingsView::from_json(&payload) {
-                                pane.settings = settings;
+                            "account.changed" => {
+                                pane.consented =
+                                    studio_for_events.read_ui_settings(families::ai_consent);
+                                pane.posting_consented = studio_for_events
+                                    .read_ui_settings(families::buddy_auto_chat_consent);
+                                cx.notify();
                             }
-                            pane.consented = pane.studio.read_ui_settings(families::ai_consent);
-                            pane.posting_consented = pane
-                                .studio
-                                .read_ui_settings(families::buddy_auto_chat_consent);
-                            cx.notify();
+                            _ => {}
+                        });
+                        if alive.is_err() {
+                            break;
                         }
-                        "account.changed" => {
-                            pane.consented =
-                                studio_for_events.read_ui_settings(families::ai_consent);
-                            pane.posting_consented = studio_for_events
-                                .read_ui_settings(families::buddy_auto_chat_consent);
-                            cx.notify();
-                        }
-                        _ => {}
-                    });
-                    if alive.is_err() {
-                        break;
                     }
+                    Ok(_) => {}
+                    Err(_) => break,
                 }
-                Ok(_) => {}
-                Err(_) => break,
             }
         })
         .detach();
