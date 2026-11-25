@@ -16,6 +16,7 @@ use videorc_app_core::notices::NoticeAction;
 use videorc_app_core::{BackendState, ConnectionState, Tone};
 use videorc_kit::{
     button::{Button, ButtonSize, ButtonVariant},
+    icon::{IconName, icon},
     shortcut_keys::ShortcutKeys,
     status_bar::{StatusBar, StatusBarHint},
     status_bar_action::StatusBarAction,
@@ -74,6 +75,28 @@ fn status_tone(tone: Tone) -> StatusTone {
         Tone::Busy => StatusTone::Warn,
         Tone::Failed => StatusTone::Error,
         Tone::Stopped => StatusTone::Neutral,
+    }
+}
+
+/// Electron's sidebar / ⌘K page glyphs (`workspace-nav.tsx`,
+/// `page-row-icons.tsx`): each `PageId` wears the same Phosphor mark the
+/// React twin draws, including `UserSound` for Sidekick.
+fn page_icon(page: PageId) -> IconName {
+    match page {
+        PageId::Studio => IconName::VideoCamera,
+        PageId::Sources => IconName::Monitor,
+        PageId::Layouts => IconName::SquaresFour,
+        PageId::Captions => IconName::ClosedCaptioning,
+        PageId::Recording => IconName::Record,
+        PageId::Live => IconName::Broadcast,
+        PageId::Guests => IconName::UserCircle,
+        PageId::Avatar => IconName::Smiley,
+        PageId::Ai => IconName::UserSound,
+        PageId::Assets => IconName::ImageSquare,
+        PageId::Sounds => IconName::SpeakerHigh,
+        PageId::Library => IconName::FilmReel,
+        PageId::Settings => IconName::GearSix,
+        PageId::Diagnostics => IconName::Pulse,
     }
 }
 
@@ -554,6 +577,11 @@ impl Shell {
             }
             for &page in pages {
                 let selected = page == self.page;
+                let ink = if selected {
+                    hsla(t.foreground)
+                } else {
+                    hsla(t.muted_foreground)
+                };
                 let shortcut = page
                     .key()
                     .and_then(super::menus::page_action)
@@ -565,14 +593,23 @@ impl Shell {
                             .flex()
                             .justify_between()
                             .items_center()
+                            .gap(px(10.))
                             .px(px(8.))
                             .py(px(5.))
                             .rounded(px(radius::ROW))
                             .type_scale(text::SECTION)
-                            .text_color(hsla(t.foreground))
+                            .text_color(ink)
                             .when(selected, |row| row.bg(hsla(t.accent)))
                             .cursor_pointer()
-                            .child(page.label())
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(10.))
+                                    .min_w(px(0.))
+                                    .child(icon(page_icon(page), 16., ink))
+                                    .child(page.label()),
+                            )
                             .children(shortcut)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_page(page, window, cx)
