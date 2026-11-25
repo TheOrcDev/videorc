@@ -6,11 +6,12 @@ use videorc_app_core::cloud_scene::{
     ROOM_SOURCES_READY_POLL_MS, ROOM_SOURCES_READY_WAIT_MS, room_sources_ready,
     room_sources_ready_poll_ticks,
 };
+use videorc_app_core::guests::wire::{HostShape, Stage, StageLayout};
 use videorc_app_core::studio::room_background::{
     PICTURE_ENCODE_GAP, background_fit, background_zoom_crop, hex_of, live_background_dim,
-    prepare_room_background,
+    managed_background_file_name, prepare_room_background,
 };
-use videorc_app_core::studio::room_media::screen_params;
+use videorc_app_core::studio::room_media::{screen_params, stage_has_screen, stage_set_params};
 use videorc_app_core::studio::room_screen_source::{
     RoomScreenKind, RoomScreenSources, RoomScreenWant, capturer_id_for_native, is_native_screen_id,
     native_id_for_capturer, room_screen_needs_switch, room_screen_needs_switch_native,
@@ -104,6 +105,10 @@ fn background_prepare_live_and_picture_gap() {
     )
     .expect_err("gap");
     assert_eq!(err, PICTURE_ENCODE_GAP);
+    assert_eq!(
+        managed_background_file_name("videorc-asset://background/code-demo.webp").as_deref(),
+        Some("code-demo.webp")
+    );
 
     let bytes = b"webp";
     let (picture, _) = prepare_room_background(
@@ -122,4 +127,16 @@ fn background_prepare_live_and_picture_gap() {
     let asset = picture.asset.expect("asset");
     assert_eq!(asset.hash, hex_of(bytes));
     assert_eq!(asset.mime, BackgroundMime::Webp);
+
+    let stage = Stage {
+        layout: StageLayout::Solo,
+        on_stage: vec!["host:s1".into()],
+        screen: Some("host:s1".into()),
+        ..Default::default()
+    };
+    assert!(stage_has_screen(&stage));
+    assert_eq!(
+        stage_set_params(&stage, HostShape::Rounded)["screen"],
+        json!("host:s1")
+    );
 }

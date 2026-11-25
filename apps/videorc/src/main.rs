@@ -713,6 +713,7 @@ fn main() -> Result<()> {
                         studio.clone(),
                         core_handle.clone(),
                         talk_show.clone(),
+                        paths.user_data_dir.clone(),
                         cx,
                     )
                 });

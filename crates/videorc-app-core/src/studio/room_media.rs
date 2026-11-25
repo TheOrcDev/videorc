@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use videorc_protocol::AudioSettings;
 
 use crate::guests::session::ControllerFacts;
+use crate::guests::wire::{HostShape, Stage};
 
 /// The backend's event for what the room publishes and who is in it.
 pub const PRESENTATION_EVENT: &str = "cloud.room.presentation";
@@ -32,6 +33,8 @@ pub const MONITOR_SET: &str = "cloud.room.monitor.set";
 pub const RETURN_SET: &str = "cloud.return.set";
 pub const AVATAR_SET: &str = "cloud.room.avatar.set";
 pub const PRESENTATION_SET: &str = "cloud.room.presentation.set";
+/// The whole stage in one frame (`CloudStage` / Electron `setStage`).
+pub const STAGE_SET: &str = "cloud.stage.set";
 
 /// The room microphone's gain bounds (`room_microphone::Settings`).
 const GAIN_DB_MIN: f64 = -24.0;
@@ -189,6 +192,44 @@ pub fn screen_params(source_id: &str) -> Option<Value> {
 
 pub fn stop_screen_params() -> Value {
     json!({ "screen": null })
+}
+
+/// Whether the stage already names a screen (Electron's
+/// `room.stage.screen !== undefined`).
+pub fn stage_has_screen(stage: &Stage) -> bool {
+    stage.screen.as_ref().is_some_and(|id| !id.is_empty())
+}
+
+/// Host camera shape for `cloud.stage.set`, from Sources' `cameraShape`.
+pub fn host_shape_for_camera(camera_shape: Option<&str>) -> HostShape {
+    match camera_shape {
+        Some("circle") => HostShape::Circle,
+        _ => HostShape::Rounded,
+    }
+}
+
+/// `cloud.stage.set` params: the whole stage, with a host shape when the
+/// stage does not already name one (Electron's `setStage`).
+pub fn stage_set_params(stage: &Stage, host_shape: HostShape) -> Value {
+    let shape = stage.host_shape.unwrap_or(host_shape);
+    let mut params = json!({
+        "layout": stage.layout.as_str(),
+        "onStage": stage.on_stage,
+        "hostShape": match shape {
+            HostShape::Circle => "circle",
+            HostShape::Rounded => "rounded",
+        },
+    });
+    if let Some(spotlight) = stage.spotlight.as_ref().filter(|id| !id.is_empty()) {
+        params["spotlight"] = json!(spotlight);
+    }
+    if let Some(screen) = stage.screen.as_ref().filter(|id| !id.is_empty()) {
+        params["screen"] = json!(screen);
+    }
+    if !stage.screens.is_empty() {
+        params["screens"] = json!(stage.screens);
+    }
+    params
 }
 
 /// `cloud.room.monitor.set`'s params: the runner's return taken, and heard
@@ -378,6 +419,24 @@ mod tests {
             Some(json!({ "graphics": false, "avatar": true }))
         );
         assert!(!held(&json!({ "held": false })));
+        let stage = crate::guests::wire::Stage {
+            layout: crate::guests::wire::StageLayout::Solo,
+            on_stage: vec!["host:show-1".into()],
+            screen: Some("host:show-1".into()),
+            ..Default::default()
+        };
+        assert!(stage_has_screen(&stage));
+        assert_eq!(
+            stage_set_params(&stage, HostShape::Circle),
+            json!({
+                "layout": "solo",
+                "onStage": ["host:show-1"],
+                "hostShape": "circle",
+                "screen": "host:show-1",
+            })
+        );
+        assert_eq!(host_shape_for_camera(Some("circle")), HostShape::Circle);
+        assert_eq!(host_shape_for_camera(Some("rounded")), HostShape::Rounded);
     }
 
     #[test]
