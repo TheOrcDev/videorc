@@ -3,6 +3,7 @@
 //! without a typed source remain behind the bell.
 mod render;
 mod routing;
+mod system;
 mod watchdog;
 
 use gpui::{
@@ -396,6 +397,8 @@ pub struct Centre {
     ticking: bool,
     toaster: Entity<Toaster>,
     focuses: HashMap<String, FocusHandle>,
+    /// The main window's watchdog system notifications (`system.rs`).
+    watchdog_notices: Option<system::WatchdogNotices>,
 }
 impl Centre {
     pub fn new(
@@ -413,6 +416,13 @@ impl Centre {
             }
         })
         .detach();
+        // The watchdog's system notifications have one home: the window
+        // whose focus and toasts they read.
+        if who == "main" {
+            cx.defer_in(window, |this, window, cx| {
+                this.start_watchdog_notices(window, cx)
+            });
+        }
         let closing = hub.clone();
         cx.on_release(move |this, cx| {
             if this.open {
@@ -427,6 +437,7 @@ impl Centre {
             ticking: false,
             toaster,
             focuses: HashMap::new(),
+            watchdog_notices: None,
         }
     }
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
