@@ -1945,6 +1945,9 @@ fn kind_chips(chips: &[KindChip], t: &Theme, cx: &mut Context<SidekickScreen>) -
         group = group.item(
             ToggleItem::new(chip.group.id.as_str(), chip.group.label)
                 .disabled(chip.state == ChipState::Empty)
+                // What a click does ("Cut all 3" / "Keep all 3"); an empty
+                // chip says why it can't (Electron's DisabledReason).
+                .tooltip(chip.tooltip())
                 .child(body),
         );
     }
