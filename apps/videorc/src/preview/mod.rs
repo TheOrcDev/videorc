@@ -105,6 +105,9 @@ pub struct Preview {
     /// docked video; the Studio says so and offers both places to open it.
     #[cfg(target_os = "macos")]
     closed: bool,
+    /// Where a closed Preview opens again: where it was when it closed.
+    #[cfg(target_os = "macos")]
+    closed_from: WindowMode,
 }
 
 impl Preview {
@@ -244,6 +247,7 @@ impl Preview {
                 opening: false,
                 frame: None,
                 closed: false,
+                closed_from: WindowMode::Docked,
             }
         })
     }
@@ -260,6 +264,7 @@ impl Preview {
             opening: false,
             frame: None,
             closed: false,
+            closed_from: WindowMode::Docked,
         }
     }
 
@@ -357,6 +362,20 @@ impl Preview {
         self.set_closed(cx);
     }
 
+    /// Window → Preview, ⌘P and the palette's Open/Close Preview (P1506,
+    /// Electron's `togglePreviewWindow`): an open Preview closes where it
+    /// is; a closed one opens where it was.
+    #[cfg(target_os = "macos")]
+    pub fn toggle_open(&mut self, cx: &mut Context<Self>) {
+        if !self.closed {
+            self.close(cx);
+        } else if self.closed_from == WindowMode::Floating {
+            self.open_floating(cx);
+        } else {
+            self.open_docked(cx);
+        }
+    }
+
     /// Show here, from closed: the Preview docks in the Studio.
     #[cfg(target_os = "macos")]
     pub fn open_docked(&mut self, cx: &mut Context<Self>) {
@@ -385,6 +404,7 @@ impl Preview {
     /// saved.
     #[cfg(target_os = "macos")]
     fn set_closed(&mut self, cx: &mut Context<Self>) {
+        self.closed_from = self.mode;
         self.return_to_dock();
         self.closed = true;
         self.apply_visibility();
@@ -420,6 +440,15 @@ impl Preview {
         {
             // Left closed: the Studio shows it closed.
             self.closed = true;
+            self.closed_from = if self
+                .frame
+                .as_ref()
+                .is_some_and(frame::PreviewFrame::reopens_floating)
+            {
+                WindowMode::Floating
+            } else {
+                WindowMode::Docked
+            };
             self.apply_visibility();
             cx.notify();
         }

@@ -859,8 +859,8 @@ fn main() -> Result<()> {
                 )
             });
         });
-        // Window → Preview and ⌘P (P1506, P052): the Preview in its own
-        // window, or docked back; the main window comes up for it.
+        // Window → Preview and ⌘P (P1506, P052): an open Preview closes, a
+        // closed one opens where it was; the main window comes up for it.
         let toggle_preview = preview_slot.clone();
         cx.on_action(move |_: &menus::TogglePreview, cx| {
             let Some(preview) = toggle_preview.borrow().clone() else {
@@ -869,6 +869,9 @@ fn main() -> Result<()> {
             let _ = main_window.update(cx, |_, window, _| window.activate_window());
             preview.update(cx, |preview, cx| {
                 if preview.can_float() {
+                    #[cfg(target_os = "macos")]
+                    preview.toggle_open(cx);
+                    #[cfg(not(target_os = "macos"))]
                     preview.toggle_floating(cx);
                 }
             });
