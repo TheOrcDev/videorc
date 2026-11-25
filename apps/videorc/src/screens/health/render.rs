@@ -1,6 +1,7 @@
 use super::*;
 use gpui::{AnyElement, ClipboardItem, SharedString, Window, div, prelude::*, px};
 use videorc_app_core::desktop::{permissions::PermissionPlatform, system_access as access};
+use videorc_app_core::studio::cloud_program_health::{self as cloud_health, ProgramHealthTone};
 use videorc_app_core::studio::virtual_camera::camera_copy;
 use videorc_kit::{
     Alert, AlertVariant, Button, ButtonVariant, GroupedList, ListRow, PanelSection,
@@ -17,6 +18,15 @@ fn tone(t: h::Tone) -> StatusTone {
         h::Tone::Warn => StatusTone::Warn,
         h::Tone::Error => StatusTone::Error,
         _ => StatusTone::Neutral,
+    }
+}
+
+fn program_tone(t: ProgramHealthTone) -> StatusTone {
+    match t {
+        ProgramHealthTone::Good => StatusTone::Good,
+        ProgramHealthTone::Warn => StatusTone::Warn,
+        ProgramHealthTone::Error => StatusTone::Error,
+        ProgramHealthTone::Neutral => StatusTone::Neutral,
     }
 }
 impl HealthScreen {
@@ -200,6 +210,32 @@ impl HealthScreen {
         }
         section.into_any_element()
     }
+
+    /// Plan 249 S26 / P070: Cloud room program-health while a room is open.
+    fn cloud_room_section(&self) -> Option<PanelSection> {
+        let rows = self.cloud_room.as_ref()?;
+        let mut section = PanelSection::new("cloud-program-health")
+            .title(cloud_health::CLOUD_ROOM_TITLE)
+            .description(cloud_health::PROGRAM_PREVIEW_NOTE);
+        let mut body = div().flex().flex_col().gap(px(12.));
+        for (layer, rows) in cloud_health::program_health_layers(rows) {
+            let mut list = GroupedList::new().label(layer.label());
+            for row in rows {
+                list = list.item(
+                    ListRow::new(SharedString::from(row.id.clone()), row.label.clone())
+                        .compact(true)
+                        .context(row.detail.clone())
+                        .child(
+                            StatusDot::new(SharedString::from(format!("{}-status", row.id)))
+                                .tone(program_tone(row.tone))
+                                .label(row.status.clone()),
+                        ),
+                );
+            }
+            body = body.child(list);
+        }
+        Some(section.child(body))
+    }
 }
 impl Render for HealthScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -364,6 +400,7 @@ impl Render for HealthScreen {
                             .map(|message| Alert::new("health-error").title(message)),
                     )
                     .child(summary)
+                    .children(self.cloud_room_section())
                     .child(support)
                     .child(details),
             )
