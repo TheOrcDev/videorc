@@ -58,15 +58,9 @@ pub fn scene_shows_words(scene: &Scene, orientation: Orientation) -> String {
     }
 }
 
-/// `ScenePictureTarget`: what a card asks a picture of. Plan 260: the
-/// `sources.scene_pictures` request is not in `videorc-protocol` yet (L2);
-/// until it is, the target is this crate's.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ScenePictureTarget {
-    App { bundle_id: String },
-    Window { window_id: String },
-    Display { screen_id: String },
-}
+/// `ScenePictureTarget`: what a card asks a picture of, the protocol's
+/// (`sources.scene_pictures`, [`crate::client::methods::ScenePicturesGet`]).
+pub use videorc_protocol::scene_pictures::ScenePictureTarget;
 
 /// `scenePictureTarget` (D7, D17): the app (its front window), the fixed
 /// window or the display a scene shows, or none when its layout draws no
