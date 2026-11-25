@@ -17,6 +17,7 @@ mod layout;
 mod list;
 pub mod model;
 mod picker;
+mod resolve;
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -72,6 +73,9 @@ pub struct ScenePage {
     /// Guests in the room….
     guests: DialogHandle,
     guesting: Option<guests::Guesting>,
+    /// Resolve scene sources.
+    resolve: DialogHandle,
+    resolving: Option<resolve::Resolving>,
     /// Draws again when the switch status line is due (no timer lives in
     /// the Studio).
     status_timer: Option<Task<()>>,
@@ -161,6 +165,8 @@ impl ScenePage {
             picking: None,
             guests: DialogHandle::new(false),
             guesting: None,
+            resolve: DialogHandle::new(false),
+            resolving: None,
             status_timer: None,
         };
         let snapshot = page.studio.watch().borrow().clone();
@@ -238,5 +244,6 @@ impl Render for ScenePage {
             .child(self.delete_dialog(cx))
             .child(self.picker_dialog(window, cx))
             .child(self.guests_dialog(window, cx))
+            .child(self.resolve_dialog(window, cx))
     }
 }
