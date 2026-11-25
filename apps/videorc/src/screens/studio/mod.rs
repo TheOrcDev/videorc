@@ -10,6 +10,7 @@
 
 pub mod audio;
 pub mod layout;
+pub mod scenes;
 pub mod session;
 pub mod space;
 pub mod takeover;
@@ -34,6 +35,7 @@ use crate::preview::Preview;
 
 use audio::AudioSection;
 use layout::{INSPECTOR_MAX_PX, StudioLayout};
+use scenes::ScenesSection;
 use session::SessionSection;
 use space::{KEY_CONTEXT, SPACE, SpaceAction, SpacePress, ToggleRecord, space_action};
 use takeover::TakeoverSection;
@@ -52,6 +54,9 @@ pub struct StudioPage {
     session: Entity<SessionSection>,
     audio: Entity<AudioSection>,
     takeover: Entity<TakeoverSection>,
+    /// The Scenes section under the preview (P273: Scenes first in the
+    /// bottom row; Soundboard and the vertical leg fill in after it).
+    scenes: Entity<ScenesSection>,
     /// The page's width at the last paint, for the breakpoint.
     width: f32,
     /// The Space now dispatching is a held key's repeat.
@@ -75,6 +80,7 @@ impl StudioPage {
         session: Entity<SessionSection>,
         audio: Entity<AudioSection>,
         takeover: Entity<TakeoverSection>,
+        scenes: Entity<ScenesSection>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -85,6 +91,8 @@ impl StudioPage {
         cx.subscribe(&audio, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
         cx.subscribe(&takeover, |_, _, open: &OpenPage, cx| cx.emit(*open))
+            .detach();
+        cx.subscribe(&scenes, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
         // The preview notifies only when its slot's words or its window
         // change, never per video frame. The transport also carries the
@@ -100,6 +108,7 @@ impl StudioPage {
             session,
             audio,
             takeover,
+            scenes,
             width: 0.,
             space_held: false,
         }
@@ -254,6 +263,20 @@ impl Render for StudioPage {
             .child(self.audio.clone())
             .child(self.takeover.clone());
         let transport = self.transport.clone();
+        // `StudioDashboardBottomRow`: under the preview stage, in the
+        // preview column. Wide, the stage keeps the room the row leaves.
+        let stage_column = match layout {
+            StudioLayout::Wide => preview_column.flex_1(),
+            StudioLayout::Narrow => preview_column,
+        };
+        let preview_column = div()
+            .id("studio-preview-and-scenes")
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .min_h_0()
+            .child(stage_column)
+            .child(div().flex_none().child(self.scenes.clone()));
 
         let grid = match layout {
             StudioLayout::Wide => div()

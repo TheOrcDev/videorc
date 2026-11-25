@@ -73,6 +73,7 @@ use screens::sources::SourcesPanel;
 use screens::stream_manager::frame::StreamManagerFrame;
 use screens::studio::{
     self as studio_screen, StudioPage,
+    scenes::ScenesSection,
     session::SessionSection,
     takeover::{TakeoverLink, TakeoverSection},
     transport::{SessionControls, Transport},
@@ -549,6 +550,16 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let scenes = cx.new(|cx| {
+                    ScenesSection::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        studio_state.clone(),
+                        talk_show.clone(),
+                        global_keys.clone(),
+                        cx,
+                    )
+                });
                 let studio_page = cx.new(|cx| {
                     StudioPage::new(
                         transport.clone(),
@@ -556,6 +567,7 @@ fn main() -> Result<()> {
                         session,
                         audio,
                         takeover,
+                        scenes,
                         window,
                         cx,
                     )

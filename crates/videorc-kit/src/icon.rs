@@ -36,6 +36,8 @@ pub enum IconName {
     /// `WarningIcon`.
     WarningFill,
     /// `LockIcon` (Phosphor's LockKey).
+    LockKey,
+    /// `LockIcon` at Phosphor's fill weight (Phosphor's LockKey).
     LockFill,
     /// `MoreIcon` at Phosphor's bold weight: the kebab menu's dots.
     DotsThreeBold,
@@ -57,6 +59,12 @@ pub enum IconName {
     PushPin,
     /// `PinIcon` at Phosphor's fill weight: Keep on top, pinned.
     PushPinFill,
+    /// `SourcesIcon` / `DisplayIcon` (Phosphor's Monitor).
+    Monitor,
+    /// `MobileIcon` (Phosphor's DeviceMobile).
+    DeviceMobile,
+    /// `LayoutIcon` (Phosphor's Layout).
+    Layout,
 }
 
 impl IconName {
@@ -76,6 +84,7 @@ impl IconName {
             IconName::XCircleFill => include_bytes!("../icons/x-circle-fill.svg"),
             IconName::CheckCircleFill => include_bytes!("../icons/check-circle-fill.svg"),
             IconName::WarningFill => include_bytes!("../icons/warning-fill.svg"),
+            IconName::LockKey => include_bytes!("../icons/lock-key.svg"),
             IconName::LockFill => include_bytes!("../icons/lock-key-fill.svg"),
             IconName::DotsThreeBold => include_bytes!("../icons/dots-three-bold.svg"),
             IconName::CircleNotch => include_bytes!("../icons/circle-notch.svg"),
@@ -87,6 +96,9 @@ impl IconName {
             IconName::ImageSquare => include_bytes!("../icons/image-square.svg"),
             IconName::PushPin => include_bytes!("../icons/push-pin.svg"),
             IconName::PushPinFill => include_bytes!("../icons/push-pin-fill.svg"),
+            IconName::Monitor => include_bytes!("../icons/monitor.svg"),
+            IconName::DeviceMobile => include_bytes!("../icons/device-mobile.svg"),
+            IconName::Layout => include_bytes!("../icons/layout.svg"),
         }
     }
 }
