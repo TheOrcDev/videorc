@@ -162,6 +162,12 @@ has no switch yet: a named SKIP. `preview-window-os-close` closes the Preview wi
 (`~/cloud-test/gpui-builds/latest`) instead of building one. Evidence: `gpui-preview-lifecycle.json` in the
 output folder.
 
+`VIDEORC_APP=gpui pnpm probe:preview-window` runs `scripts/gpui-preview-window-probe.mjs`: the Preview on screen
+(`preview-surface-sample`) against the frame the backend presents (`preview.debug.sample`), cell by cell over a 4 × 4
+grid (each channel within `VIDEORC_PREVIEW_WINDOW_TOLERANCE`, 48; at least 13 of 16 cells). It checks it docked,
+after main-window resizes, in the Preview window (opened, moved and sized off 16:9 with `preview-window-set-bounds`),
+after its close button and ⌘P, docked back, and on the Scene page. It needs Screen Recording and the debug backend.
+
 Wait for a GPUI product path or new commands first:
 
 | Smoke                                                                                                                                            | Missing on GPUI                                                                                                                                                                                                |
