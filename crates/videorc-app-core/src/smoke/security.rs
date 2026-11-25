@@ -281,6 +281,7 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     "ui-appearance",
     "ui-click",
     "ui-find",
+    "ui-focus",
     "ui-key",
     "ui-scroll",
     "ui-set-value",
@@ -294,6 +295,7 @@ pub const UI_DRIVER_COMMAND_NAMES: &[&str] = &[
     "ui-appearance",
     "ui-click",
     "ui-find",
+    "ui-focus",
     "ui-key",
     "ui-scroll",
     "ui-set-value",
@@ -830,6 +832,12 @@ pub enum UiDriverRequest {
         timeout_ms: u64,
         via: UiClickVia,
     },
+    /// Pointer-click a row or field so it takes the focus (`ui-focus`).
+    Focus {
+        window: UiWindow,
+        selector: super::ui_tree::UiSelector,
+        timeout_ms: u64,
+    },
     Type {
         window: UiWindow,
         selector: Option<super::ui_tree::UiSelector>,
@@ -867,6 +875,7 @@ impl UiDriverRequest {
         match self {
             Self::Find { timeout_ms, .. }
             | Self::Click { timeout_ms, .. }
+            | Self::Focus { timeout_ms, .. }
             | Self::Type { timeout_ms, .. }
             | Self::Key { timeout_ms, .. }
             | Self::Scroll { timeout_ms, .. }
@@ -999,6 +1008,14 @@ pub fn validate_ui_driver_request(
                 selector: required(UiSelector::parse(params)?)?,
                 timeout_ms: timeout()?,
                 via,
+            })
+        }
+        "ui-focus" => {
+            allow(&["timeoutMs"], true)?;
+            Ok(UiDriverRequest::Focus {
+                window,
+                selector: required(UiSelector::parse(params)?)?,
+                timeout_ms: timeout()?,
             })
         }
         "ui-type" => {
@@ -1633,6 +1650,19 @@ mod tests {
             ok("ui-find", json!({"label": "x", "timeoutMs": 0})).timeout_ms(),
             0
         );
+
+        assert_eq!(
+            ok("ui-focus", json!({"id": "scene-row-1"})),
+            UiDriverRequest::Focus {
+                window: UiWindow::Main,
+                selector: UiSelector {
+                    id: Some("scene-row-1".into()),
+                    ..UiSelector::default()
+                },
+                timeout_ms: DEFAULT_UI_WAIT_MS,
+            }
+        );
+        assert!(refused("ui-focus", json!({})).contains("needs a label"));
 
         assert!(matches!(
             ok("ui-click", json!({"label": "Record", "via": "action"})),

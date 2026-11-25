@@ -15,14 +15,17 @@
 //!   element's centre through the window's own dispatch (`via: "pointer"`,
 //!   the default: what a mouse does, so a dialog's scrim takes a click meant
 //!   for what it covers). A disabled element is waited for, then refused by
-//!   name.
+//!   name. The selector is an element id or accessibility name (label).
+//! - `ui-focus {…selector}`: the same pointer click so a row or field takes
+//!   the focus; answers once the tree says it is focused.
 //! - `ui-type {…selector?, text, clear?}`: focuses the element (a click, then
 //!   a frame for its input handler) or keeps the focus, which must be on a
 //!   text field, and types each character as a keystroke; `clear` selects
 //!   all and deletes first.
 //! - `ui-key {…selector?, key, modifiers?}`: one key with modifiers held,
-//!   into the focused element or the one named. `meta` is ⌘ on macOS and
-//!   the Windows or Super key elsewhere, as GPUI's `platform` modifier is.
+//!   into the focused element or the one named (no selector → whatever has
+//!   the focus). `meta` is ⌘ on macOS and the Windows or Super key elsewhere,
+//!   as GPUI's `platform` modifier is.
 //! - `ui-scroll {…selector?, dx?, dy?}`: a wheel scroll at the element's
 //!   centre (or the window's); positive `dy` reveals what is below, as a DOM
 //!   `deltaY` does.
@@ -35,8 +38,8 @@
 //! Gaps in gpui-pre 0.3.14, each answered by name, never a silent success
 //! (`docs/gpui/ui-driver.md`):
 //!
-//! - The tree dump carries no bounds, so a pointer click, a scroll at an
-//!   element and focusing by click have no target until it does.
+//! - Bounds in the dump: closed locally (`patches/gpui-pre`); a node that
+//!   still has no rect is refused by name.
 //! - No public way to send an AccessKit action into a window
 //!   (`Window::handle_a11y_action` is crate-private): `via: "action"` and a
 //!   true set-value action wait for it.
@@ -72,6 +75,7 @@ pub const UI_DRIVER_WINDOW_COMMANDS: &[&str] = &[
     "ui-appearance",
     "ui-click",
     "ui-find",
+    "ui-focus",
     "ui-key",
     "ui-scroll",
     "ui-set-value",
@@ -85,9 +89,9 @@ const POLL: Duration = Duration::from_millis(50);
 /// How much of the window's words an error quotes.
 const SHOWN_TEXT_LIMIT: usize = 240;
 
-/// The bounds gap, by name.
-const NO_BOUNDS: &str = "GPUI's accessibility tree (gpui-pre 0.3.14) does not say where this \
-     element is, so the pointer has no target (plan 260 S2.5 gap: docs/gpui/ui-driver.md).";
+/// A node with no rect in the dump (most do, after `patches/gpui-pre`).
+const NO_BOUNDS: &str = "This element's accessibility node has no bounds, so the pointer has \
+     no target (plan 260 S2.5: docs/gpui/ui-driver.md).";
 /// The action gap, by name.
 const NO_ACTIONS: &str = "GPUI (gpui-pre 0.3.14) has no public way to send an accessibility \
      action into a window; use the pointer (plan 260 S2.5 gap: docs/gpui/ui-driver.md).";
@@ -156,6 +160,7 @@ fn window_of(request: &UiDriverRequest) -> UiWindow {
         UiDriverRequest::Tree { window, .. }
         | UiDriverRequest::Find { window, .. }
         | UiDriverRequest::Click { window, .. }
+        | UiDriverRequest::Focus { window, .. }
         | UiDriverRequest::Type { window, .. }
         | UiDriverRequest::Key { window, .. }
         | UiDriverRequest::Scroll { window, .. }
@@ -279,6 +284,28 @@ fn look(
                     })))
                 }
             }
+        }
+        UiDriverRequest::Focus { selector, .. } => {
+            let Some(node) = selector.find(tree) else {
+                return Ok(missing(selector));
+            };
+            if !node.enabled {
+                return Ok(Attempt::Wait(format!(
+                    "Timed out waiting: {} is disabled.",
+                    selector.describe()
+                )));
+            }
+            if node.focused {
+                return Ok(Attempt::Done(json!({
+                    "focused": true,
+                    "element": node.json(false, Some(0)),
+                })));
+            }
+            click(node, window, cx)?;
+            Ok(Attempt::Wait(format!(
+                "{} did not take the focus.",
+                selector.describe()
+            )))
         }
         UiDriverRequest::Type {
             selector,

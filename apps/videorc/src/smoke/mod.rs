@@ -8,7 +8,7 @@
 //!
 //! - [`UiThread`]: one hop from the server's tokio task to GPUI's
 //!   foreground, where every window command runs.
-//! - [`driver`]: `ui-tree`, `ui-find`, `ui-click`, `ui-type`, `ui-key`,
+//! - [`driver`]: `ui-tree`, `ui-find`, `ui-click`, `ui-focus`, `ui-type`, `ui-key`,
 //!   `ui-scroll`, `ui-set-value`, `ui-appearance`, `ui-toast` and
 //!   `resize-window` over each window's AccessKit tree.
 //! - [`windows`]: the Notes and Stream Manager windows' commands and

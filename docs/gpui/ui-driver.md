@@ -41,21 +41,19 @@ No Accessibility grant is involved. From then on GPUI keeps the last frame's
 tree, and the driver reads it with `Window::debug_a11y_tree_json`. Pointer
 and keys go through `Window::dispatch_event` and `Window::dispatch_keystroke`,
 the window's own dispatch, so a dialog's scrim takes a click meant for what
-it covers, as a mouse would.
+it covers, as a mouse would. `ui-click` / `ui-focus` take a selector by
+element id or accessibility name; `ui-key` with no selector sends keys to
+whatever has the focus.
 
 ## Gaps in gpui-pre 0.3.14
 
 Each gap is answered by name in the driver and listed here until it closes.
 
-1. **No bounds in the tree dump.** GPUI sets each node's rect
-   (`accesskit::Node::set_bounds`, `element.rs`), but `debug.rs`'s
-   `node_to_json` does not print it. Without it, `ui-click`, `ui-scroll` at an
-   element, and focusing a field by click have no target. The driver already
-   reads a node's `bounds` as AccessKit's `{x0, y0, x1, y1}` in physical pixels
-   (`gpui_tree.rs`).
-   **Fix:** a few lines in `node_to_json`
-   (`if let Some(rect) = node.bounds() { map.insert("bounds", …) }`), upstream
-   in Zed, then the next weekly snapshot bump.
+1. ~~**No bounds in the tree dump.**~~ **Closed** (C5, local `patches/gpui-pre`).
+   `node_to_json` now prints AccessKit `{x0, y0, x1, y1}` physical-pixel bounds
+   so `ui-click`, `ui-focus`, `ui-scroll` at an element, and focusing a field by
+   click have a target. Drop `patches/gpui-pre` when a gpui-pre release prints
+   the same lines upstream. The driver reads them in `gpui_tree.rs`.
 2. **No public way to send an AccessKit action.** `Window::handle_a11y_action`
    is `pub(crate)`. So `ui-click {via: "action"}` and a true set-value action
    wait for it. `ui-set-value` types the value instead.
@@ -72,9 +70,9 @@ Each gap is answered by name in the driver and listed here until it closes.
    selector's `id` matches the element id that created the node, which debug
    builds print, qualified by its view (`StudioPage::record`).
 
-Gaps 1 and 2 are the ones the smokes need first. Until 1 closes, the driver
-can read a window (`ui-tree`, `ui-find`) and press keys into whatever has the
-focus (`ui-key`), but it cannot click.
+Gap 1 is closed locally (`patches/gpui-pre`). Gap 2 (AccessKit actions) is
+still open: `ui-click {via: "action"}` waits. Pointer clicks, focus, and keys
+go through `Window::dispatch_event` / `dispatch_keystroke` (no OS-level HID).
 
 ## What the plan's "done when" still needs
 
@@ -143,7 +141,7 @@ Wait for a GPUI product path or new commands first:
 | `smoke:banners`, `smoke:html-overlay`                                                                                                            | `import-takeover-image` (the Images takeover import), `html-overlay-stats` (an HTML overlay host)                                                               |
 | `smoke:screens`                                                                                                                                  | `import-takeover-image`, `main-window-id`, `capture-page` (gap 3)                                                                                               |
 | `smoke:preview-pump-diagnostics`, `smoke:preview-click-focus`                                                                                    | Electron's present-pump and click-focus probes                                                                                                                  |
-| `smoke:preview-scene-commit`, `smoke:freeform-editor`                                                                                            | `select-camera-shape`; the editor needs clicks (gap 1)                                                                                                          |
+| `smoke:preview-scene-commit`, `smoke:freeform-editor`                                                                                            | `select-camera-shape`; freeform-editor clicks unblocked once gap 1's bounds patch is in the smoke binary                                                                                          |
 | `smoke:preview-check-invisible`                                                                                                                  | `preview-surface-sample`, the Check computer command                                                                                                            |
 | `smoke:recording-native-preview`, `smoke:preview-surface`, `probe:preview-lifecycle`, `probe:preview-window`, `smoke:preview-interaction-stress` | Electron's native-surface and window commands; they need GPUI-specific probes, not a port                                                                       |
 | `probe:comments-window`                                                                                                                          | the chat fixtures (`comments-window-push-*`, `-seed-*`), `capture-page` (gap 3), the person card and layout metrics; it needs a GPUI-specific probe, not a port |
@@ -209,8 +207,8 @@ writes the highlight's rects into the overlay layout, as Electron's `snapHighlig
   `scenes::migration`.
 - New scenes: the GPUI Scene page has no Add scene… dialog yet, so the smoke builds the app scenes (Follow on, the app's
   name, "<name> 2" for a second) and inserts them with `studio-scene-insert`.
-- Reorder: `studio-scene-move` instead of a row's Alt+ArrowUp (no clicks or row focus yet, driver gap 1); position keys
-  come from `studio-scenes-state`'s `keys`.
+- Reorder: can use a row's Alt+ArrowUp through `ui-focus` + `ui-key` (gap 1 closed); `studio-scene-move` remains as a
+  direct Studio path. Position keys come from `studio-scenes-state`'s `keys`.
 - Rapid keys: the trace is polled from `studio-scenes-state`; the renderer-only diagnostics (layout intent, queued key,
   resolve generation) are `null`. The gate reads only the frames and the final state.
 - A refused scene apply reads as `false` (the command's error); refusal reasons come from `studio-state`.
