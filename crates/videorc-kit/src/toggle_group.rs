@@ -7,6 +7,11 @@
 //! Size and variant match the React twin's Toggle props (default / xs,
 //! default / outline) without `<Name>Size` / `<Name>Variant` enums: the
 //! twin's cva lives on `toggle`, not on `toggle-group`.
+//!
+//! An item's label is the default chip text and its accessible name. React's
+//! `ToggleGroupItem` children are [`ToggleItem::child`]: a preview swatch,
+//! title and description (Captions Style), which replaces the label text
+//! while the label stays the AccessKit name.
 
 use std::rc::Rc;
 
@@ -28,6 +33,8 @@ type ChangeHandler = Rc<dyn Fn(Vec<SharedString>, &mut Window, &mut App)>;
 pub struct ToggleItem {
     value: SharedString,
     label: SharedString,
+    /// React `ToggleGroupItem` children: preview content instead of the label.
+    child: Option<AnyElement>,
     disabled: bool,
 }
 
@@ -36,8 +43,16 @@ impl ToggleItem {
         ToggleItem {
             value: value.into(),
             label: label.into(),
+            child: None,
             disabled: false,
         }
+    }
+
+    /// Custom chip body (a style swatch, title and description). The item's
+    /// label remains the accessible name.
+    pub fn child(mut self, child: impl IntoElement) -> Self {
+        self.child = Some(child.into_any_element());
+        self
     }
 
     pub fn disabled(mut self, disabled: bool) -> Self {
@@ -212,24 +227,44 @@ impl RenderOnce for ToggleGroup {
                 let current = current.clone();
                 let value = item.value.clone();
                 let chip_id = SharedString::from(format!("{group_id}/{}", item.value));
+                let custom = item.child.is_some();
+                let body = item
+                    .child
+                    .unwrap_or_else(|| item.label.clone().into_any_element());
 
                 let mut chip = gpui_base::Toggle::new(chip_id)
                     .pressed(pressed)
                     .disabled(disabled)
                     .accessibility_label(item.label.clone())
-                    .h(px(height))
-                    .px(px(if self.xs { 6.0 } else { 10.0 }))
+                    .px(px(if custom {
+                        8.0
+                    } else if self.xs {
+                        6.0
+                    } else {
+                        10.0
+                    }))
+                    .py(px(if custom { 8.0 } else { 0.0 }))
                     .flex()
-                    .items_center()
-                    .justify_center()
                     .gap(px(4.0))
-                    .rounded(px(radius::CHIP))
+                    .rounded(px(if custom { radius::ROW } else { radius::CHIP }))
                     .text_size(px(text_size))
                     .font_weight(FontWeight::MEDIUM)
-                    .whitespace_nowrap()
                     .border_1()
-                    .border_color(gpui::transparent_black())
-                    .child(item.label);
+                    .border_color(gpui::transparent_black());
+                chip = if custom {
+                    chip.min_h(px(height))
+                        .flex_col()
+                        .items_stretch()
+                        .justify_start()
+                        .whitespace_normal()
+                        .child(body)
+                } else {
+                    chip.h(px(height))
+                        .items_center()
+                        .justify_center()
+                        .whitespace_nowrap()
+                        .child(body)
+                };
 
                 if let Some(on_change) = on_change {
                     chip = chip.on_change(move |_, _, window, cx| {
