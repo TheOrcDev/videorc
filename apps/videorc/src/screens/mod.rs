@@ -12,6 +12,7 @@ pub mod library;
 pub mod notes;
 pub mod notifications;
 pub mod output;
+pub mod scene;
 pub mod settings;
 pub mod sidekick;
 pub mod sources;

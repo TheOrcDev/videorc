@@ -29,6 +29,7 @@ use crate::screens::go_live::GoLiveDialog;
 use crate::screens::guests::GuestsPanel;
 use crate::screens::images_sounds::{ImagesPanel, SoundsPanel};
 use crate::screens::output::OutputPanel;
+use crate::screens::scene::{SceneNavigate, ScenePage};
 use crate::screens::settings::OpenSetup;
 use crate::screens::sidekick::SidekickScreen;
 use crate::screens::sources::SourcesPanel;
@@ -107,6 +108,8 @@ pub struct Shell {
     dialogs: Entity<DialogsHost>,
     notices: Entity<Centre>,
     notice_hub: Entity<Hub>,
+    /// Phase 3 (L1): Scene ⌘3.
+    scene: Entity<ScenePage>,
 }
 
 impl Shell {
@@ -130,6 +133,7 @@ impl Shell {
         palette: Entity<CommandPalette>,
         dialogs: Entity<DialogsHost>,
         notice_hub: Entity<Hub>,
+        scene: Entity<ScenePage>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -194,6 +198,15 @@ impl Shell {
         cx.observe(&sounds, |_, _, cx| cx.notify()).detach();
         cx.observe(&go_live, |_, _, cx| cx.notify()).detach();
         cx.observe(&first_run, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &scene,
+            window,
+            |this, _, to: &SceneNavigate, window, cx| match to {
+                SceneNavigate::Page(page) => this.open_page(*page, window, cx),
+                SceneNavigate::Settings(tab) => this.open_settings(Some(*tab), window, cx),
+            },
+        )
+        .detach();
         // Both routes use the same lifecycle, title and focus updates.
         cx.subscribe_in(&studio, window, |this, _, open: &OpenPage, window, cx| {
             if let Some(tab) = open.settings_tab {
@@ -266,6 +279,7 @@ impl Shell {
             dialogs,
             notices,
             notice_hub,
+            scene,
         }
     }
 
@@ -446,6 +460,22 @@ impl Render for Shell {
                             .flex_col()
                             .pt(px(40.))
                             .child(self.studio.clone())
+                    } else if page == PageId::Layouts {
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .px(px(24.))
+                                    .type_scale(text::SECTION)
+                                    .child(page.label()),
+                            )
+                            .child(self.scene.clone())
                     } else if page == PageId::Library {
                         div()
                             .flex_1()

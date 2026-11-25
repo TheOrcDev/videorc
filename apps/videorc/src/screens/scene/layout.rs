@@ -1,0 +1,227 @@
+//! The Layout section (`layout-tab.tsx`; P499–P511): the orientation, the
+//! layouts of the scene on stream, the switch's status line, the hint, the
+//! screen's framing and Animate scene changes. The view is the core's
+//! `layout_section_view`. The Freeform toggle joins with the canvas.
+
+use gpui::{AnyElement, Context, FontWeight, SharedString, Window, div, prelude::*, px};
+use serde_json::{Map, json};
+use videorc_app_core::editor::inspector::copy as inspector_copy;
+use videorc_app_core::nav::PageId;
+use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::panel_section::PanelSection;
+use videorc_kit::segmented_control::{Segment, SegmentedControl};
+use videorc_kit::settings_row::SettingsRow;
+use videorc_kit::spinner::Spinner;
+use videorc_kit::switch::Switch;
+use videorc_kit::theme::{self, TypeScale, hsla};
+use videorc_kit::tokens::text;
+
+use super::model::copy;
+use super::{SceneNavigate, ScenePage, epoch_ms};
+
+const HORIZONTAL: &str = "horizontal";
+const VERTICAL: &str = "vertical";
+
+impl ScenePage {
+    pub(super) fn layout_section(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme::resolve(None, window, cx);
+        let muted = hsla(t.muted_foreground);
+        let ink = hsla(t.foreground);
+        let view = self.model.layout.clone();
+        let page = cx.entity().downgrade();
+
+        // P499/P500: the orientation, locked while a session runs.
+        let orientation_page = page.clone();
+        let mut orientation = SegmentedControl::new("scene-orientation")
+            .accessibility_label(copy::ORIENTATION)
+            .manual(true)
+            .small(true)
+            .option(Segment::new(HORIZONTAL, "16:9").tooltip(copy::HORIZONTAL_TIP))
+            .option(Segment::new(VERTICAL, "9:16").tooltip(copy::VERTICAL_TIP))
+            .value(Some(if view.vertical { VERTICAL } else { HORIZONTAL }))
+            .on_change(move |value, _, cx| {
+                let vertical = value.as_ref() == VERTICAL;
+                let _ = orientation_page.update(cx, |page, _| page.switch_orientation(vertical));
+            });
+        if let Some(reason) = view.orientation_lock {
+            orientation = orientation.disabled(true).disabled_reason(reason);
+        }
+
+        // P501–P504: the layouts. A layout that asks for a screen (D19)
+        // opens Change screen… once the picker lands; until then it waits.
+        let presets_page = page.clone();
+        let mut presets = SegmentedControl::new("scene-layout-presets")
+            .accessibility_label(copy::LAYOUT_TITLE)
+            .manual(true)
+            .disabled(!view.presets_enabled)
+            .value(
+                view.preset_index
+                    .and_then(|index| view.presets.get(index))
+                    .map(|option| SharedString::from(option.id)),
+            )
+            .on_change(move |value, _, cx| {
+                let preset = value.to_string();
+                let _ = presets_page.update(cx, |page, _| page.apply_layout(&preset));
+            });
+        for option in &view.presets {
+            presets = presets.option(
+                Segment::new(option.id, option.label.clone())
+                    .disabled(option.disabled || option.asks_for_screen),
+            );
+        }
+
+        let mut section = PanelSection::new("scene-layout")
+            .title(copy::LAYOUT_TITLE)
+            .description(inspector_copy::LAYOUT_DESCRIPTION)
+            .action(orientation)
+            .child(presets);
+
+        // P506: the switch's status line, 1.5 s after it starts.
+        if let Some(line) = self
+            .studio
+            .watch()
+            .borrow()
+            .scenes
+            .progress_line(epoch_ms(), None)
+        {
+            section = section.child(
+                div()
+                    .id("scene-switch-status")
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(4.))
+                    .type_scale(text::META)
+                    .text_color(muted)
+                    .child(Spinner::new("scene-switch-spinner").size(14.))
+                    .child(div().text_color(ink).child(line.title))
+                    .children(line.detail),
+            );
+        }
+
+        // P507–P509: the hint, with the door to Sources.
+        if let Some((hint, door)) = view.hint {
+            section = section.child(
+                div()
+                    .id("scene-layout-hint")
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(4.))
+                    .type_scale(text::META)
+                    .text_color(muted)
+                    .child(hint)
+                    .when(door, |line| {
+                        line.child(
+                            Button::new("scene-layout-open-sources")
+                                .label(copy::OPEN_SOURCES)
+                                .variant(ButtonVariant::Link)
+                                .size(ButtonSize::Xs)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.navigate(SceneNavigate::Page(PageId::Sources), cx)
+                                })),
+                        )
+                    }),
+            );
+        }
+
+        // P510: the screen's framing.
+        if let Some((fit, line, vertical)) = view.framing {
+            let framing_page = page.clone();
+            section = section.child(
+                div()
+                    .id("scene-screen-framing")
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .type_scale(text::LABEL)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(copy::SCREEN),
+                            )
+                            .child(div().type_scale(text::META).text_color(muted).child(line)),
+                    )
+                    .child(
+                        SegmentedControl::new("scene-screen-framing-control")
+                            .accessibility_label(copy::SCREEN_FRAMING)
+                            .option(Segment::new("fill", copy::FILL))
+                            .option(Segment::new("fit", copy::FIT))
+                            .value(Some(if fit { "fit" } else { "fill" }))
+                            .on_change(move |value, _, cx| {
+                                let framing = value.to_string();
+                                let _ = framing_page
+                                    .update(cx, |page, _| page.set_framing(vertical, &framing));
+                            }),
+                    ),
+            );
+        }
+
+        // P511: Animate scene changes.
+        let animate_page = page;
+        section = section.child(
+            SettingsRow::new("animate-scene-changes", copy::ANIMATE)
+                .description(copy::ANIMATE_DESCRIPTION)
+                .child(
+                    Switch::new("animate-scene-changes-switch")
+                        .accessibility_label(copy::ANIMATE)
+                        .checked(view.animate)
+                        .on_change(move |on, _, cx| {
+                            let _ = animate_page.update(cx, |page, _| page.set_animate(on));
+                        }),
+                ),
+        );
+        section.into_any_element()
+    }
+
+    fn switch_orientation(&self, vertical: bool) {
+        let studio = self.studio.clone();
+        self.run(async move {
+            let ok = studio.switch_orientation(vertical).await;
+            eprintln!("[videorc-app] Scene orientation: {ok}");
+        });
+    }
+
+    fn apply_layout(&self, preset: &str) {
+        let studio = self.studio.clone();
+        let preset = preset.to_string();
+        self.run(async move {
+            let ok = studio.apply_layout_preset(&preset).await;
+            eprintln!("[videorc-app] Scene layout: {ok}");
+        });
+    }
+
+    /// `applyCameraPreset({verticalScreenFraming})` or its landscape twin.
+    fn set_framing(&self, vertical: bool, framing: &str) {
+        let studio = self.studio.clone();
+        let mut patch = Map::new();
+        let key = if vertical {
+            "verticalScreenFraming"
+        } else {
+            "horizontalScreenFraming"
+        };
+        patch.insert(key.into(), json!(framing));
+        self.run(async move {
+            let ok = studio.apply_camera_preset(patch, false).await;
+            eprintln!("[videorc-app] Scene framing: {ok}");
+        });
+    }
+
+    fn set_animate(&self, on: bool) {
+        let studio = self.studio.clone();
+        self.run(async move {
+            let result = studio.set_animate_scene_changes(on).await;
+            eprintln!("[videorc-app] Animate scene changes: {result:?}");
+        });
+    }
+}
