@@ -579,7 +579,20 @@ impl Preview {
             let status = native.element.status();
             return serde_json::json!({
                 "transport": "native-surface",
-                "state": status.phase.as_str(),
+                // Electron's surface states: `live` while frames present (the
+                // smokes wait for it), else the element's phase.
+                "state": if status.phase == videorc_preview::element::Phase::Presenting {
+                    "live"
+                } else {
+                    status.phase.as_str()
+                },
+                "phase": status.phase.as_str(),
+                "bounds": self.smoke_slot().map(|slot| serde_json::json!({
+                    "x": f32::from(slot.origin.x),
+                    "y": f32::from(slot.origin.y),
+                    "width": f32::from(slot.size.width),
+                    "height": f32::from(slot.size.height),
+                })),
                 "presentedFrameId": telemetry.presented_frame_id,
                 "presented": telemetry.presented,
                 "framesRendered": telemetry.frames_rendered,

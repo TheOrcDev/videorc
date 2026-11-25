@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use gpui::{AnyWindowHandle, App, px, size};
+use gpui::{AnyWindowHandle, App};
 use serde_json::{Map, Value, json};
 use videorc_app_core::smoke::capture::{
     Bitmap, CAPTURE_COMMANDS, COMMENTS_CAPTURE_SIZE, PixelOrder, contain, mean_rects,
@@ -107,10 +107,22 @@ impl CaptureCommands {
                     .ok_or("Chat window is not open.")?;
                 handle
                     .update(cx, |_, window, _| {
-                        window.resize(size(px(width as f32), px(height as f32)));
+                        // The window's frame, where it is (`Window::resize`
+                        // left the Stream Manager at its own size).
+                        let bounds = window.bounds();
+                        let placed = platform::current().set_window_frame(
+                            window,
+                            crate::platform::ScreenFrame {
+                                x: f64::from(f32::from(bounds.origin.x)),
+                                y: f64::from(f32::from(bounds.origin.y)),
+                                width,
+                                height,
+                            },
+                        );
                         window.activate_window();
+                        placed
                     })
-                    .map_err(|_| "Chat window is not open.".to_string())
+                    .map_err(|_| "Chat window is not open.".to_string())?
             })
             .await??;
         tokio::time::sleep(SETTLE).await;
