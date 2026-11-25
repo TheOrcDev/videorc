@@ -940,6 +940,9 @@ impl TalkShowRoomHost {
                             })
                             .ok()
                             .flatten();
+                        // share_screen takes the device-list native id
+                        // (screen|window:screencapturekit:…); Err → leave the
+                        // old share and refuse the scene (Electron adapter).
                         if room_screen_needs_switch_native(&screen_want, current.as_deref()) {
                             let share = this
                                 .update(cx, |host, cx| host.share_screen(native_id, cx))

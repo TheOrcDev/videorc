@@ -116,25 +116,44 @@ pub struct RoomScreenSources<'a> {
     pub capture_off: bool,
 }
 
+/// True when `id` is a device-list native ScreenCaptureKit id the backend
+/// room accepts (`TalkShowRoomHost::share_screen`).
+pub fn is_native_screen_id(id: &str) -> bool {
+    capturer_id_for_native(Some(id)).is_some()
+}
+
 /// What the room should share for a scene's sources. A window wins over a
 /// display, as natively.
+///
+/// The GPUI / backend-room path only needs [`RoomScreenWant::Source::native_id`]
+/// for [`crate::studio::room_media`] `cloud.room.screen.set` — no capturer
+/// mapping (unlike Electron's `nativeIdForCapturer`). Capturer ids are still
+/// filled when the native form maps, for Electron-parity helpers.
 pub fn room_screen_want(sources: RoomScreenSources<'_>) -> RoomScreenWant {
-    let native = sources.window_id.filter(|id| !id.is_empty()).or_else(|| {
+    let picked = sources.window_id.filter(|id| !id.is_empty()).or_else(|| {
         if sources.capture_off {
             None
         } else {
             sources.screen_id.filter(|id| !id.is_empty())
         }
     });
-    let Some(native) = native else {
+    let Some(picked) = picked else {
         return RoomScreenWant::Keep;
     };
-    let Some(capturer_id) = capturer_id_for_native(Some(native)) else {
+    // Prefer a native id as-is (backend room). Else map a capturer id → native.
+    let (native_id, capturer_id) = if is_native_screen_id(picked) {
+        (
+            picked.to_string(),
+            capturer_id_for_native(Some(picked)).expect("is_native_screen_id"),
+        )
+    } else if let Some(native) = native_id_for_capturer(Some(picked)) {
+        (native, picked.to_string())
+    } else {
         return RoomScreenWant::Unsupported {
             reason: UNSUPPORTED_REASON.to_string(),
         };
     };
-    let source_kind = if capturer_id.starts_with("window:") {
+    let source_kind = if native_id.starts_with("window:") {
         RoomScreenKind::Window
     } else {
         RoomScreenKind::Screen
@@ -142,7 +161,7 @@ pub fn room_screen_want(sources: RoomScreenSources<'_>) -> RoomScreenWant {
     RoomScreenWant::Source {
         capturer_id,
         source_kind,
-        native_id: Some(native.to_string()),
+        native_id: Some(native_id),
     }
 }
 
@@ -271,6 +290,24 @@ mod tests {
             ..Default::default()
         });
         assert!(matches!(want, RoomScreenWant::Unsupported { .. }));
+    }
+
+    #[test]
+    fn capturer_form_maps_to_native_for_share_screen() {
+        let want = room_screen_want(RoomScreenSources {
+            screen_id: Some("screen:5:0"),
+            ..Default::default()
+        });
+        assert_eq!(
+            want,
+            RoomScreenWant::Source {
+                capturer_id: "screen:5:0".into(),
+                source_kind: RoomScreenKind::Screen,
+                native_id: Some("screen:screencapturekit:5".into()),
+            }
+        );
+        assert!(is_native_screen_id("screen:screencapturekit:5"));
+        assert!(!is_native_screen_id("screen:5:0"));
     }
 
     #[test]
