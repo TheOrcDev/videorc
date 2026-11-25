@@ -15,8 +15,9 @@ use videorc_app_core::nav::{self, PageId, ZONES};
 use videorc_app_core::notices::NoticeAction;
 use videorc_app_core::{BackendState, ConnectionState, Tone};
 use videorc_kit::{
+    button::{Button, ButtonSize, ButtonVariant},
     shortcut_keys::ShortcutKeys,
-    status_bar::StatusBar,
+    status_bar::{StatusBar, StatusBarHint},
     status_bar_action::StatusBarAction,
     status_dot::{StatusDot, StatusTone},
     theme::{self, FONT, TypeScale, hsla},
@@ -510,7 +511,7 @@ impl Shell {
         }
     }
 
-    fn sidebar(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sidebar(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut column = div()
             .w(px(220.))
             .h_full()
@@ -562,7 +563,40 @@ impl Shell {
                     );
             }
         }
-        column
+        // Bottom: theme toggle (P022). Account row waits on L4's accounts stub.
+        let dark = matches!(
+            window.appearance(),
+            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+        );
+        column.child(div().flex_1()).child(
+            div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .border_t_1()
+                .border_color(hsla(t.border))
+                .px(px(4.))
+                .py(px(6.))
+                .child(
+                    Button::new("sidebar-theme-toggle")
+                        .size(ButtonSize::Xs)
+                        .variant(ButtonVariant::Ghost)
+                        .accessibility_label("Toggle color theme")
+                        .tooltip(if dark {
+                            "Switch to light theme"
+                        } else {
+                            "Switch to dark theme"
+                        })
+                        .label(if dark { "Light" } else { "Dark" })
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))),
+                ),
+        )
+    }
+
+    fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings
+            .update(cx, |settings, cx| settings.toggle_theme(window, cx));
+        cx.notify();
     }
 }
 
@@ -609,6 +643,11 @@ impl Render for Shell {
                     this.toggle_search(window, cx)
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &super::menus::ToggleTheme, window, cx| {
+                    this.toggle_theme(window, cx)
+                }),
+            )
             .font_family(FONT)
             .flex()
             .flex_col()
@@ -620,7 +659,7 @@ impl Render for Shell {
                     .min_h(px(0.))
                     .flex()
                     .flex_row()
-                    .child(self.sidebar(t, cx))
+                    .child(self.sidebar(t, window, cx))
                     .child(if page_error {
                         div()
                             .flex_1()
@@ -807,7 +846,7 @@ impl Render for Shell {
                     )
                     .child(div().text_color(hsla(t.muted_foreground)).child(connection))
                     .child(
-                        videorc_kit::status_bar::StatusBarHint::new(
+                        StatusBarHint::new(
                             "search",
                             "Search",
                             ShortcutKeys::for_action(&super::menus::ToggleSearch),
@@ -815,6 +854,55 @@ impl Render for Shell {
                         .on_click(
                             cx.listener(|this, _, window, cx| this.toggle_search(window, cx)),
                         ),
+                    )
+                    .child({
+                        let preview_open = {
+                            #[cfg(target_os = "macos")]
+                            {
+                                !self.preview.read(cx).is_closed()
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                self.preview.read(cx).mode()
+                                    == videorc_preview::lifecycle::WindowMode::Floating
+                            }
+                        };
+                        StatusBarHint::new(
+                            "preview",
+                            "Preview",
+                            ShortcutKeys::for_action(&super::menus::TogglePreview),
+                        )
+                        .pressed(preview_open)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            #[cfg(target_os = "macos")]
+                            this.preview
+                                .update(cx, |preview, cx| preview.toggle_open(cx));
+                            #[cfg(not(target_os = "macos"))]
+                            this.preview
+                                .update(cx, |preview, cx| preview.toggle_floating(cx));
+                        }))
+                    })
+                    .child(
+                        StatusBarHint::new(
+                            "notes",
+                            "Notes",
+                            ShortcutKeys::for_action(&super::menus::ToggleNotes),
+                        )
+                        .pressed(crate::screens::notes::window::handle(cx).is_some())
+                        .on_click(cx.listener(|_, _, window, cx| {
+                            window.dispatch_action(Box::new(super::menus::ToggleNotes), cx)
+                        })),
+                    )
+                    .child(
+                        StatusBarHint::new(
+                            "stream-manager",
+                            "Stream Manager",
+                            ShortcutKeys::for_action(&super::menus::ToggleStreamManager),
+                        )
+                        .pressed(crate::screens::stream_manager::window::handle(cx).is_some())
+                        .on_click(cx.listener(|_, _, window, cx| {
+                            window.dispatch_action(Box::new(super::menus::ToggleStreamManager), cx)
+                        })),
                     )
                     .child(self.notices.clone()),
             )
