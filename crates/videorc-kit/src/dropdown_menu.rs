@@ -486,6 +486,10 @@ pub(crate) fn menu_panel(panel: Panel, window: &mut Window, cx: &mut App) -> Sta
                 rows.push(
                     row(row_id, text, (lit && !disabled).then_some(fill), disabled)
                         .role(Role::MenuItem)
+                        // The item's words are its accessible name: GPUI
+                        // names no node from its child text, so without this
+                        // a screen reader heard an unnamed item.
+                        .aria_label(item.label.clone())
                         .on_hover(hover(index, false))
                         .when(!disabled, |row| {
                             let menu = menu.clone();
@@ -534,6 +538,7 @@ pub(crate) fn menu_panel(panel: Panel, window: &mut Window, cx: &mut App) -> Sta
                         } else {
                             Role::MenuItemCheckBox
                         })
+                        .aria_label(label.clone())
                         .aria_toggled(if *checked {
                             Toggled::True
                         } else {
@@ -591,6 +596,7 @@ pub(crate) fn menu_panel(panel: Panel, window: &mut Window, cx: &mut App) -> Sta
                 let submenu = submenu.clone();
                 let trigger = gpui_base::Button::new(row_id)
                     .role(Role::MenuItem)
+                    .aria_label(label.clone())
                     .w_full()
                     .flex()
                     .items_center()
