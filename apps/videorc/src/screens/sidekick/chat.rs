@@ -21,8 +21,8 @@ use videorc_protocol::cohost::CohostAutoChat;
 
 use super::live::{LiveView, UnlockAction};
 use super::{
-    SaveSection, SidekickScreen, config_grid_pair, field_beside, field_text, save_error_line,
-    tab_lead, unlock_alert,
+    SaveSection, SidekickScreen, config_grid_pair, field_beside, field_description, field_stack,
+    field_text, save_error_line, tab_lead, unlock_alert,
 };
 
 const ANSWERS: &str = "Answers";
@@ -250,16 +250,6 @@ fn cooldown_field(
         )
 }
 
-/// A Field over its control: the words, then a segmented choice.
-fn field_over(head: gpui::Div, control: impl IntoElement) -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(12.))
-        .child(head)
-        .child(control)
-}
-
 pub fn render_chat(
     view: &LiveView,
     settings: Option<&CohostSettingsView>,
@@ -378,9 +368,11 @@ pub fn render_chat(
                             }
                         }),
                 ))
-                .child(field_over(
-                    field_text(REPLY_TONE, Some(REPLY_TONE_DESCRIPTION.into()), theme),
-                    tone_control,
+                .child(field_stack(
+                    REPLY_TONE,
+                    REPLY_TONE_DESCRIPTION,
+                    vec![tone_control.into_any_element()],
+                    theme,
                 )),
         )
         .children(save_error_line(replies_error, theme));
@@ -413,11 +405,7 @@ pub fn render_chat(
 
     // Chat rules: each saved rule in its own field with its remove button,
     // then the draft with Add and its Enter key inside it, then the count.
-    let mut rules_field = div().flex().flex_col().gap(px(12.)).child(field_text(
-        CHAT_RULES,
-        Some(RULES_HELP.into()),
-        theme,
-    ));
+    let mut rules_rest: Vec<AnyElement> = Vec::new();
     if !widgets.rule_inputs.is_empty() {
         let mut saved = div().flex().flex_col().gap(px(6.));
         for (index, (_, input)) in widgets.rule_inputs.iter().enumerate() {
@@ -446,38 +434,40 @@ pub fn render_chat(
                     ),
             );
         }
-        rules_field = rules_field.child(saved);
+        rules_rest.push(saved.into_any_element());
     }
-    rules_field = rules_field
-        .child(
-            InputGroup::new("chat-rule-draft", &widgets.rule_draft)
-                .accessibility_label(if rules_full { RULES_FULL } else { ADD_A_RULE })
-                .disabled(locked || rules_full)
-                .end(
-                    InputGroupAddon::end().child(
-                        Button::new("add-chat-rule")
-                            .variant(ButtonVariant::Ghost)
-                            .size(ButtonSize::Xs)
-                            .label("Add")
-                            .child(ShortcutKeys::accelerator("Enter"))
-                            .disabled(locked || rules_full || draft_empty)
-                            .on_click({
-                                let entity = entity.clone();
-                                move |_, window, cx| {
-                                    entity.update(cx, |screen, cx| {
-                                        screen.add_chat_rule(window, cx);
-                                    });
-                                }
-                            }),
-                    ),
+    rules_rest.push(
+        InputGroup::new("chat-rule-draft", &widgets.rule_draft)
+            .accessibility_label(if rules_full { RULES_FULL } else { ADD_A_RULE })
+            .disabled(locked || rules_full)
+            .end(
+                InputGroupAddon::end().child(
+                    Button::new("add-chat-rule")
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Xs)
+                        .label("Add")
+                        .child(ShortcutKeys::accelerator("Enter"))
+                        .disabled(locked || rules_full || draft_empty)
+                        .on_click({
+                            let entity = entity.clone();
+                            move |_, window, cx| {
+                                entity.update(cx, |screen, cx| {
+                                    screen.add_chat_rule(window, cx);
+                                });
+                            }
+                        }),
                 ),
-        )
-        .child(
-            div()
-                .type_scale(text::META)
-                .text_color(muted)
-                .child(format!("{}/{}", rules.len(), RULES_MAX)),
-        );
+            )
+            .into_any_element(),
+    );
+    rules_rest.push(
+        div()
+            .type_scale(text::META)
+            .text_color(muted)
+            .child(format!("{}/{}", rules.len(), RULES_MAX))
+            .into_any_element(),
+    );
+    let rules_field = field_stack(CHAT_RULES, RULES_HELP, rules_rest, theme);
 
     let mut sensitivity_control = SegmentedControl::new("flag-sensitivity")
         .small(true)
@@ -539,30 +529,29 @@ pub fn render_chat(
             FieldGroup::new()
                 .grouped()
                 .child(rules_field)
-                .child(field_over(
-                    field_text(
-                        FLAG_SENSITIVITY,
-                        Some(FLAG_SENSITIVITY_DESCRIPTION.into()),
-                        theme,
-                    ),
-                    sensitivity_control,
+                .child(field_stack(
+                    FLAG_SENSITIVITY,
+                    FLAG_SENSITIVITY_DESCRIPTION,
+                    vec![sensitivity_control.into_any_element()],
+                    theme,
                 ))
-                .child(
-                    field_over(
-                        field_text(PUT_COMMENTS, Some(PUT_COMMENTS_DESCRIPTION.into()), theme),
-                        show_control,
-                    )
-                    .child(
+                .child(field_stack(
+                    PUT_COMMENTS,
+                    PUT_COMMENTS_DESCRIPTION,
+                    vec![
+                        show_control.into_any_element(),
+                        // The notes are one `FieldDescription`, its lines
+                        // `gap-0.5` apart.
                         div()
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .type_scale(text::META)
-                            .text_color(muted)
-                            .child(SHOW_VOICE_NOTE)
-                            .child(SHOW_PICKS_NOTE),
-                    ),
-                ),
+                            .child(field_description(SHOW_VOICE_NOTE, theme))
+                            .child(field_description(SHOW_PICKS_NOTE, theme))
+                            .into_any_element(),
+                    ],
+                    theme,
+                )),
         )
         .children(save_error_line(moderation_error, theme));
 

@@ -19,7 +19,8 @@ use videorc_kit::tooltip::tooltip;
 
 use super::live::{LiveView, StatusKind};
 use super::{
-    SidekickScreen, config_grid_pair, field_beside, field_text, save_error_line, unlock_alert,
+    SidekickScreen, config_grid_pair, field_beside, field_description, field_text_xs,
+    save_error_line, unlock_alert,
 };
 
 pub struct OverviewState<'a> {
@@ -200,11 +201,8 @@ pub fn render_overview(
     // `BuddyLiveSection`: whether Sidekick hears you, its allowance under
     // the sentence, a failed save under the card.
     let locked = view.unlock.is_some();
-    let mut listen_words = field_text(
-        words::LISTEN_LABEL,
-        Some(words::listen_consent_sentence().into()),
-        theme,
-    );
+    let mut listen_words =
+        field_text_xs(words::LISTEN_LABEL, words::listen_consent_sentence(), theme);
     if let Some(line) = state.allowance {
         listen_words =
             listen_words.child(div().type_scale(text::META).text_color(muted).child(line));
@@ -261,12 +259,7 @@ pub fn render_overview(
                                 .text_color(foreground)
                                 .child(title),
                         )
-                        .child(
-                            div()
-                                .type_scale(text::META)
-                                .text_color(muted)
-                                .child(description),
-                        ),
+                        .child(field_description(description, theme)),
                 )
                 .child(
                     Button::new(format!("open-{tab}-for-{title}"))
