@@ -2,6 +2,7 @@
 //! Forget — `cohost.community.*` plus `videorc_app_core::buddy::community`.
 //! Words and behaviour from Electron's `components/community/*.tsx`.
 
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -15,11 +16,13 @@ use serde_json::{Value, json};
 use videorc_app_core::buddy::community::{
     self, BUDDY_REMEMBERS_LOCK_REASON, COMMUNITY_DISCLOSURE_LINE, CommunitySummary,
     REMEMBER_OFFER_DESCRIPTION, REMEMBER_OFFER_TITLE, X_SELF_LINK_REASON, YOUTUBE_RETENTION_LINE,
-    account_label, forget_copy, forget_memory_label, has_x, linked_line, memory_forget_copy,
-    note_to_save, nothing_remembered_line, people_empty_copy, person_load_failed_line,
-    person_row_context, person_stats_line, regular_after_label, remember_offer_shows,
-    retention_line, support_line,
+    account_label, avatar_retry_delay, avatar_url, avatar_urls_to_load, forget_copy,
+    forget_memory_label, has_x, linked_line, memory_forget_copy, note_to_save,
+    nothing_remembered_line, people_empty_copy, person_load_failed_line, person_row_context,
+    person_stats_line, regular_after_label, remember_offer_shows, retention_line, support_line,
 };
+use videorc_app_core::chat::highlight_driver as driver;
+use videorc_app_core::chat::images;
 use videorc_app_core::chat::overlay::monogram_initials;
 use videorc_app_core::client::RpcError;
 use videorc_app_core::resources::capability::{IssueOptions, ResourceKind};
@@ -55,6 +58,7 @@ use videorc_protocol::community::{CommunitySettings, REGULAR_STREAMS_MAX, REGULA
 use super::live::{Unlock, UnlockAction};
 use super::voice::chat_platform;
 use super::{SidekickScreen, config_grid_pair, unlock_alert};
+use crate::screens::chat_media::{self, Picture};
 
 const YOUR_COMMUNITY: &str = "Your community";
 const PEOPLE: &str = "People";
@@ -136,12 +140,18 @@ const FILTERS: [(&str, &str); 4] = [
 const COPIED_FOR: Duration = Duration::from_millis(1_500);
 /// How long Wave says "Waved" (person-card-body.tsx).
 const WAVED_FOR: Duration = Duration::from_millis(3_000);
+/// Pictures kept for the People rows and the card; past it, only the ones
+/// on screen stay (the list asks for 100 people at most).
+const AVATAR_CACHE: usize = 256;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersonRow {
     pub id: String,
     pub name: String,
+    /// The viewer's picture (`CommunityPersonRow.avatarUrl`).
+    #[serde(default)]
+    pub avatar_url: Option<String>,
     #[serde(default)]
     pub platforms: Vec<String>,
     #[serde(default)]
@@ -199,6 +209,9 @@ pub struct AccountSuggestion {
 pub struct PersonDetail {
     pub id: String,
     pub name: String,
+    /// The viewer's picture (`CommunityPerson.avatarUrl`).
+    #[serde(default)]
+    pub avatar_url: Option<String>,
     #[serde(default)]
     pub streams: u64,
     #[serde(default)]
@@ -271,6 +284,11 @@ pub struct CommunityState {
     pub file_busy: Option<CommunityFile>,
     /// P1201: Play a welcome / Play a milestone (local preview only).
     pub(super) preview: Option<super::community_preview::CommunityPreview>,
+    /// `useCachedAvatar`: the People rows' and the card's pictures by
+    /// `avatarUrl`, through the backend's chat image cache.
+    pub(super) avatars: HashMap<String, Picture>,
+    /// How many times each picture has failed, for its next wait.
+    pub(super) avatar_failures: HashMap<String, usize>,
 }
 
 /// Export… and Import… (D12): a picked folder or file goes to the backend
@@ -342,6 +360,8 @@ impl CommunityState {
             copied_epoch: 0,
             file_busy: None,
             preview: None,
+            avatars: HashMap::new(),
+            avatar_failures: HashMap::new(),
         }
     }
 }
@@ -446,7 +466,102 @@ impl SidekickScreen {
             }
             None => community.load_failed = true,
         }
+        self.load_community_avatars(cx);
         cx.notify();
+    }
+
+    /// `useCachedAvatar` for the People rows and the card: the backend
+    /// caches the picture, its route serves the bytes, and the monogram
+    /// stays while it loads or when either refuses.
+    pub(super) fn load_community_avatars(&mut self, cx: &mut Context<Self>) {
+        let Some(community) = self.community.as_mut() else {
+            return;
+        };
+        let shown: Vec<String> = community
+            .people
+            .iter()
+            .map(|person| person.avatar_url.as_deref())
+            .chain(
+                community
+                    .selected
+                    .iter()
+                    .map(|person| person.avatar_url.as_deref()),
+            )
+            .filter_map(avatar_url)
+            .map(str::to_owned)
+            .collect();
+        let wanted = avatar_urls_to_load(shown.iter().map(|url| Some(url.as_str())), |url| {
+            community.avatars.contains_key(url)
+        });
+        if community.avatars.len() + wanted.len() > AVATAR_CACHE {
+            let keep: HashSet<&str> = shown.iter().map(String::as_str).collect();
+            community
+                .avatars
+                .retain(|url, _| keep.contains(url.as_str()));
+            community
+                .avatar_failures
+                .retain(|url, _| keep.contains(url.as_str()));
+        }
+        for url in wanted {
+            self.fetch_community_avatar(url, cx);
+        }
+    }
+
+    /// One picture through the backend's cache. One the cache could not
+    /// fetch is asked for again after 5, 20 and 60 s, then left as the
+    /// monogram (`useCachedAvatar`'s `CHAT_IMAGE_NULL_RETRY_DELAYS_MS`).
+    fn fetch_community_avatar(&mut self, url: String, cx: &mut Context<Self>) {
+        let backend = self.studio.backend().clone();
+        let Some(community) = self.community.as_mut() else {
+            return;
+        };
+        community.avatars.insert(url.clone(), Picture::Loading);
+        let remote = url.clone();
+        let job = self.runtime.spawn(async move {
+            let kind = chat_media::cache_kind_for_url(&remote, false);
+            let local = driver::cache_image_as(&*backend, &remote, kind).await?;
+            let bytes = images::read_route(&local).await.ok()?;
+            Some(chat_media::picture_from_bytes(bytes))
+        });
+        cx.spawn(async move |this, cx| {
+            let picture = job.await.ok().flatten();
+            let retry = this
+                .update(cx, |screen, cx| {
+                    let community = screen.community.as_mut()?;
+                    let retry = match picture {
+                        Some(picture) => {
+                            community.avatar_failures.remove(&url);
+                            community.avatars.insert(url.clone(), picture);
+                            None
+                        }
+                        None => {
+                            let failed = community.avatar_failures.entry(url.clone()).or_insert(0);
+                            let delay = avatar_retry_delay(*failed);
+                            *failed += 1;
+                            community.avatars.insert(url.clone(), Picture::Failed);
+                            delay
+                        }
+                    };
+                    cx.notify();
+                    retry
+                })
+                .ok()
+                .flatten();
+            let Some(delay) = retry else {
+                return;
+            };
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |screen, cx| {
+                // Still on the page and still failed: ask again.
+                let again = screen.community.as_ref().is_some_and(|community| {
+                    matches!(community.avatars.get(&url), Some(Picture::Failed))
+                });
+                if again {
+                    screen.fetch_community_avatar(url, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// One card action (Wave, a note, Not the same, a memory, a bot flag, a
@@ -939,7 +1054,14 @@ pub fn render_community(
                     })
                     .child(
                         ListRow::new(format!("person-{}", person.id), person.name.clone())
-                            .leading(Avatar::new(monogram_initials(&person.name)).sm())
+                            .leading(
+                                person_avatar(
+                                    &person.name,
+                                    person.avatar_url.as_deref(),
+                                    &state.avatars,
+                                )
+                                .sm(),
+                            )
                             .alias(marks)
                             .meta(context)
                             .grouped()
@@ -1465,6 +1587,19 @@ fn person_dialog(
     Dialog::new("community-person", &state.person, title).child(body)
 }
 
+/// `Avatar` with `AvatarImage` over the `AvatarFallback` monogram: the
+/// person's picture once the cache has it, the initials until then.
+fn person_avatar(name: &str, url: Option<&str>, avatars: &HashMap<String, Picture>) -> Avatar {
+    let avatar = Avatar::new(monogram_initials(name));
+    match avatar_url(url)
+        .and_then(|url| avatars.get(url))
+        .and_then(Picture::ready)
+    {
+        Some(image) => avatar.image(image),
+        None => avatar,
+    }
+}
+
 /// The card's section label (`SectionLabel`: 11 px / 600, tertiary).
 fn card_label(label: &'static str, subtle: Hsla) -> impl IntoElement {
     div()
@@ -1533,7 +1668,12 @@ fn render_person_card(
     if is_bot {
         name_line = name_line.child(Badge::new(BOT).variant(BadgeVariant::Outline));
     }
-    let mut header = div().flex().flex_col().child(name_line);
+    let mut header = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.))
+        .child(name_line);
     if linked {
         header = header.child(
             div()
@@ -1542,7 +1682,16 @@ fn render_person_card(
                 .child(linked_line(person.accounts.len())),
         );
     }
-    body = body.child(header);
+    // `Avatar size="lg"` beside the name, 10 px apart (`gap-2.5`).
+    body = body.child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .min_w(px(0.))
+            .child(person_avatar(&name, person.avatar_url.as_deref(), &state.avatars).lg())
+            .child(header),
+    );
 
     // AccountsList: a linked account's "Not the same" splits it off.
     if !person.accounts.is_empty() {
@@ -2183,4 +2332,53 @@ fn press_community_toast(toast: ToastData, cx: &mut Context<SidekickScreen>) {
     hub.update(cx, |hub, cx| {
         hub.press_toast("community-file".to_string(), toast, cx)
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PersonDetail, PersonRow};
+    use serde_json::json;
+
+    /// `cohost.community.list` rows and `cohost.community.person` carry the
+    /// viewer's picture as `avatarUrl`; an older answer without it still reads.
+    #[test]
+    fn people_and_the_card_read_the_avatar_url() {
+        let row: PersonRow = serde_json::from_value(json!({
+            "id": "p1",
+            "name": "Ada",
+            "avatarUrl": "https://yt3.ggpht.com/ada.jpg",
+            "platforms": ["youtube"],
+            "streams": 3,
+            "regular": true,
+            "status": "normal",
+        }))
+        .expect("row");
+        assert_eq!(
+            row.avatar_url.as_deref(),
+            Some("https://yt3.ggpht.com/ada.jpg")
+        );
+        let bare: PersonRow =
+            serde_json::from_value(json!({ "id": "p2", "name": "Bo" })).expect("bare row");
+        assert_eq!(bare.avatar_url, None);
+
+        let person: PersonDetail = serde_json::from_value(json!({
+            "id": "p1",
+            "name": "Ada",
+            "avatarUrl": "https://static-cdn.jtvnw.net/ada.png",
+            "accounts": [],
+            "streams": 3,
+            "messages": 40,
+            "inARow": 2,
+            "bestInARow": 2,
+            "regular": true,
+            "support": {},
+            "note": "",
+            "status": "normal",
+        }))
+        .expect("person");
+        assert_eq!(
+            person.avatar_url.as_deref(),
+            Some("https://static-cdn.jtvnw.net/ada.png")
+        );
+    }
 }
