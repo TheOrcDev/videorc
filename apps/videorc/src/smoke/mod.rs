@@ -47,6 +47,7 @@ use std::sync::Arc;
 use gpui::{AnyWindowHandle, App, Global};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, watch};
+use videorc_app_core::nav::PageId;
 use videorc_app_core::process::IsolatedBackendPaths;
 use videorc_app_core::smoke::security::{UiAppearanceRequest, UiToastRequest, UiWindow};
 use videorc_app_core::smoke::{
@@ -68,6 +69,42 @@ pub trait ShellSmoke: 'static {
     fn appearance(&self, request: UiAppearanceRequest, cx: &mut App) -> Result<Value, String>;
     /// `ui-toast`: a toast in the main window through the app's toast path.
     fn toast(&self, request: &UiToastRequest, cx: &mut App) -> Result<Value, String>;
+    /// `open-tab`: the main window shows `page`, as its sidebar row would.
+    fn open_page(&self, page: PageId, cx: &mut App) -> Result<(), String>;
+}
+
+/// `open-tab {tab, waitFor?}` on the main window. `tab` is Electron's
+/// trigger id (`studio`, `sources`, `layout`, `streaming`, …) or a page's own
+/// id. `waitFor` is a CSS selector on Electron; the GPUI page is drawn in the
+/// same frame, so it is not needed here and is ignored.
+pub struct ShellCommands {
+    ui: UiThread,
+}
+
+impl SmokeCommandHandler for ShellCommands {
+    fn handles(&self, command: &str) -> bool {
+        command == "open-tab"
+    }
+
+    fn run<'a>(
+        &'a self,
+        _command: &'a str,
+        params: serde_json::Map<String, Value>,
+    ) -> videorc_app_core::smoke::CommandFuture<'a> {
+        Box::pin(async move {
+            let tab = params
+                .get("tab")
+                .and_then(Value::as_str)
+                .unwrap_or("studio")
+                .to_string();
+            let page = PageId::from_tab_param(&tab)
+                .ok_or_else(|| format!("open-tab: no page is called {tab:?}."))?;
+            self.ui
+                .run(move |cx| shell(cx)?.open_page(page, cx))
+                .await??;
+            Ok(serde_json::json!({ "activeTab": tab }))
+        })
+    }
 }
 
 /// The shell's answers, where the driver's foreground jobs find them.
@@ -156,7 +193,8 @@ pub fn start(cx: &mut App, start: SmokeStart) -> bool {
         AppSmokeConfig::from_env(env, start.packaged, start.isolated_backend),
         start.quit,
     )
-    .with_handler(Arc::new(driver::UiDriver::new(ui, output_dir)));
+    .with_handler(Arc::new(driver::UiDriver::new(ui.clone(), output_dir)))
+    .with_handler(Arc::new(ShellCommands { ui }));
     if let Some(studio) = start.studio {
         commands = commands.with_handler(studio);
     }

@@ -13,13 +13,12 @@
 //    (`sceneRevision == frameSceneRevision`) and its frames advance.
 // 3. The Studio page: the Record button (`session-record`) is in the main
 //    window's tree and says "Record".
-// 4. Session: with a source, Space starts a take (the button reads "Stop
-//    recording" and `recording.status` is recording), Space stops it, and the
-//    take lands in the isolated recordings folder. Without one (a smoke run
-//    picks no devices, and the GPUI app has no test-pattern source until the
-//    Studio's `enable-synthetic-source` lands), Record must say why it is
-//    blocked instead; the smoke checks that and says the take was skipped.
-//    VIDEORC_SMOKE_REQUIRE_TAKE=1 makes a skipped take a failure.
+// 4. Session: a smoke run picks no devices, so Record first says why it is
+//    blocked (logged when it does). `enable-synthetic-source` turns the test
+//    pattern on (the Studio smoke handler, as Electron's switch), and then
+//    Space starts a take (the button reads "Stop recording" and
+//    `recording.status` is recording), Space stops it, and the take lands in
+//    the isolated recordings folder.
 //
 // Functional contract only: no fps floors (perf stays in its own gates).
 
@@ -37,7 +36,6 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const previewBudgetMs = Number(process.env.VIDEORC_GPUI_PREVIEW_BUDGET_MS ?? 20000)
 const takeMs = Number(process.env.VIDEORC_GPUI_TAKE_MS ?? 3000)
-const requireTake = process.env.VIDEORC_SMOKE_REQUIRE_TAKE === '1'
 
 const RECORD = { role: 'button', id: 'session-record' }
 const BLOCKED_REASON = { id: 'session-blocked-reason' }
@@ -101,20 +99,23 @@ async function main() {
     console.log('gpui-studio: Studio page with Record ✓')
 
     // 4. Session.
-    const blocked = await ui
-      .waitFor(BLOCKED_REASON, { timeoutMs: 1000 })
-      .then((node) => nodeWords(node))
-      .catch(() => null)
-    if (blocked) {
-      if (requireTake) {
-        throw new Error(`gpui-studio: FAIL — Record is blocked: ${blocked}`)
-      }
-      console.log(
-        `gpui-studio: Record is blocked and says why ("${blocked}") ✓ — ` +
-          'take skipped: no source until the Studio smoke handler gives a test pattern.'
-      )
-      return
+    const blockedReason = () =>
+      ui
+        .waitFor(BLOCKED_REASON, { timeoutMs: 1000 })
+        .then((node) => nodeWords(node))
+        .catch(() => null)
+    const before = await blockedReason()
+    if (before) console.log(`gpui-studio: without a source Record says "${before}" ✓`)
+    await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 500 })
+    const state = await requestSmokeCommand(smoke, 'studio-state', {})
+    if (state?.testPattern !== true) {
+      throw new Error(`gpui-studio: FAIL — the test pattern is not on: ${JSON.stringify(state)}`)
     }
+    const blocked = await blockedReason()
+    if (blocked) {
+      throw new Error(`gpui-studio: FAIL — Record is blocked with the test pattern on: ${blocked}`)
+    }
+    console.log('gpui-studio: test pattern on, Record enabled ✓')
     await ui.press('Space')
     await ui.waitFor({ role: 'label', value: 'Stop recording' }, { timeoutMs: 15000 })
     const started = await rpc('recording.status')

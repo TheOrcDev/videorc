@@ -5,14 +5,16 @@
 use std::cell::Cell;
 use std::time::Duration;
 
-use gpui::{AnyWindowHandle, App, Entity};
+use gpui::{AnyWindowHandle, App, Entity, WindowHandle};
 use serde_json::{Value, json};
 use videorc_app_core::smoke::security::{UiAppearanceRequest, UiToastRequest, UiWindow};
 use videorc_kit::theme::{ForcedDark, IncreaseContrast, ReduceMotion};
 use videorc_kit::{ToastData, ToastKind};
 
 use super::ShellSmoke;
+use crate::app::shell::Shell;
 use crate::screens::notifications::Hub;
+use videorc_app_core::nav::PageId;
 
 /// What is forced now: `None` gives that part back to the system.
 #[derive(Clone, Copy, Default)]
@@ -23,13 +25,13 @@ struct Forced {
 }
 
 pub struct ShellWindows {
-    pub main: AnyWindowHandle,
+    pub main: WindowHandle<Shell>,
     pub notices: Entity<Hub>,
     forced: Cell<Forced>,
 }
 
 impl ShellWindows {
-    pub fn new(main: AnyWindowHandle, notices: Entity<Hub>) -> Self {
+    pub fn new(main: WindowHandle<Shell>, notices: Entity<Hub>) -> Self {
         Self {
             main,
             notices,
@@ -63,7 +65,7 @@ pub(crate) fn toast_kind(kind: &str) -> Result<ToastKind, String> {
 impl ShellSmoke for ShellWindows {
     fn window(&self, which: UiWindow, cx: &App) -> Option<AnyWindowHandle> {
         match which {
-            UiWindow::Main => Some(self.main),
+            UiWindow::Main => Some(self.main.into()),
             UiWindow::StreamManager => crate::screens::stream_manager::window::handle(cx),
             UiWindow::Notes => crate::screens::notes::window::handle(cx),
             // The preview draws inside the main window, and the Captions
@@ -105,6 +107,18 @@ impl ShellSmoke for ShellWindows {
         self.notices
             .update(cx, |hub, cx| hub.press_toast(id.clone(), toast, cx));
         Ok(json!({ "shown": true, "id": id }))
+    }
+
+    fn open_page(&self, page: PageId, cx: &mut App) -> Result<(), String> {
+        self.open(page, cx)
+    }
+}
+
+impl ShellWindows {
+    fn open(&self, page: PageId, cx: &mut App) -> Result<(), String> {
+        self.main
+            .update(cx, |shell, window, cx| shell.open_page(page, window, cx))
+            .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())
     }
 }
 
