@@ -1374,5 +1374,11 @@ impl Render for SidekickScreen {
             .font_family(FONT)
             .child(tabs.child(body))
             .child(consent)
+            // Reports' Markers dialog draws itself when open.
+            .children(
+                self.reports
+                    .as_ref()
+                    .and_then(|reports| reports.markers.clone()),
+            )
     }
 }

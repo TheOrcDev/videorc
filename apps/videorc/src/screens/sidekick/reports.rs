@@ -32,6 +32,7 @@ use videorc_protocol::{ClipMomentSource, CohostReportPayload};
 
 use super::SidekickScreen;
 use super::live::{LiveView, UnlockAction};
+use crate::screens::session_player;
 
 /// A platform mark in a row or the stream line.
 const MARK_PX: f32 = 14.;
@@ -58,9 +59,36 @@ pub struct ReportsState {
     pub expanded: HashSet<&'static str>,
     /// Drops an answer a newer ask overtook.
     generation: u64,
+    /// The Library's recording dialog with the session's markers
+    /// (`SessionMarkersDialog`), made on the first Markers click.
+    pub markers: Option<Entity<session_player::Player>>,
 }
 
 impl SidekickScreen {
+    /// Markers: the shared player's dialog on the report's stream. Closing
+    /// it stops playback.
+    fn open_report_markers(
+        &mut self,
+        session_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(reports) = self.reports.as_mut() else {
+            return;
+        };
+        if reports.markers.is_none() {
+            reports.markers = session_player::hosted(session_player::Mode::Dialog, window, cx);
+        }
+        let Some(player) = reports.markers.clone() else {
+            return;
+        };
+        let opened = player.update(cx, |player, cx| player.open_session(session_id, window, cx));
+        if !opened {
+            eprintln!("[videorc-app] Sidekick Reports: the Library has no session {session_id}");
+        }
+        cx.notify();
+    }
+
     /// Asks for the report again (every `cohost.report.saved` too): the
     /// Library's sessions first (the picker and "Last stream"), then
     /// `cohost.report.get` for the picked or newest stream, or
@@ -203,15 +231,19 @@ pub fn render_reports(
     let mut section = PanelSection::new("sidekick-stream-report")
         .title(rv::STREAM_REPORT)
         .description(rv::DESCRIPTION);
-    // P1219: the markers dialog lives inside Library's player (it needs
-    // Library's core), so the button stays disabled until one can be
-    // hosted here.
-    if shown.is_some() && session.is_some() {
+    // P1219: the shown stream's markers, in the Library's own dialog.
+    if let (Some(shown), Some(_)) = (shown, session) {
+        let session_id = shown.session_id.clone();
+        let open = entity.clone();
         section = section.action(
             Button::new("report-markers")
                 .variant(ButtonVariant::Ghost)
                 .label(rv::MARKERS)
-                .disabled(true),
+                .on_click(move |_, window, cx| {
+                    open.update(cx, |screen, cx| {
+                        screen.open_report_markers(&session_id, window, cx);
+                    });
+                }),
         );
     }
     if let Some(selected) = selected
