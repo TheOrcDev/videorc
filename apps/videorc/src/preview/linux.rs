@@ -26,9 +26,11 @@ use std::sync::Arc;
 use gpui::{
     App, AppContext, AsyncApp, Bounds, Context, Entity, Pixels, TitlebarOptions, WeakEntity,
     Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, canvas, div, prelude::*, px,
-    rgb, size,
+    size,
 };
 use videorc_app_core::{Level, Logger};
+use videorc_kit::theme::hsla;
+use videorc_kit::tokens::DARK;
 use videorc_preview::LayerRect;
 use videorc_preview::bounds::WindowGeometry;
 use videorc_preview::element::{ElementConfig, Phase, PreviewElement, UiRequest};
@@ -438,21 +440,25 @@ impl Render for FloatingPreview {
             .upgrade()
             .and_then(|preview| preview.read(cx).floating_words());
         let preview = self.preview.clone();
-        let slot = div().size_full().relative().bg(rgb(0x000000)).child(
-            canvas(
-                move |bounds, window, cx| {
-                    let geometry = geometry_of(window, bounds, cx);
-                    let _ = preview.update(cx, |preview, _| {
-                        preview.place_linux(Host::Floating, window, bounds, geometry)
-                    });
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full(),
-        );
+        let slot = div()
+            .size_full()
+            .relative()
+            .bg(hsla(DARK.video_ground))
+            .child(
+                canvas(
+                    move |bounds, window, cx| {
+                        let geometry = geometry_of(window, bounds, cx);
+                        let _ = preview.update(cx, |preview, _| {
+                            preview.place_linux(Host::Floating, window, bounds, geometry)
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
         match words {
             Some(words) => slot.child(words_card(words)),
             None => slot,

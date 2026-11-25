@@ -11,7 +11,7 @@
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
-use gpui::{App, Bounds, NativeView, Pixels, Window, rgb};
+use gpui::{App, Bounds, NativeView, Pixels, Window};
 use objc2::rc::Retained;
 use objc2::{ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::NSView;
@@ -20,6 +20,8 @@ use objc2_quartz_core::{CAAutoresizingMask, CALayer, CAMetalLayer, CATransaction
 use raw_window_handle::{
     AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle as RawHandle,
 };
+use videorc_kit::theme::hsla;
+use videorc_kit::tokens::DARK;
 use videorc_preview::bounds::WindowGeometry;
 
 /// One place the layer can live: the `NSView` given to GPUI, and GPUI's
@@ -40,7 +42,7 @@ impl HostView {
             .map_err(|error| format!("GPUI could not host the preview: {error:#}"))?;
         // What shows for a frame or two while GPUI moves the view: the
         // slot's own black.
-        native.set_background(rgb(0x000000), cx);
+        native.set_background(hsla(DARK.video_ground), cx);
         Ok(Self { view, native })
     }
 }

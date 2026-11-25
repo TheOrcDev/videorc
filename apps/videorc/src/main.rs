@@ -222,6 +222,7 @@ fn main() -> Result<()> {
                     .chain([camera::VIRTUAL_CAMERA_CHANGED, app::exit::CLOUD_STATE])
                     .chain(screens::settings::EVENTS)
                     .chain(screens::avatar::EVENTS)
+                    .chain(screens::sidekick::EVENTS)
                     .chain(videorc_app_core::library::LIBRARY_EVENTS)
                     .chain(["session.log"]),
             ),

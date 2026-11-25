@@ -15,6 +15,7 @@ use videorc_kit::{
     context_menu::ContextMenu,
     dropdown_menu::{Menu, MenuItem},
     kebab_menu::{KebabMenu, KebabMenuItem, KebabReveal},
+    tokens::radius,
 };
 
 /// Person-menu words (Electron `ChatPersonMenu`).
@@ -75,7 +76,7 @@ pub fn chat_row(message: &Arc<LiveChatMessage>, live: bool) -> AnyElement {
         .gap(px(2.))
         .px(px(4.))
         .py(px(4.))
-        .rounded(px(6.))
+        .rounded(px(radius::CHIP))
         .child(div().flex_1().min_w(px(0.)).child(body))
         .child(
             KebabMenu::new(
@@ -129,7 +130,7 @@ fn row_body(view: &ManagerRow) -> AnyElement {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(10.))
+                        .text_size(px(11.))
                         .child(view.row.initials.clone()),
                 )
                 .child(
@@ -149,15 +150,15 @@ fn row_body(view: &ManagerRow) -> AnyElement {
                         .child(div().text_size(px(11.)).child(view.row.platform_label))
                         .children(view.roles.iter().map(|role| {
                             div()
-                                .text_size(px(10.))
+                                .text_size(px(11.))
                                 .child((*role).to_string())
                                 .into_any_element()
                         }))
                         .when(view.first_chat, |row| {
-                            row.child(div().text_size(px(10.)).child("First chat"))
+                            row.child(div().text_size(px(11.)).child("First chat"))
                         })
                         .when(view.mentioned, |row| {
-                            row.child(div().text_size(px(10.)).child("@you"))
+                            row.child(div().text_size(px(11.)).child("@you"))
                         }),
                 )
                 .child(

@@ -10,9 +10,11 @@
 //! the first frame, "Preview failed" once the contracts give up. It redraws
 //! when the Preview notifies (its phase or mode changed), never per frame.
 
-use gpui::{App, Context, Entity, WeakEntity, Window, canvas, div, prelude::*, rgb};
+use gpui::{App, Context, Entity, WeakEntity, Window, canvas, div, prelude::*};
 use objc2::rc::Retained;
 use objc2_app_kit::NSView;
+use videorc_kit::theme::hsla;
+use videorc_kit::tokens::DARK;
 use videorc_preview::words;
 
 use videorc_app_core::desktop::capture_protection::WindowRole;
@@ -79,7 +81,8 @@ impl FloatingPreview {
 
 impl Render for FloatingPreview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let slot = div().size_full().relative().bg(rgb(0x000000));
+        // The video ground is the same in every appearance.
+        let slot = div().size_full().relative().bg(hsla(DARK.video_ground));
         let Ok(host) = &self.host else {
             // No native view: the honest card, as the docked slot says it.
             return slot.child(words_card(words::FAILED));

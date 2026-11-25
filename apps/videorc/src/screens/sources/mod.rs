@@ -190,13 +190,13 @@ fn meter_bar(
     div()
         .h(px(8.))
         .w_full()
-        .rounded(px(4.))
+        .rounded_full()
         .bg(hsla(track))
         .child(
             div()
                 .h_full()
                 .w(px((amount * 220.0) as f32))
-                .rounded(px(4.))
+                .rounded_full()
                 .bg(hsla(fill)),
         )
 }

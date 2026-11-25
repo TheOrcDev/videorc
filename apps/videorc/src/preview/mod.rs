@@ -27,9 +27,12 @@ pub(crate) mod macos;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod scene;
 
-use gpui::{AnyElement, App, AppContext, Entity, FontWeight, Window, div, prelude::*, px, rgb};
+use gpui::{AnyElement, App, AppContext, Entity, FontWeight, Window, div, prelude::*, px};
+use videorc_kit::theme::hsla;
+// The video ground and its words are the same in every appearance.
 use tokio::sync::watch;
 use videorc_app_core::{BackendState, Level, Logger};
+use videorc_kit::tokens::DARK as VIDEO;
 use videorc_preview::element::Phase;
 use videorc_preview::lifecycle::WindowMode;
 use videorc_preview::words::{self, PreviewWords};
@@ -403,7 +406,7 @@ impl Preview {
             .relative()
             .size_full()
             .rounded(px(SLOT_RADIUS as f32))
-            .bg(rgb(0x000000))
+            .bg(hsla(VIDEO.video_ground))
             .overflow_hidden();
         #[cfg(target_os = "macos")]
         if preview.mode == WindowMode::Docked
@@ -758,7 +761,7 @@ fn words_card(words: PreviewWords) -> impl IntoElement {
         .justify_center()
         .gap(px(4.))
         .px(px(24.))
-        .text_color(rgb(0xe8e8ea))
+        .text_color(hsla(VIDEO.video_ground_foreground))
         .child(
             div()
                 .text_size(px(13.))
@@ -769,7 +772,7 @@ fn words_card(words: PreviewWords) -> impl IntoElement {
         card = card.child(
             div()
                 .text_size(px(12.))
-                .text_color(rgb(0x8e8e93))
+                .text_color(hsla(VIDEO.video_ground_muted))
                 .child(words.detail),
         );
     }

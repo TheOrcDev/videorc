@@ -233,7 +233,7 @@ fn sparkline(points: &[f32], ink: gpui::Hsla) -> Option<AnyElement> {
         div()
             .w(px(3.))
             .h(px(height))
-            .rounded(px(1.))
+            .rounded_none()
             .bg(ink)
             .into_any_element()
     });
@@ -258,13 +258,17 @@ struct StatDrag {
 }
 
 impl Render for StatDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        // A floating chip under the pointer: the popover's glass and ink.
+        let t = videorc_kit::theme::resolve(None, window, cx);
         div()
             .px(px(8.))
             .py(px(4.))
-            .rounded(px(4.))
-            .bg(gpui::rgba(0x00000080))
-            .text_color(gpui::white())
+            .rounded(px(videorc_kit::tokens::radius::CHIP))
+            .bg(hsla(t.popover))
+            .border_1()
+            .border_color(hsla(t.border))
+            .text_color(hsla(t.popover_foreground))
             .text_size(px(12.))
             .child(self.id.clone())
     }
