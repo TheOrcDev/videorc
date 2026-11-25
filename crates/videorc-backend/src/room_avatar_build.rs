@@ -12,8 +12,11 @@
 //! reads the content ([`crate::room_content`]). The pet is the still at a
 //! fixed clock (Electron sends the pack's neutral frame), so a new layer
 //! goes out only when the pet, the bubble or the place changes, never every
-//! animation frame. The bubble rides on the landscape lane only: the caption
-//! slots raster it for the primary canvas.
+//! animation frame. The sprite slot keeps one atlas per leg and canvas, so
+//! the Preview leg is asked for the landscape canvas only (asking for both
+//! would rebuild its atlas on every look); the portrait lane gets the same
+//! pet, without the bubble (the caption slots raster it for the primary
+//! canvas), in its own box ([`buddy_box`] for the portrait rect).
 //!
 //! Not yet: the atlas variant and the motion topic for animating pages
 //! (`animated`, `cloud.room.avatar.motion`); those pages draw this still.
@@ -25,7 +28,7 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::buddy_sprite::{BuddyLegRequest, BuddySpriteLeg};
+use crate::buddy_sprite::{BuddyLegRequest, BuddySpriteLeg, buddy_box, buddy_rect_for_canvas};
 use crate::preview_buddy_layer::compose_buddy_layer;
 use crate::state::AppState;
 
@@ -33,7 +36,8 @@ use crate::state::AppState;
 static BUILD: AtomicBool = AtomicBool::new(false);
 
 /// The room program's canvas per lane (web `STAGE_CANVAS`).
-const LANES: [(&str, (u32, u32)); 2] = [("h", (1920, 1080)), ("v", (1080, 1920))];
+const LANDSCAPE: (u32, u32) = (1920, 1080);
+const PORTRAIT: (u32, u32) = (1080, 1920);
 /// How often the content is looked at (a change goes out within this).
 const POLL: Duration = Duration::from_millis(250);
 /// The still's clock: a fixed instant, so an idle pet's still never changes.
@@ -49,13 +53,25 @@ pub(crate) fn building() -> bool {
     BUILD.load(Ordering::Acquire)
 }
 
-/// One lane's static layer from a composed straight-alpha BGRA frame: a
-/// PNG named by its SHA-256 (`avatarHash`), its rect in canvas fractions.
-/// `None` when it would not fit the avatar's budget.
-pub(crate) fn png_layer(canvas: (u32, u32), rect: [u32; 4], bgra: &[u8]) -> Option<Value> {
+/// One lane's static layer from a composed straight-alpha BGRA picture of
+/// `size`: a PNG named by its SHA-256 (`avatarHash`), placed at `place`
+/// (canvas pixels, `[x, y, w, h]`) in canvas fractions. `None` when it would
+/// not fit the avatar's budget.
+pub(crate) fn png_layer(
+    canvas: (u32, u32),
+    place: [f32; 4],
+    size: (u32, u32),
+    bgra: &[u8],
+) -> Option<Value> {
     use image::ImageEncoder as _;
-    let [x, y, width, height] = rect;
-    if width == 0 || height == 0 || bgra.len() < width as usize * height as usize * 4 {
+    let (width, height) = size;
+    let [x, y, place_width, place_height] = place;
+    if width == 0
+        || height == 0
+        || place_width <= 0.0
+        || place_height <= 0.0
+        || bgra.len() < width as usize * height as usize * 4
+    {
         return None;
     }
     let mut rgba = Vec::with_capacity(bgra.len());
@@ -77,8 +93,8 @@ pub(crate) fn png_layer(canvas: (u32, u32), rect: [u32; 4], bgra: &[u8]) -> Opti
         "rect": {
             "x": f64::from(x) / canvas_width,
             "y": f64::from(y) / canvas_height,
-            "w": f64::from(width) / canvas_width,
-            "h": f64::from(height) / canvas_height,
+            "w": f64::from(place_width) / canvas_width,
+            "h": f64::from(place_height) / canvas_height,
         },
         "asset": { "hash": hash, "png": png, "width": width, "height": height },
         "expiresAt": null,
@@ -110,40 +126,62 @@ pub(crate) async fn run(state: AppState) {
                 .as_ref()
                 .map(|bubble| (bubble.revision, bubble.width, bubble.height))
         );
-        let mut lanes: Vec<Vec<Value>> = Vec::with_capacity(LANES.len());
-        for (lane, canvas) in LANES {
-            let frame = state.buddy_sprite.leg_frame_at(
-                BuddyLegRequest {
-                    leg: BuddySpriteLeg::Preview,
-                    canvas,
-                    now_seconds: STILL_CLOCK_SECONDS,
-                    highlight_rect: None,
-                    caption_rect: None,
-                },
-                None,
-            );
-            key.push_str(&format!(
-                "|{lane}:{:?}:{:?}",
-                frame
-                    .sprite
-                    .as_ref()
-                    .map(|sprite| (sprite.atlas.revision, sprite.draw)),
-                (
-                    frame.bubble_anchor.x.to_bits(),
-                    frame.bubble_anchor.y.to_bits()
-                ),
-            ));
-            let lane_bubble = if lane == "h" { bubble.as_ref() } else { None };
-            let layer = compose_buddy_layer(canvas, &frame, lane_bubble)
-                .and_then(|composed| png_layer(canvas, composed.rect, &composed.bgra));
-            lanes.push(layer.into_iter().collect());
-        }
+        // One look at the Preview leg, for the landscape canvas only.
+        let frame = state.buddy_sprite.leg_frame_at(
+            BuddyLegRequest {
+                leg: BuddySpriteLeg::Preview,
+                canvas: LANDSCAPE,
+                now_seconds: STILL_CLOCK_SECONDS,
+                highlight_rect: None,
+                caption_rect: None,
+            },
+            None,
+        );
+        key.push_str(&format!(
+            "|{:?}:{:?}:{:?}",
+            frame
+                .sprite
+                .as_ref()
+                .map(|sprite| (sprite.atlas.revision, sprite.draw)),
+            (
+                frame.bubble_anchor.x.to_bits(),
+                frame.bubble_anchor.y.to_bits()
+            ),
+            (layout.horizontal, layout.vertical),
+        ));
+        let at = |rect: [u32; 4]| rect.map(|value| value as f32);
+        let h: Vec<Value> = compose_buddy_layer(LANDSCAPE, &frame, bubble.as_ref())
+            .and_then(|composed| {
+                png_layer(
+                    LANDSCAPE,
+                    at(composed.rect),
+                    (composed.rect[2], composed.rect[3]),
+                    &composed.bgra,
+                )
+            })
+            .into_iter()
+            .collect();
+        // The portrait lane: the same pet, in the portrait rect's box.
+        let portrait_box = buddy_box(
+            buddy_rect_for_canvas(&layout, PORTRAIT.0, PORTRAIT.1),
+            PORTRAIT.0,
+            PORTRAIT.1,
+        );
+        let v: Vec<Value> = compose_buddy_layer(LANDSCAPE, &frame, None)
+            .and_then(|composed| {
+                png_layer(
+                    PORTRAIT,
+                    portrait_box,
+                    (composed.rect[2], composed.rect[3]),
+                    &composed.bgra,
+                )
+            })
+            .into_iter()
+            .collect();
         if last_key.as_ref() == Some(&key) {
             continue;
         }
         last_key = Some(key);
-        let v = lanes.pop().unwrap_or_default();
-        let h = lanes.pop().unwrap_or_default();
         crate::room_content::set_built_avatar(content(
             h,
             v,
@@ -161,7 +199,7 @@ mod tests {
     fn a_layer_is_a_png_named_by_its_hash_in_canvas_fractions() {
         // 2×1 pixels: one opaque red (BGRA), one clear.
         let bgra = [0, 0, 255, 255, 0, 0, 0, 0];
-        let layer = png_layer((100, 50), [10, 5, 2, 1], &bgra).expect("a layer");
+        let layer = png_layer((100, 50), [10.0, 5.0, 2.0, 1.0], (2, 1), &bgra).expect("a layer");
         assert_eq!(layer["kind"], "avatar");
         assert_eq!(
             layer["rect"],
@@ -177,9 +215,13 @@ mod tests {
             format!("{:x}", Sha256::digest(&png))
         );
         assert_eq!(layer["expiresAt"], Value::Null);
-        // Short pixels or an empty rect: none.
-        assert!(png_layer((100, 50), [0, 0, 2, 2], &bgra).is_none());
-        assert!(png_layer((100, 50), [0, 0, 0, 1], &bgra).is_none());
+        // Placed elsewhere than its size: the rect is the place.
+        let placed = png_layer((100, 50), [0.0, 0.0, 50.0, 25.0], (2, 1), &bgra).unwrap();
+        assert_eq!(placed["rect"]["w"], json!(0.5));
+        assert_eq!(placed["asset"]["width"], 2);
+        // Short pixels or an empty size: none.
+        assert!(png_layer((100, 50), [0.0, 0.0, 2.0, 2.0], (2, 2), &bgra).is_none());
+        assert!(png_layer((100, 50), [0.0, 0.0, 0.0, 1.0], (2, 1), &bgra).is_none());
     }
 
     #[test]
