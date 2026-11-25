@@ -25,6 +25,7 @@ use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::chat_platform::ChatPlatform;
 use videorc_kit::chrome::focus_ring;
 use videorc_kit::icon::{IconName, icon};
+use videorc_kit::platform_glyph::PlatformMark;
 use videorc_kit::separator::Separator;
 use videorc_kit::shortcut_keys::ShortcutKeys;
 use videorc_kit::status_dot::{StatusDot, StatusTone};
@@ -62,9 +63,16 @@ fn platform(id: &str) -> ChatPlatform {
     }
 }
 
-fn mark(id: &str, t: &Theme) -> AnyElement {
+/// `ChatPlatformIcon`: YouTube's official mark (never under 20 px, with its
+/// `mr-1` clear space), every other platform its glyph in the brand tint.
+fn mark(id: &str) -> AnyElement {
     let platform = platform(id);
-    icon(platform.icon(), MARK_PX, platform.tint_hsla(t)).into_any_element()
+    let glyph = PlatformMark::new(platform).size(MARK_PX);
+    if platform == ChatPlatform::Youtube {
+        div().flex_none().mr(px(4.)).child(glyph).into_any_element()
+    } else {
+        glyph.into_any_element()
+    }
 }
 
 /// 11 px words (`text-[11px]`).
@@ -573,7 +581,7 @@ impl SidekickPane {
                     .flex_none()
                     .items_center()
                     .gap(px(4.))
-                    .children(question.platforms.iter().map(|id| mark(id, t))),
+                    .children(question.platforms.iter().map(|id| mark(id.as_str()))),
             )
             .when(!askers.is_empty(), |row| {
                 row.child(
@@ -865,7 +873,7 @@ impl SidekickPane {
         let rows = self.state.say_hi.iter().map(|entry| {
             let author = entry.author_key.clone();
             card_row(SharedString::from(format!("say-hi-{author}")))
-                .child(mark(&entry.platform, t))
+                .child(mark(&entry.platform))
                 .child(
                     div()
                         .flex_1()
@@ -936,7 +944,7 @@ impl SidekickPane {
                     )
             });
             card_row(SharedString::from(format!("welcome-back-{person}")))
-                .child(mark(&entry.platform, t))
+                .child(mark(&entry.platform))
                 .child(
                     div()
                         .flex_1()

@@ -59,9 +59,6 @@ const REVIEW: &str = "Review";
 const CANCEL: &str = "Cancel";
 const RETRY: &str = "Retry";
 const OPEN_IN_LIBRARY: &str = "Open in Library";
-/// `ConfigGrid`: the two sections side by side from this page width
-/// (`@min-[940px]/page`), one under the other below it.
-const CONFIG_GRID_MIN_WIDTH: f32 = 940.;
 /// Clean cut's name as a user of the app-wide poster cache.
 pub(super) const POSTER_USER: &str = "clean-cut";
 /// A recording row's poster (`SessionPoster className="h-9 w-16"`): 64 × 36.
@@ -104,8 +101,6 @@ pub struct CleanCutState {
     pub review: Option<ReviewState>,
     pub drafts_path: PathBuf,
     pub loaded: bool,
-    /// The page's measured width, for the config grid's two columns.
-    pub width: f32,
 }
 
 impl CleanCutState {
@@ -129,7 +124,6 @@ impl CleanCutState {
             review: None,
             drafts_path: local_dir.join(format!("{STORAGE_KEY}.json")),
             loaded: false,
-            width: 0.,
         }
     }
 
@@ -186,19 +180,6 @@ impl SidekickScreen {
             active: self.studio.session_owns_transport(),
             // The watch borrows the snapshot; `snapshot()` would clone it.
             streaming: session_is_live(&self.studio.watch().borrow().session.status),
-        }
-    }
-
-    /// The page's measured width; draws again only when the grid's columns
-    /// flip.
-    fn measure_clean_cut(&mut self, width: f32, cx: &mut Context<Self>) {
-        let Some(clean) = self.clean_cut.as_mut() else {
-            return;
-        };
-        let flips = (width >= CONFIG_GRID_MIN_WIDTH) != (clean.width >= CONFIG_GRID_MIN_WIDTH);
-        clean.width = width;
-        if flips {
-            cx.notify();
         }
     }
 
@@ -372,26 +353,7 @@ impl SidekickScreen {
             account_locked: !self.signed_in || !gate.allowed(),
         };
 
-        // The page's width decides the grid's columns (`@container/page`).
-        let measured = cx.entity().downgrade();
-        let measure = gpui::canvas(
-            move |bounds, _, cx| {
-                let width = f32::from(bounds.size.width);
-                measured
-                    .update(cx, |screen, cx| screen.measure_clean_cut(width, cx))
-                    .ok();
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full();
-        let mut page = div()
-            .relative()
-            .flex()
-            .flex_1()
-            .flex_col()
-            .w_full()
-            .child(measure);
+        let mut page = div().flex().flex_1().flex_col().w_full();
         // Locked means disabled with one reason, in the strip every Sidekick
         // tab leads with (plan 174 E-31): the switch and Make are off under it.
         if let Some(unlock) = card.unlock.as_ref() {
@@ -404,47 +366,20 @@ impl SidekickScreen {
                     .child(lock_alert(unlock)),
             );
         }
-        // `ConfigGrid` + `CONFIG_GRID_PAIR`: flush sections. From 940 px they
-        // sit side by side and fill the height, a hairline between the
-        // columns and none under them; below it they stack at their own
-        // height, a hairline between them.
-        let wide = state.width >= CONFIG_GRID_MIN_WIDTH;
-        let switch = auto_section(&card, auto, t, cx).last(wide);
+        // `ConfigGrid` + `CONFIG_GRID_PAIR`: flush sections, side by side
+        // from 940 px of page (the grid measures it), filling the height
+        // with the hairline between the columns and none under them;
+        // stacked, a hairline between them.
+        let switch = auto_section(&card, auto, t, cx).last(true);
         let recordings = recordings_section(&card, t, cx).last(true);
-        let grid = if wide {
-            div()
-                .flex()
-                .flex_1()
-                .w_full()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .border_r_1()
-                        .border_color(hsla(t.border))
-                        .child(switch),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .child(recordings),
-                )
-        } else {
-            div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .child(switch)
-                .child(recordings)
-        };
-        page.child(grid)
-            .child(consent_dialog(state, t, cx))
-            .into_any_element()
+        page.child(super::config_grid_pair(
+            "clean-cut-grid",
+            switch,
+            recordings,
+            hsla(t.border),
+        ))
+        .child(consent_dialog(state, t, cx))
+        .into_any_element()
     }
 }
 
@@ -780,7 +715,9 @@ fn selected_recording(
     };
 
     let mut kind = div().flex().flex_wrap().items_center().gap(px(8.)).child(
+        // `w-fit` in a wrapping row, as Electron's default.
         SegmentedControl::new("clean-cut-mode")
+            .fit(true)
             .accessibility_label(KIND_OF_CUT)
             .value(Some(mode.as_str()))
             .option(Segment::new("clean", "Clean"))
@@ -805,6 +742,7 @@ fn selected_recording(
     if mode == CleanCutMode::Condensed && !condensed_blocked && !status.busy {
         let mut length = SegmentedControl::new("clean-cut-length")
             .small(true)
+            .fit(true)
             .accessibility_label(CONDENSED_LENGTH)
             .value(Some(state.target_minutes.to_string()));
         for minutes in CONDENSED_TARGET_MINUTES {

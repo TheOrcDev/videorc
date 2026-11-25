@@ -11,9 +11,9 @@ use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::chat_platform::ChatPlatform;
 use videorc_kit::field::FieldGroup;
-use videorc_kit::icon::icon;
 use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::panel_section::PanelSection;
+use videorc_kit::platform_glyph::PlatformMark;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
@@ -213,7 +213,6 @@ pub fn render_voice(
     settings: Option<&CohostSettingsView>,
     paused: &[&'static str],
     rows: &[RemoveMessagesRow],
-    wide: bool,
     window: &mut Window,
     cx: &mut Context<SidekickScreen>,
 ) -> AnyElement {
@@ -315,7 +314,7 @@ pub fn render_voice(
     let commands = PanelSection::new("sidekick-voice-commands")
         .title(COMMANDS)
         .description(commands_description())
-        .last(wide)
+        .last(true)
         .child(command_list)
         .child(
             FieldGroup::new()
@@ -390,7 +389,14 @@ pub fn render_voice(
         };
         let mut list_row = ListRow::new(format!("remove-messages-{}", row.platform), row.label)
             .compact(true)
-            .icon(icon(mark.icon(), 14., mark.tint_hsla(theme)))
+            // `ChatPlatformIcon`: 20 px, YouTube's official mark with its
+            // `mr-1` clear space.
+            .icon(
+                div()
+                    .flex_none()
+                    .when(mark == ChatPlatform::Youtube, |slot| slot.mr(px(4.)))
+                    .child(PlatformMark::new(mark).size(20.)),
+            )
             .status_icon(
                 StatusDot::new(format!("remove-messages-status-{}", row.platform))
                     .tone(if row.ready {
@@ -453,6 +459,11 @@ pub fn render_voice(
         .flex_col()
         .flex_1()
         .when(show_lead, |page| page.child(lead))
-        .child(config_grid_pair(commands, remove, wide, border))
+        .child(config_grid_pair(
+            "sidekick-voice-grid",
+            commands,
+            remove,
+            border,
+        ))
         .into_any_element()
 }

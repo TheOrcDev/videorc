@@ -41,7 +41,9 @@ use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::input_group::{InputGroup, InputGroupAddon};
 use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
+use videorc_kit::page::PageStack;
 use videorc_kit::panel_section::PanelSection;
+use videorc_kit::platform_glyph::PlatformMark;
 use videorc_kit::progress::Progress;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::select::Select;
@@ -859,7 +861,6 @@ pub fn render_community(
     state: &CommunityState,
     settings: &CommunitySettings,
     preview: AnyElement,
-    wide: bool,
     window: &mut Window,
     cx: &mut Context<SidekickScreen>,
 ) -> AnyElement {
@@ -921,10 +922,14 @@ pub fn render_community(
             let account_a = suggestion.account_a.account_key.clone();
             let account_b = suggestion.account_b.account_key.clone();
             let key = format!("{account_a}|{account_b}");
-            let account = |person: &PersonAccount| {
-                let mark = chat_platform(&person.platform);
+            // `ChatPlatformIcon className="mr-0"`: the 20 px mark (YouTube's
+            // official one) with no clear space of its own.
+            let account = |person: &PersonAccount, side: &str| {
                 [
-                    icon(mark.icon(), 16., mark.tint_hsla(theme)).into_any_element(),
+                    PlatformMark::new(chat_platform(&person.platform))
+                        .size(20.)
+                        .id(SharedString::from(format!("link-mark-{key}-{side}")))
+                        .into_any_element(),
                     div()
                         .min_w_0()
                         .truncate()
@@ -940,9 +945,9 @@ pub fn render_community(
                 .min_w_0()
                 .items_center()
                 .gap(px(6.))
-                .children(account(&suggestion.account_a))
+                .children(account(&suggestion.account_a, "a"))
                 .child(div().flex_none().text_color(muted).child(AND))
-                .children(account(&suggestion.account_b))
+                .children(account(&suggestion.account_b, "b"))
                 .when(suggestion.reason == "link-cancelled", |names| {
                     names.child(Badge::new(LINK_CANCELLED).variant(BadgeVariant::Outline))
                 });
@@ -1042,10 +1047,12 @@ pub fn render_community(
                 .flex_none()
                 .items_center()
                 .gap(px(4.))
-                .children(person.platforms.iter().map(|platform| {
-                    let mark = chat_platform(platform);
-                    icon(mark.icon(), 16., mark.tint_hsla(theme))
-                }))
+                .children(
+                    person
+                        .platforms
+                        .iter()
+                        .map(|platform| PlatformMark::new(chat_platform(platform)).size(20.)),
+                )
                 .children(tag.map(|tag| Badge::new(tag).variant(BadgeVariant::Outline)));
             rows = rows.child(
                 div()
@@ -1112,7 +1119,10 @@ pub fn render_community(
     for (value, label) in SORTS {
         sort = sort.option(value, label);
     }
+    // A plain `SegmentedControl` (not in a Field): `w-fit`, hugging its
+    // options at the left.
     let mut show = SegmentedControl::new("community-show")
+        .fit(true)
         .accessibility_label(SHOW)
         .value(Some(state.filter))
         .on_change({
@@ -1130,7 +1140,7 @@ pub fn render_community(
     let people = PanelSection::new("sidekick-people")
         .title(PEOPLE)
         .description(PEOPLE_DESCRIPTION)
-        .last(wide)
+        .last(true)
         .child(
             div()
                 .flex()
@@ -1155,9 +1165,7 @@ pub fn render_community(
                         )
                         .child(sort),
                 )
-                // A plain `SegmentedControl` (not in a Field): it hugs its
-                // options at the left (`w-fit`).
-                .child(div().flex().child(show))
+                .child(show)
                 .child(people_body),
         );
 
@@ -1314,17 +1322,11 @@ pub fn render_community(
 
     // One column for the people (the header, links that need you, the
     // list), one for the settings, Premium, your data and the preview.
-    let lead = div()
-        .flex()
-        .flex_col()
-        .min_w_0()
+    let lead = PageStack::new()
         .child(summary)
         .children(links)
         .child(people);
-    let trail = div()
-        .flex()
-        .flex_col()
-        .min_w_0()
+    let trail = PageStack::new()
         .child(community_settings)
         .child(premium)
         .child(data)
@@ -1334,7 +1336,12 @@ pub fn render_community(
         .flex()
         .flex_col()
         .flex_1()
-        .child(config_grid_pair(lead, trail, wide, border))
+        .child(config_grid_pair(
+            "sidekick-community-grid",
+            lead,
+            trail,
+            border,
+        ))
         .child(person)
         .child(forget)
         .child(forget_all)
