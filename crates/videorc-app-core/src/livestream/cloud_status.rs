@@ -39,6 +39,13 @@ pub struct CloudStatus {
     pub announce: Option<bool>,
     pub room: Option<Value>,
     pub recording: Option<Value>,
+    /// Plan 249 S26: each program output's health (managed shows). Empty when
+    /// absent or from an older web.
+    #[serde(default)]
+    pub output_health: Vec<Value>,
+    /// Plan 253 S7: how long Videorc Cloud took to answer this show's
+    /// commands. Absent until a managed talk-show command was timed.
+    pub command_times: Option<CloudCommandTimes>,
     /// The span the show is live on the platforms (`CloudLiveInterval`).
     pub live_interval: Option<CloudLiveInterval>,
     /// The runner's platform legs, keyed by target id.
@@ -46,6 +53,14 @@ pub struct CloudStatus {
     /// Plan 249 S24: who controls the show (`ControllerFacts`): a takeover
     /// from another device holds this computer's devices.
     pub controller: Option<Value>,
+}
+
+/// Plan 253 S7: command answer times on this computer's clock.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CloudCommandTimes {
+    pub last_ms: u32,
+    pub slowest_ms: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
