@@ -210,8 +210,15 @@ fn attempt(request: &UiDriverRequest, cx: &mut App) -> Result<Attempt, String> {
                 Some(Ok(tree)) => look(request, which, &tree, window, cx),
                 _ => {
                     // No tree yet: ask for it as a screen reader would, and
-                    // draw a frame that builds it.
-                    wake = Some(native_window(window));
+                    // draw a frame that builds it. Linux's switch is the
+                    // desktop's AT-SPI flag, which a smoke run doesn't own:
+                    // the tree is switched on in-process there (the
+                    // patched `Window::activate_a11y_in_process`).
+                    if cfg!(target_os = "linux") {
+                        window.activate_a11y_in_process();
+                    } else {
+                        wake = Some(native_window(window));
+                    }
                     window.refresh();
                     Ok(Attempt::Wait(format!(
                         "The {} window's accessibility tree did not arrive.",

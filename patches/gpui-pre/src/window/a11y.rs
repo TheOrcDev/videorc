@@ -213,6 +213,13 @@ impl A11y {
         self.active_this_frame = self.is_enabled() && self.active_flag.load(Ordering::SeqCst);
     }
 
+    /// Videorc plan 260 (patch): switch the tree on without assistive
+    /// technology, for an in-process UI driver where the platform's switch is
+    /// the desktop's (Linux's AT-SPI). The next frame builds the tree.
+    pub(crate) fn force_active(&mut self) {
+        self.active_flag.store(true, Ordering::SeqCst);
+    }
+
     pub(crate) fn is_enabled(&self) -> bool {
         !self.force_disabled
     }

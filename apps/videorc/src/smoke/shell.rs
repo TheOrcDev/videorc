@@ -101,11 +101,15 @@ impl ShellSmoke for ShellWindows {
         // theme picker uses; theme::current then follows window.appearance().
         // The app does not read Increase Contrast or Reduce Motion from the
         // system yet (S2.6), so giving one back means off.
-        cx.set_window_appearance(match forced.dark {
+        let appearance = match forced.dark {
             Some(true) => Some(WindowAppearance::Dark),
             Some(false) => Some(WindowAppearance::Light),
             None => None,
-        });
+        };
+        // The window's appearance on macOS; the kit's own override everywhere,
+        // which is the only switch on Linux (`AppearanceOverride`).
+        cx.set_window_appearance(appearance);
+        cx.set_global(videorc_kit::theme::AppearanceOverride(appearance));
         cx.set_global(IncreaseContrast(forced.increase_contrast.unwrap_or(false)));
         cx.set_global(ReduceMotion(forced.reduce_motion.unwrap_or(false)));
         cx.refresh_windows();

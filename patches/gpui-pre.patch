@@ -1,13 +1,19 @@
-# gpui-pre 0.3.14: print AccessKit node bounds in debug_a11y_tree_json
-# (Videorc plan 260 S2.5 UI driver gap 1). Drop when a gpui-pre release
+# gpui-pre 0.3.14, two Videorc patches. Drop each when a gpui-pre release
 # carries the same lines upstream.
+# 1. Print AccessKit node bounds in debug_a11y_tree_json (plan 260 S2.5 UI
+#    driver gap 1).
+# 2. Window::activate_a11y_in_process: build the accessibility tree without
+#    assistive technology, for the in-process UI driver on Linux, where the
+#    switch is the desktop's AT-SPI flag (plan 260, L6).
 #
 --- a/src/window/a11y/debug.rs
 +++ b/src/window/a11y/debug.rs
-@@ -309,6 +309,20 @@ fn node_to_json(
-         aria.insert("column_count".into(), json!(v));
+@@ -307,6 +307,20 @@
      }
- 
+     if let Some(v) = node.column_count() {
+         aria.insert("column_count".into(), json!(v));
++    }
++
 +    // Physical-pixel rect for the UI driver (Videorc plan 260 S2.5 gap 1).
 +    // Upstream dump omitted this; drop this block when a gpui-pre release prints it.
 +    if let Some(rect) = node.bounds() {
@@ -20,8 +26,43 @@
 +                "y1": rect.y1,
 +            }),
 +        );
+     }
+ 
+     map.insert("aria".into(), serde_json::Value::Object(aria));
+--- a/src/window/a11y.rs
++++ b/src/window/a11y.rs
+@@ -213,6 +213,13 @@
+         self.active_this_frame = self.is_enabled() && self.active_flag.load(Ordering::SeqCst);
+     }
+ 
++    /// Videorc plan 260 (patch): switch the tree on without assistive
++    /// technology, for an in-process UI driver where the platform's switch is
++    /// the desktop's (Linux's AT-SPI). The next frame builds the tree.
++    pub(crate) fn force_active(&mut self) {
++        self.active_flag.store(true, Ordering::SeqCst);
 +    }
 +
-     map.insert("aria".into(), serde_json::Value::Object(aria));
+     pub(crate) fn is_enabled(&self) -> bool {
+         !self.force_disabled
+     }
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -7545,6 +7545,18 @@
+     /// See the [accessibility guide](crate::_accessibility) for an overview.
+     pub fn is_a11y_active(&self) -> bool {
+         self.a11y.is_active()
++    }
++
++    /// Videorc plan 260 (patch): builds this window's accessibility tree as
++    /// if assistive technology had asked for it, for an in-process UI driver
++    /// on a platform whose switch belongs to the desktop (Linux's AT-SPI
++    /// screen-reader flag). The platform adapter is not told; it stays as the
++    /// desktop has it. Does nothing in an app made without accessibility.
++    pub fn activate_a11y_in_process(&mut self) {
++        if self.a11y.is_enabled() {
++            self.a11y.force_active();
++            self.refresh();
++        }
+     }
  
-     serde_json::Value::Object(map)
+     /// Debug representation of the last frame's accessibility information.

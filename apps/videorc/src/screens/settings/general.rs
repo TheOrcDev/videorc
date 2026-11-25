@@ -375,17 +375,22 @@ impl SettingsScreen {
             .into_any_element()
     }
 
-    pub fn apply_theme(&mut self, cx: &App) {
+    pub fn apply_theme(&mut self, cx: &mut App) {
         let stored = self.studio.snapshot().settings.theme;
         let choice = ThemeChoice::parse(stored.as_deref());
         if self.applied_theme == Some(choice) {
             return;
         }
         self.applied_theme = Some(choice);
-        cx.set_window_appearance(match choice {
+        let appearance = match choice {
             ThemeChoice::Light => Some(WindowAppearance::Light),
             ThemeChoice::Dark => Some(WindowAppearance::Dark),
             ThemeChoice::System => None,
-        });
+        };
+        // macOS sets the windows' appearance; Linux can't, so the kit reads
+        // the app's own choice first on every platform (`AppearanceOverride`).
+        cx.set_window_appearance(appearance);
+        cx.set_global(videorc_kit::theme::AppearanceOverride(appearance));
+        cx.refresh_windows();
     }
 }

@@ -30,12 +30,19 @@ GPUI 0.3.14 builds the AccessKit tree only while the platform's adapter says
 assistive technology is there. A smoke runs without a screen reader, so the
 driver asks the same first question of its own window, in its own process:
 
-- **macOS:** `accessibilityChildren` on the window's view.
-  `accesskit_macos::SubclassingAdapter` answers it and activates GPUI.
+- **macOS:** `accessibilityChildren` on the window's content view (where
+  `accesskit_macos::SubclassingAdapter` lives; GPUI's own view is a subview of it).
+  The adapter answers it and activates GPUI.
 - **Windows:** `WM_GETOBJECT` with `UiaRootObjectId` to its own `HWND`.
   `accesskit_windows::Adapter` answers it.
-- **Linux:** the adapter follows the AT-SPI bus's screen-reader switch.
-  Turning that on is S2.6c's (L5). Until then the driver refuses by name.
+- **Linux:** the adapter follows the AT-SPI bus's screen-reader switch, which belongs to the desktop, not to a smoke
+  run. The driver switches the tree on in-process instead: `Window::activate_a11y_in_process`, patched into gpui-pre
+  (`patches/gpui-pre.patch`). The platform adapter is not told; the driver reads and acts on the tree exactly as on
+  macOS, so the same `ui-*` smokes run unchanged.
+
+**Light and dark:** `ui-appearance` and the Settings theme choice set the kit's `AppearanceOverride` as well as the
+window appearance. `theme::current` reads the override first, so the app's own choice draws on every platform; on
+Linux, where a window's appearance can't be set, it's the only switch.
 
 No Accessibility grant is involved. From then on GPUI keeps the last frame's
 tree, and the driver reads it with `Window::debug_a11y_tree_json`. Pointer
