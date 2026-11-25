@@ -1,16 +1,13 @@
 //! Sidekick → Clean cut: the card (`clean-cut-card.tsx`, its consent dialog
-//! `clean-cut-consent-dialog.tsx`), the review and kept drafts, from
-//! `cleanCut.*` and `buddy::clean_cut_view`, `clean_cut_review` and
-//! `clean_cut_drafts`.
+//! `clean-cut-consent-dialog.tsx`) and the kept drafts' storage, from
+//! `cleanCut.*`, `buddy::clean_cut_view` and `clean_cut_drafts`. The open
+//! review takes the card's place (`clean_cut_review.rs`).
 
 use std::path::{Path, PathBuf};
 
 use gpui::{AnyElement, Context, Entity, EventEmitter, FontWeight, Window, div, prelude::*, px};
 use videorc_app_core::account::entitlements::cloud_ai_upload_gate;
 use videorc_app_core::buddy::clean_cut_drafts::{self, STORAGE_KEY};
-use videorc_app_core::buddy::clean_cut_review::{
-    self, Draft, effective_removals, kind_chips, toggle_kind_group, toggle_removal,
-};
 use videorc_app_core::buddy::clean_cut_view::{
     self as view, AutoStatusKind, CLEAN_CUT_AUTO_LABEL, CLEAN_CUT_CONSENT_ALSO,
     CLEAN_CUT_DESCRIPTION, CLEAN_CUT_LIST_CAP, CLEAN_CUT_NO_RECORDINGS, CLEAN_CUT_TITLE,
@@ -38,12 +35,10 @@ use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{Theme, size, text};
-use videorc_protocol::{
-    CleanCutJob, CleanCutJobDetail, CleanCutMode, CleanCutRemoval, EntitlementsSnapshot,
-    SessionListItem,
-};
+use videorc_protocol::{CleanCutJob, CleanCutMode, EntitlementsSnapshot, SessionListItem};
 
 use super::SidekickScreen;
+use super::clean_cut_review::ReviewState;
 
 const RECORDINGS: &str = "Recordings";
 const SEARCH_RECORDINGS: &str = "Search recordings…";
@@ -58,9 +53,6 @@ const REVIEW: &str = "Review";
 const CANCEL: &str = "Cancel";
 const RETRY: &str = "Retry";
 const OPEN_IN_LIBRARY: &str = "Open in Library";
-const SAVE_CHANGES: &str = "Save changes";
-const DISCARD: &str = "Discard";
-const KINDS_OF_CUTS: &str = "Kinds of cuts";
 
 /// "Open in Library" on a cut: the shell opens Library on this session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,9 +83,8 @@ pub struct CleanCutState {
     /// What asked for cloud AI consent while the dialog is open.
     pub ask: Option<ConsentAsk>,
     pub consent: DialogHandle,
-    pub review_job: Option<CleanCutJobDetail>,
-    pub draft: Draft,
-    pub saved_removals: Vec<CleanCutRemoval>,
+    /// The open review, in place of the card.
+    pub review: Option<ReviewState>,
     pub drafts_path: PathBuf,
     pub loaded: bool,
 }
@@ -116,9 +107,7 @@ impl CleanCutState {
             pending: false,
             ask: None,
             consent: DialogHandle::new(false),
-            review_job: None,
-            draft: Draft::default(),
-            saved_removals: Vec::new(),
+            review: None,
             drafts_path: local_dir.join(format!("{STORAGE_KEY}.json")),
             loaded: false,
         }
@@ -170,7 +159,7 @@ impl Card<'_> {
 
 impl SidekickScreen {
     /// `CleanCutCaptureContext`: heavy work waits while a capture runs.
-    fn clean_cut_capture(&self) -> CleanCutCapture {
+    pub(super) fn clean_cut_capture(&self) -> CleanCutCapture {
         CleanCutCapture {
             active: self.studio.session_owns_transport(),
             // The watch borrows the snapshot; `snapshot()` would clone it.
@@ -333,6 +322,9 @@ impl SidekickScreen {
         let Some(state) = self.clean_cut.as_ref() else {
             return div().into_any_element();
         };
+        if state.review.is_some() {
+            return self.render_clean_cut_review(window, cx);
+        }
         let t = theme::resolve(None, window, cx);
         let gate = cloud_ai_upload_gate(state.entitlements.as_ref());
         let card = Card {
@@ -356,10 +348,6 @@ impl SidekickScreen {
                     .child(lock_alert(unlock)),
             );
         }
-        let review = state
-            .review_job
-            .as_ref()
-            .map(|detail| render_review(detail, state, hsla(t.muted_foreground), cx));
         page.child(
             div()
                 .flex()
@@ -367,8 +355,7 @@ impl SidekickScreen {
                 .gap(px(size::GUTTER))
                 .p(px(size::GUTTER))
                 .child(auto_section(&card, auto, t, cx))
-                .child(recordings_section(&card, t, cx))
-                .children(review),
+                .child(recordings_section(&card, t, cx)),
         )
         .child(consent_dialog(state, t, cx))
         .into_any_element()
@@ -752,9 +739,9 @@ fn selected_recording(
                     .variant(ButtonVariant::Ghost)
                     .size(ButtonSize::Xs)
                     .label(REVIEW)
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
                         entity.update(cx, |screen, cx| {
-                            screen.open_clean_cut_review(job_id.clone(), cx)
+                            screen.open_clean_cut_review(job_id.clone(), window, cx)
                         });
                     }),
             );
@@ -835,9 +822,9 @@ fn status_row(
         Button::new(id)
             .variant(variant)
             .label(REVIEW)
-            .on_click(move |_, _, cx| {
+            .on_click(move |_, window, cx| {
                 entity.update(cx, |screen, cx| {
-                    screen.open_clean_cut_review(job_id.clone(), cx)
+                    screen.open_clean_cut_review(job_id.clone(), window, cx)
                 });
             })
     };
@@ -979,133 +966,4 @@ fn consent_dialog(
             }),
     )
     .into_any_element()
-}
-
-fn render_review(
-    detail: &CleanCutJobDetail,
-    state: &CleanCutState,
-    muted: gpui::Hsla,
-    cx: &mut Context<SidekickScreen>,
-) -> AnyElement {
-    let entity = cx.entity();
-    let job_id = detail.job.id.clone();
-    let saved = state.saved_removals.clone();
-    let effective = effective_removals(&saved, &state.draft);
-    let chips = kind_chips(&effective);
-    let changes = state.draft.change_count();
-
-    let mut chip_row = div().flex().flex_wrap().gap(px(6.));
-    for chip in &chips {
-        let group = chip.group;
-        let label = format!("{} {}", group.label, chip.count_label());
-        chip_row = chip_row.child(
-            Button::new(format!("kind-{}", group.id.as_str()))
-                .variant(ButtonVariant::Outline)
-                .size(ButtonSize::Xs)
-                .label(label)
-                .disabled(chip.total == 0)
-                .on_click({
-                    let entity = entity.clone();
-                    let saved = saved.clone();
-                    move |_, _, cx| {
-                        entity.update(cx, |screen, cx| {
-                            if let Some(clean) = screen.clean_cut.as_mut() {
-                                clean.draft = toggle_kind_group(&clean.draft, &saved, group.id);
-                                screen.persist_clean_cut_draft(cx);
-                            }
-                            cx.notify();
-                        });
-                    }
-                }),
-        );
-    }
-
-    let mut removals = div().flex().flex_col().gap(px(4.));
-    for removal in effective.iter().take(40) {
-        let id = removal.id.clone();
-        let title = clean_cut_review::removal_title(removal, removal.enabled);
-        removals = removals.child(
-            ListRow::new(format!("removal-{id}"), title)
-                .compact(true)
-                .context(format!("{}–{} ms", removal.start_ms, removal.end_ms))
-                .child(
-                    Button::new(format!("toggle-{id}"))
-                        .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::Xs)
-                        .label(if removal.enabled { "Keep" } else { "Cut" })
-                        .on_click({
-                            let entity = entity.clone();
-                            let saved = saved.clone();
-                            move |_, _, cx| {
-                                entity.update(cx, |screen, cx| {
-                                    if let Some(clean) = screen.clean_cut.as_mut() {
-                                        clean.draft = toggle_removal(&clean.draft, &saved, &id);
-                                        screen.persist_clean_cut_draft(cx);
-                                    }
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                ),
-        );
-    }
-    if effective.is_empty() {
-        removals = removals.child(
-            div()
-                .type_scale(text::META)
-                .text_color(muted)
-                .child("No removals in this cut."),
-        );
-    }
-
-    PanelSection::new("sidekick-clean-cut-review")
-        .title(format!("Review · {}", detail.job.id))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .type_scale(text::META)
-                        .text_color(muted)
-                        .child(KINDS_OF_CUTS),
-                )
-                .child(chip_row)
-                .child(removals)
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .child(
-                            Button::new("save-clean-cut")
-                                .variant(ButtonVariant::Default)
-                                .label(SAVE_CHANGES)
-                                .disabled(changes == 0)
-                                .on_click({
-                                    let entity = entity.clone();
-                                    let job_id = job_id.clone();
-                                    move |_, _, cx| {
-                                        entity.update(cx, |screen, cx| {
-                                            screen.save_clean_cut_review(job_id.clone(), cx);
-                                        });
-                                    }
-                                }),
-                        )
-                        .child(
-                            Button::new("discard-clean-cut")
-                                .variant(ButtonVariant::Ghost)
-                                .label(DISCARD)
-                                .on_click({
-                                    let entity = entity.clone();
-                                    move |_, _, cx| {
-                                        entity.update(cx, |screen, cx| {
-                                            screen.discard_clean_cut_review(cx);
-                                        });
-                                    }
-                                }),
-                        ),
-                ),
-        )
-        .into_any_element()
 }
