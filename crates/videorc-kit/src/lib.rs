@@ -10,6 +10,7 @@ pub mod badge;
 pub mod bar_visualizer;
 pub mod button;
 pub mod caption_preview_backdrop;
+pub mod channel_toggle;
 pub mod chat_platform;
 pub mod checkbox;
 pub mod chrome;
@@ -30,8 +31,10 @@ pub mod kebab_menu;
 pub mod label;
 pub mod list_row;
 pub mod live_waveform;
+pub mod media_card;
 pub mod motion;
 pub mod navigable_row;
+pub mod page;
 pub mod page_tabs;
 pub mod panel_section;
 pub mod pin_window_button;
@@ -64,6 +67,7 @@ pub mod toast;
 pub mod toggle_group;
 pub mod tokens;
 pub mod tooltip;
+pub mod tracking;
 pub mod window;
 pub mod window_frame;
 
@@ -73,6 +77,10 @@ pub use badge::{Badge, BadgeVariant, plate_shadows};
 pub use bar_visualizer::{BarVisualizer, BarVisualizerState};
 pub use button::{Button, ButtonSize, ButtonVariant};
 pub use caption_preview_backdrop::{CaptionPreviewBackdrop, CaptionPreviewBackdropEl};
+pub use channel_toggle::{
+    ChannelToggle, ChannelToggleSize, ChannelToggleTone, ChannelToggleVariant, monitor_toggle,
+    mute_toggle, solo_toggle,
+};
 pub use chat_platform::ChatPlatform;
 pub use checkbox::{Checkbox, CheckboxChecked};
 pub use collapsible::Collapsible;
@@ -91,11 +99,13 @@ pub use kebab_menu::{KEBAB_HOST, KebabMenu, KebabMenuItem, KebabReveal, kebab_me
 pub use label::Label;
 pub use list_row::{GroupedList, GroupedRow, ListRow};
 pub use live_waveform::LiveWaveform;
+pub use media_card::MediaCard;
 pub use navigable_row::NavigableRow;
+pub use page::{ConfigGrid, Gallery, PageStack};
 pub use page_tabs::PageTabs;
 pub use panel_section::PanelSection;
 pub use pin_window_button::{PIN_WINDOW_LABEL, PinWindowButton};
-pub use platform_glyph::PlatformGlyph;
+pub use platform_glyph::{PlatformGlyph, PlatformMark};
 pub use popover::Popover;
 pub use progress::Progress;
 pub use qr_code::{DEFAULT_SIZE, QrCode, path_for};
@@ -127,6 +137,7 @@ pub use theme::{
 pub use toast::{ToastData, ToastKind, Toaster, toast_card};
 pub use toggle_group::{ToggleGroup, ToggleItem};
 pub use tooltip::{tooltip, tooltip_with_accelerator, tooltip_with_action, tooltip_with_shortcut};
+pub use tracking::TrackedText;
 pub use window_frame::{WindowFrame, WindowHeader};
 
 /// Install the kit's keyboard, focus and overlay behaviour once, before
