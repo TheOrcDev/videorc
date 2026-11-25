@@ -8,7 +8,7 @@ use gpui::{AnyElement, ClipboardItem, Context, SharedString, Window, div, prelud
 use videorc_app_core::livestream::copy as page_copy;
 use videorc_app_core::livestream::watchdog_section::{
     self, AI_CHAT_READ, AI_CHAT_READ_DESCRIPTION, ALERT_ME_AFTER, ALERT_ME_AFTER_DESCRIPTION,
-    DESCRIPTION, LIVE_URL, MIC_MUTED_AFTER_OPTIONS, PHONE, PHONE_PREMIUM_REASON,
+    DESCRIPTION, LIVE_URL, MIC_MUTED_AFTER_OPTIONS, PHONE, PHONE_PREMIUM_REASON, QR_CODE_LABEL,
     SYSTEM_NOTIFICATIONS, SYSTEM_NOTIFICATIONS_DESCRIPTION, SectionView, TITLE,
 };
 use videorc_app_core::studio::watchdog_settings::WatchdogSettingsStore;
