@@ -58,7 +58,6 @@ use videorc_app_core::{
 use app::args;
 use app::bridge;
 use app::exit::ExitGuard;
-use app::frames::MainFrame;
 use app::hide::HideFromStream;
 use app::permissions::Permissions;
 use app::shell::{Shell, StatusLine, connection_text};
@@ -336,7 +335,6 @@ fn main() -> Result<()> {
     let core_handle = runtime.handle().clone();
     let quit_after = args.quit_after;
     // The main window's frame, saved in the data directory.
-    let main_frame = MainFrame::new(&paths.user_data_dir, logger.clone());
     let stream_manager_frame = StreamManagerFrame::new(&paths.user_data_dir, logger.clone());
     let notes_frame = NotesFrame::new(&paths.user_data_dir, logger.clone());
     let captions_frame =
@@ -504,10 +502,9 @@ fn main() -> Result<()> {
                 cx,
             )
         });
-        // Electron's main window (P043): 1180×780, at least 960×660.
-        let window_bounds = main_frame
-            .restored(cx)
-            .unwrap_or_else(|| Bounds::centered(None, size(px(1180.), px(780.)), cx));
+        // Electron's main window (P043, P1553): 1180×780 every launch (its
+        // frame is never saved), at least 960×660.
+        let window_bounds = Bounds::centered(None, size(px(1180.), px(780.)), cx);
         let opened = cx.open_window(
             WindowOptions {
                 app_id: Some(APP_ID.into()),
@@ -737,9 +734,7 @@ fn main() -> Result<()> {
         });
 
         // The main window coming to the front re-checks a grant System
-        // Settings may have made meanwhile; a move or resize saves its frame
-        // soon after, and the quit saves it once more.
-        let moved_frame = main_frame.clone();
+        // Settings may have made meanwhile.
         let focus_studio = studio.clone();
         let _ = main_window.update(cx, |_shell, window, cx| {
             let shell_weak = cx.weak_entity();
@@ -756,17 +751,7 @@ fn main() -> Result<()> {
                 }
             })
             .detach();
-            cx.observe_window_bounds(window, move |_, window, cx| {
-                moved_frame.moved(window, cx);
-            })
-            .detach();
         });
-        let quit_frame = main_frame.clone();
-        cx.on_app_quit(move |cx| {
-            let _ = main_window.update(cx, |_, window, _| quit_frame.save(window));
-            async {}
-        })
-        .detach();
 
         // Closing the last window quits, as Electron does on Windows and
         // Linux. On macOS the main window hides instead of closing, so the
