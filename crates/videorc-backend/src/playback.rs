@@ -354,6 +354,7 @@ impl Shared {
 
 /// The output's real-time side: the buffered sound while playing (silence
 /// when muted, still pulled), silence while paused.
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 fn render_into(shared: &Shared, buffer: &mut [f32]) {
     if !shared.playing.load(Ordering::Relaxed) {
         buffer.fill(0.0);
