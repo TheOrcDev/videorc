@@ -4,8 +4,9 @@ mod actions;
 mod render;
 
 use crate::app::{camera::Camera, permissions::Permissions};
+use crate::screens::linux_setup;
 use gpui::Context;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashSet},
     path::PathBuf,
@@ -20,6 +21,7 @@ use videorc_app_core::protocol::{
 use videorc_app_core::studio::health_page::{
     self as h, CameraGroupInputs, Fields, PageInputs, RecordingLog,
 };
+use videorc_app_core::studio::linux_desktop::LinuxKeyringStatus;
 use videorc_app_core::{
     AppPaths, BackendClient, BackendEvent, Logger, Studio,
     crash_log::{self, CrashRecord},
@@ -55,6 +57,9 @@ pub struct HealthScreen {
     exported: Option<PathBuf>,
     removing: bool,
     confirm: DialogHandle,
+    /// Plan 257 / P1489: Linux desktop diagnostics + keyring probe.
+    linux_keyring: Option<LinuxKeyringStatus>,
+    linux_desktop: Option<Value>,
 }
 
 impl HealthScreen {
@@ -68,7 +73,17 @@ impl HealthScreen {
         cx: &mut Context<Self>,
     ) -> Self {
         let recording_log = RecordingLog::default();
-        let view = page_view(&studio, &recording_log, &logger, None, None, None, false);
+        let view = page_view(
+            &studio,
+            &recording_log,
+            &logger,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+        );
         let mut snapshots = studio.watch();
         let mut telemetry = studio.telemetry();
         let mut events = studio.backend().subscribe();
@@ -166,6 +181,8 @@ impl HealthScreen {
             exported: None,
             removing: false,
             confirm: DialogHandle::new(false),
+            linux_keyring: None,
+            linux_desktop: None,
         }
     }
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
@@ -185,6 +202,8 @@ impl HealthScreen {
             self.camera_status.as_ref(),
             self.compositor.as_ref(),
             self.removing,
+            self.linux_keyring.as_ref(),
+            self.linux_desktop.as_ref(),
         );
         let warning_events: Vec<_> = self
             .studio
@@ -226,14 +245,33 @@ impl HealthScreen {
         let client = self.studio.backend().clone();
         let crash_path = self.paths.backend_crash_log_file();
         let job = self.runtime.spawn(async move {
-            let (sessions, camera, compositor) = tokio::join!(
+            let linux_client = client.clone();
+            let (sessions, camera, compositor, linux_desktop) = tokio::join!(
                 client.call::<SessionsList>(&SessionListParams {
                     cursor: None,
                     limit: 50
                 }),
                 client.request("virtualCamera.status", json!({})),
-                client.call::<CompositorStatusGet>(&())
+                client.call::<CompositorStatusGet>(&()),
+                async move {
+                    if cfg!(target_os = "linux") {
+                        linux_client
+                            .request("diagnostics.linuxDesktop", Value::Null)
+                            .await
+                            .ok()
+                    } else {
+                        None
+                    }
+                }
             );
+            let linux_keyring = if cfg!(target_os = "linux") {
+                tokio::task::spawn_blocking(linux_setup::probe_keyring_status)
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
             let mut log = RecordingLog::default();
             match sessions {
                 Ok(page) => {
@@ -282,6 +320,8 @@ impl HealthScreen {
                     .and_then(|v| serde_json::from_value::<VirtualCameraStatus>(v).ok()),
                 compositor.ok().map(|v| v.frame_pipeline),
                 crash,
+                linux_keyring,
+                linux_desktop,
             )
         });
         cx.spawn(async move |entity, cx| {
@@ -291,7 +331,9 @@ impl HealthScreen {
                 if this.studio.snapshot().connection_generation == generation
                     && this.studio.snapshot().session.status.session_id == requested_session
                 {
-                    if let Ok((mut log, camera, compositor, crash)) = result {
+                    if let Ok((mut log, camera, compositor, crash, linux_keyring, linux_desktop)) =
+                        result
+                    {
                         if log.session_id == this.recording_log.session_id {
                             log.log_count = log.log_count.max(this.recording_log.log_count);
                             // Pushed lines may arrive after the snapshot was
@@ -308,6 +350,8 @@ impl HealthScreen {
                             this.compositor = compositor;
                         }
                         this.crash = crash;
+                        this.linux_keyring = linux_keyring;
+                        this.linux_desktop = linux_desktop;
                     } else {
                         this.recording_log.loading = false;
                         this.recording_log.failed = true;
@@ -335,6 +379,8 @@ fn page_view(
     camera: Option<&VirtualCameraStatus>,
     compositor: Option<&CompositorFramePipelineStatus>,
     removing: bool,
+    linux_keyring: Option<&LinuxKeyringStatus>,
+    linux_desktop: Option<&Value>,
 ) -> h::HealthPageView {
     let snapshot = studio.snapshot();
     let telemetry = studio.telemetry_now();
@@ -357,8 +403,8 @@ fn page_view(
             connected: studio.is_connected(),
             removing,
         },
-        linux_keyring: None,
-        linux_desktop: None,
+        linux_keyring,
+        linux_desktop,
         now: Instant::now(),
     })
 }

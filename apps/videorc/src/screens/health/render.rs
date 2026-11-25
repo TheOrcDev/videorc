@@ -218,6 +218,12 @@ impl Render for HealthScreen {
             );
         }
         let (alerts, names) = self.permission_warnings(cx);
+        let linux_alerts: Vec<_> = self
+            .view
+            .linux_issues
+            .iter()
+            .map(crate::screens::linux_setup::linux_setup_alert)
+            .collect();
         let verdict = h::health_verdict(
             &self.view.checks,
             &names,
@@ -247,6 +253,7 @@ impl Render for HealthScreen {
                     .variant(variant)
                     .description(verdict.description.unwrap_or_default()),
             )
+            .children(linux_alerts)
             .children(alerts)
             .child(checks)
             .child(
