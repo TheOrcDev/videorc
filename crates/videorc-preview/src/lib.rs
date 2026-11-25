@@ -61,6 +61,11 @@ pub mod linux;
 mod macos;
 #[cfg(target_os = "macos")]
 pub mod playback;
+/// Plan 260 (L5): the Library's player on Linux, over the playback's CPU
+/// ring; the same public names as macOS's.
+#[cfg(target_os = "linux")]
+#[path = "playback_linux.rs"]
+pub mod playback;
 pub mod words;
 #[cfg(target_os = "macos")]
 pub use macos::{
