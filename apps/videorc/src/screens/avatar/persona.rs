@@ -30,12 +30,9 @@ use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{Theme, text};
 use videorc_protocol::cohost::CohostPersona;
 
+use super::reactions::SaveSection;
 use super::{AvatarScreen, pictures, sync_handle};
 
-const SAVE_THE_CHANGES: UserErrorContext = UserErrorContext {
-    action: "save",
-    object: "the changes",
-};
 const START_OVER: UserErrorContext = UserErrorContext {
     action: "start",
     object: "over",
@@ -246,7 +243,7 @@ impl AvatarScreen {
             return;
         };
         fields.saved_about = notes.clone();
-        self.patch_settings(json!({ "notes": notes }), cx);
+        self.patch_settings(json!({ "notes": notes }), SaveSection::Persona, cx);
     }
 
     fn set_bubble(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -362,12 +359,35 @@ impl AvatarScreen {
     }
 
     fn save_persona(&mut self, persona: CohostPersona, cx: &mut Context<Self>) {
-        self.patch_settings(json!({ "persona": persona }), cx);
+        self.save_persona_with(persona, SaveSection::Persona, cx);
+    }
+
+    /// Saves the persona; a failure is the given section's.
+    pub(super) fn save_persona_with(
+        &mut self,
+        persona: CohostPersona,
+        section: SaveSection,
+        cx: &mut Context<Self>,
+    ) {
+        self.patch_settings(json!({ "persona": persona }), section, cx);
+    }
+
+    /// The failed save a section shows, in words.
+    pub(super) fn save_error(&self, section: SaveSection) -> Option<String> {
+        self.save_error
+            .as_ref()
+            .filter(|(failed, _)| *failed == section)
+            .map(|(_, message)| message.clone())
     }
 
     /// `patchCohostSettings`: the answer is the new settings.
-    fn patch_settings(&mut self, patch: Value, cx: &mut Context<Self>) {
-        self.persona_error = None;
+    pub(super) fn patch_settings(
+        &mut self,
+        patch: Value,
+        section: SaveSection,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_error = None;
         let backend = self.studio.backend().clone();
         let job = self
             .runtime
@@ -378,9 +398,13 @@ impl AvatarScreen {
                 match answer {
                     Ok(Ok(value)) => screen.settings_answered(&value, cx),
                     Ok(Err(error)) => {
-                        let copy = user_error_message(Failure::Rpc(&error), Some(SAVE_THE_CHANGES));
-                        screen.persona_error =
-                            Some(format!("{}. {}", copy.title, copy.description));
+                        let context = UserErrorContext {
+                            action: "save",
+                            object: section.object(),
+                        };
+                        let copy = user_error_message(Failure::Rpc(&error), Some(context));
+                        screen.save_error =
+                            Some((section, format!("{}. {}", copy.title, copy.description)));
                     }
                     Err(_) => {}
                 }
@@ -396,6 +420,9 @@ impl AvatarScreen {
                 self.persona = settings.persona;
             }
             self.notes = Some(settings.notes);
+            if settings.auto_chat.is_some() {
+                self.auto_chat = settings.auto_chat;
+            }
         }
         cx.notify();
     }
@@ -555,7 +582,7 @@ pub(super) fn render_persona(
         .title(words::PERSONA_TITLE)
         .description(words::PERSONA_DESCRIPTION)
         .child(header);
-    if let Some(error) = screen.persona_error.clone() {
+    if let Some(error) = screen.save_error(SaveSection::Persona) {
         section = section.child(
             Alert::new("avatar-persona-error")
                 .variant(AlertVariant::Destructive)
