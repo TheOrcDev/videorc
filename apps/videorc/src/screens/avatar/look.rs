@@ -33,6 +33,7 @@ use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
 use videorc_kit::empty::Empty;
+use videorc_kit::icon::IconName;
 use videorc_kit::kbd::Kbd;
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
@@ -1112,8 +1113,8 @@ fn preview_column(
             Button::new("avatar-test-open")
                 .variant(ButtonVariant::Ghost)
                 .size(ButtonSize::Xs)
+                .icon(IconName::Play)
                 .label("Test")
-                .child(Kbd::new("T"))
                 .on_click(move |_, window, cx| {
                     test.update(cx, |screen, cx| screen.open_test(window, cx))
                 }),
