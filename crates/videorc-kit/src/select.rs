@@ -41,6 +41,8 @@ pub struct SelectOption {
     child: Option<AnyElement>,
     /// Group heading; the first option of each group paints the label (P482).
     group: Option<SharedString>,
+    /// Hairline row (Electron `SelectSeparator`); not selectable.
+    separator: bool,
     disabled: bool,
 }
 
@@ -51,7 +53,20 @@ impl SelectOption {
             label: label.into(),
             child: None,
             group: None,
+            separator: false,
             disabled: false,
+        }
+    }
+
+    /// A non-selectable hairline between options (Output presets).
+    pub fn separator() -> Self {
+        SelectOption {
+            value: SharedString::from("__separator__"),
+            label: SharedString::default(),
+            child: None,
+            group: None,
+            separator: true,
+            disabled: true,
         }
     }
 
@@ -223,6 +238,9 @@ impl SelectOpen {
 }
 
 fn matches_query(option: &SelectOption, query: &str) -> bool {
+    if option.separator {
+        return query.is_empty();
+    }
     if query.is_empty() {
         return true;
     }
@@ -573,6 +591,18 @@ fn popup_list(p: PopupList<'_>) -> AnyElement {
                         .into_any_element(),
                 );
             }
+        }
+        if p.options[index].separator {
+            rows.push(
+                div()
+                    .flex_none()
+                    .my(px(4.0))
+                    .mx(px(8.0))
+                    .h(px(1.0))
+                    .bg(hsla(p.t.border))
+                    .into_any_element(),
+            );
+            continue;
         }
         let option_disabled = p.options[index].disabled;
         let label = p.options[index].label.clone();

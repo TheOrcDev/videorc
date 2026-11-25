@@ -305,6 +305,8 @@ impl RenderOnce for ListRow {
 #[derive(IntoElement)]
 pub struct GroupedList {
     label: Option<SharedString>,
+    /// Screen-reader name when there is no visible section label.
+    accessibility_label: Option<SharedString>,
     rows: SmallVec<[AnyElement; 4]>,
     appearance: Option<Appearance>,
 }
@@ -313,6 +315,7 @@ impl GroupedList {
     pub fn new() -> Self {
         GroupedList {
             label: None,
+            accessibility_label: None,
             rows: SmallVec::new(),
             appearance: None,
         }
@@ -321,6 +324,12 @@ impl GroupedList {
     /// The group's name, as a section label over it.
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// Accessible name only (Electron `aria-label` with no visible label).
+    pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessibility_label = Some(label.into());
         self
     }
 
@@ -353,34 +362,43 @@ impl RenderOnce for GroupedList {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
         let appearance = self.appearance;
+        let a11y = self.accessibility_label.clone();
+        // Divider is painted inside each following row so the row stays 32 px
+        // (Electron), not 33 with an external border.
         let rows = self.rows.into_iter().enumerate().map(|(index, row)| {
-            div()
-                .when(index > 0, |row| {
-                    row.border_t_1().border_color(hsla(t.border))
-                })
-                .child(row)
+            div().relative().child(row).when(index > 0, |wrap| {
+                wrap.child(
+                    div()
+                        .absolute()
+                        .top(px(0.0))
+                        .left(px(0.0))
+                        .right(px(0.0))
+                        .h(px(1.0))
+                        .bg(hsla(t.border)),
+                )
+            })
         });
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .children(self.label.map(|label| {
-                let label = SectionLabel::new(label);
-                div().px(px(4.0)).child(match appearance {
-                    Some(appearance) => label.appearance(appearance),
-                    None => label,
-                })
-            }))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
-                    .rounded(px(radius::ROW))
-                    .border_1()
-                    .border_color(hsla(t.border))
-                    .bg(hsla(t.inset))
-                    .children(rows),
-            )
+        let mut root = div().flex().flex_col().gap(px(6.0)).role(gpui::Role::List);
+        if let Some(name) = a11y {
+            root = root.aria_label(name);
+        }
+        root.children(self.label.map(|label| {
+            let label = SectionLabel::new(label);
+            div().px(px(4.0)).child(match appearance {
+                Some(appearance) => label.appearance(appearance),
+                None => label,
+            })
+        }))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .rounded(px(radius::ROW))
+                .border_1()
+                .border_color(hsla(t.border))
+                .bg(hsla(t.inset))
+                .children(rows),
+        )
     }
 }

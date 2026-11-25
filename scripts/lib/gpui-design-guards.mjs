@@ -203,6 +203,10 @@ export const COLOUR_LITERAL_ALLOWLIST = new Map([
   [
     'crates/videorc-kit/src/platform_glyph.rs',
     "X partner-kit lockup fallback: pure black/white by theme (plan 167), never a theme token"
+  ],
+  [
+    'crates/videorc-kit/src/caption_preview_backdrop.rs',
+    "Electron caption-preview.tsx fixed gradients (dark/mixed); GPUI has no radial gradient so SVG stops stay literal"
   ]
 ])
 
