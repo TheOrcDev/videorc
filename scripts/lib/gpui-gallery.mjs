@@ -217,6 +217,27 @@ export const SCREENS = Object.freeze([
     baseline: { screen: 'avatar-profile', state: 'default' },
     sections: ['Avatar page', 'Avatar → Profile']
   },
+  // Profile below the fold: the page scrolled down by `dy` CSS pixels (the
+  // smoke driver's `ui-scroll`, a wheel at the window's centre; Electron's
+  // shooter sets the page-tabs scroller's `scrollTop` to the same value).
+  {
+    id: 'avatar-profile-2',
+    title: 'Avatar ⌘8, Profile scrolled: Name and personality, Look',
+    deck: 'livestream',
+    open: page('avatar', { subTab: 'profile' }),
+    scroll: { dy: 600 },
+    baseline: { screen: 'avatar-profile', state: 'scroll-2' },
+    sections: ['Avatar → Profile: Name and personality', 'Avatar → Profile: Look']
+  },
+  {
+    id: 'avatar-profile-3',
+    title: 'Avatar ⌘8, Profile scrolled: Reactions and Motion',
+    deck: 'livestream',
+    open: page('avatar', { subTab: 'profile' }),
+    scroll: { dy: 1200 },
+    baseline: { screen: 'avatar-profile', state: 'scroll-3' },
+    sections: ['Avatar → Profile: Reactions and Motion']
+  },
   {
     id: 'avatar-greetings',
     title: 'Avatar ⌘8, Greetings',
