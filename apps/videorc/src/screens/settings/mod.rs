@@ -3,6 +3,7 @@
 //! is device-local. The kit owns every control and section.
 mod about;
 mod changelog;
+pub mod connect_agent;
 mod general;
 mod obs;
 mod permissions;
@@ -90,6 +91,8 @@ pub struct SettingsScreen {
     setup: setup::Replay,
     changelog: changelog::Changelog,
     account: Option<videorc_app_core::protocol::VideorcAccountSnapshot>,
+    /// Connect an agent… (P1424, P1425), made on first use.
+    connect_agent: Option<gpui::Entity<connect_agent::ConnectAgentDialog>>,
 }
 
 impl SettingsScreen {
@@ -291,6 +294,7 @@ impl SettingsScreen {
             setup: Default::default(),
             changelog: Default::default(),
             account: None,
+            connect_agent: None,
         };
         this.apply_theme(cx);
         this.apply_shortcuts();
@@ -548,6 +552,7 @@ impl Render for SettingsScreen {
             .child(self.confirmation_dialog(cx))
             .child(self.rename_dialog(cx))
             .child(self.pair_dialog(window, cx))
+            .children(self.connect_agent.clone())
             .child(self.obs_dialog(cx))
             .child(self.setup_dialog(window, cx))
             .child(self.changelog_dialog(cx))

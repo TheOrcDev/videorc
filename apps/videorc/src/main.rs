@@ -157,6 +157,8 @@ fn main() -> Result<()> {
         paths.backend_log_file().display()
     );
 
+    // Connect an agent's bridge (`videorc-mcp`) ships beside the backend.
+    let mut bridge_dir = root.join("target").join(args::build_profile_dir());
     let mut launch = if args.cargo_run {
         BackendLaunch::cargo_run(&root, paths.user_data_dir.clone())
     } else {
@@ -170,6 +172,9 @@ fn main() -> Result<()> {
                 "backend binary {} is missing; build it with `cargo build -p videorc-backend`, pass --backend, or use --cargo-run",
                 backend.display()
             );
+        }
+        if let Some(dir) = backend.parent() {
+            bridge_dir = dir.to_path_buf();
         }
         BackendLaunch::binary(backend, &root, paths.user_data_dir.clone())
     };
@@ -337,6 +342,20 @@ fn main() -> Result<()> {
     deep_links.set_account_sink(accounts.clone());
     // The updater (plan 260, L4): no feed until S5.2.
     let updater = app::updater::start();
+    // Where Connect an agent's bridge lives; after an update a copy the
+    // streamer already has is refreshed (`refreshAgentBridgeCopy`).
+    let agent_bridge = videorc_app_core::desktop::agent_bridge::BridgeLocation {
+        packaged: smoke::shell::packaged(),
+        platform: videorc_app_core::desktop::agent_bridge::BridgePlatform::current(),
+        bundled_dir: bridge_dir,
+        home_dir: videorc_app_core::paths::home_dir(),
+        local_app_data: std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from),
+        app_executable: std::env::current_exe().ok(),
+    };
+    let refresh_bridge = agent_bridge.clone();
+    let _ = runtime.spawn_blocking(move || {
+        videorc_app_core::desktop::agent_bridge::refresh_copy(&refresh_bridge)
+    });
     links::receive(&deep_links, &args.links, LinkSource::CommandLine);
 
     let backend_state = supervisor.state();
@@ -415,6 +434,9 @@ fn main() -> Result<()> {
         );
         menus::install(cx);
         app::updater::install(cx, updater.clone(), studio.clone());
+        cx.set_global(screens::settings::connect_agent::AgentBridge(
+            agent_bridge.clone(),
+        ));
         app::accounts::install(
             cx,
             app::accounts::Shared {
