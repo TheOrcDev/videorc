@@ -495,7 +495,7 @@ fn gain_row(
                     .tooltip(reset.to_string())
                     .child(
                         div()
-                            .font_family(lcd::SCREEN_FONT)
+                            .font_family(videorc_kit::FONT_MONO)
                             .text_color(value_ink)
                             .child(shown),
                     )
@@ -519,13 +519,16 @@ fn gain_row(
         .items_center()
         .gap(px(12.))
         .child(if retro { label } else { label.w(px(36.)) })
-        .child(
-            div().flex().flex_1().min_w_0().items_center().child(
-                Slider::new(slider)
-                    .accessibility_label(aria)
-                    .disabled(disabled),
-            ),
-        )
+        .child(div().flex().flex_1().min_w_0().items_center().child({
+            let fader = Slider::new(slider)
+                .accessibility_label(aria)
+                .disabled(disabled);
+            if retro {
+                lcd::fader(fader, theme)
+            } else {
+                fader
+            }
+        }))
         .child(
             div()
                 .flex()
@@ -533,7 +536,7 @@ fn gain_row(
                 .justify_end()
                 .min_w(px(GAIN_VALUE_MIN_PX))
                 .whitespace_nowrap()
-                .font_family(lcd::SCREEN_FONT)
+                .font_family(videorc_kit::FONT_MONO)
                 .type_scale(text::META)
                 .text_color(value_ink)
                 .child(value),
@@ -545,8 +548,25 @@ fn gain_row(
 /// muted ink, the title, then its chip and its one control.
 fn source_header(id: &'static str, glyph: IconName, title: &'static str, theme: &Theme) -> ListRow {
     ListRow::new(id, title)
-        .icon(icon(glyph, 16., hsla(theme.muted_foreground)))
+        .icon(icon(duotone(glyph), 16., hsla(theme.muted_foreground)))
+        // `h-auto min-h-10 py-1.5` (`source-item.tsx:110`).
+        .auto_height(true)
+        .min_height(40.)
         .grouped()
+}
+
+/// The source glyphs at Phosphor's duotone weight (`source-item.tsx:113-116`,
+/// the MuteToggle's speakers).
+pub(crate) fn duotone(glyph: IconName) -> IconName {
+    match glyph {
+        IconName::Monitor => IconName::MonitorDuotone,
+        IconName::VideoCamera => IconName::VideoCameraDuotone,
+        IconName::Microphone => IconName::MicrophoneDuotone,
+        IconName::Desktop => IconName::DesktopDuotone,
+        IconName::SpeakerHigh => IconName::SpeakerHighDuotone,
+        IconName::SpeakerSlash => IconName::SpeakerSlashDuotone,
+        other => other,
+    }
 }
 
 /// `SourceItem`'s body: `flex flex-col gap-2 pr-3 pb-3 pl-3` (the Studio's
@@ -586,9 +606,9 @@ impl AudioSection {
             words::MUTE_MICROPHONE
         };
         let (speaker, speaker_ink) = if muted {
-            (IconName::SpeakerSlash, theme.chrome_fill_ink)
+            (IconName::SpeakerSlashDuotone, theme.chrome_fill_ink)
         } else {
-            (IconName::SpeakerHigh, theme.muted_foreground)
+            (IconName::SpeakerHighDuotone, theme.muted_foreground)
         };
         header = header.child(
             Button::new("studio-mic-mute")

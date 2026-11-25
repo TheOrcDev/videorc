@@ -21,13 +21,14 @@ use videorc_app_core::studio::{Connection, StudioSnapshot};
 use videorc_app_core::{BackendState, ConnectionState, Tone};
 use videorc_kit::{
     button::{Button, ButtonSize, ButtonVariant},
-    chrome::{self, Direction, box_shadow},
+    chrome::{self, Direction},
     icon::{IconName, icon},
+    plate_shadows,
     shortcut_keys::ShortcutKeys,
     status_bar::{StatusBar, StatusBarHint},
     status_dot::{StatusDot, StatusTone},
     theme::{self, FONT, TypeScale, hsla, with_alpha},
-    tokens::{Shadow, Theme, radius, size, text},
+    tokens::{Theme, radius, size, text},
     tooltip::tooltip,
 };
 
@@ -157,24 +158,7 @@ fn chrome_plate<E: Styled>(element: E, t: &Theme) -> E {
             linear_color_stop(hsla(t.chrome_plate_bottom), 1.),
         )
         .color_space(ColorSpace::Oklab))
-        .shadow(vec![
-            box_shadow(&Shadow {
-                inset: true,
-                x: 0.,
-                y: 1.,
-                blur: 0.,
-                spread: 0.,
-                color: t.chrome_plate_hi,
-            }),
-            box_shadow(&Shadow {
-                inset: true,
-                x: 0.,
-                y: 0.,
-                blur: 0.,
-                spread: 1.,
-                color: t.chrome_plate_rim,
-            }),
-        ])
+        .shadow(plate_shadows(t))
 }
 
 /// The pane toolbar (`pane.tsx` `Toolbar`): the page title at 14 px / 600
@@ -830,7 +814,13 @@ impl Shell {
         } else {
             row.hover(move |style| style.bg(hover_bg).text_color(hover_ink))
         };
-        row.child(icon(page_icon(page), 16., hsla(icon_ink)))
+        // The page you're on wears the fill weight (`sidebar.tsx:76-79`).
+        let glyph = if selected {
+            page_icon(page).filled()
+        } else {
+            page_icon(page)
+        };
+        row.child(icon(glyph, 16., hsla(icon_ink)))
             .child(div().flex_1().min_w(px(0.)).truncate().child(page.label()))
             .children(shortcut)
             .on_click(cx.listener(move |this, _, window, cx| this.open_page(page, window, cx)))
@@ -842,6 +832,12 @@ impl Shell {
     /// shortcut chip takes the slab's ink.
     fn studio_slab(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let ink = hsla(t.chrome_fill_ink);
+        // Filled while the Studio is open (`sidebar.tsx:140`).
+        let slab_glyph = if self.page == PageId::Studio {
+            page_icon(PageId::Studio).filled()
+        } else {
+            page_icon(PageId::Studio)
+        };
         let shortcut = PageId::Studio
             .key()
             .and_then(super::menus::page_action)
@@ -883,7 +879,7 @@ impl Shell {
                     .text_size(px(ROW_TEXT))
                     .line_height(px(ROW_LINE))
                     .font_weight(FontWeight::MEDIUM)
-                    .child(icon(page_icon(PageId::Studio), 20., ink))
+                    .child(icon(slab_glyph, 20., ink))
                     .child(
                         div()
                             .flex_1()
@@ -911,7 +907,7 @@ impl Shell {
                     .size(ButtonSize::Icon)
                     .variant(ButtonVariant::Ghost)
                     .accessibility_label("Search")
-                    .tooltip("Search")
+                    .tooltip_with_action("Search", &super::menus::ToggleSearch)
                     .child(icon(
                         IconName::MagnifyingGlass,
                         16.,
@@ -1015,15 +1011,28 @@ impl Shell {
             )
             .child(
                 Button::new("sidebar-theme-toggle")
-                    .size(ButtonSize::Xs)
+                    .size(ButtonSize::Icon)
                     .variant(ButtonVariant::Ghost)
                     .accessibility_label("Toggle color theme")
-                    .tooltip(if dark {
-                        "Switch to light theme"
-                    } else {
-                        "Switch to dark theme"
-                    })
-                    .label(if dark { "Light" } else { "Dark" })
+                    .tooltip_with_action(
+                        if dark {
+                            "Switch to light theme"
+                        } else {
+                            "Switch to dark theme"
+                        },
+                        &super::menus::ToggleTheme,
+                    )
+                    // `theme-toggle.tsx:46-48`: the moon in dark, the sun in
+                    // light, both at the fill weight.
+                    .child(icon(
+                        if dark {
+                            IconName::MoonFill
+                        } else {
+                            IconName::SunFill
+                        },
+                        16.,
+                        hsla(t.foreground),
+                    ))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))),
             );
         // `w-52`: 208 px.

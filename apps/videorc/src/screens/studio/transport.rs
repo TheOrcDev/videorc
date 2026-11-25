@@ -291,11 +291,11 @@ impl Transport {
 
 /// The glyph before a transport button's words (`record-button.tsx`,
 /// `go-live-button.tsx`): Record or Broadcast while it starts, Stop once it
-/// stops a session. Electron draws them at Phosphor's fill weight; the kit
-/// has the filled Stop only.
+/// stops a session, all at Phosphor's fill weight (`record-button.tsx:80`,
+/// `go-live-button.tsx:74`, `retro-lcd-studio.tsx:138,157`).
 fn record_glyph(face: &RecordFace) -> IconName {
     if face.shortcut {
-        IconName::Record
+        IconName::RecordFill
     } else {
         IconName::StopFill
     }
@@ -305,7 +305,7 @@ fn go_live_glyph(face: &GoLiveFace) -> IconName {
     if face.ends_livestream {
         IconName::StopFill
     } else {
-        IconName::Broadcast
+        IconName::BroadcastFill
     }
 }
 
