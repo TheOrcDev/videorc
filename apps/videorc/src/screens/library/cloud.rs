@@ -5,14 +5,17 @@ use videorc_kit::{
     alert::Alert,
     button::Button,
     empty::Empty,
+    kebab_menu::{KebabMenu, KebabMenuItem},
     list_row::{GroupedList, ListRow},
+    page_tabs::PageTabs,
     scroll_area::ScrollArea,
-    tabs::Tabs,
 };
 impl LibraryScreen {
-    pub(super) fn tabs(&self, cx: &mut Context<Self>) -> Tabs {
+    /// `PageTabs`: Local | Cloud in the strip under the toolbar, and the
+    /// region under it.
+    pub(super) fn tabs(&self, cx: &mut Context<Self>) -> PageTabs {
         let entity = cx.entity();
-        Tabs::new("library-tabs")
+        PageTabs::new("library-tabs", videorc_app_core::library::copy::VIEW_LABEL)
             .tab(c::LOCAL_VIEW)
             .tab(c::CLOUD_VIEW)
             .selected(usize::from(self.cloud_shown))
@@ -248,6 +251,23 @@ impl LibraryScreen {
                         })),
                 );
             }
+            // `cloudRowMenu`'s Show markers (P1363); the row's other menu
+            // items stay on its button above.
+            let show = item.show_id.clone();
+            let entity = cx.entity();
+            line = line.child(
+                KebabMenu::new(
+                    SharedString::from(format!("cloud-menu-{}", item.id)),
+                    vec![
+                        KebabMenuItem::new("markers", c::SHOW_MARKERS, move |window, cx| {
+                            let show = show.clone();
+                            entity.update(cx, |this, cx| this.open_markers(show, window, cx));
+                        })
+                        .disabled(!data.online || item.show_id.is_empty()),
+                    ],
+                )
+                .label(c::ROW_MENU_LABEL),
+            );
             rows = rows.row(line);
         }
         body = body.child(rows);

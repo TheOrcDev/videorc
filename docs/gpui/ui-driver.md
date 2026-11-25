@@ -41,40 +41,47 @@ No Accessibility grant is involved. From then on GPUI keeps the last frame's
 tree, and the driver reads it with `Window::debug_a11y_tree_json`. Pointer
 and keys go through `Window::dispatch_event` and `Window::dispatch_keystroke`,
 the window's own dispatch, so a dialog's scrim takes a click meant for what
-it covers, as a mouse would.
+it covers, as a mouse would. `ui-click` / `ui-focus` take a selector by
+element id or accessibility name; `ui-click {x,y}` and `ui-drag
+{fromX,fromY,toX,toY}` hit absolute window points (the Scene stage paints
+sources without a11y nodes); `ui-key` with no selector sends keys to
+whatever has the focus.
 
 ## Gaps in gpui-pre 0.3.14
 
 Each gap is answered by name in the driver and listed here until it closes.
 
-1. **No bounds in the tree dump.** GPUI sets each node's rect
-   (`accesskit::Node::set_bounds`, `element.rs`), but `debug.rs`'s
-   `node_to_json` does not print it. Without it, `ui-click`, `ui-scroll` at an
-   element, and focusing a field by click have no target. The driver already
-   reads a node's `bounds` as AccessKit's `{x0, y0, x1, y1}` in physical pixels
-   (`gpui_tree.rs`).
-   **Fix:** a few lines in `node_to_json`
-   (`if let Some(rect) = node.bounds() { map.insert("bounds", …) }`), upstream
-   in Zed, then the next weekly snapshot bump.
+1. ~~**No bounds in the tree dump.**~~ **Closed** (C5, local `patches/gpui-pre`).
+   `node_to_json` now prints AccessKit `{x0, y0, x1, y1}` physical-pixel bounds
+   so `ui-click`, `ui-focus`, `ui-scroll` at an element, and focusing a field by
+   click have a target. Drop `patches/gpui-pre` when a gpui-pre release prints
+   the same lines upstream. The driver reads them in `gpui_tree.rs`.
 2. **No public way to send an AccessKit action.** `Window::handle_a11y_action`
    is `pub(crate)`. So `ui-click {via: "action"}` and a true set-value action
    wait for it. `ui-set-value` types the value instead.
    **Fix:** make it public, or add `Window::perform_a11y_action(ActionRequest)`,
    upstream.
-3. **No window capture outside tests.** `Window::render_to_image` is
-   `test-support` only, so `capture-page` refuses by name.
-   **Fix:** the feature in smoke builds only, or an OS capture of the window
-   (macOS `CGWindowListCreateImage` needs Screen Recording). This is a
-   decision for S2.5's follow-up.
+3. **No window capture outside tests (closed on macOS by an OS capture).**
+   `Window::render_to_image` is `test-support` only, so `capture-page-alpha`
+   (a page render's alpha) still refuses by name. `capture-page`,
+   `comments-window-capture-page` and `preview-surface-sample`
+   (`apps/videorc/src/smoke/capture.rs`, shapes in
+   `videorc_app_core::smoke::capture`) capture the composited window with
+   `screencapture -x -o -l <windowNumber>`: what is on screen, glass and the
+   native preview layer included. It needs Screen Recording for the process
+   that runs the app (a terminal's grant carries over). Windows and Linux
+   answer by name that they have no capture yet.
 4. **No disabled flag or clipping in the dump.** Every node reads as enabled
    and visible. The driver honours `disabled: true` should it appear.
 5. **No author ids in the dump.** `accessibility_id` is not printed. A
    selector's `id` matches the element id that created the node, which debug
    builds print, qualified by its view (`StudioPage::record`).
 
-Gaps 1 and 2 are the ones the smokes need first. Until 1 closes, the driver
-can read a window (`ui-tree`, `ui-find`) and press keys into whatever has the
-focus (`ui-key`), but it cannot click.
+Gap 1 is closed locally (`patches/gpui-pre`). Absolute `ui-click {x,y}` and
+`ui-drag {fromX,fromY,toX,toY}` use the same pointer dispatch for painted
+stage content that has no accessibility node. Gap 2 (AccessKit actions) is
+still open: `ui-click {via: "action"}` waits. Pointer clicks, focus, drag, and
+keys go through `Window::dispatch_event` / `dispatch_keystroke` (no OS-level HID).
 
 ## What the plan's "done when" still needs
 
@@ -134,19 +141,65 @@ Should run with `VIDEORC_APP=gpui` (nothing app-specific beyond supported comman
 bubble case skips on GPUI), `smoke:dev` (its asset background goes through `import-smoke-background`, now in the
 core), `smoke:preview-real-launch` (on GPUI the main side of the chain is `inspect-native-preview-runtime`).
 
+`smoke:preview-overlay-presentation` and `smoke:preview-check-invisible` run with `VIDEORC_APP=gpui` on macOS:
+`native-preview-surface-status` reads the element's live feed (`presentedFrameId`, transport `native-surface`), and
+`preview-surface-sample` captures the window showing the Preview and reads the rects in the canvas the layer contain-fits
+(the frame's own size, else the Studio's video). The renderer hooks are the Studio handler's: `studio-capture-configure`,
+`studio-replay-buffer`, `studio-scenes-state`, `studio-record` / `studio-stop`, and `studio-performance-check` (Check
+this computer as the Output page starts it). The GPUI watchdog's `[preview] healing` / `stalled` lines count as
+Electron's `[preview-watch]` ones.
+
+### The GPUI native preview probes (L6, 2026-11-25)
+
+`VIDEORC_APP=gpui pnpm probe:preview-lifecycle` runs `scripts/gpui-preview-lifecycle-probe.mjs` (Electron's
+probe hands over; no new package script while the 0.38 guard holds). It drives the paths a person takes and
+reads L1's preview through the smoke server: docked and presenting (`presentedFrameId` advances), Retry while
+presenting (`retried: true`, `retry preview (n)`, `reset-native-path` on macOS, back at presenting), ⌘P close and
+reopen cycles (`VIDEORC_PREVIEW_LIFECYCLE_CYCLES`, 10), the Preview window (macOS: ⌘P, its close button through
+`preview-window-os-close`, docking back), and Retry after `preview.surface.destroy`. A forced first-frame fallback
+has no switch yet: a named SKIP. `preview-window-os-close` closes the Preview window as its close button does
+(`performClose:`, so `on_window_should_close` runs). `VIDEORC_GPUI_APP_BINARY` runs a prebuilt app
+(`~/cloud-test/gpui-builds/latest`) instead of building one. Evidence: `gpui-preview-lifecycle.json` in the
+output folder.
+
+**Found on the first runs (sentinel build `010616c0d`):** the UI driver's accessibility tree never arrived in a
+smoke run (`ui-*` waited 20 s and gave up). The cause: GPUI's window handle names its own `GPUIView`, a subview of the
+window's content view, while AccessKit's `SubclassingAdapter::for_window` subclasses the content view, so
+`activate.rs` asked a plain view. It now asks the content view (L6). The preview probes press ⌘P as the
+`TogglePreview` action (`preview-toggle-open`) either way.
+
+`VIDEORC_APP=gpui pnpm probe:preview-window` runs `scripts/gpui-preview-window-probe.mjs` with a geometry oracle:
+after each move and resize, the rect Core Animation displays for the video layer (`displayedFrame`) must be the rect
+the app set (`layerFrame`), and that must fill the slot (`slot`), within 1 point (`native-preview-surface-status`).
+It checks docked, after main-window resizes, in the Preview window (opened, moved and sized off 16:9 with
+`preview-window-set-bounds`), after its close button and ⌘P, docked back, and on the Scene page. A colour
+comparison of the screen with the backend's frame can't serve here: the test pattern animates its whole background,
+and a window capture takes about a second.
+
+`VIDEORC_APP=gpui pnpm smoke:preview-interaction-stress` runs `scripts/gpui-preview-interaction-stress.mjs`: a
+sampler reads `presentedFrameId` and the phase every 100 ms while rapid layout intents (a burst, then
+`VIDEORC_PREVIEW_STRESS_SCENE_ROUNDS` rounds of Electron's sequence), a Preview window move/resize storm (then the
+alignment read) and a main-window storm (`main-window-set-bounds`, now on GPUI) run with no settle. A phase fails when
+the preview stood still longer than `VIDEORC_PREVIEW_STRESS_MAX_STILL_MS` (1000), left presenting, or presented
+nothing; a layout the backend refuses without a real device makes the scene phase a named SKIP.
+
+`session-player-geometry` reads every live session player (the Library's, and any a page hosts) the same way:
+`{ players: [{ mode, active, open, layerFrame, displayedFrame, slot }] }`. On macOS `displayedFrame` must equal
+`layerFrame` and fill `slot`, as the live preview's do; it uses the same `VideoLayer` (`tune_video_layer`).
+`node scripts/gpui-library-player-probe.mjs` (with `VIDEORC_GPUI_APP_BINARY`) records a short take, opens it in the Library
+player through the UI driver (the row's Session actions, then Markers), and holds the player's layer to its slot, then
+again after main-window resizes.
+
 Wait for a GPUI product path or new commands first:
 
-| Smoke                                                                                                                                            | Missing on GPUI                                                                                                                                                 |
-| ------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `smoke:captions-live`                                                                                                                            | the renderer's caption frame submissions (live PNG and cue frames)                                                                                              |
-| `smoke:preview-overlay-presentation`                                                                                                             | `native-preview-surface-status`, `preview-surface-sample`                                                                                                       |
-| `smoke:banners`, `smoke:html-overlay`                                                                                                            | `import-takeover-image` (the Images takeover import), `html-overlay-stats` (an HTML overlay host)                                                               |
-| `smoke:screens`                                                                                                                                  | `import-takeover-image`, `main-window-id`, `capture-page` (gap 3)                                                                                               |
-| `smoke:preview-pump-diagnostics`, `smoke:preview-click-focus`                                                                                    | Electron's present-pump and click-focus probes                                                                                                                  |
-| `smoke:preview-scene-commit`, `smoke:freeform-editor`                                                                                            | `select-camera-shape`; the editor needs clicks (gap 1)                                                                                                          |
-| `smoke:preview-check-invisible`                                                                                                                  | `preview-surface-sample`, the Check computer command                                                                                                            |
-| `smoke:recording-native-preview`, `smoke:preview-surface`, `probe:preview-lifecycle`, `probe:preview-window`, `smoke:preview-interaction-stress` | Electron's native-surface and window commands; they need GPUI-specific probes, not a port                                                                       |
-| `probe:comments-window`                                                                                                                          | the chat fixtures (`comments-window-push-*`, `-seed-*`), `capture-page` (gap 3), the person card and layout metrics; it needs a GPUI-specific probe, not a port |
+| Smoke                                                                                                                                            | Missing on GPUI                                                                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `smoke:captions-live`                                                                                                                            | the renderer's caption frame submissions (live PNG and cue frames)                                                                                                                                             |
+| `smoke:html-overlay`                                                                                                                             | the Chromium page host (`videorc-page-host` / P5-D10); `html-overlay-stats` answers `{ stats: null }` until then (named SKIP on GPUI)                                                                          |
+| `smoke:screens` theme screenshots                                                                                                                | the port itself (C1): `capture-page` captures the composited window on macOS now (gap 3)                                                                                                                       |
+| `smoke:preview-pump-diagnostics`, `smoke:preview-click-focus`                                                                                    | Electron's present-pump and click-focus probes                                                                                                                                                                 |
+| `smoke:recording-native-preview`, `smoke:preview-surface`, `probe:preview-lifecycle`, `probe:preview-window`, `smoke:preview-interaction-stress` | Electron's native-surface and window commands; they need GPUI-specific probes, not a port                                                                                                                      |
+| `probe:comments-window`                                                                                                                          | Electron fixtures (`push-*`/`seed-*`/person-card/layout-metrics) stay Electron-only. GPUI path: `comments-window-probe-gpui.mjs` (open/place/raise/hide + `#2142` composited capture on macOS; Win/Linux SKIP) |
 
 ### The Notes and Stream Manager windows on GPUI (2026-11-25)
 
@@ -168,6 +221,20 @@ writes the highlight's rects into the overlay layout, as Electron's `snapHighlig
 `smoke:comment-highlight-stream` runs with `VIDEORC_APP=gpui` on its default Stream Manager surface;
 `VIDEORC_COMMENT_HIGHLIGHT_SURFACE=studio` is still Electron-only (it reads the renderer through `eval-js`).
 
+### Banners, HTML overlays and Screens on GPUI (2026-11-25)
+
+`videorc_app_core::smoke::commands` runs `import-takeover-image` (the Images takeover import through
+`screens.importImage`, answered with Electron's `{ ids, readyIds }` from `screens.list`) and
+`html-overlay-stats` (`{ stats: null }` until the page host reports). `apps/videorc/src/smoke` runs
+`main-window-id` (OS capture id + top-left bounds). `capture-page` and `comments-window-capture-page`
+write a PNG of the composited window on macOS (#2142); Windows and Linux still answer by name that
+they have no capture.
+
+`smoke:banners` and `smoke:screens` run with `VIDEORC_APP=gpui`. The banners smoke skips the
+`videorc-asset://` renderer fetch (no Chromium scheme; recording samples still prove the draw).
+`smoke:html-overlay` is a named SKIP until `videorc-page-host` (P5-D10) paints frames. Screens can
+use `capture-page` on macOS for theme screenshots; the renderer mic `eval-js` check stays Electron.
+
 ### Sources, layouts and saved scenes
 
 `StudioSmoke` also runs:
@@ -176,6 +243,8 @@ writes the highlight's rects into the overlay layout, as Electron's `snapHighlig
   screen off macOS), or `sourceId`; it turns the test pattern off first, as Electron's hook does. Answers `{id, kind}`.
 - `select-camera-device {cameraId?, off?, timeoutMs?, settleMs?}`: the first available camera, `cameraId`, or Camera
   off. Answers `{cameraId}`.
+- `select-camera-shape {shape, settleMs?}`: `apply_camera_preset` with `camera_shape_patch` (circle / rounded /
+  rectangle). Answers `{shape, pressed, editModeActivated, label}`. Shared with `smoke:preview-scene-commit`.
 - `select-layout-preset {preset, settleMs?}`: the layout on stream (switching to 9:16 first for a `vertical-` preset),
   answered once the capture config shows it. It moved from the window commands to the Studio's.
 - `studio-scenes-state`: the library (`scenes`, `onStreamId`, `pendingSceneId`, `modified`, `readOnly`, `error`) and
@@ -209,10 +278,17 @@ writes the highlight's rects into the overlay layout, as Electron's `snapHighlig
   `scenes::migration`.
 - New scenes: the GPUI Scene page has no Add scene… dialog yet, so the smoke builds the app scenes (Follow on, the app's
   name, "<name> 2" for a second) and inserts them with `studio-scene-insert`.
-- Reorder: `studio-scene-move` instead of a row's Alt+ArrowUp (no clicks or row focus yet, driver gap 1); position keys
-  come from `studio-scenes-state`'s `keys`.
+- Reorder: `ui-focus` on `scene-row-{id}` then Alt+ArrowUp through `ui-key` (gap 1 closed; rows `track_focus`).
+  `studio-scene-move` remains as a direct Studio path. Position keys come from `studio-scenes-state`'s `keys`.
 - Rapid keys: the trace is polled from `studio-scenes-state`; the renderer-only diagnostics (layout intent, queued key,
   resolve generation) are `null`. The gate reads only the frames and the final state.
 - A refused scene apply reads as `false` (the command's error); refusal reasons come from `studio-state`.
 - Add app… for the password-manager list goes through `studio-privacy-add-app` (no picker yet).
 - Follow's "Videorc in front" row is Electron's and is left out on GPUI.
+
+### freeform-editor on GPUI
+
+`smoke:freeform-editor` with `VIDEORC_APP=gpui` skips CDP / `__freeformSmoke` and drives the Scene stage through
+`ui-click {x,y}` and `ui-drag` (`scripts/lib/freeform-editor-gpui.mjs`). Stage bounds come from `ui-find` on
+`scene-stage` (gutter 28 px). The gate is backend-authoritative (scene revision + accepted transform); DOM frame /
+pointer-capture evidence stays Electron. `select-camera-shape` covers the mask case shared with preview-scene-commit.

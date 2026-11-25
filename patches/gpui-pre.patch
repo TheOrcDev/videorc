@@ -1,0 +1,27 @@
+# gpui-pre 0.3.14: print AccessKit node bounds in debug_a11y_tree_json
+# (Videorc plan 260 S2.5 UI driver gap 1). Drop when a gpui-pre release
+# carries the same lines upstream.
+#
+--- a/src/window/a11y/debug.rs
++++ b/src/window/a11y/debug.rs
+@@ -309,6 +309,20 @@ fn node_to_json(
+         aria.insert("column_count".into(), json!(v));
+     }
+ 
++    // Physical-pixel rect for the UI driver (Videorc plan 260 S2.5 gap 1).
++    // Upstream dump omitted this; drop this block when a gpui-pre release prints it.
++    if let Some(rect) = node.bounds() {
++        map.insert(
++            "bounds".into(),
++            json!({
++                "x0": rect.x0,
++                "y0": rect.y0,
++                "x1": rect.x1,
++                "y1": rect.y1,
++            }),
++        );
++    }
++
+     map.insert("aria".into(), serde_json::Value::Object(aria));
+ 
+     serde_json::Value::Object(map)

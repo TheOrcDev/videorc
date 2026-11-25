@@ -56,11 +56,42 @@ const KEY_IN_BUTTON_PX: f32 = 512.;
 const FILL: &str = "fill";
 const FIT: &str = "fit";
 
-/// A layout's icon-size diagram (`LayoutChoice inTrigger`, `compact`): a
-/// 16:9 one 28 px wide, a 9:16 one 20 px tall, never a picture.
-fn compact_thumb(preset: &str, fit: bool, t: &Theme) -> AnyElement {
+/// Where a layout's icon-size diagram stands (`LayoutChoice`'s `inTrigger`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThumbPlace {
+    /// Beside the select's trigger (`w-7`; a 9:16 one `h-5`).
+    Trigger,
+    /// In a list row (`w-9`; a 9:16 one `w-3/5` of it, upright).
+    List,
+}
+
+impl ThumbPlace {
+    /// The diagram's well width.
+    fn well(self) -> f32 {
+        match self {
+            ThumbPlace::Trigger => 28.,
+            ThumbPlace::List => 36.,
+        }
+    }
+
+    /// The frame's height for `row_frame`: a 16:9 one fills the well's
+    /// width; a 9:16 one is 20 px tall by the trigger, `w-3/5` of the well
+    /// wide in a list.
+    fn frame_height(self, vertical: bool) -> f32 {
+        match (self, vertical) {
+            (ThumbPlace::Trigger, true) => 20.,
+            (ThumbPlace::List, true) => self.well() * 3. / 5. * 16. / 9.,
+            (_, false) => self.well() * 9. / 16.,
+        }
+    }
+}
+
+/// A layout's icon-size diagram (`LayoutChoice`, `compact`), never a
+/// picture: by the trigger a 16:9 one 28 px wide and a 9:16 one 20 px tall,
+/// in a list a 16:9 one 36 px wide and a 9:16 one about 22 px wide.
+fn compact_thumb(preset: &str, fit: bool, place: ThumbPlace, t: &Theme) -> AnyElement {
     let vertical = thumb_is_vertical(preset);
-    let frame = row_frame(vertical, if vertical { 20. } else { 28. * 9. / 16. });
+    let frame = row_frame(vertical, place.frame_height(vertical));
     let areas = thumb_areas(
         preset,
         fit,
@@ -74,7 +105,7 @@ fn compact_thumb(preset: &str, fit: bool, t: &Theme) -> AnyElement {
     let camera = hsla(faded_over(t.foreground, t.glass_solid, 0.55));
     div()
         .flex_none()
-        .w(px(28.))
+        .w(px(place.well()))
         .flex()
         .justify_center()
         .child(
@@ -105,6 +136,20 @@ fn compact_thumb(preset: &str, fit: bool, t: &Theme) -> AnyElement {
                         })
                 })),
         )
+        .into_any_element()
+}
+
+/// A layout in the select's list (`LayoutChoice`, P325, P328): its
+/// icon-size diagram, then its name, truncated. The label stays the
+/// trigger's words.
+fn layout_choice(preset: &str, label: SharedString, fit: bool, t: &Theme) -> AnyElement {
+    div()
+        .flex()
+        .min_w_0()
+        .items_center()
+        .gap(px(8.))
+        .child(compact_thumb(preset, fit, ThumbPlace::List, t))
+        .child(div().min_w_0().truncate().child(label))
         .into_any_element()
 }
 
@@ -622,7 +667,14 @@ impl ScenesSection {
             });
         for choice in &layout.choices {
             select = select.option_item(
-                SelectOption::new(choice.value, choice.label.clone()).disabled(choice.disabled),
+                SelectOption::new(choice.value, choice.label.clone())
+                    .disabled(choice.disabled)
+                    .child(layout_choice(
+                        choice.value,
+                        choice.label.clone().into(),
+                        layout.fit,
+                        t,
+                    )),
             );
         }
         let layout_control = div()
@@ -630,7 +682,12 @@ impl ScenesSection {
             .items_center()
             .gap(px(8.))
             .when(!layout.freeform, |control| {
-                control.child(compact_thumb(&layout.preset, layout.fit, t))
+                control.child(compact_thumb(
+                    &layout.preset,
+                    layout.fit,
+                    ThumbPlace::Trigger,
+                    t,
+                ))
             })
             .child(select)
             .into_any_element();
@@ -683,14 +740,25 @@ impl ScenesSection {
             for choice in &vertical.choices {
                 select = select.option_item(
                     SelectOption::new(choice.preset, choice.label.clone())
-                        .disabled(choice.disabled),
+                        .disabled(choice.disabled)
+                        .child(layout_choice(
+                            choice.preset,
+                            choice.label.clone().into(),
+                            vertical.fit,
+                            t,
+                        )),
                 );
             }
             let control = div()
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(compact_thumb(&vertical.preset, vertical.fit, t))
+                .child(compact_thumb(
+                    &vertical.preset,
+                    vertical.fit,
+                    ThumbPlace::Trigger,
+                    t,
+                ))
                 .child(select);
             let control: AnyElement = match read_only {
                 Some(reason) => div()

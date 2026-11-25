@@ -245,7 +245,7 @@ pub mod encoder {
         OPTIONS
             .iter()
             .find(|(value, ..)| *value == preference)
-            .map_or("auto", |(_, wire, _)| wire)
+            .map_or("auto", |(_, wire, _)| *wire)
     }
 
     pub fn of_wire(value: &str) -> Option<WindowsH264EncoderPreference> {

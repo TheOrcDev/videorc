@@ -62,10 +62,10 @@ pub const PICTURE_TYPE_ERROR: &str = "Use a PNG, JPEG or WebP picture.";
 pub const PICTURE_UNREADABLE: &str = "That picture could not be read. Try another one.";
 /// `BUDDY_LOOK_PICTURE_SIZE_ERROR`: over 10 MB, refused before reading.
 pub const PICTURE_SIZE_ERROR: &str = "Choose a picture under 10 MB.";
-/// The backend's own refusal for a picture over 3 MB
-/// (`COHOST_AVATAR_PICTURE_TOO_LARGE`): Electron shrinks it first, this app
-/// has no encoder yet.
-pub const PICTURE_SEND_TOO_LARGE: &str = "The picture is over 3 MB. Choose a smaller one.";
+/// `BUDDY_LOOK_PICTURE_TOO_LARGE`: still over 3 MB once fitted and shrunk
+/// as far as it is worth sending.
+pub const PICTURE_TOO_LARGE: &str =
+    "That picture is too large to send, even made smaller. Try another one.";
 pub const NEXT_HINT: &str = "Describe it or add a picture to continue.";
 
 /// `BUDDY_ONBOARDING_STEP3`'s own examples (the edit dialog has none).

@@ -156,8 +156,12 @@ pub const PORTED: &[PageId] = &[
     PageId::Library,
     PageId::Studio,
     PageId::Sources,
+    PageId::Layouts,
+    PageId::Captions,
+    PageId::Recording,
     PageId::Live,
     PageId::Guests,
+    PageId::Avatar,
     PageId::Ai,
     PageId::Assets,
     PageId::Sounds,
@@ -1062,5 +1066,14 @@ mod tests {
         assert!(PageId::Diagnostics.key().is_none());
         assert!(PageId::Live.ported());
         assert!(menu_availability(&[]).pages.contains(&PageKey::Settings));
+        // The GPUI app draws every sidebar page, so ⌘3/⌘4/⌘5/⌘8 bind too.
+        for page in [
+            PageId::Layouts,
+            PageId::Captions,
+            PageId::Recording,
+            PageId::Avatar,
+        ] {
+            assert!(page.ported(), "{page:?}");
+        }
     }
 }

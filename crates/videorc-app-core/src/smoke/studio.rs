@@ -41,6 +41,7 @@ use tokio::sync::watch;
 
 use super::{CommandFuture, SmokeCommandHandler};
 use crate::desktop::global_shortcuts::scene_for_action;
+use crate::editor::inspector::camera_shape_patch;
 use crate::scenes::model::SavedScene;
 use crate::scenes::section::scene_slot_accelerator;
 use crate::scenes::store::normalize_scene;
@@ -56,10 +57,12 @@ use videorc_protocol::{Device, DeviceKind, DeviceStatus};
 pub const STUDIO_SMOKE_COMMANDS: &[&str] = &[
     "enable-synthetic-source",
     "select-camera-device",
+    "select-camera-shape",
     "select-layout-preset",
     "select-screen-device",
     "preview-surface-scene-state",
     "studio-capture-configure",
+    "studio-performance-check",
     "studio-record",
     "studio-replay-buffer",
     "studio-privacy-add-app",
@@ -390,6 +393,39 @@ impl StudioSmoke {
         Ok(json!({ "configured": true, "state": state_json(&self.studio.snapshot()) }))
     }
 
+    /// `studio-performance-check {displayWidth?, displayHeight?}`: "Check
+    /// this computer" as the Output page starts it (`requestPerformanceCheck`
+    /// through `Studio::run_performance_check`, the Clips ring stepping
+    /// aside). It answers once the run is asked for; the smoke follows
+    /// `performance.check.progress` / `.completed` from the backend.
+    fn performance_check(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let side = |key: &str| params.get(key).and_then(Value::as_u64).map(|v| v as u32);
+        let display = side("displayWidth").zip(side("displayHeight"));
+        let snapshot = self.studio.snapshot();
+        let separate = snapshot.settings.capture_doc["separateSourceRecordings"]["enabled"]
+            .as_bool()
+            .unwrap_or(false);
+        let run = crate::studio::performance_check::ceiling(
+            &snapshot.settings.capture.video,
+            display,
+            separate,
+        );
+        let answer = json!({
+            "started": true,
+            "ceilingWidth": run.ceiling_width,
+            "ceilingHeight": run.ceiling_height,
+            "ceilingFps": run.ceiling_fps,
+        });
+        let studio = self.studio.clone();
+        tokio::spawn(async move {
+            if let Err(error) = studio.run_performance_check(run).await {
+                // The smoke's own output: it names a check that never completes.
+                eprintln!("[smoke] studio-performance-check: {error}");
+            }
+        });
+        Ok(answer)
+    }
+
     fn replay_buffer(&self, params: Map<String, Value>) -> Result<Value, String> {
         let armed = params
             .get("armed")
@@ -482,6 +518,34 @@ impl StudioSmoke {
             .await?;
         tokio::time::sleep(settle).await;
         Ok(json!({ "cameraId": device.id }))
+    }
+
+    async fn select_camera_shape(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let shape = text_param(&params, "shape").unwrap_or("circle").to_string();
+        let settle = Duration::from_millis(millis(&params, "settleMs", DEFAULT_SETTLE_MS));
+        let patch = camera_shape_patch(&shape);
+        if !self.studio.apply_camera_preset(patch, false).await {
+            return Err(format!("Could not apply camera shape {shape}."));
+        }
+        let shown = |snapshot: &StudioSnapshot| {
+            snapshot.settings.capture_doc["layout"]["cameraShape"].as_str() == Some(shape.as_str())
+        };
+        if !shown(&self.studio.snapshot()) {
+            wait_for(
+                self.studio.watch(),
+                SWITCH_WAIT,
+                &format!("camera shape {shape} to become active"),
+                shown,
+            )
+            .await?;
+        }
+        tokio::time::sleep(settle).await;
+        Ok(json!({
+            "shape": shape,
+            "pressed": true,
+            "editModeActivated": false,
+            "label": shape,
+        }))
     }
 
     async fn select_layout_preset(&self, params: Map<String, Value>) -> Result<Value, String> {
@@ -784,8 +848,10 @@ impl SmokeCommandHandler for StudioSmoke {
                 "studio-stop" => self.stop(params).await,
                 "studio-capture-configure" => self.capture_configure(params).await,
                 "studio-replay-buffer" => self.replay_buffer(params),
+                "studio-performance-check" => self.performance_check(params),
                 "select-screen-device" => self.select_screen(params).await,
                 "select-camera-device" => self.select_camera(params).await,
+                "select-camera-shape" => self.select_camera_shape(params).await,
                 "select-layout-preset" => self.select_layout_preset(params).await,
                 "studio-scenes-state" => Ok(scenes_json(&self.studio.snapshot())),
                 "preview-surface-scene-state" => Ok(surface_scene_json(&self.studio.snapshot())),

@@ -1,10 +1,8 @@
 //! Studio → Soundboard (`soundboard-section.tsx`, plan 189 / parity P340–P350):
 //! the pads under Scenes, room sounds while the talk-show room is open, and
 //! keys 1–9. Words and helpers live in `videorc_app_core::soundboard`; this
-//! module draws them and talks to the backend.
-//!
-//! Pad chrome is a kit placeholder until `SoundPad` lands (see plan 260
-//! `queues.md` Kit).
+//! module draws them and talks to the backend. Pad chrome is kit
+//! `SoundPad` / `SoundPadGrid`.
 
 mod pads;
 mod room;
@@ -13,9 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{
-    Context, Entity, EventEmitter, KeyDownEvent, KeyUpEvent, Window, canvas, div, prelude::*, px,
-};
+use gpui::{Context, Entity, EventEmitter, KeyDownEvent, KeyUpEvent, Window, div, prelude::*};
 use serde_json::json;
 use tokio::sync::watch;
 use videorc_app_core::BackendEvent;
@@ -68,7 +64,8 @@ pub struct SoundboardSection {
     room_aux: Option<RoomAux>,
     room_routing: RoomAudioRouting,
     room_sliders: room::RoomSliders,
-    width: f32,
+    /// Cancels a stale progress-notify loop when playback changes.
+    progress_epoch: u64,
 }
 
 impl EventEmitter<OpenPage> for SoundboardSection {}
@@ -140,7 +137,7 @@ impl SoundboardSection {
             room_aux: None,
             room_routing: RoomAudioRouting::default(),
             room_sliders,
-            width: 0.,
+            progress_epoch: 0,
         };
         section.apply_snapshot(&initial, cx);
         let open = section.talk_show.read(cx).value().open;
@@ -163,6 +160,7 @@ impl SoundboardSection {
                 self.board_state = BoardState::Loading;
                 self.voices.clear();
                 self.session_without_sounds = false;
+                self.kick_progress_tick(cx);
             }
         }
         if self.disconnected != disconnected {
@@ -205,6 +203,7 @@ impl SoundboardSection {
                 if let Ok(playback) = serde_json::from_value::<SoundsPlayback>(payload) {
                     self.voices = playback.voices;
                     self.session_without_sounds = playback.session_without_sounds;
+                    self.kick_progress_tick(cx);
                     cx.notify();
                 }
             }
@@ -398,11 +397,13 @@ impl SoundboardSection {
 
     pub(crate) fn toggle_speech_mute(&mut self, cx: &mut Context<Self>) {
         self.room_routing.program.speech_muted = !self.room_routing.program.speech_muted;
+        self.push_program();
         cx.notify();
     }
 
     pub(crate) fn toggle_auxiliary_mute(&mut self, cx: &mut Context<Self>) {
         self.room_routing.program.auxiliary_muted = !self.room_routing.program.auxiliary_muted;
+        self.push_program();
         cx.notify();
     }
 
@@ -414,12 +415,32 @@ impl SoundboardSection {
 
     pub(crate) fn set_speech_gain(&mut self, gain: f32, cx: &mut Context<Self>) {
         self.room_routing.program.speech_gain = gain.clamp(0., 1.);
+        self.push_program();
         cx.notify();
     }
 
     pub(crate) fn set_auxiliary_gain(&mut self, gain: f32, cx: &mut Context<Self>) {
         self.room_routing.program.auxiliary_gain = gain.clamp(0., 1.);
+        self.push_program();
         cx.notify();
+    }
+
+    /// Plan 260 S1.8 (L1): the program audio routing goes to the backend's
+    /// room while it is open (`cloud.room.routing.set`, as the renderer's
+    /// room sent it on to the program pages that route).
+    fn push_program(&self) {
+        if self.room_aux.is_none() {
+            return;
+        }
+        let params =
+            videorc_app_core::studio::room_media::routing_params(&self.room_routing.program);
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            let _ = studio
+                .backend()
+                .livestream_request(videorc_app_core::studio::room_media::ROUTING_SET, params)
+                .await;
+        });
     }
 
     fn push_aux(&self, _cx: &mut Context<Self>) {
@@ -436,11 +457,41 @@ impl SoundboardSection {
         });
     }
 
-    fn measured(&mut self, width: f32, cx: &mut Context<Self>) {
-        if (self.width - width).abs() > 0.5 {
-            self.width = width;
-            cx.notify();
+    /// Re-render pads while non-loop voices play so the kit progress ring moves.
+    fn kick_progress_tick(&mut self, cx: &mut Context<Self>) {
+        let needs = self.voices.iter().any(|v| !v.r#loop && v.duration_ms > 0);
+        if !needs {
+            self.progress_epoch = self.progress_epoch.wrapping_add(1);
+            return;
         }
+        self.progress_epoch = self.progress_epoch.wrapping_add(1);
+        let epoch = self.progress_epoch;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+                let cont = this
+                    .update(cx, |section, cx| {
+                        if section.progress_epoch != epoch {
+                            return false;
+                        }
+                        let needs = section
+                            .voices
+                            .iter()
+                            .any(|v| !v.r#loop && v.duration_ms > 0);
+                        if needs {
+                            cx.notify();
+                        }
+                        needs
+                    })
+                    .unwrap_or(false);
+                if !cont {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 }
 
@@ -451,17 +502,6 @@ impl Render for SoundboardSection {
         let ink = hsla(theme.foreground);
         let entity = cx.entity();
         let weak = entity.downgrade();
-        let page = weak.clone();
-        let measure = canvas(
-            move |bounds, _, cx| {
-                let width = f32::from(bounds.size.width);
-                page.update(cx, |section, cx| section.measured(width, cx))
-                    .ok();
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full();
 
         let desc = description(
             self.session_active,
@@ -505,17 +545,13 @@ impl Render for SoundboardSection {
         let sounds = self.sounds().to_vec();
         let voices: BTreeMap<String, SoundVoice> = voice_by_sound(&self.voices);
         let loaded = self.board_state == BoardState::Ready;
-        let width = self.width.max(1.);
 
         if !sounds.is_empty() {
             section = section.child(pads::grid(
                 &sounds,
                 &voices,
-                width,
                 self.disconnected.is_some(),
                 weak.clone(),
-                window,
-                cx,
             ));
             if let Some(reason) = self.disconnected {
                 section = section.child(
@@ -573,7 +609,6 @@ impl Render for SoundboardSection {
             .flex()
             .flex_col()
             .w_full()
-            .child(measure)
             .child(section)
     }
 }
@@ -584,9 +619,7 @@ pub fn handle_key_down(
     event: &KeyDownEvent,
     cx: &mut gpui::App,
 ) -> bool {
-    section
-        .update(cx, |section, cx| section.key_down(event, cx))
-        .unwrap_or(false)
+    section.update(cx, |section, cx| section.key_down(event, cx))
 }
 
 pub fn handle_key_up(
@@ -594,9 +627,7 @@ pub fn handle_key_up(
     event: &KeyUpEvent,
     cx: &mut gpui::App,
 ) -> bool {
-    section
-        .update(cx, |section, cx| section.key_up(event, cx))
-        .unwrap_or(false)
+    section.update(cx, |section, cx| section.key_up(event, cx))
 }
 
 pub fn release_held(section: &Entity<SoundboardSection>, cx: &mut gpui::App) {

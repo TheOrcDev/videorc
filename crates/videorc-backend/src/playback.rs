@@ -890,6 +890,8 @@ fn refused(
 
 /// `playback.open`: closes any playback, checks the file, probes it, and
 /// answers once the first frame is in the ring (paused at 0:00).
+// macOS returns from its cfg block early; elsewhere FFmpeg is the tail.
+#[cfg_attr(target_os = "macos", allow(clippy::needless_return))]
 pub async fn open(state: &AppState, params: PlaybackOpenParams) -> PlaybackStatus {
     close(state).await;
     let session_id = params.session_id.clone();

@@ -296,7 +296,7 @@ impl TakeoverSection {
                 "takeover-empty",
                 theme,
                 "None yet",
-                ADD_IN_IMAGES,
+                lcd::caps(ADD_IN_IMAGES),
                 cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Assets))),
             ));
         } else {

@@ -14,10 +14,9 @@
 //! it (each a reported gap, `docs/gpui/ui-driver.md`):
 //!
 //! - **Bounds.** GPUI gives each node its rect (`accesskit::Node::bounds`,
-//!   physical pixels) but the dump does not print it. A node's `bounds`,
-//!   when a later snapshot prints it as AccessKit's `{x0, y0, x1, y1}`, is
-//!   read here and turned into window points; until then
-//!   [`UiNode::bounds`] is `None` and a pointer click has no target.
+//!   physical pixels). Videorc's `patches/gpui-pre` prints them as AccessKit's
+//!   `{x0, y0, x1, y1}`; they are read here and turned into window points.
+//!   A node without a rect still has [`UiNode::bounds`] as `None`.
 //! - **Disabled and clipped.** The dump has no disabled flag and no
 //!   clipping, so every node reads enabled and visible (a `disabled: true`
 //!   in `aria`, should it appear, is honoured).

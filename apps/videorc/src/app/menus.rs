@@ -349,12 +349,12 @@ pub fn install(cx: &mut App) {
     #[cfg(target_os = "macos")]
     super::speech::install(cx);
     cx.bind_keys([
-        KeyBinding::new("secondary-k", ToggleSearch, Some(SHELL_GATE)),
-        KeyBinding::new("secondary-k", ToggleSearch, Some("CommandPalette")),
-        KeyBinding::new("secondary-,", ShowSettings, Some(SHELL_GATE)),
-        KeyBinding::new("secondary-/", ShowShortcuts, Some(SHELL_GATE)),
+        KeyBinding::new(secondary!("k"), ToggleSearch, Some(SHELL_GATE)),
+        KeyBinding::new(secondary!("k"), ToggleSearch, Some("CommandPalette")),
+        KeyBinding::new(secondary!(","), ShowSettings, Some(SHELL_GATE)),
+        KeyBinding::new(secondary!("/"), ShowShortcuts, Some(SHELL_GATE)),
         // ⌘J shows Stream Manager (P054); the SM window's own ⌘J focuses Buddy.
-        KeyBinding::new("secondary-j", ShowStreamManager, Some(SHELL_GATE)),
+        KeyBinding::new(secondary!("j"), ShowStreamManager, Some(SHELL_GATE)),
         // Plain D (no modifiers): Electron's theme toggle. Skip while a
         // dialog, menu, select or text field holds the key context.
         KeyBinding::new(
@@ -367,7 +367,7 @@ pub fn install(cx: &mut App) {
         cx.bind_keys(bar.bindings);
         cx.set_menus(bar.menus);
     } else {
-        cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
+        cx.bind_keys([KeyBinding::new(secondary!("q"), Quit, None)]);
         cx.bind_keys(menu_less_bindings(cx, &windows()));
     }
     cx.on_action(|_: &ShowStreamManager, cx| {

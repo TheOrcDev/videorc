@@ -134,6 +134,20 @@ pub fn emblem() -> Arc<Image> {
         .clone()
 }
 
+const EMBLEM_LARGE: &[u8] =
+    include_bytes!("../../../../desktop/src/renderer/src/assets/buddy/buddy-emblem-112.webp");
+/// `buddy-emblem-112.webp`'s size: the emblem is wider than it is tall.
+pub const EMBLEM_LARGE_SIZE: (f32, f32) = (125., 112.);
+
+/// `BuddyEmblem size="lg"` with no picture: the golem's emblem, cut close
+/// (the idle pose carries the stage's margin and reads smaller).
+pub fn emblem_large() -> Arc<Image> {
+    static IMAGE: OnceLock<Arc<Image>> = OnceLock::new();
+    IMAGE
+        .get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Webp, EMBLEM_LARGE.to_vec())))
+        .clone()
+}
+
 /// The stone golem: the default avatar's picture (`BuddyEmblem` with no
 /// picture of its own).
 pub fn default_idle() -> Option<Arc<Image>> {

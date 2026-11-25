@@ -28,13 +28,23 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { writeBuddyPetFixturePack } from './lib/buddy-pet-fixture.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { reloadKeepingSeedJs, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const isWindows = process.platform === 'win32'
+// Plan 260 Phase 3: VIDEORC_APP=gpui drives the GPUI app. Its native preview
+// reports `native-preview-surface-status` from the element's live feed (the
+// same `presentedFrameId` rule), the capture config and Clips go through the
+// Studio smoke handler instead of the renderer, and its watchdog logs
+// `[preview] healing` / `[preview] stalled`.
+const gpuiApp = smokeAppIsGpui()
+assert(
+  !(gpuiApp && isWindows),
+  'The GPUI app has no Windows preview yet (S2.3b); run this smoke on macOS'
+)
 assert(
   process.platform === 'darwin' || isWindows,
   'The Preview overlay presentation smoke requires the macOS or Windows dev app'
@@ -104,10 +114,14 @@ async function setBuddy(on) {
 }
 
 async function setClips(armed) {
-  const switched = await command('eval-js', {
-    code: `return window.__videorcSmokeSetReplayBuffer?.(${armed}, 30) ?? null`
-  })
-  assert.equal(switched.result, true, 'the maintained renderer Clips hook must be available')
+  if (gpuiApp) {
+    await command('studio-replay-buffer', { armed, seconds: 30 })
+  } else {
+    const switched = await command('eval-js', {
+      code: `return window.__videorcSmokeSetReplayBuffer?.(${armed}, 30) ?? null`
+    })
+    assert.equal(switched.result, true, 'the maintained renderer Clips hook must be available')
+  }
   const until = Date.now() + 30_000
   let ring
   do {
@@ -185,8 +199,12 @@ async function phase(label, ms, { programLeg, layers }) {
     programLeg: samples.at(-1).programLeg,
     watchdog: logs
       .slice(logMark)
-      .filter((line) => /\[preview-watch\] (healing|stalled)/.test(line))
-      .map((line) => line.replace(/^.*\[preview-watch\]/, '[preview-watch]'))
+      .filter((line) =>
+        gpuiApp
+          ? /\[preview\] (healing|stalled)/.test(line)
+          : /\[preview-watch\] (healing|stalled)/.test(line)
+      )
+      .map((line) => line.replace(/^.*\[preview(-watch)?\]/, '[preview-watch]'))
   }
   if (isWindows) result.surfaceLayers = await windowsSurfaceLayers(label, layers)
   phases.push(result)
@@ -294,9 +312,20 @@ try {
   })
   ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)
   // A camera-free profile: the dev app has no camera grant.
-  await command('eval-js', {
-    video,
-    code: `
+  if (gpuiApp) {
+    await command('studio-capture-configure', {
+      config: {
+        video,
+        layout: { layoutPreset: 'screen-only' },
+        recordEnabled: true,
+        streamEnabled: false,
+        replayBuffer: { enabled: false, explicit: true }
+      }
+    })
+  } else
+    await command('eval-js', {
+      video,
+      code: `
       const settings = await ${UI_SETTINGS_READY_JS};
       const key = 'videorc.captureConfig';
       const current = JSON.parse(settings.getItem(key) ?? '{}');
@@ -309,9 +338,9 @@ try {
       ${reloadKeepingSeedJs()}
       return true;
     `
-  })
+    })
   const reloadDeadline = Date.now() + 30_000
-  while (true) {
+  while (!gpuiApp) {
     const ready = await command('eval-js', {
       code: 'return !window.__overlayPresentationBeforeReload && typeof window.__videorcSmokeSetReplayBuffer === "function"'
     }).catch(() => null)

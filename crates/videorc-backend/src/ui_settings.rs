@@ -525,7 +525,7 @@ mod tests {
                 )
             })
             .collect();
-        assert!(MAX_VALUE_BYTES * 2 > MAX_BATCH_BYTES);
+        const { assert!(MAX_VALUE_BYTES * 2 > MAX_BATCH_BYTES) };
         assert!(matches!(
             set(
                 &state,

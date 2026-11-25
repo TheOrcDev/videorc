@@ -2431,8 +2431,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab22c23c1304a0b3f34f64568f59a4ce2abbfab3727273a90c66b37924d31089"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -7949,6 +7947,7 @@ dependencies = [
  "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",
+ "image",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-av-foundation",
@@ -7990,6 +7989,7 @@ dependencies = [
  "url",
  "uuid",
  "videorc-protocol",
+ "videorc-updater",
 ]
 
 [[package]]

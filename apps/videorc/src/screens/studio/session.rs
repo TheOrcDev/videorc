@@ -313,7 +313,7 @@ impl SessionSection {
                     .child(
                         div()
                             .min_w_0()
-                            .flex_shrink()
+                            .flex_shrink(1.)
                             .truncate()
                             .text_color(lcd::dim(theme))
                             .child(line),
@@ -346,6 +346,9 @@ impl SessionSection {
                     .disabled(self.agents_stopping)
                     .on_click(stop),
             )
+            // `agents-session-row.tsx:55`, `icon={TerminalIcon}`: the
+            // NavigableRow's leading icon, 16 px, secondary gray.
+            .icon(icon(IconName::Terminal, 16., hsla(theme.muted_foreground)))
             .grouped()
             .into_any_element(),
         )
@@ -505,12 +508,17 @@ impl SessionSection {
                 .items_center()
                 .gap(px(6.))
                 .child(StatusDot::new((fact.id, 0usize)).tone(tone))
-                .child(div().min_w_0().truncate().child(fact.value.clone()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(lcd::caps(fact.value.clone())),
+                )
                 .into_any_element(),
             None => div()
                 .min_w_0()
                 .truncate()
-                .child(fact.value.clone())
+                .child(lcd::caps(fact.value.clone()))
                 .into_any_element(),
         };
         if let Some(page) = fact.opens {
@@ -536,7 +544,7 @@ impl SessionSection {
                     div()
                         .flex_shrink_0()
                         .text_color(lcd::dim(theme))
-                        .child(fact.label.clone()),
+                        .child(lcd::caps(fact.label.clone())),
                 )
                 .child(div().min_w_0().text_color(lcd::lit(theme)).child(value))
                 .into_any_element()

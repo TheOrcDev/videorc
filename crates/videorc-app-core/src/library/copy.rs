@@ -6,6 +6,8 @@
 
 pub const TITLE: &str = "Library";
 pub const DESCRIPTION: &str = "Every recording and livestream you make. Files stay on disk.";
+/// The Local | Cloud strip's accessible name.
+pub const VIEW_LABEL: &str = "Library view";
 
 // The filter bar.
 pub const FILTER_LABEL: &str = "Filter";

@@ -275,6 +275,7 @@ export function createUiDriver(
     if (gpui) {
       const params = { ...gpuiSelector(selector), timeoutMs: ms }
       if (options.via) params.via = options.via
+      if (options.modifiers) params.modifiers = options.modifiers
       return send('ui-click', params, ms)
     }
     return page(
@@ -286,6 +287,89 @@ export function createUiDriver(
        }
        el.click();
        return { clicked: true, element: __ui.describe(el) }`,
+      { spec: electronSelector(selector), ms },
+      ms
+    )
+  }
+
+  /**
+   * Absolute pointer click in window points (GPUI: `ui-click {x,y}`; Electron:
+   * `elementFromPoint` then click). Used for the Scene stage where sources are
+   * painted, not separate accessibility nodes.
+   */
+  async function clickAt(x, y, options = {}) {
+    const ms = waitMs(options)
+    if (gpui) {
+      const params = { x, y, timeoutMs: ms }
+      if (options.modifiers) params.modifiers = options.modifiers
+      return send('ui-click', params, ms)
+    }
+    return page(
+      `const el = document.elementFromPoint(params.x, params.y);
+       if (!el) throw new Error('Nothing at (' + params.x + ', ' + params.y + ')');
+       el.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: params.x, clientY: params.y }));
+       return { clicked: true, x: params.x, y: params.y }`,
+      { x, y },
+      ms
+    )
+  }
+
+  /**
+   * Pointer drag from (fromX, fromY) to (toX, toY) in window points (GPUI:
+   * `ui-drag`; Electron: mouse events on the document). `steps` is how many
+   * move samples between press and release (default 8).
+   */
+  async function drag(fromX, fromY, toX, toY, options = {}) {
+    const ms = waitMs(options)
+    const steps = options.steps ?? 8
+    if (gpui) {
+      const params = { fromX, fromY, toX, toY, steps, timeoutMs: ms }
+      if (options.modifiers) params.modifiers = options.modifiers
+      return send('ui-drag', params, ms)
+    }
+    return page(
+      `const has = (name) => (params.modifiers ?? []).map((m) => m.toLowerCase()).some((m) => name.includes(m));
+       const mods = {
+         shiftKey: has(['shift']),
+         ctrlKey: has(['control', 'ctrl']),
+         altKey: has(['alt', 'option']),
+         metaKey: has(['meta', 'command', 'cmd'])
+       };
+       const fire = (type, x, y, buttons) =>
+         document.elementFromPoint(x, y)?.dispatchEvent(new MouseEvent(type, {
+           bubbles: true, cancelable: true, clientX: x, clientY: y, buttons, ...mods
+         }));
+       fire('mousemove', params.fromX, params.fromY, 0);
+       fire('mousedown', params.fromX, params.fromY, 1);
+       for (let hop = 1; hop <= params.steps; hop += 1) {
+         const t = hop / params.steps;
+         fire(
+           'mousemove',
+           params.fromX + (params.toX - params.fromX) * t,
+           params.fromY + (params.toY - params.fromY) * t,
+           1
+         );
+       }
+       fire('mouseup', params.toX, params.toY, 0);
+       return { dragged: true, fromX: params.fromX, fromY: params.fromY, toX: params.toX, toY: params.toY, steps: params.steps }`,
+      { fromX, fromY, toX, toY, steps, modifiers: options.modifiers ?? [] },
+      ms
+    )
+  }
+
+  /**
+   * Focuses a row or field (GPUI: pointer click through the window's dispatch;
+   * Electron: `el.focus()`). Then `press` without a selector sends keys to it.
+   */
+  async function focus(selector, options = {}) {
+    const ms = waitMs(options)
+    if (gpui) {
+      return send('ui-focus', { ...gpuiSelector(selector), timeoutMs: ms }, ms)
+    }
+    return page(
+      `const el = await __ui.wait(params.spec, params.ms);
+       el.focus();
+       return { focused: true, element: __ui.describe(el) }`,
       { spec: electronSelector(selector), ms },
       ms
     )
@@ -479,6 +563,9 @@ export function createUiDriver(
     waitFor,
     waitForGone,
     click,
+    clickAt,
+    drag,
+    focus,
     type,
     readText,
     isChecked,

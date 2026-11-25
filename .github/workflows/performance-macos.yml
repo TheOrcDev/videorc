@@ -36,8 +36,8 @@ permissions:
   actions: read
 
 concurrency:
-  group: macos-performance-endurance
-  cancel-in-progress: false
+  group: performance-macos-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   performance-contract:

@@ -74,6 +74,7 @@ impl<B: StudioBackend> Studio<B> {
                 match serde_json::from_value::<LiveChatSnapshotWire>(payload.clone()) {
                     Ok(snapshot) => {
                         chat.apply_snapshot(snapshot, true);
+                        self.clear_moderation_operations();
                         true
                     }
                     Err(error) => {
@@ -132,6 +133,7 @@ impl<B: StudioBackend> Studio<B> {
         let mut chat = self.live_chat_tx.borrow().clone();
         chat.apply_snapshot(snapshot, true);
         self.publish_live_chat(chat);
+        self.read_moderation_operations().await;
     }
 
     /// Send text to every writable chat destination (`liveChat.send`).

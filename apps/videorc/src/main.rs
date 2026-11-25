@@ -23,6 +23,25 @@
 //! the app uses the owner's real Videorc data directory, as the shipped app
 //! will.
 
+/// `secondary-` for a static key binding: ⌘ on macOS, Ctrl elsewhere.
+/// gpui-pre 0.3.14's `KeyBinding::new` parses only explicit modifiers (its
+/// `secondary-` needs the host OS, `KeyBinding::load`), and panics on
+/// anything else, so `KeyBinding::new("secondary-k", …)` aborted the app at
+/// launch. `secondary!("k")` is `"cmd-k"` or `"ctrl-k"`, decided where it
+/// was compiled, which is where it runs.
+#[cfg(target_os = "macos")]
+macro_rules! secondary {
+    ($keys:literal) => {
+        concat!("cmd-", $keys)
+    };
+}
+#[cfg(not(target_os = "macos"))]
+macro_rules! secondary {
+    ($keys:literal) => {
+        concat!("ctrl-", $keys)
+    };
+}
+
 mod app;
 mod lcd;
 mod platform;
@@ -157,24 +176,56 @@ fn main() -> Result<()> {
         paths.backend_log_file().display()
     );
 
+    // Connect an agent's bridge (`videorc-mcp`) ships beside the backend.
+    let mut bridge_dir = root.join("target").join(args::build_profile_dir());
     let mut launch = if args.cargo_run {
         BackendLaunch::cargo_run(&root, paths.user_data_dir.clone())
     } else {
-        let backend = args.backend.clone().unwrap_or_else(|| {
-            root.join("target")
-                .join(args::build_profile_dir())
-                .join(videorc_app_core::process::backend_binary_name())
-        });
+        let backend = args
+            .backend
+            .clone()
+            .or_else(|| {
+                // Published sentinel pairs and packaged apps keep their
+                // backend beside the app, independent of the build checkout.
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| {
+                        exe.parent()
+                            .map(|dir| dir.join(videorc_app_core::process::backend_binary_name()))
+                    })
+                    .filter(|path| path.is_file())
+            })
+            .unwrap_or_else(|| {
+                root.join("target")
+                    .join(args::build_profile_dir())
+                    .join(videorc_app_core::process::backend_binary_name())
+            });
         if !backend.is_file() {
             bail!(
                 "backend binary {} is missing; build it with `cargo build -p videorc-backend`, pass --backend, or use --cargo-run",
                 backend.display()
             );
         }
+        if let Some(dir) = backend.parent() {
+            bridge_dir = dir.to_path_buf();
+        }
         BackendLaunch::binary(backend, &root, paths.user_data_dir.clone())
     };
     launch.isolation = paths.isolation;
     launch.app_version = Some(env!("CARGO_PKG_VERSION").to_string());
+    // Electron's `extraResources` (preset pictures and live posters, pet
+    // packs, starter sounds): this checkout's in a dev build, the package's
+    // resources once there is one. The backend gets the managed roots
+    // Electron's main sets, so bundled and imported pictures resolve.
+    let resources = std::env::current_exe().ok().and_then(|exe| {
+        videorc_app_core::bundled::packaged_resources_dir(&exe, |name| std::env::var(name).ok())
+    });
+    let bundled = videorc_app_core::bundled::init(
+        videorc_app_core::bundled::BundledAssets::locate(&root, resources.as_deref()),
+    );
+    launch
+        .extra_env
+        .extend(bundled.backend_env(&paths.user_data_dir));
     launch.path_prepend = vec![videorc_app_core::paths::cargo_bin_dir()];
     let stderr_logger = logger.clone();
     launch.stderr_sink = Some(std::sync::Arc::new(move |line: &str| {
@@ -228,6 +279,7 @@ fn main() -> Result<()> {
                     .chain(screens::studio::chat::EVENTS)
                     .chain(screens::studio::soundboard::EVENTS)
                     .chain(videorc_app_core::library::LIBRARY_EVENTS)
+                    .chain([videorc_app_core::library::cloud_markers::CREATED_EVENT])
                     .chain(["session.log"])
                     // The hide state: Follow the app in front, and Studio's
                     // Scenes section (Hide screen).
@@ -318,6 +370,8 @@ fn main() -> Result<()> {
         logger.clone(),
     );
     studio.set_clips_media_access(Some(permissions.snapshot()));
+    // The bundled pictures, registered with the backend at every READY.
+    app::bundled_backgrounds::install(runtime.handle(), supervisor.state(), logger.clone());
     // Videorc Camera's extension: activated when the backend's switch is on.
     let camera_controller = camera::Camera::install(
         runtime.handle(),
@@ -335,6 +389,22 @@ fn main() -> Result<()> {
         studio.clone(),
     );
     deep_links.set_account_sink(accounts.clone());
+    // The updater (plan 260, L4): no feed until S5.2.
+    let updater = app::updater::start();
+    // Where Connect an agent's bridge lives; after an update a copy the
+    // streamer already has is refreshed (`refreshAgentBridgeCopy`).
+    let agent_bridge = videorc_app_core::desktop::agent_bridge::BridgeLocation {
+        packaged: smoke::shell::packaged(),
+        platform: videorc_app_core::desktop::agent_bridge::BridgePlatform::current(),
+        bundled_dir: bridge_dir,
+        home_dir: videorc_app_core::paths::home_dir(),
+        local_app_data: std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from),
+        app_executable: std::env::current_exe().ok(),
+    };
+    let refresh_bridge = agent_bridge.clone();
+    let _ = runtime.spawn_blocking(move || {
+        videorc_app_core::desktop::agent_bridge::refresh_copy(&refresh_bridge)
+    });
     links::receive(&deep_links, &args.links, LinkSource::CommandLine);
 
     let backend_state = supervisor.state();
@@ -412,6 +482,10 @@ fn main() -> Result<()> {
             cx,
         );
         menus::install(cx);
+        app::updater::install(cx, updater.clone(), studio.clone());
+        cx.set_global(screens::settings::connect_agent::AgentBridge(
+            agent_bridge.clone(),
+        ));
         app::accounts::install(
             cx,
             app::accounts::Shared {
@@ -517,6 +591,9 @@ fn main() -> Result<()> {
         let destinations =
             cx.new(|cx| DestinationsPanel::new(studio.clone(), core_handle.clone(), cx));
         let guests = cx.new(|cx| GuestsPanel::new(studio.clone(), core_handle.clone(), cx));
+        // One poster cache for the Library and Clean cut (plan 260 L3),
+        // before Sidekick, which observes it.
+        app::posters::install(library.clone(), core_handle.clone(), cx);
         let sidekick = cx.new(|cx| {
             screens::sidekick::SidekickScreen::new(
                 studio.clone(),
@@ -534,7 +611,14 @@ fn main() -> Result<()> {
                 cx,
             )
         });
-        let images = cx.new(|cx| ImagesPanel::new(studio.clone(), core_handle.clone(), cx));
+        let images = cx.new(|cx| {
+            ImagesPanel::new(
+                studio.clone(),
+                core_handle.clone(),
+                backend_state.clone(),
+                cx,
+            )
+        });
         let go_live = cx.new(|cx| GoLiveDialog::new(studio.clone(), core_handle.clone(), cx));
         let first_run = cx.new(|cx| {
             FirstRunScreen::new(studio.clone(), permissions.clone(), core_handle.clone(), cx)
@@ -679,7 +763,9 @@ fn main() -> Result<()> {
                 let talk_show_host = cx.new(|cx| {
                     screens::studio::talk_show_host::TalkShowRoomHost::new(
                         studio.clone(),
+                        core_handle.clone(),
                         talk_show.clone(),
+                        paths.user_data_dir.clone(),
                         cx,
                     )
                 });
@@ -731,8 +817,15 @@ fn main() -> Result<()> {
                 });
                 palette.update(cx, |palette, _| palette.bind_dialogs(dialogs.clone()));
                 cloud_resume.update(cx, |slot, _| slot.bind_dialogs(dialogs.clone()));
-                let sounds =
-                    cx.new(|cx| SoundsPanel::new(studio.clone(), core_handle.clone(), window, cx));
+                let sounds = cx.new(|cx| {
+                    SoundsPanel::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        backend_state.clone(),
+                        window,
+                        cx,
+                    )
+                });
                 // Plan 260 Phase 3 (L1): the Scene page ⌘3.
                 let scene = cx.new(|cx| {
                     screens::scene::ScenePage::new(
@@ -971,17 +1064,15 @@ fn main() -> Result<()> {
         });
         // Window → Preview and ⌘P (P1506, P052): an open Preview closes, a
         // closed one opens where it was; the main window comes up for it.
+        // Every platform: without a floating window (Windows today) it still
+        // toggles the closed state, and `toggle_open` docks it.
         let toggle_preview = preview_slot.clone();
         cx.on_action(move |_: &menus::TogglePreview, cx| {
             let Some(preview) = toggle_preview.borrow().clone() else {
                 return;
             };
             let _ = main_window.update(cx, |_, window, _| window.activate_window());
-            preview.update(cx, |preview, cx| {
-                if preview.can_float() {
-                    preview.toggle_open(cx);
-                }
-            });
+            preview.update(cx, |preview, cx| preview.toggle_open(cx));
         });
         cx.on_action(move |_: &menus::ShowImages, cx| {
             let _ = main_window.update(cx, |shell, window, cx| {
@@ -1026,7 +1117,8 @@ fn main() -> Result<()> {
         let _ = main_window.update(cx, |_shell, window, cx| {
             let shell_weak = cx.weak_entity();
             sources.update(cx, |panel, _| panel.bind_shell(shell_weak.clone()));
-            output.update(cx, |panel, _| panel.bind_shell(shell_weak));
+            output.update(cx, |panel, _| panel.bind_shell(shell_weak.clone()));
+            images.update(cx, |panel, _| panel.bind_shell(shell_weak));
             ExitGuard::watch_main_window(window, cx);
             cx.observe_window_activation(window, move |_, window, cx| {
                 if window.is_window_active() {

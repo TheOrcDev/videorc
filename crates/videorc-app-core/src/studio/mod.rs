@@ -83,6 +83,7 @@ pub mod clips_ring;
 pub mod cloud;
 pub mod cloud_clips;
 pub mod cloud_iso;
+pub mod cloud_program_health;
 pub mod dashboard;
 pub mod families;
 pub mod follow_runner;
@@ -96,13 +97,20 @@ pub mod linux_desktop;
 pub mod live_audio;
 pub mod live_chat;
 pub mod live_sources;
+pub mod moderation;
 pub mod output_quality;
 pub mod performance_check;
 mod platform_lifecycle;
 mod platforms;
 pub mod preview_scene;
+pub mod preview_startup;
 pub mod recordings_folder;
 mod recordings_folder_actions;
+pub mod room_background;
+pub mod room_frames;
+pub mod room_media;
+pub mod room_scene;
+pub mod room_screen_source;
 pub mod scene_editor;
 pub mod scene_on_stream;
 pub mod scene_switch;
@@ -223,7 +231,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 41] = [
+pub const STUDIO_EVENTS: [&str; 43] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -277,9 +285,13 @@ pub const STUDIO_EVENTS: [&str; 41] = [
     live_chat::SNAPSHOT_EVENT,
     live_chat::CLEARED_EVENT,
     live_chat::PROVIDER_EVENT,
+    moderation::OPERATION_EVENT,
     // The Output page's performance check (it holds the Clips ring).
     performance_check::PROGRESS_EVENT,
     performance_check::COMPLETED_EVENT,
+    // Destinations' Watchdog phones and After the stream read afresh when
+    // the Videorc account changes.
+    crate::accounts::methods::CHANGED_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -971,6 +983,8 @@ pub struct Studio<B: StudioBackend> {
     dashboard: Arc<Mutex<dashboard::DashboardInner>>,
     /// Live chat for the Stream Manager (and Studio's Chat section later).
     live_chat_tx: watch::Sender<crate::chat::LiveChat>,
+    /// Chat removals (`liveChat.moderationOperation` ledger).
+    moderation_tx: watch::Sender<Vec<crate::stream_manager::removal::ModerationOperation>>,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -1044,6 +1058,7 @@ impl<B: StudioBackend> Studio<B> {
             watch::channel(crate::stream_manager::dashboard::LiveDashboard::default());
         let dashboard = Arc::new(Mutex::new(dashboard::DashboardInner::new(&now_iso())));
         let (live_chat_tx, _) = watch::channel(crate::chat::LiveChat::default());
+        let (moderation_tx, _) = watch::channel(Vec::new());
         Self {
             backend,
             config,
@@ -1080,6 +1095,7 @@ impl<B: StudioBackend> Studio<B> {
             dashboard_tx,
             dashboard,
             live_chat_tx,
+            moderation_tx,
         }
     }
 
@@ -1402,8 +1418,11 @@ impl<B: StudioBackend> Studio<B> {
                 // stores do (`stream.targets`, `stream.health`); it never
                 // owns the early return.
                 let _ = self.handle_dashboard_event(&event, &payload);
+                // Destinations' account-bound sections read afresh.
+                self.handle_account_event(&event).await;
                 if self.handle_performance_event(&event, &payload)
                     || self.handle_live_chat_event(&event, &payload)
+                    || self.handle_moderation_event(&event, &payload)
                     || self.handle_chat_commands_event(&event, &payload)
                     || self.handle_watchdog_event(&event, &payload)
                     || self.handle_cloud_event(&event, &payload).await

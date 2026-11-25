@@ -13,8 +13,11 @@
 //! create and redo spends the streamer's images: nothing here runs in a
 //! test.
 //!
-//! Not yet in this flavour: the animated stream demo (a still one) and
-//! shrinking a picture over 3 MB before it is sent.
+//! A chosen picture is fitted within 1024 px and shrunk under 3 MB off the
+//! main thread before it is kept (`prepareBuddyLookPicture`); only one that
+//! can't get under 3 MB is refused.
+//!
+//! Not yet in this flavour: the animated stream demo (a still one).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -49,7 +52,7 @@ use videorc_kit::textarea::{Textarea, TextareaState};
 use videorc_kit::theme::{self, TypeScale, hsla, with_alpha};
 use videorc_kit::tokens::{Theme, radius, text};
 
-use super::files::{self, ChooseError, ChosenPicture, PictureKind};
+use super::files::{self, ChooseError, ChosenPicture, LookPictureError};
 use super::gate::{self, Gate};
 use super::look::DRAFT_PREVIEW_PX;
 use super::onboarding_view::{self as view, Input as Typed};
@@ -550,37 +553,29 @@ impl AvatarScreen {
                 }
                 cx.notify();
             });
+            // Decoding, fitting and encoding run on a blocking worker.
             let read = runtime
-                .spawn_blocking(move || {
-                    files::read_picture(
-                        &path,
-                        &[PictureKind::Png, PictureKind::Jpeg, PictureKind::Webp],
-                        files::LOOK_PICTURE_MAX_BYTES,
-                    )
-                })
+                .spawn_blocking(move || files::read_look_picture(&path))
                 .await
-                .unwrap_or(Err(ChooseError::Unreadable));
+                .unwrap_or(Err(LookPictureError::Choose(ChooseError::Unreadable)));
             let _ = this.update(cx, |screen, cx| {
                 let Some(onboarding) = screen.onboarding.as_mut() else {
                     return;
                 };
                 onboarding.preparing = false;
                 match read {
-                    Ok(picture)
-                        if picture.base64.len() as u64
-                            > files::LOOK_SEND_MAX_BYTES.div_ceil(3) * 4 =>
-                    {
-                        onboarding.picture_error = Some(view::PICTURE_SEND_TOO_LARGE);
-                    }
                     Ok(picture) => onboarding.picture = Some(picture),
-                    Err(ChooseError::Kind) => {
+                    Err(LookPictureError::Choose(ChooseError::Kind)) => {
                         onboarding.picture_error = Some(view::PICTURE_TYPE_ERROR);
                     }
-                    Err(ChooseError::TooLarge) => {
+                    Err(LookPictureError::Choose(ChooseError::TooLarge)) => {
                         onboarding.picture_error = Some(view::PICTURE_SIZE_ERROR);
                     }
-                    Err(ChooseError::Unreadable) => {
+                    Err(LookPictureError::Choose(ChooseError::Unreadable)) => {
                         onboarding.picture_error = Some(view::PICTURE_UNREADABLE);
+                    }
+                    Err(LookPictureError::CantShrink) => {
+                        onboarding.picture_error = Some(view::PICTURE_TOO_LARGE);
                     }
                 }
                 cx.notify();

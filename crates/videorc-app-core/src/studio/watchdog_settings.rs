@@ -4,18 +4,27 @@
 //! Pure view rules live in [`crate::livestream::watchdog_section`]. This
 //! module holds the saved settings and phone device count on a watch
 //! channel. An older backend never answers: `settings` stays `None` and
-//! the section stays away. L2 fills any protocol typing gaps; the RPC
-//! names here match Electron.
+//! the section stays away. As `WatchdogSection`: the phones are read once
+//! per Premium account (again after `account.changed` or when Premium
+//! comes back), and a failed save toasts. The RPC names match Electron.
 
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use super::{Studio, StudioBackend};
-use crate::livestream::watchdog_section::{self, Settings};
+use crate::livestream::watchdog_section::{self, SAVE_OBJECT, Settings};
+use crate::user_error::{Failure, UserErrorContext, toast_user_error};
 
 pub const SETTINGS_GET: &str = "watchdog.settings.get";
 pub const SETTINGS_SET: &str = "watchdog.settings.set";
 pub const PHONE_DEVICES: &str = "watchdog.phone.devices";
+
+/// `toastUserError(error, { action: 'save', object: 'the watchdog settings' })`.
+const SAVE_SETTINGS: UserErrorContext = UserErrorContext {
+    action: "save",
+    object: SAVE_OBJECT,
+};
+const SAVE_TOAST_ID: &str = "watchdog-settings-save";
 
 /// What Destinations' Watchdog section reads.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -29,6 +38,9 @@ pub struct WatchdogSettingsStore {
     pub show_code: bool,
     /// "Copied" flash after Copy link.
     pub copied: bool,
+    /// `watchdog.phone.devices` went out for this Premium account; the
+    /// window's rebuilds never ask twice (a failed read stays unread).
+    phone_devices_asked: bool,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -61,6 +73,41 @@ impl<B: StudioBackend> Studio<B> {
             }
             Err(_) => {}
         }
+    }
+
+    /// The window's rebuild: `true` once per Premium account, when the
+    /// phones should be read (then call
+    /// [`Self::refresh_watchdog_phone_devices`]). Losing Premium forgets the
+    /// count, so getting it back reads again (`useEffect([client, premium])`).
+    pub fn claim_watchdog_phone_read(&self, premium: bool) -> bool {
+        let mut claimed = false;
+        self.edit_watchdog_settings(|store| {
+            if !premium {
+                let changed = store.phone_devices.is_some();
+                store.phone_devices_asked = false;
+                store.phone_devices = None;
+                return changed;
+            }
+            if store.settings.is_none() || store.phone_devices_asked {
+                return false;
+            }
+            store.phone_devices_asked = true;
+            claimed = true;
+            false
+        });
+        claimed
+    }
+
+    /// `account.changed`: another account's phones are not this one's.
+    pub(super) fn watchdog_account_changed(&self) {
+        self.edit_watchdog_settings(|store| {
+            let changed = store.phone_devices.is_some();
+            store.phone_devices_asked = false;
+            store.phone_devices = None;
+            store.show_code = false;
+            store.copied = false;
+            changed
+        });
     }
 
     /// Premium: `watchdog.phone.devices` for the Phone row's count.
@@ -112,6 +159,11 @@ impl<B: StudioBackend> Studio<B> {
                 self.config
                     .logger
                     .warn(format!("Studio: {SETTINGS_SET} did not save ({error})."));
+                if let Some(command) =
+                    toast_user_error(Failure::Rpc(&error), SAVE_SETTINGS, SAVE_TOAST_ID)
+                {
+                    self.post(vec![command]);
+                }
             }
         }
     }

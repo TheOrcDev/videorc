@@ -8,13 +8,15 @@
 
 use std::collections::BTreeMap;
 
-use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, px, relative};
 use serde_json::json;
 pub use videorc_app_core::buddy::reactions::*;
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::field::FieldGroup;
+use videorc_kit::icon::IconName;
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
-use videorc_kit::select::Select;
+use videorc_kit::select::{Select, SelectSize};
 use videorc_kit::slider::{Slider, SliderEvent, SliderState};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, TypeScale, hsla};
@@ -209,8 +211,11 @@ impl SaveSection {
     }
 }
 
+/// `last`: the config grid's own hairline closes it (two columns), so the
+/// section draws none.
 pub(super) fn render_reactions(
     screen: &AvatarScreen,
+    last: bool,
     window: &mut Window,
     cx: &mut Context<AvatarScreen>,
 ) -> Option<AnyElement> {
@@ -222,6 +227,7 @@ pub(super) fn render_reactions(
     let screen_has_preview = screen.preview.read(cx).test_pack().is_some();
 
     let mut section = PanelSection::new("avatar-reactions")
+        .last(last)
         .title("Reactions")
         .description(format!(
             "What {} does on stream when something happens. Try plays it here.",
@@ -238,6 +244,7 @@ pub(super) fn render_reactions(
             let chosen = persona.reactions.get(&trigger).cloned();
             let fallback = trigger_outcome(trigger, &BTreeMap::new(), &pack);
             let mut select = Select::new(SharedString::from(format!("avatar-reaction-{key}")))
+                .size(SelectSize::Xs)
                 .width(160.)
                 .accessibility_label(format!("{title} reaction"))
                 .value(Some(SharedString::from(
@@ -275,6 +282,7 @@ pub(super) fn render_reactions(
             let try_it = Button::new(SharedString::from(format!("avatar-reaction-try-{key}")))
                 .variant(ButtonVariant::Ghost)
                 .size(ButtonSize::Xs)
+                .icon(IconName::Play)
                 .label("Try")
                 .accessibility_label(format!("Try the {} reaction", title.to_lowercase()))
                 .disabled(try_id.is_none() || !screen_has_preview)
@@ -305,6 +313,7 @@ pub(super) fn render_reactions(
     Some(section.into_any_element())
 }
 
+/// The config grid's last cell: its hairline is the grid's.
 pub(super) fn render_motion(
     screen: &AvatarScreen,
     window: &mut Window,
@@ -317,23 +326,46 @@ pub(super) fn render_motion(
     let motion = &persona.motion;
     let shown = widgets.intensity.read(cx).value().end();
 
-    let mut ticks = div().flex().justify_between().items_center();
+    // The ticks sit under their values (`left: value%`): the ends hang
+    // 6 px outside the track, a middle one is centred on its value.
+    let mut ticks = div().relative().w_full().h(px(24.));
     for (label, value) in MOTION_TICKS {
         let pick = entity.clone();
-        ticks = ticks.child(
-            Button::new(SharedString::from(format!("avatar-motion-tick-{label}")))
-                .variant(ButtonVariant::Ghost)
-                .size(ButtonSize::Xs)
-                .label(label)
-                .on_click(move |_, window, cx| {
-                    pick.update(cx, |screen, cx| screen.pick_tick(value, window, cx))
-                }),
-        );
+        let tick = Button::new(SharedString::from(format!("avatar-motion-tick-{label}")))
+            .variant(ButtonVariant::Ghost)
+            .size(ButtonSize::Xs)
+            .dense(true)
+            .accessibility_label(label)
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .line_height(px(16.))
+                    .text_color(hsla(t.muted_foreground))
+                    .child(label),
+            )
+            .on_click(move |_, window, cx| {
+                pick.update(cx, |screen, cx| screen.pick_tick(value, window, cx))
+            });
+        let place = div().absolute().top_0();
+        ticks = ticks.child(if value <= 0. {
+            place.left(px(-6.)).child(tick)
+        } else if value >= 1. {
+            place.right(px(-6.)).child(tick)
+        } else {
+            // A zero-wide box at the value, centring the tick on it.
+            place
+                .left(relative(value))
+                .w(px(0.))
+                .flex()
+                .justify_center()
+                .child(tick)
+        });
     }
+    // `Field`: the label line, then the slider and its ticks (`gap-1`).
     let intensity = div()
         .flex()
         .flex_col()
-        .gap(px(6.))
+        .gap(px(12.))
         .child(
             div()
                 .flex()
@@ -343,8 +375,14 @@ pub(super) fn render_motion(
                 .child(label_text("Motion", t))
                 .child(meta(format!("{}%", (shown * 100.0).round() as i32), t)),
         )
-        .child(Slider::new(&widgets.intensity).accessibility_label("Motion"))
-        .child(ticks);
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(Slider::new(&widgets.intensity).accessibility_label("Motion"))
+                .child(ticks),
+        );
 
     let sleep_entity = entity.clone();
     let mut sleep = Select::new("avatar-sleep-after")
@@ -368,16 +406,17 @@ pub(super) fn render_motion(
         .on_change(move |on, _, cx| breathe.update(cx, |screen, cx| screen.set_breathing(on, cx)));
 
     let mut section = PanelSection::new("avatar-motion")
+        .last(true)
         .title("Motion")
         .description(format!(
             "How {} moves on stream and here. Off keeps its poses and drops the bounce.",
             persona.name
         ))
+        // `FieldGroup variant="grouped"`: one inset card, a hairline between
+        // the three.
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(20.))
+            FieldGroup::new()
+                .grouped()
                 .child(intensity)
                 .child(row(
                     "Sleep after",

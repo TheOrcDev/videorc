@@ -14,7 +14,7 @@
 import { useSyncExternalStore } from 'react'
 import { BackendClient } from '@/backendClient'
 import type { LocalOffsetSpan, LocalOffsets } from '../../../shared/backend'
-import { offsetTimeZone } from '@/lib/schedule-time'
+import { offsetTimeZone } from '@/lib/offset-time-zone'
 
 /** Re-read the spans this often, and when the system zone changes. */
 const REFRESH_MS = 6 * 60 * 60_000

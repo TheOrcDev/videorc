@@ -383,7 +383,8 @@ pub struct ShortcutsView {
     pub unavailable: Option<String>,
     pub action_rows: Vec<RecorderRow>,
     pub scene_rows: Vec<RecorderRow>,
-    /// The reference list: each group's rows with their keys as labels.
+    /// The reference list: each group's rows with their keys as
+    /// accelerators ("CmdOrCtrl+Shift+G"), for the key chips to print.
     pub app_groups: Vec<(&'static str, Vec<(String, Vec<String>)>)>,
 }
 
@@ -447,16 +448,11 @@ pub fn shortcuts_view(input: ShortcutsInput<'_>) -> ShortcutsView {
     let app_groups: Vec<(&'static str, Vec<(String, Vec<String>)>)> = shortcuts_by_group()
         .into_iter()
         .map(|(group, rows)| {
+            // Raw accelerators: the page's key chips parse them, so a
+            // letter shows as "⇧⌘G", not a label re-read as one key.
             let rows: Vec<(String, Vec<String>)> = rows
                 .into_iter()
-                .map(|entry| {
-                    let keys: Vec<String> = entry
-                        .accelerators
-                        .iter()
-                        .map(|key| accelerator_label(Some(key.as_str()), input.platform))
-                        .collect();
-                    (entry.label, keys)
-                })
+                .map(|entry| (entry.label, entry.accelerators))
                 .collect();
             (group.label(), rows)
         })
@@ -700,7 +696,7 @@ mod tests {
         assert_eq!(view.app_groups[0].0, "Navigation");
         assert_eq!(
             view.app_groups[0].1[0],
-            ("Studio".to_string(), vec!["⌘1".to_string()])
+            ("Studio".to_string(), vec!["CmdOrCtrl+1".to_string()])
         );
 
         let wayland = shortcuts_view(ShortcutsInput {

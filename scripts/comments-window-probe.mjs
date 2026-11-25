@@ -7,12 +7,17 @@
 // state. Real-machine bound (Electron + a display).
 //
 //   node scripts/comments-window-probe.mjs
+//   VIDEORC_APP=gpui pnpm probe:comments-window
 //
-// Exits 0 when all assertions pass, 1 otherwise.
+// On GPUI this delegates to comments-window-probe-gpui.mjs (a GPUI-specific
+// probe: open/place/raise/hide + composited capture; not a port of the
+// Electron chat fixtures). Exits 0 when all assertions pass, 1 otherwise.
 
 import { copyFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
 import {
   COMMENTS_COMMAND_RELAY_TIMEOUT_MS,
@@ -24,7 +29,16 @@ import {
   commentsWindowFrameWidthFor
 } from './lib/comments-window-bounds.mjs'
 import { probeCommentsTotals } from './lib/comments-totals-probe.mjs'
-import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui, stopProcess } from './lib/app-launcher.mjs'
+
+if (smokeAppIsGpui()) {
+  const gpuiProbe = fileURLToPath(new URL('./comments-window-probe-gpui.mjs', import.meta.url))
+  const result = spawnSync(process.execPath, [gpuiProbe, ...process.argv.slice(2)], {
+    stdio: 'inherit',
+    env: process.env
+  })
+  process.exit(result.status === null ? 2 : result.status)
+}
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const outputDirectory = join(tmpdir(), `videorc-comments-window-probe-${Date.now()}`)

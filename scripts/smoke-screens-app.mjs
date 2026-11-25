@@ -7,7 +7,7 @@ import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -20,6 +20,10 @@ const userDataDir =
   mkdtempSync(join(tmpdir(), 'videorc-screens-smoke-user-data-'))
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
+// Plan 260 Phase 3: VIDEORC_APP=gpui. import-takeover-image and main-window-id
+// run on the GPUI app; capture-page stays refused (gap 3), so the live Assets
+// theme screenshots and the renderer mic eval-js are Electron-only.
+const gpuiApp = smokeAppIsGpui()
 
 mkdirSync(outputDirectory, { recursive: true })
 
@@ -246,6 +250,12 @@ try {
       console.log(`Live takeover import PASS: ${mode}`)
     }
     async function captureLiveAssetsThemes() {
+      if (gpuiApp) {
+        console.log(
+          'SKIP: live Assets theme screenshots need capture-page (GPUI gap 3) and the Electron Assets DOM.'
+        )
+        return
+      }
       await requestSmokeCommand(smoke, 'resize-window', { width: 960, height: 660 }, { timeoutMs })
       for (const theme of ['light', 'dark']) {
         await requestSmokeCommand(
@@ -297,6 +307,12 @@ try {
       }
     }
     async function assertMicrophoneMuted(expected) {
+      if (gpuiApp) {
+        console.log(
+          `SKIP: takeover microphone UI settings check (eval-js) on GPUI; expected muted=${expected}`
+        )
+        return
+      }
       const state = await requestSmokeCommand(
         smoke,
         'eval-js',

@@ -81,7 +81,10 @@ impl DestinationsPanel {
     ) -> AnyElement {
         let t = theme::current(window, cx).theme();
         let entity = cx.entity();
-        let mut section = PanelSection::new("destinations-chat-commands").title(SECTION_TITLE);
+        // The lead column's last section: no hairline under it (`last:border-b-0`).
+        let mut section = PanelSection::new("destinations-chat-commands")
+            .title(SECTION_TITLE)
+            .last(true);
 
         if store.load_failed {
             section = section.child(
@@ -244,7 +247,10 @@ impl DestinationsPanel {
             return div().into_any_element();
         }
         if !editor.dialog.is_open() {
-            editor.dialog.open(window, cx);
+            // Escape / backdrop / X closed the kit sheet — same as Cancel.
+            // Do not reopen: that left the dialog ignoring Escape.
+            editor.editing = None;
+            return div().into_any_element();
         }
         let title = chat_commands::dialog_title(editor.editing.as_ref().and_then(|c| c.as_ref()));
         let entity = cx.entity();
@@ -297,6 +303,15 @@ impl DestinationsPanel {
 
         Dialog::new("chat-command-dialog", &editor.dialog, title)
             .size(DialogSize::Md)
+            .on_open_change({
+                let entity = entity.clone();
+                move |open, _, window, cx| {
+                    if !open {
+                        // Escape / backdrop / X — same as Cancel.
+                        entity.update(cx, |this, cx| this.close_command_editor(window, cx));
+                    }
+                }
+            })
             .child(body)
             .footer(
                 Button::new("cmd-cancel")
@@ -367,8 +382,11 @@ impl DestinationsPanel {
     }
 
     fn close_command_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(editor) = self.command_editor.as_mut() {
-            editor.editing = None;
+        let Some(editor) = self.command_editor.as_mut() else {
+            return;
+        };
+        editor.editing = None;
+        if editor.dialog.is_open() {
             editor.dialog.close(window, cx);
         }
         cx.notify();

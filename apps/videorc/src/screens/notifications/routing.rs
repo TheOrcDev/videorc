@@ -163,6 +163,12 @@ impl Hub {
                         }
                     }
                 }
+                // P1443 (`AgentsWatcher`): an agent's on-air action, named.
+                sources::app::AGENTS_ACTIVITY_EVENT => {
+                    if let Some(input) = sources::app::agent_activity_notice(&payload) {
+                        self.store.publish(input, now());
+                    }
+                }
                 _ => {}
             },
             BackendEvent::EventsLagged(_) | BackendEvent::ClientLagged { .. } => {

@@ -125,6 +125,9 @@ pub struct Preview {
     scrolled_away: bool,
     /// The Studio, for the grants the preview's sources wait for (P141).
     studio: Option<std::sync::Arc<videorc_app_core::Studio<videorc_app_core::BackendClient>>>,
+    /// The slot each host last laid the video out in, in that window's
+    /// points (docked, floating): where `preview-surface-sample` reads.
+    smoke_slots: [Option<gpui::Bounds<gpui::Pixels>>; 2],
 }
 
 impl Preview {
@@ -155,6 +158,7 @@ impl Preview {
                 logger: setup.logger,
                 closed: false,
                 closed_from: WindowMode::Docked,
+                smoke_slots: [None, None],
                 studio: Some(setup.studio),
             })
         }
@@ -270,6 +274,7 @@ impl Preview {
                 frame: None,
                 closed: false,
                 closed_from: WindowMode::Docked,
+                smoke_slots: [None, None],
                 studio: Some(words_studio),
             }
         })
@@ -288,6 +293,7 @@ impl Preview {
             frame: None,
             closed: false,
             closed_from: WindowMode::Docked,
+            smoke_slots: [None, None],
             studio: None,
         }
     }
@@ -463,11 +469,13 @@ impl Preview {
 
     /// What the Studio slot says, or nothing while a frame shows there.
     pub fn docked_words(&self) -> Option<PreviewWords> {
-        if !self.native_ready() {
-            return Some(words::FAILED);
-        }
+        // Closed first: a closed Preview without the native path (Windows
+        // today) reads as closed, not as failed.
         if self.is_closed() {
             return Some(words::LIVES_IN_ITS_OWN_WINDOW);
+        }
+        if !self.native_ready() {
+            return Some(words::FAILED);
         }
         #[cfg(target_os = "linux")]
         if self.mode == WindowMode::Docked
@@ -528,6 +536,77 @@ impl Preview {
                 "title": words.title,
                 "detail": words.detail,
             })),
+        })
+    }
+
+    /// The slot the video is laid out in where the preview shows now (the
+    /// main window's while docked, its own window's while floating), in that
+    /// window's points; `None` before it was laid out.
+    pub fn smoke_slot(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        match self.mode {
+            WindowMode::Docked => self.smoke_slots[0],
+            WindowMode::Floating => self.smoke_slots[1],
+        }
+    }
+
+    /// The program canvas the frames are drawn at (the recording video's
+    /// size): the layer contain-fits it into the slot.
+    pub fn smoke_canvas(&self) -> Option<(u32, u32)> {
+        // The frames' own size when one has drawn; the Studio's video
+        // settings before that.
+        #[cfg(target_os = "macos")]
+        if let Some(native) = self.native.as_ref() {
+            let telemetry = native.element.telemetry();
+            if telemetry.frame_width > 0 && telemetry.frame_height > 0 {
+                return Some((telemetry.frame_width, telemetry.frame_height));
+            }
+        }
+        let studio = self.studio.as_ref()?;
+        let video = videorc_app_core::livestream::plan::recording_video(
+            &studio.snapshot().settings.capture_doc,
+        );
+        (video.width > 0 && video.height > 0).then_some((video.width, video.height))
+    }
+
+    /// `native-preview-surface-status` (Electron's `nativePreviewSurfaceStatus`):
+    /// what the element presents, read live from its feed (the status the
+    /// log reads refreshes only every 750 ms). `presentedFrameId` advances
+    /// with every frame the layer shows.
+    pub fn smoke_surface_status(&self) -> serde_json::Value {
+        #[cfg(target_os = "macos")]
+        if let Some(native) = self.native.as_ref() {
+            let telemetry = native.element.telemetry();
+            let status = native.element.status();
+            return serde_json::json!({
+                "transport": "native-surface",
+                "state": status.phase.as_str(),
+                "presentedFrameId": telemetry.presented_frame_id,
+                "presented": telemetry.presented,
+                "framesRendered": telemetry.frames_rendered,
+                "frameWidth": telemetry.frame_width,
+                "frameHeight": telemetry.frame_height,
+                "presentedSceneRevision": telemetry.presented_scene_revision,
+                "message": status.reason.or(telemetry.surface_message),
+                // The window probe's geometry oracle: the rect the app set on
+                // the layer, the one Core Animation displays, and the slot it
+                // was laid out in (window points).
+                "layerFrame": native.element.frame().map(rect_json),
+                "displayedFrame": native.element.displayed_frame().map(rect_json),
+                "slot": self.smoke_slot().map(|slot| {
+                    serde_json::json!({
+                        "x": f32::from(slot.origin.x),
+                        "y": f32::from(slot.origin.y),
+                        "width": f32::from(slot.size.width),
+                        "height": f32::from(slot.size.height),
+                    })
+                }),
+            });
+        }
+        serde_json::json!({
+            "transport": null,
+            "state": self.phase.as_str(),
+            "presentedFrameId": null,
+            "message": "This platform's GPUI preview has no native surface to report yet.",
         })
     }
 
@@ -875,6 +954,10 @@ impl Preview {
     /// place on the screen.
     #[cfg(target_os = "macos")]
     pub(crate) fn place(&mut self, host: Host, slot: Bounds<Pixels>, geometry: WindowGeometry) {
+        self.smoke_slots[match host {
+            Host::Docked => 0,
+            Host::Floating => 1,
+        }] = Some(slot);
         let Some(native) = self.native.as_mut() else {
             return;
         };
@@ -897,6 +980,10 @@ impl Preview {
         let visible = !self.closed && (self.mode == WindowMode::Floating || self.docked_shown);
         if let Some(native) = self.native.as_mut() {
             native.element.set_visible(visible);
+            // A closed Preview presents nothing and the backend renders no
+            // preview frames (Electron destroys its host on close); a Preview
+            // that is only off screen (another page) keeps its surface.
+            native.element.park(self.closed);
         }
     }
 
@@ -989,15 +1076,80 @@ impl Preview {
             ),
         }
         self.floating = Some(handle);
-        if self.attach_to(Host::Floating) {
+        let attached = self.attach_to(Host::Floating);
+        if attached {
             self.mode = WindowMode::Floating;
             self.apply_visibility();
             self.logger
                 .log(Level::Info, "[preview] the Preview is in its own window");
+            // The window opened hidden and draws nothing until it shows
+            // (gpui's display link waits for a visible window), so its canvas
+            // can't place the layer yet: place it from the window's viewport
+            // here, where the canvas will (the whole content).
+            let placed = handle.update(cx, |_, window, cx| {
+                let slot = Bounds {
+                    origin: gpui::point(px(0.), px(0.)),
+                    size: window.viewport_size(),
+                };
+                (slot, macos::geometry_of(window, slot, cx))
+            });
+            if let Ok((slot, geometry)) = placed {
+                self.place(Host::Floating, slot, geometry);
+            }
         }
         // The window's canvas places the layer on its next draw.
         let _ = handle.update(cx, |_, window, _| window.refresh());
+        self.reveal_floating(handle, attached, cx);
         cx.notify();
+    }
+
+    /// The Preview window shows once the layer has presented a frame in it,
+    /// as the docked slot shows its video only from its first frame: never a
+    /// black window first (L6, 2026-11-25). A window without the video (no
+    /// host view) shows at once with its words; one whose frame doesn't come
+    /// shows after [`REVEAL_DEADLINE`] anyway, with "Opening preview…" or the
+    /// failure, so a slow or failed Preview is never an invisible one.
+    #[cfg(target_os = "macos")]
+    fn reveal_floating(
+        &self,
+        handle: WindowHandle<floating::FloatingPreview>,
+        attached: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let from = self
+            .native
+            .as_ref()
+            .filter(|_| attached)
+            .map(|native| native.element.telemetry().presented_frame_id);
+        let Some(from) = from else {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            return;
+        };
+        let started = std::time::Instant::now();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            loop {
+                let presented = this.update(cx, |preview, _| {
+                    preview
+                        .native
+                        .as_ref()
+                        .map(|native| native.element.telemetry().presented_frame_id)
+                });
+                match presented {
+                    // The Preview is gone (quit): nothing to show.
+                    Err(_) => return,
+                    Ok(Some(id)) if id <= from => {}
+                    // A frame presented here, or the native path went down.
+                    Ok(_) => break,
+                }
+                if started.elapsed() >= REVEAL_DEADLINE {
+                    break;
+                }
+                cx.background_executor().timer(REVEAL_POLL).await;
+            }
+            // A window docked or closed meanwhile is gone: the update fails.
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        })
+        .detach();
     }
 
     /// Docks the preview back and closes its window (the Studio's button).
@@ -1075,6 +1227,13 @@ impl Preview {
     }
 }
 
+/// The longest the Preview window stays hidden waiting for its first frame.
+#[cfg(target_os = "macos")]
+const REVEAL_DEADLINE: std::time::Duration = std::time::Duration::from_millis(1000);
+/// How often the hidden window looks for that frame (about a display frame).
+#[cfg(target_os = "macos")]
+const REVEAL_POLL: std::time::Duration = std::time::Duration::from_millis(16);
+
 /// Opens the Preview window, outside any update of the Preview entity (see
 /// [`Preview::float`]), and hands it to the Preview.
 #[cfg(target_os = "macos")]
@@ -1102,6 +1261,9 @@ fn open_floating(preview: WeakEntity<Preview>, cx: &mut App) {
             // goes to the background. Keep on top raises its level.
             kind: WindowKind::Normal,
             window_min_size: Some(size(px(frame::MIN_WIDTH), px(frame::MIN_HEIGHT))),
+            // Hidden until the layer has presented in it
+            // (`Preview::reveal_floating`): never a black window first.
+            show: false,
             ..Default::default()
         },
         move |window, cx| floating::FloatingPreview::build(builder, remembered, window, cx),
@@ -1147,4 +1309,15 @@ fn words_card(words: PreviewWords) -> impl IntoElement {
         );
     }
     card
+}
+
+/// A layer rect for the smoke driver's answers.
+#[cfg(target_os = "macos")]
+fn rect_json(rect: videorc_preview::LayerRect) -> serde_json::Value {
+    serde_json::json!({
+        "x": rect.x,
+        "y": rect.y,
+        "width": rect.width,
+        "height": rect.height,
+    })
 }
