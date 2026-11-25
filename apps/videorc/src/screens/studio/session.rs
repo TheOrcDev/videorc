@@ -25,11 +25,13 @@ use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::watch;
 use videorc_app_core::library::page::reveal_in_file_manager_label;
+use videorc_app_core::livestream::cloud_status::CloudStatus;
 use videorc_app_core::livestream::watchdog::{top_watchdog_alert, watchdog_chip_label};
 use videorc_app_core::nav::PageId;
 use videorc_app_core::studio::inspector::{
     AgentsState, FactRow, RuntimeAlertView, SessionInputs, SessionSectionView, StartFailureAlert,
     copy::{CAMERA_SHARED_TITLE, DISMISS, OPEN_AUDIO, OPEN_LIBRARY, RETRY},
+    session_cloud_show,
 };
 use videorc_app_core::studio::screen_views::{GUESTS_ROW_LABEL, guests_session_row};
 use videorc_app_core::studio::watchdog_alerts::WatchdogState;
@@ -71,17 +73,20 @@ pub fn fact_tone(tone: &str) -> Option<StatusTone> {
 }
 
 /// The section's view now. The Stream row names the watchdog's top alert
-/// (`watchdogChipLabel(topWatchdogAlert(watchdogAlerts))`); the other areas'
-/// facts (the cloud show, Sidekick, the on-air encode) join as their lanes
-/// hand them over; each `None` leaves its row or reading out. The agents
-/// line and the Guests row are the section's own (see [`SessionSection`]).
+/// (`watchdogChipLabel(topWatchdogAlert(watchdogAlerts))`) and the cloud
+/// show carrying this session (`useSessionCloud`); the other areas' facts
+/// (Sidekick, the on-air encode) join as their lanes hand them over; each
+/// `None` leaves its row or reading out. The agents line and the Guests row
+/// are the section's own (see [`SessionSection`]).
 pub fn section_view(
     snapshot: &StudioSnapshot,
     telemetry: &HealthTelemetry,
     watchdog: &WatchdogState,
+    cloud: Option<&CloudStatus>,
 ) -> SessionSectionView {
     let inputs = SessionInputs {
         watchdog_chip: top_watchdog_alert(&watchdog.alerts).map(watchdog_chip_label),
+        cloud: session_cloud_show(cloud, snapshot.session.status.session_id.as_deref()),
         ..SessionInputs::default()
     };
     SessionSectionView::from_snapshot(snapshot, telemetry, &inputs, Utc::now(), Instant::now())
@@ -131,8 +136,14 @@ impl SessionSection {
         let mut alerts = studio.watchdog();
         let mut cloud = studio.cloud();
         let snap = snapshot.borrow().clone();
-        let view = section_view(&snap, &telemetry.borrow(), &alerts.borrow());
-        let guests = guests_session_row(cloud.borrow().status.as_ref());
+        let cloud_status = cloud.borrow().status.clone();
+        let view = section_view(
+            &snap,
+            &telemetry.borrow(),
+            &alerts.borrow(),
+            cloud_status.as_ref(),
+        );
+        let guests = guests_session_row(cloud_status.as_ref());
         let retro = snap.settings.studio.retro_lcd_studio();
         let watchdog = cx.new(|cx| WatchdogCards::new(studio.clone(), runtime.clone(), cx));
         cx.observe(&watchdog, |_, _, cx| cx.notify()).detach();
@@ -154,12 +165,14 @@ impl SessionSection {
                     break;
                 }
                 let snap = snapshot.borrow_and_update().clone();
+                let cloud_status = cloud.borrow_and_update().status.clone();
                 let next = section_view(
                     &snap,
                     &telemetry.borrow_and_update(),
                     &alerts.borrow_and_update(),
+                    cloud_status.as_ref(),
                 );
-                let guests = guests_session_row(cloud.borrow_and_update().status.as_ref());
+                let guests = guests_session_row(cloud_status.as_ref());
                 let retro = snap.settings.studio.retro_lcd_studio();
                 let alive = this.update(cx, |section, cx| {
                     if section.view != next || section.retro != retro || section.guests != guests {
