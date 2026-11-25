@@ -151,6 +151,56 @@ fn each_fix_names_the_studios_own_action() {
     );
 }
 
+#[test]
+fn a_refused_fix_says_the_remote_intents_words() {
+    const COPY: &str =
+        include_str!("../../../../apps/desktop/src/renderer/src/lib/studio-actions/copy.ts");
+    assert!(COPY.contains(&format!("microphone: \"{UNMUTE_FIX_FAILED}\"")));
+    assert!(COPY.contains(&format!("takeoverHide: \"{END_TAKEOVER_FIX_FAILED}\"")));
+}
+
+#[test]
+fn only_a_silent_microphone_notice_holds_the_watchdogs_mic_silent_card() {
+    use std::time::Instant;
+
+    use crate::notices::{AudioIssue, MicrophoneNotice, MicrophonePhase, RuntimeActivity};
+    use crate::studio::session::{RecordingFailedNotice, SessionActivity};
+    use crate::studio::test_support::ready_snapshot;
+
+    let notice = |codes: &[&str]| MicrophoneNotice {
+        audio_issues: codes
+            .iter()
+            .map(|code| AudioIssue {
+                code: code.to_string(),
+                message: "The microphone is silent.".to_string(),
+            })
+            .collect(),
+        activity: RuntimeActivity::Recording,
+        phase: MicrophonePhase::Active,
+        message: "The microphone is silent.".to_string(),
+        session_id: None,
+    };
+    let mut snapshot = ready_snapshot();
+    assert!(!silence_notice_shown(&snapshot));
+    snapshot.session.microphone_notice = Some(notice(&[MICROPHONE_SILENT_CODE]));
+    assert!(silence_notice_shown(&snapshot));
+    snapshot.session.microphone_notice =
+        Some(notice(&[MICROPHONE_SILENT_CODE, "microphone-input-lost"]));
+    assert!(
+        !silence_notice_shown(&snapshot),
+        "a lost input is not silence"
+    );
+    snapshot.session.microphone_notice = Some(notice(&[MICROPHONE_SILENT_CODE]));
+    snapshot.session.notice = Some(RecordingFailedNotice {
+        activity: SessionActivity::Recording,
+        message: "The encoder stopped.".to_string(),
+        session_id: None,
+        output_path: None,
+        at: Instant::now(),
+    });
+    assert!(!silence_notice_shown(&snapshot), "the failure outranks it");
+}
+
 fn cloud(value: serde_json::Value) -> CloudStatus {
     serde_json::from_value(value).unwrap()
 }

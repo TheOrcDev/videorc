@@ -5,12 +5,15 @@
 //! The runtime alert's Open Audio waits for the Audio section and its
 //! reveal for the reveal command, as Electron leaves out a door it has no
 //! handler for.
+//!
+//! The watchdog's cards (`alerts::WatchdogCards`) sit under the facts and
+//! above the refused start, as `SessionNotices` draws them.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
-use gpui::{Context, EventEmitter, Hsla, Window, div, prelude::*, px};
+use gpui::{Context, Entity, EventEmitter, Hsla, Window, div, prelude::*, px};
 use tokio::sync::watch;
 use videorc_app_core::StudioSnapshot;
 use videorc_app_core::nav::PageId;
@@ -26,6 +29,7 @@ use videorc_kit::{
     PanelSection, StatusDot, StatusTone,
 };
 
+use super::alerts::{StudioRequest, WatchdogCards};
 use super::transport::{AppStudio, OpenPage};
 
 /// The Electron row's `pl-9.5`: a destination under the Destinations row.
@@ -61,9 +65,12 @@ pub struct SessionSection {
     studio: Arc<AppStudio>,
     runtime: tokio::runtime::Handle,
     view: SessionSectionView,
+    /// The watchdog's cards; drawn only while there is one.
+    watchdog: Entity<WatchdogCards>,
 }
 
 impl EventEmitter<OpenPage> for SessionSection {}
+impl EventEmitter<StudioRequest> for SessionSection {}
 
 impl SessionSection {
     /// Follows the snapshot and the telemetry; it redraws only when the
@@ -76,6 +83,14 @@ impl SessionSection {
         cx: &mut Context<Self>,
     ) -> Self {
         let view = section_view(&snapshot.borrow(), &telemetry.borrow());
+        let watchdog = cx.new(|cx| WatchdogCards::new(studio.clone(), runtime.clone(), cx));
+        cx.observe(&watchdog, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&watchdog, |_, _, open: &OpenPage, cx| cx.emit(*open))
+            .detach();
+        cx.subscribe(&watchdog, |_, _, request: &StudioRequest, cx| {
+            cx.emit(*request)
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             loop {
                 let open = tokio::select! {
@@ -105,6 +120,7 @@ impl SessionSection {
             studio,
             runtime,
             view,
+            watchdog,
         }
     }
 
@@ -257,8 +273,10 @@ impl Render for SessionSection {
             .runtime_alert
             .clone()
             .map(|alert| self.runtime_alert(&alert, cx));
+        let watchdog = (!self.watchdog.read(cx).is_empty()).then(|| self.watchdog.clone());
         PanelSection::new("studio-session")
             .child(list)
+            .children(watchdog)
             .children(start_failure)
             .children(camera_notice)
             .children(runtime_alert)

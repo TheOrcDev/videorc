@@ -15,6 +15,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::StudioSnapshot;
 use super::cloud::CloudState;
 use super::session::{END_LIVESTREAM_LABEL, END_LIVESTREAM_TITLE, KEEP_STREAMING_LABEL};
 use super::watchdog_alerts::SnoozeScope;
@@ -24,6 +25,7 @@ use crate::livestream::cloud_show::{
 };
 use crate::livestream::cloud_status::CloudStatus;
 use crate::livestream::watchdog::{WatchdogAlert, WatchdogAlertFix, visible_watchdog_alerts};
+use crate::notices::MICROPHONE_SILENT_CODE;
 
 // ---------------------------------------------------------------------------
 // The watchdog's cards
@@ -210,6 +212,30 @@ pub fn watchdog_fix_action(
         }
         _ => return None,
     })
+}
+
+/// `REMOTE_INTENT_COPY.microphone`: the warning toast of an Unmute fix the
+/// session refused.
+pub const UNMUTE_FIX_FAILED: &str = "Couldn't change the microphone.";
+/// `REMOTE_INTENT_COPY.takeoverHide`: the warning toast of an End takeover
+/// fix that did not land.
+pub const END_TAKEOVER_FIX_FAILED: &str = "Couldn't hide the takeover.";
+
+/// `SessionNotices`' `silenceNoticeShown`: the runtime notice is the
+/// microphone's, and only about silence (issue 1064). The failure outranks
+/// it, as the runtime alert does.
+pub fn silence_notice_shown(snapshot: &StudioSnapshot) -> bool {
+    snapshot.session.notice.is_none()
+        && snapshot
+            .session
+            .microphone_notice
+            .as_ref()
+            .is_some_and(|notice| {
+                notice
+                    .audio_issues
+                    .iter()
+                    .all(|issue| issue.code == MICROPHONE_SILENT_CODE)
+            })
 }
 
 // ---------------------------------------------------------------------------
