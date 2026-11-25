@@ -224,8 +224,8 @@ impl Inner {
             start_pending: start_in_flight || self.session.start_pending(),
             stop_pending: stop_in_flight || self.session.stop_pending(),
             layout_awaiting_proof: self.scenes.switch.awaits_proof(),
-            // No performance check and no talk show room in app-core yet.
-            performance_check_hold: false,
+            // No talk show room in app-core yet.
+            performance_check_hold: self.performance.hold,
             room_holds_camera: false,
             record_blocked: self.clips.record_blocked.is_some(),
             wait: self.clips.wait,
@@ -602,7 +602,7 @@ impl<B: StudioBackend> Studio<B> {
 
     /// `stopReplayBuffer`'s request: only a buffer-only session; a failure
     /// says "Couldn't turn off clips".
-    async fn stop_buffer_only_session(&self) {
+    pub(super) async fn stop_buffer_only_session(&self) {
         let replay_only = session_is_replay_only(self.lock().session.status());
         if !replay_only {
             return;

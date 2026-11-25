@@ -222,6 +222,7 @@ fn main() -> Result<()> {
                     .into_iter()
                     .chain([camera::VIRTUAL_CAMERA_CHANGED, app::exit::CLOUD_STATE])
                     .chain(screens::settings::EVENTS)
+                    .chain(screens::captions::EVENTS)
                     .chain(screens::avatar::EVENTS)
                     .chain(screens::sidekick::EVENTS)
                     .chain(screens::studio::chat::EVENTS)
@@ -479,6 +480,9 @@ fn main() -> Result<()> {
         let sources = cx.new(|cx| {
             SourcesPanel::new(studio.clone(), permissions.clone(), core_handle.clone(), cx)
         });
+        // Captions ⌘4 and the reader share one caption feed (plan 260, L2);
+        // Output's quality lock reads its entitlements, so it comes first.
+        screens::captions::install(studio.clone(), core_handle.clone(), cx);
         let output = cx.new(|cx| {
             OutputPanel::new(
                 studio.clone(),
@@ -487,8 +491,6 @@ fn main() -> Result<()> {
                 cx,
             )
         });
-        // Captions ⌘4 and the reader share one caption feed (plan 260, L2).
-        screens::captions::install(studio.clone(), core_handle.clone(), cx);
         let destinations =
             cx.new(|cx| DestinationsPanel::new(studio.clone(), core_handle.clone(), cx));
         let guests = cx.new(|cx| GuestsPanel::new(studio.clone(), core_handle.clone(), cx));

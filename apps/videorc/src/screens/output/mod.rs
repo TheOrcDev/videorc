@@ -7,14 +7,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    ClipboardItem, Context, Keystroke, PathPromptOptions, SharedString, Subscription, WeakEntity,
-    Window, div, prelude::*, px,
+    App, ClipboardItem, Context, Entity, Focusable, Keystroke, PathPromptOptions, SharedString,
+    Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use serde_json::{Value, json};
+use videorc_app_core::account::entitlements::{
+    EntitlementGate, ProfileKind, video_profile_entitlement_gate,
+};
 use videorc_app_core::desktop::camera_extension::camera_extension_approval_url;
 use videorc_app_core::desktop::{accelerator as accel, global_shortcuts as keys};
 use videorc_app_core::protocol::{
-    EncoderPreferenceState, VirtualCameraStatus, WindowsH264EncoderPreference,
+    EncoderPreferenceState, VideoSettings, VirtualCameraStatus, WindowsH264EncoderPreference,
 };
 use videorc_app_core::shortcuts as recorder;
 use videorc_app_core::studio::Connection;
@@ -24,6 +27,8 @@ use videorc_app_core::studio::cloud_clips::{
     self as cloud_clips, CloudClipJob, CloudClipsStatus, JobAction, Orientation,
 };
 use videorc_app_core::studio::inspector::format_video_quality;
+use videorc_app_core::studio::output_quality::{self as quality, Compatibility};
+use videorc_app_core::studio::performance_check::{self as perf, LineTone, PerformanceLine};
 use videorc_app_core::studio::recordings_folder::{self, StoredFolder, copy as folder_copy};
 use videorc_app_core::studio::virtual_camera::{
     CameraAction, CameraTone, OutputCameraView, VIDEORC_CAMERA,
@@ -42,6 +47,9 @@ use videorc_kit::tabs::Tabs;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
 use videorc_kit::toggle_group::{ToggleGroup, ToggleItem};
 use videorc_kit::tokens::{size, text};
+
+use gpui_base::input::InputEvent;
+use videorc_kit::input::{Input, InputState};
 
 use crate::app::hotkeys::{self, Hotkeys};
 use crate::app::shell::Shell;
@@ -215,6 +223,13 @@ struct OutputModel {
     keep_original: bool,
     camera: OutputCameraView,
     connected: bool,
+    stream_enabled: bool,
+    video: VideoSettings,
+    compatibility: Compatibility,
+    performance_line: Option<PerformanceLine>,
+    /// The next take also writes the Screen and Camera files (the check
+    /// counts their encoders, plan 200 D4).
+    separate_files: bool,
 }
 
 impl OutputModel {
@@ -262,6 +277,23 @@ impl OutputModel {
                 hotkeys::node_platform(),
             ),
             connected: matches!(snapshot.connection, Connection::Connected { .. }),
+            stream_enabled: capture.stream_enabled,
+            video: video.clone(),
+            compatibility: quality::compatibility(
+                hotkeys::node_platform(),
+                record_enabled,
+                capture.stream_enabled,
+                video,
+            ),
+            performance_line: perf::performance_line(
+                &snapshot.performance,
+                video,
+                videorc_app_core::format::device_noun(hotkeys::node_platform()),
+                snapshot.clips.on,
+            ),
+            separate_files: cfg!(target_os = "macos")
+                && record_enabled
+                && capture.separate_source_recordings.enabled,
         }
     }
 }
@@ -302,6 +334,12 @@ pub struct OutputPanel {
     recorder: Recorder,
     cloud: CloudClips,
     active: bool,
+    /// The four typed fields, made with the first render (they need a
+    /// window), and the refusal under one of them with the canvas it was
+    /// refused against.
+    fields: Option<Vec<(quality::Field, Entity<InputState>)>>,
+    field_refusal: Option<(quality::Field, &'static str, (u32, u32))>,
+    check_error: Option<String>,
     #[allow(dead_code)]
     shell: Option<WeakEntity<Shell>>,
     facts_ticket: u64,
@@ -360,6 +398,10 @@ impl OutputPanel {
             }
         })
         .detach();
+        // The plan's lock reads the caption feed's entitlements.
+        if let Some(feed) = crate::screens::captions::feed::feed(cx) {
+            cx.observe(&feed, |_, _, cx| cx.notify()).detach();
+        }
         // Cloud Clips reads every two seconds while the page shows it.
         cx.spawn(async move |this, cx| {
             loop {
@@ -389,6 +431,9 @@ impl OutputPanel {
             recorder: Recorder::default(),
             cloud: CloudClips::default(),
             active: false,
+            fields: None,
+            field_refusal: None,
+            check_error: None,
             shell: None,
             facts_ticket: 0,
         };
@@ -750,6 +795,157 @@ impl OutputPanel {
         }
     }
 
+    // ── Typed fields (P659) ──────────────────────────────────────────────
+
+    /// The four inputs, made once a window is there. Enter and leaving the
+    /// field commit; typing commits nothing.
+    fn ensure_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.fields.is_some() {
+            return;
+        }
+        let mut fields = Vec::new();
+        for (field, label) in quality::FIELDS {
+            let state = cx.new(|cx| InputState::new(window, cx).placeholder(label));
+            cx.subscribe(&state, move |this, _, event: &InputEvent, cx| match event {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => this.commit_field(field, cx),
+                InputEvent::Change => {
+                    if this
+                        .field_refusal
+                        .is_some_and(|(refused, ..)| refused == field)
+                    {
+                        this.field_refusal = None;
+                        cx.notify();
+                    }
+                }
+                _ => {}
+            })
+            .detach();
+            fields.push((field, state));
+        }
+        self.fields = Some(fields);
+    }
+
+    fn field_state(&self, field: quality::Field) -> Option<Entity<InputState>> {
+        self.fields
+            .as_ref()?
+            .iter()
+            .find(|(candidate, _)| *candidate == field)
+            .map(|(_, state)| state.clone())
+    }
+
+    /// Each unfocused field shows the setting.
+    fn sync_fields(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(fields) = self.fields.clone() else {
+            return;
+        };
+        for (field, state) in fields {
+            let value = field.of(&self.model.video).to_string();
+            let focused = state.read(cx).focus_handle(cx).is_focused(window);
+            if !focused && state.read(cx).value().to_string() != value {
+                state.update(cx, |state, cx| state.set_value(value, window, cx));
+            }
+        }
+    }
+
+    fn commit_field(&mut self, field: quality::Field, cx: &mut Context<Self>) {
+        let Some(state) = self.field_state(field) else {
+            return;
+        };
+        if self.model.quality_locked {
+            return;
+        }
+        let draft = state.read(cx).value().to_string();
+        let video = self.model.video.clone();
+        match quality::commit(&video, field, &draft, self.model.vertical) {
+            quality::Commit::Unchanged => {}
+            quality::Commit::Refused(rule) => {
+                self.field_refusal = Some((field, rule, (video.width, video.height)));
+                cx.notify();
+            }
+            quality::Commit::Value(value) => {
+                self.field_refusal = None;
+                let studio = self.studio.clone();
+                self.run_studio(async move {
+                    let _ = studio
+                        .update_capture_config(|config| {
+                            capture_config::set_path(
+                                config,
+                                &["video", field.key()],
+                                Some(json!(value)),
+                            );
+                            capture_config::set_path(
+                                config,
+                                &["video", "preset"],
+                                Some(json!("custom")),
+                            );
+                        })
+                        .await;
+                });
+                self.push_model(cx);
+            }
+        }
+    }
+
+    /// Escape: the field shows the setting again.
+    fn revert_field(&mut self, field: quality::Field, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.field_state(field) else {
+            return;
+        };
+        let value = field.of(&self.model.video).to_string();
+        state.update(cx, |state, cx| state.set_value(value, window, cx));
+        self.field_refusal = None;
+        cx.notify();
+    }
+
+    // ── The performance check (P655) ─────────────────────────────────────
+
+    fn run_performance_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model.session_locked {
+            return;
+        }
+        let scale = window.scale_factor();
+        let display = window.display(cx).map(|display| {
+            let size = display.bounds().size;
+            (
+                (f32::from(size.width) * scale).round() as u32,
+                (f32::from(size.height) * scale).round() as u32,
+            )
+        });
+        let params = perf::ceiling(&self.model.video, display, self.model.separate_files);
+        self.check_error = None;
+        let studio = self.studio.clone();
+        let job = self
+            .runtime
+            .spawn(async move { studio.run_performance_check(params).await });
+        cx.spawn(async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |panel, cx| {
+                panel.check_error = match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(message)) => Some(format!("Couldn't check this computer. {message}")),
+                    Err(_) => Some("Couldn't check this computer.".into()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    // ── The plan's lock (P656) ───────────────────────────────────────────
+
+    /// `videoProfileEntitlementGate({ kind: 'recording', video })`, over the
+    /// entitlements the caption feed reads on every connection.
+    fn profile_gate(&self, cx: &App) -> EntitlementGate {
+        let entitlements = crate::screens::captions::feed::feed(cx)
+            .and_then(|feed| feed.read(cx).entitlements().cloned());
+        video_profile_entitlement_gate(
+            entitlements.as_ref(),
+            ProfileKind::Recording,
+            &self.model.video,
+        )
+    }
+
     fn push_model(&mut self, cx: &mut Context<Self>) {
         self.rebuild(&*self.studio.watch().borrow(), cx);
     }
@@ -1041,6 +1237,180 @@ impl OutputPanel {
         .detach();
     }
 
+    /// P655: the performance check's line under the preset, with "Use …"
+    /// and "Check this computer" / "Check again".
+    fn performance_row(
+        &self,
+        model: &OutputModel,
+        t: &videorc_kit::tokens::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let line = model.performance_line.clone()?;
+        let mut row = div()
+            .id("output-performance-check")
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.))
+            .px(px(12.))
+            .pb(px(8.))
+            .type_scale(text::META)
+            .text_color(hsla(match line.tone {
+                LineTone::Warning => t.foreground,
+                LineTone::Muted => t.muted_foreground,
+            }));
+        if line.busy {
+            row = row
+                .child(videorc_kit::spinner::Spinner::new("output-performance-spinner").size(14.));
+        } else if line.tone == LineTone::Warning {
+            row = row.child(StatusDot::new("output-performance-warning").tone(StatusTone::Warn));
+        }
+        row = row.child(line.text.clone());
+        if let Some((preset, label)) = line.apply.clone() {
+            let preset = SharedString::from(preset_id(&preset));
+            row = row.child(
+                Button::new("output-performance-apply")
+                    .label(label)
+                    .variant(ButtonVariant::Outline)
+                    .size(videorc_kit::button::ButtonSize::Xs)
+                    .disabled(model.quality_locked)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.set_preset(preset.clone(), cx)),
+                    ),
+            );
+        }
+        if let Some(check) = line.check_label {
+            let mut button = Button::new("output-performance-run")
+                .label(check)
+                .variant(ButtonVariant::Ghost)
+                .size(videorc_kit::button::ButtonSize::Xs)
+                .disabled(model.session_locked || !model.connected)
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.run_performance_check(window, cx)),
+                );
+            if let Some(hint) = line.check_hint {
+                button = button.tooltip(hint);
+            }
+            row = row.child(button);
+        }
+        let mut column = div().flex().flex_col().child(row);
+        if let Some(error) = &self.check_error {
+            column = column.child(
+                div()
+                    .px(px(12.))
+                    .pb(px(8.))
+                    .type_scale(text::META)
+                    .text_color(hsla(t.destructive))
+                    .child(error.clone()),
+            );
+        }
+        Some(column.into_any_element())
+    }
+
+    /// P656 and P657: the plan's lock, then why this output can't run or
+    /// is risky here.
+    fn quality_alerts(&self, model: &OutputModel, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let mut alerts = Vec::new();
+        if let EntitlementGate::Locked {
+            reason,
+            upgrade_url,
+            ..
+        } = self.profile_gate(cx)
+        {
+            let mut alert = Alert::new("output-profile-lock")
+                .variant(AlertVariant::Locked)
+                .title(reason);
+            if let Some(url) = upgrade_url {
+                alert = alert.action(
+                    Button::new("output-profile-unlock")
+                        .label("View Premium")
+                        .variant(ButtonVariant::Outline)
+                        .size(videorc_kit::button::ButtonSize::Xs)
+                        .on_click(move |_, _, cx| cx.open_url(url)),
+                );
+            }
+            alerts.push(div().px(px(12.)).pb(px(8.)).child(alert).into_any_element());
+        }
+        if let Some((message, blocking)) = model.compatibility.message() {
+            alerts.push(
+                div()
+                    .px(px(12.))
+                    .pb(px(8.))
+                    .child(
+                        Alert::new("output-compatibility")
+                            .variant(if blocking {
+                                AlertVariant::Destructive
+                            } else {
+                                AlertVariant::Warning
+                            })
+                            .title(message.to_string()),
+                    )
+                    .into_any_element(),
+            );
+        }
+        alerts
+    }
+
+    /// P659: Width, Height, FPS and Bitrate kbps. Enter or leaving commits,
+    /// Escape puts the setting back, a refused size says the rule.
+    fn field_grid(
+        &self,
+        model: &OutputModel,
+        t: &videorc_kit::tokens::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mut grid = div()
+            .grid()
+            .grid_cols(2)
+            .gap(px(12.))
+            .px(px(12.))
+            .py(px(8.));
+        let refusal = self
+            .field_refusal
+            .filter(|(.., canvas)| *canvas == (model.width, model.height));
+        for (field, label) in quality::FIELDS {
+            let Some(state) = self.field_state(field) else {
+                continue;
+            };
+            let refused = refusal.filter(|(refused, ..)| *refused == field);
+            grid = grid.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .on_key_down(cx.listener(
+                        move |this, event: &gpui::KeyDownEvent, window, cx| {
+                            if event.keystroke.key == "escape" {
+                                this.revert_field(field, window, cx);
+                            }
+                        },
+                    ))
+                    .child(
+                        div()
+                            .type_scale(text::LABEL)
+                            .text_color(hsla(t.foreground))
+                            .child(label),
+                    )
+                    .child(
+                        Input::new(
+                            SharedString::from(format!("output-field-{}", field.key())),
+                            &state,
+                        )
+                        .accessibility_label(label)
+                        .disabled(model.quality_locked)
+                        .invalid(refused.is_some()),
+                    )
+                    .children(refused.map(|(_, rule, _)| {
+                        div()
+                            .type_scale(text::META)
+                            .text_color(hsla(t.destructive))
+                            .child(rule)
+                    })),
+            );
+        }
+        grid.into_any_element()
+    }
+
     /// Clips on this computer: the ring's switch, its disk use, the two clip
     /// keys and where clips go.
     fn native_clips_section(
@@ -1307,6 +1677,8 @@ impl OutputPanel {
 
 impl Render for OutputPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_fields(window, cx);
+        self.sync_fields(window, cx);
         let t = theme::current(window, cx).theme();
         let model = self.model.clone();
         let resolutions = if model.vertical {
@@ -1396,7 +1768,9 @@ impl Render for OutputPanel {
                         .type_scale(text::META)
                         .text_color(hsla(t.muted_foreground))
                         .child("Editing a value below switches the preset to Custom."),
-                ),
+                )
+                .children(self.performance_row(&model, t, cx))
+                .children(self.quality_alerts(&model, cx)),
         );
         let entity = cx.entity();
         let mut resolution = Tabs::new("output-resolution").selected(selected_resolution);
@@ -1429,6 +1803,7 @@ impl Render for OutputPanel {
                         )),
                 ),
         );
+        local_rows = local_rows.item(self.field_grid(&model, t, cx));
         if let Some(encoder) = self
             .encoder
             .as_ref()
