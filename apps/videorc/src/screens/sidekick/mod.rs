@@ -366,6 +366,9 @@ pub struct SidekickScreen {
     community: Option<CommunityState>,
     reports: Option<ReportsState>,
     clean_cut: Option<CleanCutState>,
+    /// The app-wide recording poster cache (`app::posters`): Clean cut's
+    /// rows draw the Library's posters.
+    posters: Option<gpui::Entity<crate::app::posters::Posters>>,
     /// The shell has Sidekick on screen (Community's living preview ticks).
     page_shown: bool,
     /// The page's measured width: two columns from [`PAGE_WIDE_MIN`]. It
@@ -388,6 +391,10 @@ impl SidekickScreen {
     ) -> Self {
         let tab = Tab::from_id(UiLocal::in_dir(&local_dir).buddy_tab());
         let consented = studio.read_ui_settings(families::ai_consent);
+        let posters = crate::app::posters::shared(cx);
+        if let Some(posters) = posters.as_ref() {
+            cx.observe(posters, |_, _, cx| cx.notify()).detach();
+        }
         let mut screen = Self {
             studio: studio.clone(),
             runtime: runtime.clone(),
@@ -409,6 +416,7 @@ impl SidekickScreen {
             community: None,
             reports: None,
             clean_cut: None,
+            posters,
         };
         screen.refresh(cx);
         screen.watch(cx);
@@ -682,6 +690,14 @@ impl SidekickScreen {
                     }
                     if let Some(sessions) = sessions {
                         clean.sessions = sessions;
+                        if let Some(posters) = screen.posters.clone() {
+                            let listed = &clean.sessions;
+                            posters.update(cx, |posters, _| {
+                                posters.keep(clean_cut::POSTER_USER, |id| {
+                                    listed.iter().any(|session| session.id == id)
+                                })
+                            });
+                        }
                     }
                     clean.capabilities =
                         videorc_app_core::buddy::clean_cut_view::clean_cut_capabilities(
@@ -834,6 +850,7 @@ impl SidekickScreen {
                     community.suggestions = suggestions;
                     community.loaded = true;
                 }
+                screen.load_community_avatars(cx);
                 cx.notify();
             });
         })

@@ -111,6 +111,13 @@ pub struct Select {
     max_width: Option<f32>,
     ground: Option<Color>,
     accessibility_label: Option<SharedString>,
+    /// A caller-owned handle for the trigger (first run's autofocus).
+    track_focus: Option<FocusHandle>,
+    /// The trigger fills its column (`w-full min-w-0`).
+    full_width: bool,
+    /// A row's right-aligned value (`device-picker.tsx` INLINE_TRIGGER).
+    inline: bool,
+    trigger_with: Option<TriggerBuilder>,
     on_change: Option<ChangeHandler>,
     appearance: Option<Appearance>,
 }
@@ -129,6 +136,10 @@ impl Select {
             max_width: None,
             ground: None,
             accessibility_label: None,
+            track_focus: None,
+            full_width: false,
+            inline: false,
+            trigger_with: None,
             on_change: None,
             appearance: None,
         }
@@ -182,6 +193,33 @@ impl Select {
         self
     }
 
+    /// The trigger fills its column (`w-full min-w-0`): Sources' device
+    /// pickers.
+    pub fn full_width(mut self, full: bool) -> Self {
+        self.full_width = full;
+        self
+    }
+
+    /// A row's value instead of a field: borderless and transparent, 8 px
+    /// sides, medium words, right-aligned, the hover block (and while open),
+    /// and a 288 px list aligned to the trigger's end (`device-picker.tsx`
+    /// INLINE_TRIGGER / INLINE_POPUP: Studio's Camera "Off ⌄").
+    pub fn inline(mut self, inline: bool) -> Self {
+        self.inline = inline;
+        self
+    }
+
+    /// Draws the trigger's content yourself (the Retro LCD's lit value and
+    /// pixel chevron). The kit keeps the button, focus, keys and the list;
+    /// the trigger has no rim, fill or padding of its own.
+    pub fn trigger_with(
+        mut self,
+        build: impl FnOnce(SelectTriggerState) -> AnyElement + 'static,
+    ) -> Self {
+        self.trigger_with = Some(Box::new(build));
+        self
+    }
+
     /// Cap the trigger width (Electron `max-w-56` = 224).
     pub fn max_width(mut self, max_width: f32) -> Self {
         self.max_width = Some(max_width);
@@ -199,6 +237,13 @@ impl Select {
         self
     }
 
+    /// The trigger takes this focus handle instead of its own, so a page can
+    /// focus it (`autoFocus`) or ask whether it holds focus.
+    pub fn track_focus(mut self, handle: &FocusHandle) -> Self {
+        self.track_focus = Some(handle.clone());
+        self
+    }
+
     /// Called with the chosen option's value.
     pub fn on_change(
         mut self,
@@ -213,6 +258,18 @@ impl Select {
         self.appearance = Some(appearance);
         self
     }
+}
+
+type TriggerBuilder = Box<dyn FnOnce(SelectTriggerState) -> AnyElement>;
+
+/// What a custom trigger ([`Select::trigger_with`]) draws from.
+#[derive(Clone, Debug)]
+pub struct SelectTriggerState {
+    /// The chosen option's words, if any.
+    pub label: Option<SharedString>,
+    pub placeholder: SharedString,
+    pub open: bool,
+    pub disabled: bool,
 }
 
 /// What a select keeps between frames.
@@ -288,6 +345,12 @@ impl RenderOnce for Select {
                 }
             });
             state.update(cx, |s, _| s._search_sub = Some(sub));
+        }
+        if let Some(handle) = self.track_focus.as_ref()
+            && state.read(cx).trigger_focus != *handle
+        {
+            // Closing the popup hands focus back through the state's handle.
+            state.update(cx, |s, _| s.trigger_focus = handle.clone());
         }
         let (open, highlighted, bounds, trigger_focus, content_focus, search, query) = {
             let s = state.read(cx);
@@ -404,41 +467,74 @@ impl RenderOnce for Select {
             SelectSize::Default => size::CONTROL,
             SelectSize::Xs => 24.0,
         };
-        let trigger = div()
-            .id("select-trigger")
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(6.0))
-            .h(px(trigger_h))
-            .px(px(10.0))
-            .when_some(self.width, |trigger, width| trigger.w(px(width)))
-            .when_some(self.max_width, |trigger, max_width| {
-                trigger.max_w(px(max_width))
-            })
-            .rounded(px(radius::CHIP))
-            .border_1()
-            .border_color(hsla(if open {
-                t.ring
-            } else {
-                with_alpha(t.border, 0.0)
-            }))
-            .bg(hsla(fade(with_alpha(t.input, 0.5))))
-            .whitespace_nowrap()
-            .child(
-                div()
-                    .text_color(hsla(fade(if shown.is_some() {
-                        t.foreground
+        let full_width = self.full_width || self.inline;
+        let inline = self.inline;
+        let trigger = match self.trigger_with {
+            Some(build) => div()
+                .id("select-trigger")
+                .flex()
+                .items_center()
+                .when(full_width, |trigger| trigger.w_full().min_w(px(0.0)))
+                .child(build(SelectTriggerState {
+                    label: shown.clone(),
+                    placeholder: self.placeholder.clone(),
+                    open,
+                    disabled,
+                })),
+            None => div()
+                .id("select-trigger")
+                .flex()
+                .items_center()
+                .when(inline, |trigger| trigger.justify_end())
+                .when(!inline, |trigger| trigger.justify_between())
+                .gap(px(6.0))
+                .h(px(trigger_h))
+                .px(px(if inline { 8.0 } else { 10.0 }))
+                .when_some(self.width, |trigger, width| trigger.w(px(width)))
+                .when(full_width, |trigger| trigger.w_full().min_w(px(0.0)))
+                .when_some(self.max_width, |trigger, max_width| {
+                    trigger.max_w(px(max_width))
+                })
+                .rounded(px(radius::CHIP))
+                .border_1()
+                .map(|trigger| {
+                    if inline {
+                        trigger
+                            .border_color(gpui::transparent_black())
+                            .when(open, |trigger| trigger.bg(hsla(t.accent)))
+                            .when(!disabled, |trigger| {
+                                trigger.hover(|style| style.bg(hsla(t.accent)))
+                            })
                     } else {
-                        t.muted_foreground
-                    })))
-                    .child(shown.clone().unwrap_or(self.placeholder.clone())),
-            )
-            .child(icon(
-                IconName::CaretDown,
-                16.0,
-                hsla(fade(t.muted_foreground)),
-            ))
+                        trigger
+                            .border_color(hsla(if open {
+                                t.ring
+                            } else {
+                                with_alpha(t.border, 0.0)
+                            }))
+                            .bg(hsla(fade(with_alpha(t.input, 0.5))))
+                    }
+                })
+                .whitespace_nowrap()
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .when(inline, |words| words.font_weight(FontWeight::MEDIUM))
+                        .text_color(hsla(fade(if shown.is_some() {
+                            t.foreground
+                        } else {
+                            t.muted_foreground
+                        })))
+                        .child(shown.clone().unwrap_or(self.placeholder.clone())),
+                )
+                .child(icon(
+                    IconName::CaretDown,
+                    16.0,
+                    hsla(fade(t.muted_foreground)),
+                )),
+        };
+        let trigger = trigger
             .when(!disabled, |trigger| {
                 let toggle = toggle.clone();
                 trigger.on_click(move |_, window, cx| toggle(window, cx))
@@ -466,6 +562,7 @@ impl RenderOnce for Select {
                 toggle: Rc::new(toggle.clone()),
                 search: search.clone(),
                 appearance,
+                inline,
                 t,
             })
         });
@@ -517,6 +614,7 @@ impl RenderOnce for Select {
             select = select.accessibility_label(label);
         }
         select
+            .when(full_width, |select| select.w_full().min_w(px(0.0)))
             .font_family(FONT)
             .text_size(px(14.0))
             .child(trigger)
@@ -541,6 +639,8 @@ struct PopupList<'a> {
     toggle: Rc<dyn Fn(&mut Window, &mut App)>,
     search: Entity<InputState>,
     appearance: Option<Appearance>,
+    /// INLINE_POPUP: 288 px wide, aligned to the trigger's end.
+    inline: bool,
     t: &'static Theme,
 }
 
@@ -702,7 +802,7 @@ fn popup_list(p: PopupList<'_>) -> AnyElement {
     deferred(
         Positioner::side(p.bounds)
             .placement(Placement::Bottom)
-            .align(Align::Start)
+            .align(if p.inline { Align::End } else { Align::Start })
             .offset(px(6.0))
             .margin(px(8.0))
             .child(
@@ -714,7 +814,13 @@ fn popup_list(p: PopupList<'_>) -> AnyElement {
                 .id("select-content")
                 .occlude()
                 .track_focus(&p.content_focus)
-                .min_w(px(f32::from(p.bounds.size.width).max(144.0)))
+                .map(|list| {
+                    if p.inline {
+                        list.w(px(288.0))
+                    } else {
+                        list.min_w(px(f32::from(p.bounds.size.width).max(144.0)))
+                    }
+                })
                 .max_h(px(320.0))
                 .overflow_y_scroll()
                 .p(px(4.0))

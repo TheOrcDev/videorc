@@ -511,6 +511,34 @@ impl Drop for Player {
 }
 
 impl Player {
+    /// `session-player-open {sessionId}`: the Library's Markers item, as the
+    /// smoke asks for it (the ⋯ menu's items aren't in the accessibility tree
+    /// for the UI driver yet): the recording opens in this player. False when
+    /// the Library has no such recording.
+    pub fn smoke_open(
+        &mut self,
+        session_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(session) = self
+            .core
+            .data()
+            .sessions
+            .into_iter()
+            .find(|row| row.id == session_id)
+        else {
+            return false;
+        };
+        self.open(&session, window, cx);
+        true
+    }
+
+    /// Whether this is the Library's dialog player (the one Markers opens).
+    pub fn smoke_is_dialog(&self) -> bool {
+        self.mode == Mode::Dialog
+    }
+
     /// `session-player-geometry`: where the player's layer is. On macOS the
     /// rect the app set, the rect Core Animation displays, and the slot,
     /// which must agree as the live preview's do (`probe:preview-window`).

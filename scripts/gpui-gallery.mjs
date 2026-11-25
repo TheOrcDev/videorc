@@ -105,6 +105,8 @@ const SETTLE_MS = Number(process.env.VIDEORC_GALLERY_SETTLE_MS ?? 1500)
 const WAKE_MS = Number(process.env.VIDEORC_GALLERY_WAKE_MS ?? 700)
 // The test toast's life: gone before the next screen is shot.
 const TOAST_MS = 2_500
+// A wheel far past any page's height, so a scrolled shot starts at the top.
+const SCROLL_TOP_PX = 100_000
 
 function buildSha(buildDir) {
   if (values.sha) return values.sha
@@ -442,6 +444,18 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
               )
             }
             await sleep(screen.open.dialog ? SETTLE_MS + 800 : SETTLE_MS)
+            // Below the fold: a wheel at the window's centre (the page's
+            // own scroller), `dy` CSS pixels down, as Electron's shooter
+            // sets the page-tabs scroller's `scrollTop`.
+            // The same tab keeps its scroll across `open-tab`, so go to the
+            // top first: every look lands at the same `dy`.
+            if (screen.scroll) {
+              const at = screen.scroll.selector ? { selector: screen.scroll.selector } : {}
+              await command('ui-scroll', { ...at, dy: -SCROLL_TOP_PX })
+              await sleep(300)
+              await command('ui-scroll', { ...at, dy: screen.scroll.dy })
+              await sleep(SETTLE_MS)
+            }
           }
           const png = join(gpuiDir, `${name}.png`)
           const windowId = String(raisedWindowId ?? mainWindowId(app.process.pid, jxa))

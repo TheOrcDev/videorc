@@ -213,6 +213,19 @@ fn main() -> Result<()> {
     };
     launch.isolation = paths.isolation;
     launch.app_version = Some(env!("CARGO_PKG_VERSION").to_string());
+    // Electron's `extraResources` (preset pictures and live posters, pet
+    // packs, starter sounds): this checkout's in a dev build, the package's
+    // resources once there is one. The backend gets the managed roots
+    // Electron's main sets, so bundled and imported pictures resolve.
+    let resources = std::env::current_exe().ok().and_then(|exe| {
+        videorc_app_core::bundled::packaged_resources_dir(&exe, |name| std::env::var(name).ok())
+    });
+    let bundled = videorc_app_core::bundled::init(
+        videorc_app_core::bundled::BundledAssets::locate(&root, resources.as_deref()),
+    );
+    launch
+        .extra_env
+        .extend(bundled.backend_env(&paths.user_data_dir));
     launch.path_prepend = vec![videorc_app_core::paths::cargo_bin_dir()];
     let stderr_logger = logger.clone();
     launch.stderr_sink = Some(std::sync::Arc::new(move |line: &str| {
@@ -357,6 +370,8 @@ fn main() -> Result<()> {
         logger.clone(),
     );
     studio.set_clips_media_access(Some(permissions.snapshot()));
+    // The bundled pictures, registered with the backend at every READY.
+    app::bundled_backgrounds::install(runtime.handle(), supervisor.state(), logger.clone());
     // Videorc Camera's extension: activated when the backend's switch is on.
     let camera_controller = camera::Camera::install(
         runtime.handle(),
@@ -576,6 +591,9 @@ fn main() -> Result<()> {
         let destinations =
             cx.new(|cx| DestinationsPanel::new(studio.clone(), core_handle.clone(), cx));
         let guests = cx.new(|cx| GuestsPanel::new(studio.clone(), core_handle.clone(), cx));
+        // One poster cache for the Library and Clean cut (plan 260 L3),
+        // before Sidekick, which observes it.
+        app::posters::install(library.clone(), core_handle.clone(), cx);
         let sidekick = cx.new(|cx| {
             screens::sidekick::SidekickScreen::new(
                 studio.clone(),

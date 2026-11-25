@@ -651,6 +651,54 @@
       "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
     },
     {
+      "screen": "avatar-profile",
+      "state": "scroll-2",
+      "theme": "dark",
+      "contrast": "normal",
+      "width": 1280,
+      "height": 800,
+      "path": "avatar-profile/scroll-2-1280x800-dark.png",
+      "bytes": 195009,
+      "sha256": "ad6a7e3153978ae0aed07f84b982b10a57665a20308d3915386ffba46e1196e1",
+      "appCommit": "2b4c9389948de0fa92f21c1712632e4457a922d1"
+    },
+    {
+      "screen": "avatar-profile",
+      "state": "scroll-2",
+      "theme": "light",
+      "contrast": "normal",
+      "width": 1280,
+      "height": 800,
+      "path": "avatar-profile/scroll-2-1280x800-light.png",
+      "bytes": 194022,
+      "sha256": "73a41f84ce1affab4583364737eaea43ee86b792c1f1906772d263ed2253cf24",
+      "appCommit": "2b4c9389948de0fa92f21c1712632e4457a922d1"
+    },
+    {
+      "screen": "avatar-profile",
+      "state": "scroll-3",
+      "theme": "dark",
+      "contrast": "normal",
+      "width": 1280,
+      "height": 800,
+      "path": "avatar-profile/scroll-3-1280x800-dark.png",
+      "bytes": 339827,
+      "sha256": "e30d28f6f5a7cd5184aa39e50baef04ef4e4c8e7db4c7cf9ff9901d4bc1595dd",
+      "appCommit": "2b4c9389948de0fa92f21c1712632e4457a922d1"
+    },
+    {
+      "screen": "avatar-profile",
+      "state": "scroll-3",
+      "theme": "light",
+      "contrast": "normal",
+      "width": 1280,
+      "height": 800,
+      "path": "avatar-profile/scroll-3-1280x800-light.png",
+      "bytes": 341662,
+      "sha256": "0d2ddcf7a321627212d1f415033201577c92b189ec22b615abbf35c94534f218",
+      "appCommit": "2b4c9389948de0fa92f21c1712632e4457a922d1"
+    },
+    {
       "screen": "buddy-chat",
       "state": "locked",
       "theme": "dark",

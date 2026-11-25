@@ -22,6 +22,7 @@ use videorc_app_core::user_error::{
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
+use videorc_kit::field::FieldGroup;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::panel_section::PanelSection;
@@ -484,12 +485,18 @@ pub(super) fn render_persona(
         .items_start()
         .gap(px(8.))
         .child(name_field)
+        // `mt-0.5`, `ResetIcon` leading.
         .child(
-            Button::new("avatar-start-over")
-                .variant(ButtonVariant::Ghost)
-                .size(ButtonSize::Xs)
-                .label(words::START_OVER)
-                .on_click(move |_, _, cx| start.update(cx, |screen, cx| screen.ask_start_over(cx))),
+            div().mt(px(2.)).child(
+                Button::new("avatar-start-over")
+                    .variant(ButtonVariant::Ghost)
+                    .size(ButtonSize::Xs)
+                    .icon(IconName::ArrowCounterClockwise)
+                    .label(words::START_OVER)
+                    .on_click(move |_, _, cx| {
+                        start.update(cx, |screen, cx| screen.ask_start_over(cx))
+                    }),
+            ),
         );
 
     let personality_draft = fields.personality.read(cx).value().to_string();
@@ -525,7 +532,7 @@ pub(super) fn render_persona(
             .accessibility_label(words::PERSONALITY_LABEL)
             .invalid(text_length(&personality_draft) > PERSONALITY_MAX_CHARS)
             .into_any_element(),
-        chips.into_any_element(),
+        Some(chips.into_any_element()),
         t,
     );
 
@@ -549,7 +556,7 @@ pub(super) fn render_persona(
             .accessibility_label(words::ABOUT_FIELD_LABEL)
             .invalid(text_length(&about_draft) > CONTEXT_MAX_CHARS)
             .into_any_element(),
-        about_footer.into_any_element(),
+        Some(about_footer.into_any_element()),
         t,
     );
 
@@ -592,7 +599,7 @@ pub(super) fn render_persona(
         words::BUBBLE_LABEL,
         Some(words::bubble_description(&persona.name)),
         controls.into_any_element(),
-        div().into_any_element(),
+        None,
         t,
     );
 
@@ -607,12 +614,11 @@ pub(super) fn render_persona(
                 .title(error),
         );
     }
+    // `FieldGroup variant="grouped"`: one inset card, a hairline between
+    // the fields.
     section = section.child(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(20.))
-            .pt(px(4.))
+        FieldGroup::new()
+            .grouped()
             .child(personality)
             .child(about)
             .child(bubble),
@@ -679,19 +685,19 @@ pub(super) fn persona_dialogs(screen: &AvatarScreen, cx: &mut Context<AvatarScre
         .into_any_element()
 }
 
-/// One field (`Field`): a 14 px label, its 12 px description, the control
-/// and a footer row.
+/// One field (`Field`, vertical, `gap-3`): a 14 px label, its 12 px
+/// description, the control and an optional footer row.
 fn field(
     label: &'static str,
     description: Option<String>,
     control: AnyElement,
-    footer: AnyElement,
+    footer: Option<AnyElement>,
     t: &Theme,
 ) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
-        .gap(px(6.))
+        .gap(px(12.))
         .child(
             div()
                 .text_size(px(14.))
@@ -702,7 +708,7 @@ fn field(
         )
         .children(description.map(|line| meta(line, t)))
         .child(control)
-        .child(footer)
+        .children(footer)
 }
 
 fn meta(line: impl Into<SharedString>, t: &Theme) -> gpui::Div {

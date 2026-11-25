@@ -62,6 +62,25 @@ test('first run is shot last, and a narrowed list keeps its order', () => {
   assert.throws(() => pickScreens('nope'), /nope/)
 })
 
+test('a scrolled screen is its page shot again lower down, picked by the prefix', () => {
+  assert.deepEqual(
+    pickScreens('avatar-profile*').map((screen) => screen.id),
+    ['avatar-profile', 'avatar-profile-2', 'avatar-profile-3']
+  )
+  for (const screen of SCREENS.filter((s) => s.scroll)) {
+    assert.ok(screen.scroll.dy > 0, `${screen.id} scrolls down`)
+    assert.ok(screen.open && !screen.toast, `${screen.id} opens a page to scroll`)
+    assert.match(screen.baseline.state, /^scroll-\d+$/, `${screen.id} pairs with a scrolled shot`)
+  }
+  assert.equal(
+    baselinePath(
+      SCREENS.find((s) => s.id === 'avatar-profile-2'),
+      'dark'
+    ),
+    'avatar-profile/scroll-2-1280x800-dark.png'
+  )
+})
+
 test('row ranges join neighbours', () => {
   assert.equal(rowRanges(['P003', 'P001', 'P002', 'P010', 'P1200']), 'P001–P003, P010, P1200')
 })

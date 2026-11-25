@@ -21,9 +21,10 @@ use videorc_app_core::studio::room_background::{
 /// Electron's quality ladder for `canvas.convertToBlob` (0.9 → 0.55).
 const JPEG_QUALITIES: [u8; 4] = [90, 80, 70, 55];
 
-/// Bundled pictures next to the Electron assets (dev) or resources (packaged).
+/// Bundled pictures next to the Electron assets (dev) or resources
+/// (packaged): [`videorc_app_core::bundled`].
 pub fn bundled_background_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../desktop/src/renderer/src/assets/backgrounds")
+    videorc_app_core::bundled::current().backgrounds.clone()
 }
 
 /// Load and encode the working background's managed picture, or `None` when

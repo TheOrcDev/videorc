@@ -85,6 +85,7 @@ export async function runGpuiLibraryPlayerProbe() {
   })
   const ws = await connectBackend(app.connections['backend-ready'], timeoutMs)
   const rpc = (method, params = {}) => request(ws, 15000, method, params)
+  let sessionId = null
   /** The open player, or null: the Library's, once a take is in it. */
   const openPlayer = async () => {
     const { players = [] } = await command('session-player-geometry')
@@ -112,6 +113,13 @@ export async function runGpuiLibraryPlayerProbe() {
         { budgetMs: 20000, label: describePreview }
       )
       await command('studio-record')
+      const started = await waitUntil(
+        'the take never started',
+        () => rpc('recording.status'),
+        (status) => status?.state === 'recording' && status?.sessionId,
+        { budgetMs: 15000, everyMs: 200 }
+      )
+      sessionId = started.value.sessionId
       await sleep(takeMs)
       await command('studio-stop')
       await waitUntil(
@@ -120,19 +128,31 @@ export async function runGpuiLibraryPlayerProbe() {
         (status) => status?.state !== 'recording' && status?.state !== 'stopping',
         { budgetMs: 30000, everyMs: 250 }
       )
-      return { summary: `${takeMs} ms` }
+      return { summary: `${takeMs} ms, session ${sessionId}` }
     })
     if (!recorded) return finish()
 
     const opened = await step('the take opened in the Library player', async () => {
       await command('open-tab', { tab: 'library' })
-      await ui.click({ name: 'Session actions', role: 'button' }, { timeoutMs: 20000 })
-      await ui.click({ name: 'Markers' }, { timeoutMs: 5000 })
+      // The way a person opens it: the row's ⋯, then Markers. Where the
+      // menu's items aren't in the accessibility tree, the same open runs
+      // through `session-player-open` and the evidence says so.
+      let path = 'ui'
+      try {
+        await ui.click({ name: 'Session actions', role: 'button' }, { timeoutMs: 20000 })
+        await ui.click({ name: 'Markers' }, { timeoutMs: 3000 })
+      } catch (error) {
+        path = `session-player-open (the UI path failed: ${error.message.slice(0, 120)})`
+        await ui.press('Escape').catch(() => {})
+        const opened = await command('session-player-open', { sessionId })
+        if (opened?.opened !== true)
+          throw new Error(`session-player-open: ${JSON.stringify(opened)}`)
+      }
       await waitUntil('the player never opened', openPlayer, Boolean, {
         budgetMs: 15000,
         everyMs: 200
       })
-      return { summary: await aligned('opened') }
+      return { summary: `${await aligned('opened')}; opened by ${path}` }
     })
     if (!opened) return finish()
 

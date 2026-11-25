@@ -7,6 +7,11 @@
 //! The value lives in a `SliderState` entity the screen owns
 //! (`cx.new(|_| SliderState::new().min(0.).max(100.).default_value(40.))`),
 //! which emits `SliderEvent::Change` and `Release`.
+//!
+//! As a gain fader (audiocn's `Fader`), [`Slider::origin`] starts the range
+//! at 0 dB instead of the left end, so at unity nothing is filled. A skin (the
+//! Retro LCD's `LCD_FADER`) replaces the colours with [`Slider::track_color`],
+//! [`Slider::range_color`] and [`Slider::thumb_color`]: flat fills, no chrome.
 
 use gpui::{
     App, ElementId, Entity, FocusHandle, IntoElement, SharedString, Window, div, prelude::*, px,
@@ -28,6 +33,11 @@ pub struct Slider {
     state: Entity<SliderState>,
     disabled: bool,
     ground: Option<Color>,
+    /// Where the range starts, as a fraction of the travel (0 = left end).
+    origin: f32,
+    track: Option<Color>,
+    range: Option<Color>,
+    thumb: Option<(Color, Color)>,
     accessibility_label: Option<SharedString>,
     appearance: Option<Appearance>,
 }
@@ -38,9 +48,38 @@ impl Slider {
             state: state.clone(),
             disabled: false,
             ground: None,
+            origin: 0.0,
+            track: None,
+            range: None,
+            thumb: None,
             accessibility_label: None,
             appearance: None,
         }
+    }
+
+    /// The range runs from here to the thumb, as a fraction of the travel:
+    /// a gain fader's 0 dB (`FaderRange` from `originPosition`).
+    pub fn origin(mut self, fraction: f32) -> Self {
+        self.origin = fraction.clamp(0.0, 1.0);
+        self
+    }
+
+    /// The track's colour instead of `bg-foreground/15`.
+    pub fn track_color(mut self, color: Color) -> Self {
+        self.track = Some(color);
+        self
+    }
+
+    /// A flat range in this colour instead of the chrome fill.
+    pub fn range_color(mut self, color: Color) -> Self {
+        self.range = Some(color);
+        self
+    }
+
+    /// A flat thumb in `fill` on a 1 px `ring` instead of the chrome bead.
+    pub fn thumb_color(mut self, fill: Color, ring: Color) -> Self {
+        self.thumb = Some((fill, ring));
+        self
     }
 
     pub fn disabled(mut self, disabled: bool) -> Self {
@@ -85,31 +124,43 @@ impl RenderOnce for Slider {
         };
         // Edge alignment: the thumb travels the track less its own width,
         // and the range ends under the thumb's centre.
-        let thumb_left = (fraction * (width - THUMB)).max(0.0);
-        let range = thumb_left + THUMB / 2.0;
-        let well = with_alpha(t.foreground, 0.15);
-
-        let range_fill = if disabled {
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .h_full()
-                .w(px(range))
-                .bg(hsla(faded_over(t.chrome_fill_flat, ground, 0.5)))
+        let travel = (width - THUMB).max(0.0);
+        let thumb_left = (fraction * travel).max(0.0);
+        // The range runs between the origin and the thumb's centre.
+        let thumb_centre = thumb_left + THUMB / 2.0;
+        let origin_x = if self.origin > 0.0 {
+            self.origin * travel + THUMB / 2.0
         } else {
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .h_full()
-                .w(px(range))
+            0.0
+        };
+        let range_left = origin_x.min(thumb_centre);
+        let range = (origin_x.max(thumb_centre) - range_left).max(0.0);
+        let well = self.track.unwrap_or(with_alpha(t.foreground, 0.15));
+        let fade = |color: Color| {
+            if disabled {
+                faded_over(color, ground, 0.5)
+            } else {
+                color
+            }
+        };
+
+        let range_fill = div()
+            .absolute()
+            .top_0()
+            .left(px(range_left))
+            .h_full()
+            .w(px(range))
+            .rounded_full();
+        let range_fill = match self.range {
+            Some(color) => range_fill.bg(hsla(fade(color))),
+            None if disabled => range_fill.bg(hsla(fade(t.chrome_fill_flat))),
+            None => range_fill
                 .shadow(chrome::shadows(t.chrome_fill_shadow))
                 .child(chrome::metal(
                     t.chrome_fill_stops,
-                    [2.0, 0.0, 0.0, 2.0],
+                    [2.0, 2.0, 2.0, 2.0],
                     Direction::Down,
-                ))
+                )),
         };
         let thumb = gpui_base::SliderThumb::new(&self.state)
             .disabled(disabled)
@@ -118,7 +169,16 @@ impl RenderOnce for Slider {
             .left(px(thumb_left))
             .size(px(THUMB))
             .rounded_full();
-        let thumb = if disabled {
+        let thumb = if let Some((fill, ring)) = self.thumb {
+            thumb.bg(hsla(fade(fill))).shadow(vec![box_shadow(&Shadow {
+                inset: false,
+                x: 0.0,
+                y: 0.0,
+                blur: 0.0,
+                spread: 1.0,
+                color: fade(ring),
+            })])
+        } else if disabled {
             thumb.bg(hsla(faded_over(t.knob, ground, 0.5)))
         } else {
             // hover:ring-4 ring-ring/30 around the bead.
@@ -163,11 +223,7 @@ impl RenderOnce for Slider {
                         .w_full()
                         .h(px(4.0))
                         .rounded_full()
-                        .bg(hsla(if disabled {
-                            faded_over(well, ground, 0.5)
-                        } else {
-                            well
-                        }))
+                        .bg(hsla(fade(well)))
                         .child(range_fill)
                         .child(thumb),
                 ),

@@ -43,6 +43,7 @@ pub const WINDOW_COMMANDS: &[&str] = &[
     "notes-window-state",
     "raise-window",
     "session-player-geometry",
+    "session-player-open",
 ];
 
 const NOTES_CLOSED: &str = "Notes window is not open.";
@@ -198,6 +199,32 @@ fn run(command: &str, params: &Map<String, Value>, cx: &mut App) -> Result<Value
             Ok(json!({ "bounds": bounds }))
         }
         "raise-window" => raise(params, cx),
+        "session-player-open" => {
+            let id = params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .ok_or("session-player-open takes a sessionId.")?
+                .to_string();
+            let player = cx
+                .try_global::<crate::screens::session_player::SmokePlayers>()
+                .and_then(|players| {
+                    players
+                        .0
+                        .iter()
+                        .filter_map(|player| player.upgrade())
+                        .find(|player| player.read(cx).smoke_is_dialog())
+                })
+                .ok_or("session-player-open: the Library's player isn't there yet.")?;
+            let main = super::shell(cx)?
+                .window(videorc_app_core::smoke::security::UiWindow::Main, cx)
+                .ok_or(super::MAIN_WINDOW_NOT_READY)?;
+            let opened = main
+                .update(cx, |_, window, cx| {
+                    player.update(cx, |player, cx| player.smoke_open(&id, window, cx))
+                })
+                .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())?;
+            Ok(json!({ "opened": opened, "sessionId": id }))
+        }
         "session-player-geometry" => {
             // Every live session player (the Library's, and any a page hosts),
             // newest last.

@@ -4,7 +4,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gpui::{
-    Context, Entity, PathPromptOptions, SharedString, WeakEntity, Window, div, prelude::*, px,
+    Context, Entity, ImageSource, ObjectFit, PathPromptOptions, SharedString, WeakEntity, Window,
+    div, img, linear_color_stop, linear_gradient, prelude::*, px,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -16,6 +17,7 @@ use videorc_app_core::resources::{
     capability::{IssueOptions, ResourceKind},
     issue_capability,
 };
+use videorc_app_core::scenes::background::{BUNDLED_BACKGROUNDS, bundled_background_name};
 use videorc_app_core::studio::StudioBackend;
 use videorc_app_core::{BackendClient, BackendState, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
@@ -635,8 +637,18 @@ fn picture_tile(
     id: SharedString,
     name: SharedString,
     live: bool,
+    picture: Option<ImageSource>,
     t: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    // Over a picture the strip fades up from the background
+    // (`bg-gradient-to-t from-background/95 to-transparent`), so the name
+    // reads on any picture.
+    let pictured = picture.is_some();
+    let fade = linear_gradient(
+        0.,
+        linear_color_stop(hsla(with_alpha(t.background, 0.95)), 0.),
+        linear_color_stop(hsla(with_alpha(t.background, 0.)), 1.),
+    );
     div()
         .id(id)
         .relative()
@@ -651,8 +663,17 @@ fn picture_tile(
         .border_color(hsla(t.border))
         .hover(|style| style.border_color(hsla(with_alpha(t.foreground, 0.3))))
         .bg(hsla(t.muted))
+        // The picture fills the frame (`object-cover`) under the strip.
+        .children(picture.map(|picture| {
+            img(picture)
+                .absolute()
+                .inset_0()
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+        }))
         .child(
             div()
+                .relative()
                 .w_full()
                 .min_w(px(0.))
                 .flex()
@@ -661,6 +682,7 @@ fn picture_tile(
                 .px(px(8.))
                 .pt(px(20.))
                 .pb(px(4.))
+                .when(pictured, |strip| strip.bg(fade))
                 .child(
                     div()
                         .min_w(px(0.))
@@ -726,7 +748,18 @@ impl Render for ImagesPanel {
                     entity.update(cx, |panel, cx| panel.import_background(cx));
                 })
         };
-        let image_tiles = if self.backgrounds.is_empty() {
+        // The presets Videorc ships (`BUNDLED_BACKGROUND_MANIFEST`, from
+        // `videorc_app_core::bundled`), then the pictures imported here.
+        let bundled = &videorc_app_core::bundled::current().backgrounds;
+        let presets: Vec<(&str, &str, std::path::PathBuf)> = BUNDLED_BACKGROUNDS
+            .iter()
+            .filter_map(|(id, file)| {
+                let path = bundled.join(file);
+                let name = bundled_background_name(id)?;
+                path.is_file().then_some((*id, name, path))
+            })
+            .collect();
+        let image_tiles = if presets.is_empty() && self.backgrounds.is_empty() {
             Empty::new()
                 .title(assets::ADD_IMAGE)
                 .description("Import a PNG, JPEG or WebP for your scenes.")
@@ -734,11 +767,21 @@ impl Render for ImagesPanel {
                 .into_any_element()
         } else {
             let mut grid = gallery();
+            for (id, name, path) in presets {
+                grid = grid.child(picture_tile(
+                    SharedString::from(format!("bg-asset-{id}")),
+                    SharedString::from(name),
+                    false,
+                    Some(ImageSource::from(path)),
+                    t,
+                ));
+            }
             for row in &self.backgrounds {
                 grid = grid.child(picture_tile(
                     SharedString::from(format!("bg-asset-{}", row.id)),
                     SharedString::from(row.name.clone()),
                     false,
+                    None,
                     t,
                 ));
             }
@@ -748,10 +791,13 @@ impl Render for ImagesPanel {
         // over its gallery (`flex flex-col gap-2`).
         let mut live_grid = gallery();
         for id in assets::live_backgrounds_offered() {
+            // The default look's thumbnail (`liveBackgroundThumbnail`), the
+            // same embedded still first-run shows.
             live_grid = live_grid.child(picture_tile(
                 SharedString::from(format!("live-bg-{id}")),
                 SharedString::from(assets::live_background_name(id)),
                 true,
+                crate::screens::first_run::pictures::live_thumb(id).map(ImageSource::from),
                 t,
             ));
         }

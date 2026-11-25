@@ -206,6 +206,7 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "scroll-studio",
     "select-camera-shape",
     "session-player-geometry",
+    "session-player-open",
     "studio-dock-slot",
     "suspend-native-preview-surface",
     "ui-appearance",

@@ -18,8 +18,9 @@
 use std::{rc::Rc, time::Duration};
 
 use gpui::{
-    AnyElement, App, ClickEvent, ColorSpace, ElementId, FontWeight, IntoElement, ParentElement,
-    SharedString, Window, canvas, div, linear_color_stop, linear_gradient, prelude::*, px,
+    Action, AnyElement, App, ClickEvent, ColorSpace, ElementId, FocusHandle, FontWeight,
+    IntoElement, ParentElement, SharedString, Window, canvas, div, linear_color_stop,
+    linear_gradient, prelude::*, px,
 };
 use smallvec::SmallVec;
 
@@ -90,6 +91,10 @@ pub struct Button {
     ground: Option<Color>,
     accessibility_label: Option<SharedString>,
     tooltip: Option<SharedString>,
+    /// With `tooltip`: the chip reads this action's binding from the keymap.
+    tooltip_action: Option<Box<dyn Action>>,
+    /// A caller-owned focus handle (first run's autofocus).
+    track_focus: Option<FocusHandle>,
     on_click: Option<ClickHandler>,
     children: SmallVec<[AnyElement; 2]>,
     appearance: Option<Appearance>,
@@ -110,6 +115,8 @@ impl Button {
             ground: None,
             accessibility_label: None,
             tooltip: None,
+            tooltip_action: None,
+            track_focus: None,
             on_click: None,
             children: SmallVec::new(),
             appearance: None,
@@ -166,6 +173,26 @@ impl Button {
     /// The name a screen reader reads, for an icon-only button.
     pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
         self.accessibility_label = Some(label.into());
+        self
+    }
+
+    /// A tooltip whose key chip reads `action`'s binding from the live keymap
+    /// (Search ⌘K, the theme toggle's D), so the chip cannot drift from the
+    /// binding.
+    pub fn tooltip_with_action(
+        mut self,
+        text: impl Into<SharedString>,
+        action: &dyn Action,
+    ) -> Self {
+        self.tooltip = Some(text.into());
+        self.tooltip_action = Some(action.boxed_clone());
+        self
+    }
+
+    /// Takes this focus handle instead of its own, so a page can focus the
+    /// button (`autoFocus`) or ask whether it holds focus.
+    pub fn track_focus(mut self, handle: &FocusHandle) -> Self {
+        self.track_focus = Some(handle.clone());
         self
     }
 
@@ -361,8 +388,16 @@ impl RenderOnce for Button {
         if let Some(label) = self.accessibility_label {
             button = button.accessibility_label(label);
         }
+        if let Some(handle) = self.track_focus.as_ref() {
+            button = button.track_focus(handle);
+        }
         if let Some(text) = self.tooltip {
-            button = button.tooltip(crate::tooltip::tooltip(text));
+            button = match self.tooltip_action {
+                Some(action) => {
+                    button.tooltip(crate::tooltip::tooltip_with_action(text, action.as_ref()))
+                }
+                None => button.tooltip(crate::tooltip::tooltip(text)),
+            };
         }
         if let Some(on_click) = self.on_click {
             button = button.on_click(move |event, window, cx| on_click(event, window, cx));

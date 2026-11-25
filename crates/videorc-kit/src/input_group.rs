@@ -11,7 +11,7 @@ use smallvec::SmallVec;
 use crate::{
     chrome::box_shadow,
     input::{Input, InputState},
-    theme::{Appearance, faded_over, hsla, resolve, with_alpha},
+    theme::{Appearance, hsla, resolve, with_alpha},
     tokens::{Color, Shadow, radius, size},
 };
 
@@ -27,6 +27,7 @@ pub struct InputGroup {
     id: ElementId,
     state: Entity<InputState>,
     disabled: bool,
+    readonly: bool,
     invalid: bool,
     start: SmallVec<[AnyElement; 2]>,
     end: SmallVec<[AnyElement; 2]>,
@@ -41,6 +42,7 @@ impl InputGroup {
             id: id.into(),
             state: state.clone(),
             disabled: false,
+            readonly: false,
             invalid: false,
             start: SmallVec::new(),
             end: SmallVec::new(),
@@ -52,6 +54,13 @@ impl InputGroup {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// `readOnly` control (Guests' invite link beside its Link addon): it
+    /// selects and copies but never edits, in full colour.
+    pub fn readonly(mut self, readonly: bool) -> Self {
+        self.readonly = readonly;
         self
     }
 
@@ -193,13 +202,6 @@ impl RenderOnce for InputGroup {
         let t = resolve(self.appearance, window, cx);
         let ground = self.ground.unwrap_or(t.glass_solid);
         let disabled = self.disabled;
-        let fade = |color: Color| {
-            if disabled {
-                faded_over(color, ground, 0.5)
-            } else {
-                color
-            }
-        };
         let focused = {
             let state = self.state.read(cx);
             use gpui::Focusable;
@@ -214,6 +216,7 @@ impl RenderOnce for InputGroup {
         let mut control = Input::new((self.id.clone(), "control"), &self.state)
             .plain(true)
             .disabled(disabled)
+            .readonly(self.readonly)
             .invalid(self.invalid)
             .ground(ground);
         if let Some(appearance) = self.appearance {
@@ -234,8 +237,10 @@ impl RenderOnce for InputGroup {
             .rounded(px(radius::CHIP))
             .border_1()
             .border_color(hsla(if focused { focus_rim } else { rim }))
-            .bg(hsla(fade(with_alpha(t.input, 0.5))))
+            .bg(hsla(with_alpha(t.input, 0.5)))
             .when(focused, |group| group.shadow(vec![ring(focus_ring)]))
+            // `has-disabled:opacity-50`: the group, addons and text fade as
+            // one, once (the plain control inside skips its own fade).
             .when(disabled, |group| group.opacity(0.5))
             .children(self.start)
             .child(div().flex_1().min_w(px(0.0)).h_full().child(control))

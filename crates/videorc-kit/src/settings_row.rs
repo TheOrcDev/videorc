@@ -19,6 +19,8 @@ use crate::{
 pub struct SettingsRow {
     id: ElementId,
     label: SharedString,
+    /// An element before the label's words (Guests' "● Room closed").
+    label_leading: Option<AnyElement>,
     description: Option<AnyElement>,
     error: Option<SharedString>,
     /// When the control is a button that cannot take the label's name.
@@ -36,6 +38,7 @@ impl SettingsRow {
         SettingsRow {
             id: id.into(),
             label: label.into(),
+            label_leading: None,
             description: None,
             error: None,
             accessibility_label: None,
@@ -47,6 +50,13 @@ impl SettingsRow {
     }
 
     /// 12 px secondary text under the label (string or a status-dot row).
+    /// An element before the label's words, 6 px on (a StatusDot: "● Room
+    /// closed"). The row is still named by the label's words.
+    pub fn label_leading(mut self, leading: impl IntoElement) -> Self {
+        self.label_leading = Some(leading.into_any_element());
+        self
+    }
+
     pub fn description(mut self, description: impl IntoElement) -> Self {
         self.description = Some(description.into_any_element());
         self
@@ -104,11 +114,18 @@ impl RenderOnce for SettingsRow {
             .gap(px(4.0))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
                     .text_size(px(14.0))
                     .line_height(px(20.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(hsla(t.foreground))
-                    .child(self.label),
+                    .children(
+                        self.label_leading
+                            .map(|leading| div().flex_none().flex().items_center().child(leading)),
+                    )
+                    .child(div().min_w(px(0.0)).child(self.label)),
             )
             .children(self.description.map(|description| {
                 div()

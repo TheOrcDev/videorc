@@ -293,7 +293,31 @@ impl RenderOnce for ToggleGroup {
                     });
                 }
 
-                if disabled {
+                if disabled && pressed {
+                    // A disabled group keeps its choice on show, faded
+                    // (`disabled:opacity-50` over the pressed look),
+                    // pre-blended per the kit.
+                    let fade = |color| faded_over(color, ground, 0.5);
+                    chip = chip.text_color(hsla(fade(t.foreground)));
+                    if self.card {
+                        chip = chip
+                            .border_color(hsla(fade(with_alpha(t.primary, 0.5))))
+                            .bg(hsla(fade(with_alpha(t.primary, 0.1))));
+                    } else {
+                        let mut plate = plate_shadows(t);
+                        for shadow in &mut plate {
+                            shadow.color.a *= 0.5;
+                        }
+                        chip = chip
+                            .bg(linear_gradient(
+                                180.0,
+                                linear_color_stop(hsla(fade(t.chrome_plate_top)), 0.0),
+                                linear_color_stop(hsla(fade(t.chrome_plate_bottom)), 1.0),
+                            )
+                            .color_space(ColorSpace::Oklab))
+                            .shadow(plate);
+                    }
+                } else if disabled {
                     let ink = faded_over(t.muted_foreground, ground, 0.5);
                     chip = chip.text_color(hsla(ink));
                     if self.outline {

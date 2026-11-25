@@ -69,7 +69,7 @@ pub mod window_frame;
 
 pub use alert::{Alert, AlertVariant};
 pub use avatar::Avatar;
-pub use badge::{Badge, BadgeVariant};
+pub use badge::{Badge, BadgeVariant, plate_shadows};
 pub use bar_visualizer::{BarVisualizer, BarVisualizerState};
 pub use button::{Button, ButtonSize, ButtonVariant};
 pub use caption_preview_backdrop::{CaptionPreviewBackdrop, CaptionPreviewBackdropEl};
@@ -80,7 +80,7 @@ pub use context_menu::ContextMenu;
 pub use dialog::{Dialog, DialogHandle, DialogSize};
 pub use dropdown_menu::{DropdownMenu, Menu, MenuAlign, MenuItem, MenuItemTone, MenuShortcut};
 pub use empty::Empty;
-pub use field::{Field, FieldGroup, FieldGroupVariant, FieldOrientation};
+pub use field::{Field, FieldError, FieldGroup, FieldGroupVariant, FieldOrientation};
 pub use hover_card::HoverCard;
 pub use icon::{IconName, icon};
 pub use input::{Input, InputState};
@@ -102,7 +102,7 @@ pub use qr_code::{DEFAULT_SIZE, QrCode, path_for};
 pub use scroll_area::ScrollArea;
 pub use section_label::SectionLabel;
 pub use segmented_control::{Segment, SegmentedControl};
-pub use select::{Select, SelectOption, SelectSize};
+pub use select::{Select, SelectOption, SelectSize, SelectTriggerState};
 pub use selectable_text::SelectableText;
 pub use separator::{Separator, SeparatorOrientation};
 pub use settings_row::{SettingsGroup, SettingsRow};
@@ -121,7 +121,9 @@ pub use status_dot::{StatusDot, StatusTone};
 pub use switch::Switch;
 pub use tabs::{Tabs, TabsVariant};
 pub use textarea::{Textarea, TextareaState};
-pub use theme::{Appearance, FONT, IncreaseContrast, ReduceMotion, TypeScale, faded_over, hsla};
+pub use theme::{
+    Appearance, FONT, FONT_MONO, IncreaseContrast, ReduceMotion, TypeScale, faded_over, hsla,
+};
 pub use toast::{ToastData, ToastKind, Toaster, toast_card};
 pub use toggle_group::{ToggleGroup, ToggleItem};
 pub use tooltip::{tooltip, tooltip_with_accelerator, tooltip_with_action, tooltip_with_shortcut};
