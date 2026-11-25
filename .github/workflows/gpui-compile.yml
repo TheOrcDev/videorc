@@ -5,13 +5,16 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: gpui-compile-${{ github.ref }}
-  cancel-in-progress: true
+  # Settled-batch dispatches must finish even when a new merge lands.
+  # Keep them separate from the cancellable push/PR checks.
+  group: gpui-compile-${{ github.event_name == 'workflow_dispatch' && 'sentinel' || 'continuous' }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   compile:
@@ -43,6 +46,32 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: gpui-compile-linux
+          cache-on-failure: true
+
+      - name: Compile GPUI and test targets without running tests
+        run: cargo check --locked -p videorc-app-core -p videorc-kit -p videorc-protocol -p videorc-app --all-targets
+
+  compile-windows:
+    name: gpui compile (Windows)
+    # Keep draft/PR feedback cheap; the sentinel dispatches both platforms
+    # on main after ten quiet minutes, once per settled batch.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache GPUI check dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gpui-compile-windows
           cache-on-failure: true
 
       - name: Compile GPUI and test targets without running tests
