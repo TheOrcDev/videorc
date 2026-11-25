@@ -42,7 +42,11 @@
     "page-tabs",
     "settings-row",
     "checkbox",
-    "textarea"
+    "textarea",
+    "separator",
+    "collapsible",
+    "avatar",
+    "chat-platform"
   ],
   "keepLocal": []
 }

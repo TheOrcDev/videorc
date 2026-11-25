@@ -292,7 +292,8 @@ impl SceneModel {
             layout: &capture["layout"],
             sources: &capture["sources"],
             session_active,
-            // The stage's gestures join with the canvas (the next PR).
+            // The stage's phase is the page's: `layout_section` gates the
+            // presets and Freeform on it as it draws.
             stage_busy: false,
             has_scene: view.on_stream_id.is_some(),
             pending: view

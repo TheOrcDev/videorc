@@ -140,6 +140,48 @@ pub struct VerticalStreamLayoutView {
     pub read_only_reason: Option<&'static str>,
 }
 
+/// Copy for the Studio bottom-row Vertical stream panel
+/// (`vertical-leg-monitor.tsx`).
+pub mod leg_copy {
+    pub const TITLE: &str = "Vertical stream";
+    pub const ON_AIR: &str = "On air";
+    pub const READY: &str = "Ready";
+    pub const DESC_LIVE: &str =
+        "Changes here go live on the vertical stream only. Your horizontal stream isn't touched.";
+    pub const DESC_IDLE: &str = "Goes live beside your horizontal stream when you start.";
+    pub const LAYOUT: &str = "Layout";
+    pub const LAYOUT_ARIA: &str = "Vertical stream layout";
+    /// `ScreenFramingControl`'s default label on the Vertical stream panel.
+    pub const SCREEN: &str = "Screen";
+}
+
+/// The Vertical stream panel in the Studio dashboard bottom row
+/// (`VerticalLegMonitor`): none while simulcast is not armed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerticalLegMonitorView {
+    pub session_active: bool,
+    /// The scene on stream's 9:16 layout control; none without a scene or
+    /// while the studio itself is already 9:16.
+    pub layout: Option<VerticalStreamLayoutView>,
+}
+
+/// `VerticalLegMonitor`: the panel when a vertical destination is armed
+/// beside a 16:9 studio.
+pub fn vertical_leg_monitor_view(
+    capture: &Value,
+    session_active: bool,
+    scene: Option<&Scene>,
+    read_only: bool,
+) -> Option<VerticalLegMonitorView> {
+    if !capture_config::simulcast_armed(capture) {
+        return None;
+    }
+    Some(VerticalLegMonitorView {
+        session_active,
+        layout: vertical_stream_layout_view(scene, capture, read_only),
+    })
+}
+
 fn needs_camera(preset: &str) -> bool {
     matches!(
         preset,
@@ -307,6 +349,29 @@ impl<B: StudioBackend> Studio<B> {
             .as_ref()
             .is_some_and(|state| state.read_only);
         vertical_stream_layout_view(scene.as_ref(), &inner.capture.config, read_only)
+    }
+
+    /// The Studio bottom-row Vertical stream panel (`VerticalLegMonitor`).
+    pub fn vertical_leg_monitor(&self, session_active: bool) -> Option<VerticalLegMonitorView> {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        inner.capture.sync(inner.settings.get(keys::CAPTURE_CONFIG));
+        let scene = inner
+            .scenes
+            .on_stream
+            .clone()
+            .and_then(|id| inner.stored_scene(&id));
+        let read_only = inner
+            .scenes
+            .state
+            .as_ref()
+            .is_some_and(|state| state.read_only);
+        vertical_leg_monitor_view(
+            &inner.capture.config,
+            session_active,
+            scene.as_ref(),
+            read_only,
+        )
     }
 }
 

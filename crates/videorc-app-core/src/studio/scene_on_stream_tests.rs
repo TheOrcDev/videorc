@@ -224,6 +224,31 @@ fn a_scene_that_shows_no_screen_asks_for_one_before_a_screen_layout() {
     assert_eq!(asking, ["screen-camera", "screen-only", "side-by-side"]);
     // D19 waits for Change screen…'s picker.
     assert_eq!(fields.layout.pick("screen-only"), None);
+    assert_eq!(
+        fields.layout.asks_for_screen("screen-only"),
+        Some("screen-only")
+    );
+    // The layout on now, and one that draws no screen, never ask.
+    assert_eq!(fields.layout.asks_for_screen("camera-only"), None);
+    assert_eq!(
+        Fixture::new()
+            .fields()
+            .layout
+            .asks_for_screen("screen-only"),
+        None
+    );
+}
+
+#[test]
+fn change_screen_waits_for_a_newer_library_or_the_screen_switch() {
+    let mut fixture = Fixture::new();
+    assert_eq!(fixture.fields().change_screen_reason, None);
+    assert_eq!(copy::CHANGE_SCREEN, "Change screen\u{2026}");
+    fixture.read_only = true;
+    assert_eq!(
+        fixture.fields().change_screen_reason.as_deref(),
+        Some("Update Videorc to change your scenes.")
+    );
 }
 
 #[test]

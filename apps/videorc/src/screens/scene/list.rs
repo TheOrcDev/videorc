@@ -14,6 +14,7 @@ use videorc_app_core::nav::PageId;
 use videorc_app_core::scenes::list::{duplicated_scene, scene_with_audio, scene_with_follow};
 use videorc_app_core::scenes::model::scene_audio;
 use videorc_app_core::scenes::store::DeleteRule;
+use videorc_app_core::studio::scenes_section::copy::EDIT_SCENE;
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::icon::{IconName, icon};
@@ -86,10 +87,27 @@ impl ScenePage {
         if list.read_only {
             add = add.tooltip(copy::READ_ONLY_REASON);
         }
+        // P452 / X2: Edit scene, kept in place but hidden while the editor
+        // is open, so the header never moves at the first grab.
+        let editing = self.studio.watch().borrow().scene_edit_mode;
+        let edit = div().when(editing, |slot| slot.invisible()).child(
+            Button::new("scene-edit")
+                .label(EDIT_SCENE)
+                .variant(ButtonVariant::Ghost)
+                .disabled(editing)
+                .on_click(cx.listener(|this, _, _, cx| this.edit_scene(cx))),
+        );
         let mut section = PanelSection::new("scenes")
             .title(copy::SCENES_TITLE)
             .description(description)
-            .action(add);
+            .action(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(edit)
+                    .child(add),
+            );
 
         if let Some(error) = list.error {
             section = section.child(

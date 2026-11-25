@@ -18,9 +18,19 @@ pub const SLIGHT_BLUR_PCT: f64 = 30.0;
 pub const LABEL: &str = "Background";
 pub const SETTINGS_LABEL: &str = "Background settings";
 pub const CHOOSE_IMAGE_LABEL: &str = "Choose image…";
+/// The popover's narrow Choose image… tile (`camera-background-tiles.tsx`).
+pub const CHOOSE_COMPACT_LABEL: &str = "Choose…";
 pub const BLUR_STRENGTH_LABEL: &str = "Blur strength";
 pub const WHAT_VIEWERS_SEE_LABEL: &str = "What viewers see";
 pub const LOCK_LINE: &str = "Done on this Mac, before anything is recorded or sent.";
+/// The popover's Settings door (`camera-background-picker.tsx`).
+pub const SETTINGS_BUTTON: &str = "Settings";
+/// "Choose an image" dialog (`camera-background-image-dialog.tsx`).
+pub const CHOOSE_IMAGE_TITLE: &str = "Choose an image";
+pub const CHOOSE_IMAGE_DESCRIPTION: &str = "It shows behind you on this camera, in every scene.";
+pub const CHOOSE_IMAGE_EMPTY: &str = "No images yet. Add one in Images.";
+pub const OPEN_IMAGES_LABEL: &str = "Open Images";
+pub const DONE_LABEL: &str = "Done";
 pub const DESCRIPTION: &str = "Blurs or replaces what's behind you in the recording, the livestream, Clips, Videorc Camera and the room. This camera keeps it in every scene.";
 pub const HINT: &str =
     "Works best with light on your face. Done on this Mac, before anything is recorded or sent.";
@@ -499,6 +509,8 @@ impl BackgroundDraft {
 
 /// `SECTION_IMAGES`: the pictures the section's row shows before Choose image….
 pub const SECTION_IMAGES: usize = 2;
+/// `POPOVER_IMAGES`: the pictures the Studio popover shows before Choose….
+pub const POPOVER_IMAGES: usize = 3;
 /// `BLUR_MARKS` and the slider's range.
 pub const BLUR_MARKS: [(f64, &str); 2] = [(SLIGHT_BLUR_PCT, "Slight"), (STRONG_BLUR_PCT, "Strong")];
 pub const BLUR_MIN_PCT: f64 = 10.0;

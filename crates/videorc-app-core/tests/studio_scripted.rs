@@ -4539,6 +4539,58 @@ async fn a_cloud_recording_stop_that_did_not_happen_says_so_once() {
     assert_eq!(said(&mut notices), expected);
 }
 
+// --- The Resume notice's talk-show Resume (`cloud.room.resume`) ----------
+
+#[tokio::test]
+async fn resume_in_a_talk_show_rejoins_the_room_and_a_refusal_says_so_under_the_clouds_id() {
+    let (backend, studio) = talk_show_studio(false).await;
+    // The answer is the room's status: here, the cloud recording runs again.
+    answer_livestream(
+        &backend,
+        "cloud.room.resume",
+        talk_show_status("show-7", true),
+    );
+    assert!(!cloud_outputs(&studio).unwrap().recording);
+    let mut notices = studio.notices();
+    studio.resume_talk_room().await;
+    fn resumes(backend: &Scripted) -> usize {
+        livestream_methods(backend)
+            .iter()
+            .filter(|method| *method == "cloud.room.resume")
+            .count()
+    }
+    assert_eq!(resumes(&backend), 1);
+    assert!(
+        cloud_outputs(&studio).unwrap().recording,
+        "the answer is committed"
+    );
+    assert_eq!(said(&mut notices), []);
+
+    backend.with(|script| {
+        script
+            .livestream
+            .entry("cloud.room.resume".to_string())
+            .or_default()
+            .push_back(Err(RpcError::new(
+                "cloud.room.resume",
+                "failed",
+                "The room did not answer.",
+            )));
+    });
+    studio.resume_talk_room().await;
+    assert_eq!(resumes(&backend), 2);
+    let toasts = said(&mut notices);
+    assert_eq!(toasts.len(), 1, "{toasts:?}");
+    assert!(
+        toasts[0].0.starts_with("Couldn't resume the show"),
+        "{toasts:?}"
+    );
+    assert_eq!(
+        toasts[0].1.as_deref(),
+        Some(videorc_app_core::livestream::cloud_view::CLOUD_TOAST_ID)
+    );
+}
+
 // --- The live dashboard's 1 s push (#1969 review) -------------------------
 
 #[tokio::test]

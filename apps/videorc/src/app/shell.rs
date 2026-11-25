@@ -282,6 +282,12 @@ impl Shell {
                     this.first_run
                         .update(cx, |setup, cx| setup.open_replay(return_to, cx));
                 }
+                // Open/Close Preview (macOS only, as the row is).
+                #[cfg(target_os = "macos")]
+                Command::Preview => this
+                    .preview
+                    .update(cx, |preview, cx| preview.toggle_open(cx)),
+                #[cfg(not(target_os = "macos"))]
                 Command::Preview => this
                     .preview
                     .update(cx, |preview, cx| preview.toggle_floating(cx)),
@@ -291,6 +297,13 @@ impl Shell {
                 Command::Notes => window.dispatch_action(Box::new(super::menus::ToggleNotes), cx),
                 Command::CaptionsReader => {
                     window.dispatch_action(Box::new(super::menus::ToggleCaptions), cx)
+                }
+                // P283: Studio is the home of scenes; its Scenes section
+                // opens the picker.
+                Command::AddScene => {
+                    this.open_page(PageId::Studio, window, cx);
+                    this.studio
+                        .update(cx, |studio, cx| studio.open_add_scene(window, cx));
                 }
                 _ => {}
             },
@@ -357,6 +370,65 @@ impl Shell {
         self.page
     }
 
+    /// The smokes' `open-tab` ([`crate::smoke::OpenTab`], the screen
+    /// gallery): `page` as its sidebar row opens it, on `sub_tab`, with
+    /// `dialog` over it.
+    pub fn smoke_open(
+        &mut self,
+        page: PageId,
+        open: crate::smoke::OpenTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        use crate::smoke::SmokeDialog;
+        use videorc_app_core::nav::sub_tabs::{AVATAR_TABS, BUDDY_TABS};
+        use videorc_app_core::settings_page::SettingsTab;
+
+        self.open_page(page, window, cx);
+        if let Some(sub) = open.sub_tab.as_deref() {
+            let unknown = || format!("open-tab: {} has no tab {sub:?}.", page.label());
+            match page {
+                PageId::Settings => {
+                    let tab = SettingsTab::parse(sub).ok_or_else(unknown)?;
+                    self.settings
+                        .update(cx, |settings, cx| settings.select(tab, cx));
+                }
+                PageId::Ai => {
+                    let index = BUDDY_TABS
+                        .iter()
+                        .position(|id| *id == sub)
+                        .ok_or_else(unknown)?;
+                    self.sidekick
+                        .update(cx, |sidekick, cx| sidekick.select_tab(index, cx));
+                }
+                PageId::Avatar => {
+                    let index = AVATAR_TABS
+                        .iter()
+                        .position(|id| *id == sub)
+                        .ok_or_else(unknown)?;
+                    self.avatar
+                        .update(cx, |avatar, cx| avatar.select_tab(index, cx));
+                }
+                _ => {
+                    return Err(format!(
+                        "open-tab: the GPUI app has no sub-tabs on {}.",
+                        page.label()
+                    ));
+                }
+            }
+        }
+        match open.dialog {
+            None => {}
+            Some(SmokeDialog::GoLive) => self.go_live.read(cx).open(),
+            Some(SmokeDialog::Palette) => self.toggle_search(window, cx),
+            Some(SmokeDialog::FirstRun { step, goal }) => self
+                .first_run
+                .update(cx, |first_run, cx| first_run.open_first_run(step, goal, cx)),
+        }
+        cx.notify();
+        Ok(())
+    }
+
     pub fn open_page(&mut self, page: PageId, window: &mut Window, cx: &mut Context<Self>) {
         if self.page != page {
             self.settings
@@ -388,13 +460,22 @@ impl Shell {
                     .update(cx, |settings, cx| settings.refresh(cx));
             }
             window.set_window_title(&nav::window_title(page));
-            // A docked slot that is not on screen presents nothing.
+            // A docked slot that is not on screen presents nothing. The
+            // Scene page's canvas is the other docked slot (X5).
             self.preview.update(cx, |preview, _| {
-                preview.set_docked_shown(page == PageId::Studio)
+                preview.set_docked_shown(
+                    page == PageId::Studio
+                        || (crate::preview::SCENE_HOSTS_DOCKED && page == PageId::Layouts),
+                )
             });
             // Space records only while the Studio page holds focus.
             if page == PageId::Studio {
                 let focus = self.studio.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+            // ⌘Z undoes a layout change while the Scene page holds focus.
+            if page == PageId::Layouts {
+                let focus = self.scene.read(cx).focus_handle();
                 window.focus(&focus, cx);
             }
             cx.notify();

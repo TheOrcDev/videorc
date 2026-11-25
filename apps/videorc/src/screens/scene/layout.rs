@@ -1,7 +1,8 @@
 //! The Layout section (`layout-tab.tsx`; P499–P511): the orientation, the
 //! layouts of the scene on stream, the switch's status line, the hint, the
-//! screen's framing and Animate scene changes. The view is the core's
-//! `layout_section_view`. The Freeform toggle joins with the canvas.
+//! screen's framing and Animate scene changes, and the Freeform toggle
+//! (P505). The view is the core's `layout_section_view`; the stage's phase
+//! gates the layouts and Freeform as it draws.
 
 use gpui::{AnyElement, Context, FontWeight, SharedString, Window, div, prelude::*, px};
 use serde_json::{Map, json};
@@ -32,7 +33,13 @@ impl ScenePage {
         let t = theme::resolve(None, window, cx);
         let muted = hsla(t.muted_foreground);
         let ink = hsla(t.foreground);
-        let view = self.model.layout.clone();
+        let mut view = self.model.layout.clone();
+        // `stageBusy`: no layout or Freeform while a gesture or its commit
+        // is in flight.
+        if self.stage.phase() != super::stage::StagePhase::Idle {
+            view.presets_enabled = false;
+            view.freeform_enabled = false;
+        }
         let page = cx.entity().downgrade();
 
         // P499/P500: the orientation, locked while a session runs.
@@ -74,12 +81,39 @@ impl ScenePage {
                 .option(Segment::new(option.id, option.label.clone()).disabled(option.disabled));
         }
 
+        // P505 / X3: Freeform. Every press enters it (pressing it again
+        // re-enters; only a layout leaves it); a spinner while it lands.
+        let freeform = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                Button::new("scene-layout-freeform")
+                    .label(view.freeform_label)
+                    .variant(ButtonVariant::Outline)
+                    .lit(view.freeform)
+                    .disabled(!view.freeform_enabled)
+                    .on_click(cx.listener(|this, _, _, cx| this.enter_freeform(cx))),
+            )
+            .when(view.freeform_pending, |row| {
+                row.child(Spinner::new("scene-freeform-spinner").size(14.))
+            });
         let mut section = PanelSection::new("scene-layout")
             .title(copy::LAYOUT_TITLE)
             .icon(icon(IconName::Layout, 16., muted))
             .description(inspector_copy::LAYOUT_DESCRIPTION)
             .action(orientation)
-            .child(presets);
+            .child(
+                div()
+                    .id("scene-layout-row")
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(presets)
+                    .child(div().w(px(1.)).h(px(20.)).bg(hsla(t.border)))
+                    .child(freeform),
+            );
 
         // P506: the switch's status line, 1.5 s after it starts.
         if let Some(line) = self

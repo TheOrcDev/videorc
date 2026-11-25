@@ -252,7 +252,6 @@ impl AvatarScreen {
     /// `cohost.avatar.create` (the onboarding's "Create my avatar"): the
     /// params are Electron's (`description`, `inspirationBase64`, `name`,
     /// `personality`, `context`). False when a job already runs.
-    #[allow(dead_code)] // The onboarding (batch B) calls it.
     pub(super) fn look_create(&mut self, params: Value, cx: &mut Context<Self>) -> bool {
         if !self.look_ui.look.begin_create(wall_ms()) {
             return false;

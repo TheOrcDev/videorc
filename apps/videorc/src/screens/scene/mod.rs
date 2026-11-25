@@ -2,8 +2,9 @@
 //! list with its ⋯ menu, Rename and Delete, the picker (Add scene…, Change
 //! screen…), Set key…, Guests in the room… and Resolve scene sources; the
 //! Layout section, the Canvas section's toolbar and Hide screen; the
-//! inspector and the Banners section. The stage itself (its drawing,
-//! gestures and live drafts) is batch B.
+//! inspector and the Banners section; the stage (its drawing, gestures and
+//! live drafts) over the docked preview, with its footer, Freeform, Edit
+//! scene and ⌘Z.
 //!
 //! Every rule is the core's; [`model::SceneModel`] and
 //! [`editor::EditorModel`] map one snapshot (and what the page keeps) to
@@ -23,11 +24,14 @@ mod inspector;
 mod layout;
 mod list;
 pub mod model;
+mod stage;
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use gpui::{Context, Entity, EventEmitter, Task, Window, div, prelude::*};
+use gpui::{
+    Context, Entity, EventEmitter, FocusHandle, KeyBinding, Task, Window, actions, div, prelude::*,
+};
 use videorc_app_core::nav::PageId;
 use videorc_app_core::settings_page::SettingsTab;
 use videorc_app_core::studio::Connection;
@@ -36,6 +40,8 @@ use videorc_app_core::{BackendClient, Studio, StudioSnapshot};
 use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::theme::{self, hsla};
 
+use crate::preview::Preview;
+
 use controls::Controls;
 use dialogs::SceneDialogs;
 use editor::{EditorModel, EditorState, parse_banners};
@@ -43,6 +49,22 @@ use model::SceneModel;
 
 /// `@min-[940px]/page`: the inspector beside the lead column from here.
 const SCENE_GRID_MIN_WIDTH: f32 = 940.;
+
+/// The page's key context: ⌘Z / Ctrl+Z undoes the last layout change
+/// (P536). A focused text field's own Undo binding is deeper, so it wins.
+const KEY_CONTEXT: &str = "ScenePage";
+
+actions!(scene_page, [UndoLayout]);
+
+/// Binds the page's keys; call once at start. ⇧⌘Z and ⌥⌘Z stay unbound
+/// (P537: no redo).
+pub fn bind_keys(cx: &mut gpui::App) {
+    cx.bind_keys([KeyBinding::new(
+        "secondary-z",
+        UndoLayout,
+        Some(KEY_CONTEXT),
+    )]);
+}
 
 pub type AppStudio = Studio<BackendClient>;
 
@@ -56,6 +78,14 @@ pub enum SceneNavigate {
 pub struct ScenePage {
     studio: Arc<AppStudio>,
     runtime: tokio::runtime::Handle,
+    /// The page's focus: ⌘Z lands here (the shell focuses it on entry).
+    focus: FocusHandle,
+    /// The preview: its docked layer is the canvas's picture (X5).
+    preview: Entity<Preview>,
+    /// The stage's gesture, drafts and Snap toggle.
+    stage: stage::Stage,
+    /// The layout undo slot holds an entry (Undo shows, ⌘Z works).
+    undo_available: bool,
     model: SceneModel,
     /// The scene dialogs, shared with the Studio's Scenes section.
     dialogs: Entity<SceneDialogs>,
@@ -101,9 +131,12 @@ impl ScenePage {
         studio: Arc<AppStudio>,
         runtime: tokio::runtime::Handle,
         hotkeys: crate::app::hotkeys::Hotkeys,
+        preview: Entity<Preview>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // The canvas follows the preview between docked and its own window.
+        cx.observe(&preview, |_, _, cx| cx.notify()).detach();
         let model = SceneModel::of(&studio.watch().borrow(), platform(), wayland());
         let dialogs =
             cx.new(|cx| SceneDialogs::new(studio.clone(), runtime.clone(), hotkeys, window, cx));
@@ -144,6 +177,10 @@ impl ScenePage {
         let mut page = Self {
             studio,
             runtime,
+            focus: cx.focus_handle(),
+            preview,
+            stage: stage::Stage::new(),
+            undo_available: false,
             model,
             dialogs,
             add_app_open: false,
@@ -163,6 +200,11 @@ impl ScenePage {
         self.schedule_status_line(snapshot, cx);
         if model != self.model {
             self.model = model;
+            cx.notify();
+        }
+        let undo_available = self.studio.layout_undo_available();
+        if undo_available != self.undo_available {
+            self.undo_available = undo_available;
             cx.notify();
         }
         self.update_editor(snapshot, cx);
@@ -259,10 +301,21 @@ impl ScenePage {
     fn navigate(&mut self, to: SceneNavigate, cx: &mut Context<Self>) {
         cx.emit(to);
     }
+
+    /// The page's focus, for the shell to focus on entry.
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
+    }
 }
 
 impl Render for ScenePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The inspector waits while a stage gesture runs.
+        let dragging = self.stage.phase() == stage::StagePhase::Dragging;
+        if dragging != self.editor_state.stage_dragging {
+            self.editor_state.stage_dragging = dragging;
+            self.refresh_editor(cx);
+        }
         self.sync_controls(window, cx);
         let t = theme::resolve(None, window, cx);
         let list = self.scenes_section(window, cx);
@@ -316,6 +369,9 @@ impl Render for ScenePage {
         };
         div()
             .id("scene-page")
+            .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|page, _: &UndoLayout, _, cx| page.undo_key(cx)))
             .relative()
             .size_full()
             .child(measure)

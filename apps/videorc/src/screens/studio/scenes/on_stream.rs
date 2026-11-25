@@ -8,10 +8,10 @@
 //!
 //! Hide screen is the backend's one state: read on every connection
 //! (`screen.privacy.get`), heard on every change (`screen.privacy.changed`)
-//! and changed with `screen.hide` / `screen.show`. Change screen… waits for
-//! the scene picker, as on the Scene page; until it lands a layout that
-//! asks for a screen first (D19) isn't offered. The Retro LCD rows (P329)
-//! wait for the kit's LCD panel.
+//! and changed with `screen.hide` / `screen.show`. Change screen… (P322)
+//! opens the Scene page's picker for the scene on stream, and a layout that
+//! asks for a screen first (D19) opens it with that layout. The Retro LCD
+//! rows (P329) wait for the kit's LCD panel.
 
 use gpui::{
     AnyElement, Context, Div, Role, SharedString, Window, div, linear_color_stop, linear_gradient,
@@ -322,13 +322,19 @@ impl ScenesSection {
         .detach();
     }
 
-    /// The Layout field's pick (`chooseLayout`).
-    fn choose_layout(&mut self, preset: &str) {
-        let Some(preset) = self
-            .on_stream
-            .as_ref()
-            .and_then(|view| view.layout.pick(preset))
-        else {
+    /// The Layout field's pick (`chooseLayout`): D19 first (a layout that
+    /// draws a screen, on a scene that shows none, opens Change screen…
+    /// with it; Cancel keeps the old one), else the layout goes on.
+    fn choose_layout(&mut self, preset: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.on_stream.as_ref() else {
+            return;
+        };
+        if let Some(asked) = view.layout.asks_for_screen(preset) {
+            let id = view.id.clone();
+            self.open_change_screen(&id, Some(asked.to_string()), window, cx);
+            return;
+        }
+        let Some(preset) = view.layout.pick(preset) else {
             return;
         };
         let studio = self.studio.clone();
@@ -368,6 +374,18 @@ impl ScenesSection {
                 eprintln!("[videorc-app] Scenes: the vertical stream's layout wasn't saved");
             }
         });
+    }
+
+    /// Change screen… for the scene on stream (P322).
+    fn change_screen_on_stream(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.on_stream.as_ref() else {
+            return;
+        };
+        if view.change_screen_reason.is_some() {
+            return;
+        }
+        let id = view.id.clone();
+        self.open_change_screen(&id, None, window, cx);
     }
 
     /// The capture line's Check again.
@@ -480,6 +498,29 @@ impl ScenesSection {
                 .into_any_element(),
             None => hide.tooltip(privacy.action_label).into_any_element(),
         };
+        // P322: Change screen… beside Hide screen, off with its reason.
+        let change_screen = Button::new("scene-change-screen")
+            .variant(ButtonVariant::Outline)
+            .label(copy::CHANGE_SCREEN)
+            .disabled(view.change_screen_reason.is_some())
+            .on_click(
+                cx.listener(|section, _, window, cx| section.change_screen_on_stream(window, cx)),
+            );
+        let change_screen: AnyElement = match view.change_screen_reason.clone() {
+            Some(reason) => div()
+                .id("scene-change-screen-reason")
+                .child(change_screen)
+                .tooltip(tooltip(reason))
+                .into_any_element(),
+            None => change_screen.into_any_element(),
+        };
+        let screen_controls = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(hide)
+            .child(change_screen)
+            .into_any_element();
         // P321, P333: the chip while it holds; a room's confirmation on hover.
         let chip = privacy.chip.clone().map(|chip| {
             div()
@@ -533,7 +574,7 @@ impl ScenesSection {
             chip,
             view.screen_words.clone(),
             view.screen_note.clone(),
-            hide,
+            screen_controls,
             t,
         )
         .children(status)
@@ -550,16 +591,20 @@ impl ScenesSection {
             .placeholder(layout.trigger.clone())
             .on_change({
                 let entity = entity.clone();
-                move |value, _, cx| {
-                    entity.update(cx, |section, _| section.choose_layout(value.as_ref()))
+                move |value, window, cx| {
+                    entity.update(cx, |section, cx| {
+                        section.choose_layout(value.as_ref(), window, cx)
+                    })
                 }
             });
-        // The kit's Select has no disabled option: a layout that is off (or
-        // that waits for Change screen…) is left out; the camera's line says
-        // why.
-        for choice in layout.choices.iter().filter(|choice| {
-            choice.value == layout.preset || (!choice.disabled && !choice.asks_for_screen)
-        }) {
+        // The kit's Select has no disabled option: a layout that is off is
+        // left out, and the camera's line says why. One that asks for a
+        // screen first (D19) is offered and opens Change screen….
+        for choice in layout
+            .choices
+            .iter()
+            .filter(|choice| choice.value == layout.preset || !choice.disabled)
+        {
             select = select.option(choice.value, choice.label.clone());
         }
         let layout_control = div()

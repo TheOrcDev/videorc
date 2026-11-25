@@ -5,10 +5,13 @@
 //! the same re-exports as videorc-ui's `gpui/kit/src/lib.rs`.
 
 pub mod alert;
+pub mod avatar;
 pub mod badge;
 pub mod button;
+pub mod chat_platform;
 pub mod checkbox;
 pub mod chrome;
+pub mod collapsible;
 pub mod command;
 pub mod context_menu;
 pub mod dialog;
@@ -31,6 +34,7 @@ pub mod scroll_area;
 pub mod section_label;
 pub mod segmented_control;
 pub mod select;
+pub mod separator;
 pub mod settings_row;
 pub mod shortcut_keys;
 pub mod skeleton;
@@ -51,9 +55,12 @@ pub mod window;
 pub mod window_frame;
 
 pub use alert::{Alert, AlertVariant};
+pub use avatar::Avatar;
 pub use badge::{Badge, BadgeVariant};
 pub use button::{Button, ButtonSize, ButtonVariant};
+pub use chat_platform::ChatPlatform;
 pub use checkbox::{Checkbox, CheckboxChecked};
+pub use collapsible::Collapsible;
 pub use context_menu::ContextMenu;
 pub use dialog::{Dialog, DialogHandle, DialogSize};
 pub use dropdown_menu::{DropdownMenu, Menu, MenuAlign, MenuItem, MenuItemTone, MenuShortcut};
@@ -73,7 +80,8 @@ pub use popover::Popover;
 pub use scroll_area::ScrollArea;
 pub use section_label::SectionLabel;
 pub use segmented_control::{Segment, SegmentedControl};
-pub use select::Select;
+pub use select::{Select, SelectOption};
+pub use separator::{Separator, SeparatorOrientation};
 pub use settings_row::{SettingsGroup, SettingsRow};
 pub use shortcut_keys::{ShortcutKeys, ShortcutStyle};
 pub use skeleton::Skeleton;
@@ -88,7 +96,7 @@ pub use textarea::{Textarea, TextareaState};
 pub use theme::{Appearance, FONT, IncreaseContrast, ReduceMotion, TypeScale, faded_over, hsla};
 pub use toast::{ToastData, ToastKind, Toaster, toast_card};
 pub use toggle_group::{ToggleGroup, ToggleItem};
-pub use tooltip::{tooltip, tooltip_with_shortcut};
+pub use tooltip::{tooltip, tooltip_with_accelerator, tooltip_with_shortcut};
 pub use window_frame::{WindowFrame, WindowHeader};
 
 /// Install the kit's keyboard, focus and overlay behaviour once, before

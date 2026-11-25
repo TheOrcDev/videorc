@@ -570,11 +570,12 @@ impl Thread {
         self.store
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .publish(
+            .publish_with_metadata(
                 self.frame_id,
                 self.size.0,
                 self.size.1,
                 CompositorPixelFormat::yuv420p_cpu_buffer(),
+                Default::default(),
                 Instant::now(),
                 bytes,
             );

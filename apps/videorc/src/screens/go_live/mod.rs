@@ -82,6 +82,14 @@ impl GoLiveDialog {
         panel
     }
 
+    /// Opens the confirmation as the Studio's Go Live button does (the
+    /// smokes' `open-tab {dialog: "go-live"}`, the screen gallery).
+    pub fn open(&self) {
+        let studio = self.studio.clone();
+        self.runtime
+            .spawn(async move { studio.open_go_live().await });
+    }
+
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         let state = self.studio.go_live_now();
         let snapshot = self.studio.snapshot();

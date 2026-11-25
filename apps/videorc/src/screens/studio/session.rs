@@ -5,12 +5,15 @@
 //! The runtime alert's Open Audio waits for the Audio section and its
 //! reveal for the reveal command, as Electron leaves out a door it has no
 //! handler for.
+//!
+//! The watchdog's cards (`alerts::WatchdogCards`) sit under the facts and
+//! above the refused start, as `SessionNotices` draws them.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
-use gpui::{Context, EventEmitter, Hsla, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Entity, EventEmitter, Hsla, Window, div, prelude::*, px};
 use tokio::sync::watch;
 use videorc_app_core::StudioSnapshot;
 use videorc_app_core::nav::PageId;
@@ -26,7 +29,9 @@ use videorc_kit::{
     PanelSection, StatusDot, StatusTone,
 };
 
+use super::alerts::{StudioRequest, WatchdogCards};
 use super::transport::{AppStudio, OpenPage};
+use crate::lcd;
 
 /// The Electron row's `pl-9.5`: a destination under the Destinations row.
 const NESTED_INDENT_PX: f32 = 38.;
@@ -61,9 +66,13 @@ pub struct SessionSection {
     studio: Arc<AppStudio>,
     runtime: tokio::runtime::Handle,
     view: SessionSectionView,
+    /// The watchdog's cards; drawn only while there is one.
+    watchdog: Entity<WatchdogCards>,
+    retro: bool,
 }
 
 impl EventEmitter<OpenPage> for SessionSection {}
+impl EventEmitter<StudioRequest> for SessionSection {}
 
 impl SessionSection {
     /// Follows the snapshot and the telemetry; it redraws only when the
@@ -75,7 +84,17 @@ impl SessionSection {
         mut telemetry: watch::Receiver<HealthTelemetry>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let view = section_view(&snapshot.borrow(), &telemetry.borrow());
+        let snap = snapshot.borrow().clone();
+        let view = section_view(&snap, &telemetry.borrow());
+        let retro = snap.settings.studio.retro_lcd_studio();
+        let watchdog = cx.new(|cx| WatchdogCards::new(studio.clone(), runtime.clone(), cx));
+        cx.observe(&watchdog, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&watchdog, |_, _, open: &OpenPage, cx| cx.emit(*open))
+            .detach();
+        cx.subscribe(&watchdog, |_, _, request: &StudioRequest, cx| {
+            cx.emit(*request)
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             loop {
                 let open = tokio::select! {
@@ -85,13 +104,13 @@ impl SessionSection {
                 if !open {
                     break;
                 }
-                let next = section_view(
-                    &snapshot.borrow_and_update(),
-                    &telemetry.borrow_and_update(),
-                );
+                let snap = snapshot.borrow_and_update().clone();
+                let next = section_view(&snap, &telemetry.borrow_and_update());
+                let retro = snap.settings.studio.retro_lcd_studio();
                 let alive = this.update(cx, |section, cx| {
-                    if section.view != next {
+                    if section.view != next || section.retro != retro {
                         section.view = next;
+                        section.retro = retro;
                         cx.notify();
                     }
                 });
@@ -105,6 +124,8 @@ impl SessionSection {
             studio,
             runtime,
             view,
+            watchdog,
+            retro,
         }
     }
 
@@ -222,25 +243,63 @@ fn row_icon(id: &str) -> Option<IconName> {
     }
 }
 
+impl SessionSection {
+    fn lcd_row(
+        &self,
+        fact: &FactRow,
+        theme: &videorc_kit::tokens::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let value = match fact_tone(fact.tone) {
+            Some(tone) => div()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(StatusDot::new((fact.id, 0usize)).tone(tone))
+                .child(div().min_w_0().truncate().child(fact.value.clone()))
+                .into_any_element(),
+            None => div()
+                .min_w_0()
+                .truncate()
+                .child(fact.value.clone())
+                .into_any_element(),
+        };
+        if let Some(page) = fact.opens {
+            lcd::nav_row(
+                (fact.id, fact.nested as usize),
+                theme,
+                fact.label.clone(),
+                value,
+                cx.listener(move |_, _, _, cx| cx.emit(OpenPage::of(page))),
+            )
+            .into_any_element()
+        } else {
+            div()
+                .id((fact.id, fact.nested as usize))
+                .flex()
+                .min_w_0()
+                .items_center()
+                .justify_between()
+                .gap(px(16.))
+                .px(px(4.))
+                .py(px(8.))
+                .child(
+                    div()
+                        .shrink_0()
+                        .text_color(lcd::dim(theme))
+                        .child(fact.label.clone()),
+                )
+                .child(div().min_w_0().text_color(lcd::lit(theme)).child(value))
+                .into_any_element()
+        }
+    }
+}
+
 impl Render for SessionSection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::resolve(None, window, cx);
         let muted = hsla(theme.muted_foreground);
-        let mut list = GroupedList::new();
-        for (index, fact) in self.view.rows.iter().enumerate() {
-            let row = self.row(fact, muted, cx);
-            list = if fact.nested {
-                // Each problem row needs its own id: several share "destination".
-                list.item(
-                    div()
-                        .id(("session-destination", index))
-                        .pl(px(NESTED_INDENT_PX))
-                        .child(row.grouped()),
-                )
-            } else {
-                list.row(row)
-            };
-        }
         let start_failure = self
             .view
             .start_failure
@@ -257,8 +316,41 @@ impl Render for SessionSection {
             .runtime_alert
             .clone()
             .map(|alert| self.runtime_alert(&alert, cx));
+        let facts: AnyElement = if self.retro {
+            let mut screen = div().flex().flex_col();
+            let mut saw_live_block = false;
+            for fact in &self.view.rows {
+                let live_block =
+                    fact.nested || matches!(fact.id, "destinations" | "stream" | "sidekick");
+                if live_block && !saw_live_block {
+                    screen = screen.child(lcd::separator(&theme));
+                    saw_live_block = true;
+                }
+                screen = screen.child(self.lcd_row(fact, &theme, cx));
+            }
+            lcd::panel("studio-lcd-session", &theme, "Session", screen).into_any_element()
+        } else {
+            let mut list = GroupedList::new();
+            for (index, fact) in self.view.rows.iter().enumerate() {
+                let row = self.row(fact, muted, cx);
+                list = if fact.nested {
+                    // Each problem row needs its own id: several share "destination".
+                    list.item(
+                        div()
+                            .id(("session-destination", index))
+                            .pl(px(NESTED_INDENT_PX))
+                            .child(row.grouped()),
+                    )
+                } else {
+                    list.row(row)
+                };
+            }
+            list.into_any_element()
+        };
+        let watchdog = (!self.watchdog.read(cx).is_empty()).then(|| self.watchdog.clone());
         PanelSection::new("studio-session")
-            .child(list)
+            .child(facts)
+            .children(watchdog)
             .children(start_failure)
             .children(camera_notice)
             .children(runtime_alert)

@@ -26,10 +26,33 @@ use crate::{
 
 type ChangeHandler = Rc<dyn Fn(SharedString, &mut Window, &mut App)>;
 
+/// One choice in a [`Select`].
+#[derive(Clone)]
+pub struct SelectOption {
+    value: SharedString,
+    label: SharedString,
+    disabled: bool,
+}
+
+impl SelectOption {
+    pub fn new(value: impl Into<SharedString>, label: impl Into<SharedString>) -> Self {
+        SelectOption {
+            value: value.into(),
+            label: label.into(),
+            disabled: false,
+        }
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+}
+
 #[derive(IntoElement)]
 pub struct Select {
     id: ElementId,
-    options: Vec<(SharedString, SharedString)>,
+    options: Vec<SelectOption>,
     value: Option<SharedString>,
     placeholder: SharedString,
     disabled: bool,
@@ -62,7 +85,13 @@ impl Select {
         value: impl Into<SharedString>,
         label: impl Into<SharedString>,
     ) -> Self {
-        self.options.push((value.into(), label.into()));
+        self.options.push(SelectOption::new(value, label));
+        self
+    }
+
+    /// One option that may be disabled (greyed, skipped by keys, not choosable).
+    pub fn option_item(mut self, option: SelectOption) -> Self {
+        self.options.push(option);
         self
     }
 
@@ -167,13 +196,17 @@ impl RenderOnce for Select {
         let chosen = self
             .value
             .as_ref()
-            .and_then(|value| options.iter().position(|(v, _)| v == value));
-        let shown = chosen.map(|index| options[index].1.clone());
+            .and_then(|value| options.iter().position(|option| &option.value == value));
+        let shown = chosen.map(|index| options[index].label.clone());
         let on_change = self.on_change;
         let count = options.len();
+        let enabled: Vec<bool> = options.iter().map(|option| !option.disabled).collect();
 
-        // Opening highlights the chosen row, or the first.
-        let open_at = chosen.unwrap_or(0);
+        // Opening highlights the chosen row, or the first enabled.
+        let open_at = chosen
+            .filter(|&index| enabled.get(index).copied().unwrap_or(false))
+            .or_else(|| enabled.iter().position(|on| *on))
+            .unwrap_or(0);
         let toggle = {
             let state = state.clone();
             move |window: &mut Window, cx: &mut App| {
@@ -190,13 +223,17 @@ impl RenderOnce for Select {
             let options = options.clone();
             let on_change = on_change.clone();
             Rc::new(move |index: usize, window: &mut Window, cx: &mut App| {
+                let Some(option) = options.get(index) else {
+                    return;
+                };
+                if option.disabled {
+                    return;
+                }
                 let trigger_focus = state.read(cx).trigger_focus.clone();
                 state.update(cx, |s, cx| s.set_open(false, index, cx));
                 trigger_focus.focus(window, cx);
-                if let (Some(on_change), Some((value, _))) =
-                    (on_change.as_ref(), options.get(index))
-                {
-                    on_change(value.clone(), window, cx);
+                if let Some(on_change) = on_change.as_ref() {
+                    on_change(option.value.clone(), window, cx);
                 }
             })
         };
@@ -251,9 +288,10 @@ impl RenderOnce for Select {
 
         // Drawn while open and for the 100 ms fade out after.
         let popup = sample.should_render().then(|| {
-            let rows = options.iter().enumerate().map(|(index, (_, label))| {
+            let rows = options.iter().enumerate().map(|(index, option)| {
                 let choose = choose.clone();
                 let hover_state = state.clone();
+                let option_disabled = option.disabled;
                 div()
                     .id(index)
                     .relative()
@@ -265,11 +303,14 @@ impl RenderOnce for Select {
                     .pl(px(8.0))
                     .pr(px(32.0))
                     .rounded(px(radius::CHIP))
-                    .when(index == highlighted, |row| {
+                    .when(option_disabled, |row| {
+                        row.opacity(0.5).text_color(hsla(t.muted_foreground))
+                    })
+                    .when(index == highlighted && !option_disabled, |row| {
                         row.bg(hsla(t.accent)).text_color(hsla(t.accent_foreground))
                     })
                     .on_hover(move |hovered, _, cx| {
-                        if *hovered {
+                        if *hovered && !option_disabled {
                             hover_state.update(cx, |s, cx| {
                                 s.highlighted = index;
                                 cx.notify();
@@ -282,7 +323,7 @@ impl RenderOnce for Select {
                             choose(index, window, cx);
                         }
                     })
-                    .child(label.clone())
+                    .child(option.label.clone())
                     .when(Some(index) == chosen, |row| {
                         row.child(div().absolute().right(px(8.0)).child(icon(
                             IconName::Check,
@@ -293,11 +334,22 @@ impl RenderOnce for Select {
             });
             let step = |delta: isize| {
                 let state = state.clone();
+                let enabled = enabled.clone();
                 move |window: &mut Window, cx: &mut App| {
                     let _ = window;
                     state.update(cx, |s, cx| {
+                        if !enabled.iter().any(|on| *on) {
+                            return;
+                        }
                         let last = count.saturating_sub(1) as isize;
-                        s.highlighted = (s.highlighted as isize + delta).clamp(0, last) as usize;
+                        let mut next = s.highlighted as isize;
+                        for _ in 0..count.max(1) {
+                            next = (next + delta).rem_euclid(last + 1);
+                            if enabled.get(next as usize).copied().unwrap_or(false) {
+                                s.highlighted = next as usize;
+                                break;
+                            }
+                        }
                         cx.notify();
                     });
                 }
