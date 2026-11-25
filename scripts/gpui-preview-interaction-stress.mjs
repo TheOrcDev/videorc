@@ -177,29 +177,42 @@ export async function runGpuiPreviewInteractionStress() {
           { budgetMs: 10000, everyMs: 100 }
         )
       }
-      // The overlapping burst: three intents in flight at once.
-      const burst = ['camera-only', 'screen-only', 'side-by-side']
-      const sent = await Promise.allSettled(
-        burst.map((preset) => command('select-layout-preset', { preset, settleMs: 0 }))
-      )
-      const refused = sent.find(
-        (each) =>
-          each.status === 'rejected' &&
-          /blocked|needs a (screen|camera)|refus/i.test(each.reason?.message ?? '')
-      )
-      if (refused) {
-        return {
-          skip: true,
-          reason: `the backend refuses a layout without a real device: ${refused.reason.message}`
+      // The presets this run can show: a camera layout needs a camera, which
+      // a test-pattern run has none of (Electron's gate supplies one with its
+      // synthetic motion), so the Studio refuses it by name.
+      const available = []
+      const refused = []
+      for (const preset of PREVIEW_INTERACTION_STRESS_PROFILE.sceneSequence) {
+        try {
+          await command('select-layout-preset', { preset, settleMs: 0 })
+          await converge(preset)
+          available.push(preset)
+        } catch (error) {
+          if (/Could not find layout preset|blocked|needs a (screen|camera)/i.test(error.message)) {
+            refused.push(preset)
+          } else {
+            failures.push(`${preset}: ${error.message}`)
+          }
         }
       }
+      if (available.length < 2) {
+        return {
+          skip: true,
+          reason: `only [${available.join(', ')}] can show without a camera (refused: ${refused.join(', ')}); run with a camera for this phase`
+        }
+      }
+      // The overlapping burst: every available intent in flight at once; the
+      // last must win.
+      await Promise.allSettled(
+        available.map((preset) => command('select-layout-preset', { preset, settleMs: 0 }))
+      )
       try {
-        await converge(burst.at(-1))
+        await converge(available.at(-1))
       } catch (error) {
         failures.push(`burst: ${error.message}`)
       }
       for (let round = 1; round <= sceneRounds; round++) {
-        for (const preset of PREVIEW_INTERACTION_STRESS_PROFILE.sceneSequence) {
+        for (const preset of available) {
           try {
             await command('select-layout-preset', { preset, settleMs: 0 })
             await converge(preset)
@@ -210,7 +223,7 @@ export async function runGpuiPreviewInteractionStress() {
       }
       return {
         failures,
-        summary: `${sceneRounds} rounds of ${PREVIEW_INTERACTION_STRESS_PROFILE.sceneSequence.length}`
+        summary: `${sceneRounds} rounds of [${available.join(', ')}]${refused.length ? `; refused without a camera: ${refused.join(', ')}` : ''}`
       }
     })
 
