@@ -4406,3 +4406,135 @@ async fn a_late_ingest_reply_never_overwrites_what_the_stop_wrote() {
         .collect();
     assert_eq!(transitions, [&json!("complete")]);
 }
+
+// --- The talk show's Stop recording (`cloud.recording.stop`) -------------
+
+/// A talk show's status with the room open.
+fn talk_show_status(show: &str, recording: bool) -> Value {
+    json!({
+        "phase": "live",
+        "show": { "id": show, "kind": "talk" },
+        "room": { "phase": "open", "live": false, "connected": true },
+        "recording": { "active": recording, "seconds": 12 }
+    })
+}
+
+async fn talk_show_studio(recording: bool) -> (Arc<Scripted>, Arc<Studio<Scripted>>) {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    studio
+        .handle_event(BackendEvent::Untyped {
+            event: "cloud.state".to_string(),
+            payload: talk_show_status("show-7", recording),
+        })
+        .await;
+    (backend, studio)
+}
+
+fn cloud_outputs(
+    studio: &Studio<Scripted>,
+) -> Option<videorc_app_core::studio::screen_views::TalkShowOutputs> {
+    videorc_app_core::studio::screen_views::talk_show_room_in(&studio.cloud_now())
+        .transport_outputs()
+}
+
+fn stop_calls(backend: &Scripted) -> usize {
+    livestream_methods(backend)
+        .iter()
+        .filter(|method| *method == "cloud.recording.stop")
+        .count()
+}
+
+const COULD_NOT_STOP: (&str, &str) = (
+    "Couldn't stop the cloud recording",
+    videorc_app_core::livestream::cloud_view::CLOUD_TOAST_ID,
+);
+
+#[tokio::test]
+async fn stop_recording_in_an_open_room_stops_the_cloud_recording_and_reads_stopping_meanwhile() {
+    let (backend, studio) = talk_show_studio(true).await;
+    let outputs = cloud_outputs(&studio).expect("the room is open");
+    assert!(outputs.recording && !outputs.stopping);
+
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| {
+        script.livestream_held = Some(("cloud.recording.stop".to_string(), gate.clone()));
+    });
+    answer_livestream(
+        &backend,
+        "cloud.recording.stop",
+        talk_show_status("show-7", false),
+    );
+    let mut notices = studio.notices();
+    let stop = tokio::spawn({
+        let studio = studio.clone();
+        async move { studio.stop_cloud_recording().await }
+    });
+    let asked = async {
+        while !backend.script.lock().unwrap().held_reached {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), asked)
+        .await
+        .expect("the stop is sent");
+
+    // Record reads "Stopping…" while the request is out, and a second
+    // click sends nothing.
+    assert!(cloud_outputs(&studio).unwrap().stopping);
+    assert!(!studio.stop_cloud_recording().await);
+
+    gate.add_permits(1);
+    assert!(stop.await.unwrap(), "the answer says it stopped");
+    let outputs = cloud_outputs(&studio).unwrap();
+    assert!(!outputs.recording && !outputs.stopping);
+    assert!(!studio.cloud_now().recording_stop_pending);
+    assert_eq!(stop_calls(&backend), 1);
+    assert_eq!(said(&mut notices), []);
+}
+
+#[tokio::test]
+async fn a_cloud_recording_stop_that_did_not_happen_says_so_once() {
+    let expected = vec![(
+        COULD_NOT_STOP.0.to_string(),
+        Some(COULD_NOT_STOP.1.to_string()),
+    )];
+
+    // The backend refused.
+    let (backend, studio) = talk_show_studio(true).await;
+    backend.with(|script| {
+        script
+            .livestream
+            .entry("cloud.recording.stop".to_string())
+            .or_default()
+            .push_back(Err(RpcError::new(
+                "cloud.recording.stop",
+                "failed",
+                "The runner did not answer.",
+            )));
+    });
+    let mut notices = studio.notices();
+    assert!(!studio.stop_cloud_recording().await);
+    assert_eq!(said(&mut notices), expected);
+    assert!(!cloud_outputs(&studio).unwrap().stopping);
+
+    // The answer still records: committed, and said.
+    let (backend, studio) = talk_show_studio(true).await;
+    answer_livestream(
+        &backend,
+        "cloud.recording.stop",
+        talk_show_status("show-7", true),
+    );
+    let mut notices = studio.notices();
+    assert!(!studio.stop_cloud_recording().await);
+    assert_eq!(said(&mut notices), expected);
+    assert!(cloud_outputs(&studio).unwrap().recording);
+
+    // Nothing records: no request, and the same words.
+    let (backend, studio) = talk_show_studio(false).await;
+    let mut notices = studio.notices();
+    assert!(!studio.stop_cloud_recording().await);
+    assert_eq!(stop_calls(&backend), 0);
+    assert_eq!(said(&mut notices), expected);
+}
