@@ -5,9 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, Svg, Window, div, prelude::*, px,
-};
+use gpui::{AnyElement, Context, Entity, EventEmitter, FontWeight, Window, div, prelude::*, px};
 use videorc_app_core::account::entitlements::cloud_ai_upload_gate;
 use videorc_app_core::buddy::clean_cut_drafts::{self, STORAGE_KEY};
 use videorc_app_core::buddy::clean_cut_view::{
@@ -36,8 +34,8 @@ use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::spinner::Spinner;
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
-use videorc_kit::theme::{self, TypeScale, faded_over, hsla};
-use videorc_kit::tokens::{Color, Theme, size, text};
+use videorc_kit::theme::{self, TypeScale, hsla};
+use videorc_kit::tokens::{Theme, size, text};
 use videorc_protocol::{CleanCutJob, CleanCutMode, EntitlementsSnapshot, SessionListItem};
 
 use super::SidekickScreen;
@@ -59,9 +57,6 @@ const OPEN_IN_LIBRARY: &str = "Open in Library";
 /// `ConfigGrid`: the two sections side by side from this page width
 /// (`@min-[940px]/page`), one under the other below it.
 const CONFIG_GRID_MIN_WIDTH: f32 = 940.;
-/// A button's leading glyph: `size-4`, `size-3` at `xs`.
-const BUTTON_ICON_PX: f32 = 16.;
-const BUTTON_XS_ICON_PX: f32 = 12.;
 
 /// "Open in Library" on a cut: the shell opens Library on this session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -823,15 +818,8 @@ fn selected_recording(
             Button::new("clean-cut-retry")
                 .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Xs)
-                .accessibility_label(RETRY)
-                .child(button_glyph(
-                    IconName::ArrowCounterClockwise,
-                    BUTTON_XS_ICON_PX,
-                    t.foreground,
-                    cannot_retry,
-                    t,
-                ))
-                .child(RETRY)
+                .icon(IconName::ArrowCounterClockwise)
+                .label(RETRY)
                 .disabled(cannot_retry)
                 .on_click(move |_, window, cx| {
                     entity.update(cx, |screen, cx| {
@@ -888,7 +876,10 @@ fn status_row(
     let unsaved = job
         .map(|job| clean_cut_drafts::read(&card.state.load_drafts(), &job.id).change_count())
         .unwrap_or(0);
-    let mut row = ListRow::new("clean-cut-status", status.label.clone()).icon(glyph);
+    // `px-0`: the row sits flush in the chosen recording's block.
+    let mut row = ListRow::new("clean-cut-status", status.label.clone())
+        .icon(glyph)
+        .flush(true);
     if unsaved > 0 {
         row = row.context(view::unsaved_label(unsaved));
     } else if let Some(detail) = status.detail.clone() {
@@ -937,13 +928,8 @@ fn status_row(
                         .child(
                             Button::new("clean-cut-reveal")
                                 .variant(ButtonVariant::Ghost)
-                                .accessibility_label(label)
-                                .child(icon(
-                                    IconName::FolderOpen,
-                                    BUTTON_ICON_PX,
-                                    hsla(t.foreground),
-                                ))
-                                .child(label)
+                                .icon(IconName::FolderOpen)
+                                .label(label)
                                 .on_click(move |_, _, cx| {
                                     reveal.update(cx, |screen, cx| {
                                         screen.reveal_clean_cut_output(&reveal_id, cx)
@@ -953,9 +939,8 @@ fn status_row(
                         .child(
                             Button::new("clean-cut-open-library")
                                 .variant(ButtonVariant::Ghost)
-                                .accessibility_label(OPEN_IN_LIBRARY)
-                                .child(icon(IconName::FilmReel, BUTTON_ICON_PX, hsla(t.foreground)))
-                                .child(OPEN_IN_LIBRARY)
+                                .icon(IconName::FilmReel)
+                                .label(OPEN_IN_LIBRARY)
                                 .on_click(move |_, _, cx| {
                                     entity.update(cx, |_, cx| {
                                         cx.emit(OpenLibrarySession(output.clone()))
@@ -970,15 +955,8 @@ fn status_row(
             row = row.child(
                 Button::new("clean-cut-make")
                     .variant(ButtonVariant::Default)
-                    .accessibility_label(make)
-                    .child(button_glyph(
-                        IconName::Scissors,
-                        BUTTON_ICON_PX,
-                        t.chrome_fill_ink,
-                        cannot_start,
-                        t,
-                    ))
-                    .child(make)
+                    .icon(IconName::Scissors)
+                    .label(make)
                     .disabled(cannot_start)
                     .on_click(move |_, window, cx| {
                         entity.update(cx, |screen, cx| screen.make_clean_cut(window, cx));
@@ -987,18 +965,6 @@ fn status_row(
         }
     }
     row.into_any_element()
-}
-
-/// A button's leading glyph (`data-icon="inline-start"`) in its look's ink:
-/// `ink` is the variant's (`button.rs`), pre-blended over the window's solid
-/// like the button's own label when it is disabled.
-fn button_glyph(name: IconName, size: f32, ink: Color, disabled: bool, t: &Theme) -> Svg {
-    let ink = if disabled {
-        faded_over(ink, t.glass_solid, 0.5)
-    } else {
-        ink
-    };
-    icon(name, size, hsla(ink))
 }
 
 /// `CleanCutConsentDialog`: cloud AI consent, asked where Clean cut needs

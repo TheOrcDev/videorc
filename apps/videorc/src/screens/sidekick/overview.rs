@@ -141,9 +141,8 @@ pub fn render_overview(
     // row (`commentsWindowEnabled`).
     let open_stream_manager = Button::new("open-stream-manager")
         .variant(ButtonVariant::Outline)
-        .accessibility_label(words::OPEN_STREAM_MANAGER)
-        .child(icon(IconName::ChatCircle, 16., foreground))
-        .child(words::OPEN_STREAM_MANAGER)
+        .icon(IconName::ChatCircle)
+        .label(words::OPEN_STREAM_MANAGER)
         .child(ShortcutKeys::for_action(
             &crate::app::menus::ToggleStreamManager,
         ))

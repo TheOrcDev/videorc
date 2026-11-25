@@ -1147,9 +1147,8 @@ pub fn render_community(
                                 Button::new("copy-disclosure")
                                     .variant(ButtonVariant::Secondary)
                                     .size(ButtonSize::Xs)
-                                    .accessibility_label(if state.copied { COPIED } else { COPY })
-                                    .child(icon(IconName::Copy, 14., foreground))
-                                    .child(if state.copied { COPIED } else { COPY })
+                                    .icon(IconName::Copy)
+                                    .label(if state.copied { COPIED } else { COPY })
                                     .on_click({
                                         let entity = entity.clone();
                                         move |_, _, cx| {

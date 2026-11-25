@@ -23,7 +23,7 @@ use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::popover::Popover;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
-use videorc_kit::select::Select;
+use videorc_kit::select::{Select, SelectSize};
 use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
 use videorc_kit::shortcut_keys::ShortcutKeys;
 use videorc_kit::switch::Switch;
@@ -479,6 +479,7 @@ pub(super) fn render_greetings(
     let full = greetings.templates.len() >= TEMPLATES_MAX;
     let add = entity.clone();
     let mut picker = Select::new("avatar-greeting-add")
+        .size(SelectSize::Xs)
         .width(176.)
         .accessibility_label("Add a greeting")
         .placeholder(if full {
@@ -668,6 +669,7 @@ fn line_editor(
     if !matches!(target, Target::Welcome(_)) {
         let pick = entity.clone();
         let mut platforms = Select::new("avatar-greeting-platform")
+            .size(SelectSize::Xs)
             .width(112.)
             .accessibility_label("Platform")
             .value(Some(SharedString::from(

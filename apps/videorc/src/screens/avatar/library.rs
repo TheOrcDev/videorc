@@ -81,9 +81,8 @@ pub fn render_library(
         Button::new("avatar-library-new")
             .variant(ButtonVariant::Outline)
             .size(ButtonSize::Xs)
-            .accessibility_label(words::LIBRARY_NEW_BUDDY)
-            .child(icon(IconName::Sparkle, 12., hsla(t.foreground)))
-            .child(words::LIBRARY_NEW_BUDDY)
+            .icon(IconName::Sparkle)
+            .label(words::LIBRARY_NEW_BUDDY)
             .on_click({
                 let entity = entity.clone();
                 move |_, _, cx| entity.update(cx, |screen, cx| screen.open_onboarding(cx))
@@ -223,9 +222,8 @@ pub fn render_library(
                     Button::new("avatar-library-sign-in")
                         .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
-                        .accessibility_label(words::SIGN_IN)
-                        .child(icon(IconName::SignIn, 12., hsla(t.foreground)))
-                        .child(words::SIGN_IN)
+                        .icon(IconName::SignIn)
+                        .label(words::SIGN_IN)
                         .on_click(move |_, _, cx| {
                             sign_in.update(cx, |screen, cx| screen.sign_in(cx))
                         }),
