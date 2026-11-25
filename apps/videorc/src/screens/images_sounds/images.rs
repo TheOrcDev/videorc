@@ -616,7 +616,7 @@ fn ghost_btn(
     disabled: bool,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> Button {
-    Button::new(id)
+    Button::new(id.into())
         .label(label)
         .size(ButtonSize::Xs)
         .variant(ButtonVariant::Ghost)

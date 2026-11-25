@@ -61,7 +61,7 @@ pub fn message_body(
     gifs: &[Gif],
     pictures: &HashMap<String, Picture>,
     text_px: f32,
-    /// Studio compact = 64 px GIF slot; Stream Manager comfortable = 96 px.
+    // Studio compact = 64 px GIF slot; Stream Manager comfortable = 96 px.
     gif_height_px: f32,
 ) -> AnyElement {
     let mut line = div()

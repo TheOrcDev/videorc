@@ -150,7 +150,7 @@ impl SidekickPane {
         div()
             .id("cohost-status")
             .flex()
-            .flex_shrink()
+            .flex_shrink(1.)
             .min_w(px(0.))
             .max_w(px(STATUS_MAX_W))
             .items_center()

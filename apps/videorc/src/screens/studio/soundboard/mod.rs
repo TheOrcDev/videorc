@@ -619,9 +619,7 @@ pub fn handle_key_down(
     event: &KeyDownEvent,
     cx: &mut gpui::App,
 ) -> bool {
-    section
-        .update(cx, |section, cx| section.key_down(event, cx))
-        .unwrap_or(false)
+    section.update(cx, |section, cx| section.key_down(event, cx))
 }
 
 pub fn handle_key_up(
@@ -629,9 +627,7 @@ pub fn handle_key_up(
     event: &KeyUpEvent,
     cx: &mut gpui::App,
 ) -> bool {
-    section
-        .update(cx, |section, cx| section.key_up(event, cx))
-        .unwrap_or(false)
+    section.update(cx, |section, cx| section.key_up(event, cx))
 }
 
 pub fn release_held(section: &Entity<SoundboardSection>, cx: &mut gpui::App) {

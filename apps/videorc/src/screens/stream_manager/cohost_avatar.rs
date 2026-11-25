@@ -82,7 +82,7 @@ impl SidekickPane {
                 }))
                 .child(
                     div()
-                        .flex_shrink()
+                        .flex_shrink(1.)
                         .min_w(px(0.))
                         .truncate()
                         .type_scale(text::META)
