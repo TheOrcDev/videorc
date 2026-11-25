@@ -3,8 +3,11 @@
 //! and Radio for the radiogroup / radio roles, AccessKit and focus; the
 //! kit paints the recessed track and the chrome-plate segment. A Field's
 //! label names the group (`accessibility_label`) unless the caller sets
-//! one. Tabs switch a view; ToggleGroup is for filter chips; Switch is a
-//! boolean.
+//! one. An option's label is the default segment text and its accessible
+//! name. React's icon options (`label: <Icon />`, `tooltip`) are
+//! [`Segment::child`] plus [`Segment::tooltip`]: the child replaces the
+//! label text while the label stays the AccessKit name. Tabs switch a
+//! view; ToggleGroup is for filter chips; Switch is a boolean.
 //!
 //! Keyboard (roving focus, one tab stop): arrows and Home / End move
 //! between enabled options; with automatic activation (the default) a
@@ -53,6 +56,8 @@ pub fn init(cx: &mut App) {
 pub struct Segment {
     value: SharedString,
     label: SharedString,
+    /// React option `label` when it is an icon (or other custom body).
+    child: Option<AnyElement>,
     disabled: bool,
     tooltip: Option<SharedString>,
 }
@@ -62,9 +67,17 @@ impl Segment {
         Segment {
             value: value.into(),
             label: label.into(),
+            child: None,
             disabled: false,
             tooltip: None,
         }
+    }
+
+    /// Custom segment body (an icon for Orientation). The option's label
+    /// remains the accessible name; pair with [`Self::tooltip`] for hover.
+    pub fn child(mut self, child: impl IntoElement) -> Self {
+        self.child = Some(child.into_any_element());
+        self
     }
 
     pub fn disabled(mut self, disabled: bool) -> Self {
@@ -295,6 +308,9 @@ impl RenderOnce for SegmentedControl {
                 let already = self.value.clone();
                 let radio_id = SharedString::from(format!("{key}/{index}"));
                 let tip = option.tooltip.clone();
+                let body = option
+                    .child
+                    .unwrap_or_else(|| option.label.clone().into_any_element());
 
                 let mut radio = gpui_base::Radio::new(radio_id)
                     .checked(checked)
@@ -316,7 +332,7 @@ impl RenderOnce for SegmentedControl {
                     .whitespace_nowrap()
                     .text_size(px(text_size))
                     .font_weight(FontWeight::MEDIUM)
-                    .child(option.label);
+                    .child(body);
 
                 if let Some(on_change) = on_change {
                     radio = radio.on_change(move |_, _, window, cx| {
