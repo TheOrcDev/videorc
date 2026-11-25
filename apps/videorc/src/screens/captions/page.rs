@@ -344,7 +344,9 @@ impl CaptionsPanel {
                     .top_0()
                     .left_0()
                     .size_full()
-                    .child(CaptionPreviewBackdropEl::new(backdrop)),
+                    // Inside the 1 px border, so the frame's radius less
+                    // the border (the padding edge's curve).
+                    .child(CaptionPreviewBackdropEl::new(backdrop).rounded(radius::ROW - 1.)),
             );
         // Faint safe-area columns: a hairline at the middle of every 8rem
         // tile, white 8% at 35%.
@@ -649,11 +651,11 @@ impl CaptionsPanel {
             },
         );
         fields.push(
-            field(
-                t,
-                c::STYLE,
-                c::STYLE_DESCRIPTION,
-                styles.on_change({
+            Field::new("caption-style-field")
+                .label(c::STYLE)
+                .description(c::STYLE_DESCRIPTION)
+                .description_above(true)
+                .child(styles.on_change({
                     let this = this.clone();
                     move |values, _, app| {
                         let Some(value) = values.into_iter().next() else {
@@ -665,9 +667,8 @@ impl CaptionsPanel {
                             });
                         }
                     }
-                }),
-            )
-            .into_any_element(),
+                }))
+                .into_any_element(),
         );
 
         let sizes = c::TEXT_SIZES.iter().fold(
@@ -699,20 +700,19 @@ impl CaptionsPanel {
             |select, (id, label)| select.option(*id, *label),
         );
         fields.push(
-            field(
-                t,
-                c::LANGUAGE,
-                view.language_description,
-                languages.on_change({
+            Field::new("caption-language-field")
+                .label(c::LANGUAGE)
+                .description(view.language_description)
+                .description_above(true)
+                .child(languages.on_change({
                     let this = this.clone();
                     move |value, _, app| {
                         let _ = this.update(app, |this, cx| {
                             this.patch("language", json!(value.as_ref()), false, cx)
                         });
                     }
-                }),
-            )
-            .into_any_element(),
+                }))
+                .into_any_element(),
         );
 
         // The live strip: the last three lines, partials in the secondary
@@ -995,44 +995,6 @@ fn status_tone(tone: Tone) -> StatusTone {
         Tone::Error => StatusTone::Error,
         Tone::Neutral => StatusTone::Neutral,
     }
-}
-
-/// A field whose line sits above the control (`Field` > `FieldContent`
-/// [`FieldTitle`/`FieldLabel` 14/20/500, `FieldDescription` 12/18, 4 px
-/// apart], then the control 12 px under them). The kit `Field` puts the
-/// description after the control (the plain shadcn order), so Style and
-/// Spoken language keep this one.
-fn field(
-    t: &Theme,
-    label: &'static str,
-    description: &'static str,
-    control: impl IntoElement,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(12.))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .line_height(px(20.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .type_scale(text::META)
-                        .line_height(px(18.))
-                        .text_color(hsla(t.muted_foreground))
-                        .child(description),
-                ),
-        )
-        .child(control)
 }
 
 /// The settled line for screen readers (`aria-live="polite"`), drawn

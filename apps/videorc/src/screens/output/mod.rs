@@ -38,7 +38,7 @@ use videorc_app_core::{BackendClient, Studio, StudioSnapshot};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonVariant};
-use videorc_kit::field::{Field, FieldGroup};
+use videorc_kit::field::{Field, FieldError, FieldGroup};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::list_row::GroupedList;
 use videorc_kit::panel_section::PanelSection;
@@ -46,11 +46,13 @@ use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::select::{Select, SelectOption};
 use videorc_kit::settings_row::SettingsRow;
+use videorc_kit::shortcut_keys::ShortcutKeys;
+use videorc_kit::shortcut_recorder::ShortcutRecorder;
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
 use videorc_kit::toggle_group::{ToggleGroup, ToggleItem};
-use videorc_kit::tokens::{Theme, text};
+use videorc_kit::tokens::text;
 
 use gpui_base::input::InputEvent;
 use videorc_kit::input::{Input, InputState};
@@ -785,9 +787,14 @@ impl OutputPanel {
             }
         };
         self.disarm_recorder(cx);
+        self.save_clip_key(action, value, cx);
+    }
+
+    /// Saves a clip key (empty clears it); Settings applies the saved keys
+    /// to the OS on the change.
+    fn save_clip_key(&mut self, action: String, value: String, cx: &mut Context<Self>) {
         self.recorder.message = None;
         let studio = self.studio.clone();
-        // Settings applies the saved keys to the OS on the change.
         self.run_studio(async move {
             let _ = studio
                 .update_studio_settings(|settings| {
@@ -1314,7 +1321,7 @@ impl OutputPanel {
         }
         let mut column = div().flex().flex_col().gap(px(8.)).child(row);
         if let Some(error) = &self.check_error {
-            column = column.child(field_error(error.clone(), t));
+            column = column.child(FieldError::new(error.clone()));
         }
         Some(column.into_any_element())
     }
@@ -1451,7 +1458,7 @@ impl OutputPanel {
                             .child(model.disk_estimate.clone()),
                     ),
             );
-        for row in self.clip_key_rows(cx) {
+        for row in self.clip_key_rows(t, cx) {
             rows = rows.item(row);
         }
         rows = rows.item(
@@ -1470,8 +1477,12 @@ impl OutputPanel {
     }
 
     /// The two clip keys as Settings → Shortcuts records them: press the
-    /// button, then the keys; Escape cancels, Backspace clears.
-    fn clip_key_rows(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+    /// field, then the keys; Escape cancels, Backspace or Clear clears.
+    fn clip_key_rows(
+        &self,
+        t: &videorc_kit::tokens::Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
         let platform = Some(hotkeys::node_platform());
         let registration = self.hotkeys.registration();
         let config = self.shortcut_config();
@@ -1489,21 +1500,40 @@ impl OutputPanel {
             .filter(|row| CLIP_KEY_ACTIONS.contains(&row.action.as_str()))
             .map(|row| {
                 let armed = self.recorder.action.as_deref() == Some(row.action.as_str());
-                let name = recorder::shortcut_recorder_name(
+                // The core's spoken binding (`shortcutRecorderName` after
+                // "<label>: "); the kit puts the label and the armed words.
+                let spoken = recorder::shortcut_recorder_name(
                     &row.label,
                     row.value.as_deref(),
                     row.app_key.as_ref(),
-                    armed,
+                    false,
                     platform,
                 );
-                let label = if armed {
-                    "Press shortcut…".to_string()
+                let prefix = format!("{}: ", row.label);
+                let spoken = spoken.strip_prefix(&prefix).unwrap_or(&spoken).to_string();
+                let value = row.value.clone().filter(|value| !value.is_empty());
+                // The key, or the app's own key and where; nothing while
+                // armed or unbound (the kit's Press shortcut… / Unassigned).
+                let keys: Option<gpui::AnyElement> = if armed {
+                    None
+                } else if let Some(value) = &value {
+                    Some(ShortcutKeys::accelerator(value.clone()).into_any_element())
                 } else {
-                    row.value
-                        .as_deref()
-                        .filter(|value| !value.is_empty())
-                        .map(|value| accel::accelerator_label(Some(value), platform))
-                        .unwrap_or_else(|| "Unassigned".into())
+                    row.app_key.as_ref().map(|app_key| {
+                        div()
+                            .flex()
+                            .min_w(px(0.))
+                            .items_center()
+                            .gap(px(6.))
+                            .child(ShortcutKeys::accelerator(app_key.accelerator.clone()))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_color(hsla(t.muted_foreground))
+                                    .child(app_key.place.clone()),
+                            )
+                            .into_any_element()
+                    })
                 };
                 let message = self
                     .recorder
@@ -1513,26 +1543,36 @@ impl OutputPanel {
                     .map(|(_, message)| message.clone())
                     .or(row.conflict.clone());
                 let action = row.action.clone();
-                // `ShortcutRecorderField`: a SettingsRow, its refusal as the
-                // row's error.
-                SettingsRow::new(
-                    SharedString::from(format!("output-key-{action}")),
-                    row.label,
-                )
-                .when_some(message, |field, message| field.error(message))
-                .child(
-                    Button::new(SharedString::from(format!("output-record-{action}")))
-                        .accessibility_label(name)
-                        .label(label)
-                        .variant(ButtonVariant::Outline)
-                        .disabled(!hotkeys::supported(&action))
+                let clear_action = row.action.clone();
+                let mut control =
+                    ShortcutRecorder::new(SharedString::from(format!("output-record-{action}")))
+                        .label(row.label.clone())
+                        .value_label(spoken)
                         .tooltip("Click to change")
+                        .armed(armed)
+                        .invalid(row.conflict.is_some())
+                        .disabled(!hotkeys::supported(&action))
                         .on_click(
                             cx.listener(move |this, _, _, cx| {
                                 this.arm_recorder(action.clone(), cx)
                             }),
-                        ),
+                        );
+                if let Some(keys) = keys {
+                    control = control.keys(keys);
+                }
+                if value.is_some() {
+                    control = control.on_clear(cx.listener(move |this, _, _, cx| {
+                        this.save_clip_key(clear_action.clone(), String::new(), cx)
+                    }));
+                }
+                // `ShortcutRecorderField`: a SettingsRow, its refusal as the
+                // row's error.
+                SettingsRow::new(
+                    SharedString::from(format!("output-key-{}", row.action)),
+                    row.label,
                 )
+                .when_some(message, |field, message| field.error(message))
+                .child(control)
                 .into_any_element()
             })
             .collect()
@@ -1658,23 +1698,6 @@ impl OutputPanel {
             .description(copy::DESCRIPTION)
             .children(body)
     }
-}
-
-/// `FieldError`: monochrome 12 px words with the destructive error glyph.
-fn field_error(error: impl Into<SharedString>, t: &Theme) -> gpui::Div {
-    let error: SharedString = error.into();
-    div()
-        .flex()
-        .items_start()
-        .gap(px(6.))
-        .type_scale(text::META)
-        .text_color(hsla(t.foreground))
-        .child(div().flex_none().mt(px(1.)).child(icon(
-            IconName::XCircleFill,
-            14.,
-            hsla(t.destructive),
-        )))
-        .child(div().min_w(px(0.)).child(error))
 }
 
 impl Render for OutputPanel {
