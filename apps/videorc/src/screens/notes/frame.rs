@@ -1,6 +1,6 @@
 //! The Notes window's saved frame (`openNotesWindow`): Electron's
 //! `notes-window.json` frame and `open` bit. Text and font scale live in
-//! the same file ([`super::document`]).
+//! the same file (`videorc_app_core::notes`).
 
 use std::cell::RefCell;
 use std::path::Path;

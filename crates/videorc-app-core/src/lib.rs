@@ -27,6 +27,7 @@ pub mod library;
 pub mod livestream;
 pub mod log;
 pub mod nav;
+pub mod notes;
 pub mod notices;
 pub mod paths;
 pub mod process;

@@ -7,6 +7,10 @@ use gpui::{
 };
 use gpui_base::input::InputEvent;
 use videorc_app_core::desktop::capture_protection::{ProtectionResult, WindowRole};
+use videorc_app_core::notes::{
+    self, ARIA_LABEL, CAPTURE_EXPOSED_BODY, CAPTURE_EXPOSED_TITLE, FontScale, HIDDEN_FROM_CAPTURE,
+    LOAD_FAILED, PLACEHOLDER, PinError, RETRY, SAVE_FAILED, SaveState, TEXT_SIZE, WINDOW_NAME,
+};
 use videorc_kit::{
     alert::{Alert, AlertVariant},
     button::{Button, ButtonSize, ButtonVariant},
@@ -19,13 +23,10 @@ use videorc_kit::{
     window_frame::{WindowFrame, WindowHeader},
 };
 
-use super::document::{
-    self, CAPTURE_EXPOSED_BODY, CAPTURE_EXPOSED_TITLE, FontScale, HIDDEN_FROM_CAPTURE, LOAD_FAILED,
-    PLACEHOLDER, RETRY, SAVE_FAILED, SaveState, TEXT_SIZE, WINDOW_NAME,
-};
 use super::frame::{DEFAULT_HEIGHT, DEFAULT_WIDTH, MIN_HEIGHT, MIN_WIDTH, NotesFrame};
 use crate::app::hide::HideFromStream;
 use crate::app::menus::ToggleNotes;
+use crate::platform;
 
 /// The one window, its frame file, and whether the quit is closing it.
 struct Open {
@@ -120,6 +121,7 @@ pub struct Notes {
     load_failed: bool,
     capture_protected: bool,
     pinned: bool,
+    pin_error: Option<PinError>,
     focus: FocusHandle,
     _bounds: Subscription,
     _text: Subscription,
@@ -129,9 +131,14 @@ impl Notes {
     fn new(frame: NotesFrame, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let prefs = frame.prefs();
         let (loaded_text, scale) =
-            document::load(&prefs).unwrap_or_else(|_| (String::new(), FontScale::default()));
+            notes::load(&prefs).unwrap_or_else(|_| (String::new(), FontScale::default()));
         let load_failed = false;
         let pinned = frame.always_on_top();
+        let pin_error = match platform::current().set_keep_on_top(window, pinned) {
+            Ok(()) => None,
+            Err(_) if pinned => Some(pin_error_for_platform()),
+            Err(_) => None,
+        };
         let text = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder(PLACEHOLDER)
@@ -146,7 +153,8 @@ impl Notes {
         });
         let text_sub = cx.subscribe(&text, |this, state, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                this.queue_save(state.read(cx).value().to_string(), cx);
+                let value = notes::clamp_text(&state.read(cx).value());
+                this.queue_save(value, cx);
             }
             if matches!(event, InputEvent::Blur) {
                 this.flush_save(cx);
@@ -165,6 +173,7 @@ impl Notes {
             load_failed,
             capture_protected,
             pinned,
+            pin_error,
             focus,
             _bounds: bounds,
             _text: text_sub,
@@ -175,9 +184,10 @@ impl Notes {
         if self.load_failed {
             return;
         }
+        let value = notes::clamp_text(&value);
         self.save = SaveState::Saving;
         cx.notify();
-        match document::save(&self.frame.prefs(), &value, self.scale) {
+        match notes::save(&self.frame.prefs(), &value, self.scale) {
             Ok(()) => self.save = SaveState::Saved,
             Err(_) => self.save = SaveState::Failed,
         }
@@ -188,12 +198,12 @@ impl Notes {
         if self.load_failed {
             return;
         }
-        let value = self.text.read(cx).value().to_string();
+        let value = notes::clamp_text(&self.text.read(cx).value());
         self.queue_save(value, cx);
     }
 
     fn retry_load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match document::load(&self.frame.prefs()) {
+        match notes::load(&self.frame.prefs()) {
             Ok((text, scale)) => {
                 self.scale = scale;
                 self.load_failed = false;
@@ -217,14 +227,34 @@ impl Notes {
 
     fn set_scale(&mut self, scale: FontScale, cx: &mut Context<Self>) {
         self.scale = scale;
-        let value = self.text.read(cx).value().to_string();
+        let value = notes::clamp_text(&self.text.read(cx).value());
         self.queue_save(value, cx);
     }
 
-    fn set_pinned(&mut self, pinned: bool, cx: &mut Context<Self>) {
+    fn set_pinned(&mut self, pinned: bool, window: &Window, cx: &mut Context<Self>) {
+        let previous = self.pinned;
         self.pinned = pinned;
-        self.frame.set_always_on_top(pinned);
+        self.pin_error = None;
+        match platform::current().set_keep_on_top(window, pinned) {
+            Ok(()) => {
+                self.frame.set_always_on_top(pinned);
+            }
+            Err(_) => {
+                self.pinned = previous;
+                self.pin_error = Some(pin_error_for_platform());
+            }
+        }
         cx.notify();
+    }
+}
+
+/// Electron's unavailable vs failed: platforms without Keep on top are
+/// unavailable; a platform that tried and failed is failed.
+fn pin_error_for_platform() -> PinError {
+    if cfg!(target_os = "macos") {
+        PinError::Failed
+    } else {
+        PinError::Unavailable
     }
 }
 
@@ -233,9 +263,10 @@ impl Render for Notes {
         let t = theme::resolve(None, window, cx);
         let mac = cfg!(target_os = "macos");
         let scale = self.scale;
-        let words = document::words_label(document::word_count(&self.text.read(cx).value()));
+        let words = notes::words_label(notes::word_count(&self.text.read(cx).value()));
         let save_words = self.save.words();
         let pinned = self.pinned;
+        let pin_error = self.pin_error;
         let this = cx.entity().downgrade();
         let text_size = scale.px();
 
@@ -283,17 +314,29 @@ impl Render for Notes {
                     }),
             )
             .child(
-                PinWindowButton::new("notes-keep-on-top")
-                    .status_bar()
-                    .pinned(pinned)
-                    .on_pinned_change({
-                        let this = this.clone();
-                        move |next, _, _, app| {
-                            let _ = this.update(app, |this, cx| {
-                                this.set_pinned(next, cx);
-                            });
-                        }
-                    }),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .children(pin_error.map(|error| {
+                        div()
+                            .text_size(px(11.))
+                            .text_color(hsla(t.foreground))
+                            .child(error.words())
+                    }))
+                    .child(
+                        PinWindowButton::new("notes-keep-on-top")
+                            .status_bar()
+                            .pinned(pinned)
+                            .on_pinned_change({
+                                let this = this.clone();
+                                move |next, _, window, app| {
+                                    let _ = this.update(app, |this, cx| {
+                                        this.set_pinned(next, window, cx);
+                                    });
+                                }
+                            }),
+                    ),
             );
 
         let mut root = div()
@@ -309,7 +352,7 @@ impl Render for Notes {
                         .plain(true)
                         .disabled(self.load_failed)
                         .text_size(px(text_size))
-                        .accessibility_label(WINDOW_NAME)
+                        .accessibility_label(ARIA_LABEL)
                         .ground(t.glass_solid),
                 ),
             );

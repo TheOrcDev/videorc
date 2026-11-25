@@ -1,8 +1,12 @@
-//! The Notes document and save words (`notes-window.tsx`,
-//! `notes-persistence.ts`): text, font scale and the footer's labels.
+//! Pure Notes helpers (`notes-window.tsx`, `notes-persistence` fields in
+//! `notes-window.json`).
 
 use serde_json::{Map, Value};
-use videorc_app_core::desktop::window_frames::WindowPrefsFile;
+
+use crate::desktop::window_frames::WindowPrefsFile;
+use crate::format::plural;
+
+use super::copy;
 
 /// Electron's `NotesFontScale`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -24,17 +28,17 @@ impl FontScale {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Sm => "Small",
-            Self::Md => "Medium",
-            Self::Lg => "Large",
+            Self::Sm => copy::FONT_SM,
+            Self::Md => copy::FONT_MD,
+            Self::Lg => copy::FONT_LG,
         }
     }
 
     pub fn aria_label(self) -> &'static str {
         match self {
-            Self::Sm => "Small text",
-            Self::Md => "Medium text",
-            Self::Lg => "Large text",
+            Self::Sm => copy::FONT_SM_ARIA,
+            Self::Md => copy::FONT_MD_ARIA,
+            Self::Lg => copy::FONT_LG_ARIA,
         }
     }
 
@@ -56,7 +60,7 @@ impl FontScale {
     }
 }
 
-/// Electron's `NOTES_SAVE_LABELS`.
+/// Electron's `NOTES_SAVE_LABELS` keys.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SaveState {
     #[default]
@@ -68,9 +72,25 @@ pub enum SaveState {
 impl SaveState {
     pub fn words(self) -> &'static str {
         match self {
-            Self::Saved => "Saved",
-            Self::Saving => "Saving…",
-            Self::Failed => "Not saved",
+            Self::Saved => copy::SAVE_SAVED,
+            Self::Saving => copy::SAVE_SAVING,
+            Self::Failed => copy::SAVE_FAILED_LABEL,
+        }
+    }
+}
+
+/// Why Keep on top didn't take (`NotesPinError`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinError {
+    Failed,
+    Unavailable,
+}
+
+impl PinError {
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::Failed => copy::PIN_FAILED,
+            Self::Unavailable => copy::PIN_UNAVAILABLE,
         }
     }
 }
@@ -85,33 +105,23 @@ pub fn word_count(text: &str) -> usize {
     }
 }
 
-/// Electron's `plural(n, 'word')`.
+/// Electron's `plural(n, 'word')` in the status bar.
 pub fn words_label(count: usize) -> String {
-    match count {
-        1 => "1 word".into(),
-        n => format!("{n} words"),
-    }
+    plural(count as i64, "word", None)
 }
 
-pub const PLACEHOLDER: &str = "Notes for this recording…";
-pub const ARIA_LABEL: &str = "Notes for this recording";
-pub const HIDDEN_FROM_CAPTURE: &str = "Hidden from recordings and streams";
-pub const CAPTURE_EXPOSED_TITLE: &str = "These notes can appear in your recording";
-pub const CAPTURE_EXPOSED_BODY: &str = "Videorc couldn't hide this window from screen capture. Keep it off the screen you capture, or close it.";
-pub const LOAD_FAILED: &str = "Couldn't open your notes. Nothing was changed.";
-pub const SAVE_FAILED: &str = "Couldn't save your notes. Your text is still here.";
-pub const RETRY: &str = "Retry";
-pub const TEXT_SIZE: &str = "Text size";
-pub const WINDOW_NAME: &str = "Notes";
+/// Clamp to `MAX_NOTES_TEXT_LENGTH` (char boundary safe).
+pub fn clamp_text(text: &str) -> String {
+    if text.chars().count() <= copy::MAX_TEXT_LENGTH {
+        return text.to_string();
+    }
+    text.chars().take(copy::MAX_TEXT_LENGTH).collect()
+}
 
 /// Text and font scale from `notes-window.json`.
 pub fn load(prefs: &WindowPrefsFile) -> Result<(String, FontScale), String> {
     let map = prefs.load();
-    let text = map
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    let text = clamp_text(map.get("text").and_then(Value::as_str).unwrap_or(""));
     let scale = map
         .get("fontScale")
         .and_then(Value::as_str)
@@ -123,7 +133,7 @@ pub fn load(prefs: &WindowPrefsFile) -> Result<(String, FontScale), String> {
 /// Writes text and font scale; keeps other prefs.
 pub fn save(prefs: &WindowPrefsFile, text: &str, scale: FontScale) -> Result<(), String> {
     let mut patch = Map::new();
-    patch.insert("text".into(), Value::String(text.into()));
+    patch.insert("text".into(), Value::String(clamp_text(text)));
     patch.insert("fontScale".into(), Value::String(scale.id().into()));
     prefs.save(patch).map_err(|error| error.to_string())
 }
@@ -144,9 +154,20 @@ mod tests {
     }
 
     #[test]
-    fn save_labels_match_electron() {
+    fn save_and_pin_labels_match_electron() {
         assert_eq!(SaveState::Saved.words(), "Saved");
         assert_eq!(SaveState::Saving.words(), "Saving…");
         assert_eq!(SaveState::Failed.words(), "Not saved");
+        assert_eq!(PinError::Failed.words(), "Couldn't keep on top");
+        assert_eq!(PinError::Unavailable.words(), "Keep on top isn't available");
+    }
+
+    #[test]
+    fn clamp_respects_the_million_char_bound() {
+        let over: String = std::iter::repeat('a')
+            .take(copy::MAX_TEXT_LENGTH + 10)
+            .collect();
+        assert_eq!(clamp_text(&over).chars().count(), copy::MAX_TEXT_LENGTH);
+        assert_eq!(clamp_text("short"), "short");
     }
 }
