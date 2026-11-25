@@ -25,11 +25,13 @@ use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
 use videorc_app_core::cloud_scene::types::SceneOrientation;
 use videorc_app_core::cloud_scene::{
-    ROOM_SCENES_OFF, USE_SCENES, cloud_scene_from_native, room_scene_canvas, room_sources_ready,
+    ROOM_SCENES_OFF, ROOM_SOURCES_READY_POLL_MS, ROOM_SOURCES_READY_WAIT_MS, USE_SCENES,
+    cloud_scene_from_native, room_scene_canvas, room_scene_message, room_sources_ready,
 };
 use videorc_app_core::guests::session::ControllerFacts;
 use videorc_app_core::library::cloud::{CloudRecordingStop, CloudRecordingWatch};
 use videorc_app_core::studio::preview_scene::studio_scene_params;
+use videorc_app_core::studio::room_background::{self, LiveClockMemory};
 use videorc_app_core::studio::room_frames::{self, FrameCursor, FramePoll, RemoteSource};
 use videorc_app_core::studio::room_media::{
     self, AVATAR_SET, CAMERA_SET, HTML_SET, MICROPHONE_SET, MONITOR_SET, PRESENTATION_EVENT,
@@ -39,8 +41,12 @@ use videorc_app_core::studio::room_scene::{
     self, BACKEND_SCENE_COMMIT_WAIT, PreparedBackgroundAsset, RoomSceneCommit, SCENE_COMMIT,
     SCENE_RESOLVE, SceneCommitAnswer, SceneCommitSettle, SceneContent,
 };
+use videorc_app_core::studio::room_screen_source::{
+    RoomScreenSources, RoomScreenWant, room_screen_needs_switch_native, room_screen_want,
+};
 use videorc_app_core::studio::screen_views::TalkShowRoomView;
 use videorc_app_core::{BackendEvent, ConnectionState};
+use videorc_kit::toast::{ToastData, ToastKind};
 use videorc_protocol::Scene;
 
 use super::transport::AppStudio;
@@ -107,6 +113,8 @@ pub struct TalkShowRoomHost {
     /// Content the backend refused (`held: false`); resent once presentation
     /// shows it holds the seat again.
     pending_scene: Option<(Option<SceneContent>, Vec<PreparedBackgroundAsset>)>,
+    /// Live background phase clock continued across scene sends (S14).
+    live_background: Option<LiveClockMemory>,
 }
 
 impl TalkShowRoomHost {
@@ -275,6 +283,7 @@ impl TalkShowRoomHost {
             scenes_show_id: None,
             last_scene_layout_revision: 0,
             pending_scene: None,
+            live_background: None,
         };
         host.on_talk_show(&initial);
         host
@@ -324,6 +333,57 @@ impl TalkShowRoomHost {
     /// Copy for a scene command while scenes are off in this room.
     pub fn room_scenes_off_copy() -> (&'static str, &'static str) {
         (ROOM_SCENES_OFF, USE_SCENES)
+    }
+
+    fn press_toast(&self, id: &str, toast: ToastData, cx: &mut Context<Self>) {
+        if let Some(hub) = cx
+            .try_global::<crate::screens::notifications::Shared>()
+            .map(|shared| shared.0.clone())
+        {
+            hub.update(cx, |hub, cx| hub.press_toast(id.to_string(), toast, cx));
+        }
+    }
+
+    /// Toast while scenes are off: Use scenes turns them on and retries.
+    fn toast_scenes_off(&self, cx: &mut Context<Self>) {
+        let host = cx.entity().downgrade();
+        let mut toast =
+            ToastData::new(ToastKind::Warning, ROOM_SCENES_OFF).action(USE_SCENES, move |_, cx| {
+                let _ = host.update(cx, |host, cx| {
+                    host.set_scenes_enabled(true, cx);
+                    host.send_studio_scene_to_room(cx).detach();
+                });
+            });
+        toast.timeout = Some(Some(videorc_app_core::notices::WITH_DESCRIPTION));
+        self.press_toast("room-scenes", toast, cx);
+    }
+
+    fn toast_room_scene(&self, message: &str, ok: bool, cx: &mut Context<Self>) {
+        if message.is_empty() {
+            return;
+        }
+        let kind = if ok {
+            ToastKind::Info
+        } else {
+            ToastKind::Warning
+        };
+        self.press_toast("room-scene", ToastData::new(kind, message.to_string()), cx);
+    }
+
+    /// Explicit scene apply into the room (Electron `applySceneInRoom`): when
+    /// scenes are off, toast with Use scenes; otherwise send.
+    pub fn apply_studio_scene_to_room(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Option<RoomSceneCommit>> {
+        if !self.room_open() {
+            return gpui::Task::ready(None);
+        }
+        if !self.scenes_enabled() {
+            self.toast_scenes_off(cx);
+            return gpui::Task::ready(None);
+        }
+        self.send_studio_scene_to_room(cx)
     }
 
     fn controller(&self) -> Option<ControllerFacts> {
@@ -782,8 +842,9 @@ impl TalkShowRoomHost {
     }
 
     /// Resolve the Studio's current capture scene for the room canvas,
-    /// translate it, and commit when room scenes are on. No-ops when the
-    /// room is closed or scenes are off.
+    /// then screen-switch → background prepare → readiness wait → commit
+    /// when room scenes are on. No-ops when the room is closed or scenes
+    /// are off. Surfaces result messages via toast when possible.
     pub fn send_studio_scene_to_room(
         &mut self,
         cx: &mut Context<Self>,
@@ -804,19 +865,28 @@ impl TalkShowRoomHost {
             video.width = canvas.width.round().max(1.0) as u32;
             video.height = canvas.height.round().max(1.0) as u32;
         }
-        if let Some(background) = snapshot.scenes.working_background.clone() {
+        let working_background = snapshot.scenes.working_background.clone();
+        if let Some(background) = working_background.clone() {
             params.background = serde_json::from_value(background).ok();
         }
         let animate = snapshot.settings.studio.animate_scene_changes();
         let camera_off = snapshot.settings.capture_doc["sources"]["cameraOff"]
             .as_bool()
             .unwrap_or(false);
-        let media = self.room_media.clone();
+        let capture_off = !snapshot.settings.capture.layout.source_visibility.capture;
+        let screen_id = snapshot.settings.capture.sources.screen_id.clone();
+        let window_id = snapshot.settings.capture.sources.window_id.clone();
+        let screen_want = room_screen_want(RoomScreenSources {
+            screen_id: screen_id.as_deref(),
+            window_id: window_id.as_deref(),
+            capture_off,
+        });
         let layout_value = serde_json::to_value(&params.layout).unwrap_or(Value::Null);
         let background_value = params
             .background
             .as_ref()
             .and_then(|background| serde_json::to_value(background).ok());
+        let live_memory = self.live_background.clone();
         let studio = self.studio.clone();
         let runtime = self.runtime.clone();
         let Ok(resolve_params) = serde_json::to_value(&params) else {
@@ -842,34 +912,165 @@ impl TalkShowRoomHost {
             let translation = cloud_scene_from_native(
                 &resolved,
                 &layout_value,
-                background_value.as_ref(),
+                background_value.as_ref().or(working_background.as_ref()),
                 orientation,
                 None,
             );
-            let camera_published = media.as_ref().is_some_and(|media| media.camera);
-            let screen_published = media
-                .as_ref()
-                .and_then(|media| media.screen.as_ref())
-                .is_some_and(|screen| screen.published);
-            if let Err(message) = room_sources_ready(
-                translation.needs.camera,
-                translation.needs.screen,
-                camera_published,
-                camera_off,
-                screen_published,
-                false,
-            ) {
-                eprintln!("[videorc-app] Talk-show host: room scene: {message}");
+
+            // S14: scene's own screen/window on the room share first.
+            if translation.needs.screen {
+                match &screen_want {
+                    RoomScreenWant::Unsupported { reason } => {
+                        let _ = this.update(cx, |host, cx| {
+                            host.toast_room_scene(reason, false, cx);
+                        });
+                        return None;
+                    }
+                    RoomScreenWant::Source {
+                        native_id: Some(native_id),
+                        source_kind,
+                        ..
+                    } => {
+                        let current = this
+                            .update(cx, |host, _| {
+                                host.room_media
+                                    .as_ref()
+                                    .and_then(|media| media.screen.as_ref())
+                                    .map(|screen| screen.source_id.clone())
+                            })
+                            .ok()
+                            .flatten();
+                        if room_screen_needs_switch_native(&screen_want, current.as_deref()) {
+                            let share = this
+                                .update(cx, |host, cx| host.share_screen(native_id, cx))
+                                .ok()?;
+                            if let Err(error) = share.await {
+                                let message = format!(
+                                    "The scene's {} couldn't be shared in the room: {error}",
+                                    source_kind.as_str()
+                                );
+                                let _ = this.update(cx, |host, cx| {
+                                    host.toast_room_scene(&message, false, cx);
+                                });
+                                return None;
+                            }
+                        }
+                    }
+                    RoomScreenWant::Source {
+                        native_id: None, ..
+                    }
+                    | RoomScreenWant::Keep => {}
+                }
+            }
+
+            // S14: background behind every source.
+            let mut scene = translation.scene;
+            let mut assets: Vec<PreparedBackgroundAsset> = Vec::new();
+            let mut background_note: Option<String> = None;
+            if let Some(background) = working_background.as_ref() {
+                let prepared = this
+                    .update(cx, |host, _| {
+                        room_background::prepare_room_background(
+                            background,
+                            now_ms(),
+                            host.live_background.as_ref().or(live_memory.as_ref()),
+                            None,
+                        )
+                    })
+                    .ok()?;
+                match prepared {
+                    Ok((prepared, memory)) => {
+                        scene.background = Some(prepared.background);
+                        if let Some(asset) = prepared.asset {
+                            assets.push(asset);
+                        }
+                        let _ = this.update(cx, |host, _| {
+                            if let Some(memory) = memory {
+                                host.live_background = Some(memory);
+                            }
+                        });
+                    }
+                    Err(note) => {
+                        background_note = Some(note);
+                    }
+                }
+            }
+
+            // Atomic: sources the scene shows are in the room before it changes.
+            let deadline =
+                std::time::Instant::now() + Duration::from_millis(ROOM_SOURCES_READY_WAIT_MS);
+            let ready_error = loop {
+                let sample = this
+                    .update(cx, |host, _| {
+                        if !host.room_open() {
+                            return Err("The room is not connected.");
+                        }
+                        let media = host.room_media.as_ref();
+                        let camera_published = media.is_some_and(|media| media.camera);
+                        let screen_published = media
+                            .and_then(|media| media.screen.as_ref())
+                            .is_some_and(|screen| screen.published);
+                        // Gap: GPUI has no stage-set RPC wired on the host yet;
+                        // stage_has_screen stays false (Electron may setStage).
+                        room_sources_ready(
+                            translation.needs.camera,
+                            translation.needs.screen,
+                            camera_published,
+                            camera_off,
+                            screen_published,
+                            false,
+                        )
+                    })
+                    .ok()?;
+                match sample {
+                    Ok(()) => break None,
+                    Err(message) if std::time::Instant::now() >= deadline => {
+                        break Some(message.to_string());
+                    }
+                    Err(_) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(ROOM_SOURCES_READY_POLL_MS))
+                            .await;
+                    }
+                }
+            };
+            if let Some(message) = ready_error {
+                let _ = this.update(cx, |host, cx| {
+                    host.toast_room_scene(&message, false, cx);
+                });
                 return None;
             }
-            let content =
-                room_scene::scene_content_for_orientation(orientation, translation.scene, animate);
-            let Ok(task) = this.update(cx, |host, cx| {
-                host.commit_scene(Some(content), Vec::new(), cx)
-            }) else {
+
+            let content = room_scene::scene_content_for_orientation(orientation, scene, animate);
+            let Ok(task) = this.update(cx, |host, cx| host.commit_scene(Some(content), assets, cx))
+            else {
                 return None;
             };
-            task.await
+            let commit = task.await;
+            let _ = this.update(cx, |host, cx| {
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(commit) = commit.as_ref() {
+                    if let Some(message) =
+                        room_scene_message(commit.state, commit.reason.as_deref())
+                    {
+                        parts.push(message);
+                    }
+                }
+                if let Some(note) = background_note {
+                    parts.push(note);
+                }
+                if !parts.is_empty() {
+                    let ok = commit.as_ref().is_some_and(|commit| {
+                        matches!(
+                            commit.state,
+                            videorc_app_core::cloud_scene::RoomSceneCommitState::Applied
+                                | videorc_app_core::cloud_scene::RoomSceneCommitState::Preview
+                        )
+                    });
+                    host.toast_room_scene(&parts.join(" "), ok, cx);
+                }
+            });
+            commit
         })
     }
 

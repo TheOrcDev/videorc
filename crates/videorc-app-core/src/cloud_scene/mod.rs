@@ -16,9 +16,10 @@ pub mod receiver;
 pub mod types;
 
 pub use adapter::{
-    ROOM_SCENE_CANVAS_H, ROOM_SCENE_CANVAS_V, ROOM_SCENES_OFF, RoomSceneCommitState, USE_SCENES,
-    orientation_from_layout_preset, room_scene_canvas, room_scene_message, room_scene_transition,
-    room_sources_ready, stage_layout_clears_scene,
+    ROOM_SCENE_CANVAS_H, ROOM_SCENE_CANVAS_V, ROOM_SCENES_OFF, ROOM_SOURCES_READY_POLL_MS,
+    ROOM_SOURCES_READY_WAIT_MS, RoomSceneCommitState, USE_SCENES, orientation_from_layout_preset,
+    room_scene_canvas, room_scene_message, room_scene_transition, room_sources_ready,
+    room_sources_ready_poll_ticks, stage_layout_clears_scene,
 };
 pub use native::{
     CloudSceneNeeds, CloudSceneSkip, CloudSceneSkipReason, CloudSceneTranslation,
