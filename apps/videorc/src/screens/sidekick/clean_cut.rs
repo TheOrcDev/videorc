@@ -391,9 +391,7 @@ fn lock_alert(unlock: &Unlock) -> Alert {
                 .size(ButtonSize::Xs)
                 .label(label)
                 .on_click(move |_, _, cx| match &action {
-                    UnlockAction::SignIn => {
-                        eprintln!("[videorc-app] Sidekick Clean cut: Sign in (account UI next)")
-                    }
+                    UnlockAction::SignIn => crate::app::accounts::sign_in(cx),
                     UnlockAction::ViewPremium { url } => cx.open_url(url),
                 }),
         );

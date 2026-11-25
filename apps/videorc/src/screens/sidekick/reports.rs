@@ -717,9 +717,7 @@ fn unlock_button(id: &'static str, action: UnlockAction) -> Button {
         .size(ButtonSize::Xs)
         .label(label)
         .on_click(move |_, _, cx| match action {
-            UnlockAction::SignIn => {
-                eprintln!("[videorc-app] Sidekick Reports: Sign in (account UI next)")
-            }
+            UnlockAction::SignIn => crate::app::accounts::sign_in(cx),
             UnlockAction::ViewPremium => cx.open_url("https://videorc.com/premium"),
         })
 }

@@ -5,7 +5,7 @@ use videorc_app_core::buddy::copy as words;
 use videorc_app_core::livestream::PlatformsState;
 use videorc_app_core::livestream::accounts::{
     AccountStatus, KICK_MODERATION_SCOPE, PlatformAccount, TWITCH_MODERATION_SCOPE,
-    YOUTUBE_FORCE_SSL_SCOPE, platform_label,
+    YOUTUBE_FORCE_SSL_SCOPE, permission_reconnect_scopes, platform_label,
 };
 use videorc_app_core::stream_manager::buddy::{self as sm_buddy, CohostSettingsView};
 use videorc_kit::alert::{Alert, AlertVariant};
@@ -256,9 +256,7 @@ pub fn render_voice(
                     .size(ButtonSize::Xs)
                     .label(label)
                     .on_click(move |_, _, cx| match action {
-                        UnlockAction::SignIn => {
-                            eprintln!("[videorc-app] Sidekick Voice: Sign in (account UI next)")
-                        }
+                        UnlockAction::SignIn => crate::app::accounts::sign_in(cx),
                         UnlockAction::ViewPremium => cx.open_url("https://videorc.com/premium"),
                     }),
             );
@@ -419,11 +417,21 @@ pub fn render_voice(
                     .label(action)
                     .accessibility_label(row.message.clone())
                     .tooltip(row.message.clone())
-                    .on_click(move |_, _, _| {
-                        // Reconnecting opens the platform's sign-in: the
-                        // GPUI app has no accounts yet (plan 260 open gap).
-                        eprintln!(
-                            "[videorc-app] Sidekick Voice: {platform} reconnect (accounts next)"
+                    .on_click(move |_, _, cx| {
+                        if matches!(platform, "x" | "youtube") {
+                            // Authorize X Live, and YouTube's consent before
+                            // its sign-in, have no GPUI home yet (Sweep A).
+                            eprintln!("[videorc-app] Sidekick Voice: {platform} fix (next)");
+                            return;
+                        }
+                        // The reconnect grants the moderation scope
+                        // (`permissionReconnectOptions`).
+                        crate::app::accounts::connect_provider(
+                            cx,
+                            platform,
+                            permission_reconnect_scopes(platform),
+                            false,
+                            |_, _| {},
                         );
                     }),
             );
