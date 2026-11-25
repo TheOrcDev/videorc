@@ -71,6 +71,13 @@ pub fn install(cx: &mut App, frame: NotesFrame, app_id: &'static str) {
     }
 }
 
+/// The open window, for the smoke driver; `None` while it is closed.
+pub fn handle(cx: &App) -> Option<gpui::AnyWindowHandle> {
+    cx.try_global::<Open>()
+        .and_then(|open| open.window)
+        .map(Into::into)
+}
+
 pub fn toggle(cx: &mut App) {
     let open = cx.global::<Open>().window;
     match open {

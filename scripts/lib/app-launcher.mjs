@@ -371,17 +371,22 @@ export function smokeAppIsGpui(env = process.env) {
 
 /**
  * Why `launchDevApp` must not start the app `VIDEORC_APP` names, or null.
- * The GPUI app has no launch path until plan 260 S2.1 builds it; until then
- * `VIDEORC_APP=gpui` stops here by name instead of running Electron. Pure for
- * the unit test.
+ * Both apps launch now (plan 260 Phase 3 gave the GPUI app its path); an
+ * unknown `VIDEORC_APP` still throws in `smokeAppKind`. Pure for the unit
+ * test.
  */
 export function smokeAppLaunchRefusal(env = {}, processEnv = process.env) {
-  const kind = smokeAppKind({ ...processEnv, ...env })
-  if (kind !== 'gpui') return null
-  return (
-    'VIDEORC_APP=gpui: the GPUI app (apps/videorc) does not exist yet. Plan 260 S2.1 ' +
-    'builds it and S2.5 gives it a launch path; unset VIDEORC_APP to run Electron.'
-  )
+  smokeAppKind({ ...processEnv, ...env })
+  return null
+}
+
+/**
+ * The GPUI app's dev binary (`cargo build -p videorc-app`), in the profile
+ * the backend is built in, so the app finds its backend beside it.
+ */
+export function gpuiAppBinaryPath({ env = process.env, platform = process.platform } = {}) {
+  const profile = env?.VIDEORC_DEV_BACKEND_PROFILE === 'release' ? 'release' : 'debug'
+  return join(repoRoot, 'target', profile, platform === 'win32' ? 'Videorc.exe' : 'Videorc')
 }
 
 /**
@@ -1151,6 +1156,16 @@ function exactPidIsAlive(pid) {
 }
 
 export function devAppSpawnSpec({ env, platform = process.platform } = {}) {
+  if (smokeAppIsGpui({ ...process.env, ...env })) {
+    // The binary itself, not `cargo run`: the prebuild built it with the
+    // backend, and the profile directory reaches the app through
+    // VIDEORC_USER_DATA_DIR in `env`.
+    return {
+      command: gpuiAppBinaryPath({ env: { ...process.env, ...env }, platform }),
+      args: [],
+      options: devAppSpawnOptions({ env, platform })
+    }
+  }
   if (platform === 'win32') {
     return {
       command: env?.ComSpec || process.env.ComSpec || 'cmd.exe',
@@ -1205,9 +1220,17 @@ export function devBackendPrebuildSpec({ env = process.env, platform = process.p
   // Mirrors the desktop main process: VIDEORC_DEV_BACKEND_PROFILE=release
   // makes `pnpm dev` run the optimized backend (Plan 0005).
   const release = env?.VIDEORC_DEV_BACKEND_PROFILE === 'release'
+  // VIDEORC_APP=gpui: the GPUI app builds with its backend, in one cargo run.
+  const gpui = smokeAppIsGpui({ ...process.env, ...env })
   return {
     command: platform === 'win32' ? 'cargo.exe' : 'cargo',
-    args: ['build', ...(release ? ['--release'] : []), '-p', 'videorc-backend'],
+    args: [
+      'build',
+      ...(release ? ['--release'] : []),
+      '-p',
+      'videorc-backend',
+      ...(gpui ? ['-p', 'videorc-app'] : [])
+    ],
     cwd: repoRoot,
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : defaultTimeoutMs
   }

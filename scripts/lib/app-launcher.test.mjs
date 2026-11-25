@@ -14,7 +14,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import {
   appSpawnSpec,
@@ -24,6 +24,7 @@ import {
   devBackendPrebuildFailure,
   devBackendPrebuildSpec,
   devAppSpawnSpec,
+  gpuiAppBinaryPath,
   launchDevApp,
   releaseBackendFakeOriginRefusal,
   smokeAppIsGpui,
@@ -1216,8 +1217,10 @@ test('the async dev backend prebuild keeps the event loop running and names its 
   assert.equal(slotCalls.length, 4, 'an opted-out prebuild takes no slot')
 })
 
-// Plan 260 S2.5: VIDEORC_APP picks the app; gpui is refused until S2.1 builds it.
-test('VIDEORC_APP picks electron or gpui, and gpui stops before launching until the app exists', async () => {
+const repoRoot = resolve(import.meta.dirname, '..', '..')
+
+// Plan 260 S2.5: VIDEORC_APP picks the app; Phase 3 gave the GPUI app its launch path.
+test('VIDEORC_APP picks electron or gpui, and gpui launches its own binary built with the backend', () => {
   assert.equal(smokeAppKind({}), 'electron')
   assert.equal(smokeAppKind({ VIDEORC_APP: '' }), 'electron')
   assert.equal(smokeAppKind({ VIDEORC_APP: 'electron' }), 'electron')
@@ -1228,13 +1231,24 @@ test('VIDEORC_APP picks electron or gpui, and gpui stops before launching until 
     /must be "electron" \(the default\) or "gpui", not "rust"/
   )
   assert.equal(smokeAppLaunchRefusal({}, {}), null)
-  assert.match(
-    smokeAppLaunchRefusal({ VIDEORC_APP: 'gpui' }, {}),
-    /apps\/videorc\) does not exist yet/
+  assert.equal(smokeAppLaunchRefusal({ VIDEORC_APP: 'gpui' }, {}), null)
+  assert.throws(() => smokeAppLaunchRefusal({ VIDEORC_APP: 'rust' }, {}), /not "rust"/)
+
+  const gpui = devAppSpawnSpec({ env: { VIDEORC_APP: 'gpui' }, platform: 'darwin' })
+  assert.equal(gpui.command, join(repoRoot, 'target', 'debug', 'Videorc'))
+  assert.deepEqual(gpui.args, [])
+  assert.equal(gpui.options.shell, false)
+  assert.equal(
+    gpuiAppBinaryPath({ env: { VIDEORC_DEV_BACKEND_PROFILE: 'release' }, platform: 'win32' }),
+    join(repoRoot, 'target', 'release', 'Videorc.exe')
   )
-  assert.match(smokeAppLaunchRefusal({}, { VIDEORC_APP: 'gpui' }), /Plan 260 S2.1/)
-  await assert.rejects(
-    launchDevApp({ env: { VIDEORC_APP: 'gpui' }, timeoutMs: 1000 }),
-    /does not exist yet/
+  assert.deepEqual(
+    devBackendPrebuildSpec({ env: { VIDEORC_APP: 'gpui' }, platform: 'darwin' }).args,
+    ['build', '-p', 'videorc-backend', '-p', 'videorc-app']
   )
+  assert.deepEqual(devBackendPrebuildSpec({ env: {}, platform: 'darwin' }).args, [
+    'build',
+    '-p',
+    'videorc-backend'
+  ])
 })
