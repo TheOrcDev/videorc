@@ -51,7 +51,8 @@
     "field",
     "input-group",
     "bar-visualizer",
-    "live-waveform"
+    "live-waveform",
+    "sound-pad"
   ],
   "keepLocal": []
 }

@@ -195,6 +195,10 @@ fn rounded_path(w: f32, h: f32, radii: [f32; 4]) -> String {
 }
 
 /// The SVG drawn once into an image, cached by its source.
+pub(crate) fn rasterise_for_kit(svg: &str, w: u32, h: u32) -> Option<Arc<RenderImage>> {
+    rasterise(svg, w, h)
+}
+
 fn rasterise(svg: &str, w: u32, h: u32) -> Option<Arc<RenderImage>> {
     if let Some(hit) = RASTERS.with(|cache| cache.borrow().get(svg).cloned()) {
         return Some(hit);

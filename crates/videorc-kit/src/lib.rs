@@ -44,6 +44,7 @@ pub mod settings_row;
 pub mod shortcut_keys;
 pub mod skeleton;
 pub mod slider;
+pub mod sound_pad;
 pub mod spinner;
 pub mod status_bar;
 pub mod status_bar_action;
@@ -96,6 +97,9 @@ pub use settings_row::{SettingsGroup, SettingsRow};
 pub use shortcut_keys::{ShortcutKeys, ShortcutStyle};
 pub use skeleton::Skeleton;
 pub use slider::{Slider, SliderEvent, SliderState};
+pub use sound_pad::{
+    SoundPad, SoundPadGrid, SoundPadMode, SoundPadProgressVariant, SoundPadSize, SoundPadVariant,
+};
 pub use spinner::Spinner;
 pub use status_bar::{StatusBar, StatusBarHint};
 pub use status_bar_action::StatusBarAction;
