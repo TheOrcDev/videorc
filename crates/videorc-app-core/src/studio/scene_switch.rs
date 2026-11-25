@@ -2135,6 +2135,12 @@ impl<B: StudioBackend> Studio<B> {
         staged
     }
 
+    /// The look on stream now as a scene visual (`workingVisual`), for the
+    /// smokes' `studio-scene-save`.
+    pub fn working_scene_visual(&self) -> Option<Value> {
+        self.lock().working_visual()
+    }
+
     /// `applyCameraPreset({layoutPreset})`.
     pub async fn apply_layout_preset(self: &Arc<Self>, preset: &str) -> bool {
         let mut patch = Map::new();

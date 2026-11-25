@@ -136,3 +136,21 @@ Wait for a GPUI product path or new commands first:
 | `smoke:preview-check-invisible`, `smoke:system-audio`, `smoke:smart-scenes`                                                                      | `select-screen-device`, the `studio-scene-*` commands, a Node-side tone for System audio                                              |
 | `smoke:recording-native-preview`, `smoke:preview-surface`, `probe:preview-lifecycle`, `probe:preview-window`, `smoke:preview-interaction-stress` | Electron's native-surface and window commands; they need GPUI-specific probes, not a port                                             |
 | `smoke:screen-recording-real`, `smoke:notes-window-invisible`, `smoke:comment-highlight-stream`, `probe:comments-window`                         | the Notes and Comments window commands                                                                                                |
+
+### Sources, layouts and saved scenes
+
+`StudioSmoke` also runs:
+
+- `select-screen-device {sourceId?, timeoutMs?, settleMs?}`: the first available ScreenCaptureKit screen or window (any
+  screen off macOS), or `sourceId`; it turns the test pattern off first, as Electron's hook does. Answers `{id, kind}`.
+- `select-camera-device {cameraId?, off?, timeoutMs?, settleMs?}`: the first available camera, `cameraId`, or Camera
+  off. Answers `{cameraId}`.
+- `select-layout-preset {preset, settleMs?}`: the layout on stream (switching to 9:16 first for a `vertical-` preset),
+  answered once the capture config shows it. It moved from the window commands to the Studio's.
+- `studio-scenes-state`: the library (`scenes`, `onStreamId`, `pendingSceneId`, `modified`, `readOnly`, `error`) and
+  what shows now (`visual`: screen, window, camera, Camera off, test pattern, layout preset).
+- `studio-scene-save {name, updateId?}` (the look on stream as a new scene, or over `updateId`, then on stream),
+  `studio-scene-apply {id}`, `studio-scene-delete {id}`, `studio-scene-layout {patch}` (`applyCameraPreset`) and
+  `studio-scene-background {background}` (a saved background, or `null` for none, as one quiet transaction).
+
+`smoke:record-latency -- --real-screen` uses the pickers on GPUI.
