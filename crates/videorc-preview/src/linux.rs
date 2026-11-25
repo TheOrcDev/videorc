@@ -190,6 +190,12 @@ enum Command {
     },
     Place(Placement),
     Hidden(bool),
+    /// The Scene editor's chrome over the video ([`crate::chrome`]):
+    /// Wayland shows it in a subsurface of its own above the video's; X11
+    /// has no transparent child to put it in, so it ignores it (the Scene
+    /// canvas falls back to the schematic there, by name). `None` takes it
+    /// down.
+    Chrome(Option<crate::chrome::ChromeScene>),
     Quit,
 }
 
@@ -315,6 +321,8 @@ pub struct Presenter {
     hidden: bool,
     /// What the child got ([`effective_stacking`]).
     stacking: Stacking,
+    /// The chrome last sent (a repeat sends nothing).
+    chrome: Option<crate::chrome::ChromeScene>,
 }
 
 impl Presenter {
@@ -448,6 +456,7 @@ impl Presenter {
             placement: None,
             hidden: false,
             stacking: effective_stacking(requested, backing),
+            chrome: None,
         })
     }
 
@@ -499,6 +508,29 @@ impl Presenter {
     pub fn is_hidden(&self) -> bool {
         self.hidden
     }
+
+    /// Whether this backing can show the Scene editor's chrome over the
+    /// video: Wayland's subsurfaces can; an X11 child window is opaque and
+    /// on top, with no transparent sibling to draw in.
+    pub fn chrome_supported(&self) -> bool {
+        chrome_supported(self.client.backing)
+    }
+
+    /// The Scene editor's chrome over the video, or none. Returns true when
+    /// it changed (and was sent).
+    pub fn set_chrome(&mut self, scene: Option<crate::chrome::ChromeScene>) -> bool {
+        if self.chrome == scene {
+            return false;
+        }
+        self.chrome = scene.clone();
+        self.client.send(Command::Chrome(scene));
+        true
+    }
+}
+
+/// Wayland shows the chrome in a subsurface above the video; X11 cannot.
+pub fn chrome_supported(backing: Backing) -> bool {
+    backing == Backing::WaylandSubsurface
 }
 
 impl Drop for Presenter {
@@ -717,12 +749,78 @@ mod wayland {
         Command, Doorbell, IDLE_POLL, Mapped, NativeHandles, OWN_BUFFERS, Placement, RELEASE_WAIT,
         RingMapping, Stacking, own_memory, poll_readable, report,
     };
+    use crate::chrome::ChromeScene;
 
     /// The dispatch state: which of the presenter's own buffers the
     /// compositor has given back.
     struct State {
         released: Vec<bool>,
+        /// The chrome's own buffers, likewise.
+        chrome_released: Vec<bool>,
     }
+
+    /// A chrome buffer's index (its own user data, so its release never
+    /// lands on a video buffer's).
+    struct ChromeBuffer(usize);
+
+    impl Dispatch<WlBuffer, ChromeBuffer> for State {
+        fn event(
+            state: &mut Self,
+            _: &WlBuffer,
+            event: wl_buffer::Event,
+            index: &ChromeBuffer,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+            if let wl_buffer::Event::Release = event
+                && let Some(released) = state.chrome_released.get_mut(index.0)
+            {
+                *released = true;
+            }
+        }
+    }
+
+    /// The chrome's two buffers of one size in a memory file of their own.
+    struct ChromePool {
+        width: u32,
+        height: u32,
+        memory: Mapped,
+        _fd: std::os::fd::OwnedFd,
+        pool: WlShmPool,
+        buffers: Vec<WlBuffer>,
+    }
+
+    impl ChromePool {
+        fn bytes(&self) -> usize {
+            self.width as usize * self.height as usize * 4
+        }
+    }
+
+    impl Drop for ChromePool {
+        fn drop(&mut self) {
+            for buffer in &self.buffers {
+                buffer.destroy();
+            }
+            self.pool.destroy();
+        }
+    }
+
+    /// The chrome's subsurface, above the video's, with an empty input
+    /// region (the clicks stay the window's).
+    struct ChromeLayer {
+        surface: WlSurface,
+        subsurface: WlSubsurface,
+        viewport: WpViewport,
+        pool: Option<ChromePool>,
+        /// The chrome to show once a buffer is free (or the video shows).
+        pending: Option<ChromeScene>,
+        /// The chrome on screen, shown again after a hide.
+        shown: Option<ChromeScene>,
+        attached: Option<usize>,
+    }
+
+    /// Two buffers: the one on screen, one to fill.
+    const CHROME_BUFFERS: usize = 2;
 
     impl Dispatch<WlRegistry, GlobalListContents> for State {
         fn event(
@@ -798,6 +896,12 @@ mod wayland {
         /// The own buffer last attached (it holds the last frame shown), so a
         /// show after a hide attaches it again.
         attached: Option<usize>,
+        /// What the chrome subsurface is built from, on its first use.
+        compositor: WlCompositor,
+        subcompositor: WlSubcompositor,
+        viewporter: WpViewporter,
+        parent: WlSurface,
+        chrome: Option<ChromeLayer>,
     }
 
     impl Child {
@@ -848,6 +952,7 @@ mod wayland {
                 queue,
                 state: State {
                     released: Vec::new(),
+                    chrome_released: Vec::new(),
                 },
                 shm,
                 child,
@@ -857,6 +962,11 @@ mod wayland {
                 placement: None,
                 hidden: false,
                 attached: None,
+                compositor,
+                subcompositor,
+                viewporter,
+                parent,
+                chrome: None,
             })
         }
 
@@ -1091,8 +1201,10 @@ mod wayland {
                                     // one lands.
                                     self.reshow(last);
                                 }
+                                self.chrome_hidden(hidden);
                             }
                         }
+                        Command::Chrome(scene) => self.set_chrome(scene),
                         Command::Present {
                             slot,
                             frame_id,
@@ -1176,6 +1288,8 @@ mod wayland {
                 if quit {
                     break;
                 }
+                // A chrome that waited for a buffer goes up once one is back.
+                self.flush_chrome();
                 if let Err(error) = self.dispatch_for(bell, IDLE_POLL) {
                     eprintln!("[preview] wayland presenter: {error}; the subsurface stops");
                     break;
@@ -1184,9 +1298,196 @@ mod wayland {
             self.close();
         }
 
+        // --- the Scene editor's chrome, in a subsurface above the video ---
+
+        /// Builds the chrome's subsurface: above the video's, no input.
+        fn chrome_layer(&mut self) -> &mut ChromeLayer {
+            if self.chrome.is_none() {
+                let qh = self.queue.handle();
+                let surface = self.compositor.create_surface(&qh, ());
+                let region = self.compositor.create_region(&qh, ());
+                surface.set_input_region(Some(&region));
+                region.destroy();
+                let subsurface = self
+                    .subcompositor
+                    .get_subsurface(&surface, &self.parent, &qh, ());
+                subsurface.set_desync();
+                // Applied with the parent's next commit, like the video's
+                // position.
+                subsurface.place_above(&self.child);
+                let viewport = self.viewporter.get_viewport(&surface, &qh, ());
+                self.chrome = Some(ChromeLayer {
+                    surface,
+                    subsurface,
+                    viewport,
+                    pool: None,
+                    pending: None,
+                    shown: None,
+                    attached: None,
+                });
+            }
+            self.chrome.as_mut().expect("built above")
+        }
+
+        fn set_chrome(&mut self, scene: Option<ChromeScene>) {
+            match scene {
+                Some(scene) => {
+                    self.chrome_layer().pending = Some(scene);
+                    self.flush_chrome();
+                }
+                None => {
+                    if let Some(layer) = self.chrome.as_mut() {
+                        layer.pending = None;
+                        layer.shown = None;
+                        layer.attached = None;
+                        layer.surface.attach(None, 0, 0);
+                        layer.surface.commit();
+                    }
+                }
+            }
+        }
+
+        /// The video hid (its slot is off screen, the Preview floats): the
+        /// chrome goes with it, and comes back with it.
+        fn chrome_hidden(&mut self, hidden: bool) {
+            let Some(layer) = self.chrome.as_mut() else {
+                return;
+            };
+            if hidden {
+                if layer.pending.is_none() {
+                    layer.pending = layer.shown.take();
+                }
+                layer.attached = None;
+                layer.surface.attach(None, 0, 0);
+                layer.surface.commit();
+            } else {
+                if layer.pending.is_none() {
+                    layer.pending = layer.shown.take();
+                }
+                self.flush_chrome();
+            }
+        }
+
+        /// Draws the pending chrome into a free buffer and shows it, unless
+        /// the video is hidden or both buffers are still the compositor's
+        /// (the next loop tries again).
+        fn flush_chrome(&mut self) {
+            if self.hidden {
+                return;
+            }
+            let qh = self.queue.handle();
+            let shm = self.shm.clone();
+            let released = &mut self.state.chrome_released;
+            let Some(layer) = self.chrome.as_mut() else {
+                return;
+            };
+            let Some(scene) = layer.pending.take() else {
+                return;
+            };
+            let bitmap = crate::chrome::rasterize(&scene);
+            let fits = layer
+                .pool
+                .as_ref()
+                .is_some_and(|pool| pool.width == bitmap.width && pool.height == bitmap.height);
+            if !fits {
+                // A new size: new buffers (the old ones go once released by
+                // the server with their pool).
+                layer.surface.attach(None, 0, 0);
+                layer.attached = None;
+                layer.pool = None;
+                let bytes = bitmap.pixels.len();
+                let total = bytes * CHROME_BUFFERS;
+                let Ok(pool_len) = i32::try_from(total) else {
+                    eprintln!("[preview] wayland chrome: {total} bytes is too large");
+                    return;
+                };
+                let fd = match own_memory(total) {
+                    Ok(fd) => fd,
+                    Err(error) => {
+                        eprintln!("[preview] wayland chrome: {error}");
+                        return;
+                    }
+                };
+                let memory = match Mapped::map(fd.as_fd(), total, true) {
+                    Ok(memory) => memory,
+                    Err(error) => {
+                        eprintln!("[preview] wayland chrome: mapping its buffers: {error}");
+                        return;
+                    }
+                };
+                let pool = shm.create_pool(fd.as_fd(), pool_len, &qh, ());
+                let buffers = (0..CHROME_BUFFERS)
+                    .map(|index| {
+                        pool.create_buffer(
+                            (index * bytes) as i32,
+                            bitmap.width as i32,
+                            bitmap.height as i32,
+                            (bitmap.width * 4) as i32,
+                            wl_shm::Format::Argb8888,
+                            &qh,
+                            ChromeBuffer(index),
+                        )
+                    })
+                    .collect();
+                *released = vec![true; CHROME_BUFFERS];
+                layer.pool = Some(ChromePool {
+                    width: bitmap.width,
+                    height: bitmap.height,
+                    memory,
+                    _fd: fd,
+                    pool,
+                    buffers,
+                });
+            }
+            let free = (0..CHROME_BUFFERS)
+                .filter(|index| released.get(*index).copied() == Some(true))
+                .find(|index| Some(*index) != layer.attached)
+                .or_else(|| {
+                    (0..CHROME_BUFFERS).find(|index| released.get(*index).copied() == Some(true))
+                });
+            let Some(index) = free else {
+                layer.pending = Some(scene);
+                return;
+            };
+            let Some(pool) = layer.pool.as_mut() else {
+                return;
+            };
+            let bytes = pool.bytes();
+            let Some(target) = pool.memory.slice_mut(index * bytes, bytes) else {
+                return;
+            };
+            target.copy_from_slice(&bitmap.pixels);
+            let rect = scene.rect;
+            layer
+                .subsurface
+                .set_position(rect.x.round() as i32, rect.y.round() as i32);
+            layer.viewport.set_destination(
+                rect.width.round().max(1.0) as i32,
+                rect.height.round().max(1.0) as i32,
+            );
+            if let Some(slot) = released.get_mut(index) {
+                *slot = false;
+            }
+            layer.surface.attach(Some(&pool.buffers[index]), 0, 0);
+            layer
+                .surface
+                .damage_buffer(0, 0, bitmap.width as i32, bitmap.height as i32);
+            layer.surface.commit();
+            layer.attached = Some(index);
+            layer.shown = Some(scene);
+        }
+
         /// Takes the subsurface down: the end of `run`, or a child whose
         /// caller stopped waiting for it (`Presenter::attach`).
         pub(super) fn close(mut self) {
+            if let Some(mut layer) = self.chrome.take() {
+                layer.pool = None;
+                layer.surface.attach(None, 0, 0);
+                layer.surface.commit();
+                layer.viewport.destroy();
+                layer.subsurface.destroy();
+                layer.surface.destroy();
+            }
             self.pool = None;
             self.child.attach(None, 0, 0);
             self.child.commit();
@@ -1778,6 +2079,9 @@ mod x11 {
                                 }
                             });
                         }
+                        // X11: no transparent child for the chrome; the Scene
+                        // canvas names its fallback to the schematic.
+                        Command::Chrome(_) => {}
                         Command::Quit => quit = true,
                     }
                 }
