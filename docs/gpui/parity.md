@@ -207,7 +207,7 @@ until the runtime, visual and accessibility checks above can run.
 | --- | --- | --- | --- | :-: | :-: | :-: |
 | P111 | Space key | Records when idle; stops a recording; asks to end a livestream | `renderer/components/tabs/studio-tab.tsx:137` | [x] | [ ] | [ ] |
 | P112 | Space yields | Ignored while a dialog, menu, focused control or repeat owns it | `renderer/lib/studio-space-shortcut.ts:1` | [x] | [ ] | [ ] |
-| P113 | Responsive layout | Inspector sits beside preview from 720 px; narrower, transport leads | `renderer/components/tabs/studio-tab.tsx:185` | [[x] | [ ] | [ ] |
+| P113 | Responsive layout | Inspector sits beside preview from 720 px; narrower, transport leads | `renderer/components/tabs/studio-tab.tsx:185` | [x] | [ ] | [ ] |
 | P114 | "Session inspector" aside | Holds cloud notice, Session, Chat, Audio, Sources, Takeover | `renderer/components/tabs/studio-tab.tsx:225` | [ ] | [ ] | [ ] |
 | P115 | Retro LCD switch | Settings → General Retro LCD swaps every inspector section to LCD | `renderer/components/tabs/studio-tab.tsx:72` | [ ] | [ ] | [ ] |
 | P116 | "Preview" section | Holds the preview stage; untitled when docked | `renderer/components/tabs/studio-tab.tsx:480` | [ ] | [ ] | [ ] |
@@ -260,7 +260,7 @@ until the runtime, visual and accessibility checks above can run.
 | P153 | Disabled-reason tooltips | Hover/focus tells why Record or Go Live is off | `renderer/components/studio/session-panel.tsx:167` | [x] | [ ] | [ ] |
 | P154 | Stop note "Your recording stops too." | Explains End livestream also stops recording | `renderer/components/studio/session-panel.tsx:200` | [x] | [ ] | [ ] |
 | P155 | Blocked reason line + jump link | One line why start is blocked, link to fix page | `renderer/components/studio/session-panel.tsx:233` | [ ] | [ ] | [ ] |
-| P156 | Alert "Stopping is taking longer than expected" | Explains Force stop when stop overruns | `renderer/components/studio/session-panel.tsx:210` | [[x] | [ ] | [ ] |
+| P156 | Alert "Stopping is taking longer than expected" | Explains Force stop when stop overruns | `renderer/components/studio/session-panel.tsx:210` | [x] | [ ] | [ ] |
 | P157 | "End livestream?" dialog (shell) | Confirms ending livestream; "Keep streaming"/hand-off options | `renderer/components/end-livestream-dialog.tsx:81` | [ ] | [ ] | [ ] |
 | P158 | Go Live confirmation dialog (shell) | Opened by Go Live; ⌘Enter confirms | `renderer/lib/shortcuts.ts:64` | [ ] | [ ] | [ ] |
 
@@ -435,7 +435,7 @@ until the runtime, visual and accessibility checks above can run.
 | P268 | "Takeover" header + "Open Images" cog | Opens Images page | `renderer/components/studio/session-panel.tsx:680` | [ ] | [ ] | [ ] |
 | P269 | Empty "No takeovers yet." + "Add in Images" | Opens Images | `renderer/components/studio/session-panel.tsx:684` | [ ] | [ ] | [ ] |
 | P270 | Takeover buttons (by name) | Cover output / click again to return | `renderer/components/studio/session-panel.tsx:703` | [ ] | [ ] | [ ] |
-| P271 | Hint line | What a click does, or disconnected reason | `renderer/components/studio/session-panel.tsx:740` | [[x] | [ ] | [ ] |
+| P271 | Hint line | What a click does, or disconnected reason | `renderer/components/studio/session-panel.tsx:740` | [x] | [ ] | [ ] |
 
 ### Studio dashboard bottom row (studio-dashboard-bottom-row.tsx)
 

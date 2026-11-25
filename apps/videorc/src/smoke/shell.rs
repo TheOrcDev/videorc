@@ -130,8 +130,12 @@ impl ShellSmoke for ShellWindows {
         Ok(json!({ "shown": true, "id": id }))
     }
 
-    fn open_page(&self, page: PageId, cx: &mut App) -> Result<(), String> {
-        self.open(page, cx)
+    fn open_page(&self, page: PageId, open: super::OpenTab, cx: &mut App) -> Result<(), String> {
+        self.main
+            .update(cx, |shell, window, cx| {
+                shell.smoke_open(page, open, window, cx)
+            })
+            .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())?
     }
 
     fn preview(&self, command: &str, cx: &mut App) -> Result<Value, String> {
@@ -201,13 +205,7 @@ impl ShellSmoke for ShellWindows {
     }
 }
 
-impl ShellWindows {
-    fn open(&self, page: PageId, cx: &mut App) -> Result<(), String> {
-        self.main
-            .update(cx, |shell, window, cx| shell.open_page(page, window, cx))
-            .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())
-    }
-}
+impl ShellWindows {}
 
 /// Whether this binary is a shipped app rather than a dev build. A dev build
 /// runs from cargo's `target/<profile>/`; anything else is treated as

@@ -69,8 +69,9 @@ pub trait ShellSmoke: 'static {
     fn appearance(&self, request: UiAppearanceRequest, cx: &mut App) -> Result<Value, String>;
     /// `ui-toast`: a toast in the main window through the app's toast path.
     fn toast(&self, request: &UiToastRequest, cx: &mut App) -> Result<Value, String>;
-    /// `open-tab`: the main window shows `page`, as its sidebar row would.
-    fn open_page(&self, page: PageId, cx: &mut App) -> Result<(), String>;
+    /// `open-tab`: the main window shows `page`, as its sidebar row would,
+    /// on `open`'s sub-tab with its dialog over it.
+    fn open_page(&self, page: PageId, open: OpenTab, cx: &mut App) -> Result<(), String>;
     /// The preview's commands ([`PREVIEW_COMMANDS`]): its state, and its own
     /// window opened, closed or toggled.
     fn preview(&self, command: &str, cx: &mut App) -> Result<Value, String>;
@@ -88,10 +89,67 @@ pub const PREVIEW_COMMANDS: &[&str] = &[
     "preview-window-toggle",
 ];
 
-/// `open-tab {tab, waitFor?}` on the main window. `tab` is Electron's
-/// trigger id (`studio`, `sources`, `layout`, `streaming`, …) or a page's own
-/// id. `waitFor` is a CSS selector on Electron; the GPUI page is drawn in the
-/// same frame, so it is not needed here and is ignored.
+/// A dialog `open-tab` puts over the page (GPUI only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmokeDialog {
+    /// The Go Live confirmation, as the Studio's Go Live button opens it.
+    GoLive,
+    /// The command palette (⌘K).
+    Palette,
+    /// First-run setup at `step` (the first step there is for `goal`).
+    FirstRun {
+        step: videorc_app_core::first_run::Step,
+        goal: Option<videorc_app_core::first_run::Goal>,
+    },
+}
+
+/// `open-tab`'s GPUI extras, for the screen gallery
+/// (`scripts/gpui-gallery.mjs`): `subTab` (Settings, Sidekick and Avatar
+/// tab ids, `nav::sub_tabs`) and `dialog` (`go-live`, `palette`, or
+/// `first-run` with `step` and `goal`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenTab {
+    pub sub_tab: Option<String>,
+    pub dialog: Option<SmokeDialog>,
+}
+
+impl OpenTab {
+    pub fn from_params(params: &serde_json::Map<String, Value>) -> Result<Self, String> {
+        use videorc_app_core::first_run::{Goal, Step};
+        let text = |key: &str| params.get(key).and_then(Value::as_str);
+        let dialog = match text("dialog") {
+            None => None,
+            Some("go-live") => Some(SmokeDialog::GoLive),
+            Some("palette") => Some(SmokeDialog::Palette),
+            Some("first-run") => {
+                let step = match text("step") {
+                    None => Step::Permissions,
+                    Some(id) => Step::parse(id)
+                        .ok_or_else(|| format!("open-tab: no first-run step is called {id:?}."))?,
+                };
+                let goal =
+                    match text("goal") {
+                        None => None,
+                        Some(id) => Some(Goal::parse(id).ok_or_else(|| {
+                            format!("open-tab: no first-run goal is called {id:?}.")
+                        })?),
+                    };
+                Some(SmokeDialog::FirstRun { step, goal })
+            }
+            Some(other) => return Err(format!("open-tab: no dialog is called {other:?}.")),
+        };
+        Ok(Self {
+            sub_tab: text("subTab").map(str::to_string),
+            dialog,
+        })
+    }
+}
+
+/// `open-tab {tab, waitFor?, subTab?, dialog?}` on the main window. `tab` is
+/// Electron's trigger id (`studio`, `sources`, `layout`, `streaming`, …) or a
+/// page's own id. `waitFor` is a CSS selector on Electron; the GPUI page is
+/// drawn in the same frame, so it is not needed here and is ignored.
+/// `subTab` and `dialog` are [`OpenTab`]'s.
 pub struct ShellCommands {
     ui: UiThread,
 }
@@ -121,10 +179,12 @@ impl SmokeCommandHandler for ShellCommands {
                 .to_string();
             let page = PageId::from_tab_param(&tab)
                 .ok_or_else(|| format!("open-tab: no page is called {tab:?}."))?;
+            let open = OpenTab::from_params(&params)?;
+            let sub_tab = open.sub_tab.clone();
             self.ui
-                .run(move |cx| shell(cx)?.open_page(page, cx))
+                .run(move |cx| shell(cx)?.open_page(page, open, cx))
                 .await??;
-            Ok(serde_json::json!({ "activeTab": tab }))
+            Ok(serde_json::json!({ "activeTab": tab, "subTab": sub_tab }))
         })
     }
 }
@@ -242,4 +302,51 @@ pub fn start(cx: &mut App, start: SmokeStart) -> bool {
         }
     });
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OpenTab, SmokeDialog};
+    use serde_json::{Map, Value, json};
+    use videorc_app_core::first_run::{Goal, Step};
+
+    fn params(value: Value) -> Map<String, Value> {
+        value.as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn open_tab_reads_its_sub_tab_and_dialog() {
+        assert_eq!(
+            OpenTab::from_params(&params(json!({ "tab": "settings" }))),
+            Ok(OpenTab::default())
+        );
+        assert_eq!(
+            OpenTab::from_params(&params(json!({ "subTab": "voice", "dialog": "palette" }))),
+            Ok(OpenTab {
+                sub_tab: Some("voice".into()),
+                dialog: Some(SmokeDialog::Palette),
+            })
+        );
+        assert_eq!(
+            OpenTab::from_params(&params(
+                json!({ "dialog": "first-run", "step": "look", "goal": "stream" })
+            ))
+            .map(|open| open.dialog),
+            Ok(Some(SmokeDialog::FirstRun {
+                step: Step::Look,
+                goal: Some(Goal::Stream),
+            }))
+        );
+    }
+
+    #[test]
+    fn open_tab_names_what_it_does_not_know() {
+        for bad in [
+            json!({ "dialog": "settings" }),
+            json!({ "dialog": "first-run", "step": "welcome" }),
+            json!({ "dialog": "first-run", "goal": "podcast" }),
+        ] {
+            assert!(OpenTab::from_params(&params(bad)).is_err());
+        }
+    }
 }
