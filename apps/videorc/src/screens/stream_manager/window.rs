@@ -77,9 +77,9 @@ pub fn install(
     runtime: tokio::runtime::Handle,
 ) {
     cx.bind_keys([
-        KeyBinding::new("secondary-j", ShowSidekick, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-f", SearchChat, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-l", WriteInChat, Some(KEY_CONTEXT)),
+        KeyBinding::new(secondary!("j"), ShowSidekick, Some(KEY_CONTEXT)),
+        KeyBinding::new(secondary!("f"), SearchChat, Some(KEY_CONTEXT)),
+        KeyBinding::new(secondary!("l"), WriteInChat, Some(KEY_CONTEXT)),
     ]);
     cohost::bind_keys(cx);
     let reopens = frame.reopens();
@@ -242,19 +242,25 @@ impl StreamManager {
         let notices = cx.new(|cx| {
             crate::screens::notifications::Centre::new(hub, "stream-manager", window, cx)
         });
+        let toaster = notices.read(cx).toasts();
         let live = matches!(dashboard.borrow().session, SessionState::Live);
         let chat = cx.new(|cx| {
             ChatPane::new(
                 studio.clone(),
                 runtime.clone(),
                 studio.live_chat(),
+                studio.moderation_operations(),
+                toaster,
                 live,
                 window,
                 cx,
             )
         });
         let activity = cx.new(|cx| ActivityPane::new(studio.live_chat(), dashboard.clone(), cx));
-        let sidekick = cx.new(|cx| SidekickPane::new(studio.clone(), runtime.clone(), window, cx));
+        let user_data_dir = frame.user_data_dir();
+        let sidekick = cx.new(|cx| {
+            SidekickPane::new(studio.clone(), runtime.clone(), user_data_dir, window, cx)
+        });
         let sidekick_events = cx.subscribe_in(
             &sidekick,
             window,
@@ -421,6 +427,10 @@ impl StreamManager {
             SidekickEvent::JumpTo(id) => {
                 self.panes.pick(Pane::Chat);
                 self.chat.update(cx, |chat, cx| chat.jump_to(id, cx));
+            }
+            SidekickEvent::RemoveFromChat(id) => {
+                self.chat
+                    .update(cx, |chat, cx| chat.remove_from_chat(id, window, cx));
             }
         }
         cx.notify();
@@ -849,7 +859,8 @@ impl Render for StreamManager {
                 .child({
                     let this = cx.entity().downgrade();
                     let layout = self.stats_layout.clone();
-                    stats_bar(t, &self.stats, &layout, width, move |next, app| {
+                    let hidden = self.screen_hidden;
+                    stats_bar(t, &self.stats, &layout, width, hidden, move |next, app| {
                         let _ = this.update(app, |sm, cx| sm.apply_stats_layout(next, cx));
                     })
                 })

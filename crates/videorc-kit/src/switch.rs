@@ -15,6 +15,7 @@ use crate::{
 };
 
 type ChangeHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+type TooltipBuilder = Rc<dyn Fn(&mut Window, &mut App) -> gpui::AnyView>;
 
 #[derive(IntoElement)]
 pub struct Switch {
@@ -24,6 +25,7 @@ pub struct Switch {
     small: bool,
     ground: Option<Color>,
     accessibility_label: Option<SharedString>,
+    tooltip: Option<TooltipBuilder>,
     on_change: Option<ChangeHandler>,
     appearance: Option<Appearance>,
 }
@@ -37,6 +39,7 @@ impl Switch {
             small: false,
             ground: None,
             accessibility_label: None,
+            tooltip: None,
             on_change: None,
             appearance: None,
         }
@@ -72,6 +75,37 @@ impl Switch {
     }
 
     /// Called with the next value when the switch is toggled.
+    /// A tooltip in the float glass's tooltip tier.
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(Rc::new(crate::tooltip::tooltip(text)));
+        self
+    }
+
+    /// A tooltip with the key chip `action` is bound to in the live keymap
+    /// (`ShortcutTooltip`: System audio's key lives here, not on its row).
+    pub fn tooltip_with_action(
+        mut self,
+        text: impl Into<SharedString>,
+        action: &dyn gpui::Action,
+    ) -> Self {
+        self.tooltip = Some(Rc::new(crate::tooltip::tooltip_with_action(text, action)));
+        self
+    }
+
+    /// A tooltip with an Electron accelerator's chips ("CmdOrCtrl+Shift+A"),
+    /// for a key the app registers outside the keymap.
+    pub fn tooltip_with_accelerator(
+        mut self,
+        text: impl Into<SharedString>,
+        accelerator: impl Into<SharedString>,
+    ) -> Self {
+        self.tooltip = Some(Rc::new(crate::tooltip::tooltip_with_accelerator(
+            text,
+            accelerator,
+        )));
+        self
+    }
+
     pub fn on_change(mut self, handler: impl Fn(bool, &mut Window, &mut App) + 'static) -> Self {
         self.on_change = Some(Rc::new(handler));
         self
@@ -135,6 +169,9 @@ impl RenderOnce for Switch {
             .rounded_full();
         if let Some(label) = self.accessibility_label {
             switch = switch.accessibility_label(label);
+        }
+        if let Some(tooltip) = self.tooltip {
+            switch = switch.tooltip(move |window, cx| tooltip(window, cx));
         }
         if let Some(on_change) = self.on_change {
             switch = switch.on_change(move |next, _, window, cx| on_change(next, window, cx));

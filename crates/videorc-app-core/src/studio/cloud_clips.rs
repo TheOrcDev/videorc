@@ -258,6 +258,46 @@ impl<B: StudioBackend> Studio<B> {
             .map(drop)
     }
 
+    /// Show markers' Save clip reads the show's Clips status alone: its
+    /// generation goes with the save. A failed read leaves it unknown.
+    pub async fn cloud_clips_status(&self, show_id: &str) -> Option<CloudClipsStatus> {
+        let status = self
+            .backend
+            .clips_request("cloud.clips.status", json!({ "showId": show_id }))
+            .await
+            .ok()?;
+        serde_json::from_value(status).ok()
+    }
+
+    /// Show markers (P1363): `cloud.markers.list` for one show.
+    pub async fn cloud_markers_list(
+        &self,
+        show_id: &str,
+    ) -> Answer<Vec<crate::library::cloud_markers::CloudMarker>> {
+        use crate::library::cloud_markers::{LIST_METHOD, LOAD_FAILED, MarkersPage};
+        let page = self
+            .backend
+            .clips_request(LIST_METHOD, json!({ "showId": show_id }))
+            .await
+            .map_err(|_| LOAD_FAILED.to_string())?;
+        serde_json::from_value::<MarkersPage>(page)
+            .map(|page| page.markers)
+            .map_err(|_| LOAD_FAILED.to_string())
+    }
+
+    /// Show markers' Remove: `cloud.marker.delete`.
+    pub async fn cloud_marker_delete(&self, show_id: &str, marker_id: &str) -> Answer<()> {
+        use crate::library::cloud_markers::{DELETE_METHOD, REMOVE_FAILED};
+        self.backend
+            .clips_request(
+                DELETE_METHOD,
+                json!({ "showId": show_id, "markerId": marker_id }),
+            )
+            .await
+            .map(drop)
+            .map_err(|_| REMOVE_FAILED.to_string())
+    }
+
     pub async fn cloud_clips_cancel(&self, job_id: &str) -> Answer<()> {
         self.cloud_clips_call("cloud.clips.cancel", json!({ "id": job_id }))
             .await

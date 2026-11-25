@@ -54,6 +54,10 @@ pub const TICK: Duration = Duration::from_millis(750);
 /// down (`suspend-native-preview-surface`).
 pub const SUSPENDED_REASON: &str = "The preview surface is suspended (smoke harness).";
 
+/// The status's reason while a closed Preview holds the surface down
+/// ([`PreviewElement::park`]).
+pub const PARKED_REASON: &str = "The Preview is closed: no surface until it opens.";
+
 /// S2.3c: a route handover that has not settled by then settles anyway, with
 /// a warning (the new sink shows nothing, so the old one must not hold on).
 pub const HANDOVER_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -1101,6 +1105,17 @@ impl PreviewElement {
         }
     }
 
+    /// The Preview is closed (true) or open again (false). Closed, the
+    /// backend's surface goes down and nothing presents (Electron destroys
+    /// its native host on close); open, the surface is created again and the
+    /// first-frame contract starts from the top. The feed acts only on a
+    /// change, so the host may say it on every visibility pass.
+    pub fn park(&self, on: bool) {
+        if let Some(feed) = &self.feed {
+            feed.send(FeedCommand::Park(on));
+        }
+    }
+
     /// S3.1b: destroys and creates the backend's surface (the surface loss
     /// the smokes exercise); the feed, the presenter and the layer stay.
     pub fn recreate_surface(&self) {
@@ -1231,14 +1246,20 @@ async fn watchdog(
             publish(base(Phase::Disconnected, Some(reason)), &mut current);
             continue;
         }
-        if t.suspended {
-            // S3.1b: the smokes' suspend holds the surface down on purpose:
-            // nothing to heal, and the resume starts the contract again.
+        if t.suspended || t.parked {
+            // S3.1b: the smokes' suspend (or a closed Preview's park) holds
+            // the surface down on purpose: nothing to heal, and the resume
+            // starts the contract again.
             was_connected = false;
             last_frames_rendered = None;
             last_presented = None;
+            let reason = if t.suspended {
+                SUSPENDED_REASON
+            } else {
+                PARKED_REASON
+            };
             publish(
-                base(Phase::Starting, Some(SUSPENDED_REASON.to_string())),
+                base(Phase::Starting, Some(reason.to_string())),
                 &mut current,
             );
             continue;

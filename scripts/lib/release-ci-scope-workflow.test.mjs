@@ -162,7 +162,11 @@ describe('release CI path-filter wiring', () => {
       aggregator,
       /"\$RUST_RESULT" != success \] && ! \{ \[ "\$RUST_WANTED" = false \] && \[ "\$RUST_RESULT" = skipped \]; \}/
     )
-    assert.match(aggregator, /"\$JS_RESULT" != success \] \|\| \[ "\$VITEST_RESULT" != success/)
+    assert.match(aggregator, /JS_WANTED: \$\{\{ inputs\.js \}\}/)
+    assert.match(
+      aggregator,
+      /"\$JS_RESULT" != "\$expected" \] \|\| \[ "\$VITEST_RESULT" != "\$expected"/
+    )
     // S15: only an explicit rust: false skips the Rust job; releases keep it.
     assert.match(gates, /rust:\n\s+# Plan 242 S15[\s\S]*?type: boolean\n\s+default: true/)
     assert.match(rust, /if: \$\{\{ inputs\.rust \}\}/)
@@ -182,7 +186,10 @@ describe('release CI path-filter wiring', () => {
     assert.doesNotMatch(rust, /foreach \(\$filter in @\(/)
     assert.match(rust, /cargo test -p videorc-backend -- @filters/)
     assert.match(rust, /Source ownership filter selects no runnable test/)
-    assert.match(rust, /\$runnable = @\(\$all \| Where-Object \{ \$_\.Contains\(\$filter\) \}\)\.Count - @\(\$ignored/)
+    assert.match(
+      rust,
+      /\$runnable = @\(\$all \| Where-Object \{ \$_\.Contains\(\$filter\) \}\)\.Count - @\(\$ignored/
+    )
     assert.match(rust, /\$passed -ne \$expected/)
     assert.match(rust, /foreach \(\$pass in 1\.\.25\)/)
     // S6: the CI-only profile macOS and Linux CI use, and one cache key that

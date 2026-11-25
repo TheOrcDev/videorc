@@ -11,6 +11,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     # PRs into spikes/gpui (plan 260 throwaway spikes) build nothing this
     # workflow checks, so they skip it.
     branches: [main]
@@ -26,7 +27,7 @@ jobs:
   rust:
     name: Rust (test + clippy + fmt)
     needs: scope
-    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.macos_rust == 'true' }}
+    if: ${{ needs.scope.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.scope.outputs.macos_rust == 'true' }}
     runs-on: macos-15
     # Every run on main since plan 172 was cancelled at the 75-minute limit
     # while rustc was still compiling the backend *test* binary at the
@@ -161,7 +162,7 @@ jobs:
     # tests instead of after them, and runs for app-only pull requests too.
     name: macOS app sentinel
     needs: scope
-    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.macos_sentinel == 'true' }}
+    if: ${{ needs.scope.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.scope.outputs.macos_sentinel == 'true' && needs.scope.outputs.electron_tests == 'true' }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -232,14 +233,14 @@ jobs:
   rust-skip:
     name: Rust (test + clippy + fmt)
     needs: scope
-    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.macos_rust != 'true' }}
+    if: ${{ needs.scope.result == 'success' && (!(github.event_name != 'pull_request' || github.event.pull_request.draft == false) || needs.scope.outputs.macos_rust != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Skip hosted macOS Rust gates for an allow-listed docs or version-only change
+      - name: Skip hosted macOS Rust gates for a draft or scoped change
         run: |
           echo "Skipped the hosted macOS Rust job for a ${{ needs.scope.outputs.kind }} change set."
-          echo "Ordinary code PRs still run the identical rust job on macos-15."
+          echo "Ready code PRs still run the Rust job on macos-15."
 
   # Plan 242 S8: the JS gates run as parallel jobs. `js` keeps the old check
   # name and only requires them plus the shard coverage proof. Release reuse
@@ -284,7 +285,7 @@ jobs:
   js-build:
     name: JS build and asset budget
     needs: scope
-    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.scope.outputs.electron_tests == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -315,7 +316,7 @@ jobs:
   js-node:
     name: Node logic tests
     needs: scope
-    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.scope.outputs.electron_tests == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -346,7 +347,7 @@ jobs:
   js-vitest:
     name: Desktop tests (${{ matrix.shard }}/4)
     needs: scope
-    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
+    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.js == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.scope.outputs.electron_tests == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     strategy:
@@ -405,11 +406,18 @@ jobs:
           BUILD: ${{ needs.js-build.result }}
           NODE_TESTS: ${{ needs.js-node.result }}
           VITEST: ${{ needs.js-vitest.result }}
+          ELECTRON_WANTED: ${{ needs.scope.outputs.electron_tests == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
         run: |
           echo "checks=$CHECKS build=$BUILD node=$NODE_TESTS vitest=$VITEST"
-          for result in "$CHECKS" "$BUILD" "$NODE_TESTS" "$VITEST"; do
-            if [ "$result" != success ]; then
-              echo "Every JS gate job must succeed."
+          if [ "$CHECKS" != success ]; then
+            echo "JS audit, format, lint and typecheck must succeed."
+            exit 1
+          fi
+          expected=skipped
+          if [ "$ELECTRON_WANTED" = true ]; then expected=success; fi
+          for result in "$BUILD" "$NODE_TESTS" "$VITEST"; do
+            if [ "$result" != "$expected" ]; then
+              echo "Electron gate result must be $expected for this change."
               exit 1
             fi
           done
@@ -423,6 +431,7 @@ jobs:
           node-version: '24.6.0'
 
       - name: Download shard reports
+        if: ${{ needs.js-vitest.result == 'success' }}
         uses: actions/download-artifact@v4
         with:
           pattern: vitest-shard-*
@@ -430,6 +439,7 @@ jobs:
           merge-multiple: true
 
       - name: Every desktop test file ran exactly once
+        if: ${{ needs.js-vitest.result == 'success' }}
         run: node scripts/vitest-shard-report.mjs check "$RUNNER_TEMP"/vitest-shards/*.json
 
       - name: Recorded test times from this run

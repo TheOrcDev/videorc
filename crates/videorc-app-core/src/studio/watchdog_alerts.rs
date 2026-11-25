@@ -24,6 +24,20 @@ const LIST: &str = "watchdog.alerts.list";
 const ACKNOWLEDGE: &str = "watchdog.alert.acknowledge";
 const SNOOZE: &str = "watchdog.alert.snooze";
 const RECONNECT_DESTINATION: &str = "cloud.show.reconnectDestination";
+/// Plan 223 still-there: the system's idle time, from the window side.
+pub const IDLE_REPORT: &str = "watchdog.idle.report";
+/// `mountWatchdogSurface`: one report as live starts, then every 30 s.
+pub const IDLE_REPORT_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether an idle report is due: as live starts, then every
+/// [`IDLE_REPORT_EVERY`] while it lasts; never while not live.
+pub fn idle_report_due(
+    live: bool,
+    last_report: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    live && last_report.is_none_or(|at| now.saturating_duration_since(at) >= IDLE_REPORT_EVERY)
+}
 
 /// How long a snooze lasts (D3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +76,15 @@ impl<B: StudioBackend> Studio<B> {
 
     pub fn watchdog_now(&self) -> WatchdogState {
         self.watchdog_tx.borrow().clone()
+    }
+
+    /// `reportSystemIdle`: the system's idle time for still-there, while
+    /// live. Telemetry only: a failure is never a toast.
+    pub async fn report_system_idle(&self, idle_seconds: u64) {
+        let _ = self
+            .backend
+            .livestream_request(IDLE_REPORT, json!({ "idleSeconds": idle_seconds }))
+            .await;
     }
 
     fn commit_watchdog(&self, view: WatchdogAlertsView) {
@@ -148,5 +171,24 @@ impl<B: StudioBackend> Studio<B> {
         {
             self.toast_watchdog_error(&error, "reconnect", "");
         }
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn idle_reports_go_as_live_starts_then_every_thirty_seconds() {
+        let start = std::time::Instant::now();
+        assert!(!idle_report_due(false, None, start));
+        assert!(idle_report_due(true, None, start));
+        let soon = start + std::time::Duration::from_secs(29);
+        assert!(!idle_report_due(true, Some(start), soon));
+        assert!(idle_report_due(
+            true,
+            Some(start),
+            start + IDLE_REPORT_EVERY
+        ));
     }
 }

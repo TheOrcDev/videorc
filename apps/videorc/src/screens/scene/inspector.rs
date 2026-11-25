@@ -3,9 +3,7 @@
 //! view is the core's `inspector_view`; the camera's sections are in
 //! `camera.rs`, the overlay item's and the banners' in `banners.rs`.
 
-use gpui::{
-    AnyElement, ClickEvent, Context, Transformation, Window, div, percentage, prelude::*, px,
-};
+use gpui::{AnyElement, ClickEvent, Context, Window, div, prelude::*, px};
 use videorc_app_core::desktop::accelerator::accelerator_display_keys;
 use videorc_app_core::editor::inspector::{
     CROP_FIELDS, InspectorKind, InspectorView, TRANSFORM_FIELDS, TransformFieldsView,
@@ -35,15 +33,18 @@ pub(super) fn meta_line(line: impl IntoElement, t: &Theme) -> gpui::Div {
         .child(line)
 }
 
-/// The nudge arrows' turn from CaretRight (right, down, left, up).
-// TODO(kit): ArrowUp, ArrowLeft, ArrowDown and ArrowRight; the d-pad
-// turns the caret until they land.
-fn caret_turn(dx: i8, dy: i8) -> f32 {
+/// The inspector titles' icon (`AdjustIcon`, 16 px, muted).
+pub(super) fn adjust_icon(t: &Theme) -> gpui::Svg {
+    icon(IconName::SlidersHorizontal, 16., hsla(t.muted_foreground))
+}
+
+/// The nudge arrow for a step (`ArrowUpIcon` and the rest).
+fn nudge_icon(dx: i8, dy: i8) -> IconName {
     match (dx, dy) {
-        (0, 1) => 0.25,
-        (-1, 0) => 0.5,
-        (0, -1) => 0.75,
-        _ => 0.0,
+        (0, -1) => IconName::ArrowUp,
+        (0, 1) => IconName::ArrowDown,
+        (-1, 0) => IconName::ArrowLeft,
+        _ => IconName::ArrowRight,
     }
 }
 
@@ -59,10 +60,10 @@ impl ScenePage {
         let mut column = div().id("scene-inspector").flex().flex_col().min_w_0();
         match view.kind {
             // P543: nothing selected (an empty scene).
-            // TODO(kit): AdjustIcon (SlidersHorizontal) on the title.
             InspectorKind::Empty => {
                 column = column.child(
                     PanelSection::new("scene-inspector-empty")
+                        .icon(adjust_icon(t))
                         .title(view.title.clone())
                         .description(view.description.clone().unwrap_or_default()),
                 );
@@ -95,21 +96,23 @@ impl ScenePage {
         let (on, enabled, reason) = view.visibility?;
         let id = view.source_id.clone()?;
         let page = cx.entity().downgrade();
-        let row = SettingsRow::new("scene-source-visible", copy::VISIBLE_IN_SCENE).child(
-            Switch::new("scene-source-visible-switch")
-                .accessibility_label(copy::VISIBLE_IN_SCENE)
-                .checked(on)
-                .disabled(!enabled)
-                .on_change(move |visible, _, cx| {
-                    let id = id.clone();
-                    let _ = page.update(cx, |page, _| {
-                        let studio = page.studio.clone();
-                        page.run(async move {
-                            studio.set_source_visible(&id, visible).await;
+        let row = SettingsRow::new("scene-source-visible", copy::VISIBLE_IN_SCENE)
+            .flush(true)
+            .child(
+                Switch::new("scene-source-visible-switch")
+                    .accessibility_label(copy::VISIBLE_IN_SCENE)
+                    .checked(on)
+                    .disabled(!enabled)
+                    .on_change(move |visible, _, cx| {
+                        let id = id.clone();
+                        let _ = page.update(cx, |page, _| {
+                            let studio = page.studio.clone();
+                            page.run(async move {
+                                studio.set_source_visible(&id, visible).await;
+                            });
                         });
-                    });
-                }),
-        );
+                    }),
+            );
         Some(match reason {
             Some(reason) => div()
                 .id("scene-source-visible-reason")
@@ -148,14 +151,15 @@ impl ScenePage {
 
     /// The source's name section: Visible in scene and Screen size (P545
     /// compact for a full-canvas source in a preset).
-    // TODO(kit): AdjustIcon (SlidersHorizontal) on the title.
     fn source_section(
         &self,
         view: &InspectorView,
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut section = PanelSection::new("scene-source-section").title(view.title.clone());
+        let mut section = PanelSection::new("scene-source-section")
+            .icon(adjust_icon(t))
+            .title(view.title.clone());
         if let Some(description) = &view.description {
             section = section.description(description.clone());
         }
@@ -354,11 +358,7 @@ impl ScenePage {
                 .variant(ButtonVariant::Outline)
                 .accessibility_label(name)
                 .disabled(!enabled)
-                .child(
-                    icon(IconName::CaretRight, 14., hsla(ink)).with_transformation(
-                        Transformation::rotate(percentage(caret_turn(dx, dy))),
-                    ),
-                )
+                .child(icon(nudge_icon(dx, dy), 16., hsla(ink)))
                 .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                     this.nudge(dx, dy, event.modifiers().shift, cx)
                 }))

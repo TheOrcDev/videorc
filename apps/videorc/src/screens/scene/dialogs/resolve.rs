@@ -11,7 +11,7 @@ use videorc_app_core::scenes::model::{SavedScene, normalize_scene_visual, scene_
 use videorc_app_core::studio::scene_switch::ApplyOptions;
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogSize};
-use videorc_kit::select::Select;
+use videorc_kit::select::{Select, SelectOption};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 
@@ -26,6 +26,8 @@ pub(super) mod copy {
     pub const SCREEN: &str = "Screen / window";
     pub const SCREEN_NONE: &str = "None";
     pub const CHOOSE_SCREEN: &str = "Choose a screen or window";
+    pub const SCREENS_GROUP: &str = "Screens";
+    pub const WINDOWS_GROUP: &str = "Windows";
     pub const WITHOUT_BACKGROUND: &str = "Apply without background";
     pub const BACKGROUND_OMITTED: &str = "Background omitted";
     pub const CANCEL: &str = "Cancel";
@@ -238,10 +240,13 @@ impl SceneDialogs {
         }
 
         let screen_page = cx.entity().downgrade();
+        // P482: searchable, the screens then the windows under their kind
+        // (`DevicePicker groupByKind searchable`).
         let mut screen = Select::new("resolve-screen")
             .accessibility_label(copy::SCREEN)
             .placeholder(copy::CHOOSE_SCREEN)
             .width(280.)
+            .searchable(true)
             .value(Some(
                 text_of("windowId")
                     .or_else(|| text_of("screenId"))
@@ -251,11 +256,15 @@ impl SceneDialogs {
             .on_change(move |value, _, cx| {
                 let _ = screen_page.update(cx, |page, cx| page.pick_screen(value.as_ref(), cx));
             });
-        for device in devices
-            .iter()
-            .filter(|device| matches!(device.kind, DeviceKind::Screen | DeviceKind::Window))
-        {
-            screen = screen.option(device.id.clone(), device.name.clone());
+        for (kind, group) in [
+            (DeviceKind::Screen, copy::SCREENS_GROUP),
+            (DeviceKind::Window, copy::WINDOWS_GROUP),
+        ] {
+            for device in devices.iter().filter(|device| device.kind == kind) {
+                screen = screen.option_item(
+                    SelectOption::new(device.id.clone(), device.name.clone()).group(group),
+                );
+            }
         }
 
         let field = |label: &'static str, control: AnyElement| {

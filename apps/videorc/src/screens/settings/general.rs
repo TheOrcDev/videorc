@@ -1,4 +1,5 @@
 use super::*;
+use gpui::SharedString;
 use gpui::{AnyElement, Window, WindowAppearance};
 use videorc_app_core::{
     nav::{PageId, ThemeChoice},
@@ -6,8 +7,12 @@ use videorc_app_core::{
 };
 use videorc_kit::{
     button::{Button, ButtonVariant},
-    list_row::{GroupedList, ListRow},
+    icon::{IconName, icon},
+    list_row::GroupedList,
+    navigable_row::NavigableRow,
     panel_section::PanelSection,
+    select::Select,
+    settings_row::SettingsRow,
     switch::Switch,
 };
 
@@ -104,54 +109,40 @@ impl SettingsScreen {
         } else {
             theme
         };
+        // Settings rows are the kit's twins of `field.tsx`'s SettingsRow and
+        // `navigable-row.tsx` (label and description on the left, the control
+        // on the right), in one grouped list per section.
+        let scene_row = NavigableRow::new(
+            "scene-link",
+            c::ANIMATE_SCENE_CHANGES,
+            PageId::Layouts.label(),
+        );
+        let scene_row = if model.scene_ported {
+            scene_row.on_navigate(cx.listener(|_, _, _, cx| cx.emit(Navigate(PageId::Layouts))))
+        } else {
+            scene_row
+        };
         let appearance = PanelSection::new(c::APPEARANCE)
             .title(c::APPEARANCE)
             .description(c::APPEARANCE_DESCRIPTION)
             .child(
                 GroupedList::new()
                     .item(
-                        div()
-                            .child(ListRow::new("theme-row", c::THEME).child(theme))
-                            .child(
-                                div()
-                                    .px(px(12.))
-                                    .pb(px(8.))
-                                    .type_scale(text::META)
-                                    .text_color(hsla(t.muted_foreground))
-                                    .child(model.theme_description),
-                            ),
+                        SettingsRow::new("theme-row", c::THEME)
+                            .description(model.theme_description)
+                            .child(theme),
                     )
                     .item(
-                        div()
-                            .child(ListRow::new("retro-row", c::RETRO_LCD).child(
-                                self.studio_switch(
-                                    "retroLcdStudio",
-                                    c::RETRO_LCD,
-                                    model.retro_lcd,
-                                    cx,
-                                ),
-                            ))
-                            .child(
-                                div()
-                                    .px(px(12.))
-                                    .pb(px(8.))
-                                    .type_scale(text::META)
-                                    .text_color(hsla(t.muted_foreground))
-                                    .child(c::RETRO_LCD_DESCRIPTION),
-                            ),
+                        SettingsRow::new("retro-row", c::RETRO_LCD)
+                            .description(c::RETRO_LCD_DESCRIPTION)
+                            .child(self.studio_switch(
+                                "retroLcdStudio",
+                                c::RETRO_LCD,
+                                model.retro_lcd,
+                                cx,
+                            )),
                     )
-                    .item(
-                        ListRow::new("scene-link", c::ANIMATE_SCENE_CHANGES).child(
-                            Button::new("open-scene")
-                                .label(PageId::Layouts.label())
-                                .disabled(!model.scene_ported)
-                                .tooltip(view::NOT_IN_THIS_BUILD)
-                                .variant(ButtonVariant::Outline)
-                                .on_click(
-                                    cx.listener(|_, _, _, cx| cx.emit(Navigate(PageId::Layouts))),
-                                ),
-                        ),
-                    ),
+                    .row(scene_row),
             );
         let entity = cx.entity();
         let emotes = Switch::new("seven-tv")
@@ -168,25 +159,36 @@ impl SettingsScreen {
                     )
                 });
             });
+        // `seventv-emotes-field.tsx`: the 7TV status is the description's
+        // second line.
+        let seven_tv_description = match &model.seven_tv_line {
+            Some(line) => format!("{}\n{}", c::SEVEN_TV_DESCRIPTION, line),
+            None => c::SEVEN_TV_DESCRIPTION.to_string(),
+        };
+        // GIFs in Twitch chat is a Select (`w-32`), as Electron's.
         let entity = cx.entity();
-        let mut gifs = Tabs::new("twitch-gifs").selected(model.gif_index);
-        for (_, label) in view::GIF_MODES {
-            gifs = if self.disabled() || !model.chat_loaded {
-                gifs.disabled_tab(label)
-            } else {
-                gifs.tab(label)
-            };
+        let mut gifs = Select::new("twitch-gifs")
+            .accessibility_label(c::TWITCH_GIFS)
+            .disabled(self.disabled() || !model.chat_loaded)
+            .value(
+                view::GIF_MODES
+                    .get(model.gif_index)
+                    .map(|(value, _)| SharedString::from(*value)),
+            );
+        for (value, label) in view::GIF_MODES {
+            gifs = gifs.option(value, label);
         }
-        let gifs = gifs.on_select(move |index, _, cx| {
+        let gifs = gifs.on_change(move |value, _, cx| {
             entity.update(cx, |this, cx| {
                 this.request(
                     "liveChat.emotes.set",
-                    json!({"twitchGifs":view::GIF_MODES[index].0}),
+                    json!({"twitchGifs": value.to_string()}),
                     c::CHAT_SAVE_FAILED,
                     cx,
                 )
             });
         });
+        // Electron's order: the section's own rows, then the emote fields.
         let chat = PanelSection::new(c::CHAT)
             .title(c::CHAT)
             .description(c::CHAT_DESCRIPTION)
@@ -198,75 +200,34 @@ impl SettingsScreen {
             .child(
                 GroupedList::new()
                     .item(
-                        div()
-                            .child(ListRow::new("emotes-row", c::SEVEN_TV).child(emotes))
-                            .child(
-                                div()
-                                    .px(px(12.))
-                                    .pb(px(8.))
-                                    .type_scale(text::META)
-                                    .text_color(hsla(t.muted_foreground))
-                                    .child(c::SEVEN_TV_DESCRIPTION),
-                            ),
-                    )
-                    .map(|group| {
-                        (model
-                            .seven_tv_line
-                            .map(|line| ListRow::new("emote-status", line)))
-                        .into_iter()
-                        .fold(group, |group, row| group.item(row))
-                    })
-                    .item(
-                        div()
-                            .child(ListRow::new("gif-row", c::TWITCH_GIFS).child(gifs))
-                            .child(
-                                div()
-                                    .px(px(12.))
-                                    .pb(px(8.))
-                                    .type_scale(text::META)
-                                    .text_color(hsla(t.muted_foreground))
-                                    .child(c::TWITCH_GIFS_DESCRIPTION),
-                            ),
+                        SettingsRow::new("studio-chat-row", c::CHAT_IN_STUDIO)
+                            .description(c::CHAT_IN_STUDIO_DESCRIPTION)
+                            .child(self.studio_switch(
+                                "studioChat",
+                                c::CHAT_IN_STUDIO,
+                                model.studio_chat,
+                                cx,
+                            )),
                     )
                     .item(
-                        div()
-                            .child(ListRow::new("studio-chat-row", c::CHAT_IN_STUDIO).child(
-                                self.studio_switch(
-                                    "studioChat",
-                                    c::CHAT_IN_STUDIO,
-                                    model.studio_chat,
-                                    cx,
-                                ),
-                            ))
-                            .child(
-                                div()
-                                    .px(px(12.))
-                                    .pb(px(8.))
-                                    .type_scale(text::META)
-                                    .text_color(hsla(t.muted_foreground))
-                                    .child(c::CHAT_IN_STUDIO_DESCRIPTION),
-                            ),
+                        SettingsRow::new("stream-manager-row", c::OPEN_STREAM_MANAGER)
+                            .description(c::OPEN_STREAM_MANAGER_DESCRIPTION)
+                            .child(self.studio_switch(
+                                "openStreamManagerOnLive",
+                                c::OPEN_STREAM_MANAGER,
+                                model.open_stream_manager_on_live,
+                                cx,
+                            )),
                     )
                     .item(
-                        div()
-                            .child(
-                                ListRow::new("stream-manager-row", c::OPEN_STREAM_MANAGER).child(
-                                    self.studio_switch(
-                                        "openStreamManagerOnLive",
-                                        c::OPEN_STREAM_MANAGER,
-                                        model.open_stream_manager_on_live,
-                                        cx,
-                                    ),
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .px(px(12.))
-                                    .pb(px(8.))
-                                    .type_scale(text::META)
-                                    .text_color(hsla(t.muted_foreground))
-                                    .child(c::OPEN_STREAM_MANAGER_DESCRIPTION),
-                            ),
+                        SettingsRow::new("emotes-row", c::SEVEN_TV)
+                            .description(seven_tv_description)
+                            .child(emotes),
+                    )
+                    .item(
+                        SettingsRow::new("gif-row", c::TWITCH_GIFS)
+                            .description(c::TWITCH_GIFS_DESCRIPTION)
+                            .child(div().flex_none().w(px(128.)).child(gifs)),
                     ),
             );
         let entity = cx.entity();
@@ -284,6 +245,13 @@ impl SettingsScreen {
                     )
                 });
             });
+        // `usage-stats-field.tsx`: the environment's refusal is a line of the
+        // row's description, not an alert.
+        let usage_description = if model.usage_env_disabled {
+            format!("{}\n{}", c::USAGE_STATS_DESCRIPTION, c::USAGE_STATS_ENV)
+        } else {
+            c::USAGE_STATS_DESCRIPTION.to_string()
+        };
         let privacy = PanelSection::new(c::PRIVACY)
             .title(c::PRIVACY)
             .description(c::PRIVACY_DESCRIPTION)
@@ -294,103 +262,86 @@ impl SettingsScreen {
             )
             .child(
                 GroupedList::new().item(
-                    div()
-                        .child(ListRow::new("usage-row", c::USAGE_STATS).child(usage))
-                        .child(
-                            div()
-                                .px(px(12.))
-                                .pb(px(8.))
-                                .type_scale(text::META)
-                                .text_color(hsla(t.muted_foreground))
-                                .child(c::USAGE_STATS_DESCRIPTION),
-                        ),
+                    SettingsRow::new("usage-row", c::USAGE_STATS)
+                        .description(usage_description)
+                        .child(usage),
                 ),
-            )
-            .when(model.usage_env_disabled, |section| {
-                section.child(videorc_kit::alert::Alert::new("usage-env").title(c::USAGE_STATS_ENV))
-            });
+            );
         let setup = PanelSection::new(c::SETUP)
             .title(c::SETUP)
             .description(c::SETUP_DESCRIPTION)
+            .last(true)
             .child(
                 GroupedList::new().item(
-                    div()
+                    SettingsRow::new("setup-row", c::FIRST_RUN_SETUP)
+                        .description(model.setup_description)
                         .child(
-                            ListRow::new("setup-row", c::FIRST_RUN_SETUP).child(
-                                Button::new("replay-setup")
-                                    .label(c::RUN_SETUP_AGAIN)
-                                    .variant(ButtonVariant::Outline)
-                                    .disabled(self.disabled() || model.setup_held.is_some())
-                                    .tooltip(model.setup_held.unwrap_or(c::RUN_SETUP_AGAIN))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_setup(window, cx)
-                                    })),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .px(px(12.))
-                                .pb(px(8.))
-                                .type_scale(text::META)
-                                .text_color(hsla(t.muted_foreground))
-                                .child(model.setup_description),
+                            Button::new("replay-setup")
+                                .label(c::RUN_SETUP_AGAIN)
+                                .variant(ButtonVariant::Outline)
+                                .disabled(self.disabled() || model.setup_held.is_some())
+                                .tooltip(model.setup_held.unwrap_or(c::RUN_SETUP_AGAIN))
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.open_setup(window, cx)),
+                                ),
                         ),
                 ),
             );
+        // Leading DownloadIcon, then the words (a label would draw first).
         let import = PanelSection::new(c::IMPORT)
             .title(c::IMPORT)
             .description(c::IMPORT_DESCRIPTION)
             .child(
                 GroupedList::new().item(
-                    div()
+                    SettingsRow::new("obs-row", c::OBS_STUDIO)
+                        .description(c::OBS_DESCRIPTION)
                         .child(
-                            ListRow::new("obs-row", c::OBS_STUDIO).child(
-                                Button::new("import-obs")
-                                    .label(c::IMPORT_FROM_OBS)
-                                    .variant(ButtonVariant::Outline)
-                                    .disabled(self.disabled() || snapshot.session.phase.is_active())
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            this.open_obs(window, cx)
-                                        }),
-                                    ),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .px(px(12.))
-                                .pb(px(8.))
-                                .type_scale(text::META)
-                                .text_color(hsla(t.muted_foreground))
-                                .child(c::OBS_DESCRIPTION),
+                            Button::new("import-obs")
+                                .accessibility_label(c::IMPORT_FROM_OBS)
+                                .variant(ButtonVariant::Outline)
+                                .disabled(self.disabled() || snapshot.session.phase.is_active())
+                                .child(icon(IconName::DownloadSimple, 16., hsla(t.foreground)))
+                                .child(c::IMPORT_FROM_OBS)
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.open_obs(window, cx)),
+                                ),
                         ),
                 ),
             );
+        // `ElsewhereList`: navigable rows with the page's own mark (the
+        // sidebar's), the label in secondary text and the page in front.
         let mut elsewhere = GroupedList::new();
         for row in model.elsewhere {
             let page = PageId::parse(row.id);
             let account = row.id == "account";
-            let can_open_account = account && self.account_name().is_some();
-            elsewhere = elsewhere.item(
-                ListRow::new(row.id, row.label).child(
-                    Button::new(gpui::SharedString::from(format!("navigate-{}", row.id)))
-                        .label(row.value)
-                        .variant(ButtonVariant::Ghost)
-                        .disabled((page.is_none() && !can_open_account) || !row.enabled)
-                        .tooltip(view::NOT_IN_THIS_BUILD)
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            if can_open_account {
-                                cx.open_url("https://videorc.com/account");
-                            }
-                            if let Some(page) = page {
-                                cx.emit(Navigate(page));
-                            }
-                        })),
-                ),
-            );
+            let signed_in = account && self.account_name().is_some();
+            let mark = match page {
+                Some(page) => crate::app::shell::page_icon(page),
+                None => IconName::UserCircle,
+            };
+            let mut line = NavigableRow::new(row.id, row.label, row.value).icon(icon(
+                mark,
+                16.,
+                hsla(t.muted_foreground),
+            ));
+            // `onNavigate={signedIn ? openAccount : signIn}`: signed out, the
+            // account row signs in, like the account menu's Sign in.
+            if (page.is_some() || account) && row.enabled {
+                line = line.on_navigate(cx.listener(move |_, _, _, cx| {
+                    if signed_in {
+                        crate::app::accounts::open_web(cx, |web| web.account());
+                    } else if account {
+                        crate::app::accounts::sign_in(cx);
+                    }
+                    if let Some(page) = page {
+                        cx.emit(Navigate(page));
+                    }
+                }));
+            }
+            elsewhere = elsewhere.row(line);
         }
-        // Wrapping at the same two-column breakpoint keeps rows usable at
-        // narrow window sizes; the tab strip never joins the scrolling body.
+        // `CONFIG_GRID_PAIR`: two columns with a rule between them, wrapping
+        // at the same breakpoint so rows stay usable on a narrow window.
         div()
             .flex()
             .flex_wrap()
@@ -407,12 +358,15 @@ impl SettingsScreen {
                 div()
                     .flex_1()
                     .min_w(px(360.))
+                    .border_l_1()
+                    .border_color(hsla(t.border))
                     .child(import)
                     .child(privacy)
                     .child(
                         PanelSection::new(c::ELSEWHERE)
                             .title(c::ELSEWHERE)
                             .description(c::ELSEWHERE_DESCRIPTION)
+                            .last(true)
                             .child(elsewhere),
                     ),
             )

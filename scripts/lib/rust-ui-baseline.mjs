@@ -440,6 +440,13 @@ const AVATAR_TABS = [
   ['Greetings', 'avatar-greetings']
 ]
 
+/** Avatar → Profile's scrolled states and their `scrollTop` (CSS px); the
+ * GPUI gallery's `avatar-profile-2` / `-3` scroll by the same amounts. */
+const AVATAR_PROFILE_SCROLLS = [
+  ['scroll-2', 600],
+  ['scroll-3', 1200]
+]
+
 async function shootIdle({ ctx, only, sizes, failed, missing }) {
   const tryStep = async (screen, state, work) => {
     if (!wanted(only, screen)) return
@@ -497,6 +504,30 @@ async function shootIdle({ ctx, only, sizes, failed, missing }) {
         await sleep(800)
         await ctx.shoot(screen, 'default')
       })
+    }
+    // Avatar → Profile below the fold (the GPUI gallery's avatar-profile-2
+    // and -3): the page-tabs scroller at the same `scrollTop` the gallery
+    // scrolls the GPUI page to. 1280x800 only, the gallery's size.
+    if (ctx.size.width === 1280 && ctx.size.height === 800) {
+      for (const [state, top] of AVATAR_PROFILE_SCROLLS) {
+        await tryStep('avatar-profile', state, async () => {
+          await ctx.open('avatar')
+          await ctx.click('^Profile$', { selector: '[role=tab]', how: 'click', timeout: 30_000 })
+          await sleep(800)
+          await ctx.js(
+            `const scroller = await waitFor(() => document.querySelector('[data-slot=page-tabs-scroll]'), 'the page-tabs scroller');
+             scroller.scrollTop = ${top};
+             await sleep(600);
+             return scroller.scrollTop`
+          )
+          await ctx.shoot('avatar-profile', state)
+          await ctx.js(
+            `const scroller = document.querySelector('[data-slot=page-tabs-scroll]');
+             if (scroller) scroller.scrollTop = 0;
+             return true`
+          )
+        })
+      }
     }
     for (const [label, screen] of BUDDY_TABS) {
       await tryStep(screen, 'locked', async () => {

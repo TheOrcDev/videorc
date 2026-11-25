@@ -5,6 +5,8 @@
 //! Co-host pane's parts (P1256–P1280) live beside it: `cohost` (state and
 //! calls), `cohost_list` and `cohost_avatar` (what they draw).
 
+use std::path::PathBuf;
+
 use gpui::{AnyElement, Context, IntoElement, SharedString, Window, div, prelude::*, px};
 use serde_json::json;
 use videorc_app_core::BackendEvent;
@@ -51,12 +53,15 @@ pub struct SidekickPane {
     pub(super) avatar_name: Option<String>,
     /// The Co-host pane's own state (`cohost`).
     pub(super) cohost: Cohost,
+    /// Where the streamer's own avatar pictures live (`buddy-assets/`).
+    pub(super) user_data_dir: PathBuf,
 }
 
 impl SidekickPane {
     pub fn new(
         studio: SharedStudio,
         runtime: tokio::runtime::Handle,
+        user_data_dir: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -158,6 +163,7 @@ impl SidekickPane {
             talk_consent: DialogHandle::new(false),
             avatar_name: None,
             cohost,
+            user_data_dir,
         };
         pane.cohost_start(cx);
         pane
@@ -506,7 +512,7 @@ impl Render for SidekickPane {
                     Button::new("talk-consent-not-now")
                         .label(NOT_NOW)
                         .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::Sm)
+                        .size(ButtonSize::Default)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.answer_talk_consent(false, window, cx)
                         })),
@@ -514,7 +520,7 @@ impl Render for SidekickPane {
                 .footer(
                     Button::new("talk-consent-allow")
                         .label(ALLOW)
-                        .size(ButtonSize::Sm)
+                        .size(ButtonSize::Default)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.answer_talk_consent(true, window, cx)
                         })),

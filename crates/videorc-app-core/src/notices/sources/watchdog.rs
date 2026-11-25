@@ -43,8 +43,13 @@ pub struct WatchdogAlert {
 /// `watchdogSubjectKey`: the subject an alert is about, the entry it shares
 /// with other reports.
 pub fn watchdog_subject_key(alert: &WatchdogAlert) -> String {
-    let target = alert.target_id.as_deref();
-    match alert.check.as_str() {
+    subject_key(&alert.check, alert.target_id.as_deref())
+}
+
+/// [`watchdog_subject_key`] from the check and target alone (the system
+/// notification asks whether this entry's toast is showing).
+pub fn subject_key(check: &str, target: Option<&str>) -> String {
+    match check {
         "mic-muted" | "mic-silent" | "no-voice" => "microphone".into(),
         "destination-down" => match target {
             Some(id) if id != "all" => format!("stream-target:{id}"),

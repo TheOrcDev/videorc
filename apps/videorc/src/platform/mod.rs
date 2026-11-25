@@ -24,6 +24,7 @@ use videorc_app_core::desktop::permissions::{
     MediaAccessPermission, MediaAccessStatus, MediaPane, PermissionFuture,
 };
 
+pub mod idle;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]
@@ -60,6 +61,16 @@ pub trait Platform: Send + Sync {
     fn set_window_frame(&self, _window: &Window, _frame: ScreenFrame) -> OsResult<()> {
         Err(format!(
             "Placing a window isn't written for {} yet (plan 260 S2.6)",
+            std::env::consts::OS
+        ))
+    }
+
+    /// The smokes' `preview-window-os-close`: the window closes as a click
+    /// on its close button closes it, so the app's own should-close path
+    /// runs (never `remove_window`, which skips it).
+    fn perform_close(&self, _window: &Window) -> OsResult<()> {
+        Err(format!(
+            "Closing a window as its close button does isn't written for {} yet (plan 260 S2.6)",
             std::env::consts::OS
         ))
     }

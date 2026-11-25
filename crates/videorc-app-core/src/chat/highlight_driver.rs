@@ -9,10 +9,10 @@
 //! that state, pure; [`send`] is the request it asks for, run on the client's
 //! runtime.
 //!
-//! Not here yet: the Stream Manager's corner pick (`highlightAnchor`, only
-//! the fallback when the overlay layout has no rect), the remotes' and
+//! The Stream Manager's corner pick (`highlightAnchor`) is the set params'
+//! `anchor` (and the overlay snap when the layout has no rect). Remotes',
 //! Sidekick's highlight requests, the Activity auto-show and the milestone
-//! card. They join when their surfaces drive this state.
+//! card join when their surfaces drive this state.
 
 use serde_json::{Value, json};
 
@@ -89,13 +89,21 @@ pub fn highlight_canvas(
 }
 
 /// `comments.highlight.set`'s params: the backend draws the card from the
-/// message it holds, for this canvas, inside the streamer's rect.
-pub fn set_params(session_id: &str, message_id: &str, canvas: &HighlightCanvas) -> Value {
+/// message it holds, for this canvas, inside the streamer's rect. `anchor`
+/// is the Stream Manager corner pick (P195): the fallback when `rect` /
+/// `verticalRect` are missing (`CommentHighlightAnchor`, default bottom-left).
+pub fn set_params(
+    session_id: &str,
+    message_id: &str,
+    canvas: &HighlightCanvas,
+    anchor: &str,
+) -> Value {
     let mut params = json!({
         "sessionId": session_id,
         "messageId": message_id,
         "canvasWidth": canvas.width,
         "canvasHeight": canvas.height,
+        "anchor": anchor,
     });
     if let Some(rect) = &canvas.rect {
         params["rect"] = rect.clone();
@@ -156,6 +164,7 @@ impl ChatHighlight {
         message: &LiveChatMessage,
         session_id: Option<&str>,
         canvas: &HighlightCanvas,
+        anchor: &str,
     ) -> Result<HighlightClick, u64> {
         self.intent += 1;
         self.failure = None;
@@ -169,7 +178,7 @@ impl ChatHighlight {
             HighlightRequest::Clear
         } else {
             HighlightRequest::Set {
-                params: set_params(session_id, &message.id, canvas),
+                params: set_params(session_id, &message.id, canvas, anchor),
                 warm: highlight::card_image_urls(message),
             }
         };
@@ -267,10 +276,20 @@ async fn reconcile<B: StudioBackend>(backend: &B) -> Option<CommentHighlightStat
 }
 
 /// `cacheChatAvatar(url)`: this run's loopback URL for a chat image, or
-/// none for one the allowlist refuses.
+/// none for one the allowlist refuses. Avatars and emotes use `avatar`;
+/// Twitch GIF Keyboard files use `gif`.
 pub async fn cache_image<B: StudioBackend>(backend: &B, url: &str) -> Option<String> {
+    cache_image_as(backend, url, "avatar").await
+}
+
+/// As [`cache_image`], with an explicit `chatImages.cache` kind.
+pub async fn cache_image_as<B: StudioBackend>(
+    backend: &B,
+    url: &str,
+    kind: &str,
+) -> Option<String> {
     backend
-        .chat_request(IMAGE_CACHE_METHOD, json!({ "url": url, "kind": "avatar" }))
+        .chat_request(IMAGE_CACHE_METHOD, json!({ "url": url, "kind": kind }))
         .await
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
@@ -371,7 +390,7 @@ mod tests {
     fn a_click_shows_a_row_and_a_click_on_the_live_row_takes_it_off() {
         let mut highlight = ChatHighlight::default();
         let click = highlight
-            .click(&message("m1", "s"), Some("s"), &canvas())
+            .click(&message("m1", "s"), Some("s"), &canvas(), "bottom-left")
             .unwrap();
         assert_eq!(highlight.applying_id.as_deref(), Some("m1"));
         let HighlightRequest::Set { params, warm } = &click.request else {
@@ -384,6 +403,7 @@ mod tests {
                 "messageId": "m1",
                 "canvasWidth": 1920,
                 "canvasHeight": 1080,
+                "anchor": "bottom-left",
             })
         );
         assert_eq!(warm, &["https://yt3.ggpht.com/a.png".to_string()]);
@@ -392,7 +412,7 @@ mod tests {
         assert_eq!(highlight.state, live("m1"));
 
         let off = highlight
-            .click(&message("m1", "s"), Some("s"), &canvas())
+            .click(&message("m1", "s"), Some("s"), &canvas(), "bottom-left")
             .unwrap();
         assert_eq!(off.request, HighlightRequest::Clear);
     }
@@ -401,7 +421,7 @@ mod tests {
     fn a_message_from_another_livestream_fails_on_its_row() {
         let mut highlight = ChatHighlight::default();
         let mark = highlight
-            .click(&message("m1", "old"), Some("s"), &canvas())
+            .click(&message("m1", "old"), Some("s"), &canvas(), "bottom-left")
             .unwrap_err();
         assert_eq!(highlight.applying_id, None);
         assert_eq!(
@@ -416,7 +436,7 @@ mod tests {
         // Between livestreams nothing goes on stream.
         assert!(
             highlight
-                .click(&message("m1", "s"), None, &canvas())
+                .click(&message("m1", "s"), None, &canvas(), "bottom-left")
                 .is_err()
         );
     }
@@ -425,10 +445,10 @@ mod tests {
     fn a_newer_click_wins_and_a_failure_keeps_its_own_five_seconds() {
         let mut highlight = ChatHighlight::default();
         let first = highlight
-            .click(&message("m1", "s"), Some("s"), &canvas())
+            .click(&message("m1", "s"), Some("s"), &canvas(), "bottom-left")
             .unwrap();
         let second = highlight
-            .click(&message("m2", "s"), Some("s"), &canvas())
+            .click(&message("m2", "s"), Some("s"), &canvas(), "bottom-left")
             .unwrap();
         // The first answer is stale: the second row still applies.
         assert_eq!(highlight.settle(first.intent, "m1", Ok(live("m1"))), None);
@@ -440,7 +460,7 @@ mod tests {
         assert_eq!(highlight.failure.as_ref().unwrap().message_id, "m2");
         // A newer failure outlives the older one's timer.
         let third = highlight
-            .click(&message("m3", "s"), Some("s"), &canvas())
+            .click(&message("m3", "s"), Some("s"), &canvas(), "bottom-left")
             .unwrap();
         let newer = highlight
             .settle(third.intent, "m3", Err("Highlight failed.".into()))
@@ -453,7 +473,7 @@ mod tests {
     fn the_status_push_is_the_card_and_ends_the_click() {
         let mut highlight = ChatHighlight::default();
         highlight
-            .click(&message("m1", "s"), Some("s"), &canvas())
+            .click(&message("m1", "s"), Some("s"), &canvas(), "bottom-left")
             .unwrap();
         highlight.status(live("m1"));
         assert_eq!(highlight.applying_id, None);
@@ -480,9 +500,10 @@ mod tests {
         let portrait = json!({ "video": { "width": 1080, "height": 1920 } });
         let canvas = highlight_canvas(&portrait, false, Some(&layout));
         assert_eq!(canvas.rect.as_ref(), Some(&tall));
-        let params = set_params("s", "m1", &canvas);
+        let params = set_params("s", "m1", &canvas, "bottom-right");
         assert_eq!(params["rect"], tall);
         assert_eq!(params["verticalRect"], tall);
+        assert_eq!(params["anchor"], "bottom-right");
     }
 
     #[test]

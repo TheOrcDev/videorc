@@ -224,6 +224,12 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     // scene editor will flip; the smokes and the measurement flip it here.
     "preview-route-set",
     "preview-route-state",
+    // L1's Retry preview (`Preview::retry`, P117/P146): answered with the
+    // preview's state and whether it ran.
+    "preview-retry",
+    // Window → Preview / ⌘P (`TogglePreview`, `Preview::toggle_open`),
+    // dispatched as the menu does: no accessibility tree needed.
+    "preview-toggle-open",
     // S3.3b: the Scene page's canvas editor, what Electron's smokes read and
     // drive in the DOM (`data-videorc-stage-*`, trusted pointer input over
     // CDP): the stage's state, a chip, a drag with real pointer events
@@ -233,6 +239,11 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     "scene-stage-reveal",
     "scene-stage-select",
     "scene-stage-state",
+    // L6: the session player's layer (set, displayed, slot), as the live
+    // preview's geometry oracle reads it.
+    "session-player-geometry",
+    // L6: open a recording in the Library's player (its Markers item).
+    "session-player-open",
     // S2.3b: the Studio slot's rect, which Electron's probes read from the
     // DOM with `eval-js`.
     "studio-dock-slot",
@@ -283,6 +294,7 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     // what S0.1a's baseline did with `eval-js` and `lib/toast.ts`.
     "ui-appearance",
     "ui-click",
+    "ui-drag",
     "ui-find",
     "ui-focus",
     "ui-key",
@@ -297,6 +309,7 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
 pub const UI_DRIVER_COMMAND_NAMES: &[&str] = &[
     "ui-appearance",
     "ui-click",
+    "ui-drag",
     "ui-find",
     "ui-focus",
     "ui-key",
@@ -659,6 +672,10 @@ pub const MAX_UI_WAIT_MS: u64 = 120_000;
 pub const MAX_UI_TYPE_CHARS: usize = 10_000;
 /// The largest scroll step, in logical points.
 pub const MAX_UI_SCROLL: f64 = 100_000.0;
+/// Window-point range for absolute `ui-click` / `ui-drag` coordinates.
+pub const MAX_UI_POINT: f64 = 100_000.0;
+/// How many move samples `ui-drag` may take between press and release.
+pub const MAX_UI_DRAG_STEPS: u64 = 64;
 
 /// Which window a `ui-*` or capture command reads or drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -831,9 +848,24 @@ pub enum UiDriverRequest {
     },
     Click {
         window: UiWindow,
-        selector: super::ui_tree::UiSelector,
+        /// Element centre when set; otherwise `point` (window points).
+        selector: Option<super::ui_tree::UiSelector>,
+        /// Absolute click in window points (top-left origin). Exclusive with
+        /// `selector`.
+        point: Option<(f64, f64)>,
         timeout_ms: u64,
         via: UiClickVia,
+        modifiers: Vec<UiModifier>,
+    },
+    /// Pointer press at `from`, moves to `to`, release (`ui-drag`).
+    Drag {
+        window: UiWindow,
+        from: (f64, f64),
+        to: (f64, f64),
+        /// Intermediate move samples between press and release (1 = one hop).
+        steps: usize,
+        modifiers: Vec<UiModifier>,
+        timeout_ms: u64,
     },
     /// Pointer-click a row or field so it takes the focus (`ui-focus`).
     Focus {
@@ -878,6 +910,7 @@ impl UiDriverRequest {
         match self {
             Self::Find { timeout_ms, .. }
             | Self::Click { timeout_ms, .. }
+            | Self::Drag { timeout_ms, .. }
             | Self::Focus { timeout_ms, .. }
             | Self::Type { timeout_ms, .. }
             | Self::Key { timeout_ms, .. }
@@ -900,6 +933,49 @@ pub fn capture_page_file_name(params: &Map<String, Value>) -> String {
         _ => "page".to_string(),
     };
     format!("videorc-ui-{name}.png")
+}
+
+/// One absolute window point (`x`/`y` or `fromX`/`fromY` …), or `None` when
+/// neither key is set. Both keys must be present together.
+fn ui_point_pair(
+    params: &Map<String, Value>,
+    x_key: &str,
+    y_key: &str,
+) -> Result<Option<(f64, f64)>, String> {
+    let read = |key: &str| -> Result<Option<f64>, String> {
+        match params.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_f64()
+                .filter(|point| point.is_finite() && (-MAX_UI_POINT..=MAX_UI_POINT).contains(point))
+                .map(Some)
+                .ok_or_else(|| {
+                    format!("{key} is a window point from -{MAX_UI_POINT} to {MAX_UI_POINT}.")
+                }),
+        }
+    };
+    match (read(x_key)?, read(y_key)?) {
+        (None, None) => Ok(None),
+        (Some(x), Some(y)) => Ok(Some((x, y))),
+        (Some(_), None) => Err(format!("{x_key} needs {y_key}.")),
+        (None, Some(_)) => Err(format!("{y_key} needs {x_key}.")),
+    }
+}
+
+/// `modifiers` as for `ui-key` / `ui-click` / `ui-drag`.
+fn ui_modifiers(params: &Map<String, Value>) -> Result<Vec<UiModifier>, String> {
+    let mut modifiers = match params.get("modifiers") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(modifiers)) if modifiers.len() <= 4 => modifiers
+            .iter()
+            .map(|modifier| modifier.as_str().and_then(UiModifier::parse))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("modifiers are shift, control, alt and meta.")?,
+        Some(_) => return Err("modifiers is a list of at most four.".into()),
+    };
+    modifiers.sort();
+    modifiers.dedup();
+    Ok(modifiers)
 }
 
 /// The window a command names (`window`: `main`, the default, or `preview`).
@@ -999,18 +1075,72 @@ pub fn validate_ui_driver_request(
             })
         }
         "ui-click" => {
-            allow(&["timeoutMs", "via"], true)?;
+            allow(&["timeoutMs", "via", "x", "y", "modifiers"], true)?;
             let via = match params.get("via") {
                 None | Some(Value::Null) => UiClickVia::Pointer,
                 Some(Value::String(via)) if via == "pointer" => UiClickVia::Pointer,
                 Some(Value::String(via)) if via == "action" => UiClickVia::Action,
                 Some(_) => return Err("ui-click's via is \"pointer\" or \"action\".".into()),
             };
+            let selector = UiSelector::parse(params)?;
+            let point = ui_point_pair(params, "x", "y")?;
+            match (&selector, point) {
+                (Some(_), Some(_)) => {
+                    return Err("ui-click takes a selector or x/y, not both.".into());
+                }
+                (None, None) => {
+                    return Err(
+                        "ui-click needs a label, id, role or value, or x and y in window points."
+                            .into(),
+                    );
+                }
+                (None, Some(_)) if via == UiClickVia::Action => {
+                    return Err("ui-click at x/y is pointer-only (no via: \"action\").".into());
+                }
+                _ => {}
+            }
             Ok(UiDriverRequest::Click {
                 window,
-                selector: required(UiSelector::parse(params)?)?,
+                selector,
+                point,
                 timeout_ms: timeout()?,
                 via,
+                modifiers: ui_modifiers(params)?,
+            })
+        }
+        "ui-drag" => {
+            allow(
+                &[
+                    "timeoutMs",
+                    "fromX",
+                    "fromY",
+                    "toX",
+                    "toY",
+                    "steps",
+                    "modifiers",
+                ],
+                false,
+            )?;
+            let from = ui_point_pair(params, "fromX", "fromY")?
+                .ok_or("ui-drag needs fromX and fromY in window points.")?;
+            let to = ui_point_pair(params, "toX", "toY")?
+                .ok_or("ui-drag needs toX and toY in window points.")?;
+            let steps = match params.get("steps") {
+                None | Some(Value::Null) => 8usize,
+                Some(value) => value
+                    .as_u64()
+                    .filter(|steps| (1..=MAX_UI_DRAG_STEPS).contains(steps))
+                    .ok_or_else(|| {
+                        format!("ui-drag's steps is a whole number from 1 to {MAX_UI_DRAG_STEPS}.")
+                    })? as usize,
+            };
+            Ok(UiDriverRequest::Drag {
+                window,
+                from,
+                to,
+                steps,
+                modifiers: ui_modifiers(params)?,
+                timeout_ms: timeout()?,
             })
         }
         "ui-focus" => {
@@ -1671,10 +1801,49 @@ mod tests {
             ok("ui-click", json!({"label": "Record", "via": "action"})),
             UiDriverRequest::Click {
                 via: UiClickVia::Action,
+                selector: Some(_),
+                point: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            ok("ui-click", json!({"x": 120.5, "y": 80})),
+            UiDriverRequest::Click {
+                point: Some((120.5, 80.0)),
+                selector: None,
+                via: UiClickVia::Pointer,
                 ..
             }
         ));
         assert!(refused("ui-click", json!({"label": "Record", "via": "touch"})).contains("via"));
+        assert!(
+            refused("ui-click", json!({"label": "Record", "x": 1.0, "y": 2.0}))
+                .contains("selector or x/y")
+        );
+        assert!(
+            refused("ui-click", json!({"x": 1.0, "y": 2.0, "via": "action"}))
+                .contains("pointer-only")
+        );
+        assert!(matches!(
+            ok(
+                "ui-drag",
+                json!({"fromX": 10, "fromY": 20, "toX": 30, "toY": 40, "steps": 4})
+            ),
+            UiDriverRequest::Drag {
+                from: (10.0, 20.0),
+                to: (30.0, 40.0),
+                steps: 4,
+                ..
+            }
+        ));
+        assert!(refused("ui-drag", json!({"fromX": 1})).contains("fromY"));
+        assert!(
+            refused(
+                "ui-drag",
+                json!({"fromX": 1, "fromY": 2, "toX": 3, "toY": 4, "steps": 0})
+            )
+            .contains("steps")
+        );
 
         assert!(matches!(
             ok(

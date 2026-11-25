@@ -32,10 +32,9 @@ const SAY_MIN_W: f32 = 192.;
 
 impl SidekickPane {
     /// The avatar's identity (`BuddyIdentity`): its still picture for the
-    /// state on air, its name, and the bubble while one is up. The default
-    /// avatar's pictures ship in the app; a picture of the streamer's own is
-    /// a file under user data this window doesn't read yet, so that avatar
-    /// shows its name and bubble only.
+    /// state on air, its name, and the bubble while one is up. The picture
+    /// is `buddyStateImageUrl`'s: the streamer's own for the state, else
+    /// their own idle, else the default avatar's (shipped in the app).
     pub(super) fn cohost_identity(
         &self,
         window: &mut Window,
@@ -43,20 +42,24 @@ impl SidekickPane {
     ) -> Option<AnyElement> {
         let persona = self.settings.persona.as_ref()?;
         let t = theme::resolve(None, window, cx);
-        let own_pictures = persona
-            .images
-            .entries()
-            .iter()
-            .any(|(_, picture)| picture.is_some());
         let state = if self.cohost.buddy.state.is_empty() {
             "idle"
         } else {
             self.cohost.buddy.state.as_str()
         };
-        let picture: Option<ImageSource> = (!own_pictures)
-            .then(|| pictures::default_state(state))
-            .flatten()
-            .map(Into::into);
+        let images = &persona.images;
+        let own = match state {
+            "talk" => images.talk.as_deref(),
+            "laugh" => images.laugh.as_deref(),
+            "think" => images.think.as_deref(),
+            _ => None,
+        }
+        .or(images.idle.as_deref());
+        let picture: Option<ImageSource> =
+            match own.and_then(|own| pictures::managed_path(&self.user_data_dir, own)) {
+                Some(path) => Some(path.into()),
+                None => pictures::default_state(state).map(Into::into),
+            };
         let bubble = self
             .cohost
             .buddy
@@ -79,7 +82,7 @@ impl SidekickPane {
                 }))
                 .child(
                     div()
-                        .flex_shrink()
+                        .flex_shrink(1.)
                         .min_w(px(0.))
                         .truncate()
                         .type_scale(text::META)

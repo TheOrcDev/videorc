@@ -12,7 +12,7 @@ use videorc_app_core::desktop::global_shortcuts::{
 use videorc_app_core::editor::inspector::{
     HideScreenView, LayoutInput, LayoutSectionView, hide_screen_view, layout_section_view,
 };
-use videorc_app_core::scenes::list::saved_scene_blocked_reason;
+use videorc_app_core::scenes::list::{SceneGlyph, saved_scene_blocked_reason, scene_glyph};
 use videorc_app_core::scenes::model::{SavedScene, scene_audio, scene_source_problems};
 use videorc_app_core::scenes::section::{
     scene_card_words, scene_cards_camera_gaps, scene_picture_target, scene_slot_keys_line,
@@ -128,6 +128,8 @@ pub struct RowThumb {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneRow {
     pub thumb: RowThumb,
+    /// What it shows, for the icon after the picture (`SceneGlyphIcon`).
+    pub glyph: SceneGlyph,
     pub id: String,
     pub name: String,
     /// 0-based place in the library.
@@ -281,6 +283,7 @@ impl SceneModel {
                 };
                 SceneRow {
                     thumb,
+                    glyph: scene_glyph(&scene.visual, devices),
                     change_screen_reason: if on_stream {
                         snapshot.source_reasons[0].clone()
                     } else {

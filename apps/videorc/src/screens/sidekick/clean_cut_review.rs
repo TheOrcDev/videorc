@@ -622,6 +622,8 @@ impl SidekickScreen {
 
     /// The shell shows or hides the Sidekick page.
     pub(crate) fn set_page_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        self.page_shown = shown;
+        self.sync_community_preview_active(cx);
         if !shown {
             self.hide_clean_cut_review_player(cx);
         }
@@ -1943,6 +1945,9 @@ fn kind_chips(chips: &[KindChip], t: &Theme, cx: &mut Context<SidekickScreen>) -
         group = group.item(
             ToggleItem::new(chip.group.id.as_str(), chip.group.label)
                 .disabled(chip.state == ChipState::Empty)
+                // What a click does ("Cut all 3" / "Keep all 3"); an empty
+                // chip says why it can't (Electron's DisabledReason).
+                .tooltip(chip.tooltip())
                 .child(body),
         );
     }

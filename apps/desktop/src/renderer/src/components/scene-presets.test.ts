@@ -2,6 +2,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 import type { LayoutPreset } from '@/lib/backend'
 import { normalizeSceneVisual, type VisualSources } from '@/lib/scene-presets'
 import { defaultCaptureConfig } from '@/lib/capture'
@@ -872,15 +873,15 @@ describe('Follow the app in front, in the Scenes header (plan 231 D8)', () => {
     expect(container.querySelector('label[for="scene-follow-front-app"]')!.textContent).toBe(
       'Follow the app in front'
     )
-    expect(localStorage.getItem(FOLLOW_SETTINGS_STORAGE_KEY)).toBeNull()
+    expect(uiSettingsStorage().getItem(FOLLOW_SETTINGS_STORAGE_KEY)).toBeNull()
     await act(async () => control!.click())
     expect(followSwitch()!.getAttribute('aria-checked')).toBe('false')
     expect(getFollowSettings().followFrontApp).toBe(false)
-    expect(JSON.parse(localStorage.getItem(FOLLOW_SETTINGS_STORAGE_KEY)!)).toEqual({
+    expect(JSON.parse(uiSettingsStorage().getItem(FOLLOW_SETTINGS_STORAGE_KEY)!)).toEqual({
       followFrontApp: false
     })
     await act(async () => followSwitch()!.click())
-    expect(localStorage.getItem(FOLLOW_SETTINGS_STORAGE_KEY)).toBeNull()
+    expect(uiSettingsStorage().getItem(FOLLOW_SETTINGS_STORAGE_KEY)).toBeNull()
   })
 
   it.each(['win32', 'linux'])('is absent on %s, not disabled', async (platform) => {

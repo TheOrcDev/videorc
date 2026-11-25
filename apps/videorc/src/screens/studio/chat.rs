@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, ClipboardItem, Context, FocusHandle, FollowMode, FontStyle, FontWeight,
-    HighlightStyle, Image, ImageFormat, KeyDownEvent, ListAlignment, ListState, StrikethroughStyle,
-    StyledText, WeakEntity, Window, div, list, prelude::*, px,
+    HighlightStyle, KeyDownEvent, ListAlignment, ListState, StrikethroughStyle, StyledText,
+    WeakEntity, Window, div, list, prelude::*, px,
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -27,7 +27,7 @@ use videorc_app_core::chat::LiveChat;
 use videorc_app_core::chat::arrival::ArrivalChipKind;
 use videorc_app_core::chat::highlight::{FAILURE_SHOWN_FOR, StatusChip};
 use videorc_app_core::chat::highlight_driver::{self as driver, ChatHighlight};
-use videorc_app_core::chat::images::{self, ImageKind};
+use videorc_app_core::chat::images;
 use videorc_app_core::chat::model::CommentHighlightState;
 use videorc_app_core::chat::store::DeliveryCursor;
 use videorc_app_core::chat::view::{
@@ -49,6 +49,7 @@ use videorc_kit::{
 };
 
 use super::transport::AppStudio;
+use crate::screens::chat_media::{self, Picture};
 use crate::screens::notifications::{Delivery, Shared as Notices};
 
 /// `overlays.layout`: the streamer's placement of the card (plan 164).
@@ -85,15 +86,6 @@ const AVATAR_CACHE: usize = 512;
 /// After a scroll, the list takes up following again in its own layout:
 /// the section looks once more this much later.
 const SCROLL_SETTLE: Duration = Duration::from_millis(100);
-
-/// A row's picture: the cached avatar, or the monogram while it loads or
-/// when it can't.
-#[derive(Clone)]
-enum Picture {
-    Loading,
-    Ready(Arc<Image>),
-    Failed,
-}
 
 /// What the section follows from the snapshot (`studioChatShows`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,57 +407,62 @@ impl ChatSection {
         {
             self.active = None;
         }
-        let wanted: Vec<String> = rows
+        let mut wanted: Vec<(String, bool)> = rows
             .iter()
             .filter_map(|row| row.avatar_url.clone())
             .filter(|url| !self.avatars.contains_key(url))
+            .map(|url| (url, false))
             .collect();
+        for row in &rows {
+            for (url, as_gif) in chat_media::media_urls(&row.pieces, &row.gifs) {
+                if !self.avatars.contains_key(&url)
+                    && !wanted.iter().any(|(existing, _)| existing == &url)
+                {
+                    wanted.push((url, as_gif));
+                }
+            }
+        }
         if self.avatars.len() + wanted.len() > AVATAR_CACHE {
-            let keep: std::collections::HashSet<&str> = rows
+            let keep: std::collections::HashSet<String> = rows
                 .iter()
-                .filter_map(|row| row.avatar_url.as_deref())
+                .flat_map(|row| {
+                    row.avatar_url.iter().cloned().chain(
+                        chat_media::media_urls(&row.pieces, &row.gifs)
+                            .into_iter()
+                            .map(|(url, _)| url),
+                    )
+                })
                 .collect();
-            Rc::make_mut(&mut self.avatars).retain(|url, _| keep.contains(url.as_str()));
+            Rc::make_mut(&mut self.avatars).retain(|url, _| keep.contains(url));
         }
         self.notice = notice;
         self.body = body;
         self.rows = Rc::new(rows);
-        for url in wanted {
-            self.load_avatar(url, cx);
+        for (url, as_gif) in wanted {
+            self.load_picture(url, as_gif, cx);
         }
     }
 
-    /// `useCachedAvatar`: the backend caches the picture, the route serves
-    /// its bytes; the monogram stays when either refuses.
-    fn load_avatar(&mut self, url: String, cx: &mut Context<Self>) {
+    /// `useCachedAvatar` / emote / GIF: the backend caches the picture, the
+    /// route serves its bytes; the monogram or emote name stays when either
+    /// refuses.
+    fn load_picture(&mut self, url: String, as_gif: bool, cx: &mut Context<Self>) {
         if self.avatars.contains_key(&url) {
             return;
         }
         Rc::make_mut(&mut self.avatars).insert(url.clone(), Picture::Loading);
         let backend = self.studio.backend().clone();
         let remote = url.clone();
+        let kind = chat_media::cache_kind_for_url(&remote, as_gif);
         let job = self.runtime.spawn(async move {
-            let local = driver::cache_image(&*backend, &remote).await?;
+            let local = driver::cache_image_as(&*backend, &remote, kind).await?;
             let bytes = images::read_route(&local).await.ok()?;
-            let kind = images::image_kind(&bytes)?;
-            Some((kind, bytes))
+            Some(chat_media::picture_from_bytes(bytes))
         });
         cx.spawn(async move |this, cx| {
-            let picture = job.await.ok().flatten();
+            let picture = job.await.ok().flatten().unwrap_or(Picture::Failed);
             let _ = this.update(cx, |section, cx| {
-                let avatar = match picture {
-                    Some((kind, bytes)) => {
-                        let format = match kind {
-                            ImageKind::Png => ImageFormat::Png,
-                            ImageKind::Jpeg => ImageFormat::Jpeg,
-                            ImageKind::Gif => ImageFormat::Gif,
-                            ImageKind::Webp => ImageFormat::Webp,
-                        };
-                        Picture::Ready(Arc::new(Image::from_bytes(format, bytes)))
-                    }
-                    None => Picture::Failed,
-                };
-                Rc::make_mut(&mut section.avatars).insert(url, avatar);
+                Rc::make_mut(&mut section.avatars).insert(url, picture);
                 cx.notify();
             });
         })
@@ -534,10 +531,14 @@ impl ChatSection {
             room_open,
             self.overlay_layout.as_ref(),
         );
-        let click = match self
-            .highlight
-            .click(&message, self.chat.session_id.as_deref(), &canvas)
-        {
+        let click = match self.highlight.click(
+            &message,
+            self.chat.session_id.as_deref(),
+            &canvas,
+            // Studio has no corner pick; the Stream Manager's snap writes
+            // the rects. Anchor is the backend fallback (P195).
+            "bottom-left",
+        ) {
             Ok(click) => click,
             Err(mark) => {
                 self.expire_later(mark, cx);
@@ -806,10 +807,7 @@ fn chat_row(
     let picture = row
         .avatar_url
         .as_ref()
-        .and_then(|url| match avatars.get(url) {
-            Some(Picture::Ready(image)) => Some(image.clone()),
-            Some(Picture::Loading | Picture::Failed) | None => None,
-        });
+        .and_then(|url| avatars.get(url).and_then(Picture::ready));
     // `Avatar size="sm"` with the monogram behind the picture.
     let avatar = match picture {
         Some(image) => Avatar::new(row.initials.clone()).sm().image(image),
@@ -817,26 +815,76 @@ fn chat_row(
     }
     .mt(px(1.));
 
-    let words = div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_w_0()
-        .gap(px(2.))
-        .child(
-            div()
-                .text_size(px(ROW_TEXT_PX))
-                .line_height(px(ROW_LINE_PX))
-                .text_color(foreground)
-                .child(StyledText::new(line).with_highlights(highlights)),
+    // Author + notice as styled text; emotes/GIFs as pictures (P198).
+    let body = if row.pieces.iter().any(|piece| {
+        matches!(
+            piece,
+            videorc_app_core::stream_manager::rows::Piece::Emote { .. }
         )
-        // P199: why the highlight failed, under the row.
-        .children(row.problem.clone().map(|problem| {
-            div()
-                .type_scale(text::META)
-                .text_color(muted)
-                .child(problem)
-        }));
+    }) || !row.gifs.is_empty()
+    {
+        let mut header = row.author.clone();
+        let mut header_runs = vec![(0..header.len(), RunStyle::Author)];
+        if let Some(sentence) = &row.notice_sentence {
+            header.push(' ');
+            let start = header.len();
+            header.push_str(sentence);
+            header_runs.push((start..header.len(), RunStyle::Notice));
+        }
+        header_runs.retain(|(range, _)| !range.is_empty());
+        let header_highlights: Vec<_> = header_runs
+            .into_iter()
+            .map(|(range, style)| (range, run_style(style, t)))
+            .collect();
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .gap(px(2.))
+            .child(
+                div()
+                    .text_size(px(ROW_TEXT_PX))
+                    .line_height(px(ROW_LINE_PX))
+                    .text_color(foreground)
+                    .child(StyledText::new(header).with_highlights(header_highlights)),
+            )
+            .child(div().text_color(foreground).child(chat_media::message_body(
+                &row.pieces,
+                &row.gifs,
+                avatars,
+                ROW_TEXT_PX,
+                64.,
+            )))
+            .children(row.problem.clone().map(|problem| {
+                div()
+                    .type_scale(text::META)
+                    .text_color(muted)
+                    .child(problem)
+            }))
+    } else {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .gap(px(2.))
+            .child(
+                div()
+                    .text_size(px(ROW_TEXT_PX))
+                    .line_height(px(ROW_LINE_PX))
+                    .text_color(foreground)
+                    .child(StyledText::new(line).with_highlights(highlights)),
+            )
+            // P199: why the highlight failed, under the row.
+            .children(row.problem.clone().map(|problem| {
+                div()
+                    .type_scale(text::META)
+                    .text_color(muted)
+                    .child(problem)
+            }))
+    };
+    let words = body;
 
     // `ArrivalChip` (`arrival-chip.tsx:39-48`): an outline tag led by its
     // kind's monochrome icon at the badge's `svg:size-3`.

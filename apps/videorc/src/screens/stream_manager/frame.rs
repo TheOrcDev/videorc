@@ -11,7 +11,7 @@
 //! Smoke and probe runs neither restore nor save (`persistence_enabled`).
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{App, Bounds, Pixels, Window, WindowBounds};
@@ -66,6 +66,9 @@ pub struct StreamManagerFrame {
 struct Inner {
     prefs: WindowPrefsFile,
     logger: Logger,
+    /// The profile's user data, for files the window reads itself (the
+    /// Co-host pane's own avatar pictures, P1275).
+    user_data_dir: PathBuf,
     /// `commentsWindowLastFrame`: kept across a close, so a reopen in the
     /// same run comes back where it was.
     last: Option<Rect>,
@@ -78,9 +81,15 @@ impl StreamManagerFrame {
             inner: Rc::new(RefCell::new(Inner {
                 prefs: WindowPrefsFile::new(user_data_dir, COMMENTS_WINDOW_PREFS_FILE, enabled),
                 logger,
+                user_data_dir: user_data_dir.to_path_buf(),
                 last: None,
             })),
         }
+    }
+
+    /// The profile's user data directory (an isolated profile's, when set).
+    pub fn user_data_dir(&self) -> PathBuf {
+        self.inner.borrow().user_data_dir.clone()
     }
 
     /// The window was open when the app last quit (`restoreCommentsWindowOnLaunch`:

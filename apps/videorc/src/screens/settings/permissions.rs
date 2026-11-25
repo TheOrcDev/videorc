@@ -7,11 +7,27 @@ use videorc_app_core::desktop::{
     },
 };
 use videorc_kit::{
-    badge::Badge,
     button::{Button, ButtonVariant},
-    list_row::{GroupedList, ListRow},
+    empty::Empty,
+    icon::{IconName, icon},
+    list_row::GroupedList,
     panel_section::PanelSection,
+    settings_row::SettingsRow,
+    spinner::Spinner,
+    status_badge::StatusBadge,
+    status_dot::StatusTone,
 };
+
+/// `StatusBadge`'s `tone`: the colour lives in the dot.
+fn status_tone(tone: &str) -> StatusTone {
+    match tone {
+        "good" => StatusTone::Good,
+        "warn" => StatusTone::Warn,
+        "bad" | "error" => StatusTone::Error,
+        "live" => StatusTone::Live,
+        _ => StatusTone::Neutral,
+    }
+}
 
 impl SettingsScreen {
     fn permission_action(
@@ -75,21 +91,65 @@ impl SettingsScreen {
                 ..Default::default()
             },
         });
+        let muted = hsla(t.muted_foreground);
         let mut list = GroupedList::new();
         for (index, row) in model.rows.iter().enumerate() {
             let action = rows
                 .iter()
                 .find(|raw| raw.id == row.id)
                 .and_then(|raw| row_action(raw, platform, Some(&media)));
-            let mut control = div()
+            // `system-access-list.tsx`: the label and its status badge on one
+            // line, the purpose and the detail under it, the action on the
+            // right (`flex items-start gap-3 px-3 py-2.5`).
+            let mut heading = div()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .gap(px(8.))
-                .child(Badge::new(row.status));
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .line_height(px(20.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(hsla(t.foreground))
+                        .child(row.label),
+                )
+                .child(StatusBadge::new(row.status).tone(status_tone(row.tone)));
+            if row.spinning {
+                heading = heading.child(
+                    Spinner::new(("permission-checking", index))
+                        .accessibility_label("Checking permission…"),
+                );
+            }
+            let mut line = div()
+                .id(("permission-row", index))
+                .flex()
+                .items_start()
+                .gap(px(12.))
+                .px(px(12.))
+                .py(px(10.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(heading)
+                        .child(
+                            div()
+                                .type_scale(text::META)
+                                .text_color(muted)
+                                .child(row.purpose),
+                        )
+                        .children(row.detail.clone().map(|detail| {
+                            div().type_scale(text::META).text_color(muted).child(detail)
+                        })),
+                );
             if let (Some(pane), Some(action), Some(label)) =
                 (row.pane, action, row.action_label.clone())
             {
-                control = control.child(
+                line = line.child(
                     Button::new(("permission-action", index))
                         .label(label)
                         .accessibility_label(row.action_name.clone().unwrap_or_default())
@@ -100,30 +160,19 @@ impl SettingsScreen {
                         })),
                 );
             }
-            let description = row.detail.as_ref().map_or_else(
-                || row.purpose.to_string(),
-                |detail| format!("{} {detail}", row.purpose),
-            );
-            list = list.item(
-                div()
-                    .child(ListRow::new(("permission-row", index), row.label).child(control))
-                    .child(
-                        div()
-                            .px(px(12.))
-                            .pb(px(8.))
-                            .type_scale(text::META)
-                            .text_color(hsla(t.muted_foreground))
-                            .child(description),
-                    ),
-            );
+            list = list.item(line);
         }
+        // Leading RefreshIcon, then the words.
         let mut section = PanelSection::new(view::copy::SYSTEM_ACCESS)
             .title(view::copy::SYSTEM_ACCESS)
             .description(model.description)
+            .last(true)
             .action(
                 Button::new("refresh-permissions")
-                    .label(view::copy::REFRESH)
+                    .accessibility_label(view::copy::REFRESH)
                     .variant(ButtonVariant::Ghost)
+                    .child(icon(IconName::ArrowsClockwise, 16., hsla(t.foreground)))
+                    .child(view::copy::REFRESH)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.refresh(cx);
                         cx.notify();
@@ -131,44 +180,29 @@ impl SettingsScreen {
             );
         if model.rows.is_empty() {
             section = section.child(
-                div()
-                    .child(ListRow::new("no-permissions", view::copy::NOTHING_TO_GRANT))
-                    .child(
-                        div()
-                            .px(px(12.))
-                            .pb(px(8.))
-                            .type_scale(text::META)
-                            .text_color(hsla(t.muted_foreground))
-                            .child(view::copy::NOTHING_TO_GRANT_DESCRIPTION),
-                    ),
+                Empty::new()
+                    .title(view::copy::NOTHING_TO_GRANT)
+                    .description(view::copy::NOTHING_TO_GRANT_DESCRIPTION),
             );
         } else {
             section = section.child(list).child(
-                GroupedList::new().item(
-                    div()
-                        .child(
-                            ListRow::new("privacy-settings", view::copy::CHANGE_A_PERMISSION)
-                                .child(
-                                    Button::new("open-system-settings")
-                                        .label(model.open_settings)
-                                        .variant(ButtonVariant::Outline)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.permission_action(
-                                                SystemPermissionPane::Privacy,
-                                                SystemAccessAction::OpenSettings,
-                                                cx,
-                                            )
-                                        })),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .px(px(12.))
-                                .pb(px(8.))
-                                .type_scale(text::META)
-                                .text_color(hsla(t.muted_foreground))
-                                .child(model.change_description),
-                        ),
+                div().pt(px(12.)).child(
+                    GroupedList::new().item(
+                        SettingsRow::new("privacy-settings", view::copy::CHANGE_A_PERMISSION)
+                            .description(model.change_description)
+                            .child(
+                                Button::new("open-system-settings")
+                                    .label(model.open_settings)
+                                    .variant(ButtonVariant::Outline)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.permission_action(
+                                            SystemPermissionPane::Privacy,
+                                            SystemAccessAction::OpenSettings,
+                                            cx,
+                                        )
+                                    })),
+                            ),
+                    ),
                 ),
             );
         }
