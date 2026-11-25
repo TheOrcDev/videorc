@@ -1,17 +1,21 @@
 //! Chat rows and their menus (P966–P969): ManagerRow chrome, the ⋯ menu from
 //! `pane::row_menu`, and the person right-click menu (About / Same person /
-//! Mark as bot). Actions are stubs until the chat / community drivers land.
+//! Mark as bot). A click on the row and ⋯ Highlight put the message on
+//! stream (the pane's highlight driver); the other actions are stubs until
+//! the chat / community drivers land.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{AnyElement, IntoElement, SharedString, div, prelude::*, px};
-use videorc_app_core::chat::highlight::RowHighlight;
+use gpui::{AnyElement, App, IntoElement, SharedString, Window, div, prelude::*, px};
+use videorc_app_core::chat::highlight::{RowHighlight, RowPhase, StatusChip};
 use videorc_app_core::chat::model::LiveChatMessage;
 use videorc_app_core::stream_manager::pane::{
     RowAction, RowMenuInputs, copy_text, row_menu, row_menu_label,
 };
 use videorc_app_core::stream_manager::rows::ManagerRow;
 use videorc_kit::{
+    badge::{Badge, BadgeVariant},
     context_menu::ContextMenu,
     dropdown_menu::{Menu, MenuItem},
     kebab_menu::{KebabMenu, KebabMenuItem, KebabReveal},
@@ -23,12 +27,22 @@ const SAME_PERSON: &str = "Same person as…";
 const MARK_AS_BOT: &str = "Mark as bot";
 const X_SELF_LINK_REASON: &str = "X accounts can't be linked as the same person yet.";
 
+/// What a row's click and its ⋯ Highlight ask the pane for, by message id.
+pub type OnHighlight = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
 /// One chat row: body + ⋯ menu, wrapped in the person right-click menu.
-pub fn chat_row(message: &Arc<LiveChatMessage>, live: bool) -> AnyElement {
-    let view = ManagerRow::new(message, RowHighlight::default(), live, &[]);
+pub fn chat_row(
+    message: &Arc<LiveChatMessage>,
+    highlight: RowHighlight,
+    live: bool,
+    mention_names: &[String],
+    on_highlight: OnHighlight,
+) -> AnyElement {
+    let view = ManagerRow::new(message, highlight, live, mention_names);
+    let highlightable = view.row.highlightable;
     let inputs = RowMenuInputs {
-        highlightable: view.row.highlightable,
-        on_stream: false,
+        highlightable,
+        on_stream: view.row.phase == RowPhase::Live,
         can_reply: true,
         removable: false,
         remove_reason: Some("Reconnect to remove messages."),
@@ -46,8 +60,13 @@ pub fn chat_row(message: &Arc<LiveChatMessage>, live: bool) -> AnyElement {
             };
             let action = item.action.clone();
             let text = copy_text(message);
-            let mut kebab = KebabMenuItem::new(id, item.label, move |_, _| {
-                let _ = (&action, &text);
+            let message_id = message.id.clone();
+            let on_highlight = on_highlight.clone();
+            let mut kebab = KebabMenuItem::new(id, item.label, move |window, app| {
+                if action == RowAction::Highlight {
+                    on_highlight(&message_id, window, app);
+                }
+                let _ = &text;
             })
             .destructive(item.destructive)
             .disabled(item.disabled);
@@ -68,6 +87,14 @@ pub fn chat_row(message: &Arc<LiveChatMessage>, live: bool) -> AnyElement {
         !author.is_empty() && message.event_type != "system" && message.event_type != "moderation";
 
     let body = row_body(&view);
+    let chips = view.row.chips.iter().map(|(label, chip)| {
+        Badge::new(*label).variant(match chip {
+            StatusChip::Neutral => BadgeVariant::Default,
+            StatusChip::Chrome => BadgeVariant::Chrome,
+            StatusChip::Destructive => BadgeVariant::Destructive,
+        })
+    });
+    let message_id = message.id.clone();
     let row = div()
         .id(SharedString::from(format!("chat-row-{}", view.row.id)))
         .w_full()
@@ -77,7 +104,21 @@ pub fn chat_row(message: &Arc<LiveChatMessage>, live: bool) -> AnyElement {
         .px(px(4.))
         .py(px(4.))
         .rounded(px(radius::CHIP))
-        .child(div().flex_1().min_w(px(0.)).child(body))
+        // The body is the click (`comment-row.tsx`'s plate); the ⋯ menu
+        // beside it keeps its own.
+        .child(
+            div()
+                .id(SharedString::from(format!("chat-row-body-{}", view.row.id)))
+                .flex_1()
+                .min_w(px(0.))
+                .when(highlightable, |plate| {
+                    plate
+                        .cursor_pointer()
+                        .on_click(move |_, window, app| on_highlight(&message_id, window, app))
+                })
+                .child(body),
+        )
+        .children(chips)
         .child(
             KebabMenu::new(
                 SharedString::from(format!("chat-row-menu-{}", view.row.id)),

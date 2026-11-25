@@ -568,7 +568,7 @@ impl StreamManager {
     }
 
     /// `comments-window-state`'s view half (Electron's `commentsWindowState`).
-    pub fn smoke_state(&self, window: &Window) -> Value {
+    pub fn smoke_state(&self, window: &Window, cx: &App) -> Value {
         json!({
             "alwaysOnTop": self.pinned,
             "hiddenFromStream": self.hidden,
@@ -578,7 +578,37 @@ impl StreamManager {
             "protected": self.hidden && self.hide_method == HideMethod::ContentProtection,
             "captureProtectionMarkerInstalled": self.smoke_marker.is_some(),
             "windowId": platform::current().capture_window_id(window),
+            "highlightAnchor": self.chat.read(cx).anchor().id(),
         })
+    }
+
+    /// The status bar's corner pick, kept by the chat pane that sends the
+    /// highlight.
+    fn pick_anchor(&mut self, corner: super::chat::HighlightAnchor, cx: &mut Context<Self>) {
+        self.chat
+            .update(cx, |chat, cx| chat.pick_anchor(corner, cx));
+        cx.notify();
+    }
+
+    /// `comments-window-set-highlight-anchor`: the status bar's pick.
+    pub fn smoke_set_anchor(&mut self, anchor: &str, cx: &mut Context<Self>) {
+        self.pick_anchor(super::chat::HighlightAnchor::parse(Some(anchor)), cx);
+    }
+
+    /// `comments-window-click-message {messageId}`: the row's own click.
+    pub fn smoke_click_message(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        self.chat
+            .update(cx, |chat, cx| chat.press_highlight(id, cx))
+    }
+
+    /// `comments-window-reader-state`.
+    pub fn smoke_reader_state(&self, cx: &App) -> Value {
+        self.chat.read(cx).smoke_reader_state()
+    }
+
+    /// `comments-window-command-trace`.
+    pub fn smoke_command_trace(&self, cx: &App) -> Value {
+        self.chat.read(cx).smoke_command_trace()
     }
 
     /// `comments-window-set-hidden-from-stream`: the status bar's switch.
@@ -665,6 +695,8 @@ impl Render for StreamManager {
         let clear = this.clone();
         let clip = this.clone();
         let screen = this.clone();
+        let corner_pick = this.clone();
+        let anchor = self.chat.read(cx).anchor();
         let banner = this.clone();
         let banner_all = this.clone();
         let sound = this.clone();
@@ -792,6 +824,10 @@ impl Render for StreamManager {
                     },
                     move |hide, _window, app| {
                         let _ = screen.update(app, |this, cx| this.set_screen_hidden(hide, cx));
+                    },
+                    anchor,
+                    move |corner, _window, app| {
+                        let _ = corner_pick.update(app, |this, cx| this.pick_anchor(corner, cx));
                     },
                     banners,
                     move |id, show, _window, app| {

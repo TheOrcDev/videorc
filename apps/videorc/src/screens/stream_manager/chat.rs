@@ -1,16 +1,27 @@
 //! The chat pane (P957–P982): filters, empty states, live rows and send.
+//! A row's click (and its ⋯ Highlight) puts the message on stream or takes
+//! it off through `chat::highlight_driver`, as the Studio's chat does; the
+//! corner pick writes the highlight's place into the overlay layout
+//! (Electron's `snapHighlightToAnchor`).
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, Focusable, IntoElement, ScrollHandle,
     SharedString, Subscription, Window, div, prelude::*, px,
 };
+use serde_json::{Value, json};
 use tokio::sync::watch;
 use videorc_app_core::chat::LiveChat;
+use videorc_app_core::chat::highlight::FAILURE_SHOWN_FOR;
+use videorc_app_core::chat::highlight_driver::{self as driver, ChatHighlight};
+use videorc_app_core::chat::model::CommentHighlightState;
 use videorc_app_core::chat::model::LiveChatMessage;
 use videorc_app_core::chat::store::DeliveryCursor;
 use videorc_app_core::chat::view::{self, platform_label};
+use videorc_app_core::client::BackendEvent;
+use videorc_app_core::editor::inspector::{overlay_snap_rect, with_overlay_rect};
 use videorc_app_core::stream_manager::completions::{
     ComposerCompletion, EDIT_CHAT_COMMANDS, composer_completions,
 };
@@ -23,6 +34,7 @@ use videorc_app_core::stream_manager::pane::{
 use videorc_app_core::stream_manager::send::{
     CHAT_SEND_MAX_CHARS, draft_length, validate_chat_draft, writable_providers,
 };
+use videorc_app_core::studio::screen_views::talk_show_room_in;
 use videorc_kit::{
     badge::{Badge, BadgeVariant},
     button::{Button, ButtonSize, ButtonVariant},
@@ -39,7 +51,57 @@ use videorc_kit::{
 
 use super::SharedStudio;
 use super::layout::{Tier, full_labels};
-use super::rows::chat_row;
+use super::rows::{OnHighlight, chat_row};
+
+/// `overlays.layout`: the backend's placement as it changes.
+const OVERLAY_LAYOUT_EVENT: &str = "overlays.layout";
+
+/// The highlight card's corner (`CommentHighlightAnchor`), bottom left by
+/// default (the backend's and Electron's default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HighlightAnchor {
+    TopLeft,
+    TopRight,
+    #[default]
+    BottomLeft,
+    BottomRight,
+}
+
+impl HighlightAnchor {
+    pub const ALL: [Self; 4] = [
+        Self::TopLeft,
+        Self::TopRight,
+        Self::BottomLeft,
+        Self::BottomRight,
+    ];
+
+    /// The wire's word, which is also the overlay snap's.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::TopLeft => "top-left",
+            Self::TopRight => "top-right",
+            Self::BottomLeft => "bottom-left",
+            Self::BottomRight => "bottom-right",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TopLeft => "Top left",
+            Self::TopRight => "Top right",
+            Self::BottomLeft => "Bottom left",
+            Self::BottomRight => "Bottom right",
+        }
+    }
+
+    /// `normalizeCommentHighlightAnchor`: an unknown word is the default.
+    pub fn parse(value: Option<&str>) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|anchor| Some(anchor.id()) == value)
+            .unwrap_or_default()
+    }
+}
 
 /// The chat pane: filter bar, rows, empty body and composer.
 pub struct ChatPane {
@@ -70,6 +132,14 @@ pub struct ChatPane {
     incomplete: bool,
     delivery_cursor: DeliveryCursor,
     scroll: ScrollHandle,
+    /// The click in flight, the backend's card and a failure's reason.
+    highlight: ChatHighlight,
+    /// Clicks sent and not answered yet (`comments-window-command-trace`).
+    pending: usize,
+    session_id: Option<String>,
+    /// `overlays.layout`, once read: the card's rects.
+    overlay_layout: Option<Value>,
+    anchor: HighlightAnchor,
     _search: Subscription,
     _draft: Subscription,
 }
@@ -113,6 +183,26 @@ impl ChatPane {
         let seed = live_chat.borrow().clone();
         let (messages, platforms, mention_names, can_send) = view_from_chat(&seed);
         let delivery_cursor = seed.delivery.cursor();
+        let session_id = seed.session_id.clone();
+        let mut events = studio.backend().subscribe();
+        cx.spawn(async move |this, cx| {
+            loop {
+                let event = match events.recv().await {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        BackendEvent::ClientLagged { skipped }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                if this
+                    .update(cx, |pane, cx| pane.on_event(event, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             loop {
                 if live_chat.changed().await.is_err() {
@@ -128,7 +218,7 @@ impl ChatPane {
             }
         })
         .detach();
-        Self {
+        let mut pane = Self {
             studio,
             runtime,
             filter: ChatFilter::default(),
@@ -150,9 +240,242 @@ impl ChatPane {
             incomplete: false,
             delivery_cursor,
             scroll: ScrollHandle::new(),
+            highlight: ChatHighlight::default(),
+            pending: 0,
+            session_id,
+            overlay_layout: None,
+            anchor: HighlightAnchor::default(),
             _search: search_sub,
             _draft: draft_sub,
+        };
+        pane.read_backend(cx);
+        pane
+    }
+
+    fn on_event(&mut self, event: BackendEvent, cx: &mut Context<Self>) {
+        match event {
+            BackendEvent::Untyped { event, payload } => match event.as_str() {
+                driver::STATUS_EVENT => {
+                    if let Ok(state) = serde_json::from_value::<CommentHighlightState>(payload) {
+                        self.highlight.status(state);
+                        cx.notify();
+                    }
+                }
+                OVERLAY_LAYOUT_EVENT => self.overlay_layout = Some(payload),
+                _ => {}
+            },
+            // A new connection, or events it missed: read the card and the
+            // placement again.
+            BackendEvent::Ready(_)
+            | BackendEvent::EventsLagged(_)
+            | BackendEvent::ClientLagged { .. } => self.read_backend(cx),
+            _ => {}
         }
+    }
+
+    /// `comments.highlight.status` and `overlays.layout.get`.
+    fn read_backend(&mut self, cx: &mut Context<Self>) {
+        let studio = self.studio.clone();
+        let job = self.runtime.spawn(async move {
+            let status = driver::read_status(&**studio.backend()).await;
+            let layout = studio.overlay_layout().await.ok();
+            (status, layout)
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok((status, layout)) = job.await else {
+                return;
+            };
+            let _ = this.update(cx, |pane, cx| {
+                if layout.is_some() {
+                    pane.overlay_layout = layout;
+                }
+                if let Some(state) = status {
+                    pane.highlight.authoritative(state);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// `toggleCommentHighlight` for the message `id`: on stream, or off
+    /// when it is the one on stream. False when no shown row is `id` or it
+    /// can't go on stream.
+    pub fn press_highlight(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(message) = self
+            .messages
+            .iter()
+            .find(|message| message.id == id)
+            .cloned()
+        else {
+            return false;
+        };
+        let presentation = videorc_app_core::chat::highlight::presentation(
+            id,
+            &self.highlight.state,
+            self.highlight.applying_id.as_deref(),
+            self.highlight.failure.as_ref(),
+        );
+        if !videorc_app_core::stream_manager::rows::ManagerRow::new(
+            &message,
+            presentation,
+            self.live,
+            &self.mention_names,
+        )
+        .row
+        .highlightable
+        {
+            return false;
+        }
+        let snapshot = self.studio.snapshot();
+        let room_open = talk_show_room_in(&self.studio.cloud_now()).open;
+        let canvas = driver::highlight_canvas(
+            &snapshot.settings.capture_doc,
+            room_open,
+            self.overlay_layout.as_ref(),
+        );
+        let click = match self
+            .highlight
+            .click(&message, self.session_id.as_deref(), &canvas)
+        {
+            Ok(click) => click,
+            Err(mark) => {
+                self.expire_later(mark, cx);
+                self.read_backend(cx);
+                cx.notify();
+                return true;
+            }
+        };
+        self.pending += 1;
+        cx.notify();
+        let backend = self.studio.backend().clone();
+        let sent = click.clone();
+        let job = self.runtime.spawn(async move {
+            let outcome = driver::send(&*backend, &sent).await;
+            // A failure reads the card again: it stays where the backend
+            // says it is.
+            let status = if outcome.is_err() {
+                driver::read_status(&*backend).await
+            } else {
+                None
+            };
+            (outcome, status)
+        });
+        cx.spawn(async move |this, cx| {
+            let answer = job.await;
+            let _ = this.update(cx, |pane, cx| {
+                pane.pending = pane.pending.saturating_sub(1);
+                if let Ok((outcome, status)) = answer {
+                    if let Some(mark) =
+                        pane.highlight
+                            .settle(click.intent, &click.message_id, outcome)
+                    {
+                        pane.expire_later(mark, cx);
+                    }
+                    if let Some(state) = status {
+                        pane.highlight.authoritative(state);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        true
+    }
+
+    /// A failure's reason leaves its row after five seconds.
+    fn expire_later(&self, mark: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FAILURE_SHOWN_FOR).await;
+            let _ = this.update(cx, |pane, cx| {
+                if pane.highlight.expire_failure(mark) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn anchor(&self) -> HighlightAnchor {
+        self.anchor
+    }
+
+    /// The status bar's corner pick: the card's rects at that corner, on
+    /// both orientations, written to the overlay layout (a live card moves
+    /// with it, as the backend redraws from the layout).
+    pub fn pick_anchor(&mut self, anchor: HighlightAnchor, cx: &mut Context<Self>) {
+        self.anchor = anchor;
+        let mut layout = self.overlay_layout.clone().unwrap_or_else(|| json!({}));
+        for vertical in [false, true] {
+            let rect = overlay_snap_rect("highlight", vertical, anchor.id());
+            layout = with_overlay_rect(&layout, "highlight", vertical, rect);
+        }
+        self.overlay_layout = Some(layout.clone());
+        cx.notify();
+        let studio = self.studio.clone();
+        let job = self
+            .runtime
+            .spawn(async move { studio.set_overlay_layout(layout).await });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Some(saved)) = job.await {
+                let _ = this.update(cx, |pane, _| pane.overlay_layout = Some(saved));
+            }
+        })
+        .detach();
+    }
+
+    /// `comments-window-reader-state`: the rows' words and each shown row's
+    /// highlight phase and reason, as Electron's reader reads its window.
+    pub fn smoke_reader_state(&self) -> Value {
+        let shown = chat_pane_messages(&self.messages, &self.filter, &self.mention_names);
+        let mut text = String::new();
+        let mut phases = serde_json::Map::new();
+        let mut reasons = serde_json::Map::new();
+        for message in shown {
+            let presentation = videorc_app_core::chat::highlight::presentation(
+                &message.id,
+                &self.highlight.state,
+                self.highlight.applying_id.as_deref(),
+                self.highlight.failure.as_ref(),
+            );
+            let row = videorc_app_core::stream_manager::rows::ManagerRow::new(
+                message,
+                presentation.clone(),
+                self.live,
+                &self.mention_names,
+            );
+            // Electron's reader reads the window's innerText, where an emote
+            // is a picture: the name, then the words without the emotes.
+            text.push_str(&row.row.author);
+            text.push('\n');
+            for piece in &row.pieces {
+                match piece {
+                    videorc_app_core::stream_manager::rows::Piece::Text(words) => {
+                        text.push_str(words)
+                    }
+                    videorc_app_core::stream_manager::rows::Piece::Link(link) => {
+                        text.push_str(&link.text)
+                    }
+                    videorc_app_core::stream_manager::rows::Piece::Emote { .. } => {}
+                }
+            }
+            text.push('\n');
+            phases.insert(message.id.clone(), json!(presentation.phase.as_str()));
+            if let Some(reason) = presentation.reason {
+                reasons.insert(message.id.clone(), json!(reason));
+            }
+        }
+        json!({
+            "text": text,
+            "highlightPhases": phases,
+            "highlightReasons": reasons,
+            "highlightAnchor": self.anchor.id(),
+        })
+    }
+
+    /// `comments-window-command-trace`: the clicks still in flight.
+    pub fn smoke_command_trace(&self) -> Value {
+        json!({ "pendingCount": self.pending })
     }
 
     fn apply_live_chat(&mut self, chat: &LiveChat, cx: &mut Context<Self>) {
@@ -162,6 +485,7 @@ impl ChatPane {
         self.mention_names = mention_names;
         self.can_send = can_send;
         self.composer = self.live && can_send;
+        self.session_id = chat.session_id.clone();
         let progress = chat.delivery.progress(Some(self.delivery_cursor));
         self.delivery_cursor = chat.delivery.cursor();
         if progress.reset || self.following {
@@ -548,6 +872,15 @@ impl Render for ChatPane {
         let filters = self.filters_bar(tier, labels, window, cx);
         let live = self.live;
         let this = cx.entity().downgrade();
+        let on_highlight: OnHighlight = {
+            let this = this.clone();
+            Rc::new(move |id: &str, _: &mut Window, app: &mut App| {
+                let id = id.to_string();
+                let _ = this.update(app, |pane, cx| pane.press_highlight(&id, cx));
+            })
+        };
+        let highlight = self.highlight.clone();
+        let mention_names = self.mention_names.clone();
         let completion_scroll = ScrollHandle::new();
         let show_jump = !self.following && !shown.is_empty();
         let (jump_label, jump_name) = view::jump_chip(self.unread, self.incomplete);
@@ -590,7 +923,21 @@ impl Render for ChatPane {
                         .on_scroll(move |_, _, app| {
                             let _ = this_scroll.update(app, |pane, cx| pane.note_scroll(cx));
                         })
-                        .children(shown.into_iter().map(|message| chat_row(message, live))),
+                        .children(shown.into_iter().map(|message| {
+                            let presentation = videorc_app_core::chat::highlight::presentation(
+                                &message.id,
+                                &highlight.state,
+                                highlight.applying_id.as_deref(),
+                                highlight.failure.as_ref(),
+                            );
+                            chat_row(
+                                message,
+                                presentation,
+                                live,
+                                &mention_names,
+                                on_highlight.clone(),
+                            )
+                        })),
                 )
                 .when(show_jump, |host| {
                     let this = this.clone();
