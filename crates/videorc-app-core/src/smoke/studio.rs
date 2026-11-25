@@ -22,6 +22,13 @@
 //!   stream as that scene), `studio-scene-apply {id}`, `studio-scene-delete
 //!   {id}`, `studio-scene-layout {patch}` (`applyCameraPreset`) and
 //!   `studio-scene-background {background}` (a saved background or `null`).
+//! - smart-scenes' (plan 260 Phase 3): `studio-scene-insert {scenes,
+//!   afterId?, windowHints?}` and `studio-scene-edit {scene, windowHint?}`
+//!   (v2 scenes as stored), `studio-scene-move {id, toIndex}`,
+//!   `studio-shortcut {action}` (a scene key, not waited for),
+//!   `studio-privacy-state`, `studio-privacy-add-app {bundleId, name}` and
+//!   `studio-screen-privacy {hidden}` (Hide screen as the streamer's own).
+//!   `studio-scene-apply {id, wait: false}` answers at once.
 //!
 //! The rest of [`STUDIO_COMMANDS`](super::STUDIO_COMMANDS) answer "not
 //! supported" by name until they land here.
@@ -33,8 +40,13 @@ use serde_json::{Map, Value, json};
 use tokio::sync::watch;
 
 use super::{CommandFuture, SmokeCommandHandler};
+use crate::desktop::global_shortcuts::scene_for_action;
 use crate::scenes::model::SavedScene;
+use crate::scenes::section::scene_slot_accelerator;
+use crate::scenes::store::normalize_scene;
+use crate::scenes::v2::Scene;
 use crate::scenes::view::scene_from_saved;
+use crate::studio::families::add_password_manager;
 use crate::studio::source_selection::SourceKind;
 use crate::studio::{Connection, StudioSnapshot};
 use crate::{BackendClient, SessionPhase, StartOutcome, Studio};
@@ -50,12 +62,19 @@ pub const STUDIO_SMOKE_COMMANDS: &[&str] = &[
     "studio-capture-configure",
     "studio-record",
     "studio-replay-buffer",
+    "studio-privacy-add-app",
+    "studio-privacy-state",
     "studio-scene-apply",
     "studio-scene-background",
     "studio-scene-delete",
+    "studio-scene-edit",
+    "studio-scene-insert",
     "studio-scene-layout",
+    "studio-scene-move",
     "studio-scene-save",
     "studio-scenes-state",
+    "studio-screen-privacy",
+    "studio-shortcut",
     "studio-state",
     "studio-stop",
 ];
@@ -190,10 +209,44 @@ pub fn surface_scene_json(snapshot: &StudioSnapshot) -> Value {
     })
 }
 
+/// The platform's name as Electron spells it (`process.platform`).
+fn node_platform() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    }
+}
+
 /// `studio-scenes-state`'s answer.
 pub fn scenes_json(snapshot: &StudioSnapshot) -> Value {
     let view = &snapshot.scenes;
+    let shortcuts = snapshot.settings.studio.global_shortcuts();
+    let keys: Vec<Value> = view
+        .scenes
+        .iter()
+        .enumerate()
+        .map(|(index, scene)| {
+            json!({
+                "id": scene.id,
+                "key": (index < 9).then(|| {
+                    scene_slot_accelerator(Some(&shortcuts), index + 1, Some(node_platform()))
+                }),
+            })
+        })
+        .collect();
     json!({
+        // smart-scenes: the stored v2 scenes, the working picture as the
+        // capture config holds it, and each scene's position key.
+        "library": view
+            .library
+            .as_ref()
+            .map(|library| library.scenes.iter().map(Scene::to_json).collect::<Vec<_>>()),
+        "working": {
+            "sources": snapshot.settings.capture_doc["sources"],
+            "layout": snapshot.settings.capture_doc["layout"],
+        },
+        "keys": keys,
         "loaded": view.loaded,
         "readOnly": view.read_only,
         "error": view.error,
@@ -529,6 +582,15 @@ impl StudioSmoke {
         let id = text_param(&params, "id")
             .ok_or("studio-scene-apply needs an id.")?
             .to_string();
+        if params.get("wait").and_then(Value::as_bool) == Some(false) {
+            // smart-scenes' timed switches: the request time is the caller's,
+            // and the apply runs on.
+            let studio = self.studio.clone();
+            tokio::spawn(async move {
+                studio.apply_saved_scene_by_id(&id).await;
+            });
+            return Ok(json!({ "requested": true }));
+        }
         let wait = Duration::from_millis(millis(&params, "timeoutMs", DEFAULT_SESSION_WAIT_MS));
         if !self.studio.apply_saved_scene_by_id(&id).await {
             return Err(format!(
@@ -582,6 +644,132 @@ impl StudioSmoke {
     }
 }
 
+/// `studio-privacy-state`'s answer: the saved privacy settings.
+fn privacy_json(snapshot: &StudioSnapshot) -> Value {
+    serde_json::to_value(&snapshot.settings.families.privacy).unwrap_or(Value::Null)
+}
+
+fn scenes_param(params: &Map<String, Value>, key: &str) -> Result<Vec<Scene>, String> {
+    let raw: Vec<&Value> = match params.get(key) {
+        Some(Value::Array(items)) => items.iter().collect(),
+        Some(item @ Value::Object(_)) => vec![item],
+        _ => return Err(format!("{key} must be a scene or a list of scenes.")),
+    };
+    raw.into_iter()
+        .map(|item| normalize_scene(item).map_err(|reason| format!("{key}: {reason}")))
+        .collect()
+}
+
+impl StudioSmoke {
+    async fn scene_insert(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let scenes = scenes_param(&params, "scenes")?;
+        let hints: std::collections::HashMap<String, String> = params
+            .get("windowHints")
+            .and_then(Value::as_object)
+            .map(|hints| {
+                hints
+                    .iter()
+                    .filter_map(|(id, hint)| Some((id.clone(), hint.as_str()?.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !self
+            .studio
+            .insert_scenes(&scenes, text_param(&params, "afterId"), &hints)
+            .await
+        {
+            return Err(format!(
+                "The scenes were not added: {}",
+                self.studio.snapshot().last_error.unwrap_or_default()
+            ));
+        }
+        Ok(json!({ "inserted": scenes.len(), "state": scenes_json(&self.studio.snapshot()) }))
+    }
+
+    async fn scene_edit(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let scene = scenes_param(&params, "scene")?
+            .into_iter()
+            .next()
+            .ok_or("studio-scene-edit needs a scene.")?;
+        if !self
+            .studio
+            .edit_scene(&scene, text_param(&params, "windowHint"))
+            .await
+        {
+            return Err(format!("Scene {} was not saved.", scene.id));
+        }
+        Ok(json!({ "edited": true, "state": scenes_json(&self.studio.snapshot()) }))
+    }
+
+    async fn scene_move(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let id = text_param(&params, "id").ok_or("studio-scene-move needs an id.")?;
+        let to = params
+            .get("toIndex")
+            .and_then(Value::as_u64)
+            .ok_or("studio-scene-move needs toIndex.")? as usize;
+        if !self.studio.move_scene(id, to).await {
+            return Err(format!("Scene {id} did not move."));
+        }
+        Ok(json!({ "moved": true, "state": scenes_json(&self.studio.snapshot()) }))
+    }
+
+    /// A scene key as the global shortcut runs it; answered at once, the
+    /// switch runs on (a key press never waits for its scene).
+    fn shortcut(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let action = text_param(&params, "action")
+            .ok_or("studio-shortcut needs an action.")?
+            .to_string();
+        let snapshot = self.studio.snapshot();
+        let ids: Vec<&str> = snapshot
+            .scenes
+            .scenes
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        let id = scene_for_action(&action, &ids, snapshot.scenes.on_stream_id.as_deref())
+            .ok_or_else(|| format!("studio-shortcut: {action} names no scene."))?;
+        let studio = self.studio.clone();
+        let scene = id.clone();
+        tokio::spawn(async move {
+            studio.apply_saved_scene_by_id(&scene).await;
+        });
+        Ok(json!({ "action": action, "sceneId": id }))
+    }
+
+    async fn privacy_add_app(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let bundle =
+            text_param(&params, "bundleId").ok_or("studio-privacy-add-app needs a bundleId.")?;
+        let name = text_param(&params, "name").unwrap_or(bundle);
+        let current = self.studio.snapshot().settings.families.privacy.clone();
+        let next = add_password_manager(&current, bundle, name);
+        self.studio
+            .set_privacy_settings(&next)
+            .await
+            .map_err(|error| format!("The password manager was not added: {error}"))?;
+        Ok(privacy_json(&self.studio.snapshot()))
+    }
+
+    /// Hide screen and Show screen as the streamer's own (`reason: you`).
+    async fn screen_privacy(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let hidden = params
+            .get("hidden")
+            .and_then(Value::as_bool)
+            .ok_or("studio-screen-privacy needs hidden: true or false.")?;
+        let backend = self.studio.backend();
+        let answer = if hidden {
+            backend
+                .request(
+                    "screen.hide",
+                    json!({ "reason": crate::protocol::ScreenPrivacyReason::You }),
+                )
+                .await
+        } else {
+            backend.request("screen.show", Value::Null).await
+        };
+        answer.map_err(|error| format!("Hide screen: {error}"))
+    }
+}
+
 impl SmokeCommandHandler for StudioSmoke {
     fn handles(&self, command: &str) -> bool {
         STUDIO_SMOKE_COMMANDS.contains(&command)
@@ -606,6 +794,13 @@ impl SmokeCommandHandler for StudioSmoke {
                 "studio-scene-delete" => self.scene_delete(params).await,
                 "studio-scene-layout" => self.scene_layout(params).await,
                 "studio-scene-background" => self.scene_background(params).await,
+                "studio-scene-insert" => self.scene_insert(params).await,
+                "studio-scene-edit" => self.scene_edit(params).await,
+                "studio-scene-move" => self.scene_move(params).await,
+                "studio-shortcut" => self.shortcut(params),
+                "studio-privacy-state" => Ok(privacy_json(&self.studio.snapshot())),
+                "studio-privacy-add-app" => self.privacy_add_app(params).await,
+                "studio-screen-privacy" => self.screen_privacy(params).await,
                 other => Err(format!("The Studio smoke handler does not take {other}.")),
             }
         })

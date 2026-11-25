@@ -254,6 +254,16 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     "studio-scene-layout",
     "studio-scene-save",
     "studio-scenes-state",
+    // Plan 260 Phase 3 (smart-scenes): the library edits the renderer's
+    // smokes reach through `add`, `edit` and a row's Alt+Arrow, a scene key
+    // (`shortcut`), the password-manager list and Hide screen.
+    "studio-privacy-add-app",
+    "studio-privacy-state",
+    "studio-scene-edit",
+    "studio-scene-insert",
+    "studio-scene-move",
+    "studio-screen-privacy",
+    "studio-shortcut",
     // S3.1d: the Studio's live audio sync held off a session a smoke starts
     // on the backend, what `smoke:rnnoise` does to the renderer's socket.
     "studio-live-audio-hold",
