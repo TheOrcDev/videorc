@@ -3,15 +3,22 @@
 //! P1431). The window redraws when the status changes, so both read it as
 //! they draw.
 //!
+//! A downloaded update also says so once in a system notification (P1554,
+//! `updateReadyNotification`), never while Videorc records or is on air.
+//!
 //! The build runs [`NoFeed`] until the feed lands (plan 260 S5.2, L2): no
 //! request, no download, and the row says this build doesn't update itself.
 
 use std::sync::Arc;
 
-use gpui::{App, Global};
+use gpui::{App, Global, SystemNotification};
 use videorc_app_core::studio::scenes_section::session_active;
-use videorc_app_core::updater::{NoFeed, UpdateStatus, Updater};
+use videorc_app_core::updater::{NoFeed, UpdateStatus, Updater, update_ready_notification};
+
 use videorc_app_core::{BackendClient, Studio};
+
+/// The update-ready notice's tag: a newer one replaces it.
+const UPDATE_READY_TAG: &str = "videorc-update-ready";
 
 /// What the chip and the row reach the updater through.
 #[derive(Clone)]
@@ -35,8 +42,26 @@ pub fn install(cx: &mut App, updater: Arc<Updater>, studio: Arc<Studio<BackendCl
     let mut status = updater.watch();
     cx.set_global(Shared { updater, studio });
     cx.spawn(async move |cx| {
+        let mut announced: Option<String> = None;
         while status.changed().await.is_ok() {
-            cx.update(|cx| cx.refresh_windows());
+            let now = status.borrow_and_update().clone();
+            cx.update(|cx| {
+                // P1554: once per downloaded version, never while capturing.
+                if let UpdateStatus::Downloaded { version } = &now
+                    && announced.as_ref() != Some(version)
+                {
+                    announced = Some(version.clone());
+                    if let Some(notice) = update_ready_notification(version, capture_active(cx)) {
+                        cx.show_system_notification(SystemNotification {
+                            tag: UPDATE_READY_TAG.into(),
+                            title: notice.title.into(),
+                            body: notice.body.into(),
+                            actions: Vec::new(),
+                        });
+                    }
+                }
+                cx.refresh_windows();
+            });
         }
     })
     .detach();

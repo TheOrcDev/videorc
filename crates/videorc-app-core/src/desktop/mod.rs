@@ -7,6 +7,7 @@
 //! the global shortcuts (S1.6f).
 
 pub mod accelerator;
+pub mod agent_bridge;
 pub mod camera_extension;
 pub mod capture_protection;
 pub mod capture_state;

@@ -20,6 +20,28 @@ pub(super) struct Confirmation {
 }
 
 impl SettingsScreen {
+    /// P1421: Connect an agent… opens the dialog (made on first use).
+    fn open_connect_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let enabled = self.agents.as_ref().is_some_and(|status| status.enabled);
+        let dialog = match &self.connect_agent {
+            Some(dialog) => dialog.clone(),
+            None => {
+                let dialog = super::connect_agent::dialog(
+                    self.studio.clone(),
+                    self.backend.clone(),
+                    self.runtime.clone(),
+                    window,
+                    cx,
+                );
+                cx.observe(&dialog, |_, _, cx| cx.notify()).detach();
+                self.connect_agent = Some(dialog.clone());
+                dialog
+            }
+        };
+        dialog.update(cx, |dialog, cx| dialog.open(enabled, window, cx));
+        cx.notify();
+    }
+
     fn ask(&mut self, confirmation: Confirmation, window: &mut Window, cx: &mut Context<Self>) {
         self.confirmation = Some(confirmation);
         self.confirm.open(window, cx);
@@ -301,8 +323,10 @@ impl SettingsScreen {
                     Button::new("connect-agent")
                         .label(agents::copy::CONNECT_COMMAND)
                         .variant(ButtonVariant::Outline)
-                        .disabled(true)
-                        .tooltip(view::NOT_IN_THIS_BUILD),
+                        .disabled(self.disabled() || self.agents.is_none())
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_connect_agent(window, cx)),
+                        ),
                 ),
             );
         if let Some(status) = &self.agents {
