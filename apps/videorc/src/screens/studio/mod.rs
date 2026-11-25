@@ -17,6 +17,7 @@ pub mod background;
 pub mod chat;
 pub mod layout;
 pub mod quick_settings;
+pub mod room_picture;
 pub mod scenes;
 pub mod session;
 pub mod show_stage;

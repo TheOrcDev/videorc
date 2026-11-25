@@ -2,15 +2,17 @@
 //! commit (`room-background.ts` / `cloud-background.ts`).
 //!
 //! Live backgrounds become [`SceneBackground::Live`] with a phase clock.
-//! Picture backgrounds need encoded bytes (hash/mime/width/height); the
-//! Electron host draws and encodes in the browser. GPUI has no image encoder
-//! here yet — when asset bytes are supplied (tests, a future encode path)
-//! they are hashed and attached; otherwise picture prepare fails with a
-//! clear note and the scene still commits without a background asset.
+//! Picture backgrounds need encoded bytes (hash/mime/width/height). The
+//! GPUI host resolves [`managed_background_file_name`] under
+//! [`managed_background_roots`], encodes (WebP/JPEG), and passes the
+//! bytes here; without bytes, prepare fails with a clear note and the
+//! scene still commits without a background asset.
 //!
 //! Gap: look-specific live clock rates/poster phases from
 //! `live_background/looks.rs` are not mirrored in app-core; calm uses half
 //! of [`DEFAULT_LIVE_CLOCK_RATE`].
+
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -25,8 +27,100 @@ use crate::studio::room_scene::PreparedBackgroundAsset;
 /// Bytes of one encoded picture (WebP/JPEG/PNG), header excluded.
 pub const BACKGROUND_ASSET_MAX_BYTES: usize = 2 * 1024 * 1024;
 
-/// Gap: GPUI does not yet encode managed background pictures for the room.
-pub const PICTURE_ENCODE_GAP: &str = "The background picture couldn't be sent to the room: encoding is not available in the GPUI host yet.";
+/// The managed folder under the app's user data (`background-assets`).
+pub const MANAGED_BACKGROUND_DIR: &str = "background-assets";
+
+/// When the host could not load or encode the managed picture.
+pub const PICTURE_ENCODE_GAP: &str =
+    "The background picture couldn't be sent to the room: the file couldn't be read or encoded.";
+
+/// File name inside a `videorc-asset://background/…` URL, or the basename of
+/// an absolute managed path. `None` when the path is empty or escapes.
+pub fn managed_background_file_name(managed_asset_path: &str) -> Option<String> {
+    let path = managed_asset_path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let file =
+        if let Some(rest) = path.strip_prefix(crate::scenes::background::MANAGED_BACKGROUND_ROOT) {
+            rest
+        } else if path.starts_with('/')
+            || (path.len() > 2 && path.as_bytes()[1] == b':' && path.as_bytes()[2] == b'\\')
+        {
+            Path::new(path).file_name()?.to_str()?
+        } else {
+            return None;
+        };
+    let decoded = percent_decode(file);
+    if decoded.is_empty()
+        || decoded.contains('/')
+        || decoded.contains('\\')
+        || decoded.contains("..")
+    {
+        return None;
+    }
+    Some(decoded)
+}
+
+/// Roots Electron serves for `videorc-asset://background/…`: imported assets
+/// under user data, then the bundled pictures directory when present.
+pub fn managed_background_roots(user_data_dir: &Path, bundled_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots = vec![user_data_dir.join(MANAGED_BACKGROUND_DIR)];
+    if let Some(bundled) = bundled_dir.filter(|path| path.is_dir()) {
+        roots.push(bundled.to_path_buf());
+    }
+    roots
+}
+
+/// The first regular file named `file_name` under `roots` (no symlinks).
+pub fn resolve_managed_background_file(file_name: &str, roots: &[PathBuf]) -> Option<PathBuf> {
+    if file_name.is_empty()
+        || file_name.contains('/')
+        || file_name.contains('\\')
+        || file_name.contains("..")
+    {
+        return None;
+    }
+    for root in roots {
+        let candidate = root.join(file_name);
+        let Ok(meta) = std::fs::symlink_metadata(&candidate) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            continue;
+        }
+        let Ok(canonical_root) = std::fs::canonicalize(root) else {
+            continue;
+        };
+        let Ok(canonical_file) = std::fs::canonicalize(&candidate) else {
+            continue;
+        };
+        if canonical_file.starts_with(&canonical_root) {
+            return Some(canonical_file);
+        }
+    }
+    None
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
 
 /// A prepared room background (and optional picture asset).
 #[derive(Debug, Clone, PartialEq)]
@@ -358,6 +452,31 @@ mod tests {
         )
         .expect_err("gap");
         assert_eq!(err, PICTURE_ENCODE_GAP);
+    }
+
+    #[test]
+    fn managed_asset_paths_resolve_under_roots() {
+        assert_eq!(
+            managed_background_file_name("videorc-asset://background/code-demo.webp").as_deref(),
+            Some("code-demo.webp")
+        );
+        assert_eq!(
+            managed_background_file_name("videorc-asset://background/bg%207.webp").as_deref(),
+            Some("bg 7.webp")
+        );
+        assert!(managed_background_file_name("videorc-asset://background/../x").is_none());
+
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("beach.webp");
+        std::fs::write(&file, b"webp").unwrap();
+        let roots = managed_background_roots(root.path(), None);
+        assert_eq!(roots, vec![root.path().join(MANAGED_BACKGROUND_DIR)]);
+        let roots = vec![root.path().to_path_buf()];
+        assert_eq!(
+            resolve_managed_background_file("beach.webp", &roots).as_deref(),
+            Some(file.as_path())
+        );
+        assert!(resolve_managed_background_file("../beach.webp", &roots).is_none());
     }
 
     #[test]

@@ -17,6 +17,7 @@
 //! The join chime and the scripted smoke room (P396, P398) wait.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -29,13 +30,16 @@ use videorc_app_core::cloud_scene::{
     cloud_scene_from_native, room_scene_canvas, room_scene_message, room_sources_ready,
 };
 use videorc_app_core::guests::session::ControllerFacts;
+use videorc_app_core::guests::view::stage_with_screen;
+use videorc_app_core::guests::wire::RoomStatus;
 use videorc_app_core::library::cloud::{CloudRecordingStop, CloudRecordingWatch};
 use videorc_app_core::studio::preview_scene::studio_scene_params;
 use videorc_app_core::studio::room_background::{self, LiveClockMemory};
 use videorc_app_core::studio::room_frames::{self, FrameCursor, FramePoll, RemoteSource};
 use videorc_app_core::studio::room_media::{
     self, AVATAR_SET, CAMERA_SET, HTML_SET, MICROPHONE_SET, MONITOR_SET, PRESENTATION_EVENT,
-    PRESENTATION_SET, RETURN_SET, RoomMedia, SCREEN_SET,
+    PRESENTATION_SET, RETURN_SET, RoomMedia, SCREEN_SET, STAGE_SET, host_shape_for_camera,
+    stage_has_screen, stage_set_params,
 };
 use videorc_app_core::studio::room_scene::{
     self, BACKEND_SCENE_COMMIT_WAIT, PreparedBackgroundAsset, RoomSceneCommit, SCENE_COMMIT,
@@ -49,6 +53,7 @@ use videorc_app_core::{BackendEvent, ConnectionState};
 use videorc_kit::toast::{ToastData, ToastKind};
 use videorc_protocol::Scene;
 
+use super::room_picture::{self, background_with_encoded};
 use super::transport::AppStudio;
 use crate::app::bridge::Mirror;
 
@@ -74,6 +79,8 @@ pub struct TalkShowRoomHost {
     studio: Arc<AppStudio>,
     runtime: tokio::runtime::Handle,
     talk_show: Entity<Mirror<TalkShowRoomView>>,
+    /// App user-data root: managed backgrounds live under `background-assets`.
+    user_data_dir: PathBuf,
     recording_watch: CloudRecordingWatch,
     last_host_identity: Option<String>,
     last_recording_active: bool,
@@ -122,6 +129,7 @@ impl TalkShowRoomHost {
         studio: Arc<AppStudio>,
         runtime: tokio::runtime::Handle,
         talk_show: Entity<Mirror<TalkShowRoomView>>,
+        user_data_dir: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&talk_show, |host, mirror, cx| {
@@ -265,6 +273,7 @@ impl TalkShowRoomHost {
             studio,
             runtime,
             talk_show,
+            user_data_dir,
             recording_watch: CloudRecordingWatch::default(),
             last_host_identity: None,
             last_recording_active: false,
@@ -524,6 +533,45 @@ impl TalkShowRoomHost {
     /// stage).
     pub fn stop_screen_share(&self) {
         let _ = self.request(SCREEN_SET, room_media::stop_screen_params());
+    }
+
+    /// Puts the host's published screen on the program (`cloud.stage.set`),
+    /// as Electron's `applySceneToRoom` does when the stage names no screen.
+    pub fn set_stage_with_host_screen(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Result<(), String>> {
+        let Some(status) = self.studio.cloud_now().status else {
+            return gpui::Task::ready(Err("The room is not open.".into()));
+        };
+        let Some(room) = status.room.as_ref().and_then(RoomStatus::from_value) else {
+            return gpui::Task::ready(Err("The room is not open.".into()));
+        };
+        let Some(host) = self
+            .talk_show
+            .read(cx)
+            .value()
+            .host_identity
+            .clone()
+            .filter(|id| !id.is_empty())
+        else {
+            return gpui::Task::ready(Err("The room is not open.".into()));
+        };
+        let camera_shape = self.studio.snapshot().settings.capture.layout.camera_shape;
+        let shape = match camera_shape {
+            videorc_protocol::CameraShape::Circle => Some("circle"),
+            _ => Some("rounded"),
+        };
+        let next = stage_with_screen(&room.stage, Some(&host));
+        let params = stage_set_params(&next, host_shape_for_camera(shape));
+        let request = self.request(STAGE_SET, params);
+        cx.background_executor().spawn(async move {
+            match request.await {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err("The room is not open.".into()),
+            }
+        })
     }
 
     /// The Program monitor on or off: the backend's room takes the runner's
@@ -889,6 +937,7 @@ impl TalkShowRoomHost {
         let live_memory = self.live_background.clone();
         let studio = self.studio.clone();
         let runtime = self.runtime.clone();
+        let user_data_dir = self.user_data_dir.clone();
         let Ok(resolve_params) = serde_json::to_value(&params) else {
             return gpui::Task::ready(None);
         };
@@ -971,30 +1020,49 @@ impl TalkShowRoomHost {
             let mut assets: Vec<PreparedBackgroundAsset> = Vec::new();
             let mut background_note: Option<String> = None;
             if let Some(background) = working_background.as_ref() {
-                let prepared = this
-                    .update(cx, |host, _| {
-                        room_background::prepare_room_background(
-                            background,
-                            now_ms(),
-                            host.live_background.as_ref().or(live_memory.as_ref()),
-                            None,
-                        )
-                    })
-                    .ok()?;
-                match prepared {
-                    Ok((prepared, memory)) => {
-                        scene.background = Some(prepared.background);
-                        if let Some(asset) = prepared.asset {
-                            assets.push(asset);
-                        }
-                        let _ = this.update(cx, |host, _| {
-                            if let Some(memory) = memory {
-                                host.live_background = Some(memory);
-                            }
-                        });
-                    }
+                let picture = match room_picture::encode_working_background_picture(
+                    background,
+                    &user_data_dir,
+                ) {
+                    Ok(picture) => picture,
                     Err(note) => {
-                        background_note = Some(note);
+                        background_note = Some(format!(
+                            "The background couldn't be sent to the room: {note}"
+                        ));
+                        None
+                    }
+                };
+                if background_note.is_none() {
+                    let prepared_bg = match picture.as_ref() {
+                        Some(encoded) => background_with_encoded(background, encoded),
+                        None => background.clone(),
+                    };
+                    let picture_bytes = picture.as_ref().map(|encoded| encoded.bytes.clone());
+                    let prepared = this
+                        .update(cx, |host, _| {
+                            room_background::prepare_room_background(
+                                &prepared_bg,
+                                now_ms(),
+                                host.live_background.as_ref().or(live_memory.as_ref()),
+                                picture_bytes.as_deref(),
+                            )
+                        })
+                        .ok()?;
+                    match prepared {
+                        Ok((prepared, memory)) => {
+                            scene.background = Some(prepared.background);
+                            if let Some(asset) = prepared.asset {
+                                assets.push(asset);
+                            }
+                            let _ = this.update(cx, |host, _| {
+                                if let Some(memory) = memory {
+                                    host.live_background = Some(memory);
+                                }
+                            });
+                        }
+                        Err(note) => {
+                            background_note = Some(note);
+                        }
                     }
                 }
             }
@@ -1013,15 +1081,21 @@ impl TalkShowRoomHost {
                         let screen_published = media
                             .and_then(|media| media.screen.as_ref())
                             .is_some_and(|screen| screen.published);
-                        // Gap: GPUI has no stage-set RPC wired on the host yet;
-                        // stage_has_screen stays false (Electron may setStage).
+                        let on_stage = host
+                            .studio
+                            .cloud_now()
+                            .status
+                            .as_ref()
+                            .and_then(|status| status.room.as_ref())
+                            .and_then(RoomStatus::from_value)
+                            .is_some_and(|room| stage_has_screen(&room.stage));
                         room_sources_ready(
                             translation.needs.camera,
                             translation.needs.screen,
                             camera_published,
                             camera_off,
                             screen_published,
-                            false,
+                            on_stage,
                         )
                     })
                     .ok()?;
@@ -1042,6 +1116,40 @@ impl TalkShowRoomHost {
                     host.toast_room_scene(&message, false, cx);
                 });
                 return None;
+            }
+
+            // The scene's screen box shows the stage's screen: the host's,
+            // unless a guest's is already up (Electron applySceneToRoom).
+            if translation.needs.screen {
+                let uplift = this
+                    .update(cx, |host, _| {
+                        let room = host
+                            .studio
+                            .cloud_now()
+                            .status
+                            .as_ref()
+                            .and_then(|status| status.room.as_ref())
+                            .and_then(RoomStatus::from_value);
+                        let screen_published = host
+                            .room_media
+                            .as_ref()
+                            .and_then(|media| media.screen.as_ref())
+                            .is_some_and(|screen| screen.published);
+                        room.is_some_and(|room| !stage_has_screen(&room.stage)) && screen_published
+                    })
+                    .ok()?;
+                if uplift {
+                    let set = this
+                        .update(cx, |host, cx| host.set_stage_with_host_screen(cx))
+                        .ok()?;
+                    if let Err(error) = set.await {
+                        let message = format!("The room's screen couldn't be put up: {error}");
+                        let _ = this.update(cx, |host, cx| {
+                            host.toast_room_scene(&message, false, cx);
+                        });
+                        return None;
+                    }
+                }
             }
 
             let content = room_scene::scene_content_for_orientation(orientation, scene, animate);
