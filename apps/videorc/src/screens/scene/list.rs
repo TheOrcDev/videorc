@@ -9,14 +9,22 @@ use gpui::{
     AnyElement, Context, FontWeight, KeyDownEvent, SharedString, Window, div, prelude::*, px,
 };
 use serde_json::Value;
+use videorc_app_core::client::methods::ScenePicturesGet;
 use videorc_app_core::desktop::accelerator::{
     accelerator_display_keys, accelerator_label, global_shortcut_conflict_reason,
 };
 use videorc_app_core::nav::PageId;
 use videorc_app_core::scenes::list::{duplicated_scene, scene_with_audio, scene_with_follow};
 use videorc_app_core::scenes::model::scene_audio;
+use videorc_app_core::scenes::pictures::{
+    PictureInputs, PicturesAnswer, picture_key, pictures_answer, pictures_eligible,
+};
 use videorc_app_core::scenes::store::DeleteRule;
+use videorc_app_core::scenes::thumb::{ThumbCorner, ThumbPart, ThumbSize, row_frame, thumb_areas};
+use videorc_app_core::studio::Connection;
+use videorc_app_core::studio::scene_on_stream::SCREEN_PRIVACY_GET_METHOD;
 use videorc_app_core::studio::scenes_section::copy::EDIT_SCENE;
+use videorc_app_core::studio::transport::transport_active;
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::icon::{IconName, icon};
@@ -25,11 +33,12 @@ use videorc_kit::kebab_menu::{KEBAB_HOST, KebabMenu, KebabMenuItem, KebabReveal}
 use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::spinner::Spinner;
-use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::text;
+use videorc_kit::theme::{self, TypeScale, faded_over, hsla, with_alpha};
+use videorc_kit::tokens::{Theme, radius, text};
 use videorc_kit::tooltip::tooltip;
+use videorc_protocol::ScreenPrivacy;
 
-use super::model::{RowMeta, SceneRow, copy};
+use super::model::{RowMeta, RowThumb, SceneRow, copy};
 use super::{SceneNavigate, ScenePage, now_iso};
 
 /// `sceneMoveKeyStep`: ⌥↑ is -1 and ⌥↓ is +1; any other modifier is not a
@@ -166,6 +175,7 @@ impl ScenePage {
         let id = row.id.clone();
 
         let mut line = ListRow::new(SharedString::from(format!("scene-{id}")), row.name.clone())
+            .icon(self.row_thumb(&row.thumb, row.disabled, &t))
             .selected(row.on_stream)
             .disabled(row.disabled)
             .grouped();
@@ -532,5 +542,156 @@ impl ScenePage {
             let added = studio.insert_scenes(&[copy], None, &HashMap::new()).await;
             eprintln!("[videorc-app] Scene duplicate: {added}");
         });
+    }
+}
+
+/// A thumb area's corner in points (Studio's `corner_px`).
+fn corner_px(corner: ThumbCorner) -> f32 {
+    match corner {
+        ThumbCorner::Chip => radius::CHIP,
+        ThumbCorner::Area => radius::CHIP / 2.0,
+        ThumbCorner::Tight => radius::CHIP / 3.0,
+        ThumbCorner::Hair => radius::CHIP / 6.0,
+    }
+}
+
+/// The row picture's well: 16:9 at 24 px high (`aspect-video h-6`).
+const ROW_THUMB_HEIGHT: f32 = 24.0;
+
+impl ScenePage {
+    /// P458: the scene's layout at icon size with its still in the screen
+    /// area, the same picture as its card in Studio; a 9:16 layout stands
+    /// upright in the same 16:9 well.
+    fn row_thumb(&self, thumb: &RowThumb, disabled: bool, t: &Theme) -> AnyElement {
+        let frame = row_frame(thumb.vertical, ROW_THUMB_HEIGHT);
+        let border = 1.0;
+        let areas = thumb_areas(
+            &thumb.preset,
+            thumb.fit,
+            ThumbSize::Compact,
+            frame.width - 2. * border,
+            frame.height - 2. * border,
+        );
+        let still = thumb
+            .picture
+            .as_ref()
+            .and_then(|target| self.row_stills.get(&picture_key(target)).cloned());
+        let screen = hsla(with_alpha(t.foreground, 0.25));
+        let camera = hsla(faded_over(t.foreground, t.glass_solid, 0.55));
+        let rim = hsla(with_alpha(t.background, 0.6));
+        let picture = div()
+            .relative()
+            .flex_none()
+            .w(px(frame.width))
+            .h(px(frame.height))
+            .overflow_hidden()
+            .rounded(px(corner_px(frame.corner)))
+            .border_1()
+            .border_color(hsla(with_alpha(t.foreground, 0.25)))
+            .bg(gpui::linear_gradient(
+                135.,
+                gpui::linear_color_stop(hsla(with_alpha(t.muted, 0.4)), 0.),
+                gpui::linear_color_stop(hsla(with_alpha(t.muted, 0.7)), 1.),
+            ))
+            .children(areas.into_iter().map(|area| {
+                let still = (area.part == ThumbPart::Screen)
+                    .then(|| still.clone())
+                    .flatten();
+                div()
+                    .absolute()
+                    .left(px(area.left))
+                    .top(px(area.top))
+                    .w(px(area.width))
+                    .h(px(area.height))
+                    .overflow_hidden()
+                    .rounded(px(corner_px(area.corner)))
+                    .bg(match area.part {
+                        ThumbPart::Camera => camera,
+                        ThumbPart::Screen => screen,
+                    })
+                    .when(area.rim, |plate| plate.border_1().border_color(rim))
+                    .children(still.map(|still| {
+                        gpui::img(still)
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Cover)
+                    }))
+            }));
+        div()
+            .h(px(ROW_THUMB_HEIGHT))
+            .w(px(ROW_THUMB_HEIGHT * 16. / 9.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(disabled, |well| well.opacity(0.5))
+            .child(picture)
+            .into_any_element()
+    }
+
+    /// The rows' stills (`useScenePictures`): one ask each time the page
+    /// opens; never while recording or live, none while Hide screen holds.
+    pub(super) fn ask_row_stills(&mut self, cx: &mut Context<Self>) {
+        let snapshot = self.studio.snapshot();
+        let connected = matches!(snapshot.connection, Connection::Connected { .. });
+        let targets: Vec<_> = self
+            .model
+            .list
+            .rows
+            .iter()
+            .filter_map(|row| row.thumb.picture.clone())
+            .collect();
+        let busy = transport_active(&snapshot.session);
+        let open = PictureInputs::of(targets.clone(), false, busy);
+        if !pictures_eligible(
+            Some(crate::app::hotkeys::node_platform()),
+            connected,
+            false,
+            &open,
+        ) {
+            return;
+        }
+        let studio = self.studio.clone();
+        let job = self.runtime.spawn(async move {
+            let hidden = studio
+                .backend()
+                .request(SCREEN_PRIVACY_GET_METHOD, Value::Null)
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<ScreenPrivacy>(value).ok())
+                .is_some_and(|privacy| privacy.hidden);
+            let inputs = PictureInputs::of(targets, hidden, busy);
+            if inputs.hidden {
+                return None;
+            }
+            studio
+                .backend()
+                .call::<ScenePicturesGet>(&inputs.params())
+                .await
+                .ok()
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(result)) = job.await else {
+                return;
+            };
+            let PicturesAnswer::Pictures(pictures) = pictures_answer(&result) else {
+                return;
+            };
+            let _ = this.update(cx, |page, cx| {
+                page.row_stills = pictures
+                    .into_iter()
+                    .map(|(key, jpeg)| {
+                        (
+                            key,
+                            std::sync::Arc::new(gpui::Image::from_bytes(
+                                gpui::ImageFormat::Jpeg,
+                                jpeg,
+                            )),
+                        )
+                    })
+                    .collect();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }

@@ -111,6 +111,8 @@ pub struct ScenePage {
     dialogs: Entity<SceneDialogs>,
     /// The global keys: a key the OS refused shows why on its chip (P461).
     hotkeys: crate::app::hotkeys::Hotkeys,
+    /// The scene rows' stills, by `picture_key` (P458).
+    row_stills: std::collections::HashMap<String, Arc<gpui::Image>>,
     /// Hide screen's Add app… popover, and its search.
     add_app_open: bool,
     add_app_search: Entity<InputState>,
@@ -217,6 +219,7 @@ impl ScenePage {
             model,
             dialogs,
             hotkeys,
+            row_stills: Default::default(),
             add_app_open: false,
             add_app_search,
             status_timer: None,
@@ -361,6 +364,7 @@ impl ScenePage {
         let snapshot = self.studio.snapshot();
         if matches!(snapshot.connection, Connection::Connected { .. }) {
             self.load_lists(cx);
+            self.ask_row_stills(cx);
         }
     }
 }

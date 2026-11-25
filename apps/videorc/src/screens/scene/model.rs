@@ -15,12 +15,13 @@ use videorc_app_core::editor::inspector::{
 use videorc_app_core::scenes::list::saved_scene_blocked_reason;
 use videorc_app_core::scenes::model::{SavedScene, scene_audio, scene_source_problems};
 use videorc_app_core::scenes::section::{
-    scene_card_words, scene_cards_camera_gaps, scene_slot_keys_line,
+    scene_card_words, scene_cards_camera_gaps, scene_picture_target, scene_slot_keys_line,
 };
 use videorc_app_core::scenes::store::{DeleteRule, can_delete_scene};
-use videorc_app_core::scenes::v2::SceneShows;
+use videorc_app_core::scenes::v2::{Orientation, SceneShows, layout_preset};
 use videorc_app_core::studio::scenes_section::scene_keeps_audio;
 use videorc_app_core::studio::transport::transport_active;
+use videorc_protocol::scene_pictures::ScenePictureTarget;
 
 /// The scene list's words (`scene-entries.tsx`, `scene-dialogs.tsx`,
 /// `lib/edit-scene.ts`), byte for byte.
@@ -112,9 +113,21 @@ pub enum RowMeta {
     Text(String),
 }
 
+/// A row's picture (P458): the scene's layout at icon size, its still in
+/// the screen area (`SceneRowThumb`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowThumb {
+    pub preset: String,
+    pub vertical: bool,
+    /// A 9:16 layout's screen fits rather than fills.
+    pub fit: bool,
+    pub picture: Option<ScenePictureTarget>,
+}
+
 /// One scene row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneRow {
+    pub thumb: RowThumb,
     pub id: String,
     pub name: String,
     /// 0-based place in the library.
@@ -258,7 +271,16 @@ impl SceneModel {
                     _ => None,
                 };
                 let on_stream = view.on_stream_id.as_deref() == Some(scene.id.as_str());
+                let layout = scene.visual.get("layout").unwrap_or(&Value::Null);
+                let preset = layout_preset(layout).to_string();
+                let thumb = RowThumb {
+                    vertical: Orientation::of_preset(&preset) == Orientation::Vertical,
+                    fit: layout.get("verticalScreenFraming").and_then(Value::as_str) == Some("fit"),
+                    picture: scene_picture_target(&scene.visual),
+                    preset,
+                };
                 SceneRow {
+                    thumb,
                     change_screen_reason: if on_stream {
                         snapshot.source_reasons[0].clone()
                     } else {
