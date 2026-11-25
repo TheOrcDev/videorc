@@ -100,6 +100,7 @@ pub mod preview_scene;
 pub mod recordings_folder;
 mod recordings_folder_actions;
 pub mod scene_editor;
+pub mod scene_on_stream;
 pub mod scene_switch;
 pub mod scenes;
 pub mod scenes_section;
