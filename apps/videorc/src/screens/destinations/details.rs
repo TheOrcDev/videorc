@@ -38,6 +38,7 @@ impl DestinationsPanel {
                     draft.title = value;
                 });
                 this.details_dirty = true;
+                this.title_checked = true;
                 cx.notify();
             }
         })
@@ -160,7 +161,13 @@ impl DestinationsPanel {
                 .disabled(disabled || state.save_pending)
                 .on_click({
                     let entity = entity.clone();
-                    move |_, _, cx| entity.update(cx, |this, _| this.save_details())
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.title_checked = true;
+                            this.save_details();
+                            cx.notify();
+                        })
+                    }
                 }),
         );
         section = section.action(action);
@@ -169,10 +176,17 @@ impl DestinationsPanel {
             return section.into_any_element();
         };
 
+        // Electron's `titleRequired={titleChecked}`: an empty title is no
+        // error until the streamer has edited it or pressed Save (V-3).
+        let title_empty = state
+            .draft
+            .as_ref()
+            .is_none_or(|draft| draft.title.trim().is_empty());
         let title_issue = state
             .validation
             .as_ref()
             .and_then(|v| v.issue("title", None))
+            .filter(|_| self.title_checked || !title_empty)
             .map(|i| i.message.clone());
         let description_issue = state
             .validation
