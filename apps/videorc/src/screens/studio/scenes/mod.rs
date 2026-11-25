@@ -1430,10 +1430,12 @@ impl ScenesSection {
             .disabled(gallery.orientation_locked.is_some())
             .option(
                 Segment::new(copy::HORIZONTAL, copy::HORIZONTAL_SEGMENT)
+                    .child(icon(IconName::Monitor, 16., muted))
                     .tooltip(copy::HORIZONTAL_TOOLTIP),
             )
             .option(
                 Segment::new(copy::VERTICAL, copy::VERTICAL_SEGMENT)
+                    .child(icon(IconName::DeviceMobile, 16., muted))
                     .tooltip(copy::VERTICAL_TOOLTIP),
             )
             .on_change({
