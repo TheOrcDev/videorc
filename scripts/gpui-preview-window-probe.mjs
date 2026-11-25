@@ -29,9 +29,11 @@ import { join, resolve } from 'node:path'
 import {
   TOGGLE_PREVIEW_MODIFIERS,
   describePreview,
+  enableTestPattern,
   launchGpuiApp,
   sleep,
-  waitUntil
+  waitUntil,
+  warmUiTree
 } from './lib/gpui-preview-probe.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -115,15 +117,14 @@ export async function runGpuiPreviewWindowProbe() {
     return detail
   }
 
-  let canFloat = false
   try {
     await step('docked in the Studio', async () => {
-      await command('enable-synthetic-source', { settleMs: 500 })
-      const { value } = await settleAt(
+      await enableTestPattern(command)
+      await warmUiTree(ui)
+      await settleAt(
         'the docked preview never presented',
         (seen) => presenting(seen) && seen.mode === 'docked'
       )
-      canFloat = value.canFloat === true
       const probe = await rpc('preview.debug.sample', { rects: [GRID[5]] }).catch((error) => ({
         error: error.message
       }))
@@ -150,7 +151,7 @@ export async function runGpuiPreviewWindowProbe() {
     })
 
     await step('the Preview window: opened, moved, and sized off 16:9', async () => {
-      if (!canFloat) {
+      if ((await state())?.canFloat !== true) {
         return {
           skip: true,
           reason: 'the Preview window opens only on macOS with the native preview'
@@ -174,7 +175,7 @@ export async function runGpuiPreviewWindowProbe() {
     })
 
     await step('closed by its button, reopened with ⌘P, docked back', async () => {
-      if (!canFloat) {
+      if ((await state())?.canFloat !== true) {
         return {
           skip: true,
           reason: 'the Preview window opens only on macOS with the native preview'

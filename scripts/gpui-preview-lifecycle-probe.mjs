@@ -31,10 +31,12 @@ import { join, resolve } from 'node:path'
 import {
   TOGGLE_PREVIEW_MODIFIERS,
   describePreview,
+  enableTestPattern,
   launchGpuiApp,
   logLinesSince,
   presentedAdvance,
-  waitUntil
+  waitUntil,
+  warmUiTree
 } from './lib/gpui-preview-probe.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -86,7 +88,8 @@ export async function runGpuiPreviewLifecycleProbe() {
   let canFloat = false
   try {
     await step('docked and presenting', async () => {
-      await command('enable-synthetic-source', { settleMs: 500 })
+      await enableTestPattern(command)
+      await warmUiTree(ui)
       const { value } = await waitUntil(
         'the docked preview never presented',
         state,
@@ -149,7 +152,7 @@ export async function runGpuiPreviewLifecycleProbe() {
     })
 
     await step('the Preview window: ⌘P, its close button, and docking back', async () => {
-      if (!canFloat) {
+      if ((await state())?.canFloat !== true) {
         return {
           skip: true,
           reason: 'the Preview window opens only on macOS with the native preview'
