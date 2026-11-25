@@ -3,10 +3,10 @@
 //! window, sending, and Sidekick's cards. Pure state and rules; the window is
 //! the app's.
 //!
-//! Still to land in S1.6e: the activity pane, the composer, the stats and
-//! status bar, the dashboard, the chat commands and the window prefs (they
-//! need the Studio, S1.6a, behind a trait).
+//! Still to land in S1.6e: the composer, chat commands and the window prefs
+//! (they need the Studio, S1.6a, behind a trait).
 
+pub mod activity;
 pub mod buddy;
 pub mod copy;
 pub mod dashboard;
