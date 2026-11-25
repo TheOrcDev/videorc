@@ -108,7 +108,21 @@ const APP_ID: &str = "dev.theorcdev.videorc";
 
 fn main() -> Result<()> {
     let args = args::parse()?;
-    let root = args::workspace_root(args.workspace.clone())?;
+    // A package's resources (Electron's `process.resourcesPath`), when the
+    // app runs from one: the bundled pictures, pet packs and starter sounds
+    // load from there, and the run needs no checkout.
+    let exe = std::env::current_exe().context("this app's executable")?;
+    let resources =
+        videorc_app_core::bundled::packaged_resources_dir(&exe, |name| std::env::var(name).ok());
+    // A package never adopts a checkout it merely finds (it would share a
+    // dev app's owned-process ledger); see `bundled::run_root`.
+    let root = videorc_app_core::bundled::run_root(
+        args::explicit_workspace_root(args.workspace.clone()),
+        resources.as_deref(),
+        &exe,
+        args::discovered_workspace_root,
+    )
+    .ok_or_else(|| anyhow::anyhow!("could not find the workspace root; pass --workspace"))?;
     let paths = args::app_paths(&args);
     std::fs::create_dir_all(&paths.user_data_dir)
         .with_context(|| format!("could not create {}", paths.user_data_dir.display()))?;
@@ -217,9 +231,6 @@ fn main() -> Result<()> {
     // packs, starter sounds): this checkout's in a dev build, the package's
     // resources once there is one. The backend gets the managed roots
     // Electron's main sets, so bundled and imported pictures resolve.
-    let resources = std::env::current_exe().ok().and_then(|exe| {
-        videorc_app_core::bundled::packaged_resources_dir(&exe, |name| std::env::var(name).ok())
-    });
     let bundled = videorc_app_core::bundled::init(
         videorc_app_core::bundled::BundledAssets::locate(&root, resources.as_deref()),
     );
