@@ -980,6 +980,10 @@ impl Preview {
         let visible = !self.closed && (self.mode == WindowMode::Floating || self.docked_shown);
         if let Some(native) = self.native.as_mut() {
             native.element.set_visible(visible);
+            // A closed Preview presents nothing and the backend renders no
+            // preview frames (Electron destroys its host on close); a Preview
+            // that is only off screen (another page) keeps its surface.
+            native.element.park(self.closed);
         }
     }
 
@@ -1072,15 +1076,80 @@ impl Preview {
             ),
         }
         self.floating = Some(handle);
-        if self.attach_to(Host::Floating) {
+        let attached = self.attach_to(Host::Floating);
+        if attached {
             self.mode = WindowMode::Floating;
             self.apply_visibility();
             self.logger
                 .log(Level::Info, "[preview] the Preview is in its own window");
+            // The window opened hidden and draws nothing until it shows
+            // (gpui's display link waits for a visible window), so its canvas
+            // can't place the layer yet: place it from the window's viewport
+            // here, where the canvas will (the whole content).
+            let placed = handle.update(cx, |_, window, cx| {
+                let slot = Bounds {
+                    origin: gpui::point(px(0.), px(0.)),
+                    size: window.viewport_size(),
+                };
+                (slot, macos::geometry_of(window, slot, cx))
+            });
+            if let Ok((slot, geometry)) = placed {
+                self.place(Host::Floating, slot, geometry);
+            }
         }
         // The window's canvas places the layer on its next draw.
         let _ = handle.update(cx, |_, window, _| window.refresh());
+        self.reveal_floating(handle, attached, cx);
         cx.notify();
+    }
+
+    /// The Preview window shows once the layer has presented a frame in it,
+    /// as the docked slot shows its video only from its first frame: never a
+    /// black window first (L6, 2026-11-25). A window without the video (no
+    /// host view) shows at once with its words; one whose frame doesn't come
+    /// shows after [`REVEAL_DEADLINE`] anyway, with "Opening preview…" or the
+    /// failure, so a slow or failed Preview is never an invisible one.
+    #[cfg(target_os = "macos")]
+    fn reveal_floating(
+        &self,
+        handle: WindowHandle<floating::FloatingPreview>,
+        attached: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let from = self
+            .native
+            .as_ref()
+            .filter(|_| attached)
+            .map(|native| native.element.telemetry().presented_frame_id);
+        let Some(from) = from else {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            return;
+        };
+        let started = std::time::Instant::now();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            loop {
+                let presented = this.update(cx, |preview, _| {
+                    preview
+                        .native
+                        .as_ref()
+                        .map(|native| native.element.telemetry().presented_frame_id)
+                });
+                match presented {
+                    // The Preview is gone (quit): nothing to show.
+                    Err(_) => return,
+                    Ok(Some(id)) if id <= from => {}
+                    // A frame presented here, or the native path went down.
+                    Ok(_) => break,
+                }
+                if started.elapsed() >= REVEAL_DEADLINE {
+                    break;
+                }
+                cx.background_executor().timer(REVEAL_POLL).await;
+            }
+            // A window docked or closed meanwhile is gone: the update fails.
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        })
+        .detach();
     }
 
     /// Docks the preview back and closes its window (the Studio's button).
@@ -1158,6 +1227,13 @@ impl Preview {
     }
 }
 
+/// The longest the Preview window stays hidden waiting for its first frame.
+#[cfg(target_os = "macos")]
+const REVEAL_DEADLINE: std::time::Duration = std::time::Duration::from_millis(1000);
+/// How often the hidden window looks for that frame (about a display frame).
+#[cfg(target_os = "macos")]
+const REVEAL_POLL: std::time::Duration = std::time::Duration::from_millis(16);
+
 /// Opens the Preview window, outside any update of the Preview entity (see
 /// [`Preview::float`]), and hands it to the Preview.
 #[cfg(target_os = "macos")]
@@ -1185,6 +1261,9 @@ fn open_floating(preview: WeakEntity<Preview>, cx: &mut App) {
             // goes to the background. Keep on top raises its level.
             kind: WindowKind::Normal,
             window_min_size: Some(size(px(frame::MIN_WIDTH), px(frame::MIN_HEIGHT))),
+            // Hidden until the layer has presented in it
+            // (`Preview::reveal_floating`): never a black window first.
+            show: false,
             ..Default::default()
         },
         move |window, cx| floating::FloatingPreview::build(builder, remembered, window, cx),
