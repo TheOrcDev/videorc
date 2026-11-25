@@ -6,7 +6,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, Bounds, IntoElement, RenderImage, SharedString, Window, canvas, div, prelude::*, px,
+    App, Bounds, ElementId, IntoElement, RenderImage, SharedString, Window, canvas, div,
+    prelude::*, px,
 };
 
 use crate::{
@@ -30,6 +31,7 @@ const YT_VIEW: &str = "102.6875 119.167969 396 277.402343";
 
 #[derive(IntoElement)]
 pub struct PlatformGlyph {
+    id: ElementId,
     platform: ChatPlatform,
     appearance: Option<Appearance>,
 }
@@ -37,9 +39,16 @@ pub struct PlatformGlyph {
 impl PlatformGlyph {
     pub fn new(platform: ChatPlatform) -> Self {
         PlatformGlyph {
+            id: ("platform-glyph", platform as usize).into(),
             platform,
             appearance: None,
         }
+    }
+
+    /// Override the stable element ID when repeating a platform under one parent.
+    pub fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = id.into();
+        self
     }
 
     /// Draws in this appearance instead of the window's (the gallery).
@@ -107,6 +116,7 @@ impl RenderOnce for PlatformGlyph {
         let t = resolve(self.appearance, window, cx);
         let label: SharedString = self.platform.label().into();
         let slot = div()
+            .id(self.id)
             .flex()
             .flex_none()
             .w(px(SLOT_W))
