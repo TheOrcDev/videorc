@@ -139,6 +139,26 @@ pub enum IconName {
     WaveformSlash,
     /// `DesktopIcon` (Phosphor's Desktop).
     Desktop,
+    /// `EyeSlashIcon` for Screen hidden (Phosphor's EyeSlash).
+    EyeSlash,
+    /// `ArrowDownIcon` for jump chips (Phosphor's ArrowDown).
+    ArrowDown,
+    /// YouTube platform mark.
+    YoutubeLogo,
+    /// Twitch platform mark.
+    TwitchLogo,
+    /// X platform mark.
+    XLogo,
+    /// Instagram platform mark.
+    InstagramLogo,
+    /// TikTok platform mark.
+    TiktokLogo,
+    /// Facebook platform mark.
+    FacebookLogo,
+    /// Kick platform mark (Simple Icons, CC0).
+    KickLogo,
+    /// `StopIcon` at Phosphor's fill weight.
+    StopFill,
 }
 
 impl IconName {
@@ -212,6 +232,16 @@ impl IconName {
             IconName::FolderOpen => include_bytes!("../icons/folder-open.svg"),
             IconName::WaveformSlash => include_bytes!("../icons/waveform-slash.svg"),
             IconName::Desktop => include_bytes!("../icons/desktop.svg"),
+            IconName::EyeSlash => include_bytes!("../icons/eye-slash.svg"),
+            IconName::ArrowDown => include_bytes!("../icons/arrow-down.svg"),
+            IconName::YoutubeLogo => include_bytes!("../icons/youtube-logo.svg"),
+            IconName::TwitchLogo => include_bytes!("../icons/twitch-logo.svg"),
+            IconName::XLogo => include_bytes!("../icons/x-logo.svg"),
+            IconName::InstagramLogo => include_bytes!("../icons/instagram-logo.svg"),
+            IconName::TiktokLogo => include_bytes!("../icons/tiktok-logo.svg"),
+            IconName::FacebookLogo => include_bytes!("../icons/facebook-logo.svg"),
+            IconName::KickLogo => include_bytes!("../icons/kick-logo.svg"),
+            IconName::StopFill => include_bytes!("../icons/stop-fill.svg"),
         }
     }
 }

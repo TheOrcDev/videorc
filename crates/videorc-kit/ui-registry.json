@@ -44,7 +44,9 @@
     "checkbox",
     "textarea",
     "separator",
-    "collapsible"
+    "collapsible",
+    "avatar",
+    "chat-platform"
   ],
   "keepLocal": []
 }

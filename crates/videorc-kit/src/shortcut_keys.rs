@@ -47,10 +47,26 @@ impl ShortcutKeys {
     /// A fixed keystroke sequence in GPUI's syntax (`cmd-shift-j`), for the
     /// docs and the gallery; screens use `for_action`.
     pub fn keystrokes(source: &'static str) -> Self {
+        Self::keystrokes_owned(source)
+    }
+
+    /// Runtime GPUI keystrokes (`cmd-shift-j`), for tooltips fed by a live
+    /// keymap without `Box::leak`.
+    pub fn keystrokes_owned(source: impl Into<SharedString>) -> Self {
+        let source = source.into();
         let strokes = source
             .split_whitespace()
             .filter_map(|stroke| Keystroke::parse(stroke).ok())
             .collect();
+        Self::from_source(Source::Keystrokes(strokes))
+    }
+
+    /// An Electron accelerator (`CmdOrCtrl+Shift+J`) printed the way the
+    /// platform's menus do. Runtime string; for tooltips from a live keymap.
+    pub fn accelerator(source: impl Into<SharedString>) -> Self {
+        let source = source.into();
+        let mac = cfg!(target_os = "macos");
+        let strokes = parse_accelerator(&source, mac).into_iter().collect();
         Self::from_source(Source::Keystrokes(strokes))
     }
 
@@ -172,6 +188,63 @@ fn key_label(key: &str, mac: bool) -> String {
     }
 }
 
+/// Electron accelerator (`CmdOrCtrl+Shift+J`) → GPUI [`Keystroke`]s for this
+/// platform. Several strokes may be space-separated in one accelerator.
+pub fn parse_accelerator(source: &str, mac: bool) -> Vec<Keystroke> {
+    source
+        .split_whitespace()
+        .filter_map(|stroke| parse_one_accelerator(stroke, mac))
+        .collect()
+}
+
+fn parse_one_accelerator(source: &str, mac: bool) -> Option<Keystroke> {
+    let mut modifiers = Modifiers::default();
+    let mut key = None::<String>;
+    for part in source.split('+') {
+        let lower = part.trim().to_ascii_lowercase();
+        match lower.as_str() {
+            "command" | "cmd" | "commandorcontrol" | "cmdorctrl" => {
+                if mac {
+                    modifiers.platform = true;
+                } else {
+                    modifiers.control = true;
+                }
+            }
+            "control" | "ctrl" => modifiers.control = true,
+            "alt" | "option" => modifiers.alt = true,
+            "shift" => modifiers.shift = true,
+            "super" | "meta" | "win" => modifiers.platform = true,
+            "" => {}
+            other => {
+                let aliased = match other {
+                    "return" => "enter",
+                    "esc" => "escape",
+                    "plus" => "+",
+                    _ => other,
+                };
+                key = Some(aliased.to_owned());
+            }
+        }
+    }
+    let key = key?;
+    // Rebuild through GPUI's parser so key aliases stay consistent.
+    let mut parts = Vec::new();
+    if modifiers.control {
+        parts.push("ctrl");
+    }
+    if modifiers.alt {
+        parts.push("alt");
+    }
+    if modifiers.shift {
+        parts.push("shift");
+    }
+    if modifiers.platform {
+        parts.push("cmd");
+    }
+    parts.push(key.as_str());
+    Keystroke::parse(&parts.join("-")).ok()
+}
+
 /// A keystroke sequence as the platform's menus print it: macOS glyphs in
 /// system order (⌃⌥⇧⌘) with no separator, words joined by "+" elsewhere;
 /// strokes in a sequence are spaced.
@@ -217,6 +290,21 @@ mod tests {
         assert_eq!(read("cmd-enter", true), "⌘↵");
         assert_eq!(read("ctrl-alt-shift-cmd-k", true), "⌃⌥⇧⌘K");
         assert_eq!(read("space", true), "Space");
+    }
+
+    #[test]
+    fn parses_electron_accelerators() {
+        let mac = parse_accelerator("CmdOrCtrl+Shift+J", true);
+        assert_eq!(mac.len(), 1);
+        assert_eq!(
+            label([(mac[0].modifiers, mac[0].key.as_str())], true),
+            "⇧⌘J"
+        );
+        let win = parse_accelerator("CmdOrCtrl+Shift+J", false);
+        assert_eq!(
+            label([(win[0].modifiers, win[0].key.as_str())], false),
+            "Ctrl+Shift+J"
+        );
     }
 
     #[test]

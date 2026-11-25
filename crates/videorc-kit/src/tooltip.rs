@@ -12,9 +12,16 @@ use crate::{
     tokens::radius,
 };
 
+enum ShortcutSource {
+    /// GPUI keystroke syntax (`cmd-shift-j`).
+    Keystrokes(SharedString),
+    /// Electron accelerator (`CmdOrCtrl+Shift+J`).
+    Accelerator(SharedString),
+}
+
 pub struct Tooltip {
     text: SharedString,
-    shortcut: Option<&'static str>,
+    shortcut: Option<ShortcutSource>,
 }
 
 impl Render for Tooltip {
@@ -30,6 +37,10 @@ impl Render for Tooltip {
             drop: t.glass_float_drop,
             radius: radius::ROW,
         };
+        let chip = self.shortcut.as_ref().map(|source| match source {
+            ShortcutSource::Keystrokes(keys) => ShortcutKeys::keystrokes_owned(keys.clone()),
+            ShortcutSource::Accelerator(accel) => ShortcutKeys::accelerator(accel.clone()),
+        });
         gpui_base::Tooltip::new("tooltip").child(
             floating(
                 glass,
@@ -40,7 +51,7 @@ impl Render for Tooltip {
                     .items_center()
                     .gap(px(6.0))
                     .child(div().child(self.text.clone()))
-                    .children(self.shortcut.map(ShortcutKeys::keystrokes)),
+                    .children(chip),
             )
             .max_w(px(320.0))
             .px(px(8.0))
@@ -68,16 +79,35 @@ pub fn tooltip(
     }
 }
 
-/// A tooltip with its shortcut's key chip (GPUI keystroke syntax).
+/// A tooltip with a GPUI keystroke chip (`cmd-shift-j`). Accepts a runtime
+/// string so screens need not `Box::leak` a live keymap binding.
 pub fn tooltip_with_shortcut(
     text: impl Into<SharedString>,
-    shortcut: &'static str,
+    shortcut: impl Into<SharedString>,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     let text = text.into();
+    let shortcut = shortcut.into();
     move |_, cx| {
         cx.new(|_| Tooltip {
             text: text.clone(),
-            shortcut: Some(shortcut),
+            shortcut: Some(ShortcutSource::Keystrokes(shortcut.clone())),
+        })
+        .into()
+    }
+}
+
+/// A tooltip with an Electron accelerator chip (`CmdOrCtrl+Shift+J`), for
+/// bindings that still arrive in accelerator form from the live keymap.
+pub fn tooltip_with_accelerator(
+    text: impl Into<SharedString>,
+    accelerator: impl Into<SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text = text.into();
+    let accelerator = accelerator.into();
+    move |_, cx| {
+        cx.new(|_| Tooltip {
+            text: text.clone(),
+            shortcut: Some(ShortcutSource::Accelerator(accelerator.clone())),
         })
         .into()
     }
