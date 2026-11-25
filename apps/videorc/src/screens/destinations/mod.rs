@@ -1,24 +1,41 @@
-//! Destinations ⌘6 (plan 260 Phase 3, L4): Setup from
-//! `videorc_app_core::livestream::setup`, Upcoming and Discord as stubs until
-//! their slices land. Words from `livestream::copy`.
+//! Destinations ⌘6 (plan 260 Phase 3, Sweep A): Setup trail (destinations,
+//! stream details, chat commands, output quality, Videorc Cloud, ready),
+//! Upcoming, and Discord. Words from `livestream::copy` and section modules.
+
+mod chat_commands;
+mod cloud;
+mod details;
+mod discord;
+mod quality;
+mod ready;
+mod upcoming;
 
 use std::sync::Arc;
 
-use gpui::{Context, Window, div, prelude::*, px};
+use gpui::{Context, Entity, SharedString, Window, div, prelude::*, px};
 use serde_json::json;
+use videorc_app_core::livestream::DetailsState;
+use videorc_app_core::livestream::cloud_view::{self, SectionView as CloudSectionView};
 use videorc_app_core::livestream::copy as page_copy;
+use videorc_app_core::livestream::discord::{DiscordMemory, discord_view};
+use videorc_app_core::livestream::ready::ReadyView;
 use videorc_app_core::livestream::setup::{
     self as setup, DestinationView, PageMemory, SetupInput, SetupView, Tone,
 };
 use videorc_app_core::livestream::targets::TargetPatch;
+use videorc_app_core::studio::chat_commands_store::ChatCommandsStore;
+use videorc_app_core::studio::scheduled::ScheduledState;
 use videorc_app_core::{BackendClient, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::icon::{IconName, icon};
+use videorc_kit::input::{Input, InputState};
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::scroll_area::ScrollArea;
+use videorc_kit::segmented_control::{Segment, SegmentedControl};
+use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
 use videorc_kit::switch::Switch;
 use videorc_kit::tabs::Tabs;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
@@ -27,7 +44,7 @@ use videorc_kit::tokens::{size, text};
 pub type AppStudio = Studio<BackendClient>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DestinationsTab {
+pub(crate) enum DestinationsTab {
     Setup,
     Upcoming,
     Discord,
@@ -67,6 +84,19 @@ pub struct DestinationsPanel {
     tab: DestinationsTab,
     memory: PageMemory,
     setup: SetupView,
+    cloud: Option<CloudSectionView>,
+    details: DetailsState,
+    details_inputs: Option<details::DetailsInputs>,
+    details_dirty: bool,
+    chat_commands: ChatCommandsStore,
+    command_editor: Option<chat_commands::CommandEditor>,
+    ready: ReadyView,
+    scheduled: ScheduledState,
+    discord_memory: DiscordMemory,
+    discord_paste: Option<Entity<InputState>>,
+    /// Per-destination draft for the stream key field while expanded.
+    manual_key_drafts: std::collections::BTreeMap<String, Entity<InputState>>,
+    manual_url_drafts: std::collections::BTreeMap<String, Entity<InputState>>,
 }
 
 impl DestinationsPanel {
@@ -82,12 +112,20 @@ impl DestinationsPanel {
             let mut platforms_rx = studio_watch.platforms();
             let mut telemetry_rx = studio_watch.telemetry();
             let mut go_live_rx = studio_watch.go_live();
+            let mut cloud_rx = studio_watch.cloud();
+            let mut details_rx = studio_watch.details();
+            let mut chat_rx = studio_watch.chat_commands();
+            let mut scheduled_rx = studio_watch.scheduled();
             loop {
                 tokio::select! {
                     changed = studio_rx.changed() => if changed.is_err() { break },
                     changed = platforms_rx.changed() => if changed.is_err() { break },
                     changed = telemetry_rx.changed() => if changed.is_err() { break },
                     changed = go_live_rx.changed() => if changed.is_err() { break },
+                    changed = cloud_rx.changed() => if changed.is_err() { break },
+                    changed = details_rx.changed() => if changed.is_err() { break },
+                    changed = chat_rx.changed() => if changed.is_err() { break },
+                    changed = scheduled_rx.changed() => if changed.is_err() { break },
                 }
                 let _ = this.update(cx, |panel, cx| {
                     panel.rebuild(cx);
@@ -95,13 +133,32 @@ impl DestinationsPanel {
             }
         })
         .detach();
-        Self {
+        let mut panel = Self {
             studio,
             runtime,
             tab: DestinationsTab::Setup,
             memory: PageMemory::default(),
             setup,
-        }
+            cloud: None,
+            details: DetailsState::default(),
+            details_inputs: None,
+            details_dirty: false,
+            chat_commands: ChatCommandsStore::default(),
+            command_editor: None,
+            ready: ReadyView {
+                rows: Vec::new(),
+                not_ready: Vec::new(),
+                retry: false,
+                warning: None,
+            },
+            scheduled: ScheduledState::default(),
+            discord_memory: DiscordMemory::default(),
+            discord_paste: None,
+            manual_key_drafts: std::collections::BTreeMap::new(),
+            manual_url_drafts: std::collections::BTreeMap::new(),
+        };
+        panel.rebuild_from_studio();
+        panel
     }
 
     fn build_setup(studio: &AppStudio, memory: &PageMemory) -> SetupView {
@@ -124,10 +181,35 @@ impl DestinationsPanel {
         )
     }
 
+    fn rebuild_from_studio(&mut self) {
+        self.setup = Self::build_setup(&self.studio, &self.memory);
+        let cloud = self.studio.cloud_now();
+        self.cloud = cloud_view::section_view(
+            cloud.status.as_ref(),
+            self.studio.snapshot().session.phase.is_active(),
+            self.studio.cloud_upload_plan().as_ref(),
+        );
+        self.details = self.studio.details_now();
+        self.chat_commands = self.studio.chat_commands_now();
+        self.scheduled = self.studio.scheduled_now();
+        self.ready = self.build_ready();
+    }
+
     fn rebuild(&mut self, cx: &mut Context<Self>) {
-        let next = Self::build_setup(&self.studio, &self.memory);
-        if self.setup != next {
-            self.setup = next;
+        let before_setup = self.setup.clone();
+        let before_cloud = self.cloud.clone();
+        let before_details = self.details.clone();
+        let before_chat = self.chat_commands.clone();
+        let before_scheduled = self.scheduled.clone();
+        let before_ready = self.ready.clone();
+        self.rebuild_from_studio();
+        if self.setup != before_setup
+            || self.cloud != before_cloud
+            || self.details != before_details
+            || self.chat_commands != before_chat
+            || self.scheduled != before_scheduled
+            || self.ready != before_ready
+        {
             cx.notify();
         }
     }
@@ -135,6 +217,12 @@ impl DestinationsPanel {
     fn set_tab(&mut self, tab: DestinationsTab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.tab = tab;
+            if tab == DestinationsTab::Upcoming {
+                let studio = self.studio.clone();
+                self.runtime.spawn(async move {
+                    studio.scheduled_focus().await;
+                });
+            }
             cx.notify();
         }
     }
@@ -179,12 +267,104 @@ impl DestinationsPanel {
         self.rebuild(cx);
     }
 
+    fn set_destination_quality(&self, id: String, preset: String) {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            studio
+                .patch_stream_target(&id, TargetPatch::quality(&preset))
+                .await;
+        });
+    }
+
+    fn set_auth_mode(&self, id: String, mode: String) {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            studio
+                .patch_stream_target(&id, TargetPatch::default().set("authMode", json!(mode)))
+                .await;
+        });
+    }
+
+    fn set_url_mode(&self, id: String, full_url: bool) {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            studio
+                .patch_stream_target(
+                    &id,
+                    TargetPatch::default().set(
+                        "urlMode",
+                        json!(if full_url {
+                            "full-url"
+                        } else {
+                            "server-and-key"
+                        }),
+                    ),
+                )
+                .await;
+        });
+    }
+
+    fn save_manual_url(&self, id: String, url: String) {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            studio
+                .patch_stream_target(&id, TargetPatch::default().set("serverUrl", json!(url)))
+                .await;
+        });
+    }
+
+    fn save_manual_key(&self, id: String, key: String) {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            studio.save_manual_stream_key(&id, &key).await;
+        });
+    }
+
+    fn restore_manual_key(&self, id: String) {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            studio.restore_previous_stream_key(&id).await;
+        });
+    }
+
+    fn ensure_manual_inputs(
+        &mut self,
+        dest: &DestinationView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(manual) = &dest.manual {
+            if !self.manual_url_drafts.contains_key(&dest.id) {
+                let value = manual.server_value.clone();
+                let input = cx.new(|cx| {
+                    let mut state = InputState::new(window, cx);
+                    state.set_value(value, window, cx);
+                    state
+                });
+                self.manual_url_drafts.insert(dest.id.clone(), input);
+            }
+            if !self.manual_key_drafts.contains_key(&dest.id) {
+                let value = manual.key_value.clone();
+                let input = cx.new(|cx| {
+                    let mut state = InputState::new(window, cx);
+                    state.set_value(value, window, cx);
+                    state
+                });
+                self.manual_key_drafts.insert(dest.id.clone(), input);
+            }
+        }
+    }
+
     fn destination_card(
-        &self,
+        &mut self,
         dest: &DestinationView,
         t: &videorc_kit::tokens::Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        if dest.expanded {
+            self.ensure_manual_inputs(dest, window, cx);
+        }
         let id = dest.id.clone();
         let enabled = dest.enabled;
         let switch_enabled = dest.switch_enabled && !dest.disabled;
@@ -284,6 +464,13 @@ impl DestinationsPanel {
                         .child(line.clone()),
                 );
             }
+            if let Some(quota) = &dest.quota_paused {
+                detail = detail.child(
+                    Alert::new(format!("dest-quota-{}", dest.id))
+                        .variant(AlertVariant::Warning)
+                        .title(quota.clone()),
+                );
+            }
             if let Some((guidance, link)) = &dest.guidance {
                 detail = detail.child(
                     div()
@@ -300,6 +487,66 @@ impl DestinationsPanel {
                             .on_click(move |_, _, cx| cx.open_url(&url)),
                     );
                 }
+            }
+            if let Some((labels, selected)) = &dest.auth_mode {
+                let mut control = SegmentedControl::new(format!("dest-auth-{}", dest.id))
+                    .small(true)
+                    .accessibility_label(page_copy::CONNECT_WITH)
+                    .disabled(dest.disabled)
+                    .value(
+                        labels
+                            .get(*selected as usize)
+                            .cloned()
+                            .map(SharedString::from),
+                    )
+                    .on_change({
+                        let entity = entity.clone();
+                        let id = id.clone();
+                        move |value, _, cx| {
+                            let mode = if value.as_ref().contains("Sign in") {
+                                "oauth"
+                            } else {
+                                "manual-rtmp"
+                            };
+                            entity.update(cx, |this, _| {
+                                this.set_auth_mode(id.clone(), mode.to_string())
+                            });
+                        }
+                    });
+                for label in labels {
+                    control = control.option(Segment::new(label.clone(), label.clone()));
+                }
+                detail = detail.child(
+                    SettingsRow::new(
+                        format!("dest-auth-row-{}", dest.id),
+                        page_copy::CONNECT_WITH,
+                    )
+                    .child(control),
+                );
+            }
+            if dest.quality.options.len() > 1 {
+                let quality = dest.quality.clone();
+                let dest_id = dest.id.clone();
+                detail = detail.child(
+                    SettingsRow::new(
+                        format!("dest-quality-{}", dest.id),
+                        page_copy::OUTPUT_QUALITY,
+                    )
+                    .description(quality.description.clone())
+                    .child(quality::quality_control(
+                        format!("dest-quality-control-{}", dest.id),
+                        &quality,
+                        dest.disabled,
+                        {
+                            let entity = entity.clone();
+                            move |value, _, cx| {
+                                entity.update(cx, |this, _| {
+                                    this.set_destination_quality(dest_id.clone(), value.to_string())
+                                })
+                            }
+                        },
+                    )),
+                );
             }
             if let Some(oauth) = &dest.oauth {
                 match oauth {
@@ -351,6 +598,149 @@ impl DestinationsPanel {
                     }
                 }
             }
+            if let Some(manual) = &dest.manual {
+                if let Some(mode) = dest.url_mode {
+                    detail = detail.child(
+                        SettingsRow::new(format!("dest-url-mode-{}", dest.id), page_copy::URL_MODE)
+                            .child(
+                                SegmentedControl::new(format!("dest-url-mode-control-{}", dest.id))
+                                    .small(true)
+                                    .accessibility_label(page_copy::URL_MODE)
+                                    .disabled(dest.disabled)
+                                    .value(Some(SharedString::from(if mode == 1 {
+                                        "full"
+                                    } else {
+                                        "server"
+                                    })))
+                                    .option(Segment::new(
+                                        "server",
+                                        page_copy::URL_MODE_SERVER_AND_KEY,
+                                    ))
+                                    .option(Segment::new("full", page_copy::URL_MODE_FULL_URL))
+                                    .on_change({
+                                        let entity = entity.clone();
+                                        let id = id.clone();
+                                        move |value, _, cx| {
+                                            entity.update(cx, |this, _| {
+                                                this.set_url_mode(
+                                                    id.clone(),
+                                                    value.as_ref() == "full",
+                                                )
+                                            })
+                                        }
+                                    }),
+                            ),
+                    );
+                }
+                if let Some(url_input) = self.manual_url_drafts.get(&dest.id) {
+                    detail = detail.child(
+                        SettingsGroup::new().row(
+                            SettingsRow::new(
+                                format!("dest-server-{}", dest.id),
+                                manual.server_label.clone(),
+                            )
+                            .description(manual.server_description.clone().unwrap_or_default())
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(
+                                        Input::new(
+                                            format!("dest-server-input-{}", dest.id),
+                                            url_input,
+                                        )
+                                        .accessibility_label(manual.server_label.clone())
+                                        .disabled(dest.disabled)
+                                        .invalid(manual.server_issue.is_some()),
+                                    )
+                                    .when(manual.save_url, |row| {
+                                        let entity = entity.clone();
+                                        let id = id.clone();
+                                        let url_input = url_input.clone();
+                                        row.child(
+                                            Button::new(format!("dest-save-url-{}", dest.id))
+                                                .label(page_copy::SAVE_URL)
+                                                .variant(ButtonVariant::Outline)
+                                                .disabled(dest.disabled)
+                                                .on_click(move |_, _, cx| {
+                                                    let url =
+                                                        url_input.read(cx).value().to_string();
+                                                    entity.update(cx, |this, _| {
+                                                        this.save_manual_url(id.clone(), url)
+                                                    })
+                                                }),
+                                        )
+                                    }),
+                            ),
+                        ),
+                    );
+                    if let Some(issue) = &manual.server_issue {
+                        detail = detail.child(
+                            div()
+                                .type_scale(text::META)
+                                .text_color(hsla(t.destructive))
+                                .child(issue.clone()),
+                        );
+                    }
+                }
+                if let Some(key_input) = self.manual_key_drafts.get(&dest.id) {
+                    detail = detail.child(
+                        SettingsGroup::new().row(
+                            SettingsRow::new(
+                                format!("dest-key-{}", dest.id),
+                                page_copy::ROW_STREAM_KEY,
+                            )
+                            .description(manual.key_description.clone().unwrap_or_default())
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(
+                                        Input::new(
+                                            format!("dest-key-input-{}", dest.id),
+                                            key_input,
+                                        )
+                                        .accessibility_label(manual.key_placeholder.clone())
+                                        .disabled(dest.disabled),
+                                    )
+                                    .when(manual.save_key, |row| {
+                                        let entity = entity.clone();
+                                        let id = id.clone();
+                                        let key_input = key_input.clone();
+                                        row.child(
+                                            Button::new(format!("dest-save-key-{}", dest.id))
+                                                .label(page_copy::SAVE_KEY)
+                                                .variant(ButtonVariant::Outline)
+                                                .disabled(dest.disabled)
+                                                .on_click(move |_, _, cx| {
+                                                    let key =
+                                                        key_input.read(cx).value().to_string();
+                                                    entity.update(cx, |this, _| {
+                                                        this.save_manual_key(id.clone(), key)
+                                                    })
+                                                }),
+                                        )
+                                    }),
+                            ),
+                        ),
+                    );
+                    if let Some(restore) = &manual.restore {
+                        let entity = entity.clone();
+                        let id = id.clone();
+                        detail = detail.child(
+                            Button::new(format!("dest-restore-key-{}", dest.id))
+                                .label(restore.clone())
+                                .variant(ButtonVariant::Ghost)
+                                .disabled(dest.disabled)
+                                .on_click(move |_, _, cx| {
+                                    entity.update(cx, |this, _| this.restore_manual_key(id.clone()))
+                                }),
+                        );
+                    }
+                }
+            }
         }
         if has_detail {
             card = card.child(detail);
@@ -361,6 +751,12 @@ impl DestinationsPanel {
 
 impl Render for DestinationsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_details_inputs(window, cx);
+        self.ensure_command_editor(window, cx);
+        self.ensure_discord_paste(window, cx);
+        let details = self.details.clone();
+        self.sync_details_inputs(&details, window, cx);
+
         let t = theme::current(window, cx).theme();
         let entity = cx.entity();
         let tabs = Tabs::new("destinations-views")
@@ -445,12 +841,13 @@ impl Render for DestinationsPanel {
                     );
                 }
 
+                let destinations: Vec<DestinationView> = setup.destinations.clone();
                 let mut list = GroupedList::new();
-                for dest in &setup.destinations {
-                    list = list.item(self.destination_card(dest, t, cx));
+                for dest in &destinations {
+                    list = list.item(self.destination_card(dest, t, window, cx));
                 }
 
-                div()
+                let mut column = div()
                     .flex()
                     .flex_col()
                     .gap(px(8.))
@@ -459,22 +856,34 @@ impl Render for DestinationsPanel {
                         PanelSection::new("destinations-list")
                             .title(page_copy::DESTINATIONS)
                             .description(setup.destinations_description.clone())
-                            .last(true)
                             .child(list),
                     )
+                    .child(self.details_section(&details, setup.controls_disabled, window, cx))
+                    .child(self.chat_commands_section(&self.chat_commands.clone(), window, cx))
+                    .child(self.quality_section(window, cx));
+                if let Some(cloud) = self.cloud.clone() {
+                    column = column.child(self.cloud_section(&cloud, window, cx));
+                }
+                column
+                    .child(self.ready_section(&self.ready.clone(), window, cx))
                     .into_any_element()
             }
-            DestinationsTab::Upcoming => div()
-                .type_scale(text::META)
-                .text_color(hsla(t.muted_foreground))
-                .child("Loading upcoming streams…")
-                .into_any_element(),
-            DestinationsTab::Discord => div()
-                .type_scale(text::META)
-                .text_color(hsla(t.muted_foreground))
-                .child(page_copy::LOADING_DISCORD)
-                .into_any_element(),
+            DestinationsTab::Upcoming => self.upcoming_body(&self.scheduled.clone(), window, cx),
+            DestinationsTab::Discord => {
+                let details = self.studio.details_now();
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let view = discord_view(
+                    details.discord.as_ref(),
+                    details.discord_preview.as_ref(),
+                    details.discord_error.as_deref(),
+                    &self.discord_memory,
+                    now_ms,
+                );
+                self.discord_body(&view, window, cx)
+            }
         };
+
+        let command_dialog = self.command_dialog_element(window, cx);
 
         div()
             .id("destinations-page")
@@ -510,5 +919,6 @@ impl Render for DestinationsPanel {
                         .child(body),
                 ),
             )
+            .child(command_dialog)
     }
 }
