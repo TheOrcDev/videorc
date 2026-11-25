@@ -67,7 +67,7 @@ actions!(scene_page, [UndoLayout]);
 /// (P537: no redo).
 pub fn bind_keys(cx: &mut gpui::App) {
     cx.bind_keys([KeyBinding::new(
-        "secondary-z",
+        secondary!("z"),
         UndoLayout,
         Some(KEY_CONTEXT),
     )]);

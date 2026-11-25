@@ -23,6 +23,25 @@
 //! the app uses the owner's real Videorc data directory, as the shipped app
 //! will.
 
+/// `secondary-` for a static key binding: ⌘ on macOS, Ctrl elsewhere.
+/// gpui-pre 0.3.14's `KeyBinding::new` parses only explicit modifiers (its
+/// `secondary-` needs the host OS, `KeyBinding::load`), and panics on
+/// anything else, so `KeyBinding::new("secondary-k", …)` aborted the app at
+/// launch. `secondary!("k")` is `"cmd-k"` or `"ctrl-k"`, decided where it
+/// was compiled, which is where it runs.
+#[cfg(target_os = "macos")]
+macro_rules! secondary {
+    ($keys:literal) => {
+        concat!("cmd-", $keys)
+    };
+}
+#[cfg(not(target_os = "macos"))]
+macro_rules! secondary {
+    ($keys:literal) => {
+        concat!("ctrl-", $keys)
+    };
+}
+
 mod app;
 mod lcd;
 mod platform;

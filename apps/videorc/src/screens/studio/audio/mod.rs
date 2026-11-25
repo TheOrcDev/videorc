@@ -60,8 +60,8 @@ const METER_TICK: Duration = Duration::from_millis(33);
 /// Binds ⌘/Ctrl+↑/↓ for the Audio section; call once at start.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("secondary-up", FocusPreviousStrip, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-down", FocusNextStrip, Some(KEY_CONTEXT)),
+        KeyBinding::new(secondary!("up"), FocusPreviousStrip, Some(KEY_CONTEXT)),
+        KeyBinding::new(secondary!("down"), FocusNextStrip, Some(KEY_CONTEXT)),
     ]);
 }
 
