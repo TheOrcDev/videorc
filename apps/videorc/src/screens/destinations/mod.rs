@@ -590,9 +590,11 @@ impl DestinationsPanel {
         if let Some(line) = &dest.uplink_line {
             has_detail = true;
             detail = detail.child(
+                // Electron: muted words; the warning tone is the row's
+                // "Falling behind" badge.
                 div()
                     .type_scale(text::META)
-                    .text_color(hsla(t.warning))
+                    .text_color(hsla(t.muted_foreground))
                     .child(line.clone()),
             );
         }
@@ -1170,6 +1172,7 @@ impl Render for DestinationsPanel {
                     .flex()
                     .flex_col()
                     .min_w(px(0.))
+                    .children(self.compatibility_alert(&self.ready.clone(), window, cx))
                     .child(self.quality_section(window, cx));
                 if let Some(cloud) = self.cloud.clone() {
                     trail = trail.child(self.cloud_section(&cloud, window, cx));
