@@ -69,6 +69,8 @@ pub mod copy {
     pub const RESTORE_BUILT_IN: &str = "Restore built-in apps";
     pub const ADD_APP: &str = "Add app…";
     pub const OPEN_APPS: &str = "Open apps";
+    pub const SEARCH_OPEN_APPS: &str = "Search open apps…";
+    pub const SEARCH_OPEN_APPS_LABEL: &str = "Search open apps";
     // Layout.
     pub const LAYOUT_TITLE: &str = "Layout";
     pub const ORIENTATION: &str = "Orientation";

@@ -41,6 +41,7 @@ use videorc_app_core::settings_page::SettingsTab;
 use videorc_app_core::studio::Connection;
 use videorc_app_core::studio::screen_views::talk_show_room;
 use videorc_app_core::{BackendClient, Studio, StudioSnapshot};
+use videorc_kit::input::InputState;
 use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::theme::{self, hsla};
 
@@ -108,8 +109,9 @@ pub struct ScenePage {
     model: SceneModel,
     /// The scene dialogs, shared with the Studio's Scenes section.
     dialogs: Entity<SceneDialogs>,
-    /// Hide screen's Add app… popover.
+    /// Hide screen's Add app… popover, and its search.
     add_app_open: bool,
+    add_app_search: Entity<InputState>,
     /// Draws again when the switch status line is due (no timer lives in
     /// the Studio).
     status_timer: Option<Task<()>>,
@@ -161,6 +163,9 @@ impl ScenePage {
         let dialogs =
             cx.new(|cx| SceneDialogs::new(studio.clone(), runtime.clone(), hotkeys, window, cx));
         let controls = Controls::new(window, cx);
+        let add_app_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(model::copy::SEARCH_OPEN_APPS));
+        cx.observe(&add_app_search, |_, _, cx| cx.notify()).detach();
         let editor_state = EditorState::default();
         let editor = EditorModel::of(
             &studio.watch().borrow(),
@@ -209,6 +214,7 @@ impl ScenePage {
             model,
             dialogs,
             add_app_open: false,
+            add_app_search,
             status_timer: None,
             editor_state,
             editor,
