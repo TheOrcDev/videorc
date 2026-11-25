@@ -285,6 +285,7 @@ pub struct SourcesPanel {
     ui: SourcesUi,
     refreshing: bool,
     board: Option<SoundsBoard>,
+    board_loading: bool,
     meters: AudioMeters,
     meters_view: AudioMetersView,
     retro: bool,
@@ -388,17 +389,35 @@ impl SourcesPanel {
             let value = match event {
                 SliderEvent::Change(v) | SliderEvent::Release(v) => v.end() as i32,
             };
-            this.ui.sounds_gain_live = matches!(event, SliderEvent::Change(_));
-            if matches!(event, SliderEvent::Release(_)) {
-                this.apply_sounds_settings(
-                    SoundboardSettingsParams {
-                        volume_db: Some(value),
-                        ..Default::default()
-                    },
-                    cx,
-                );
-            } else if let Some(board) = this.board.as_mut() {
-                board.volume_db = value;
+            match event {
+                SliderEvent::Change(_) => {
+                    this.ui.sounds_gain_live = true;
+                    if let Some(board) = this.board.as_mut() {
+                        board.volume_db = value;
+                    }
+                }
+                SliderEvent::Release(_) => {
+                    this.ui.sounds_gain_live = false;
+                    match this.board.as_mut() {
+                        Some(board) => board.volume_db = value,
+                        None => {
+                            this.board = Some(SoundsBoard {
+                                volume_db: value,
+                                monitor: true,
+                            });
+                        }
+                    }
+                    // Push before the next paint so sync_sliders does not snap
+                    // the fader back to the previous model value.
+                    this.push_model(cx);
+                    this.apply_sounds_settings(
+                        SoundboardSettingsParams {
+                            volume_db: Some(value),
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                }
             }
             let _ = state;
             cx.notify();
@@ -450,6 +469,7 @@ impl SourcesPanel {
             ui: SourcesUi::default(),
             refreshing: false,
             board: None,
+            board_loading: false,
             meters,
             meters_view,
             retro: snap.settings.studio.retro_lcd_studio(),
@@ -471,6 +491,10 @@ impl SourcesPanel {
     }
 
     fn load_board(&mut self, cx: &mut Context<Self>) {
+        if self.board_loading {
+            return;
+        }
+        self.board_loading = true;
         let studio = self.studio.clone();
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
@@ -478,12 +502,38 @@ impl SourcesPanel {
                 .spawn(async move { studio.backend().sounds_list().await })
                 .await;
             let _ = this.update(cx, |panel, cx| {
-                if let Ok(Ok(board)) = result {
-                    panel.board = Some(SoundsBoard {
-                        volume_db: board.volume_db,
-                        monitor: board.monitor,
-                    });
-                    panel.push_model(cx);
+                panel.board_loading = false;
+                match result {
+                    Ok(Ok(board)) => {
+                        panel.board = Some(SoundsBoard {
+                            volume_db: board.volume_db,
+                            monitor: board.monitor,
+                        });
+                        panel.push_model(cx);
+                    }
+                    Ok(Err(err)) => {
+                        eprintln!("[videorc-app] Sources sounds.list: {err}");
+                        panel.schedule_board_retry(cx);
+                    }
+                    Err(err) => {
+                        eprintln!("[videorc-app] Sources sounds.list join: {err}");
+                        panel.schedule_board_retry(cx);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn schedule_board_retry(&mut self, cx: &mut Context<Self>) {
+        if self.board.is_some() || self.board_loading {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(3)).await;
+            let _ = this.update(cx, |panel, cx| {
+                if panel.board.is_none() {
+                    panel.load_board(cx);
                 }
             });
         })
@@ -526,15 +576,20 @@ impl SourcesPanel {
                                 monitor: board.monitor,
                             });
                         }
+                        panel.push_model(cx);
                     }
                     Ok(Err(err)) => {
                         eprintln!("[videorc-app] Sources sounds.settings: {err}");
+                        // Drop the optimistic value and reload the board.
+                        panel.board = None;
+                        panel.load_board(cx);
                     }
                     Err(err) => {
                         eprintln!("[videorc-app] Sources sounds.settings join: {err}");
+                        panel.board = None;
+                        panel.load_board(cx);
                     }
                 }
-                panel.push_model(cx);
             });
         })
         .detach();
@@ -551,6 +606,9 @@ impl SourcesPanel {
         self.retro = snapshot.settings.studio.retro_lcd_studio();
         self.meters_view = self.meters.step(snapshot, levels, Instant::now());
         self.ensure_meter_ticks(cx);
+        if self.board.is_none() {
+            self.load_board(cx);
+        }
         let next = SourcesModel::of(
             snapshot,
             telemetry,
