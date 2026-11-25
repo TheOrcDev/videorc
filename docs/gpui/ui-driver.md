@@ -10,12 +10,19 @@ each window's AccessKit tree, which is what VoiceOver, Narrator and Orca read.
 | Server, policy, the core's commands (`app-quit`, `backend-debug-rpc`, `authorize-smoke-resource`, `inspect-backend-state-isolation`, the quit guard) | `crates/videorc-app-core/src/smoke/` | L6 |
 | The tree as data, selectors (`ui_tree`, `gpui_tree`) | `crates/videorc-app-core/src/smoke/` | L6 |
 | The driver on live windows, the foreground hop, turning accessibility on | `apps/videorc/src/smoke/` | L6 |
-| Starting the server, which window is which, the forced look, a toast | `ShellSmoke` and `smoke::start` from the shell | L4 (S2.1) |
+| Starting the server, which window is which, the forced look, a toast | `smoke::start` in `main.rs`, `ShellSmoke` in `apps/videorc/src/smoke/shell.rs` | L6 (Phase 3) |
 | `studio-*` and the other Studio commands (`STUDIO_COMMANDS`) | a `SmokeCommandHandler` on S1.6a's Studio | L7 |
 | `open-tab`, `main-window-*`, the preview's and each window's commands | `SmokeCommandHandler`s from the slices that own them | their lanes |
 
 A known command that nobody runs yet answers, by name, that it is not
 supported. None ever succeeds silently.
+
+## Launching the GPUI app from a smoke
+
+`VIDEORC_APP=gpui` makes the launcher's prebuild build `videorc-app` with the
+backend, then run `target/<profile>/Videorc` itself, with the smoke's
+isolated profile through `VIDEORC_USER_DATA_DIR`. A smoke run keeps the
+Studio from picking devices for it (`withhold_device_defaults`).
 
 ## How the driver reads a window
 

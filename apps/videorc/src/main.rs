@@ -27,8 +27,9 @@ mod app;
 mod platform;
 mod preview;
 mod screens;
-// Plan 260 S2.5 (L6): the smoke command server and the UI driver. The shell
-// starts it (`smoke::start`) in a later S2 part; until then nothing calls it.
+// Plan 260 S2.5 (L6): the smoke command server and the UI driver, started
+// once the main window is up when a smoke asks for it. Some of the driver's
+// parts wait for GPUI gaps (docs/gpui/ui-driver.md) and are not called yet.
 #[allow(dead_code)]
 mod smoke;
 
@@ -177,6 +178,16 @@ fn main() -> Result<()> {
         stderr_logger.log(Level::infer(line), line);
     }));
 
+    // The smoke command server's switch (Electron's
+    // `smokeCommandServerEnabled`), read once here: a smoke run keeps the
+    // Studio from picking devices for it.
+    let smoke_packaged = smoke::shell::packaged();
+    let smoke_run = videorc_app_core::smoke::SmokeSwitch::resolve(
+        |name| std::env::var(name).ok(),
+        smoke_packaged,
+    )
+    .is_some();
+
     // The core's own runtime: two workers, beside GPUI's executor. The core
     // keeps running with every window closed.
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -243,8 +254,8 @@ fn main() -> Result<()> {
             settings_journal: Some(paths.ui_settings_journal_file()),
             app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             // The app picks a first device for a slot nobody chose, as
-            // Electron does (the smoke command server, S2's, keeps it off).
-            withhold_device_defaults: false,
+            // Electron does; a smoke run keeps it off.
+            withhold_device_defaults: smoke_run,
             ..StudioConfig::default()
         },
     ));
@@ -589,6 +600,38 @@ fn main() -> Result<()> {
             core_handle.clone(),
         );
         screens::notes::window::install(cx, notes_frame, APP_ID);
+
+        // The smoke command server and the UI driver (plan 260 S2.5), when a
+        // smoke asked for them; off, this does nothing. `app-quit` reaches
+        // the app's own quit on the foreground.
+        let (smoke_quit_tx, mut smoke_quit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        smoke::start(
+            cx,
+            smoke::SmokeStart {
+                runtime: core_handle.clone(),
+                backend: backend_state.clone(),
+                isolated_backend: (paths.isolation == Isolation::Profile).then(|| {
+                    videorc_app_core::process::IsolatedBackendPaths::under(&paths.user_data_dir)
+                }),
+                packaged: smoke_packaged,
+                quit: Arc::new(move || {
+                    let _ = smoke_quit_tx.send(());
+                }),
+                // The Studio's `studio-*` commands come with their handler.
+                studio: None,
+                windows: Vec::new(),
+                shell: Rc::new(smoke::shell::ShellWindows::new(
+                    main_window.into(),
+                    notices.clone(),
+                )),
+            },
+        );
+        cx.spawn(async move |cx| {
+            if smoke_quit_rx.recv().await.is_some() {
+                cx.update(|cx| cx.quit());
+            }
+        })
+        .detach();
         cx.on_action(move |_: &menus::ShowSettings, cx| {
             let _ = main_window.update(cx, |shell, window, cx| {
                 shell.open_settings(None, window, cx)

@@ -16,7 +16,8 @@
 //!
 //! # The seam with the shell (S2.1, L4)
 //!
-//! The shell starts the server once the main window exists:
+//! `main.rs` starts the server once the main window exists, and
+//! [`shell::ShellWindows`] answers for it. In outline:
 //!
 //! ```ignore
 //! smoke::start(cx, smoke::SmokeStart {
@@ -38,6 +39,7 @@
 
 pub mod activate;
 pub mod driver;
+pub mod shell;
 
 use std::rc::Rc;
 use std::sync::Arc;

@@ -113,6 +113,13 @@ pub fn install(
     }
 }
 
+/// The open window, for the smoke driver; `None` while it is closed.
+pub fn handle(cx: &App) -> Option<gpui::AnyWindowHandle> {
+    cx.try_global::<Open>()
+        .and_then(|open| open.window)
+        .map(Into::into)
+}
+
 /// Closes the window when it is open, opens it otherwise
 /// (`toggleCommentsWindow`).
 pub fn toggle(cx: &mut App) {
