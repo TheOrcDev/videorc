@@ -1110,7 +1110,7 @@ fn look_body(
         let selected = screen.layout_preset.as_deref() == Some(preset);
         layouts = layouts.child(
             Button::new(format!("first-run-layout-{preset}"))
-                .label(*label)
+                .label(label)
                 .variant(if selected {
                     ButtonVariant::Default
                 } else {
@@ -1119,7 +1119,7 @@ fn look_body(
                 .disabled(locked)
                 .on_click({
                     let entity = entity.clone();
-                    let preset = (*preset).to_string();
+                    let preset = preset.to_string();
                     move |_, _, cx| {
                         entity.update(cx, |this, cx| this.set_layout(preset.clone(), cx))
                     }
