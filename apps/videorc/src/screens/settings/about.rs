@@ -7,6 +7,7 @@ use videorc_kit::{
     button::{Button, ButtonSize, ButtonVariant},
     list_row::{GroupedList, ListRow},
     panel_section::PanelSection,
+    progress::Progress,
 };
 
 impl SettingsScreen {
@@ -38,7 +39,7 @@ impl SettingsScreen {
             } => div()
                 .child(
                     ListRow::new("updates", u::copy::UPDATES)
-                        .children(control.map(|control| update_control(control, &t))),
+                        .children(control.map(|control| update_control(control))),
                 )
                 .child(
                     div()
@@ -150,7 +151,7 @@ impl SettingsScreen {
 }
 
 /// The update row's one control (`UpdateControl` in `about-settings.tsx`).
-fn update_control(control: UpdateRowControl, t: &videorc_kit::tokens::Theme) -> AnyElement {
+fn update_control(control: UpdateRowControl) -> AnyElement {
     match control {
         UpdateRowControl::Check { label } => Button::new("update-check")
             .label(label)
@@ -162,25 +163,11 @@ fn update_control(control: UpdateRowControl, t: &videorc_kit::tokens::Theme) -> 
             .variant(ButtonVariant::Outline)
             .disabled(true)
             .into_any_element(),
-        // The kit has no Progress yet: a track and its fill, named as
-        // Electron's is.
         UpdateRowControl::Progress { percent } => div()
             .id("update-download")
-            .role(gpui::Role::ProgressIndicator)
-            .aria_label(u::copy::UPDATE_DOWNLOAD)
             .flex_none()
             .w(px(128.))
-            .h(px(6.))
-            .rounded_full()
-            .overflow_hidden()
-            .bg(hsla(t.muted))
-            .child(
-                div()
-                    .h_full()
-                    .w(gpui::relative(f32::from(percent) / 100.))
-                    .rounded_full()
-                    .bg(hsla(t.primary)),
-            )
+            .child(Progress::new(f32::from(percent)).accessibility_label(u::copy::UPDATE_DOWNLOAD))
             .into_any_element(),
         UpdateRowControl::Install {
             label,
