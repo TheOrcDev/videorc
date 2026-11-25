@@ -6,7 +6,7 @@ use videorc_app_core::studio::audio_mixer::{
     LcdMeterView, METER_SEGMENTS, MeterView, segment_zone,
 };
 use videorc_kit::theme::{TypeScale, hsla, with_alpha};
-use videorc_kit::tokens::{Theme, text};
+use videorc_kit::tokens::{Theme, radius, text};
 
 /// One Mixer-scale meter from [`MeterView`] (`LevelMeter variant="segmented"`):
 /// a `bg-muted` 8 px track with full rounding; every segment shows its zone
@@ -44,7 +44,10 @@ pub fn segmented_meter(meter: MeterView, muted: bool, theme: &Theme) -> impl Int
     row
 }
 
-/// Retro LCD meter: segments plus the readout digits and CLIP flag.
+/// Retro LCD meter (`LcdMeter`'s grid, `lcd-meter.tsx`): the track with its
+/// readout at its end (`LcdMeterValue`, column 3), and under the readout the
+/// CLIP flag, right-aligned (`LcdMeterClip`: `col-start-3 self-end
+/// justify-self-end`).
 pub fn lcd_meter(
     meter: MeterView,
     lcd: &LcdMeterView,
@@ -52,27 +55,52 @@ pub fn lcd_meter(
     theme: &Theme,
 ) -> impl IntoElement {
     let lit_ink = hsla(theme.foreground);
-    let dim_ink = hsla(theme.muted_foreground);
+    // The flag is an unlit ghost (`--lcd-meter-unlit`) that inverts while
+    // the clip hold is on (`data-clipping:bg-(--lcd-display-lit)
+    // text-(--lcd-display-glass)`).
+    let unlit_ink = hsla(with_alpha(theme.muted_foreground, 0.5));
+    let clip = div()
+        .px(px(4.))
+        .py(px(2.))
+        .rounded(px(radius::CHIP))
+        .map(|flag| {
+            if lcd.clipping {
+                flag.bg(lit_ink).text_color(hsla(theme.background))
+            } else {
+                flag.text_color(unlit_ink)
+            }
+        })
+        .child(SharedString::from("CLIP"));
     div()
         .flex()
         .flex_col()
-        .gap(px(4.))
+        .gap(px(2.))
         .opacity(if muted { 0.5 } else { 1.0 })
-        .child(segmented_meter(meter, false, theme))
         .child(
             div()
                 .flex()
                 .items_center()
-                .justify_between()
-                .type_scale(text::META)
-                .child(div().text_color(lit_ink).child(lcd.readout.clone()))
+                .gap(px(8.))
                 .child(
                     div()
-                        .text_color(if lcd.clipping { lit_ink } else { dim_ink })
-                        // The CLIP flag is always printed; it lights when the
-                        // level clips (`LcdMeterClip`).
-                        .child(SharedString::from("CLIP")),
+                        .flex_1()
+                        .min_w_0()
+                        .child(segmented_meter(meter, false, theme)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .type_scale(text::META)
+                        .text_color(lit_ink)
+                        .child(lcd.readout.clone()),
                 ),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .type_scale(text::META)
+                .child(clip),
         )
 }
 
