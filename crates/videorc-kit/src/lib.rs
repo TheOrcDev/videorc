@@ -101,7 +101,7 @@ pub use list_row::{GroupedList, GroupedRow, ListRow};
 pub use live_waveform::LiveWaveform;
 pub use media_card::MediaCard;
 pub use navigable_row::NavigableRow;
-pub use page::{ConfigGrid, Gallery, PageStack};
+pub use page::{ConfigColumn, ConfigGrid, Gallery, PageStack, Track};
 pub use page_tabs::PageTabs;
 pub use panel_section::PanelSection;
 pub use pin_window_button::{PIN_WINDOW_LABEL, PinWindowButton};

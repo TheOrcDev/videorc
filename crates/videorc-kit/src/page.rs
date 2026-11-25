@@ -13,12 +13,16 @@
 //! width (the page's, as they are flush) and redraw once when it changes.
 
 use gpui::{
-    AnyElement, App, Bounds, ElementId, Entity, IntoElement, Pixels, Window, div, prelude::*, px,
+    AnyElement, App, Bounds, ElementId, Entity, IntoElement, Pixels, SharedString, Window, div,
+    prelude::*, px,
 };
 use gpui_base::ElementExt as _;
 use smallvec::SmallVec;
 
-use crate::theme::{Appearance, hsla, resolve};
+use crate::{
+    scroll_area::ScrollArea,
+    theme::{Appearance, hsla, resolve},
+};
 
 /// The one page breakpoint: two config columns from here.
 pub const CONFIG_GRID_TWO_COLUMNS: f32 = 940.0;
@@ -49,6 +53,44 @@ fn record_width(state: &Entity<f32>, bounds: Bounds<Pixels>, window: &mut Window
 
 type SectionsFor = Box<dyn FnOnce(bool) -> Vec<AnyElement>>;
 
+/// One column of a two-column grid: CSS `minmax(min, <fr>fr)`. The columns
+/// share the row by their `fr`, and one never narrows under its `min`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Track {
+    pub fr: f32,
+    pub min: f32,
+}
+
+impl Track {
+    /// `minmax(0, <fr>fr)`.
+    pub const fn fr(fr: f32) -> Self {
+        Track { fr, min: 0.0 }
+    }
+
+    /// `minmax(<min>px, <fr>fr)`.
+    pub const fn min(self, min: f32) -> Self {
+        Track { fr: self.fr, min }
+    }
+}
+
+/// `grid-cols-2`: equal halves (`ConfigGrid`'s default).
+pub const CONFIG_GRID_TRACKS: [Track; 2] = [Track::fr(1.0), Track::fr(1.0)];
+/// `SCENE_GRID`: the canvas and its sources | the overlays.
+pub const SCENE_GRID: [Track; 2] = [Track::fr(1.3), Track::fr(1.0)];
+/// `CAPTIONS_GRID`: the preview | the controls, never under 380 px.
+pub const CAPTIONS_GRID: [Track; 2] = [Track::fr(1.2), Track::fr(0.8).min(380.0)];
+/// `LIVESTREAM_SETUP_GRID`: destinations and details | output and health.
+pub const LIVESTREAM_SETUP_GRID: [Track; 2] = [Track::fr(1.5), Track::fr(1.0)];
+/// `CLEAN_CUT_REVIEW_GRID`: the player | the transcript.
+pub const CLEAN_CUT_REVIEW_GRID: [Track; 2] = [Track::fr(1.0), Track::fr(1.15)];
+
+/// A column of a two-column grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigColumn {
+    Lead,
+    Trail,
+}
+
 /// Flush sections in one column, two from 940 px of page with a hairline
 /// between the columns. Rows stretch: a short section leaves the pane's
 /// background below it. [`ConfigGrid::pair`] is `CONFIG_GRID_PAIR`: two
@@ -62,6 +104,8 @@ pub struct ConfigGrid {
     children: SmallVec<[AnyElement; 4]>,
     /// Sections built once the grid knows its column count.
     sections_for: Option<SectionsFor>,
+    tracks: [Track; 2],
+    scroll: Option<ConfigColumn>,
     appearance: Option<Appearance>,
 }
 
@@ -73,8 +117,29 @@ impl ConfigGrid {
             pair: false,
             children: SmallVec::new(),
             sections_for: None,
+            tracks: CONFIG_GRID_TRACKS,
+            scroll: None,
             appearance: None,
         }
+    }
+
+    /// The two columns' widths, as Electron's page grids set them
+    /// (`grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]`): [`SCENE_GRID`],
+    /// [`CAPTIONS_GRID`], [`LIVESTREAM_SETUP_GRID`], [`CLEAN_CUT_REVIEW_GRID`].
+    pub fn tracks(mut self, tracks: [Track; 2]) -> Self {
+        self.tracks = tracks;
+        self
+    }
+
+    /// In two columns, this column scrolls on its own while the other stays
+    /// in view (Captions: the controls scroll beside the pinned preview,
+    /// Electron's `CAPTIONS_PREVIEW_PIN`). The grid then takes the rest of
+    /// the page's height, as [`Self::pair`] does, so put it in a pane that
+    /// does not scroll itself; stacked, nothing scrolls inside the grid.
+    /// For a grid of two sections.
+    pub fn scroll_column(mut self, column: ConfigColumn) -> Self {
+        self.scroll = Some(column);
+        self
     }
 
     /// Forces the column count when the screen already knows the page's
@@ -122,7 +187,11 @@ impl RenderOnce for ConfigGrid {
         let two = self
             .two_columns
             .unwrap_or_else(|| *width.read(cx) >= CONFIG_GRID_TWO_COLUMNS);
-        let pair = self.pair;
+        let scroll = self.scroll.filter(|_| two);
+        // A column that scrolls on its own needs the grid to have a height.
+        let fill = self.pair || scroll.is_some();
+        let tracks = self.tracks;
+        let scroll_id = SharedString::from(format!("{}/scroll", self.id));
         let mut children = self.children;
         if let Some(build) = self.sections_for {
             children.extend(build(two));
@@ -132,43 +201,50 @@ impl RenderOnce for ConfigGrid {
             .w_full()
             .flex()
             .flex_col()
-            .when(pair, |grid| grid.flex_1().min_h(px(0.0)))
+            .when(fill, |grid| grid.flex_1().min_h(px(0.0)))
             .on_prepaint(move |bounds, window, cx| record_width(&width, bounds, window, cx));
         if !two {
             return grid.children(children);
         }
-        // Rows of two: the left cell carries the column hairline
-        // (`[&>*:nth-child(odd)]:border-r`).
+        // One column: `minmax(min, fr)` as a flex item (basis 0, grows by
+        // its fr, never under its min); the one that scrolls wraps its
+        // section in a ScrollArea of the row's height.
+        let cell = |track: Track, column: ConfigColumn, content: Option<AnyElement>| {
+            let mut cell = div()
+                .flex()
+                .flex_col()
+                .flex_basis(px(0.0))
+                .min_w(px(track.min))
+                .min_h(px(0.0));
+            cell.style().flex_grow = Some(track.fr);
+            cell.style().flex_shrink = Some(1.0);
+            let cell = cell.when(column == ConfigColumn::Lead, |cell| {
+                // `[&>*:nth-child(odd)]:border-r`: the column hairline.
+                cell.border_r_1().border_color(hsla(t.border))
+            });
+            if scroll == Some(column) {
+                cell.child(
+                    ScrollArea::new(scroll_id.clone())
+                        .children(content)
+                        .into_any_element(),
+                )
+            } else {
+                cell.children(content)
+            }
+        };
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut cells = children.into_iter().peekable();
         while let Some(left) = cells.next() {
             let right = cells.next();
+            let first = rows.is_empty();
             rows.push(
                 div()
                     .flex()
                     .flex_row()
                     .w_full()
-                    .when(pair, |row| row.flex_1())
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .flex_basis(px(0.0))
-                            .min_w(px(0.0))
-                            .border_r_1()
-                            .border_color(hsla(t.border))
-                            .child(left),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .flex_basis(px(0.0))
-                            .min_w(px(0.0))
-                            .children(right),
-                    )
+                    .when(fill && first, |row| row.flex_1().min_h(px(0.0)))
+                    .child(cell(tracks[0], ConfigColumn::Lead, Some(left)))
+                    .child(cell(tracks[1], ConfigColumn::Trail, right))
                     .into_any_element(),
             );
         }
