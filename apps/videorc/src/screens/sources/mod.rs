@@ -1231,7 +1231,9 @@ impl SourcesPanel {
             body = body.child(
                 div()
                     .flex()
-                    .items_baseline()
+                    // GPUI's baseline follows a wrapped line's last row; the
+                    // action sits on the first, as Electron's does.
+                    .items_start()
                     .justify_between()
                     .gap(px(12.))
                     .type_scale(text::META)
@@ -1242,7 +1244,8 @@ impl SourcesPanel {
                             .child(SharedString::from(scene.line.clone())),
                     )
                     .child(
-                        div().flex_none().mr(px(-8.)).child(
+                        // The 24 px Xs button centred on the 16 px first line.
+                        div().flex_none().mr(px(-8.)).mt(px(-4.)).child(
                             Button::new(format!("{picker_id}-open-scenes"))
                                 .label(scene.open_label)
                                 .size(ButtonSize::Xs)
@@ -1390,6 +1393,8 @@ impl SourcesPanel {
         let entity = cx.entity();
         body = body.child(
             SettingsRow::new("noise-reduction", audio_copy::NOISE_REDUCTION)
+                // Electron: a bare horizontal Field inside the strip, no inset.
+                .flush(true)
                 .description(mic.noise_reduction.description.clone())
                 .child(
                     Switch::new("noise-reduction-switch")
@@ -1718,6 +1723,8 @@ impl SourcesPanel {
         let entity = cx.entity();
         body = body.child(
             SettingsRow::new("hear-sounds", audio_copy::HEAR_SOUNDS)
+                // Electron: a bare horizontal Field inside the strip, no inset.
+                .flush(true)
                 .description(audio_copy::HEAR_SOUNDS_DESCRIPTION)
                 .child(
                     Switch::new("hear-sounds-switch")

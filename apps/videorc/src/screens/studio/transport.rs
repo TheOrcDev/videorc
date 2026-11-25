@@ -16,7 +16,10 @@
 
 use std::sync::Arc;
 
-use gpui::{AnyElement, Context, Entity, EventEmitter, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, Entity, EventEmitter, FontWeight, Keystroke, SharedString, Window, div,
+    prelude::*, px,
+};
 use videorc_app_core::nav::PageId;
 use videorc_app_core::settings_page::SettingsTab;
 use videorc_app_core::studio::cloud::CloudState;
@@ -29,7 +32,7 @@ use videorc_app_core::studio::session::{END_LIVESTREAM_LABEL, StopConfirmation};
 use videorc_app_core::studio::transport::{RecordButtonState, TransportView, stop_overrun_copy};
 use videorc_app_core::{BackendClient, StopOrigin, Studio, StudioSnapshot};
 use videorc_kit::icon::{IconName, icon};
-use videorc_kit::shortcut_keys::ShortcutStyle;
+use videorc_kit::shortcut_keys;
 use videorc_kit::theme::{self, TypeScale, faded_over, hsla};
 use videorc_kit::tokens::{size, text};
 use videorc_kit::{Alert, AlertVariant, Button, ButtonSize, ButtonVariant, ShortcutKeys};
@@ -313,6 +316,21 @@ fn space_keys() -> ShortcutKeys {
     ShortcutKeys::keystrokes(SPACE)
 }
 
+/// Space on the retro Record key, in the screen's caps: Electron's LCD
+/// uppercases everything on it, the `ShortcutKeys variant="text"` too
+/// ("RECORD SPACE"). The words are the kit's, only the case is the screen's.
+fn retro_space_label() -> SharedString {
+    let words = Keystroke::parse(SPACE)
+        .map(|stroke| {
+            shortcut_keys::label(
+                [(stroke.modifiers, stroke.key.as_str())],
+                cfg!(target_os = "macos"),
+            )
+        })
+        .unwrap_or_default();
+    lcd::caps(words)
+}
+
 impl Transport {
     fn render_default(
         &self,
@@ -497,7 +515,8 @@ impl Transport {
             let shortcut = record.shortcut.then(|| {
                 div()
                     .opacity(0.7)
-                    .child(space_keys().style(ShortcutStyle::Text))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(retro_space_label())
                     .into_any_element()
             });
             let record_icon = record_glyph(&record);
