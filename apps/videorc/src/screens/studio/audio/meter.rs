@@ -36,7 +36,7 @@ pub fn segmented_meter(meter: MeterView, muted: bool, theme: &Theme) -> impl Int
         } else {
             track
         };
-        row = row.child(div().flex_1().h_full().rounded(px(1.)).bg(color));
+        row = row.child(div().flex_1().h_full().rounded_none().bg(color));
     }
     row
 }

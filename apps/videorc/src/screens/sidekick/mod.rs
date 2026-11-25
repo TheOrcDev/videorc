@@ -45,6 +45,16 @@ use voice::render_voice;
 
 pub type AppStudio = Studio<BackendClient>;
 
+/// The events the page follows; `main.rs` adds them to the client's filter
+/// (the backend drops the rest). `cohost.settings.changed` and
+/// `account.changed` come with Avatar's and Settings' lists.
+pub const EVENTS: [&str; 4] = [
+    "cohost.state",
+    "cleanCut.status",
+    "cohost.report.saved",
+    "cohost.community.changed",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Overview,

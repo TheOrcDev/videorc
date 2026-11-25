@@ -202,7 +202,7 @@ fn segmented_meter(meter: MeterView, theme: &videorc_kit::tokens::Theme) -> impl
         } else {
             track
         };
-        row = row.child(div().flex_1().h_full().rounded(px(1.)).bg(color));
+        row = row.child(div().flex_1().h_full().rounded_none().bg(color));
     }
     row
 }
@@ -1142,7 +1142,7 @@ fn look_body(
                     div()
                         .w(px(picture_w))
                         .h(px(picture_h))
-                        .rounded(px(radius::MD))
+                        .rounded(px(radius::ROW))
                         .border_1()
                         .border_color(hsla(t.border))
                         .bg(hsla(t.muted))
