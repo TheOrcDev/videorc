@@ -98,3 +98,8 @@ A smoke run picks no devices, so the smoke first logs why Record is blocked, the
 `enable-synthetic-source {settleMs?}`, `studio-state`, `studio-record {timeoutMs?}` and `studio-stop {timeoutMs?}` on
 the core's Studio. `open-tab {tab}` opens a page in the main window (`ShellCommands`, `PageId::from_tab_param`). The
 other `STUDIO_COMMANDS` still answer "not supported" by name.
+
+The preview's commands (`PREVIEW_COMMANDS` in `apps/videorc/src/smoke/mod.rs`): `inspect-native-preview-runtime` and
+`preview-window-state` answer where the preview is (`mode`, `phase`, `nativeReady`, `dockedShown`, `canFloat`,
+`floatingOpen`, `words`); `preview-window-open`, `-close` and `-toggle` float it in its own window or dock it back
+(macOS; elsewhere opening is refused by name). Electron's surface and host commands have no GPUI form.

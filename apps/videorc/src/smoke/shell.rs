@@ -2,7 +2,8 @@
 //! command names, the look a screenshot forces, and a toast through the
 //! app's own toast path (plan 260 S2.5, wired by L6 in Phase 3).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{AnyWindowHandle, App, Entity, WindowHandle};
@@ -13,8 +14,10 @@ use videorc_kit::{ToastData, ToastKind};
 
 use super::ShellSmoke;
 use crate::app::shell::Shell;
+use crate::preview::Preview;
 use crate::screens::notifications::Hub;
 use videorc_app_core::nav::PageId;
+use videorc_preview::lifecycle::WindowMode;
 
 /// What is forced now: `None` gives that part back to the system.
 #[derive(Clone, Copy, Default)]
@@ -27,14 +30,21 @@ struct Forced {
 pub struct ShellWindows {
     pub main: WindowHandle<Shell>,
     pub notices: Entity<Hub>,
+    /// The preview, once the main window started it.
+    pub preview: Rc<RefCell<Option<Entity<Preview>>>>,
     forced: Cell<Forced>,
 }
 
 impl ShellWindows {
-    pub fn new(main: WindowHandle<Shell>, notices: Entity<Hub>) -> Self {
+    pub fn new(
+        main: WindowHandle<Shell>,
+        notices: Entity<Hub>,
+        preview: Rc<RefCell<Option<Entity<Preview>>>>,
+    ) -> Self {
         Self {
             main,
             notices,
+            preview,
             forced: Cell::new(Forced::default()),
         }
     }
@@ -68,9 +78,14 @@ impl ShellSmoke for ShellWindows {
             UiWindow::Main => Some(self.main.into()),
             UiWindow::StreamManager => crate::screens::stream_manager::window::handle(cx),
             UiWindow::Notes => crate::screens::notes::window::handle(cx),
-            // The preview draws inside the main window, and the Captions
-            // reader has no window of its own yet.
-            UiWindow::Preview | UiWindow::Captions => None,
+            // The preview's own window while it floats; docked, it draws in
+            // the main window. The Captions reader has no window yet.
+            UiWindow::Preview => self
+                .preview
+                .borrow()
+                .as_ref()
+                .and_then(|preview| preview.read(cx).floating_window()),
+            UiWindow::Captions => None,
         }
     }
 
@@ -111,6 +126,40 @@ impl ShellSmoke for ShellWindows {
 
     fn open_page(&self, page: PageId, cx: &mut App) -> Result<(), String> {
         self.open(page, cx)
+    }
+
+    fn preview(&self, command: &str, cx: &mut App) -> Result<Value, String> {
+        let preview = self
+            .preview
+            .borrow()
+            .clone()
+            .ok_or_else(|| super::MAIN_WINDOW_NOT_READY.to_string())?;
+        let mode = preview.read(cx).mode();
+        let can_float = preview.read(cx).can_float();
+        let wanted = match command {
+            "inspect-native-preview-runtime" | "preview-window-state" => None,
+            "preview-window-open" => Some(WindowMode::Floating),
+            "preview-window-close" => Some(WindowMode::Docked),
+            "preview-window-toggle" => Some(match mode {
+                WindowMode::Docked => WindowMode::Floating,
+                WindowMode::Floating => WindowMode::Docked,
+            }),
+            other => return Err(format!("{other} is not a preview command.")),
+        };
+        if let Some(wanted) = wanted {
+            if wanted == WindowMode::Floating && !can_float {
+                return Err(format!(
+                    "{command}: the Preview window opens only on macOS with the native preview \
+                     ready here."
+                ));
+            }
+            // It opens a moment later (`Preview::float`); the smoke polls
+            // `preview-window-state` for `floatingOpen`.
+            if wanted != mode {
+                preview.update(cx, |preview, cx| preview.toggle_floating(cx));
+            }
+        }
+        Ok(preview.read(cx).smoke_state())
     }
 }
 

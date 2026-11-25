@@ -326,6 +326,7 @@ fn main() -> Result<()> {
     let preview_slot: Rc<RefCell<Option<gpui::Entity<preview::Preview>>>> =
         Rc::new(RefCell::new(None));
     let quit_preview = preview_slot.clone();
+    let smoke_preview = preview_slot.clone();
     let studio_state = studio.watch();
     // Taken by the quit: the shutdown handshake runs once.
     let supervisor = Rc::new(RefCell::new(Some(supervisor)));
@@ -647,6 +648,7 @@ fn main() -> Result<()> {
                 shell: Rc::new(smoke::shell::ShellWindows::new(
                     main_window,
                     notices.clone(),
+                    smoke_preview.clone(),
                 )),
             },
         );
