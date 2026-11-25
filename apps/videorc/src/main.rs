@@ -504,12 +504,14 @@ fn main() -> Result<()> {
                 cx,
             )
         });
+        // Electron's main window (P043): 1180×780, at least 960×660.
         let window_bounds = main_frame
             .restored(cx)
-            .unwrap_or_else(|| Bounds::centered(None, size(px(1280.), px(800.)), cx));
+            .unwrap_or_else(|| Bounds::centered(None, size(px(1180.), px(780.)), cx));
         let opened = cx.open_window(
             WindowOptions {
                 app_id: Some(APP_ID.into()),
+                window_min_size: Some(size(px(960.), px(660.))),
                 ..videorc_kit::window::options(nav::window_title(PageId::Studio), window_bounds)
             },
             |window, cx| {
