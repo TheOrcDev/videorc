@@ -214,16 +214,13 @@ async function runSmoke() {
     const smoke = launched.connections['preview-motion-ready']
     const backendPid = requiredPid(backendConnection?.pid, 'backend-ready backend PID')
     const appPid = requiredPid(smoke?.appPid, 'preview-motion-ready Electron PID')
-    // The recovery records sit beside the database the backend really uses.
+    // The recovery records sit beside the database the backend really uses
+    // (the renderer's health answer redacts the path; the smoke server
+    // reports it for an isolated run).
     {
-      const probe = await connectBackend(backendConnection, timeoutMs)
-      try {
-        const health = await request(probe, timeoutMs, 'health.ping', {})
-        if (typeof health?.databasePath === 'string' && health.databasePath !== ':memory:') {
-          recoveryDirectory = join(dirname(health.databasePath), 'session-finalization-recovery')
-        }
-      } finally {
-        await closeWebSocket(probe, 2_000).catch(() => {})
+      const isolation = await requestSmokeCommand(smoke, 'inspect-backend-state-isolation', {})
+      if (typeof isolation?.databasePath === 'string') {
+        recoveryDirectory = join(dirname(isolation.databasePath), 'session-finalization-recovery')
       }
     }
     assert.equal(processExists(appPid), true, `Electron main process ${appPid} is not alive.`)

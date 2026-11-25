@@ -569,6 +569,11 @@ impl AppSmokeCommands {
             "secretsInsideSmokeState": secrets_inside,
             "recordingsInsideSmokeState": recordings_inside,
             "backendUsesConfiguredDatabase": uses_database,
+            // Where the isolated backend keeps its database (and beside it its
+            // caches and recovery records), for a smoke that seeds or reads
+            // them; only ever a path inside the smoke's own state folder.
+            "databasePath": (database_inside && uses_database)
+                .then(|| expected_database.to_string_lossy().into_owned()),
         }))
     }
 }
