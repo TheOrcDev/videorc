@@ -244,6 +244,10 @@ impl Render for Player {
             );
         }
         body = body.child(controls);
+        // Embedded: the host's layout holds the player; no markers, no dialog.
+        if self.mode == Mode::Embedded {
+            return body.into_any_element();
+        }
         if let Some(view) = marker_view {
             let mut list = GroupedList::new().label(copy::SAVED_MARKERS);
             for row in view.rows {
@@ -361,5 +365,6 @@ impl Render for Player {
                     .label("Close")
                     .on_click(cx.listener(|this, _, window, cx| this.dismiss(window, cx))),
             )
+            .into_any_element()
     }
 }

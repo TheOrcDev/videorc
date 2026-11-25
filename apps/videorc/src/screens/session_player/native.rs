@@ -243,6 +243,7 @@ impl Player {
         {
             self.status = view.status;
         }
+        self.after_status(cx);
         let failed = view.last_error.is_some();
         let had_error = self.error.is_some();
         if failed {
@@ -259,7 +260,7 @@ impl Player {
         let mut slot = gpui::div()
             .relative()
             .w_full()
-            .h(gpui::px(300.))
+            .h(gpui::px(self.slot_height))
             .overflow_hidden();
         if self.active {
             if let Some(native) = self.native.as_ref() {
@@ -302,7 +303,7 @@ impl Player {
         let mut slot = gpui::div()
             .relative()
             .w_full()
-            .h(gpui::px(300.))
+            .h(gpui::px(self.slot_height))
             .overflow_hidden()
             .rounded(gpui::px(videorc_kit::tokens::radius::ROW))
             .bg(videorc_kit::theme::hsla(t.video_ground));

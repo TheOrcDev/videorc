@@ -1,12 +1,31 @@
+//! The recording player, for any page (plan 260, L4): Electron's
+//! `SessionMarkersDialog` and `SessionPlayer`.
+//!
+//! - [`Mode::Dialog`] is the Library's recording dialog: the picture, the
+//!   controls, the marker pins, the session's saved markers (rename, delete
+//!   with Undo), Open in default player and Reveal. Sidekick's Reports opens
+//!   the same dialog on its report's session (P1219, [`Player::open_session`]).
+//! - [`Mode::Embedded`] is the bare player in the host's own layout: the
+//!   picture, its status and the controls, no dialog and no markers list.
+//!   The host drives it without owning its focus (`SessionPlayerHandle`:
+//!   [`Player::toggle_playback`], [`Player::seek_to`], [`Player::seek_by`]),
+//!   gives it ranges to jump over while playing ([`Player::set_skip_ranges`],
+//!   the Clean cut review's "Preview the cut") and hears the playhead
+//!   ([`PlayheadMoved`], `onTimeUpdate`).
+//!
+//! A page makes one with [`hosted`], from the services the Library installs
+//! ([`Services`]); it calls [`Player::close`] when it stops showing it.
+//!
 //! Recording playback owns a distinct presenter/feed. No live-preview
-//! surface or capture scene is borrowed by the Library player.
+//! surface or capture scene is borrowed by the player.
 mod markers;
 mod native;
 mod render;
 
-use super::{Core, files::Files};
+use crate::screens::library::{Core, files::Files};
 use gpui::{Context, Entity, FocusHandle, Focusable, Window, prelude::*};
 use std::sync::Arc;
+use videorc_app_core::buddy::clean_cut_review::{Span, normalize_skip_ranges, skip_target_ms};
 use videorc_app_core::library::{markers::MarkersState, player as p};
 use videorc_app_core::{BackendClient, Logger, Studio};
 use videorc_kit::{
@@ -20,7 +39,62 @@ use videorc_protocol::{
     playback::{PlaybackState, PlaybackStatus},
 };
 
+/// How a page hosts the player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// The recording dialog with the session's markers (the Library's).
+    #[default]
+    Dialog,
+    /// The bare player in the host's layout.
+    Embedded,
+}
+
+/// The playhead moved, in ms (`onTimeUpdate`), while a recording is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayheadMoved(pub u64);
+
+impl gpui::EventEmitter<PlayheadMoved> for Player {}
+
+/// What a player needs, installed by the Library for every page.
+#[derive(Clone)]
+pub struct Services {
+    pub core: Arc<Core>,
+    pub files: Arc<Files>,
+    pub studio: Arc<Studio<BackendClient>>,
+    pub runtime: tokio::runtime::Handle,
+    pub logger: Logger,
+}
+
+impl gpui::Global for Services {}
+
+/// A player for any page, in `mode`; `None` before the Library installed
+/// its services.
+pub fn hosted(mode: Mode, window: &mut Window, cx: &mut gpui::App) -> Option<Entity<Player>> {
+    let services = cx.try_global::<Services>()?.clone();
+    Some(cx.new(|cx| {
+        Player::new(
+            services.core,
+            services.files,
+            services.studio,
+            services.runtime,
+            services.logger,
+            window,
+            cx,
+        )
+        .with_mode(mode)
+    }))
+}
+
 pub struct Player {
+    mode: Mode,
+    /// Removed spans to jump over while playing, normalized.
+    skip: Vec<Span>,
+    /// The skip already asked for, so one range seeks once.
+    skipping_to: Option<u64>,
+    /// The playhead last reported to the host.
+    reported_ms: Option<u64>,
+    /// The picture's height in the host's layout.
+    slot_height: f32,
     core: Arc<Core>,
     files: Arc<Files>,
     studio: Arc<Studio<BackendClient>>,
@@ -128,6 +202,11 @@ impl Player {
         })
         .detach();
         Self {
+            mode: Mode::Dialog,
+            skip: Vec::new(),
+            skipping_to: None,
+            reported_ms: None,
+            slot_height: 300.,
             core,
             files,
             studio,
@@ -173,7 +252,9 @@ impl Player {
             self.desired_muted = false;
             self.session = Some(p::PlayerSession::new(session.id.clone()));
         }
-        self.markers = Some(MarkersState::open(session));
+        self.markers = (self.mode == Mode::Dialog).then(|| MarkersState::open(session));
+        self.skipping_to = None;
+        self.reported_ms = None;
         self.scrub = None;
         self.error = None;
         self.active = true;
@@ -191,10 +272,102 @@ impl Player {
             }
             self.open_native();
         }
-        self.dialog.open(window, cx);
-        self.load_markers(false, cx);
-        cx.on_next_frame(window, |this, window, cx| this.focus.focus(window, cx));
+        if self.mode == Mode::Dialog {
+            self.dialog.open(window, cx);
+            self.load_markers(false, cx);
+            cx.on_next_frame(window, |this, window, cx| this.focus.focus(window, cx));
+        }
         cx.notify();
+    }
+    /// Opens the session the Library lists under `session_id` (Sidekick's
+    /// Reports: the report's stream). `false` when the Library has no such
+    /// session.
+    pub fn open_session(
+        &mut self,
+        session_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let session = self
+            .core
+            .data()
+            .sessions
+            .into_iter()
+            .find(|session| session.id == session_id);
+        match session {
+            Some(session) => {
+                self.open(&session, window, cx);
+                true
+            }
+            None => false,
+        }
+    }
+    /// How this player is hosted.
+    pub fn with_mode(mut self, mode: Mode) -> Self {
+        self.mode = mode;
+        self
+    }
+    /// The picture's height in the host's layout (300 px by default).
+    pub fn set_slot_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        self.slot_height = height;
+        cx.notify();
+    }
+    /// Ranges to jump over while playing (`skipRanges`), in any order;
+    /// overlaps merge. Empty plays everything.
+    pub fn set_skip_ranges(&mut self, ranges: &[Span]) {
+        self.skip = normalize_skip_ranges(ranges, None);
+        self.skipping_to = None;
+    }
+    /// `togglePlayback`: play or pause, once the recording is ready.
+    pub fn toggle_playback(&self) {
+        self.toggle();
+    }
+    /// `seekTo`: clamped to the recording.
+    pub fn seek_to(&self, ms: f64) {
+        self.seek(ms);
+    }
+    /// `seekBy`: from the playhead.
+    pub fn seek_by(&self, delta_ms: f64) {
+        self.seek(self.status.position_ms as f64 + delta_ms);
+    }
+    pub fn position_ms(&self) -> u64 {
+        self.status.position_ms
+    }
+    pub fn duration_ms(&self) -> u64 {
+        self.status.duration_ms
+    }
+    pub fn is_playing(&self) -> bool {
+        self.status.state == PlaybackState::Playing
+    }
+    /// Stops playback (the host stopped showing the player).
+    pub fn close(&mut self, cx: &mut Context<Self>) {
+        self.stop_playback(cx);
+    }
+    /// After each new status: the playhead to the host, and the jump over a
+    /// removed span while playing (`applySkip`).
+    fn after_status(&mut self, cx: &mut Context<Self>) {
+        if !self.ready() {
+            return;
+        }
+        let position = self.status.position_ms;
+        if self.reported_ms != Some(position) {
+            self.reported_ms = Some(position);
+            cx.emit(PlayheadMoved(position));
+        }
+        if self.status.state != PlaybackState::Playing || self.skip.is_empty() {
+            self.skipping_to = None;
+            return;
+        }
+        match skip_target_ms(&self.skip, position as f64, 0.) {
+            Some(target) if self.skipping_to != Some(target) => {
+                self.skipping_to = Some(target);
+                if let Some(element) = self.native.as_ref().and_then(|n| n.element.as_ref()) {
+                    element.seek(target.min(self.status.duration_ms));
+                }
+            }
+            Some(_) => {}
+            None => self.skipping_to = None,
+        }
     }
     pub fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.stop_playback(cx);
