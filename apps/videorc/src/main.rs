@@ -414,8 +414,21 @@ fn main() -> Result<()> {
         cx.set_global(screens::notifications::Shared(notices.clone()));
 
         // Hide from stream: content protection and the capture filter's
-        // list, which the Studio sends with the screen capture when it lands.
-        let _capture_filter_ids = HideFromStream::install(cx);
+        // list, which the Studio sends with each screen capture start and
+        // to a running capture when it changes (Electron's renderer re-send).
+        let mut capture_filter_ids = HideFromStream::install(cx);
+        {
+            let studio = studio.clone();
+            core_handle.spawn(async move {
+                loop {
+                    let ids = capture_filter_ids.borrow_and_update().clone();
+                    studio.set_protected_overlay_window_ids(ids).await;
+                    if capture_filter_ids.changed().await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
 
         // Only Studio-owned actions register; Settings keeps the bindings current.
         let global_keys = hotkeys::Hotkeys::install(

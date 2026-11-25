@@ -136,17 +136,29 @@ core), `smoke:preview-real-launch` (on GPUI the main side of the chain is `inspe
 
 Wait for a GPUI product path or new commands first:
 
-| Smoke                                                                                                                                            | Missing on GPUI                                                                                   |
-| ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| `smoke:captions-live`                                                                                                                            | the renderer's caption frame submissions (live PNG and cue frames)                                |
-| `smoke:preview-overlay-presentation`                                                                                                             | `native-preview-surface-status`, `preview-surface-sample`                                         |
-| `smoke:banners`, `smoke:html-overlay`                                                                                                            | `import-takeover-image` (the Images takeover import), `html-overlay-stats` (an HTML overlay host) |
-| `smoke:screens`                                                                                                                                  | `import-takeover-image`, `main-window-id`, `capture-page` (gap 3)                                 |
-| `smoke:preview-pump-diagnostics`, `smoke:preview-click-focus`                                                                                    | Electron's present-pump and click-focus probes                                                    |
-| `smoke:preview-scene-commit`, `smoke:freeform-editor`                                                                                            | `select-camera-shape`; the editor needs clicks (gap 1)                                            |
-| `smoke:preview-check-invisible`                                                                                                                  | `preview-surface-sample`, the Check computer command                                              |
-| `smoke:recording-native-preview`, `smoke:preview-surface`, `probe:preview-lifecycle`, `probe:preview-window`, `smoke:preview-interaction-stress` | Electron's native-surface and window commands; they need GPUI-specific probes, not a port         |
-| `smoke:screen-recording-real`, `smoke:notes-window-invisible`, `smoke:comment-highlight-stream`, `probe:comments-window`                         | the Notes and Comments window commands                                                            |
+| Smoke                                                                                                                                            | Missing on GPUI                                                                                                       |
+| ------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `smoke:captions-live`                                                                                                                            | the renderer's caption frame submissions (live PNG and cue frames)                                                    |
+| `smoke:preview-overlay-presentation`                                                                                                             | `native-preview-surface-status`, `preview-surface-sample`                                                             |
+| `smoke:banners`, `smoke:html-overlay`                                                                                                            | `import-takeover-image` (the Images takeover import), `html-overlay-stats` (an HTML overlay host)                     |
+| `smoke:screens`                                                                                                                                  | `import-takeover-image`, `main-window-id`, `capture-page` (gap 3)                                                     |
+| `smoke:preview-pump-diagnostics`, `smoke:preview-click-focus`                                                                                    | Electron's present-pump and click-focus probes                                                                        |
+| `smoke:preview-scene-commit`, `smoke:freeform-editor`                                                                                            | `select-camera-shape`; the editor needs clicks (gap 1)                                                                |
+| `smoke:preview-check-invisible`                                                                                                                  | `preview-surface-sample`, the Check computer command                                                                  |
+| `smoke:recording-native-preview`, `smoke:preview-surface`, `probe:preview-lifecycle`, `probe:preview-window`, `smoke:preview-interaction-stress` | Electron's native-surface and window commands; they need GPUI-specific probes, not a port                             |
+| `smoke:comment-highlight-stream`, `probe:comments-window`                                                                                        | the chat pane's smoke hooks (`comments-window-reader-state`, `-click-message`, `-set-highlight-anchor`, the fixtures) |
+
+### The Notes and Stream Manager windows on GPUI (2026-11-25)
+
+`apps/videorc/src/smoke/windows.rs` runs `notes-window-open`, `-close`, `-state`, `-set-bounds`, `-save-document`,
+`comments-window-open`, `-close`, `-toggle`, `-state`, `-set-bounds`, `-set-hidden-from-stream`, `-set-smoke-marker`
+and `raise-window` (roles `notes`, `chat`, `main`; levels `floating`, `screen-saver`; never with focus). The answers
+keep Electron's shapes (`notesWindowState`, `commentsWindowState`); `visible` is `open`, because GPUI does not say
+whether a window is minimized. Bounds are screen points with a top-left origin, as Electron's `setBounds` takes them.
+
+`smoke:screen-recording-real` and `smoke:notes-window-invisible` run with `VIDEORC_APP=gpui` on the no-surface path
+(`VIDEORC_BASELINE_NO_PREVIEW_SURFACE` is implied: the GPUI preview has no Electron surface or host-command drain).
+`VIDEORC_BASELINE_SYSTEM_AUDIO=1` is still Electron-only.
 
 ### Sources, layouts and saved scenes
 

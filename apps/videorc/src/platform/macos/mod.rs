@@ -17,18 +17,20 @@ use objc2_app_kit::{NSView, NSWindow, NSWindowSharingType};
 use objc2_av_foundation::{
     AVAuthorizationStatus, AVCaptureDevice, AVMediaType, AVMediaTypeAudio, AVMediaTypeVideo,
 };
-use objc2_foundation::{NSBundle, NSString};
+use objc2_foundation::{NSBundle, NSPoint, NSRect, NSSize, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use videorc_app_core::desktop::camera_extension::CameraExtensionBinding;
 use videorc_app_core::desktop::permissions::{
     MediaAccessPermission, MediaAccessStatus, MediaPane, PermissionFuture,
 };
 
-use super::{OsResult, Platform};
+use super::{OsResult, Platform, ScreenFrame, SmokeWindowLevel};
 
 /// `NSFloatingWindowLevel`, what Electron's `setAlwaysOnTop(true)` uses.
 const FLOATING_LEVEL: isize = 3;
 const NORMAL_LEVEL: isize = 0;
+/// `NSScreenSaverWindowLevel`, Electron's `screen-saver` level.
+const SCREEN_SAVER_LEVEL: isize = 1000;
 
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
@@ -58,6 +60,24 @@ fn media_type(permission: MediaAccessPermission) -> Option<&'static AVMediaType>
             MediaAccessPermission::Microphone => AVMediaTypeAudio,
             MediaAccessPermission::Screen => None,
         }
+    }
+}
+
+/// The primary display's height in points (`NSScreen.screens[0]`), what
+/// flips a top-left frame into AppKit's bottom-left one.
+fn primary_screen_height() -> OsResult<f64> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    let class = AnyClass::get(c"NSScreen").ok_or("no NSScreen class")?;
+    // SAFETY: AppKit class methods on the main thread (every GPUI window
+    // call runs there); `frame` returns an NSRect by value.
+    unsafe {
+        let screens: Option<Retained<AnyObject>> = msg_send![class, screens];
+        let screens = screens.ok_or("no screens")?;
+        let first: Option<Retained<AnyObject>> = msg_send![&*screens, firstObject];
+        let first = first.ok_or("no primary screen")?;
+        let frame: NSRect = msg_send![&*first, frame];
+        Ok(frame.size.height)
     }
 }
 
@@ -137,6 +157,30 @@ impl Platform for MacOs {
     /// deactivates, so the app keeps normal windows).
     fn set_keep_on_top(&self, window: &Window, on_top: bool) -> OsResult<()> {
         ns_window(window)?.setLevel(if on_top { FLOATING_LEVEL } else { NORMAL_LEVEL });
+        Ok(())
+    }
+
+    /// AppKit's frames are bottom-left on the primary display; Electron's
+    /// (and the smokes') are top-left, so y flips against its height.
+    fn set_window_frame(&self, window: &Window, frame: ScreenFrame) -> OsResult<()> {
+        let ns = ns_window(window)?;
+        let primary_height = primary_screen_height()?;
+        let rect = NSRect::new(
+            NSPoint::new(frame.x, primary_height - frame.y - frame.height),
+            NSSize::new(frame.width, frame.height),
+        );
+        ns.setFrame_display(rect, true);
+        ns.orderFrontRegardless();
+        Ok(())
+    }
+
+    fn raise_window(&self, window: &Window, level: SmokeWindowLevel) -> OsResult<()> {
+        let ns = ns_window(window)?;
+        ns.setLevel(match level {
+            SmokeWindowLevel::Floating => FLOATING_LEVEL,
+            SmokeWindowLevel::ScreenSaver => SCREEN_SAVER_LEVEL,
+        });
+        ns.orderFrontRegardless();
         Ok(())
     }
 

@@ -52,6 +52,25 @@ pub trait Platform: Send + Sync {
         None
     }
 
+    /// The smokes' window placement (`*-window-set-bounds`): the window's
+    /// frame in screen points, top-left origin on the primary display as
+    /// Electron's `setBounds` takes it, brought to the front without focus.
+    fn set_window_frame(&self, _window: &Window, _frame: ScreenFrame) -> OsResult<()> {
+        Err(format!(
+            "Placing a window isn't written for {} yet (plan 260 S2.6)",
+            std::env::consts::OS
+        ))
+    }
+
+    /// The smokes' `raise-window`: the window at `level`, in front, without
+    /// taking focus.
+    fn raise_window(&self, _window: &Window, _level: SmokeWindowLevel) -> OsResult<()> {
+        Err(format!(
+            "Raising a window isn't written for {} yet (plan 260 S2.6)",
+            std::env::consts::OS
+        ))
+    }
+
     /// Keep on top: the window above other apps' windows, or back to normal.
     fn set_keep_on_top(&self, window: &Window, on_top: bool) -> OsResult<()>;
 
@@ -106,6 +125,41 @@ pub trait Platform: Send + Sync {
     /// reports the camera unavailable, with its reason. `None` by default.
     fn camera_extension(&self) -> Option<Arc<dyn CameraExtensionBinding>> {
         None
+    }
+}
+
+/// A window frame in screen points, top-left origin on the primary display.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenFrame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// `raise-window`'s levels (Electron's `setAlwaysOnTop` levels).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmokeWindowLevel {
+    /// `floating`: what Keep on top uses.
+    Floating,
+    /// `screen-saver`: above the invisibility smokes' motion stimulus.
+    ScreenSaver,
+}
+
+impl SmokeWindowLevel {
+    pub fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None | Some("floating") => Ok(Self::Floating),
+            Some("screen-saver") => Ok(Self::ScreenSaver),
+            Some(other) => Err(format!("raise-window: no level is called {other:?}.")),
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Floating => "floating",
+            Self::ScreenSaver => "screen-saver",
+        }
     }
 }
 

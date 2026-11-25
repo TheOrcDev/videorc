@@ -113,6 +113,11 @@ pub fn install(
     }
 }
 
+/// The open window's view, for the smoke window commands.
+pub fn view(cx: &App) -> Option<WindowHandle<StreamManager>> {
+    cx.try_global::<Open>().and_then(|open| open.window)
+}
+
 /// The open window, for the smoke driver; `None` while it is closed.
 pub fn handle(cx: &App) -> Option<gpui::AnyWindowHandle> {
     cx.try_global::<Open>()
@@ -207,6 +212,9 @@ pub struct StreamManager {
     /// `None` while loading; empty when Sounds has none.
     sounds: Option<Vec<SoundRow>>,
     clear: DialogHandle,
+    /// The invisibility smoke's marker: the window painted edge to edge in
+    /// one colour the artifact gate looks for (`comments-window-set-smoke-marker`).
+    smoke_marker: Option<gpui::Hsla>,
     focus: FocusHandle,
     _bounds: Subscription,
 }
@@ -369,6 +377,7 @@ impl StreamManager {
             banners: None,
             sounds: None,
             clear: DialogHandle::new(false),
+            smoke_marker: None,
             focus,
             _bounds: bounds,
         }
@@ -544,6 +553,31 @@ impl StreamManager {
         cx.notify();
     }
 
+    /// `comments-window-state`'s view half (Electron's `commentsWindowState`).
+    pub fn smoke_state(&self, window: &Window) -> Value {
+        json!({
+            "alwaysOnTop": self.pinned,
+            "hiddenFromStream": self.hidden,
+            "hideFromStreamMethod": self.hide_method.id(),
+            // Content protection is the Stream Manager's hide only where that
+            // is the method (Windows); macOS keeps it off and filters instead.
+            "protected": self.hidden && self.hide_method == HideMethod::ContentProtection,
+            "captureProtectionMarkerInstalled": self.smoke_marker.is_some(),
+            "windowId": platform::current().capture_window_id(window),
+        })
+    }
+
+    /// `comments-window-set-hidden-from-stream`: the status bar's switch.
+    pub fn smoke_set_hidden(&mut self, hidden: bool, window: &Window, cx: &mut Context<Self>) {
+        self.set_hidden(hidden, window, cx);
+    }
+
+    /// `comments-window-set-smoke-marker`: paints the window `color`.
+    pub fn smoke_set_marker(&mut self, color: gpui::Hsla, cx: &mut Context<Self>) {
+        self.smoke_marker = Some(color);
+        cx.notify();
+    }
+
     fn run(&mut self, key: PaneKey, window: &mut Window, cx: &mut Context<Self>) {
         if !key_runs(
             key,
@@ -651,9 +685,11 @@ impl Render for StreamManager {
                         }
                     }),
             );
+        let marker = self.smoke_marker;
         WindowFrame::new().child(
             div()
                 .size_full()
+                .relative()
                 .flex()
                 .flex_col()
                 .track_focus(&self.focus)
@@ -727,7 +763,10 @@ impl Render for StreamManager {
                     },
                 ))
                 .child(clear_dialog)
-                .child(self.notices.read(cx).toasts()),
+                .child(self.notices.read(cx).toasts())
+                .when_some(marker, |root, color| {
+                    root.child(div().absolute().inset_0().bg(color))
+                }),
         )
     }
 }

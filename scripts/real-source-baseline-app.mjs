@@ -53,7 +53,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { deflateSync } from 'node:zlib'
 
-import { launchDevApp, repoRoot, stopProcess } from './lib/app-launcher.mjs'
+import { launchDevApp, repoRoot, smokeAppIsGpui, stopProcess } from './lib/app-launcher.mjs'
 import { launchAvSyncStimulus, stopAvSyncStimulus } from './lib/av-sync-stimulus.mjs'
 import { resolveExistingSiblingFfprobe } from './lib/ffmpeg-sibling-paths.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
@@ -176,7 +176,10 @@ const config = {
     process.env.VIDEORC_BASELINE_CAPTION_OVERLAY_STIMULUS_MS ?? 1000
   ),
   fallbackLivePreview: process.env.VIDEORC_BASELINE_FALLBACK_LIVE_PREVIEW === '1',
-  noPreviewSurface: process.env.VIDEORC_BASELINE_NO_PREVIEW_SURFACE === '1',
+  // Plan 260 Phase 3: the GPUI app (VIDEORC_APP=gpui) has no Electron native
+  // preview surface or host-command drain; its preview draws the backend
+  // compositor's frames itself, so its runs take the no-surface path.
+  noPreviewSurface: process.env.VIDEORC_BASELINE_NO_PREVIEW_SURFACE === '1' || smokeAppIsGpui(),
   screenMotionStimulus: process.env.VIDEORC_BASELINE_SCREEN_MOTION_STIMULUS === '1',
   avSyncStimulus: process.env.VIDEORC_BASELINE_AV_SYNC_STIMULUS === '1',
   notesOverlay: process.env.VIDEORC_BASELINE_NOTES_OVERLAY === '1',
@@ -4026,6 +4029,11 @@ async function seedRendererSystemAudio() {
   const smoke = launched?.connections?.['preview-motion-ready']
   if (config.packagedExecutable || !smoke) {
     throw new Error('VIDEORC_BASELINE_SYSTEM_AUDIO=1 needs the dev app smoke command server.')
+  }
+  if (smokeAppIsGpui()) {
+    // The renderer's switch is Electron's; the GPUI app's seed goes through
+    // its profile (renderer-profile-seed.mjs), not eval-js.
+    throw new Error('VIDEORC_BASELINE_SYSTEM_AUDIO=1 is not ported to the GPUI app yet.')
   }
   await smokeCommand(smoke, 'eval-js', {
     code: `

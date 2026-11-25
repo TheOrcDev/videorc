@@ -71,6 +71,11 @@ pub fn install(cx: &mut App, frame: NotesFrame, app_id: &'static str) {
     }
 }
 
+/// The open window's view, for the smoke window commands.
+pub fn view(cx: &App) -> Option<WindowHandle<Notes>> {
+    cx.try_global::<Open>().and_then(|open| open.window)
+}
+
 /// The open window, for the smoke driver; `None` while it is closed.
 pub fn handle(cx: &App) -> Option<gpui::AnyWindowHandle> {
     cx.try_global::<Open>()
@@ -236,6 +241,45 @@ impl Notes {
         self.scale = scale;
         let value = notes::clamp_text(&self.text.read(cx).value());
         self.queue_save(value, cx);
+    }
+
+    /// `notes-window-state`'s view half (Electron's `notesWindowState`).
+    pub fn smoke_state(&self, window: &Window, cx: &App) -> serde_json::Value {
+        serde_json::json!({
+            "alwaysOnTop": self.pinned,
+            "protected": self.capture_protected,
+            "fontScale": self.scale.id(),
+            "text": self.text.read(cx).value().to_string(),
+            "windowId": platform::current().capture_window_id(window),
+        })
+    }
+
+    /// `notes-window-save-document {text?, fontScale?}`: the text and size
+    /// set in the window as typing and the size control would, then saved.
+    /// A failed save is the answer's error, as Electron's throws.
+    pub fn smoke_save_document(
+        &mut self,
+        text: Option<String>,
+        scale: Option<FontScale>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.load_failed {
+            return Err("notes-window-save-document: Notes did not load.".to_string());
+        }
+        if let Some(scale) = scale {
+            self.scale = scale;
+        }
+        if let Some(text) = text {
+            let text = notes::clamp_text(&text);
+            self.text
+                .update(cx, |state, cx| state.set_value(text, window, cx));
+        }
+        self.flush_save(cx);
+        match self.save {
+            SaveState::Failed => Err("notes-window-save-document: the save failed.".to_string()),
+            _ => Ok(()),
+        }
     }
 
     fn set_pinned(&mut self, pinned: bool, window: &Window, cx: &mut Context<Self>) {
