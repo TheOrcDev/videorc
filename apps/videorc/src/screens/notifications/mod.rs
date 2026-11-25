@@ -529,6 +529,14 @@ impl Centre {
                         hub.update(cx, |hub, cx| hub.perform(button.action.clone(), None, cx))
                     });
                 }
+                // Sonner's cancel slot, drawn before the action: app-core's
+                // `ToastRequest` puts Copy there beside a toast's own action.
+                if let Some(button) = notice.cancel.filter(|b| Hub::supported(&b.action)) {
+                    let hub = self.hub.clone();
+                    data = data.cancel(button.label, move |_, cx| {
+                        hub.update(cx, |hub, cx| hub.perform(button.action.clone(), None, cx))
+                    });
+                }
                 if notice.on_close == Some(n::NoticeClose::DismissStartFailure) {
                     let studio = self.hub.read(cx).studio.clone();
                     data.on_close = Some(Rc::new(move |_, _| studio.dismiss_start_failure()));
@@ -590,15 +598,22 @@ pub fn install_keys(cx: &mut gpui::App) {
 /// `toast.error`'s Copy (`lib/toast.ts`, as `ToastRequest::finish` ports it):
 /// an error toast a press raises offers its words on the clipboard, and
 /// clicking it closes the toast. The duration is settled first, so Copy
-/// alone never keeps an error up. Beside the toast's own action Electron puts
-/// Copy in sonner's cancel slot, which the kit's toast has no place for yet.
+/// alone never keeps an error up. Beside the toast's own action (Retry) Copy
+/// takes the cancel slot, drawn before the action; with both taken there is
+/// no Copy.
 fn with_error_copy(mut toast: ToastData) -> ToastData {
-    if toast.kind != ToastKind::Error || toast.action.is_some() {
+    if toast.kind != ToastKind::Error || (toast.action.is_some() && toast.cancel.is_some()) {
         return toast;
     }
     let text = n::error_copy_text(&toast.title, toast.description.as_deref(), &[]);
     if text.is_empty() {
         return toast;
+    }
+    let copy = move |_: &mut gpui::Window, cx: &mut gpui::App| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()))
+    };
+    if toast.action.is_some() {
+        return toast.cancel(n::copy::COPY_ERROR, copy);
     }
     if toast.timeout.is_none() {
         toast.timeout = Some(Some(if toast.description.is_some() {
@@ -607,9 +622,7 @@ fn with_error_copy(mut toast: ToastData) -> ToastData {
             n::ONE_LINE
         }));
     }
-    toast.action(n::copy::COPY_ERROR, move |_, cx| {
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()))
-    })
+    toast.action(n::copy::COPY_ERROR, copy)
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -639,6 +652,10 @@ mod tests {
         toast.action.as_ref().map(|(label, _)| &**label)
     }
 
+    fn cancel_label(toast: &ToastData) -> Option<&str> {
+        toast.cancel.as_ref().map(|(label, _)| &**label)
+    }
+
     #[test]
     fn a_pressed_error_offers_copy_like_toast_error() {
         let error = with_error_copy(
@@ -665,6 +682,16 @@ mod tests {
             ToastData::new(ToastKind::Error, "It failed").action("Retry", |_, _| {}),
         );
         assert_eq!(action_label(&retry), Some("Retry"));
+        // Beside an own action, Copy takes the cancel slot (`lib/toast.ts`);
+        // the action still keeps the toast up.
+        assert_eq!(cancel_label(&retry), Some("Copy"));
+        assert_eq!(retry.timeout, None);
+        let full = with_error_copy(
+            ToastData::new(ToastKind::Error, "It failed")
+                .action("Retry", |_, _| {})
+                .cancel("Later", |_, _| {}),
+        );
+        assert_eq!(cancel_label(&full), Some("Later"));
         let success = with_error_copy(ToastData::new(ToastKind::Success, "Saved"));
         assert_eq!(action_label(&success), None);
         assert_eq!(success.timeout, None);
