@@ -76,6 +76,8 @@ fn failed(logger: Logger) -> Preview {
         native: None,
         closed: false,
         closed_from: WindowMode::Docked,
+        studio: None,
+        scrolled_away: false,
     }
 }
 
@@ -89,6 +91,7 @@ pub(super) fn new(setup: PreviewSetup, window: &mut Window, cx: &mut App) -> Ent
         logger,
         studio,
     } = setup;
+    let words_studio = studio.clone();
     let choice = scene::choose(|name| std::env::var(name).ok(), Some((&studio, &runtime)));
     logger.log(
         Level::Info,
@@ -179,8 +182,20 @@ pub(super) fn new(setup: PreviewSetup, window: &mut Window, cx: &mut App) -> Ent
             }),
             closed: false,
             closed_from: WindowMode::Docked,
+            studio: Some(words_studio),
+            scrolled_away: false,
         }
     })
+}
+
+/// The slot lies fully inside the clip its scroll view sets (half a point
+/// of slack for rounding).
+pub(super) fn fully_inside(clip: Bounds<Pixels>, slot: Bounds<Pixels>) -> bool {
+    let slack = 0.5;
+    f32::from(slot.origin.x) + slack >= f32::from(clip.origin.x)
+        && f32::from(slot.origin.y) + slack >= f32::from(clip.origin.y)
+        && f32::from(slot.right()) <= f32::from(clip.right()) + slack
+        && f32::from(slot.bottom()) <= f32::from(clip.bottom()) + slack
 }
 
 /// The slot's place for the surface's record. Wayland gives no window a
@@ -268,8 +283,19 @@ impl Preview {
 
     /// The child shows while its host is on screen: the floating window, or
     /// the Studio page.
+    /// The docked slot went out of (or back into) full view.
+    pub(super) fn set_scrolled_away(&mut self, away: bool, cx: &mut Context<Self>) {
+        if self.scrolled_away == away {
+            return;
+        }
+        self.scrolled_away = away;
+        self.apply_linux_visibility();
+        cx.notify();
+    }
+
     pub(super) fn apply_linux_visibility(&mut self) {
-        let visible = !self.closed && (self.mode == WindowMode::Floating || self.docked_shown);
+        let docked_visible = self.docked_shown && !self.scrolled_away;
+        let visible = !self.closed && (self.mode == WindowMode::Floating || docked_visible);
         if let Some(native) = self.native.as_mut() {
             native.element.set_visible(visible);
         }
