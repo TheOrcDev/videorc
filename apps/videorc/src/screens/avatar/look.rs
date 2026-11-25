@@ -27,7 +27,7 @@ use videorc_app_core::buddy::look::{
 };
 use videorc_app_core::studio::families;
 use videorc_app_core::studio::timecode::format_timecode;
-use videorc_app_core::user_error::{Failure, UserErrorContext, user_error_message};
+use videorc_app_core::user_error::{Failure, UserErrorContext, UserErrorKind, user_error_message};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
@@ -188,6 +188,11 @@ fn wall_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The connection was down (`OFFLINE_RAW`): no answer yet, not a refusal.
+fn is_offline(error: &videorc_app_core::client::RpcError) -> bool {
+    user_error_message(Failure::Rpc(error), Some(UPDATE_THE_LOOK)).kind == UserErrorKind::Offline
+}
+
 fn refusal(error: &videorc_app_core::client::RpcError) -> (String, String) {
     let copy = user_error_message(Failure::Rpc(error), Some(UPDATE_THE_LOOK));
     (
@@ -216,6 +221,14 @@ impl AvatarScreen {
                             serde_json::from_value::<DraftStatus>(value).unwrap_or_default();
                         screen.look_ui.look.status(status, wall_ms());
                     }
+                    // A read sent before the backend answers (the page
+                    // opens with the app, or while it reconnects) is not a
+                    // problem with the look: Electron only reads once its
+                    // client is connected, and the backend's `Ready` reads
+                    // again here. Without this, "Couldn't update your
+                    // avatar's look. Videorc is reconnecting." stayed on the
+                    // page, since a later good read never clears it.
+                    Ok(Err(error)) if is_offline(&error) => {}
                     Ok(Err(error)) => {
                         let (code, line) = refusal(&error);
                         screen.look_ui.look.status_failed(code, line);
