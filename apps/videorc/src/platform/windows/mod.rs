@@ -1,8 +1,10 @@
 //! Windows (plan 260 platform fill-ins, C4): the Win32 calls behind
 //! [`Platform`]. Hide from stream uses `SetWindowDisplayAffinity
 //! (WDA_EXCLUDEFROMCAPTURE)`, matching Electron's `setContentProtection`
-//! and the backend's D3D11 presenter path. Place, raise and Follow land in
-//! follow-up PRs on this module.
+//! and the backend's D3D11 presenter path. Follow's front-app watcher is
+//! [`front_app`]; place and raise land in a follow-up PR.
+
+pub mod front_app;
 
 use gpui::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
