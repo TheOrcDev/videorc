@@ -178,6 +178,7 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "permissions-relaunch",
     "permissions-request",
     "permissions-state",
+    "preview-retry",
     "preview-route-set",
     "preview-route-state",
     "preview-surface-sample",

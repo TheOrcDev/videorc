@@ -58,6 +58,34 @@ export async function launchGpuiApp({ stateDir, timeoutMs, verbose = false, env 
 export const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
 
 /**
+ * The test pattern on (`enable-synthetic-source`), once the app's UI settings
+ * have loaded: a fresh profile refuses the write until then
+ * (`ui-settings-not-hydrated`), as Electron's first-run placeholder does.
+ */
+export async function enableTestPattern(command, { budgetMs = 30000 } = {}) {
+  const until = Date.now() + budgetMs
+  while (true) {
+    try {
+      return await command('enable-synthetic-source', { settleMs: 500 })
+    } catch (error) {
+      const message = error?.message ?? String(error)
+      if (!/not-hydrated|not ready|no snapshot yet/i.test(message) || Date.now() > until)
+        throw error
+      await sleep(250)
+    }
+  }
+}
+
+/**
+ * Waits once for the main window's accessibility tree: the first UI request
+ * only turns accessibility on, and a key pressed with no selector makes one
+ * attempt (no wait), so ⌘P before the tree exists finds nothing to press.
+ */
+export async function warmUiTree(ui, { timeoutMs = 20000 } = {}) {
+  await ui.waitFor({ role: 'button' }, { timeoutMs })
+}
+
+/**
  * Polls `read` every `everyMs` until `holds(value)`, recording every distinct
  * `label(value)` it saw on the way (the phases a retry passes through).
  * Throws with the last value and the trail when the budget runs out.
