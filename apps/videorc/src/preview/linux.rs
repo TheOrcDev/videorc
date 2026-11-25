@@ -13,6 +13,13 @@
 //! editor's Linux pass, whose handles draw over the video. X11 is always
 //! above.
 //!
+//! Above also means a dialog drawn over the slot can't cover the video: the
+//! docked child hides while one is open (Electron's `overlay-open`). gpui-base
+//! traps a dialog's focus in its "Dialog" key context (every kit `Dialog`,
+//! the ⌘K palette included), and the Shell says when its first-run overlay
+//! shows ([`Preview::set_cover_probe`]). ogre, 2026-11-25: Go Live, the
+//! palette's search field and every first-run step sat under the video.
+//!
 //! Docked or floating: Pop out opens a GPUI window of its own, and the
 //! child moves into it at that window's first layout (the presenter builds
 //! its child in whichever window it attaches to, without restarting the
@@ -21,12 +28,13 @@
 //! or out of capture (`platform::linux`), so the floating window is a
 //! normal one there.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext, AsyncApp, Bounds, Context, Entity, Pixels, TitlebarOptions, WeakEntity,
-    Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, canvas, div, prelude::*, px,
-    size,
+    App, AppContext, AsyncApp, Bounds, Context, Entity, FocusHandle, Pixels, TitlebarOptions,
+    WeakEntity, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, canvas, div,
+    prelude::*, px, size,
 };
 use videorc_app_core::{Level, Logger};
 use videorc_kit::theme::hsla;
@@ -62,6 +70,45 @@ pub(super) struct Native {
     pub(super) floating: Option<WindowHandle<FloatingPreview>>,
     /// Pop out was pressed and the window is opening.
     pub(super) opening: bool,
+    /// What is over the docked slot (a dialog, the first-run overlay).
+    pub(super) cover: Cover,
+}
+
+/// What covers the docked slot from above, as its canvas last saw it.
+#[derive(Default)]
+pub(super) struct Cover {
+    /// A dialog or the Shell's overlay is open: the docked child hides.
+    covered: bool,
+    /// The element focused at the last look. A dialog moves focus as it
+    /// opens and gives it back as it closes, and the key-context path is
+    /// the drawn frame's, so a change asks for one more frame to read it.
+    focus: Option<FocusHandle>,
+    /// The Shell's full-window overlay (first run) is showing.
+    probe: Option<Rc<dyn Fn(&App) -> bool>>,
+}
+
+/// gpui-base's modal host traps a dialog's focus in this key context.
+const DIALOG_CONTEXT: &str = "Dialog";
+
+/// The focused element is inside a dialog (the drawn frame's path).
+fn dialog_focused(window: &Window) -> bool {
+    window
+        .context_stack()
+        .iter()
+        .any(|context| context.contains(DIALOG_CONTEXT))
+}
+
+/// Whether the child shows: a closed Preview never does; in its own window
+/// it always does; docked, while the Studio page shows the slot fully in
+/// view and nothing covers it.
+fn child_visible(
+    closed: bool,
+    floating: bool,
+    docked_shown: bool,
+    scrolled_away: bool,
+    covered: bool,
+) -> bool {
+    !closed && (floating || (docked_shown && !scrolled_away && !covered))
 }
 
 /// Where the child sits against GPUI's drawing (see the module's notes).
@@ -186,6 +233,7 @@ pub(super) fn new(setup: PreviewSetup, window: &mut Window, cx: &mut App) -> Ent
                 attach_pending: None,
                 floating: None,
                 opening: false,
+                cover: Cover::default(),
             }),
             closed: false,
             closed_from: WindowMode::Docked,
@@ -289,8 +337,45 @@ impl Preview {
         }
     }
 
-    /// The child shows while its host is on screen: the floating window, or
-    /// the Studio page.
+    /// The Shell's full-window overlay (first run): the docked child hides
+    /// while `probe` says it shows. Dialogs need nothing: their focus says.
+    pub fn set_cover_probe(&mut self, probe: impl Fn(&App) -> bool + 'static) {
+        if let Some(native) = self.native.as_mut() {
+            native.cover.probe = Some(Rc::new(probe));
+        }
+    }
+
+    /// The docked slot's canvas, each frame: is a dialog or the Shell's
+    /// overlay over the slot? The child hides while one is.
+    pub(super) fn note_docked_cover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(native) = self.native.as_mut() else {
+            return;
+        };
+        let focus = window.focused(cx);
+        if focus != native.cover.focus {
+            // The path below is the drawn frame's: read it again once the
+            // new focus is drawn.
+            native.cover.focus = focus;
+            window.request_animation_frame();
+        }
+        let overlay = native.cover.probe.as_ref().is_some_and(|probe| probe(cx));
+        let covered = overlay || dialog_focused(window);
+        if covered == native.cover.covered {
+            return;
+        }
+        native.cover.covered = covered;
+        self.logger.log(
+            Level::Info,
+            if covered {
+                "[preview] a dialog is over the Studio: the docked child hides"
+            } else {
+                "[preview] nothing is over the Studio: the docked child shows"
+            },
+        );
+        self.apply_linux_visibility();
+        cx.notify();
+    }
+
     /// The docked slot went out of (or back into) full view.
     pub(super) fn set_scrolled_away(&mut self, away: bool, cx: &mut Context<Self>) {
         if self.scrolled_away == away {
@@ -302,8 +387,17 @@ impl Preview {
     }
 
     pub(super) fn apply_linux_visibility(&mut self) {
-        let docked_visible = self.docked_shown && !self.scrolled_away;
-        let visible = !self.closed && (self.mode == WindowMode::Floating || docked_visible);
+        let covered = self
+            .native
+            .as_ref()
+            .is_some_and(|native| native.cover.covered);
+        let visible = child_visible(
+            self.closed,
+            self.mode == WindowMode::Floating,
+            self.docked_shown,
+            self.scrolled_away,
+            covered,
+        );
         if let Some(native) = self.native.as_mut() {
             native.element.set_visible(visible);
             // A closed Preview presents nothing and the backend renders no
@@ -532,5 +626,18 @@ mod tests {
             (rect.x, rect.y, rect.width, rect.height),
             (240.0, 56.0, 800.0, 450.0)
         );
+    }
+
+    #[test]
+    fn a_dialog_over_the_studio_hides_the_docked_child_only() {
+        // closed, floating, docked_shown, scrolled_away, covered
+        assert!(child_visible(false, false, true, false, false));
+        // ogre, 2026-11-25: Go Live, ⌘K and first run sat under the video.
+        assert!(!child_visible(false, false, true, false, true));
+        // Its own window is never under the main window's dialogs.
+        assert!(child_visible(false, true, true, false, true));
+        assert!(!child_visible(false, false, true, true, false));
+        assert!(!child_visible(false, false, false, false, false));
+        assert!(!child_visible(true, true, true, false, false));
     }
 }

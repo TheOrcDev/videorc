@@ -886,6 +886,9 @@ impl Preview {
                         let away = !linux::fully_inside(window.content_mask().bounds, bounds);
                         let _ = weak.update(cx, |preview, cx| {
                             preview.set_scrolled_away(away, cx);
+                            // Above the window's drawing, the child hides
+                            // under a dialog instead (linux.rs).
+                            preview.note_docked_cover(window, cx);
                             preview.place_linux(linux::Host::Docked, window, bounds, geometry)
                         });
                     },
