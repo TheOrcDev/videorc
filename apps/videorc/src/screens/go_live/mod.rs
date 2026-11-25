@@ -35,6 +35,9 @@ pub struct GoLiveDialog {
     dialog: DialogHandle,
     /// The kit handle was open for this Go Live (so Escape can cancel).
     was_open: bool,
+    /// Escape/backdrop/X closed the kit sheet; wait for `cancel_go_live`
+    /// before opening again (async cancel leaves `state.open` true briefly).
+    dismissing: bool,
     state: GoLiveState,
     view: DialogView,
     gate_blocked: bool,
@@ -79,6 +82,7 @@ impl GoLiveDialog {
             runtime,
             dialog: DialogHandle::new(false),
             was_open: false,
+            dismissing: false,
             state: GoLiveState::default(),
             view: DialogView::default(),
             gate_blocked: true,
@@ -213,10 +217,23 @@ impl GoLiveDialog {
 
     fn sync_handle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.state.open {
+            if self.dismissing {
+                // Kit already closed; studio cancel is in flight.
+                return;
+            }
             if !self.dialog.is_open() {
                 if self.was_open {
-                    self.was_open = false;
-                    self.cancel();
+                    // Escape / backdrop / X — same as Cancel (Electron
+                    // `onOpenChange` → `cancelGoLiveConfirmation`).
+                    if self.state.pending {
+                        // Keep the sheet while Go Live is starting.
+                        self.dialog.open(window, cx);
+                        self.was_open = true;
+                    } else {
+                        self.was_open = false;
+                        self.dismissing = true;
+                        self.cancel();
+                    }
                 } else {
                     self.dialog.open(window, cx);
                     self.was_open = true;
@@ -229,6 +246,7 @@ impl GoLiveDialog {
                 self.dialog.close(window, cx);
             }
             self.was_open = false;
+            self.dismissing = false;
         }
     }
 
