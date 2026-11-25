@@ -201,7 +201,7 @@ export async function runGpuiPreviewWindowProbe() {
     })
 
     await step('docked on the Scene page', async () => {
-      await command('open-tab', { tab: 'scene' })
+      await command('open-tab', { tab: 'layout' })
       const { value } = await settleAt('the Scene page never hosted the preview', presenting)
       if (value.sceneHostsDocked !== true) {
         return {

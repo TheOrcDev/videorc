@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gpui::{AnyWindowHandle, App, px, size};
 use serde_json::{Map, Value, json};
 use videorc_app_core::smoke::capture::{
-    CAPTURE_COMMANDS, COMMENTS_CAPTURE_SIZE, PixelOrder, contain, decode_bmp, mean_rects,
+    Bitmap, CAPTURE_COMMANDS, COMMENTS_CAPTURE_SIZE, PixelOrder, contain, mean_rects,
     parse_normalized_rects, stage_capture_rect,
 };
 use videorc_app_core::smoke::security::{UiWindow, capture_page_file_name, ui_window};
@@ -146,18 +146,25 @@ impl CaptureCommands {
         };
         let file = self
             .output_dir
-            .join(format!("videorc-preview-sample-{}.bmp", std::process::id()));
-        capture(target.id, &file, Format::Bmp).await?;
+            .join(format!("videorc-preview-sample-{}.png", std::process::id()));
+        // PNG, never BMP: a BMP carries no colour profile, so ImageIO
+        // converts the display's values on the way (about +60 per channel on
+        // bca6ce49b), while a PNG keeps what the screen shows.
+        capture(target.id, &file, Format::Png).await?;
         let bytes = std::fs::read(&file);
         let _ = std::fs::remove_file(&file);
         let bytes = bytes.map_err(|error| format!("The capture is unreadable: {error}"))?;
-        let bitmap = decode_bmp(&bytes)?;
+        let bitmap = decode_png(&bytes)?;
         // The capture is in device pixels; the stage is in window points.
         let scale = bitmap.width as f64 / target.viewport.0;
+        // `screencapture -l` takes the whole window frame: a titled window's
+        // title bar sits above its content (the Preview window's 28 points),
+        // while the stage is measured from the content's top.
+        let title_bar = (bitmap.height as f64 / scale - target.viewport.1).max(0.0);
         let stage = target.stage;
         let Some(pixels) = stage_capture_rect(
             stage.0 * scale,
-            stage.1 * scale,
+            (stage.1 + title_bar) * scale,
             stage.2 * scale,
             stage.3 * scale,
             (bitmap.width as f64, bitmap.height as f64),
@@ -165,6 +172,7 @@ impl CaptureCommands {
             base["error"] = json!("stage-not-on-screen");
             return Ok(base);
         };
+        base["titleBar"] = json!(title_bar);
         let Some(stage_bitmap) = bitmap.crop(pixels) else {
             base["error"] = json!("empty-capture");
             return Ok(base);
@@ -188,6 +196,23 @@ impl CaptureCommands {
         );
         Ok(base)
     }
+}
+
+/// A PNG capture as top-down BGRA (the core's [`Bitmap`]).
+fn decode_png(bytes: &[u8]) -> Result<Bitmap, String> {
+    let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .map_err(|error| format!("The capture is not a readable PNG: {error}"))?
+        .to_rgba8();
+    let (width, height) = (image.width() as usize, image.height() as usize);
+    let mut bgra = image.into_raw();
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    Ok(Bitmap {
+        width,
+        height,
+        bgra,
+    })
 }
 
 /// Where the preview is to be captured.
@@ -310,7 +335,6 @@ fn now_ms() -> u64 {
 #[derive(Clone, Copy)]
 enum Format {
     Png,
-    Bmp,
 }
 
 /// How long a woken window gets to draw before the capture that counts.
@@ -336,7 +360,6 @@ async fn capture_once(id: u32, file: &Path, format: Format) -> Result<(), String
     }
     let kind = match format {
         Format::Png => "png",
-        Format::Bmp => "bmp",
     };
     // -x: no sound; -o: no shadow; -l: this window only. A blocking call,
     // so it runs on tokio's blocking pool, never the server's task.
