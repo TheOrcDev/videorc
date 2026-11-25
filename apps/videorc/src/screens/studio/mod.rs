@@ -26,25 +26,27 @@ pub mod vertical_stream;
 
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding,
-    KeyDownEvent, KeyUpEvent, Window, canvas, div, prelude::*, px,
+    KeyDownEvent, KeyUpEvent, Role, Window, canvas, div, prelude::*, px,
 };
 use videorc_app_core::StopOrigin;
-use videorc_app_core::studio::screen_views::SHOW_HERE_LABEL;
 #[cfg(target_os = "macos")]
 use videorc_app_core::studio::screen_views::{CLOSE_PREVIEW_LABEL, OPEN_IN_ITS_OWN_WINDOW_LABEL};
+use videorc_app_core::studio::screen_views::{
+    PreviewMode, PreviewStageView, PreviewWindowState, SHOW_HERE_LABEL, preview_stage,
+};
 #[cfg(target_os = "macos")]
 use videorc_kit::ShortcutKeys;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
-use videorc_kit::{Button, ButtonVariant};
+use videorc_kit::{Button, ButtonVariant, Spinner};
 use videorc_preview::lifecycle::WindowMode;
 
 #[cfg(target_os = "macos")]
 use crate::app::menus::TogglePreview;
 use crate::preview::Preview;
 
-use alerts::{CloudResumeSlot, StudioRequest};
+use alerts::{CloudResumeSlot, PreviewNotes, StudioRequest};
 use audio::AudioSection;
 use chat::ChatSection;
 use layout::{INSPECTOR_MAX_PX, StudioLayout};
@@ -69,6 +71,9 @@ pub struct StudioPage {
     focus: FocusHandle,
     transport: Entity<Transport>,
     preview: Entity<Preview>,
+    /// The degraded preview's alert under the stage (P117/P118) and the
+    /// performance check's line on the docked row (P138).
+    preview_notes: Entity<PreviewNotes>,
     /// The cloud's Resume notice above Session; draws nothing until a show
     /// waits.
     cloud_resume: Entity<CloudResumeSlot>,
@@ -166,6 +171,13 @@ impl StudioPage {
             .detach();
         cx.observe(&show_stage, |_, _, cx| cx.notify()).detach();
         cx.observe(&talk_show_host, |_, _, cx| cx.notify()).detach();
+        // The preview's notes: Open Health goes through the page's door, and
+        // the check's line redraws the docked row.
+        let studio = transport.read(cx).studio();
+        let preview_notes = cx.new(|cx| PreviewNotes::new(studio, cx));
+        cx.subscribe(&preview_notes, |_, _, open: &OpenPage, cx| cx.emit(*open))
+            .detach();
+        cx.observe(&preview_notes, |_, _, cx| cx.notify()).detach();
         // Release While held pads when the window blurs (P343).
         cx.observe_window_activation(window, |page, window, cx| {
             if !window.is_window_active() {
@@ -179,6 +191,7 @@ impl StudioPage {
             focus,
             transport,
             preview,
+            preview_notes,
             cloud_resume,
             session,
             chat,
@@ -224,6 +237,36 @@ impl StudioPage {
             SpaceAction::Record => self.transport.read(cx).record(),
         }
     }
+}
+
+/// `StudioPreviewPanel`'s stage as app-core reads it (`preview_stage`):
+/// docked while the native surface is open in the Studio, else the section
+/// titled "Preview" (P116, `studio-tab.tsx:480`). A closed Preview reads the
+/// mode it opens in again.
+fn stage_view(preview: &Preview) -> PreviewStageView {
+    #[cfg(target_os = "macos")]
+    let (reopens_floating, always_on_top) = (preview.reopens_floating(), preview.keep_on_top());
+    #[cfg(not(target_os = "macos"))]
+    let (reopens_floating, always_on_top) = (false, false);
+    let open = !preview.is_closed();
+    let floating = if open {
+        preview.mode() == WindowMode::Floating
+    } else {
+        reopens_floating
+    };
+    preview_stage(
+        PreviewWindowState {
+            open,
+            mode: if floating {
+                PreviewMode::Floating
+            } else {
+                PreviewMode::Docked
+            },
+            always_on_top,
+        },
+        preview.can_float(),
+        false,
+    )
 }
 
 /// `preview-stage.tsx`'s floating card.
@@ -312,6 +355,30 @@ impl StudioPage {
         #[cfg(target_os = "macos")]
         let keep_on_top = preview.keep_on_top();
         let muted = hsla(theme.muted_foreground);
+        // P138: while the performance check runs the docked Preview keeps
+        // its picture, and the row's start says so (`preview-stage.tsx:397`).
+        let checking = (!floating)
+            .then(|| self.preview_notes.read(cx).checking())
+            .flatten()
+            .map(|label| {
+                div()
+                    .id("preview-checking")
+                    .role(Role::Status)
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .type_scale(text::META)
+                    .text_color(muted)
+                    .child(
+                        Spinner::new("preview-checking-spinner")
+                            .size(14.)
+                            .color(theme.muted_foreground)
+                            .hidden(true),
+                    )
+                    .child(div().min_w_0().truncate().child(label))
+            });
         let entity = self.preview.clone();
         let row = div()
             .flex()
@@ -319,6 +386,7 @@ impl StudioPage {
             .justify_end()
             .items_center()
             .gap(px(8.))
+            .children(checking)
             .child(button.on_click(move |_, _, cx| {
                 entity.update(cx, |preview, cx| preview.toggle_floating(cx));
             }));
@@ -413,6 +481,26 @@ impl Render for StudioPage {
                 .child(Preview::docked_slot(&self.preview, cx))
                 .into_any_element()
         };
+        // P116: "Preview" heads the stage while it isn't docked (in its own
+        // window, closed, or without the native surface); docked, the video
+        // is the pane, with no title (`studio-tab.tsx:466-485`).
+        let title = (!preview_replaced)
+            .then(|| stage_view(self.preview.read(cx)).section_title)
+            .flatten()
+            .map(|title| {
+                div()
+                    .id("studio-preview-title")
+                    .role(Role::Heading)
+                    .aria_level(2)
+                    .pb(px(4.))
+                    .type_scale(text::SECTION)
+                    .text_color(hsla(theme.foreground))
+                    .child(title)
+            });
+        // P117/P118: the degraded preview's alert under the stage, in both
+        // shapes; the Show stage has none.
+        let health = (!preview_replaced && self.preview_notes.read(cx).has_alert())
+            .then(|| self.preview_notes.clone());
         let preview_column = div()
             .id("studio-preview-column")
             .flex()
@@ -421,12 +509,14 @@ impl Render for StudioPage {
             .p(px(size::GUTTER))
             .min_w_0()
             .min_h_0()
+            .children(title)
             .child(stage)
             .children(
                 (!preview_replaced)
                     .then(|| self.dock_row(window, cx))
                     .flatten(),
-            );
+            )
+            .children(health);
         // "Session inspector" (P114): cloud resume, the session section,
         // chat, audio, quick settings and takeover, in that order.
         let inspector = div()

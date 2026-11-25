@@ -10,8 +10,8 @@
 //! (`screen.privacy.get`), heard on every change (`screen.privacy.changed`)
 //! and changed with `screen.hide` / `screen.show`. Change screen… (P322)
 //! opens the Scene page's picker for the scene on stream, and a layout that
-//! asks for a screen first (D19) opens it with that layout. The Retro LCD
-//! rows (P329) wait for the kit's LCD panel.
+//! asks for a screen first (D19) opens it with that layout. Under Retro LCD
+//! the same fields draw on one LCD screen (P329, `crate::lcd`).
 
 use gpui::{
     AnyElement, Context, Div, Role, SharedString, Window, div, linear_color_stop, linear_gradient,
@@ -27,8 +27,9 @@ use videorc_app_core::scenes::thumb::{
 };
 use videorc_app_core::studio::live_sources::copy as live_copy;
 use videorc_app_core::studio::scene_on_stream::{
-    FramingView, SCREEN_PRIVACY_CHANGED_EVENT, SCREEN_PRIVACY_GET_METHOD, copy,
-    screen_privacy_outcome, screen_privacy_request, vertical_framing_line, vertical_stream_pick,
+    FramingView, SCREEN_PRIVACY_CHANGED_EVENT, SCREEN_PRIVACY_GET_METHOD, SceneOnStreamView, copy,
+    retro_privacy_label, screen_privacy_outcome, screen_privacy_request, vertical_framing_line,
+    vertical_stream_pick,
 };
 use videorc_app_core::studio::sources_page::GrantAction;
 use videorc_kit::icon::{IconName, icon};
@@ -45,6 +46,7 @@ use videorc_protocol::ScreenPrivacy;
 
 use super::{ScenesSection, corner_px};
 use crate::app::hotkeys::node_platform;
+use crate::lcd;
 
 /// The Layout select's width (`w-48`).
 const LAYOUT_SELECT_PX: f32 = 192.;
@@ -443,6 +445,9 @@ impl ScenesSection {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let view = self.on_stream.clone()?;
+        if self.retro {
+            return Some(self.on_stream_lcd(&view, t, cx));
+        }
         let entity = cx.entity();
         let muted = hsla(t.muted_foreground);
         let platform = Some(node_platform());
@@ -758,4 +763,306 @@ impl ScenesSection {
                 .into_any_element(),
         )
     }
+
+    /// The fields on one Retro LCD screen (P329, `scene-on-stream.tsx:145`):
+    /// On stream, Screen with Change screen…, its lines, the Hide screen
+    /// press row, Layout, Framing and, with a vertical stream armed, its
+    /// 9:16 layout and framing. The choices are the kit's Select on the
+    /// screen, as the LCD Camera row's (no LCD choice list in the app yet).
+    fn on_stream_lcd(
+        &mut self,
+        view: &SceneOnStreamView,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let entity = cx.entity();
+        let lit = lcd::lit(t);
+        let dim = lcd::dim(t);
+        let mut screen = div()
+            .flex()
+            .flex_col()
+            .child(lcd_row(
+                "scene-on-stream-lcd-name",
+                LCD_ON_STREAM,
+                div()
+                    .id("scene-on-stream-name")
+                    .min_w_0()
+                    .truncate()
+                    .text_color(lit)
+                    .child(view.name.clone()),
+                t,
+            ))
+            .child(lcd::separator(t));
+
+        // Screen: its words and Change screen…, off with its reason.
+        let change_screen: AnyElement = match view.change_screen_reason.clone() {
+            Some(reason) => lcd::value_button(
+                "scene-change-screen",
+                t,
+                copy::CHANGE_SCREEN,
+                false,
+                true,
+                Some(SharedString::from(reason)),
+                |_, _, _| {},
+            )
+            .child(icon(IconName::CaretRight, 10., dim))
+            .into_any_element(),
+            None => lcd::action_button(
+                "scene-change-screen",
+                t,
+                copy::CHANGE_SCREEN,
+                cx.listener(|section, _, window, cx| section.change_screen_on_stream(window, cx)),
+            )
+            .into_any_element(),
+        };
+        screen = screen.child(lcd_row(
+            "scene-screen-field",
+            copy::SCREEN,
+            div()
+                .flex()
+                .min_w_0()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(lit)
+                        .child(view.screen_words.clone()),
+                )
+                .child(change_screen),
+            t,
+        ));
+        if let Some(note) = view.screen_note.clone() {
+            screen = screen.child(lcd::message(t, note));
+        }
+        // The capture switch's line, its Check again a value on the screen.
+        if let Some(line) = view.switch_status.clone() {
+            screen = screen.child(
+                div()
+                    .id("scene-capture-status")
+                    .role(Role::Status)
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .gap(px(4.))
+                    .py(px(6.))
+                    .text_color(dim)
+                    .child(line.message)
+                    .when(line.check_again, |status| {
+                        status.child(lcd::value_button(
+                            "scene-capture-check-again",
+                            t,
+                            live_copy::CHECK_AGAIN,
+                            false,
+                            false,
+                            None,
+                            cx.listener(|section, _, _, _| section.retry_capture_status()),
+                        ))
+                    }),
+            );
+        }
+        if let Some(stand_in) = view.stand_in.clone() {
+            screen = screen.child(lcd::message(t, stand_in));
+        }
+
+        // Hide screen (`RetroScreenPrivacyRow`): On while the screen is
+        // hidden, its key on hover; only a hide is ever refused.
+        let privacy = &view.privacy;
+        let press = lcd::press_row(
+            "scene-hide-screen",
+            t,
+            retro_privacy_label(privacy).to_string(),
+            privacy.hidden,
+            privacy.disabled_reason.is_some(),
+            {
+                let entity = entity.clone();
+                move |_, _, cx| entity.update(cx, |section, cx| section.toggle_privacy(cx))
+            },
+        );
+        let press = div()
+            .id("scene-hide-screen-tip")
+            .flex()
+            .flex_col()
+            .child(press);
+        let press = match (privacy.disabled_reason.clone(), privacy.accelerator.clone()) {
+            (Some(reason), _) => press.tooltip(tooltip(reason)),
+            (None, Some(accelerator)) => {
+                press.tooltip(tooltip_with_accelerator(privacy.action_label, accelerator))
+            }
+            (None, None) => press.tooltip(tooltip(privacy.action_label)),
+        };
+        screen = screen.child(press).child(lcd::separator(t));
+
+        // Layout (`chooseLayout`: D19 first).
+        let layout = &view.layout;
+        let mut select = Select::new("scene-layout")
+            .accessibility_label(copy::LAYOUT)
+            .width(LCD_SELECT_PX)
+            .value((!layout.freeform).then(|| SharedString::from(layout.preset.clone())))
+            .placeholder(layout.trigger.clone())
+            .on_change({
+                let entity = entity.clone();
+                move |value, window, cx| {
+                    entity.update(cx, |section, cx| {
+                        section.choose_layout(value.as_ref(), window, cx)
+                    })
+                }
+            });
+        for choice in &layout.choices {
+            select = select.option_item(
+                SelectOption::new(choice.value, choice.label.clone()).disabled(choice.disabled),
+            );
+        }
+        screen = screen.child(lcd_row("scene-layout-field", copy::LAYOUT, select, t));
+        if let Some(line) = layout.camera_line.clone() {
+            screen = screen.child(lcd::message(t, line));
+        }
+
+        // Framing: Fill or Fit.
+        if let Some(framing) = view.framing {
+            let entity = entity.clone();
+            screen = screen.child(lcd_row(
+                "scene-screen-framing",
+                copy::FRAMING,
+                framing_select("scene-screen-framing-select", framing.fit, false)
+                    .accessibility_label(copy::FRAMING)
+                    .on_change(move |value, _, cx| {
+                        let fit = value.as_ref() == FIT;
+                        entity.update(cx, |section, _| section.set_framing(framing.vertical, fit))
+                    }),
+                t,
+            ));
+        }
+
+        // The scene's 9:16 layout and framing beside a 16:9 studio; off
+        // with a library from a newer Videorc.
+        if let Some(vertical) = view.vertical_stream.clone() {
+            let read_only = vertical.read_only_reason.is_some();
+            let mut select = Select::new("scene-vertical-stream-layout")
+                .accessibility_label(copy::VERTICAL_STREAM)
+                .width(LCD_SELECT_PX)
+                .value(Some(SharedString::from(vertical.preset.clone())))
+                .disabled(read_only)
+                .on_change({
+                    let entity = entity.clone();
+                    let view = vertical.clone();
+                    move |value, _, cx| {
+                        if let Some(preset) = vertical_stream_pick(&view, value.as_ref()) {
+                            entity.update(cx, |section, _| {
+                                section.edit_vertical_stream("layoutPreset", preset)
+                            });
+                        }
+                    }
+                });
+            for choice in &vertical.choices {
+                select = select.option_item(
+                    SelectOption::new(choice.preset, choice.label.clone())
+                        .disabled(choice.disabled),
+                );
+            }
+            let framing_entity = entity.clone();
+            screen = screen
+                .child(lcd::separator(t))
+                .child(lcd_row(
+                    "scene-vertical-stream-field",
+                    copy::VERTICAL_STREAM,
+                    select,
+                    t,
+                ))
+                .child(lcd_row(
+                    "scene-vertical-stream-framing",
+                    LCD_VERTICAL_FRAMING,
+                    framing_select(
+                        "scene-vertical-stream-framing-select",
+                        vertical.fit,
+                        read_only,
+                    )
+                    .accessibility_label(LCD_VERTICAL_FRAMING)
+                    .on_change(move |value, _, cx| {
+                        let framing = if value.as_ref() == FIT { FIT } else { FILL };
+                        framing_entity.update(cx, |section, _| {
+                            section.edit_vertical_stream("verticalScreenFraming", framing)
+                        })
+                    }),
+                    t,
+                ));
+        }
+
+        // Screen Recording's alert under the screen (`SourcePermissionAlerts
+        // only="screen-recording"`).
+        let alert = self.screen_alert.clone().map(|alert| {
+            Alert::new("scene-screen-recording-alert")
+                .variant(AlertVariant::Warning)
+                .title(alert.alert.title)
+                .description(div().child(alert.alert.description))
+                .action(
+                    Button::new("scene-screen-recording-action")
+                        .variant(ButtonVariant::Outline)
+                        .label(alert.alert.action_label)
+                        .disabled(self.alert_pending)
+                        .on_click(cx.listener(|section, _, _, cx| section.run_screen_alert(cx))),
+                )
+        });
+        div()
+            .id("scene-on-stream")
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(lcd::panel(
+                "scene-on-stream-lcd",
+                t,
+                format!("{} {}", copy::ON_STREAM, view.name),
+                screen,
+            ))
+            .children(alert)
+            .into_any_element()
+    }
+}
+
+/// The LCD rows' "On stream" (`scene-on-stream.tsx:158`; the default look's
+/// heading is "On stream:").
+const LCD_ON_STREAM: &str = "On stream";
+/// The LCD's vertical framing row (`scene-on-stream.tsx:213`).
+const LCD_VERTICAL_FRAMING: &str = "Vertical framing";
+/// An LCD choice's width, as the LCD Camera row's select.
+const LCD_SELECT_PX: f32 = 160.;
+
+/// `LcdPanelRow`: its dim name on the left, its value or control on the
+/// right (`gap-4 py-2`).
+fn lcd_row(
+    id: &'static str,
+    label: &'static str,
+    value: impl IntoElement,
+    t: &Theme,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .min_w_0()
+        .items_center()
+        .justify_between()
+        .gap(px(16.))
+        .px(px(4.))
+        .py(px(8.))
+        .child(div().flex_shrink_0().text_color(lcd::dim(t)).child(label))
+        .child(
+            div()
+                .flex()
+                .min_w_0()
+                .items_center()
+                .justify_end()
+                .gap(px(8.))
+                .child(value),
+        )
+}
+
+/// Fill or Fit as an LCD choice (`FRAMING_CHOICES`).
+fn framing_select(id: &'static str, fit: bool, disabled: bool) -> Select {
+    Select::new(id)
+        .width(LCD_SELECT_PX)
+        .value(Some(SharedString::from(if fit { FIT } else { FILL })))
+        .disabled(disabled)
+        .option(FILL, copy::FILL)
+        .option(FIT, copy::FIT)
 }
