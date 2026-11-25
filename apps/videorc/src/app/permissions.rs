@@ -258,7 +258,8 @@ impl Permissions {
             let result = job.await.map_err(|error| error.to_string())??;
             if result.relaunched {
                 eprintln!("[videorc-app] reopening Videorc after a permission grant");
-                cx.update(|cx| cx.quit());
+                // Refused while capturing; never the person's quit.
+                cx.update(super::exit::ExitGuard::quit_unasked);
                 return Ok(true);
             }
             // The toast lands with the toast layer; its words are logged now.

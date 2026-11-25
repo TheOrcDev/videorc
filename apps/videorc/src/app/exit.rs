@@ -4,19 +4,19 @@
 //! the exits this app can hold.
 //!
 //! - **Held:** the app's Quit (⌘Q and the menu), the main window's close
-//!   button, and Close Window (⌘W) on the main window.
+//!   button, Close Window (⌘W) on the main window, and on macOS the Dock's
+//!   Quit, a logout and a restart (`NSApplication terminate:`, answered by
+//!   `platform::macos::terminate`).
 //! - **Asked by:** whatever shows the End livestream question, registered
-//!   with [`ExitGuard::set_answerer`] (the Studio, #1893). It ends the
+//!   with [`ExitGuard::set_answerer`] (`main.rs`: the Studio's stop
+//!   request, which the shell's End livestream dialog shows). It ends the
 //!   livestream (or hands a managed show off) and answers with
 //!   [`ExitGuard::exit_after_livestream_ended`], which lets that one exit
 //!   through. With nothing registered, or the main window gone, an exit
 //!   proceeds as it always did, as Electron's does without a renderer.
-//! - **Not held (a gap, `docs/gpui/parity.md`):** the Dock's Quit, a
-//!   logout and a restart reach `NSApplication terminate:`, which GPUI
-//!   answers without asking the app (it implements only
-//!   `applicationWillTerminate:`). The fix is a GPUI patch for
-//!   `applicationShouldTerminate:` returning "later" while the question is
-//!   up.
+//! - **Never held:** a quit that isn't the person's ([`ExitGuard::quit_unasked`]:
+//!   a smoke run's `--quit-after`, Reopen Videorc, a main window that never
+//!   opened), as Electron allows those up front.
 //!
 //! A recording quits as it always did: the backend's shutdown drains its
 //! finalization.
@@ -28,12 +28,21 @@ use gpui::{AnyWindowHandle, App, Global, Window};
 use tokio::sync::broadcast;
 use videorc_app_core::BackendEvent;
 use videorc_app_core::desktop::exit_guard::{AppExitKind, LiveExitGuard};
+use videorc_app_core::studio::session::StopExit;
 
 /// The `cloud.state` event a hosted talk show's room arrives on.
 pub const CLOUD_STATE: &str = "cloud.state";
 
 /// Shows the End livestream question for an exit.
 pub type Answerer = Rc<dyn Fn(AppExitKind, &mut App)>;
+
+/// The exit a confirmed stop continues with (`StopExit`), as the guard's kind.
+pub fn exit_kind(exit: StopExit) -> AppExitKind {
+    match exit {
+        StopExit::Quit => AppExitKind::Quit,
+        StopExit::Close => AppExitKind::Close,
+    }
+}
 
 /// The guard, the main window and whoever asks.
 pub struct ExitGuard {
@@ -79,6 +88,17 @@ impl ExitGuard {
             answerer: None,
             main_window: None,
         });
+        // The Dock's Quit, a logout and a restart ask the same question.
+        #[cfg(target_os = "macos")]
+        {
+            let app = cx.to_async();
+            let held = crate::platform::macos::terminate::hold_terminate(Box::new(move || {
+                app.update(|cx| Self::may_exit(AppExitKind::Quit, cx))
+            }));
+            if let Err(error) = held {
+                eprintln!("[videorc-app] the Dock's Quit can't ask first: {error}");
+            }
+        }
     }
 
     /// The main window: its close button asks while on air.
@@ -90,8 +110,7 @@ impl ExitGuard {
         window.on_window_should_close(cx, |_, cx| Self::may_exit(AppExitKind::Close, cx));
     }
 
-    /// The End livestream question's owner (the Studio page).
-    #[allow(dead_code)]
+    /// The End livestream question's owner (the Studio's stop request).
     pub fn set_answerer(answerer: Answerer, cx: &mut App) {
         if cx.has_global::<Self>() {
             cx.global_mut::<Self>().answerer = Some(answerer);
@@ -100,7 +119,6 @@ impl ExitGuard {
 
     /// `exitAfterLivestreamEnded`: the question was answered (the
     /// livestream ended, or the show was handed off); this exit goes.
-    #[allow(dead_code)]
     pub fn exit_after_livestream_ended(kind: AppExitKind, cx: &mut App) {
         let main = cx.has_global::<Self>().then(|| {
             let this = cx.global_mut::<Self>();
@@ -152,6 +170,14 @@ impl ExitGuard {
         if Self::may_exit(AppExitKind::Quit, cx) {
             cx.quit();
         }
+    }
+
+    /// A quit that isn't the person's: allowed up front, never asks.
+    pub fn quit_unasked(cx: &mut App) {
+        if cx.has_global::<Self>() {
+            cx.global::<Self>().lock().allow(AppExitKind::Quit);
+        }
+        cx.quit();
     }
 
     /// Close Window (⌘W): the main window asks first; any other window
