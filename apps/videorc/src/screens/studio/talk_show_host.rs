@@ -562,7 +562,7 @@ impl TalkShowRoomHost {
             videorc_protocol::CameraShape::Circle => Some("circle"),
             _ => Some("rounded"),
         };
-        let next = stage_with_screen(&room.stage, Some(&host));
+        let next = stage_with_screen(&room.stage, Some(host.as_str()));
         let params = stage_set_params(&next, host_shape_for_camera(shape));
         let request = self.request(STAGE_SET, params);
         cx.background_executor().spawn(async move {
