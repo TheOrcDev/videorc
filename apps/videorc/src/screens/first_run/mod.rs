@@ -792,6 +792,23 @@ fn needs_screen(preset: &str) -> bool {
     !preset.ends_with("camera-only")
 }
 
+/// A disabled control's colours (Electron's `opacity-50`), pre-blended over
+/// the card's ground (`faded_over`). GPUI fades each layer on its own, so a
+/// faded group would drop its label into its fill; these paint at full
+/// opacity instead, as the kit's SegmentedControl, InputGroup and Button do.
+fn faded_theme(t: &Theme) -> Theme {
+    let fade = |color| faded_over(color, t.glass_solid, 0.5);
+    Theme {
+        foreground: fade(t.foreground),
+        muted_foreground: fade(t.muted_foreground),
+        border: fade(t.border),
+        muted: fade(t.muted),
+        background: fade(t.background),
+        accent: fade(t.accent),
+        ..*t
+    }
+}
+
 /// `MediaCard`: the row radius, a 4% fill and a hairline; selected, the
 /// chrome plate with a brighter rim, never a colour.
 /// A Look card: a real button (`<button>` in Electron), so Tab reaches it,
@@ -805,6 +822,8 @@ fn media_card(
     focus: Option<&FocusHandle>,
     t: &Theme,
 ) -> gpui_base::Button {
+    let faded = faded_theme(t);
+    let t = if disabled { &faded } else { t };
     let accent = hsla(t.accent);
     let ring = focus_ring(t);
     let plate = vec![
@@ -851,7 +870,6 @@ fn media_card(
         .when(!selected && !disabled, |card| {
             card.cursor_pointer().hover(move |style| style.bg(accent))
         })
-        .when(disabled, |card| card.opacity(0.5))
         .focus_visible(move |style| style.shadow(vec![ring]))
 }
 
@@ -1427,6 +1445,9 @@ fn goal_body(
             IconName::VideoCamera,
         ),
     ];
+    // Locked rows draw in pre-blended colours, not a faded group.
+    let faded = faded_theme(t);
+    let t = if locked { &faded } else { t };
     let accent = hsla(t.accent);
     let muted = hsla(t.muted_foreground);
     let mut list = GroupedList::new();
@@ -1442,7 +1463,6 @@ fn goal_body(
                 .accessibility_label(title)
                 .when(chosen, |row| row.bg(accent))
                 .when(!locked, |row| row.hover(move |style| style.bg(accent)))
-                .when(locked, |row| row.opacity(0.5))
                 .focus_visible(move |style| style.shadow(vec![ring]))
                 .on_click({
                     let entity = entity.clone();
@@ -1686,8 +1706,12 @@ fn look_body(
     for id in assets::live_backgrounds_offered() {
         tiles.push((Some(*id), assets::live_background_name(id)));
     }
+    let faded = faded_theme(t);
     for (index, (id, label)) in tiles.into_iter().enumerate() {
         let selected = screen.live_background == id;
+        // Locked: the card's colours pre-blended, the still faded on its own
+        // (one layer, so its opacity is the group's).
+        let t = if locked { &faded } else { t };
         let well = div()
             .relative()
             .w_full()
@@ -1700,7 +1724,8 @@ fn look_body(
                     .inset_0()
                     .size_full()
                     .rounded(px(radius::CHIP))
-                    .object_fit(ObjectFit::Cover),
+                    .object_fit(ObjectFit::Cover)
+                    .when(locked, |still| still.opacity(0.5)),
             ),
             None => well
                 .flex()
@@ -1750,6 +1775,8 @@ fn look_body(
         let disabled = locked
             || (needs_camera(layout) && camera_gap.is_some())
             || (needs_screen(layout) && screen_gap.is_some());
+        // A disabled card draws its diagram and name in pre-blended colours.
+        let t = if disabled { &faded } else { t };
         let well = div()
             .relative()
             .rounded(px(radius::CHIP))
