@@ -12,9 +12,14 @@
 //! speech (the legacy whole-program silence).
 //!
 //! Sessions (review, option D): LiveKit's Rust SDK scopes a permission by
-//! identity, where the browser SDK scoped it by session id. So no grant
-//! rests on an identity alone: a consumer takes nothing until its capability
-//! receipt is current for the session it is in now. Every participant
+//! identity, where the browser SDK scoped it by session id. So no grant that
+//! needs a receipt rests on an identity alone: the auxiliary track, an HTML
+//! sheet, and anything at all for a consumer nobody sees (a hidden egress
+//! page) wait until its capability receipt is current for the session it is
+//! in now. A visible participant (the runner, a guest) takes the host's
+//! media as the renderer room grants it, receipt or not (L1 11-25: the node
+//! runner and the guest page send no receipt, so a backend-hosted show never
+//! went live); a removed one takes nothing. Every participant
 //! connect (a first join or a replacement under the same identity)
 //! recomputes the plan, and the new session, with no receipt of its own yet,
 //! is revoked to nothing in that same permissions update; it earns its grant
@@ -139,6 +144,11 @@ pub(crate) fn clear() {
 #[derive(Debug, Clone)]
 pub(crate) struct Consumer {
     pub(crate) identity: String,
+    /// It is in the room as a remote participant now (not a hidden page
+    /// known only by its receipt).
+    pub(crate) visible: bool,
+    /// Removed from the show: it takes nothing until it is let in again.
+    pub(crate) denied: bool,
     /// Its media v2 receipt is this session's and fresh.
     pub(crate) current: bool,
     /// The receipt says `audioRouting: 1`.
@@ -171,9 +181,9 @@ pub(crate) fn subscription_plan(
     consumers
         .iter()
         .map(|consumer| {
-            // Nothing rests on an identity alone: no current receipt for the
-            // session it is in now, no tracks.
-            if !consumer.current {
+            // A removed participant, and a consumer nobody sees without a
+            // current receipt for the session it is in now: nothing.
+            if consumer.denied || !(consumer.current || consumer.visible) {
                 return (consumer.identity.clone(), BTreeSet::new());
             }
             let egress = is_egress(&consumer.identity);
@@ -184,7 +194,7 @@ pub(crate) fn subscription_plan(
                     if track.name == AUX_TRACK_NAME {
                         !legacy_silenced && consumer.current
                     } else if is_sheet(&track.name) {
-                        egress
+                        egress && consumer.current
                     } else {
                         !(legacy_silenced && track.audio)
                     }
@@ -250,6 +260,8 @@ pub(crate) fn consumers(
         .map(|(identity, sid)| {
             let receipt = receipts.get(&identity);
             Consumer {
+                visible: visible.contains_key(&identity),
+                denied: false,
                 current: capability_current(receipt, &sid, now),
                 routing: receipt.is_some_and(|receipt| receipt.capability.audio_routing == Some(1)),
                 identity,
@@ -322,6 +334,7 @@ pub(crate) async fn run(
             for consumer in &mut consumers {
                 if denied.contains_key(&consumer.identity) {
                     consumer.current = false;
+                    consumer.denied = true;
                 }
             }
         }
@@ -417,6 +430,8 @@ mod tests {
     fn consumer(identity: &str, current: bool, routing: bool) -> Consumer {
         Consumer {
             identity: identity.to_string(),
+            visible: true,
+            denied: false,
             current,
             routing,
         }
@@ -451,8 +466,43 @@ mod tests {
             false,
         );
         assert_eq!(allowed(&plan, "g_a"), vec!["TR_aux", "TR_cam", "TR_mic"]);
-        // No current receipt for its session: nothing at all.
-        assert!(allowed(&plan, "g_old").is_empty());
+        // Visible with no current receipt: the host's media, never the aux
+        // track (the renderer room's grant to every visible participant).
+        assert_eq!(allowed(&plan, "g_old"), vec!["TR_cam", "TR_mic"]);
+    }
+
+    #[test]
+    fn the_runner_takes_the_hosts_media_without_a_receipt() {
+        // The node runner sends no capability receipt: as the renderer room,
+        // it takes the camera and microphone (L1 11-25: a backend-hosted show
+        // never went live without them). Sheets stay egress-only.
+        let plan = subscription_plan(&[consumer("runner:sh_1", false, false)], &tracks(), false);
+        assert_eq!(allowed(&plan, "runner:sh_1"), vec!["TR_cam", "TR_mic"]);
+    }
+
+    #[test]
+    fn a_hidden_page_or_a_removed_guest_takes_nothing_without_its_receipt() {
+        let hidden = Consumer {
+            visible: false,
+            ..consumer(&format!("{RECORDER_IDENTITY_PREFIX}rec"), false, false)
+        };
+        let removed = Consumer {
+            denied: true,
+            ..consumer("g_bo", false, false)
+        };
+        let plan = subscription_plan(&[hidden.clone(), removed], &tracks(), false);
+        assert!(allowed(&plan, &hidden.identity).is_empty());
+        assert!(allowed(&plan, "g_bo").is_empty());
+        // A hidden egress page with a current receipt keeps every grant.
+        let current = Consumer {
+            current: true,
+            ..hidden
+        };
+        let plan = subscription_plan(&[current.clone()], &tracks(), false);
+        assert_eq!(
+            allowed(&plan, &current.identity),
+            vec!["TR_aux", "TR_cam", "TR_mic", "TR_sheet"]
+        );
     }
 
     #[test]
