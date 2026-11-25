@@ -344,7 +344,7 @@ impl Render for SoundsPanel {
                     .value(Some(SharedString::from(hotkey.clone())))
                     .option("none", soundboard::NO_KEY);
                 for key in soundboard::SOUND_HOTKEYS {
-                    key_select = key_select.option(*key, *key);
+                    key_select = key_select.option(key, key);
                 }
                 key_select = key_select.on_change({
                     let entity = entity.clone();
