@@ -28,6 +28,8 @@ pub struct ShortcutRecorder {
     /// The binding in words ("⇧⌘R"), for the spoken name.
     value_label: Option<SharedString>,
     tooltip: Option<SharedString>,
+    /// While armed: the modifiers held so far ("⌘⇧"), as a key chip and "…".
+    armed_preview: Option<SharedString>,
     armed: bool,
     invalid: bool,
     disabled: bool,
@@ -45,6 +47,7 @@ impl ShortcutRecorder {
             label: None,
             value_label: None,
             tooltip: None,
+            armed_preview: None,
             armed: false,
             invalid: false,
             disabled: false,
@@ -84,6 +87,14 @@ impl ShortcutRecorder {
     /// A tooltip on the field (what the shortcut does, or why it is off).
     pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
         self.tooltip = Some(text.into());
+        self
+    }
+
+    /// While armed, the modifiers held so far ("⌘⇧", `acceleratorModifiersLabel`):
+    /// a key chip and a muted "…" in place of "Press shortcut…". Ignored while
+    /// unarmed; an empty string shows the prompt.
+    pub fn armed_preview(mut self, held: impl Into<SharedString>) -> Self {
+        self.armed_preview = Some(held.into());
         self
     }
 
@@ -136,7 +147,25 @@ impl RenderOnce for ShortcutRecorder {
             (with_alpha(t.border, 0.0), with_alpha(t.ring, 0.0))
         };
 
-        let body = if let Some(keys) = self.keys {
+        let held = self
+            .armed_preview
+            .clone()
+            .filter(|held| self.armed && !held.is_empty());
+        let body = if let Some(held) = held {
+            // `<KbdGroup><Kbd>{held}</Kbd><span muted>…</span></KbdGroup>`.
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(crate::kbd::Kbd::new(held))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(hsla(t.muted_foreground))
+                        .child("…"),
+                )
+                .into_any_element()
+        } else if let Some(keys) = self.keys {
             keys
         } else {
             div()

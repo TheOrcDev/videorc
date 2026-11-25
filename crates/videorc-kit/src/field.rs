@@ -42,6 +42,9 @@ pub struct Field {
     description: Option<SharedString>,
     /// Description between the label and the control (`FieldContent`).
     description_above: bool,
+    /// Electron's plain Field over its own row: the description 2 px under
+    /// the label at a 16 px line (Output's Windows encoder).
+    compact: bool,
     error: Option<SharedString>,
     invalid: bool,
     children: SmallVec<[AnyElement; 2]>,
@@ -58,6 +61,7 @@ impl Field {
             label_after: None,
             description: None,
             description_above: false,
+            compact: false,
             error: None,
             invalid: false,
             children: SmallVec::new(),
@@ -98,6 +102,13 @@ impl Field {
     /// `FieldContent` (label + description, `gap-1`) before the control.
     pub fn description_above(mut self, above: bool) -> Self {
         self.description_above = above;
+        self
+    }
+
+    /// The tight label + description stack (2 px apart, 16 px lines) of a
+    /// plain Field, instead of SettingsRow's 4 px and 18 px.
+    pub fn compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
         self
     }
 
@@ -175,10 +186,11 @@ impl RenderOnce for Field {
             row
         });
 
+        let compact = self.compact;
         let description = self.description.map(|description| {
             div()
                 .type_scale(text::META)
-                .line_height(px(18.0))
+                .line_height(px(if compact { 16.0 } else { 18.0 }))
                 .text_color(hsla(t.muted_foreground))
                 .child(description)
         });
@@ -229,7 +241,7 @@ impl RenderOnce for Field {
                     .min_w(px(0.0))
                     .flex_1()
                     .flex_col()
-                    .gap(px(4.0))
+                    .gap(px(if compact { 2.0 } else { 4.0 }))
                     .children(label_row)
                     .children(description)
                     .children(error);
