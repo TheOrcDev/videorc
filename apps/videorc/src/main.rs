@@ -563,6 +563,16 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let quick_settings = cx.new(|cx| {
+                    screens::studio::quick_settings::QuickSettingsSection::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        studio_state.clone(),
+                        studio.telemetry(),
+                        studio.live_chat(),
+                        cx,
+                    )
+                });
                 let takeover = cx.new(|cx| {
                     TakeoverSection::new(
                         studio.backend().clone(),
@@ -598,6 +608,7 @@ fn main() -> Result<()> {
                         session,
                         chat,
                         audio,
+                        quick_settings,
                         takeover,
                         scenes,
                         window,
