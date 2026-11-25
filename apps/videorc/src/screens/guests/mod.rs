@@ -11,15 +11,15 @@ use gpui::{App, Context, Entity, SharedString, Window, div, prelude::*, px};
 use videorc_app_core::guests::view::{
     self as guests, CloudRoomFacts, GUEST_NAME_MAX_CHARS, GuestsAccess, ManagedOutputProfile,
     NEW_LINK_AFTER_BAN, RoomPerson, ScreenShareAction, Tone, ban_guest_copy, close_room_asks_first,
-    declined_line, guest_consent_line, guest_screen_share, guests_access,
-    managed_profile_description, mic_toggle_label, new_link_asks_first, output_profile_chips,
-    quality_status, remove_guest_copy, renamed_guest_name, request_device, request_title,
-    room_counts, room_is_full, room_limits, room_limits_line, room_people, room_phase_label,
-    unmute_hint,
+    declined_line, guest_consent_line, guest_screen_share, guests_access, mic_toggle_label,
+    new_link_asks_first, output_profile_chips, quality_status, remove_guest_copy,
+    renamed_guest_name, request_device, request_title, room_counts, room_is_full, room_limits,
+    room_limits_line, room_people, room_phase_label, unmute_hint,
 };
 use videorc_app_core::guests::wire::{RecordingStatus, RoomPhase, RoomRequest, RoomStatus};
 use videorc_app_core::livestream::cloud_status::CloudStatus;
 use videorc_app_core::livestream::copy as livestream_copy;
+use videorc_app_core::livestream::talk_show_outputs;
 use videorc_app_core::livestream::targets;
 use videorc_app_core::notices::{NoticeCommand, ToastRequest};
 use videorc_app_core::{BackendClient, Studio};
@@ -106,6 +106,17 @@ fn tone_to_status(tone: Tone) -> StatusTone {
     }
 }
 
+/// The room's reported profile in L1's full shape (`talk_show_outputs`), for
+/// Electron's exact sentence ("… in a 60 fps stream, …, AAC 160 kbps").
+fn full_output_profile(
+    status: Option<&CloudStatus>,
+) -> Option<talk_show_outputs::ManagedOutputProfile> {
+    status
+        .and_then(|s| s.show.as_ref())
+        .and_then(|show| show.output_profile.as_ref())
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+}
+
 fn output_profile(status: Option<&CloudStatus>) -> Option<ManagedOutputProfile> {
     status
         .and_then(|s| s.show.as_ref())
@@ -134,6 +145,9 @@ pub struct GuestsPanel {
     runtime: tokio::runtime::Handle,
     facts: Option<CloudRoomFacts>,
     profile: Option<ManagedOutputProfile>,
+    full_profile: Option<talk_show_outputs::ManagedOutputProfile>,
+    /// `talkShowOutputPlan`: what a room would open with now, or why not.
+    output_plan: talk_show_outputs::TalkShowOutputPlan,
     connected: bool,
     session_active: bool,
     opening: bool,
@@ -180,11 +194,15 @@ impl GuestsPanel {
             }
         })
         .detach();
+        let output_plan =
+            talk_show_outputs::talk_show_output_plan(&studio.snapshot().settings.capture_doc);
         let mut panel = Self {
             studio,
             runtime,
             facts: None,
             profile: None,
+            full_profile: None,
+            output_plan,
             connected: false,
             session_active: false,
             opening: false,
@@ -219,15 +237,21 @@ impl GuestsPanel {
         let snapshot = self.studio.snapshot();
         let facts = cloud_facts(cloud.status.as_ref());
         let profile = output_profile(cloud.status.as_ref());
+        let full_profile = full_output_profile(cloud.status.as_ref());
+        let output_plan = talk_show_outputs::talk_show_output_plan(&snapshot.settings.capture_doc);
         let connected = self.studio.is_connected();
         let session_active = snapshot.session.phase.is_active();
         if self.facts != facts
             || self.profile != profile
+            || self.full_profile != full_profile
+            || self.output_plan != output_plan
             || self.connected != connected
             || self.session_active != session_active
         {
             self.facts = facts;
             self.profile = profile;
+            self.full_profile = full_profile;
+            self.output_plan = output_plan;
             self.connected = connected;
             self.session_active = session_active;
             let phase = self
@@ -556,7 +580,12 @@ impl Render for GuestsPanel {
         let locked = matches!(access, GuestsAccess::Locked { .. });
         let offline = !self.connected;
         let session_locked = self.session_active && phase == RoomPhase::Closed;
-        let disabled = offline || locked || session_locked;
+        // `!roomOpen && !!outputPlan.problem`: a room that can't open with
+        // these settings doesn't offer to.
+        let disabled = offline
+            || locked
+            || session_locked
+            || (!room_open && self.output_plan.problem.is_some());
         let room_pending = self.opening || phase == RoomPhase::Opening;
         let limits = room_limits(self.facts.as_ref());
         let limits_line = room_limits_line(limits);
@@ -570,7 +599,8 @@ impl Render for GuestsPanel {
             .unwrap_or_default();
         let declined = declined_line(room.as_ref().map(|r| r.declined_count).unwrap_or(0));
         let chips = output_profile_chips(self.profile.as_ref());
-        let profile_line = managed_profile_description(self.profile.as_ref());
+        let profile_line =
+            talk_show_outputs::managed_profile_description(self.full_profile.as_ref());
         let entity = cx.entity();
 
         let mut notices = div().flex().flex_col().gap(px(8.));
@@ -695,13 +725,18 @@ impl Render for GuestsPanel {
                     .id("cloud-output-profile")
                     .tooltip(tooltip(profile_line.clone())),
             );
-        } else if room_open || self.profile.is_some() {
+        } else if !room_open || self.full_profile.is_some() {
+            // `FieldDescription`: what the room will send (or why it can't
+            // open) before it opens; what it reported once open.
             room_section = room_section.child(
                 div()
-                    .px(px(4.))
                     .type_scale(text::META)
                     .text_color(hsla(t.muted_foreground))
-                    .child(profile_line.clone()),
+                    .child(if room_open {
+                        profile_line.clone()
+                    } else {
+                        self.output_plan.description.clone()
+                    }),
             );
         }
         if let Some(message) = room.as_ref().and_then(|r| r.message.clone()) {

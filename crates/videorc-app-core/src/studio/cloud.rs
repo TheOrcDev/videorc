@@ -570,8 +570,31 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     /// `cloud.room.open` (Guests ⌘7).
+    ///
+    /// Plan 249 S17 (`talkShowOutputs`): the room opens with the outputs
+    /// `talk_show_output_plan` decides from the saved settings, and a plan
+    /// with a problem refuses before anything is created, toasted like any
+    /// refusal.
     pub async fn open_talk_room(&self, title: Option<String>, platforms: Vec<String>) {
-        let mut params = json!({ "platforms": platforms });
+        let plan = crate::livestream::talk_show_outputs::talk_show_output_plan(
+            &self.snapshot().settings.capture_doc,
+        );
+        if let Some(problem) = plan.problem {
+            // The plan's problem is already Videorc's sentence.
+            let failure = Failure::Sentence {
+                text: &problem,
+                warning: false,
+            };
+            let context = UserErrorContext {
+                action: "open",
+                object: "the room",
+            };
+            if let Some(command) = toast_user_error(failure, context, CLOUD_TOAST_ID) {
+                self.post(vec![command]);
+            }
+            return;
+        }
+        let mut params = json!({ "platforms": platforms, "outputs": plan.outputs });
         if let Some(title) = title.filter(|t| !t.trim().is_empty()) {
             params["title"] = json!(title);
         }
