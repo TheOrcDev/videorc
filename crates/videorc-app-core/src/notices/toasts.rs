@@ -961,6 +961,7 @@ pub fn microphone_notice_title(notice: &MicrophoneNotice) -> String {
 }
 
 /// The microphone notice's toast: a warning, until closed.
+#[allow(dead_code)]
 fn microphone_toast(notice: &MicrophoneNotice) -> Notice {
     ToastRequest::warning(microphone_notice_title(notice))
         .id(ids::MICROPHONE_INPUT_LOST)
@@ -1333,6 +1334,7 @@ pub fn separate_file_failed_copy(message: &str, take_running: bool) -> (String, 
 /// `showSessionAudioNews` (plan 076): what the audio bus reports
 /// mid-session. The echo pause's Resume turns System audio on again
 /// (S3.1d).
+#[allow(dead_code)]
 fn session_audio_news(event: &HealthEvent, once: &mut NotifyOnce, now: Instant) -> Option<Notice> {
     let message = event.message.clone();
     let keyed = |once: &mut NotifyOnce, key: &str, request: ToastRequest| {
@@ -1937,8 +1939,6 @@ pub struct SessionNotices {
     microphone: Option<MicrophoneNotice>,
     /// `microphoneInputLostSessionRef`.
     microphone_dedupe: Option<String>,
-    /// `qualityToastSessionsRef`.
-    quality_shown: HashSet<String>,
     once: NotifyOnce,
     /// `streamTargetStatesRef`.
     stream_targets: BTreeMap<String, StreamTargetState>,
@@ -2040,23 +2040,20 @@ impl SessionNotices {
         }
     }
 
-    /// `showSessionFinished`: the live stream's news ends with it, the
-    /// microphone notice moves to the past tense, and a saved recording
-    /// gets Play.
+    /// `showSessionFinished`: dismiss the live-output keys and move a
+    /// microphone notice to the past tense. The ended mic entry and
+    /// "Recording saved" are L6 store entries (`sources::session`), not
+    /// legacy toasts.
     fn session_finished(
         &mut self,
-        session_id: Option<&str>,
-        activity: RuntimeActivity,
+        _session_id: Option<&str>,
+        _activity: RuntimeActivity,
     ) -> Vec<NoticeCommand> {
         let mut commands = vec![dismiss(ids::STREAM_DELIVERY), dismiss(ids::STREAM_UPLINK)];
         if let Some(notice) = self.microphone.as_mut()
             && notice.phase != MicrophonePhase::Ended
         {
             notice.phase = MicrophonePhase::Ended;
-            commands.push(NoticeCommand::Show(microphone_toast(notice)));
-        }
-        if activity.saves_recording() {
-            commands.push(NoticeCommand::Show(recording_saved(session_id)));
         }
         commands
     }
@@ -2090,18 +2087,10 @@ impl SessionNotices {
         if session.failure_notice {
             return Vec::new();
         }
-        // System-only losses have the mixer's state; no toast for them.
-        let quiet = notice
-            .audio_issues
-            .iter()
-            .all(|issue| issue.code == "system-audio-lost");
-        let toast = microphone_toast(&notice);
+        // Keep the snapshot for the Hub's mic entry (`sources::devices`);
+        // do not raise a legacy toast (#1859).
         self.microphone = Some(notice);
-        if quiet {
-            Vec::new()
-        } else {
-            vec![NoticeCommand::Show(toast)]
-        }
+        Vec::new()
     }
 
     /// A `health.event`: the microphone notice, or `showSessionHealthEvent`
@@ -2148,129 +2137,37 @@ impl SessionNotices {
         commands
     }
 
-    /// `showSessionHealthEvent`.
+    /// `showSessionHealthEvent`: only the Error barrier timeout stays a
+    /// legacy toast (shared refused-start id). Separate-file, quality,
+    /// mic-silent, session-audio and live-output news are L6 store entries
+    /// (`sources::health`, #1865).
     fn session_health_event(
         &mut self,
         event: &HealthEvent,
-        recording: &RecordingStatus,
-        now: Instant,
+        _recording: &RecordingStatus,
+        _now: Instant,
     ) -> Vec<NoticeCommand> {
         let mut commands = Vec::new();
-        let session_key = event.session_id.as_deref().unwrap_or("take");
-        // Plan 198 (D1) and plan 200 D1: the separate files, each with
-        // the door to Health (S3.0g).
-        if event.code == "separate-source-recordings-role-failed" {
-            let take_running = recording.session_id == event.session_id
-                && matches!(
-                    recording.state,
-                    RecordingState::Recording | RecordingState::Streaming
-                );
-            let (title, description) = separate_file_failed_copy(&event.message, take_running);
-            let role = separate_file_role(&event.message).unwrap_or("file");
-            let id = self
-                .once
-                .id(&format!("separate-file:{session_key}:{role}"), now);
-            commands.push(NoticeCommand::Show(
-                ToastRequest::warning(title)
-                    .id(id)
-                    .description(description)
-                    .action(
-                        crate::studio::health_page::OPEN_HEALTH_LABEL,
-                        NoticeAction::OpenHealth,
-                    )
-                    .duration(NoticeLifetime::For(WITH_DESCRIPTION))
-                    .finish(),
-            ));
-            return commands;
-        }
-        if event.code == "separate-source-recordings-shed" {
-            let id = self
-                .once
-                .id(&format!("separate-files-shed:{session_key}"), now);
-            commands.push(NoticeCommand::Show(
-                ToastRequest::warning(copy::SEPARATE_FILES_SHED_TITLE)
-                    .id(id)
-                    .description(copy::SEPARATE_FILES_SHED_DESCRIPTION)
-                    .action(
-                        crate::studio::health_page::OPEN_HEALTH_LABEL,
-                        NoticeAction::OpenHealth,
-                    )
-                    .duration(NoticeLifetime::For(WITH_DESCRIPTION))
-                    .finish(),
-            ));
-            return commands;
-        }
-        if let Some(notice) = recording_startup_health_toast(event) {
-            commands.push(NoticeCommand::Show(notice));
-        }
-        if event.code.starts_with("recording-quality-") {
-            if event.code != "recording-quality-not-100"
-                || !matches!(event.level, HealthLevel::Warn)
-            {
-                return commands;
-            }
-            let key = event
-                .session_id
-                .clone()
-                .unwrap_or_else(|| event.message.clone());
-            if !self.quality_shown.insert(key) {
-                return commands;
-            }
-            commands.push(NoticeCommand::Show(
-                ToastRequest::warning(copy::DROPPED_FRAMES)
-                    .description(event.message.clone())
-                    .duration(ms(15_000))
-                    .action(
-                        copy::OPEN_IN_LIBRARY,
-                        NoticeAction::OpenLibrary {
-                            session_id: event.session_id.clone(),
-                        },
-                    )
-                    .finish(),
-            ));
-            return commands;
-        }
-        if event.code == "mic-silent" {
-            let error = matches!(event.level, HealthLevel::Error);
-            commands.push(NoticeCommand::Show(
-                ToastRequest::new(
-                    if error {
-                        NoticeKind::Error
-                    } else {
-                        NoticeKind::Warning
-                    },
-                    if error {
-                        copy::NO_SOUND
-                    } else {
-                        copy::MICROPHONE_SILENT
-                    },
-                )
-                .description(event.message.clone())
-                .duration(ms(15_000))
-                .finish(),
-            ));
-        }
-        if let Some(notice) = session_audio_news(event, &mut self.once, now) {
-            commands.push(NoticeCommand::Show(notice));
-        }
-        if let Some(notice) = live_output_news(event) {
+        if let Some(notice) = recording_startup_health_toast(event)
+            && notice.kind == NoticeKind::Error
+        {
             commands.push(NoticeCommand::Show(notice));
         }
         commands
     }
 
-    /// `stream.targets`: the destinations' transitions that are news.
+    /// `stream.targets`: keep the last snapshot; L6's Hub publishes the
+    /// destination entries (#1869).
     pub fn on_stream_targets(&mut self, targets: &[StreamTargetRuntime]) -> Vec<NoticeCommand> {
         if targets.is_empty() {
             self.stream_targets.clear();
             return Vec::new();
         }
-        let notices = stream_target_notices(&self.stream_targets, targets);
         self.stream_targets = targets
             .iter()
             .map(|target| (target.target_id.clone(), target.state))
             .collect();
-        notices.into_iter().map(NoticeCommand::Show).collect()
+        Vec::new()
     }
 
     /// S3.5e: `showXPlaybackEvent`, once per broadcast and status (the

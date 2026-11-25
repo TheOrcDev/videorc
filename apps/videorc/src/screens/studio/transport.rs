@@ -259,6 +259,14 @@ impl Transport {
             eprintln!("[videorc-app] Stop cloud recording: stopped={stopped}");
         });
     }
+
+    /// `talkShow.closeRoom`: `cloud.room.close` (P147 / Guests' Close the room).
+    pub fn close_talk_room(&self) {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            studio.close_talk_room().await;
+        });
+    }
 }
 
 impl Render for Transport {

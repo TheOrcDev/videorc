@@ -289,19 +289,9 @@ fn notify_once_keeps_one_toast_per_key_within_thirty_seconds() {
 
 #[test]
 fn a_saved_recording_says_so_with_play_for_twelve_seconds() {
-    let mut notices = SessionNotices::new();
-    let commands = notices.on_effect(&SessionEffect::SessionFinished {
-        session_id: Some("s1".to_string()),
-        activity: SessionActivity::Recording,
-    });
-    assert_eq!(
-        dismissed(&commands),
-        ["stream-delivery", "stream-uplink"],
-        "the live stream's news ends with it"
-    );
-    let toasts = shown(&commands);
-    assert_eq!(toasts.len(), 1);
-    let saved = toasts[0];
+    // The toast shape stays on the builder; SessionNotices only dismisses
+    // live-output keys. The Hub publishes "Recording saved" via sources::session.
+    let saved = recording_saved(Some("s1"));
     assert_eq!(saved.kind, NoticeKind::Success);
     assert_eq!(saved.title, "Recording saved");
     assert_eq!(saved.description, None);
@@ -316,7 +306,6 @@ fn a_saved_recording_says_so_with_play_for_twelve_seconds() {
             }
         )
     );
-    // S3.7a: and Open in Library.
     assert_eq!(
         saved.cancel,
         button(
@@ -327,18 +316,23 @@ fn a_saved_recording_says_so_with_play_for_twelve_seconds() {
         )
     );
 
-    // Record and stream saved one too; a stream alone did not.
-    let both = notices.on_effect(&SessionEffect::SessionFinished {
-        session_id: Some("s2".to_string()),
-        activity: SessionActivity::RecordAndStream,
-    });
-    assert_eq!(shown(&both)[0].title, "Recording saved");
-    let stream = notices.on_effect(&SessionEffect::SessionFinished {
-        session_id: Some("s3".to_string()),
-        activity: SessionActivity::LiveStream,
-    });
-    assert!(shown(&stream).is_empty());
-    assert_eq!(dismissed(&stream), ["stream-delivery", "stream-uplink"]);
+    let mut notices = SessionNotices::new();
+    for activity in [
+        SessionActivity::Recording,
+        SessionActivity::RecordAndStream,
+        SessionActivity::LiveStream,
+    ] {
+        let commands = notices.on_effect(&SessionEffect::SessionFinished {
+            session_id: Some("s1".to_string()),
+            activity,
+        });
+        assert!(shown(&commands).is_empty());
+        assert_eq!(
+            dismissed(&commands),
+            ["stream-delivery", "stream-uplink"],
+            "the live stream's news ends with it"
+        );
+    }
 }
 
 #[test]
@@ -544,55 +538,57 @@ fn the_microphone_notice_says_what_the_session_lost() {
         Some("s1"),
         "The microphone stopped.",
     );
-    let commands = notices.on_health_event(&lost, context(&running, Some("s1")), Instant::now());
-    let toast = shown(&commands)[0];
-    assert_eq!(toast.kind, NoticeKind::Warning);
-    assert_eq!(
-        toast.title,
-        "Microphone stopped: recording continues with silence"
-    );
-    assert_eq!(
-        toast.description.as_deref(),
-        Some("The microphone stopped.")
-    );
-    assert_eq!(toast.id.as_deref(), Some("microphone-input-lost"));
-    assert_eq!(toast.lifetime, NoticeLifetime::UntilClosed);
-    // The same loss again is not news.
+    // Snapshot only; the Hub publishes the entry (#1859).
     assert!(
         notices
             .on_health_event(&lost, context(&running, Some("s1")), Instant::now())
             .is_empty()
     );
-    // System audio lost too: one notice for both.
+    let notice = notices.microphone_notice().expect("the loss");
+    assert_eq!(
+        microphone_notice_title(notice),
+        "Microphone stopped: recording continues with silence"
+    );
+    assert_eq!(notice.message, "The microphone stopped.");
+    assert!(
+        notices
+            .on_health_event(&lost, context(&running, Some("s1")), Instant::now())
+            .is_empty()
+    );
     let system = event(
         "system-audio-lost",
         HealthLevel::Warn,
         Some("s1"),
         "System audio stopped.",
     );
-    let commands = notices.on_health_event(&system, context(&running, Some("s1")), Instant::now());
-    let toast = shown(&commands)[0];
-    assert_eq!(toast.title, "Microphone and system audio lost");
+    assert!(
+        notices
+            .on_health_event(&system, context(&running, Some("s1")), Instant::now())
+            .is_empty()
+    );
+    let notice = notices.microphone_notice().expect("both losses");
     assert_eq!(
-        toast.description.as_deref(),
-        Some("The microphone stopped. System audio stopped.")
+        microphone_notice_title(notice),
+        "Microphone and system audio lost"
+    );
+    assert_eq!(
+        notice.message,
+        "The microphone stopped. System audio stopped."
     );
 
-    // The session ends: past tense, and Recording saved.
     let commands = notices.on_effect(&SessionEffect::SessionFinished {
         session_id: Some("s1".to_string()),
         activity: SessionActivity::Recording,
     });
-    let toasts = shown(&commands);
-    assert_eq!(
-        toasts[0].title,
-        "Microphone and system audio lost: saved session has missing audio"
-    );
-    assert_eq!(toasts[0].id.as_deref(), Some("microphone-input-lost"));
-    assert_eq!(toasts[1].title, "Recording saved");
+    assert!(shown(&commands).is_empty());
+    assert_eq!(dismissed(&commands), ["stream-delivery", "stream-uplink"]);
     assert_eq!(
         notices.microphone_notice().map(|notice| notice.phase),
         Some(MicrophonePhase::Ended)
+    );
+    assert_eq!(
+        microphone_notice_title(notices.microphone_notice().unwrap()),
+        "Microphone and system audio lost: saved session has missing audio"
     );
 }
 
@@ -978,107 +974,58 @@ fn every_live_output_code_has_its_toast() {
 
 #[test]
 fn the_keyed_audio_news_and_the_quality_toast_say_it_once() {
+    // Health / devices news is an L6 store entry (#1865). SessionNotices
+    // only keeps the Error barrier-timeout toast.
     let mut notices = SessionNotices::new();
     let running = status(RecordingState::Recording, Some("s1"));
     let now = Instant::now();
-    let stalled = event(
-        "audio-output-stalled",
-        HealthLevel::Warn,
-        Some("s1"),
-        "Audio stalled.",
-    );
-    let first = notices.on_health_event(&stalled, context(&running, Some("s1")), now);
-    let again = notices.on_health_event(
-        &stalled,
-        context(&running, Some("s1")),
-        now + Duration::from_secs(5),
-    );
-    assert_eq!(shown(&first)[0].title, "Audio dropped for a moment");
-    assert_eq!(shown(&first)[0].lifetime, secs(12));
-    assert_eq!(shown(&first)[0].id, shown(&again)[0].id, "one toast");
-    for (code, title, kind) in [
-        (
-            "microphone-noise-reduction-silenced",
-            "Microphone silenced for a moment",
-            NoticeKind::Warning,
-        ),
-        (
-            "microphone-signal-recovered",
-            "Your microphone has sound again",
-            NoticeKind::Success,
-        ),
-        (
-            "microphone-input-recovered",
-            "Microphone is back",
-            NoticeKind::Success,
-        ),
+    for (code, level) in [
+        ("audio-output-stalled", HealthLevel::Warn),
+        ("microphone-noise-reduction-silenced", HealthLevel::Warn),
+        ("microphone-signal-recovered", HealthLevel::Info),
+        ("recording-quality-not-100", HealthLevel::Warn),
+        ("mic-silent", HealthLevel::Error),
+        ("mic-silent", HealthLevel::Warn),
+        ("recording-degraded", HealthLevel::Warn),
     ] {
-        let commands = notices.on_health_event(
-            &event(code, HealthLevel::Info, Some("s1"), "x"),
-            context(&running, Some("s1")),
-            now,
+        assert!(
+            notices
+                .on_health_event(
+                    &event(code, level, Some("s1"), "x"),
+                    context(&running, Some("s1")),
+                    now,
+                )
+                .is_empty(),
+            "{code}"
         );
-        assert_eq!(shown(&commands)[0].title, title);
-        assert_eq!(shown(&commands)[0].kind, kind);
     }
-
-    let dropped = event(
-        "recording-quality-not-100",
-        HealthLevel::Warn,
-        Some("s1"),
-        "12 frames dropped.",
-    );
-    let commands = notices.on_health_event(&dropped, context(&running, Some("s1")), now);
-    let toast = shown(&commands)[0];
-    assert_eq!(toast.title, "This recording has dropped frames");
-    assert_eq!(toast.lifetime, secs(15));
-    assert_eq!(
-        toast.action,
-        button(
-            "Open in Library",
-            NoticeAction::OpenLibrary {
-                session_id: Some("s1".to_string())
-            }
-        )
-    );
-    assert!(
-        notices
-            .on_health_event(&dropped, context(&running, Some("s1")), now)
-            .is_empty(),
-        "once per session"
-    );
-    for (level, kind, title) in [
-        (
-            HealthLevel::Error,
-            NoticeKind::Error,
-            "Recording has no sound",
-        ),
-        (
+    // A recovery still clears a held mic notice.
+    notices.on_health_event(
+        &event(
+            "microphone-input-lost",
             HealthLevel::Warn,
-            NoticeKind::Warning,
-            "Microphone is silent",
+            Some("s1"),
+            "gone",
         ),
-    ] {
-        let commands = notices.on_health_event(
-            &event("mic-silent", level, Some("s1"), "Silence."),
-            context(&running, Some("s1")),
-            now,
-        );
-        assert_eq!(shown(&commands)[0].title, title);
-        assert_eq!(shown(&commands)[0].kind, kind);
-        assert_eq!(shown(&commands)[0].lifetime, secs(15));
-    }
-    // A degraded warning after its session is not shown.
-    let idle = status(RecordingState::Idle, Some("s1"));
-    assert!(
-        notices
-            .on_health_event(
-                &event("recording-degraded", HealthLevel::Warn, Some("s1"), "x"),
-                context(&idle, Some("s1")),
-                now,
-            )
-            .is_empty()
+        context(&running, Some("s1")),
+        now,
     );
+    assert!(notices.microphone_notice().is_some());
+    let recovered = notices.on_health_event(
+        &event(
+            "microphone-input-recovered",
+            HealthLevel::Info,
+            Some("s1"),
+            "back",
+        ),
+        context(&running, Some("s1")),
+        now,
+    );
+    assert_eq!(
+        dismissed(&recovered),
+        ["recording-stopped-unexpectedly", "microphone-input-lost"]
+    );
+    assert!(notices.microphone_notice().is_none());
 }
 
 #[test]
@@ -1114,52 +1061,21 @@ fn a_separate_file_says_which_and_why() {
     );
     let mut notices = SessionNotices::new();
     let running = status(RecordingState::Recording, Some("s1"));
-    let failed = event(
+    for code in [
         "separate-source-recordings-role-failed",
-        HealthLevel::Warn,
-        Some("s1"),
-        "camera encoder failed",
-    );
-    let commands = notices.on_health_event(&failed, context(&running, Some("s1")), Instant::now());
-    let toast = shown(&commands)[0];
-    assert_eq!(toast.title, "Camera file stopped");
-    assert_eq!(
-        toast.description.as_deref(),
-        Some("Videorc couldn't keep encoding this file. Your Combined recording keeps going.")
-    );
-    assert_eq!(toast.lifetime, secs(8));
-    assert_eq!(toast.id.as_deref(), Some("once:separate-file:s1:camera:1"));
-    // S3.0g: the door to Health, on the toast's timed life.
-    assert_eq!(
-        toast
-            .action
-            .as_ref()
-            .map(|button| (button.label.as_str(), &button.action)),
-        Some(("Open Health", &NoticeAction::OpenHealth))
-    );
-    let shed = event(
         "separate-source-recordings-shed",
-        HealthLevel::Warn,
-        Some("s1"),
-        "x",
-    );
-    let commands = notices.on_health_event(&shed, context(&running, Some("s1")), Instant::now());
-    let toast = shown(&commands)[0];
-    assert_eq!(
-        toast.title,
-        "Separate files stopped so the main recording keeps up"
-    );
-    assert_eq!(
-        toast.description.as_deref(),
-        Some(
-            "Your Mac fell behind encoding the separate files. The separate files keep what they recorded, and your Combined recording keeps going."
-        )
-    );
-    assert_eq!(
-        toast.action.as_ref().map(|button| &button.action),
-        Some(&NoticeAction::OpenHealth)
-    );
-    assert_eq!(toast.lifetime, secs(8));
+    ] {
+        assert!(
+            notices
+                .on_health_event(
+                    &event(code, HealthLevel::Warn, Some("s1"), "camera encoder failed"),
+                    context(&running, Some("s1")),
+                    Instant::now(),
+                )
+                .is_empty(),
+            "health table owns {code}"
+        );
+    }
 }
 
 #[test]
@@ -1226,107 +1142,106 @@ fn target(id: &str, label: &str, state: StreamTargetState) -> StreamTargetRuntim
 #[test]
 fn a_destination_is_news_when_it_stops_reconnects_or_comes_back() {
     use StreamTargetState::{Connecting, Failed, Live, Reconnecting, Warning};
-    let mut notices = SessionNotices::new();
+    // Notice copy stays on the pure helper; SessionNotices only tracks state
+    // for SessionEnded reset. The Hub publishes via sources::stream_targets.
+    use std::collections::BTreeMap;
+    let mut states = BTreeMap::new();
+    assert!(stream_target_notices(&states, &[target("t", "Twitch", Connecting)]).is_empty());
+    let live = [
+        target("t", "Twitch", Live),
+        target("y", "YouTube", Live),
+        target("x", "X / Twitter", Live),
+    ];
     assert!(
-        notices
-            .on_stream_targets(&[target("t", "Twitch", Connecting)])
-            .is_empty()
-    );
-    assert!(
-        notices
-            .on_stream_targets(&[
-                target("t", "Twitch", Live),
-                target("y", "YouTube", Live),
-                target("x", "X / Twitter", Live)
-            ])
-            .is_empty(),
+        stream_target_notices(&states, &live).is_empty(),
         "going live is not news"
     );
-    let commands = notices.on_stream_targets(&[
+    states = live
+        .iter()
+        .map(|t| (t.target_id.clone(), t.state))
+        .collect();
+    let reconnecting = [
         target("t", "Twitch", Reconnecting),
         target("y", "YouTube", Live),
         target("x", "X / Twitter", Live),
-    ]);
-    let toast = shown(&commands)[0];
-    assert_eq!(toast.title, "Twitch is reconnecting");
+    ];
+    let notices = stream_target_notices(&states, &reconnecting);
+    assert_eq!(notices[0].title, "Twitch is reconnecting");
     assert_eq!(
-        toast.description.as_deref(),
+        notices[0].description.as_deref(),
         Some("Viewers there see nothing until it's back. The other 2 destinations keep streaming.")
     );
-    assert_eq!(toast.id.as_deref(), Some("stream-target:t"));
-    assert_eq!(toast.kind, NoticeKind::Warning);
-    assert_eq!(toast.lifetime, NoticeLifetime::UntilClosed);
+    assert_eq!(notices[0].id.as_deref(), Some("stream-target:t"));
+    assert_eq!(notices[0].kind, NoticeKind::Warning);
+    assert_eq!(notices[0].lifetime, NoticeDuration::UntilClosed);
 
-    let commands = notices.on_stream_targets(&[
+    states = reconnecting
+        .iter()
+        .map(|t| (t.target_id.clone(), t.state))
+        .collect();
+    let after = [
         target("t", "Twitch", Live),
         target("y", "YouTube", Live),
         target("x", "X / Twitter", Failed),
-    ]);
-    let toasts = shown(&commands);
-    assert_eq!(toasts[0].title, "Twitch is back");
+    ];
+    let notices = stream_target_notices(&states, &after);
+    assert_eq!(notices[0].title, "Twitch is back");
     assert_eq!(
-        toasts[0].description.as_deref(),
+        notices[0].description.as_deref(),
         Some("Streaming to Twitch resumed.")
     );
-    assert_eq!(toasts[0].lifetime, secs(8));
-    assert_eq!(toasts[1].title, "Streaming to X stopped");
+    assert_eq!(notices[0].lifetime, secs(8));
+    assert_eq!(notices[1].title, "Streaming to X stopped");
     assert_eq!(
-        toasts[1].description.as_deref(),
+        notices[1].description.as_deref(),
         Some("The other 2 destinations keep streaming.")
     );
-    assert_eq!(toasts[1].kind, NoticeKind::Error);
+    assert_eq!(notices[1].kind, NoticeKind::Error);
 
-    let mut alone = SessionNotices::new();
-    alone.on_stream_targets(&[target("t", "Twitch", Live)]);
-    let commands = alone.on_stream_targets(&[target("t", "Twitch", Reconnecting)]);
+    states = BTreeMap::from([("t".into(), Live)]);
+    let alone = stream_target_notices(&states, &[target("t", "Twitch", Reconnecting)]);
     assert_eq!(
-        shown(&commands)[0].description.as_deref(),
+        alone[0].description.as_deref(),
         Some("Viewers see nothing until it's back.")
     );
-    let commands = alone.on_stream_targets(&[target("t", "Twitch", Warning)]);
+    states = BTreeMap::from([("t".into(), Reconnecting)]);
+    let alone = stream_target_notices(&states, &[target("t", "Twitch", Warning)]);
+    assert_eq!(alone[0].title, "Twitch isn't receiving your stream");
     assert_eq!(
-        shown(&commands)[0].title,
-        "Twitch isn't receiving your stream"
-    );
-    assert_eq!(
-        shown(&commands)[0].description.as_deref(),
+        alone[0].description.as_deref(),
         Some("Videorc is still sending it. Check the platform’s live dashboard.")
     );
-    let commands = alone.on_stream_targets(&[StreamTargetRuntime {
-        message: None,
-        ..target("t", "Twitch", Failed)
-    }]);
+    states = BTreeMap::from([("t".into(), Warning)]);
+    let alone = stream_target_notices(
+        &states,
+        &[StreamTargetRuntime {
+            message: None,
+            ..target("t", "Twitch", Failed)
+        }],
+    );
     assert_eq!(
-        shown(&commands)[0].description.as_deref(),
+        alone[0].description.as_deref(),
         Some("No other destination is streaming, so viewers see nothing.")
     );
-    // The session's end resets them: the next Live is not "back".
-    alone.on_effect(&SessionEffect::SessionEnded);
+
+    let mut session = SessionNotices::new();
     assert!(
-        alone
+        session
             .on_stream_targets(&[target("t", "Twitch", Live)])
             .is_empty()
     );
-}
-
-// ── the MP4 export, the clips ───────────────────────────────────────────
-
-fn finalization(
-    state: RecordingFinalizationState,
-    percent: Option<u8>,
-) -> RecordingFinalizationEvent {
-    RecordingFinalizationEvent {
-        session_id: "s1".to_string(),
-        state,
-        progress_percent: percent,
-        mp4_path: None,
-        output_path: None,
-        duration_ms: None,
-        file_size_bytes: None,
-        error: None,
-        interruption_recovery: None,
-        updated_at: "2026-11-09T00:00:00Z".to_string(),
-    }
+    assert!(
+        session
+            .on_stream_targets(&[target("t", "Twitch", Reconnecting)])
+            .is_empty(),
+        "legacy channel stays quiet"
+    );
+    session.on_effect(&SessionEffect::SessionEnded);
+    assert!(
+        session
+            .on_stream_targets(&[target("t", "Twitch", Live)])
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1594,9 +1509,13 @@ fn the_running_sessions_lost_inputs_come_back_as_one_notice() {
     let mut ctx = context(&running, Some("s2"));
     ctx.activity = SessionActivity::RecordAndStream;
     let commands = notices.microphone_loss(&lost, ctx);
-    let toast = shown(&commands)[0];
-    assert_eq!(toast.title, "Microphone and system audio lost");
-    assert_eq!(toast.description.as_deref(), Some("Mic gone. System gone."));
+    assert!(shown(&commands).is_empty());
+    let notice = notices.microphone_notice().expect("the loss");
+    assert_eq!(
+        microphone_notice_title(notice),
+        "Microphone and system audio lost"
+    );
+    assert_eq!(notice.message, "Mic gone. System gone.");
 
     // #1528: a source's own recovery closes its loss, so a reconnect never
     // brings back a problem that already ended.

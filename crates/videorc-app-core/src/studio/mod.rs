@@ -14,7 +14,7 @@
 //!   [`families`] (every other key family), [`camera_background`] (plan
 //!   258's normalizers), [`js_value`] (JavaScript's value rules the loaders
 //!   need) and [`ui_local`] (this device's conveniences). The wire shapes
-//!   wait in [`ui_settings_wire`] until L2's S1.4 adds them to the protocol.
+//!   are `videorc_protocol::ui_settings`.
 //! - [`health`] and [`health_page`]: `health.ping`, the health events and
 //!   the Health page's telemetry, checks, verdict and metric groups, with
 //!   [`virtual_camera`] (Videorc Camera's words) and [`timecode`]
@@ -121,7 +121,6 @@ mod test_support;
 pub mod timecode;
 pub mod transport;
 pub mod ui_local;
-pub mod ui_settings_wire;
 pub mod vertical_stream;
 pub mod virtual_camera;
 pub mod watchdog_alerts;
@@ -146,7 +145,7 @@ use videorc_protocol::{
     SessionStopParams, SourceSelection, StartSessionParams, VideoSettings,
 };
 
-use ui_settings_wire::{UiSettingsGetParams, UiSettingsSnapshot};
+use videorc_protocol::ui_settings::{UiSettingsGetParams, UiSettingsSnapshot};
 
 pub use backend::StudioBackend;
 pub use capture_config::CaptureConfigView;
@@ -222,7 +221,7 @@ pub const STUDIO_EVENTS: [&str; 39] = [
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
     crate::client::names::HEALTH_EVENT,
-    ui_settings_wire::UI_SETTINGS_CHANGED_EVENT,
+    videorc_protocol::ui_settings::UI_SETTINGS_CHANGED_EVENT,
     crate::client::names::RECORDING_FINALIZATION,
     // The toasts' news.
     crate::client::names::STREAM_TARGETS,
@@ -1272,9 +1271,11 @@ impl<B: StudioBackend> Studio<B> {
             // L2's S1.4 adds `ui.settings.changed`; the client passes it on
             // as JSON until the protocol names it.
             BackendEvent::Untyped { event, payload }
-                if event == ui_settings_wire::UI_SETTINGS_CHANGED_EVENT =>
+                if event == videorc_protocol::ui_settings::UI_SETTINGS_CHANGED_EVENT =>
             {
-                match serde_json::from_value::<ui_settings_wire::UiSettingsChange>(payload) {
+                match serde_json::from_value::<videorc_protocol::ui_settings::UiSettingsChange>(
+                    payload,
+                ) {
                     Ok(change) => {
                         let applied = {
                             let mut inner = self.lock();

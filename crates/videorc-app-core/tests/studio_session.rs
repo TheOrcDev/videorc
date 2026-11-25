@@ -22,15 +22,15 @@ use videorc_app_core::StudioBackend;
 use videorc_app_core::client::RpcError;
 use videorc_app_core::client::methods::RemoteIntentAckParams;
 use videorc_app_core::client::{BackendClient, ClientConfig, EventFilter};
-use videorc_app_core::studio::ui_settings_wire::{
-    UiSettingsChange, UiSettingsGetParams, UiSettingsSetParams, UiSettingsSnapshot,
-};
 use videorc_app_core::studio::{
     Connection, STUDIO_EVENTS, SessionEffect, SessionPhase, StartOutcome, StopOrigin, StopOutcome,
     Studio, StudioConfig, keys,
 };
 use videorc_app_core::supervisor::STOP_GRACE;
 use videorc_app_core::{AppPaths, BackendLaunch, Logger, Supervisor, SupervisorConfig};
+use videorc_protocol::ui_settings::{
+    UiSettingsChange, UiSettingsGetParams, UiSettingsSetParams, UiSettingsSnapshot,
+};
 use videorc_protocol::{
     AudioProcessingUpdateParams, AudioProcessingUpdateResult, BackendHealth, DeviceList,
     PreviewScreenStartParams, PreviewScreenStatus, RecordingFinalizationState, RecordingStatus,

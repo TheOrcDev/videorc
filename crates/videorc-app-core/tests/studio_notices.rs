@@ -14,11 +14,11 @@ use videorc_app_core::client::{BackendEvent, RpcError};
 use videorc_app_core::notices::{
     NoticeAction, NoticeButton, NoticeClose, NoticeCommand, NoticeLifetime,
 };
-use videorc_app_core::studio::ui_settings_wire::{
-    UiSettingsChange, UiSettingsGetParams, UiSettingsSetParams, UiSettingsSnapshot,
-};
 use videorc_app_core::studio::{
     StartOutcome, StopOrigin, StopOutcome, Studio, StudioBackend, StudioConfig,
+};
+use videorc_protocol::ui_settings::{
+    UiSettingsChange, UiSettingsGetParams, UiSettingsSetParams, UiSettingsSnapshot,
 };
 use videorc_protocol::{
     AudioProcessingUpdateParams, AudioProcessingUpdateResult, BackendConnection, BackendHealth,
@@ -337,17 +337,7 @@ async fn a_take_ends_with_recording_saved_and_the_mp4_toasts() {
             "dismiss end-livestream-armed",
             "dismiss stream-delivery",
             "dismiss stream-uplink",
-            "show Success - \"Recording saved\" | \"\" [12000 ms] (Play, Open in Library)",
         ]
-    );
-    let NoticeCommand::Show(recording_saved) = &commands[4] else {
-        panic!()
-    };
-    assert_eq!(
-        recording_saved.action.as_ref().map(|button| &button.action),
-        Some(&NoticeAction::PlayRecording {
-            session_id: Some("s1".to_string())
-        })
     );
 
     studio
@@ -454,12 +444,9 @@ async fn a_livestream_arms_the_hotkey_and_its_news_ends_with_it() {
     studio.handle_event(targets("live", "live")).await;
     studio.handle_event(targets("reconnecting", "live")).await;
     studio.handle_event(targets("live", "live")).await;
-    assert_eq!(
-        lines(&drain(&mut notices)),
-        [
-            "show Warning stream-target:twitch \"Twitch is reconnecting\" | \"Viewers there see nothing until it's back. The other destination keeps streaming.\" [until closed] (, )",
-            "show Success stream-target:twitch \"Twitch is back\" | \"Streaming to Twitch resumed.\" [8000 ms] (, )",
-        ]
+    assert!(
+        drain(&mut notices).is_empty(),
+        "stream.targets news is an L6 store entry (#1869)"
     );
 
     // Plan 218: a choppy stream and a thin uplink.
@@ -476,12 +463,9 @@ async fn a_livestream_arms_the_hotkey_and_its_news_ends_with_it() {
             ))))
             .await;
     }
-    assert_eq!(
-        lines(&drain(&mut notices)),
-        [
-            "show Warning stream-delivery \"Your stream is choppy\" | \"The stream runs at 22 fps.\" [until closed] (, )",
-            "show Warning stream-uplink \"Stream quality lowered to fit your connection\" | \"Now 4,500 kbps.\" [15000 ms] (, )",
-        ]
+    assert!(
+        drain(&mut notices).is_empty(),
+        "live-output health news is an L6 store entry (#1865)"
     );
 
     // The microphone drops mid-stream.
@@ -493,11 +477,9 @@ async fn a_livestream_arms_the_hotkey_and_its_news_ends_with_it() {
             "The microphone stopped.",
         ))))
         .await;
-    assert_eq!(
-        lines(&drain(&mut notices)),
-        [
-            "show Warning microphone-input-lost \"Microphone stopped: livestream continues with silence\" | \"The microphone stopped.\" [until closed] (, )"
-        ]
+    assert!(
+        drain(&mut notices).is_empty(),
+        "microphone loss is an L6 store entry (#1859)"
     );
     assert!(studio.snapshot().session.microphone_notice.is_some());
 
@@ -520,9 +502,16 @@ async fn a_livestream_arms_the_hotkey_and_its_news_ends_with_it() {
             "dismiss end-livestream-armed",
             "dismiss stream-delivery",
             "dismiss stream-uplink",
-            "show Warning microphone-input-lost \"Microphone stopped during the livestream\" | \"The microphone stopped.\" [until closed] (, )",
-            "show Success - \"Recording saved\" | \"\" [12000 ms] (Play, Open in Library)",
         ]
+    );
+    assert_eq!(
+        studio
+            .snapshot()
+            .session
+            .microphone_notice
+            .as_ref()
+            .map(|notice| notice.phase),
+        Some(videorc_app_core::notices::MicrophonePhase::Ended)
     );
 }
 

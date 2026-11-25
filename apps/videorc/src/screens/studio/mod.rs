@@ -23,9 +23,7 @@ use gpui::{
 };
 use videorc_app_core::StopOrigin;
 use videorc_app_core::guests::view::CLOSE_THE_ROOM_LABEL;
-use videorc_app_core::studio::screen_views::{
-    CLOSE_THE_ROOM_UNAVAILABLE, PREVIEW_REPLACED_BY_SHOW_STAGE, SHOW_HERE_LABEL,
-};
+use videorc_app_core::studio::screen_views::{PREVIEW_REPLACED_BY_SHOW_STAGE, SHOW_HERE_LABEL};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
@@ -233,7 +231,7 @@ impl StudioPage {
     }
 
     /// `TalkShowPreviewCard`: the Preview's place while the room is open.
-    fn show_stage_card(&self, _window: &mut Window, _cx: &mut Context<Self>) -> AnyElement {
+    fn show_stage_card(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("preview-replaced-by-show-stage")
             .flex()
@@ -254,10 +252,9 @@ impl StudioPage {
                     .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .label(CLOSE_THE_ROOM_LABEL)
-                    .tooltip(CLOSE_THE_ROOM_UNAVAILABLE)
-                    .on_click(|_, _, _| {
-                        eprintln!("[videorc-app] Close the room: {CLOSE_THE_ROOM_UNAVAILABLE}");
-                    }),
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.transport.read(cx).close_talk_room();
+                    })),
             )
             .into_any_element()
     }

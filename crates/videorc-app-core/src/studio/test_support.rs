@@ -15,14 +15,14 @@ use videorc_protocol::{
 };
 
 use super::session::SessionActivity;
-use super::ui_settings_wire::{
-    UiSettingsChange, UiSettingsGetParams, UiSettingsSetParams, UiSettingsSnapshot,
-};
 use super::{
     Connection, HealthSummary, SessionPhase, Studio, StudioBackend, StudioConfig, StudioSnapshot,
 };
 use crate::client::RpcError;
 use crate::client::methods::RemoteIntentAckParams;
+use videorc_protocol::ui_settings::{
+    UiSettingsChange, UiSettingsGetParams, UiSettingsSetParams, UiSettingsSnapshot,
+};
 
 /// A backend that answers nothing.
 pub(crate) struct Silent;
