@@ -14,6 +14,7 @@ pub mod buddy;
 pub mod captions;
 pub mod chat;
 pub mod client;
+pub mod cloud_scene;
 pub mod command_score;
 pub mod crash_log;
 pub mod desktop;
