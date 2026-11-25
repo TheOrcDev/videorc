@@ -7,7 +7,7 @@
 //! - macOS (`macos/`, lane L4): AppKit and IOKit through `objc2`.
 //! - Linux (`linux/`, lane L5): the portals and the session bus (#1809,
 //!   #1815 put the policy in `desktop::linux`).
-//! - Windows (`windows/`, the contributors).
+//! - Windows (`windows/`, C4 platform fill-ins): Win32 through `windows-sys`.
 //!
 //! Until a platform's module lands, [`Unsupported`] answers each call with a
 //! reason, never a pretend success.
@@ -28,6 +28,8 @@ use videorc_app_core::desktop::permissions::{
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 /// What a call did, or why it couldn't.
 pub type OsResult<T> = Result<T, String>;
@@ -164,10 +166,16 @@ impl SmokeWindowLevel {
 }
 
 /// A platform whose module has not landed: every call says so.
-#[cfg_attr(any(target_os = "macos", target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    allow(dead_code)
+)]
 pub struct Unsupported;
 
-#[cfg_attr(any(target_os = "macos", target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    any(target_os = "macos", target_os = "linux", target_os = "windows"),
+    allow(dead_code)
+)]
 impl Unsupported {
     fn gap<T>(what: &str) -> OsResult<T> {
         Err(format!(
@@ -213,7 +221,11 @@ pub fn current() -> &'static dyn Platform {
     {
         linux::platform()
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        &windows::WindowsOs
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         &Unsupported
     }
