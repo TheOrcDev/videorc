@@ -859,7 +859,8 @@ impl Render for StreamManager {
                 .child({
                     let this = cx.entity().downgrade();
                     let layout = self.stats_layout.clone();
-                    stats_bar(t, &self.stats, &layout, width, move |next, app| {
+                    let hidden = self.screen_hidden;
+                    stats_bar(t, &self.stats, &layout, width, hidden, move |next, app| {
                         let _ = this.update(app, |sm, cx| sm.apply_stats_layout(next, cx));
                     })
                 })

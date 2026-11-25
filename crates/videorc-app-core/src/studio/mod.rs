@@ -231,7 +231,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 42] = [
+pub const STUDIO_EVENTS: [&str; 43] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -289,6 +289,9 @@ pub const STUDIO_EVENTS: [&str; 42] = [
     // The Output page's performance check (it holds the Clips ring).
     performance_check::PROGRESS_EVENT,
     performance_check::COMPLETED_EVENT,
+    // Destinations' Watchdog phones and After the stream read afresh when
+    // the Videorc account changes.
+    crate::accounts::methods::CHANGED_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -1415,6 +1418,8 @@ impl<B: StudioBackend> Studio<B> {
                 // stores do (`stream.targets`, `stream.health`); it never
                 // owns the early return.
                 let _ = self.handle_dashboard_event(&event, &payload);
+                // Destinations' account-bound sections read afresh.
+                self.handle_account_event(&event).await;
                 if self.handle_performance_event(&event, &payload)
                     || self.handle_live_chat_event(&event, &payload)
                     || self.handle_moderation_event(&event, &payload)

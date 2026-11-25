@@ -219,7 +219,8 @@ impl Render for LibraryScreen {
                 .gap(px(12.))
                 .child(copy::TITLE)
                 .child(tabs)
-                .child(cloud);
+                .child(cloud)
+                .child(self.markers_dialog_view(cx));
         }
         let view = self.view();
         self.posters(&view.rows, cx);
