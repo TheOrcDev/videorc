@@ -32,12 +32,16 @@ use videorc_app_core::StopOrigin;
 use videorc_app_core::studio::screen_views::SHOW_HERE_LABEL;
 #[cfg(target_os = "macos")]
 use videorc_app_core::studio::screen_views::{CLOSE_PREVIEW_LABEL, OPEN_IN_ITS_OWN_WINDOW_LABEL};
+#[cfg(target_os = "macos")]
+use videorc_kit::ShortcutKeys;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
 use videorc_kit::{Button, ButtonVariant};
 use videorc_preview::lifecycle::WindowMode;
 
+#[cfg(target_os = "macos")]
+use crate::app::menus::TogglePreview;
 use crate::preview::Preview;
 
 use alerts::{CloudResumeSlot, StudioRequest};
@@ -227,6 +231,9 @@ impl StudioPage {
 const BRING_TO_FRONT_LABEL: &str = "Bring to front";
 #[cfg(target_os = "macos")]
 const KEEP_ON_TOP_LABEL: &str = "Keep on top of other apps";
+/// The docked frame's Close (`preview-stage.tsx:417`).
+#[cfg(target_os = "macos")]
+const DOCKED_CLOSE_LABEL: &str = "Close";
 
 impl StudioPage {
     /// `preview-stage.tsx`'s dock control under the video: "Pop out" while
@@ -245,8 +252,18 @@ impl StudioPage {
         if preview.is_closed() {
             let here = self.preview.clone();
             let away = self.preview.clone();
-            // Outline's ink (`button.rs`): the foreground.
+            // Outline's ink (`button.rs`): the foreground; Default's is the
+            // chrome fill's ink.
             let outline_ink = hsla(theme.foreground);
+            let default_ink = hsla(theme.chrome_fill_ink);
+            // The shortcut opens the remembered mode, so its keys ride on
+            // that button (`preview-stage.tsx:616-637`).
+            let floating_next = preview.reopens_floating();
+            let keys = || {
+                div()
+                    .ml(px(4.))
+                    .child(ShortcutKeys::for_action(&TogglePreview))
+            };
             return Some(
                 div()
                     .flex()
@@ -256,8 +273,11 @@ impl StudioPage {
                     .gap(px(8.))
                     .child(
                         Button::new("preview-open-docked")
-                            .label(SHOW_HERE_LABEL)
                             .variant(ButtonVariant::Default)
+                            .accessibility_label(SHOW_HERE_LABEL)
+                            .child(icon(IconName::PushPin, 16., default_ink))
+                            .child(SHOW_HERE_LABEL)
+                            .when(!floating_next, |button| button.child(keys()))
                             .on_click(move |_, _, cx| {
                                 here.update(cx, |preview, cx| preview.open_docked(cx))
                             }),
@@ -268,6 +288,7 @@ impl StudioPage {
                             .accessibility_label(OPEN_IN_ITS_OWN_WINDOW_LABEL)
                             .child(icon(IconName::ArrowSquareOut, 16., outline_ink))
                             .child(OPEN_IN_ITS_OWN_WINDOW_LABEL)
+                            .when(floating_next, |button| button.child(keys()))
                             .on_click(move |_, _, cx| {
                                 away.update(cx, |preview, cx| preview.open_floating(cx))
                             }),
@@ -344,7 +365,15 @@ impl StudioPage {
                     ),
             )
         } else {
-            row
+            // P140: the docked frame's Close, after Pop out
+            // (`preview-stage.tsx:416-418`): the Preview closes where it is.
+            let shut = self.preview.clone();
+            row.child(
+                Button::new("preview-close-docked")
+                    .label(DOCKED_CLOSE_LABEL)
+                    .variant(ButtonVariant::Secondary)
+                    .on_click(move |_, _, cx| shut.update(cx, |preview, cx| preview.close(cx))),
+            )
         };
         #[cfg(not(target_os = "macos"))]
         let _ = (floating, muted);

@@ -373,6 +373,45 @@ fn the_cloud_state_adds_stop_recordings_request_to_the_room() {
     assert!(!cloud_recording_active(None));
 }
 
+/// `GuestsSessionSlot` (`session-panel.tsx:359-366`) and `GuestsSessionRow`.
+#[test]
+fn the_guests_row_shows_only_while_the_room_is_open_and_counts_the_guests() {
+    let open = cloud(json!({
+        "show": { "id": "show-7", "kind": "talk" },
+        "room": {
+            "phase": "open",
+            "participants": [
+                { "identity": "host:show-7", "name": "OrcDev", "role": "host", "onStage": true }
+            ],
+            "guests": [
+                { "guestId": "g_ada", "name": "Ada" },
+                { "guestId": "g_grace", "name": "Grace" }
+            ],
+            "stage": { "onStage": ["host:show-7", "g_ada"] },
+            "requests": [{ "requestId": "r1", "name": "Lin" }]
+        }
+    }));
+    assert_eq!(
+        guests_session_row(Some(&open)).as_deref(),
+        Some("Room open · 1 on stage · 1 backstage · 1 wants to join")
+    );
+    let empty = cloud(json!({
+        "show": { "id": "show-7", "kind": "talk" },
+        "room": { "phase": "open" }
+    }));
+    assert_eq!(
+        guests_session_row(Some(&empty)).as_deref(),
+        Some("Room open")
+    );
+    let opening = cloud(json!({
+        "show": { "id": "show-7", "kind": "talk" },
+        "room": { "phase": "opening" }
+    }));
+    assert_eq!(guests_session_row(Some(&opening)), None);
+    assert_eq!(guests_session_row(None), None);
+    assert_eq!(GUESTS_ROW_LABEL, "Guests");
+}
+
 #[test]
 fn a_room_that_is_not_open_leaves_the_preview_and_the_transport_alone() {
     let opening = cloud(json!({

@@ -24,6 +24,7 @@ use gpui::{
 use serde_json::{Value, json};
 use tokio::sync::watch;
 use videorc_app_core::chat::LiveChat;
+use videorc_app_core::chat::arrival::ArrivalChipKind;
 use videorc_app_core::chat::highlight::{FAILURE_SHOWN_FOR, StatusChip};
 use videorc_app_core::chat::highlight_driver::{self as driver, ChatHighlight};
 use videorc_app_core::chat::images::{self, ImageKind};
@@ -66,6 +67,18 @@ const ROW_LINE_PX: f32 = 19.;
 const MARK_PX: f32 = 20.;
 /// The jump chip's ArrowDown (`data-icon="inline-end"`).
 const JUMP_ICON_PX: f32 = 12.;
+/// The arrival chip's icon (`badge.tsx`'s `[&>svg]:size-3`).
+const ARRIVAL_ICON_PX: f32 = 12.;
+
+/// `CHIP_ICON` (`arrival-chip.tsx:9-13`): SparkleIcon, ResetIcon and
+/// AccountIcon.
+fn arrival_icon(kind: ArrivalChipKind) -> IconName {
+    match kind {
+        ArrivalChipKind::Milestone => IconName::Sparkle,
+        ArrivalChipKind::Back => IconName::ArrowCounterClockwise,
+        ArrivalChipKind::Regular => IconName::UserCircle,
+    }
+}
 /// How many rows the list measures beyond its edges.
 const OVERDRAW_PX: f32 = 256.;
 /// Avatars kept beyond the rows on screen before the cache is trimmed.
@@ -832,12 +845,18 @@ fn chat_row(
                 .child(problem)
         }));
 
+    // `ArrivalChip` (`arrival-chip.tsx:39-48`): an outline tag led by its
+    // kind's monochrome icon at the badge's `svg:size-3`.
     let arrival = row.arrival.as_ref().map(|chip| {
         div()
             .id(("studio-chat-arrival", index))
             .flex_none()
             .tooltip(tooltip(chip.hint.clone()))
-            .child(Badge::new(chip.label.clone()).variant(BadgeVariant::Outline))
+            .child(
+                Badge::new(chip.label.clone())
+                    .variant(BadgeVariant::Outline)
+                    .icon(icon(arrival_icon(chip.kind), ARRIVAL_ICON_PX, muted)),
+            )
     });
     let chips = row.chips.iter().map(|(label, chip)| {
         Badge::new(*label).variant(match chip {

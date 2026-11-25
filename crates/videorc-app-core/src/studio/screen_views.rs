@@ -19,6 +19,8 @@ use super::StudioSnapshot;
 use super::cloud::CloudState;
 use super::session::{END_LIVESTREAM_LABEL, END_LIVESTREAM_TITLE, KEEP_STREAMING_LABEL};
 use super::watchdog_alerts::SnoozeScope;
+use crate::guests::view::{guests_session_value, room_people};
+use crate::guests::wire::RoomStatus;
 use crate::livestream::cloud_show::{
     END_CLOUD_SHOW_DESCRIPTION, ENDING_LABEL, NoticeAction, ResumeNotice, cloud_resume_notice,
     notice_action_label, rejoining_resume_notice,
@@ -475,6 +477,25 @@ pub fn talk_show_room(status: Option<&CloudStatus>) -> TalkShowRoomView {
         guests_row: open,
         phase,
     }
+}
+
+/// `GuestsSessionRow`'s label (`guests-session-row.tsx:22`).
+pub const GUESTS_ROW_LABEL: &str = "Guests";
+
+/// `GuestsSessionSlot` + `GuestsSessionRow` (plan 224 D16): while the room is
+/// open (`cloudStatus.room.phase === 'open'`), the Session section's Guests
+/// row value, "Room open · 2 backstage" (`guestsSessionValue(room,
+/// roomPeople(room, hostIdentity))`); none otherwise.
+pub fn guests_session_row(status: Option<&CloudStatus>) -> Option<String> {
+    let view = talk_show_room(status);
+    if !view.guests_row {
+        return None;
+    }
+    let room = status
+        .and_then(|status| status.room.as_ref())
+        .and_then(RoomStatus::from_value);
+    let people = room_people(room.as_ref(), view.host_identity.as_deref(), None);
+    Some(guests_session_value(room.as_ref(), &people))
 }
 
 // ---------------------------------------------------------------------------

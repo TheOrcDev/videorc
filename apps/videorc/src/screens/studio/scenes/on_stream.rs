@@ -31,6 +31,7 @@ use videorc_app_core::studio::scene_on_stream::{
     screen_privacy_outcome, screen_privacy_request, vertical_framing_line, vertical_stream_pick,
 };
 use videorc_app_core::studio::sources_page::GrantAction;
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::section_label::SectionLabel;
 use videorc_kit::select::{Select, SelectOption};
 use videorc_kit::theme::{TypeScale, faded_over, hsla, with_alpha};
@@ -530,10 +531,17 @@ impl ScenesSection {
             .child(change_screen)
             .into_any_element();
         // P321, P333: the chip while it holds; a room's confirmation on hover.
+        // `ScreenHiddenChip` (`screen-privacy-control.tsx:87`): a warn
+        // StatusBadge whose HiddenIcon (EyeSlash, `size-3.5`) takes the dot's
+        // place in the chip's tone.
         let chip = privacy.chip.clone().map(|chip| {
             div()
                 .id("scene-screen-hidden")
-                .child(Badge::new(chip).variant(BadgeVariant::Warning))
+                .child(Badge::new(chip).variant(BadgeVariant::Warning).icon(icon(
+                    IconName::EyeSlash,
+                    14.,
+                    hsla(t.warning),
+                )))
                 .when_some(privacy.chip_detail.clone(), |chip, detail| {
                     chip.tooltip(tooltip(detail))
                 })

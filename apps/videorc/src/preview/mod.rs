@@ -497,6 +497,13 @@ impl Preview {
         }
     }
 
+    /// The mode a closed Preview opens in again (`previewWindow.mode` while
+    /// closed): the Preview shortcut's keys ride on that button (P125/P126).
+    #[cfg(target_os = "macos")]
+    pub fn reopens_floating(&self) -> bool {
+        self.closed_from == WindowMode::Floating
+    }
+
     /// Keep on top of other apps (P132), off unless turned on.
     #[cfg(target_os = "macos")]
     pub fn keep_on_top(&self) -> bool {

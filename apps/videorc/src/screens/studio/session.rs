@@ -2,9 +2,14 @@
 //! that go to their pages, then the notices under them. It has no title
 //! (plan 235 D3): the rows name themselves.
 //!
-//! The runtime alert's Open Audio waits for the Audio section and its
-//! reveal for the reveal command, as Electron leaves out a door it has no
-//! handler for.
+//! The runtime alert's Open Audio asks the page for the Microphone strip
+//! (`StudioRequest::FocusAudio`), and its Show in Finder reveals the saved
+//! file.
+//!
+//! The rows are `SessionPanel`'s: Livestream, Output, the live rows, then
+//! the talk-show room's Guests row (`GuestsSessionSlot`) and the agents line
+//! with its Stop (`AgentsSessionRow`), which this section reads itself
+//! (`cloud.status` through the Studio, `agents.status`).
 //!
 //! The watchdog's cards (`alerts::WatchdogCards`) sit under the facts and
 //! above the refused start, as `SessionNotices` draws them.
@@ -13,15 +18,31 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
-use gpui::{AnyElement, Context, Entity, EventEmitter, Hsla, Window, div, prelude::*, px};
-use tokio::sync::watch;
-use videorc_app_core::StudioSnapshot;
-use videorc_app_core::nav::PageId;
-use videorc_app_core::studio::HealthTelemetry;
-use videorc_app_core::studio::inspector::{
-    FactRow, RuntimeAlertView, SessionInputs, SessionSectionView, StartFailureAlert,
-    copy::{CAMERA_SHARED_TITLE, DISMISS, OPEN_LIBRARY, RETRY},
+use gpui::{
+    AnyElement, ClickEvent, Context, Entity, EventEmitter, Hsla, Window, div, prelude::*, px,
 };
+use serde_json::json;
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::watch;
+use videorc_app_core::library::page::reveal_in_file_manager_label;
+use videorc_app_core::livestream::watchdog::{top_watchdog_alert, watchdog_chip_label};
+use videorc_app_core::nav::PageId;
+use videorc_app_core::studio::inspector::{
+    AgentsState, FactRow, RuntimeAlertView, SessionInputs, SessionSectionView, StartFailureAlert,
+    copy::{CAMERA_SHARED_TITLE, DISMISS, OPEN_AUDIO, OPEN_LIBRARY, RETRY},
+};
+use videorc_app_core::studio::screen_views::{GUESTS_ROW_LABEL, guests_session_row};
+use videorc_app_core::studio::watchdog_alerts::WatchdogState;
+use videorc_app_core::studio::{HealthTelemetry, StudioBackend};
+use videorc_app_core::user_error::{UserErrorContext, backend_error_toast};
+use videorc_app_core::{BackendEvent, StudioSnapshot};
+
+/// `agents.status`: the answer and the event (`useAgents`).
+const AGENTS_STATUS: &str = "agents.status";
+/// The agents line's button and its name (`agents-session-row.tsx:50`,
+/// `STOP_AGENTS_COMMAND` in `lib/agents-view.ts:43`).
+const STOP_LABEL: &str = "Stop";
+const STOP_AGENTS_COMMAND: &str = "Stop agents";
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, hsla};
 use videorc_kit::{
@@ -49,17 +70,34 @@ pub fn fact_tone(tone: &str) -> Option<StatusTone> {
     }
 }
 
-/// The section's view now. The other areas' facts (agents, the watchdog's
-/// chip, the cloud show, Sidekick, the on-air encode) join as their lanes
-/// hand them over; each `None` leaves its row or reading out.
-pub fn section_view(snapshot: &StudioSnapshot, telemetry: &HealthTelemetry) -> SessionSectionView {
-    SessionSectionView::from_snapshot(
-        snapshot,
-        telemetry,
-        &SessionInputs::default(),
-        Utc::now(),
-        Instant::now(),
-    )
+/// The section's view now. The Stream row names the watchdog's top alert
+/// (`watchdogChipLabel(topWatchdogAlert(watchdogAlerts))`); the other areas'
+/// facts (the cloud show, Sidekick, the on-air encode) join as their lanes
+/// hand them over; each `None` leaves its row or reading out. The agents
+/// line and the Guests row are the section's own (see [`SessionSection`]).
+pub fn section_view(
+    snapshot: &StudioSnapshot,
+    telemetry: &HealthTelemetry,
+    watchdog: &WatchdogState,
+) -> SessionSectionView {
+    let inputs = SessionInputs {
+        watchdog_chip: top_watchdog_alert(&watchdog.alerts).map(watchdog_chip_label),
+        ..SessionInputs::default()
+    };
+    SessionSectionView::from_snapshot(snapshot, telemetry, &inputs, Utc::now(), Instant::now())
+}
+
+/// The Guests row (P165) as a fact: it opens the Guests page, the room's one
+/// home (`guests-session-row.tsx:18`).
+fn guests_fact(value: String) -> FactRow {
+    FactRow {
+        id: "guests",
+        label: GUESTS_ROW_LABEL.to_string(),
+        value,
+        tone: "",
+        nested: false,
+        opens: Some(PageId::Guests),
+    }
 }
 
 pub struct SessionSection {
@@ -69,14 +107,20 @@ pub struct SessionSection {
     /// The watchdog's cards; drawn only while there is one.
     watchdog: Entity<WatchdogCards>,
     retro: bool,
+    /// P165: the Guests row's value while the talk-show room is open.
+    guests: Option<String>,
+    /// P166: `agents.status` (answer and event), for the agents line.
+    agents: AgentsState,
+    /// Stop's request is out (`stopping`).
+    agents_stopping: bool,
 }
 
 impl EventEmitter<OpenPage> for SessionSection {}
 impl EventEmitter<StudioRequest> for SessionSection {}
 
 impl SessionSection {
-    /// Follows the snapshot and the telemetry; it redraws only when the
-    /// view they make changes.
+    /// Follows the snapshot, the telemetry, the watchdog and the cloud; it
+    /// redraws only when the view they make changes.
     pub fn new(
         studio: Arc<AppStudio>,
         runtime: tokio::runtime::Handle,
@@ -84,8 +128,11 @@ impl SessionSection {
         mut telemetry: watch::Receiver<HealthTelemetry>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut alerts = studio.watchdog();
+        let mut cloud = studio.cloud();
         let snap = snapshot.borrow().clone();
-        let view = section_view(&snap, &telemetry.borrow());
+        let view = section_view(&snap, &telemetry.borrow(), &alerts.borrow());
+        let guests = guests_session_row(cloud.borrow().status.as_ref());
         let retro = snap.settings.studio.retro_lcd_studio();
         let watchdog = cx.new(|cx| WatchdogCards::new(studio.clone(), runtime.clone(), cx));
         cx.observe(&watchdog, |_, _, cx| cx.notify()).detach();
@@ -100,17 +147,25 @@ impl SessionSection {
                 let open = tokio::select! {
                     changed = snapshot.changed() => changed.is_ok(),
                     changed = telemetry.changed() => changed.is_ok(),
+                    changed = alerts.changed() => changed.is_ok(),
+                    changed = cloud.changed() => changed.is_ok(),
                 };
                 if !open {
                     break;
                 }
                 let snap = snapshot.borrow_and_update().clone();
-                let next = section_view(&snap, &telemetry.borrow_and_update());
+                let next = section_view(
+                    &snap,
+                    &telemetry.borrow_and_update(),
+                    &alerts.borrow_and_update(),
+                );
+                let guests = guests_session_row(cloud.borrow_and_update().status.as_ref());
                 let retro = snap.settings.studio.retro_lcd_studio();
                 let alive = this.update(cx, |section, cx| {
-                    if section.view != next || section.retro != retro {
+                    if section.view != next || section.retro != retro || section.guests != guests {
                         section.view = next;
                         section.retro = retro;
+                        section.guests = guests;
                         cx.notify();
                     }
                 });
@@ -120,13 +175,167 @@ impl SessionSection {
             }
         })
         .detach();
-        Self {
+        // `useAgents`: the status on every connection, then its events.
+        let mut events = studio.backend().subscribe();
+        cx.spawn(async move |this, cx| {
+            loop {
+                let event = match events.recv().await {
+                    Ok(event) => event,
+                    Err(RecvError::Lagged(skipped)) => BackendEvent::ClientLagged { skipped },
+                    Err(RecvError::Closed) => break,
+                };
+                if this
+                    .update(cx, |section, cx| section.on_event(event, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let mut section = Self {
             studio,
             runtime,
             view,
             watchdog,
             retro,
+            guests,
+            agents: AgentsState::default(),
+            agents_stopping: false,
+        };
+        section.read_agents(cx);
+        section
+    }
+
+    fn on_event(&mut self, event: BackendEvent, cx: &mut Context<Self>) {
+        match event {
+            BackendEvent::Untyped { event, payload } if event == AGENTS_STATUS => {
+                self.set_agents(AgentsState::read(&payload), cx);
+            }
+            BackendEvent::ConnectionClosed { .. } => self.set_agents(AgentsState::default(), cx),
+            BackendEvent::Ready(_)
+            | BackendEvent::EventsLagged(_)
+            | BackendEvent::ClientLagged { .. } => self.read_agents(cx),
+            _ => {}
         }
+    }
+
+    fn set_agents(&mut self, agents: AgentsState, cx: &mut Context<Self>) {
+        if self.agents != agents {
+            self.agents = agents;
+            cx.notify();
+        }
+    }
+
+    /// `agents.status`: a failed read leaves the line as it was.
+    fn read_agents(&mut self, cx: &mut Context<Self>) {
+        let client = self.studio.backend().clone();
+        let job = self
+            .runtime
+            .spawn(async move { client.request(AGENTS_STATUS, json!({})).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(status)) = job.await else {
+                return;
+            };
+            let _ = this.update(cx, |section, cx| {
+                section.set_agents(AgentsState::read(&status), cx)
+            });
+        })
+        .detach();
+    }
+
+    /// The agents line's Stop (plan 209 D12): cuts every agent and turns
+    /// Agents off at once, never asking. The status event clears the line.
+    fn stop_agents(&mut self, cx: &mut Context<Self>) {
+        if self.agents_stopping {
+            return;
+        }
+        self.agents_stopping = true;
+        cx.notify();
+        let studio = self.studio.clone();
+        // A failed stop is `toastUserError(error, { action: 'stop', object:
+        // 'the agents' })` (`agents-session-row.tsx:27`).
+        let job = self.runtime.spawn(async move {
+            if let Err(error) = studio.backend().agents_stop().await {
+                let context = UserErrorContext {
+                    action: "stop",
+                    object: "the agents",
+                };
+                if let Some(command) = backend_error_toast(&error, studio.is_connected(), context) {
+                    studio.post_notices(vec![command]);
+                }
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let _ = job.await;
+            let _ = this.update(cx, |section, cx| {
+                section.agents_stopping = false;
+                cx.notify();
+                section.read_agents(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// P166 (`AgentsSessionRow`): "Claude Desktop connected" with Stop, in
+    /// either look; nothing while no agent is connected.
+    fn agents_row(
+        &self,
+        theme: &videorc_kit::tokens::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let line = self.agents.session_line()?;
+        let stop = cx.listener(|section, _: &ClickEvent, _, cx| section.stop_agents(cx));
+        if self.retro {
+            return Some(
+                div()
+                    .id("session-agents")
+                    .flex()
+                    .min_w_0()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(16.))
+                    .px(px(4.))
+                    .py(px(8.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_shrink()
+                            .truncate()
+                            .text_color(lcd::dim(theme))
+                            .child(line),
+                    )
+                    .child(
+                        lcd::value_button(
+                            "session-agents-stop",
+                            theme,
+                            STOP_LABEL,
+                            false,
+                            self.agents_stopping,
+                            None,
+                            stop,
+                        )
+                        .flex_shrink_0()
+                        .aria_label(STOP_AGENTS_COMMAND),
+                    )
+                    .into_any_element(),
+            );
+        }
+        Some(
+            NavigableRow::with_control(
+                "session-agents",
+                line,
+                Button::new("session-agents-stop")
+                    .label(STOP_LABEL)
+                    .accessibility_label(STOP_AGENTS_COMMAND)
+                    .variant(ButtonVariant::Ghost)
+                    .size(ButtonSize::Xs)
+                    .disabled(self.agents_stopping)
+                    .on_click(stop),
+            )
+            .grouped()
+            .into_any_element(),
+        )
     }
 
     fn row(&self, fact: &FactRow, muted: Hsla, cx: &mut Context<Self>) -> NavigableRow {
@@ -191,6 +400,17 @@ impl SessionSection {
     /// for a failed recording and the warning tone otherwise.
     fn runtime_alert(&self, alert: &RuntimeAlertView, cx: &mut Context<Self>) -> Alert {
         let mut row = actions();
+        // P172: the watchdog card's door, which this notice hides while it is
+        // up: the Microphone strip (`session-runtime-alert.tsx:50-58`).
+        if alert.open_audio {
+            row = row.child(
+                Button::new("session-runtime-open-audio")
+                    .label(OPEN_AUDIO)
+                    .variant(ButtonVariant::Default)
+                    .size(ButtonSize::Xs)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(StudioRequest::FocusAudio))),
+            );
+        }
         if alert.open_library {
             row = row.child(
                 Button::new("session-runtime-open-library")
@@ -198,6 +418,19 @@ impl SessionSection {
                     .variant(ButtonVariant::Ghost)
                     .size(ButtonSize::Xs)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Library)))),
+            );
+        }
+        // P174: Show in Finder / Explorer / folder for the saved file
+        // (`session-runtime-alert.tsx:64-68`).
+        if let Some(path) = alert.reveal_path.clone() {
+            row = row.child(
+                Button::new("session-runtime-reveal")
+                    .label(reveal_in_file_manager_label())
+                    .variant(ButtonVariant::Ghost)
+                    .size(ButtonSize::Xs)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.reveal_path(std::path::Path::new(&path));
+                    })),
             );
         }
         row = row.child(
@@ -239,6 +472,8 @@ fn row_icon(id: &str) -> Option<IconName> {
         "livestream" | "destinations" => Some(IconName::Broadcast),
         "output" => Some(IconName::FrameCorners),
         "stream" => Some(IconName::WarningCircle),
+        // `GuestsSessionRow`'s AccountIcon (Phosphor's UserCircle).
+        "guests" => Some(IconName::UserCircle),
         _ => None,
     }
 }
@@ -316,10 +551,15 @@ impl Render for SessionSection {
             .runtime_alert
             .clone()
             .map(|alert| self.runtime_alert(&alert, cx));
+        // `SessionPanel`'s order: the facts, the Guests row (P165), then the
+        // agents line (P166).
+        let mut rows = self.view.rows.clone();
+        rows.extend(self.guests.clone().map(guests_fact));
+        let agents = self.agents_row(&theme, cx);
         let facts: AnyElement = if self.retro {
             let mut screen = div().flex().flex_col();
             let mut saw_live_block = false;
-            for fact in &self.view.rows {
+            for fact in &rows {
                 let live_block =
                     fact.nested || matches!(fact.id, "destinations" | "stream" | "sidekick");
                 if live_block && !saw_live_block {
@@ -328,10 +568,11 @@ impl Render for SessionSection {
                 }
                 screen = screen.child(self.lcd_row(fact, &theme, cx));
             }
+            screen = screen.children(agents);
             lcd::panel("studio-lcd-session", &theme, "Session", screen).into_any_element()
         } else {
             let mut list = GroupedList::new();
-            for (index, fact) in self.view.rows.iter().enumerate() {
+            for (index, fact) in rows.iter().enumerate() {
                 let row = self.row(fact, muted, cx);
                 list = if fact.nested {
                     // Each problem row needs its own id: several share "destination".
@@ -344,6 +585,9 @@ impl Render for SessionSection {
                 } else {
                     list.row(row)
                 };
+            }
+            if let Some(agents) = agents {
+                list = list.item(agents);
             }
             list.into_any_element()
         };
@@ -377,6 +621,7 @@ mod tests {
         assert_eq!(row_icon("destinations"), Some(IconName::Broadcast));
         assert_eq!(row_icon("output"), Some(IconName::FrameCorners));
         assert_eq!(row_icon("stream"), Some(IconName::WarningCircle));
+        assert_eq!(row_icon("guests"), Some(IconName::UserCircle));
         assert_eq!(row_icon("destination"), None);
         assert_eq!(row_icon("sidekick"), None);
     }
