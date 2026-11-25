@@ -27,13 +27,11 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import {
-  TOGGLE_PREVIEW_MODIFIERS,
   describePreview,
   enableTestPattern,
   launchGpuiApp,
   sleep,
-  waitUntil,
-  warmUiTree
+  waitUntil
 } from './lib/gpui-preview-probe.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -81,7 +79,7 @@ export async function runGpuiPreviewWindowProbe() {
     process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
       (await mkdtemp(join(tmpdir(), 'videorc-gpui-preview-window-')))
   )
-  const { app, command, ui } = await launchGpuiApp({
+  const { app, command } = await launchGpuiApp({
     stateDir,
     timeoutMs,
     verbose: process.env.VIDEORC_SMOKE_VERBOSE === '1'
@@ -120,7 +118,6 @@ export async function runGpuiPreviewWindowProbe() {
   try {
     await step('docked in the Studio', async () => {
       await enableTestPattern(command)
-      await warmUiTree(ui)
       await settleAt(
         'the docked preview never presented',
         (seen) => presenting(seen) && seen.mode === 'docked'
@@ -188,7 +185,7 @@ export async function runGpuiPreviewWindowProbe() {
         (seen) => seen?.closed === true && seen?.floatingOpen === false,
         { budgetMs: 5000, label: describePreview }
       )
-      await ui.press('p', { modifiers: TOGGLE_PREVIEW_MODIFIERS })
+      await command('preview-toggle-open')
       await settleAt(
         '⌘P never reopened the Preview window',
         (seen) => seen?.floatingOpen === true && presenting(seen)

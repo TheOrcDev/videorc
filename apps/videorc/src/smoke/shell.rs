@@ -176,6 +176,12 @@ impl ShellSmoke for ShellWindows {
             // `preview-window-state` for `closed`.
             return Ok(preview.read(cx).smoke_state());
         }
+        if command == "preview-toggle-open" {
+            // The menu's and ⌘P's own handler (`main.rs`): the main window
+            // forward, then `Preview::toggle_open`.
+            cx.dispatch_action(&crate::app::menus::TogglePreview);
+            return Ok(preview.read(cx).smoke_state());
+        }
         if command == "preview-retry" {
             let retried = preview.update(cx, |preview, cx| preview.retry(cx));
             let mut state = preview.read(cx).smoke_state();

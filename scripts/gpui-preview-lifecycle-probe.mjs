@@ -29,14 +29,12 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import {
-  TOGGLE_PREVIEW_MODIFIERS,
   describePreview,
   enableTestPattern,
   launchGpuiApp,
   logLinesSince,
   presentedAdvance,
-  waitUntil,
-  warmUiTree
+  waitUntil
 } from './lib/gpui-preview-probe.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -67,7 +65,7 @@ export async function runGpuiPreviewLifecycleProbe() {
     process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
       (await mkdtemp(join(tmpdir(), 'videorc-gpui-preview-lifecycle-')))
   )
-  const { app, command, ui, logs } = await launchGpuiApp({
+  const { app, command, logs } = await launchGpuiApp({
     stateDir,
     timeoutMs,
     verbose: process.env.VIDEORC_SMOKE_VERBOSE === '1'
@@ -77,7 +75,10 @@ export async function runGpuiPreviewLifecycleProbe() {
   const state = () => command('preview-window-state')
   const phaseOf = (seen) => describePreview(seen)
   const presenting = (seen) => seen?.phase === 'presenting' && seen?.closed !== true
-  const togglePreview = () => ui.press('p', { modifiers: TOGGLE_PREVIEW_MODIFIERS })
+  // Window → Preview / ⌘P: the `TogglePreview` action itself, as the menu
+  // dispatches it (the UI driver's keys need the accessibility tree, which a
+  // smoke run can't switch on yet).
+  const togglePreview = () => command('preview-toggle-open')
   const framesAdvance = async (what) => {
     const { advance, last } = await presentedAdvance(command, sampleMs)
     if (!(advance > 0)) {
@@ -89,7 +90,6 @@ export async function runGpuiPreviewLifecycleProbe() {
   try {
     await step('docked and presenting', async () => {
       await enableTestPattern(command)
-      await warmUiTree(ui)
       const { value } = await waitUntil(
         'the docked preview never presented',
         state,

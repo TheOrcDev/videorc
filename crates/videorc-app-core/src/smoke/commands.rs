@@ -182,6 +182,7 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "preview-route-set",
     "preview-route-state",
     "preview-surface-sample",
+    "preview-toggle-open",
     "preview-window-close",
     "preview-window-open",
     "preview-window-os-close",

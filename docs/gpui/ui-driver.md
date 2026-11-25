@@ -162,6 +162,11 @@ has no switch yet: a named SKIP. `preview-window-os-close` closes the Preview wi
 (`~/cloud-test/gpui-builds/latest`) instead of building one. Evidence: `gpui-preview-lifecycle.json` in the
 output folder.
 
+**Found on the first runs (sentinel build `010616c0d`):** the UI driver's accessibility tree never arrived in a
+smoke run (`ui-*` waits for 20 s and gives up), so `activate.rs`'s screen-reader wake does not switch GPUI's
+AccessKit on there yet. The preview probes press ⌘P as the `TogglePreview` action instead
+(`preview-toggle-open`, the menu's own dispatch); the driver's gap needs its own fix before `ui-*` smokes run.
+
 `VIDEORC_APP=gpui pnpm probe:preview-window` runs `scripts/gpui-preview-window-probe.mjs`: the Preview on screen
 (`preview-surface-sample`) against the frame the backend presents (`preview.debug.sample`), cell by cell over a 4 × 4
 grid (each channel within `VIDEORC_PREVIEW_WINDOW_TOLERANCE`, 48; at least 13 of 16 cells). It checks it docked,
