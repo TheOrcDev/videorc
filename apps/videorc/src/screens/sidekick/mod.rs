@@ -834,6 +834,7 @@ impl SidekickScreen {
                     community.suggestions = suggestions;
                     community.loaded = true;
                 }
+                screen.load_community_avatars(cx);
                 cx.notify();
             });
         })

@@ -350,6 +350,27 @@ pub fn account_label(platform: &str, handle: Option<&str>, name: &str) -> String
     format!("{} · {shown}", crate::chat::view::platform_label(platform))
 }
 
+/// A person's `avatarUrl` worth asking the picture cache for
+/// (`useCachedAvatar` skips an empty one): none when blank.
+pub fn avatar_url(url: Option<&str>) -> Option<&str> {
+    url.filter(|url| !url.trim().is_empty())
+}
+
+/// The People rows' and the card's pictures still to fetch: each usable
+/// `avatarUrl` once, in order, skipping the ones `known` already holds.
+pub fn avatar_urls_to_load<'a>(
+    urls: impl IntoIterator<Item = Option<&'a str>>,
+    known: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut wanted: Vec<String> = Vec::new();
+    for url in urls.into_iter().filter_map(avatar_url) {
+        if !known(url) && !wanted.iter().any(|existing| existing == url) {
+            wanted.push(url.to_owned());
+        }
+    }
+    wanted
+}
+
 /// The card header's line for a linked person.
 pub fn linked_line(accounts: usize) -> String {
     format!("One person on {accounts} platforms")
@@ -399,6 +420,38 @@ mod tests {
         DateTime::parse_from_rfc3339(iso)
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    /// `useCachedAvatar(row.avatarUrl)`: a blank URL shows the monogram.
+    #[test]
+    fn a_blank_avatar_url_is_no_picture() {
+        assert_eq!(
+            avatar_url(Some("https://yt3.ggpht.com/a.jpg")),
+            Some("https://yt3.ggpht.com/a.jpg")
+        );
+        assert_eq!(avatar_url(Some("")), None);
+        assert_eq!(avatar_url(Some("   ")), None);
+        assert_eq!(avatar_url(None), None);
+    }
+
+    #[test]
+    fn each_avatar_is_fetched_once_and_never_again_once_known() {
+        let urls = [
+            Some("https://a.example/1.png"),
+            None,
+            Some(""),
+            Some("https://a.example/2.png"),
+            Some("https://a.example/1.png"),
+            Some("https://a.example/3.png"),
+        ];
+        assert_eq!(
+            avatar_urls_to_load(urls, |url| url.ends_with("3.png")),
+            vec![
+                "https://a.example/1.png".to_owned(),
+                "https://a.example/2.png".to_owned(),
+            ]
+        );
+        assert!(avatar_urls_to_load([None, Some(" ")], |_| false).is_empty());
     }
 
     /// Electron's "writes the card lines and the forget question".
