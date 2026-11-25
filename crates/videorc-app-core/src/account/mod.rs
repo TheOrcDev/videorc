@@ -2,7 +2,8 @@
 //! its entitlements: what Premium unlocks, read from the backend's signed
 //! snapshot, for every page that gates on it (the Studio's start, the Go
 //! Live gate, Sidekick, Clean cut, the avatar, Output's quality). Sign-in,
-//! the account menu and its refresh land with S1.6f (L4).
+//! sign-out, the account menu and the providers are [`crate::accounts`]
+//! (S1.6f, L4).
 
 pub mod entitlements;
 
