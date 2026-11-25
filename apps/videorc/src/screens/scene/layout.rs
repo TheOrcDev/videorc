@@ -42,14 +42,31 @@ impl ScenePage {
         }
         let page = cx.entity().downgrade();
 
-        // P499/P500: the orientation, locked while a session runs.
+        // P499/P500: the orientation, locked while a session runs; the
+        // Display and Mobile marks, named for their shape.
         let orientation_page = page.clone();
         let mut orientation = SegmentedControl::new("scene-orientation")
             .accessibility_label(copy::ORIENTATION)
             .manual(true)
             .small(true)
-            .option(Segment::new(HORIZONTAL, "16:9").tooltip(copy::HORIZONTAL_TIP))
-            .option(Segment::new(VERTICAL, "9:16").tooltip(copy::VERTICAL_TIP))
+            .option(
+                Segment::new(HORIZONTAL, copy::HORIZONTAL_NAME)
+                    .child(icon(
+                        IconName::Monitor,
+                        14.,
+                        if view.vertical { muted } else { ink },
+                    ))
+                    .tooltip(copy::HORIZONTAL_TIP),
+            )
+            .option(
+                Segment::new(VERTICAL, copy::VERTICAL_NAME)
+                    .child(icon(
+                        IconName::DeviceMobile,
+                        14.,
+                        if view.vertical { ink } else { muted },
+                    ))
+                    .tooltip(copy::VERTICAL_TIP),
+            )
             .value(Some(if view.vertical { VERTICAL } else { HORIZONTAL }))
             .on_change(move |value, _, cx| {
                 let vertical = value.as_ref() == VERTICAL;
@@ -76,9 +93,28 @@ impl ScenePage {
                 let preset = value.to_string();
                 let _ = presets_page.update(cx, |page, cx| page.choose_layout(&preset, window, cx));
             });
+        // P503: the layout a switch is putting on keeps its name, with
+        // the pending mark before it (`SceneSwitchPending label={false}`).
         for option in &view.presets {
-            presets = presets
-                .option(Segment::new(option.id, option.label.clone()).disabled(option.disabled));
+            let mut segment =
+                Segment::new(option.id, option.label.clone()).disabled(option.disabled);
+            if option.pending {
+                segment = segment.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(
+                            Spinner::new(SharedString::from(format!(
+                                "scene-layout-pending-{}",
+                                option.id
+                            )))
+                            .size(14.),
+                        )
+                        .child(option.label.clone()),
+                );
+            }
+            presets = presets.option(segment);
         }
 
         // P505 / X3: Freeform. Every press enters it (pressing it again

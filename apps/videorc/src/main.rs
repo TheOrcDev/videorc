@@ -387,6 +387,8 @@ fn main() -> Result<()> {
     // (macOS keeps the app running when it closes, `app::exit`).
     application.on_reopen(ExitGuard::show_main_window);
     application.run(move |cx: &mut App| {
+        // The scene picker's Screen Recording alert reads it (P488).
+        cx.set_global(app::permissions::PermissionsGlobal(settings_permissions.clone()));
         videorc_kit::init(cx);
         // The menu bar from the core's template, and the keys it names.
         ExitGuard::install(cx, &exit_runtime, exit_events);
@@ -977,10 +979,7 @@ fn main() -> Result<()> {
             let _ = main_window.update(cx, |_, window, _| window.activate_window());
             preview.update(cx, |preview, cx| {
                 if preview.can_float() {
-                    #[cfg(target_os = "macos")]
                     preview.toggle_open(cx);
-                    #[cfg(not(target_os = "macos"))]
-                    preview.toggle_floating(cx);
                 }
             });
         });

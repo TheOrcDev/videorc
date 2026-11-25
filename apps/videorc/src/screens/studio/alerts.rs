@@ -1,10 +1,13 @@
-//! The Studio's two alert cards (plan 260 Phase 3):
+//! The Studio's alert cards (plan 260 Phase 3):
 //!
 //! - the watchdog's cards in the Session section (`SessionNotices`'
 //!   `WatchdogAlertCard`, plan 223 A5): one `Alert` per open problem, under
 //!   the Session facts and above the refused start;
 //! - the cloud's Resume notice above Session (`CloudResumeSlot` and
-//!   `cloud-resume-notice.tsx`, plan 184 C5 and plan 243 C5).
+//!   `cloud-resume-notice.tsx`, plan 184 C5 and plan 243 C5);
+//! - the degraded preview's alert under the stage, with Open Health, and the
+//!   performance check's line for the docked row (`PreviewNotes`,
+//!   `studio-tab.tsx:437`, `preview-stage.tsx:397`).
 //!
 //! Every word, tone and enabled state is app-core's
 //! (`studio::screen_views`); these draw them and run the named actions. The
@@ -26,11 +29,14 @@ use videorc_app_core::nav::PageId;
 use videorc_app_core::notices::{NoticeCommand, ToastRequest};
 use videorc_app_core::studio::StudioBackend;
 use videorc_app_core::studio::cloud::CloudState;
+use videorc_app_core::studio::health::HealthTelemetry;
+use videorc_app_core::studio::health_page::{Fields, current_platform, studio_health};
 use videorc_app_core::studio::inspector::{StartGates, live_stream_blocked_reason};
 use videorc_app_core::studio::screen_views::{
-    CardTone, CloudResumeCardView, CloudResumeInputs, END_TAKEOVER_FIX_FAILED, QuietAction,
-    ResumeTarget, UNMUTE_FIX_FAILED, WatchdogCardView, WatchdogFixAction, cloud_resume_card,
-    end_cloud_show_question, silence_notice_shown, watchdog_cards, watchdog_fix_action,
+    CardTone, CloudResumeCardView, CloudResumeInputs, END_TAKEOVER_FIX_FAILED,
+    PreviewHealthAlertView, QuietAction, ResumeTarget, UNMUTE_FIX_FAILED, WatchdogCardView,
+    WatchdogFixAction, cloud_resume_card, end_cloud_show_question, preview_health_alert,
+    preview_hold_label, silence_notice_shown, watchdog_cards, watchdog_fix_action,
 };
 use videorc_app_core::studio::transport::transport_active;
 use videorc_app_core::studio::watchdog_alerts::{SnoozeScope, WatchdogState};
@@ -527,6 +533,108 @@ impl Render for CloudResumeSlot {
                     .title(card.notice.title.clone())
                     .description(body),
             )
+            .into_any_element()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The Preview's health alert and the performance check's line
+// ---------------------------------------------------------------------------
+
+/// What the Preview says about itself from the telemetry and the snapshot:
+/// the degraded alert (`studioHealth`, `studio-tab.tsx:423`) and the check's
+/// line (`previewHoldLabel`, `preview-stage.tsx:139`).
+fn preview_notes_of(
+    telemetry: &HealthTelemetry,
+    snapshot: &StudioSnapshot,
+) -> (Option<PreviewHealthAlertView>, Option<String>) {
+    let health = studio_health(
+        Fields::of(telemetry.diagnostics.as_ref()),
+        transport_active(&snapshot.session),
+        current_platform(),
+        Fields::of(telemetry.preview_surface.as_ref()).text("nativePreviewHostKind"),
+    );
+    (
+        preview_health_alert(&health),
+        preview_hold_label(&snapshot.performance),
+    )
+}
+
+/// The Preview's own notes (P117/P118, P138): the degraded preview's alert
+/// under the stage, with its door to Health, and the performance check's
+/// line the docked frame's row carries. "Retry preview" is left out: the
+/// GPUI preview has no re-arm of its native path yet.
+pub struct PreviewNotes {
+    alert: Option<PreviewHealthAlertView>,
+    checking: Option<String>,
+}
+
+impl EventEmitter<OpenPage> for PreviewNotes {}
+
+impl PreviewNotes {
+    /// Follows the telemetry and the snapshot; it redraws only when the
+    /// alert or the line changes.
+    pub fn new(studio: Arc<AppStudio>, cx: &mut Context<Self>) -> Self {
+        let mut telemetry = studio.telemetry();
+        let mut snapshot = studio.watch();
+        let (alert, checking) = preview_notes_of(&telemetry.borrow(), &snapshot.borrow());
+        cx.spawn(async move |this, cx| {
+            loop {
+                let open = tokio::select! {
+                    changed = telemetry.changed() => changed.is_ok(),
+                    changed = snapshot.changed() => changed.is_ok(),
+                };
+                if !open {
+                    break;
+                }
+                let (alert, checking) = preview_notes_of(
+                    &telemetry.borrow_and_update(),
+                    &snapshot.borrow_and_update(),
+                );
+                let alive = this.update(cx, |notes, cx| {
+                    if notes.alert != alert || notes.checking != checking {
+                        notes.alert = alert;
+                        notes.checking = checking;
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        Self { alert, checking }
+    }
+
+    /// The degraded alert shows (the stage's column leaves no gap for it
+    /// otherwise).
+    pub fn has_alert(&self) -> bool {
+        self.alert.is_some()
+    }
+
+    /// The check's line while it runs (P138), for the docked frame's row.
+    pub fn checking(&self) -> Option<SharedString> {
+        self.checking.clone().map(SharedString::from)
+    }
+}
+
+impl Render for PreviewNotes {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(alert) = self.alert.clone() else {
+            return div().id("capture-health-slot").into_any_element();
+        };
+        // The door to Health (plan 174 D9): the details live there.
+        let door = Button::new("capture-health-open")
+            .label(alert.open_health_label)
+            .variant(ButtonVariant::Outline)
+            .size(ButtonSize::Xs)
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Diagnostics))));
+        Alert::new("capture-health-alert")
+            .variant(AlertVariant::Destructive)
+            .title(alert.title)
+            .description(div().min_w_0().line_clamp(3).child(alert.detail))
+            .action(door)
             .into_any_element()
     }
 }

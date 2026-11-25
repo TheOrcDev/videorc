@@ -51,6 +51,8 @@ mod words {
     pub const SNAP: &str = "Snap";
     pub const POP_OUT: &str = "Pop out";
     pub const SHOW_HERE: &str = "Show preview here";
+    pub const OPEN_PREVIEW: &str = "Open Preview";
+    pub const CLOSE_PREVIEW: &str = "Close Preview";
     pub const EMPTY: &str = "No sources in the scene yet. Choose a screen or a camera in Sources.";
 }
 
@@ -214,12 +216,13 @@ impl ScenePage {
         let border = hsla(t.border);
         let snapshot = self.studio.snapshot();
         let vertical_view = self.editor.overlays_on == Some(true);
-        let (live_canvas, docked, can_float) = {
+        let (live_canvas, docked, can_float, preview_open) = {
             let preview = self.preview.read(cx);
             (
                 preview.live_canvas(),
                 preview.mode() == WindowMode::Docked && !preview.is_closed(),
                 preview.can_float(),
+                !preview.is_closed(),
             )
         };
         // X5: the live picture under the stage, not in the vertical view
@@ -292,7 +295,7 @@ impl ScenePage {
             && let Some(note) = layout_only_note(
                 crate::preview::SCENE_HOSTS_DOCKED,
                 vertical_view,
-                can_float,
+                preview_open,
                 docked,
             )
         {
@@ -310,16 +313,23 @@ impl ScenePage {
                     .text_color(muted)
                     .child(note.text)
                     // Pop out Preview floats a Preview stuck to the Studio
-                    // panel; a Preview already in its own window is up.
-                    .when(can_float && pops, |line| {
+                    // panel; Open Preview opens a closed one where it was,
+                    // Show Preview brings its window up
+                    // (`showPictureFromLayoutOnly`).
+                    .when(can_float, |line| {
                         line.child(
                             Button::new("scene-stage-layout-only-action")
                                 .label(note.action_label)
                                 .variant(ButtonVariant::Link)
                                 .size(ButtonSize::Xs)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.preview
-                                        .update(cx, |preview, cx| preview.toggle_floating(cx));
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.preview.update(cx, |preview, cx| {
+                                        if pops {
+                                            preview.toggle_floating(cx)
+                                        } else {
+                                            preview.open_or_show(cx)
+                                        }
+                                    });
                                 })),
                         )
                     })
@@ -465,10 +475,31 @@ impl ScenePage {
                 )
                 .child(vertical_rule(rule));
         }
-        // P540: the preview docks here or floats. (P541's Open / Close
-        // Preview is for a canvas that can't show it: there the layout-only
-        // line carries the action.)
-        if crate::preview::SCENE_HOSTS_DOCKED && self.preview.read(cx).can_float() {
+        // P540: the preview docks here or floats, where the canvas hosts
+        // it; elsewhere P541's plain Open / Close Preview.
+        let (can_float, preview_open) = {
+            let preview = self.preview.read(cx);
+            (preview.can_float(), !preview.is_closed())
+        };
+        if !crate::preview::SCENE_HOSTS_DOCKED && can_float {
+            let label = if preview_open {
+                words::CLOSE_PREVIEW
+            } else {
+                words::OPEN_PREVIEW
+            };
+            right = right.child(
+                Button::new("scene-stage-toggle-preview")
+                    .accessibility_label(label)
+                    .variant(ButtonVariant::Ghost)
+                    .child(icon(IconName::ArrowSquareOut, 14., muted))
+                    .child(label)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.preview
+                            .update(cx, |preview, cx| preview.toggle_open(cx));
+                    })),
+            );
+        }
+        if crate::preview::SCENE_HOSTS_DOCKED && can_float {
             let button = if docked {
                 Button::new("scene-stage-pop-out")
                     .accessibility_label(words::POP_OUT)

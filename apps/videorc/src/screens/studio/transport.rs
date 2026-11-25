@@ -243,6 +243,12 @@ impl Transport {
         self.talk_show.read(cx).value().clone()
     }
 
+    /// The Studio the transport drives, for the page's own watchers (the
+    /// preview's health alert and the check's line).
+    pub fn studio(&self) -> Arc<AppStudio> {
+        self.studio.clone()
+    }
+
     pub fn record(&self) {
         let studio = self.studio.clone();
         self.runtime.spawn(async move {

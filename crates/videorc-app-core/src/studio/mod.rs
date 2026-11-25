@@ -119,6 +119,7 @@ pub mod sources_audio;
 pub mod sources_page;
 pub mod sources_section;
 mod stream_details;
+pub mod stream_report_store;
 pub mod takeover_microphone;
 #[cfg(test)]
 mod test_support;
@@ -129,6 +130,7 @@ mod vertical_leg;
 pub mod vertical_stream;
 pub mod virtual_camera;
 pub mod watchdog_alerts;
+pub mod watchdog_settings;
 
 pub use platforms::BROWSER_APPROVAL_TOAST_ID;
 pub use stream_details::{DISCORD_FAILURE_ID, METADATA_CHANGED_EVENT};
@@ -960,6 +962,10 @@ pub struct Studio<B: StudioBackend> {
     /// S1.6g: the stream watchdog's alerts, apart from the snapshot (their
     /// titles carry a live clock).
     watchdog_tx: watch::Sender<watchdog_alerts::WatchdogState>,
+    /// Destinations → Watchdog settings (`watchdog.settings.*`).
+    watchdog_settings_tx: watch::Sender<watchdog_settings::WatchdogSettingsStore>,
+    /// Destinations → After the stream (`streamReport.email.*`).
+    stream_report_tx: watch::Sender<stream_report_store::StreamReportStore>,
     /// The Stream Manager's live dashboard, coalesced at most once a second.
     dashboard_tx: watch::Sender<crate::stream_manager::dashboard::LiveDashboard>,
     dashboard: Arc<Mutex<dashboard::DashboardInner>>,
@@ -1030,6 +1036,10 @@ impl<B: StudioBackend> Studio<B> {
         let (go_live_tx, _) = watch::channel(go_live::GoLiveState::default());
         let (cloud_tx, _) = watch::channel(cloud::CloudState::default());
         let (watchdog_tx, _) = watch::channel(watchdog_alerts::WatchdogState::default());
+        let (watchdog_settings_tx, _) =
+            watch::channel(watchdog_settings::WatchdogSettingsStore::default());
+        let (stream_report_tx, _) =
+            watch::channel(stream_report_store::StreamReportStore::default());
         let (dashboard_tx, _) =
             watch::channel(crate::stream_manager::dashboard::LiveDashboard::default());
         let dashboard = Arc::new(Mutex::new(dashboard::DashboardInner::new(&now_iso())));
@@ -1065,6 +1075,8 @@ impl<B: StudioBackend> Studio<B> {
             platform: platform_lifecycle::PlatformLifecycle::default(),
             cloud_tx,
             watchdog_tx,
+            watchdog_settings_tx,
+            stream_report_tx,
             dashboard_tx,
             dashboard,
             live_chat_tx,
@@ -1691,6 +1703,8 @@ impl<B: StudioBackend> Studio<B> {
         self.read_platforms().await;
         self.read_details().await;
         self.read_chat_commands().await;
+        self.read_watchdog_settings().await;
+        self.read_stream_report().await;
         self.read_scheduled().await;
         self.read_cloud().await;
         // S1.6g: the watchdog's open alerts (a relaunch mid-stream shows

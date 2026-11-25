@@ -15,12 +15,13 @@ use videorc_app_core::editor::inspector::{
 use videorc_app_core::scenes::list::saved_scene_blocked_reason;
 use videorc_app_core::scenes::model::{SavedScene, scene_audio, scene_source_problems};
 use videorc_app_core::scenes::section::{
-    scene_card_words, scene_cards_camera_gaps, scene_slot_keys_line,
+    scene_card_words, scene_cards_camera_gaps, scene_picture_target, scene_slot_keys_line,
 };
 use videorc_app_core::scenes::store::{DeleteRule, can_delete_scene};
-use videorc_app_core::scenes::v2::SceneShows;
+use videorc_app_core::scenes::v2::{Orientation, SceneShows, layout_preset};
 use videorc_app_core::studio::scenes_section::scene_keeps_audio;
 use videorc_app_core::studio::transport::transport_active;
+use videorc_protocol::scene_pictures::ScenePictureTarget;
 
 /// The scene list's words (`scene-entries.tsx`, `scene-dialogs.tsx`,
 /// `lib/edit-scene.ts`), byte for byte.
@@ -75,6 +76,8 @@ pub mod copy {
     pub const LAYOUT_TITLE: &str = "Layout";
     pub const ORIENTATION: &str = "Orientation";
     pub const HORIZONTAL_TIP: &str = "Horizontal · 16:9";
+    pub const HORIZONTAL_NAME: &str = "Horizontal (16:9)";
+    pub const VERTICAL_NAME: &str = "Vertical (9:16)";
     pub const VERTICAL_TIP: &str = "Vertical · 9:16";
     pub const SCREEN: &str = "Screen";
     pub const SCREEN_FRAMING: &str = "Screen framing";
@@ -110,9 +113,21 @@ pub enum RowMeta {
     Text(String),
 }
 
+/// A row's picture (P458): the scene's layout at icon size, its still in
+/// the screen area (`SceneRowThumb`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowThumb {
+    pub preset: String,
+    pub vertical: bool,
+    /// A 9:16 layout's screen fits rather than fills.
+    pub fit: bool,
+    pub picture: Option<ScenePictureTarget>,
+}
+
 /// One scene row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneRow {
+    pub thumb: RowThumb,
     pub id: String,
     pub name: String,
     /// 0-based place in the library.
@@ -124,8 +139,9 @@ pub struct SceneRow {
     pub meta: RowMeta,
     /// An app scene: whether it follows the app's front window.
     pub follows: Option<bool>,
-    /// The position key, then the custom key (Electron accelerators).
-    pub keys: Vec<String>,
+    /// The position key, then the custom key: (action, Electron
+    /// accelerator).
+    pub keys: Vec<(String, String)>,
     /// Why Change screen… waits (other than read-only): the scene on
     /// stream's live screen switch (`sourceSwitchReason('capture')`).
     pub change_screen_reason: Option<String>,
@@ -255,7 +271,16 @@ impl SceneModel {
                     _ => None,
                 };
                 let on_stream = view.on_stream_id.as_deref() == Some(scene.id.as_str());
+                let layout = scene.visual.get("layout").unwrap_or(&Value::Null);
+                let preset = layout_preset(layout).to_string();
+                let thumb = RowThumb {
+                    vertical: Orientation::of_preset(&preset) == Orientation::Vertical,
+                    fit: layout.get("verticalScreenFraming").and_then(Value::as_str) == Some("fit"),
+                    picture: scene_picture_target(&scene.visual),
+                    preset,
+                };
                 SceneRow {
+                    thumb,
                     change_screen_reason: if on_stream {
                         snapshot.source_reasons[0].clone()
                     } else {
@@ -269,10 +294,7 @@ impl SceneModel {
                     disabled_reason,
                     meta,
                     follows: app.map(|app| app.get("follows") == Some(&Value::Bool(true))),
-                    keys: scene_shortcut_bindings(&scene.id, index + 1, &shortcuts, platform)
-                        .into_iter()
-                        .map(|(_, accelerator)| accelerator)
-                        .collect(),
+                    keys: scene_shortcut_bindings(&scene.id, index + 1, &shortcuts, platform),
                     // Electron's menu rule, the Studio's too: off only when
                     // the saved audio is exactly the working audio (a scene
                     // with none saved can save it).

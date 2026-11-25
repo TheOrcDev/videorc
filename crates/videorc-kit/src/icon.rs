@@ -135,6 +135,12 @@ pub enum IconName {
     UserCircle,
     /// `BuddyPageIcon` / Sidekick mark (Phosphor's UserSound).
     UserSound,
+    /// `AvatarPageIcon` (Phosphor's Smiley): the Avatar page's sidebar row.
+    Smiley,
+    /// `LibraryIcon` / `LibraryRowIcon` (Phosphor's FilmReel).
+    FilmReel,
+    /// `HealthIcon` / `HealthRowIcon` (Phosphor's Pulse).
+    Pulse,
     /// `FolderIcon` (Phosphor's FolderOpen).
     FolderOpen,
     /// `WaveformMutedIcon` (Phosphor's WaveformSlash).
@@ -232,6 +238,9 @@ impl IconName {
             IconName::ChatCircle => include_bytes!("../icons/chat-circle.svg"),
             IconName::UserCircle => include_bytes!("../icons/user-circle.svg"),
             IconName::UserSound => include_bytes!("../icons/user-sound.svg"),
+            IconName::Smiley => include_bytes!("../icons/smiley.svg"),
+            IconName::FilmReel => include_bytes!("../icons/film-reel.svg"),
+            IconName::Pulse => include_bytes!("../icons/pulse.svg"),
             IconName::FolderOpen => include_bytes!("../icons/folder-open.svg"),
             IconName::WaveformSlash => include_bytes!("../icons/waveform-slash.svg"),
             IconName::Desktop => include_bytes!("../icons/desktop.svg"),

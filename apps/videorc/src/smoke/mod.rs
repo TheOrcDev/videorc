@@ -75,8 +75,8 @@ pub trait ShellSmoke: 'static {
     /// `open-tab`: the main window shows `page`, as its sidebar row would,
     /// on `open`'s sub-tab with its dialog over it.
     fn open_page(&self, page: PageId, open: OpenTab, cx: &mut App) -> Result<(), String>;
-    /// The preview's commands ([`PREVIEW_COMMANDS`]): its state, and its own
-    /// window opened, closed or toggled.
+    /// The preview's commands ([`PREVIEW_COMMANDS`]): its state, its own
+    /// window opened, closed or toggled, and Retry preview.
     fn preview(&self, command: &str, cx: &mut App) -> Result<Value, String>;
 }
 
@@ -86,6 +86,9 @@ pub trait ShellSmoke: 'static {
 pub const PREVIEW_COMMANDS: &[&str] = &[
     "inspect-native-preview-live-background",
     "inspect-native-preview-runtime",
+    // GPUI only: Retry preview (`Preview::retry`), answered with the state
+    // and whether it ran; the phase goes back to starting.
+    "preview-retry",
     "preview-window-close",
     "preview-window-open",
     "preview-window-state",

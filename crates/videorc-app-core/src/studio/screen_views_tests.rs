@@ -523,3 +523,87 @@ fn with_no_native_surface_the_card_opens_and_retries() {
     );
     assert!(open.buttons.is_empty());
 }
+
+#[test]
+fn only_a_degraded_preview_with_words_shows_the_alert_and_its_health_door() {
+    use crate::studio::health_page::{StudioHealth, Tone};
+    let degraded = StudioHealth {
+        tone: Tone::Error,
+        value: "Degraded",
+        detail: Some("The preview may not match your recording."),
+    };
+    assert_eq!(
+        preview_health_alert(&degraded),
+        Some(PreviewHealthAlertView {
+            title: "Degraded",
+            detail: "The preview may not match your recording.",
+            open_health_label: "Open Health",
+        })
+    );
+    let wordless = StudioHealth {
+        detail: None,
+        ..degraded.clone()
+    };
+    assert_eq!(preview_health_alert(&wordless), None);
+    let lagging = StudioHealth {
+        tone: Tone::Warn,
+        value: "Lagging",
+        detail: Some("The preview is running behind what you do."),
+    };
+    assert_eq!(preview_health_alert(&lagging), None);
+}
+
+#[test]
+fn the_hold_line_shows_only_while_the_check_runs_and_names_its_rung() {
+    use crate::studio::performance_check::PerformanceView;
+    use videorc_protocol::{PerformanceCheckProgress, PerformanceCheckState};
+    let state = |running| PerformanceCheckState {
+        last_run_not_recorded: None,
+        running,
+        result: None,
+        stale: false,
+    };
+    let progress = |index: u32, count: u32| -> PerformanceCheckProgress {
+        serde_json::from_value(json!({
+            "rungIndex": index,
+            "rungCount": count,
+            "video": {
+                "preset": "custom", "width": 1920, "height": 1080, "fps": 30,
+                "bitrateKbps": 8000
+            }
+        }))
+        .unwrap()
+    };
+    assert_eq!(preview_hold_label(&PerformanceView::default()), None);
+    let idle = PerformanceView {
+        state: Some(state(false)),
+        progress: Some(progress(0, 3)),
+        hold: false,
+    };
+    assert_eq!(preview_hold_label(&idle), None);
+    let starting = PerformanceView {
+        state: Some(state(true)),
+        progress: None,
+        hold: true,
+    };
+    assert_eq!(
+        preview_hold_label(&starting).as_deref(),
+        Some("Checking this computer")
+    );
+    let no_rungs = PerformanceView {
+        progress: Some(progress(0, 0)),
+        ..starting.clone()
+    };
+    assert_eq!(
+        preview_hold_label(&no_rungs).as_deref(),
+        Some("Checking this computer")
+    );
+    let second = PerformanceView {
+        progress: Some(progress(1, 4)),
+        ..starting
+    };
+    assert_eq!(
+        preview_hold_label(&second).as_deref(),
+        Some("Checking this computer · 2 of 4")
+    );
+}

@@ -17,6 +17,8 @@ use serde_json::Value;
 
 use super::StudioSnapshot;
 use super::cloud::CloudState;
+use super::health_page::{OPEN_HEALTH_LABEL, StudioHealth, Tone};
+use super::performance_check::PerformanceView;
 use super::session::{END_LIVESTREAM_LABEL, END_LIVESTREAM_TITLE, KEEP_STREAMING_LABEL};
 use super::watchdog_alerts::SnoozeScope;
 use crate::guests::view::{guests_session_value, room_people};
@@ -672,6 +674,60 @@ pub fn preview_stage(
         buttons,
         keep_on_top,
     }
+}
+
+// ---------------------------------------------------------------------------
+// The Preview's health alert and the performance check's line
+// ---------------------------------------------------------------------------
+
+/// The degraded preview's alert (`StudioPreviewPanel`'s `healthErrorRow`,
+/// B-26, `studio-tab.tsx:437`): what it means, why, and the door to Health.
+/// "Retry preview" waits for a re-arm of the native path in the GPUI app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewHealthAlertView {
+    /// `previewHealth.value` ("Degraded").
+    pub title: &'static str,
+    /// `previewHealth.detail`, clamped to three lines.
+    pub detail: &'static str,
+    /// The door to Health (plan 174 D9): the details live there.
+    pub open_health_label: &'static str,
+}
+
+/// Only an error with words to say shows
+/// (`previewHealth.tone === 'error' && previewHealth.detail`).
+pub fn preview_health_alert(health: &StudioHealth) -> Option<PreviewHealthAlertView> {
+    if health.tone != Tone::Error {
+        return None;
+    }
+    health.detail.map(|detail| PreviewHealthAlertView {
+        title: health.value,
+        detail,
+        open_health_label: OPEN_HEALTH_LABEL,
+    })
+}
+
+/// `previewHoldLabel`'s words (`lib/performance-check.ts:170`).
+pub const CHECKING_THIS_COMPUTER: &str = "Checking this computer";
+
+/// `previewHoldLabel` (`lib/performance-check.ts:162`): the docked frame's
+/// line while the performance check runs and the Preview keeps its picture
+/// (`preview-stage.tsx:397`), with the rung once the check names one.
+pub fn preview_hold_label(performance: &PerformanceView) -> Option<String> {
+    if !performance
+        .state
+        .as_ref()
+        .is_some_and(|state| state.running)
+    {
+        return None;
+    }
+    Some(match &performance.progress {
+        Some(progress) if progress.rung_count > 0 => format!(
+            "{CHECKING_THIS_COMPUTER} · {} of {}",
+            progress.rung_index + 1,
+            progress.rung_count
+        ),
+        _ => CHECKING_THIS_COMPUTER.to_string(),
+    })
 }
 
 #[cfg(test)]

@@ -53,6 +53,12 @@ use crate::platform;
 /// instead of handing its links to the instance that is going away.
 pub const RELAUNCHED_ARG: &str = "--relaunched";
 
+/// The one controller as a window global, for a screen that isn't handed it
+/// (the scene picker's Screen Recording alert, shared by Studio and Scene).
+pub struct PermissionsGlobal(pub Arc<Permissions>);
+
+impl gpui::Global for PermissionsGlobal {}
+
 /// The grants, the watcher, the deferred restart and Reopen Videorc.
 pub struct Permissions {
     platform: PermissionPlatform,

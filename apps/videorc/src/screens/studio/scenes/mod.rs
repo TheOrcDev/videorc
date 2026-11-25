@@ -166,29 +166,103 @@ fn text_width(window: &Window, words: &str, size: f32, weight: FontWeight, color
 /// The dragged card's fade (`opacity-40`).
 const DRAGGING_OPACITY: f32 = 0.4;
 
-/// A card being dragged (P281): its scene, its place and its name for the
-/// picture under the pointer.
+/// A card being dragged (P281): its scene, its place, and what the pointer
+/// carries: the card itself, as wide as it sits in the row, with its still.
 #[derive(Clone)]
 struct SceneDrag {
     id: String,
     index: usize,
-    name: SharedString,
+    card: SceneCardView,
+    width: f32,
+    still: Option<Arc<gpui::Image>>,
 }
 
 impl Render for SceneDrag {
+    /// The card's picture under the pointer, as the browser's drag image
+    /// draws the card: GPUI lays it out where the card was, offset by the
+    /// grab point. A copy of the card's face (its well, name row and meta
+    /// row) on its own ground, without the ⋯, the hover and the text
+    /// measures; the opaque ground keeps what it passes over out of it.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme::resolve(None, window, cx);
-        div()
-            .px(px(8.))
-            .py(px(4.))
-            .rounded(px(radius::CHIP))
-            .border_1()
-            .border_color(hsla(t.glass_float_rim))
-            .bg(hsla(t.glass_float))
-            .font_family(FONT)
+        let card = &self.card;
+        let paint = Paint::of(t, card.disabled);
+        let ground = card_ground(t);
+        let foreground = hsla(t.foreground);
+        let name_ink = if card.disabled {
+            hsla(faded_over(t.foreground, ground, 0.5))
+        } else {
+            foreground
+        };
+        let inner = self.width - 2. * (CARD_PADDING_PX + CARD_BORDER_PX);
+        let well = div().relative().flex_none().child(layout_thumb(
+            card,
+            inner,
+            &paint,
+            self.still.as_ref(),
+        ));
+        let name_row = div()
+            .mt(px(8.))
+            .h(px(20.))
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .child(icon(glyph_icon(&card.glyph), 16., paint.screen_glyph))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .type_scale(text::LABEL)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(name_ink)
+                    .child(card.name.clone()),
+            )
+            .when(card.on_stream, |row| {
+                row.child(icon(IconName::Check, 16., foreground))
+            });
+        let meta_words = if card.pending {
+            SCENE_SWITCH_PENDING_LABEL.to_string()
+        } else {
+            card.meta.clone().unwrap_or_default()
+        };
+        let meta_row = div()
+            .mt(px(4.))
+            .h(px(20.))
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(8.))
             .type_scale(text::META)
-            .text_color(hsla(t.popover_foreground))
-            .child(self.name.clone())
+            .text_color(hsla(t.muted_foreground))
+            .child(div().flex_1().min_w_0().truncate().child(meta_words))
+            .children(card_keys(&card.keys));
+        div()
+            .w(px(self.width))
+            .flex()
+            .flex_col()
+            .p(px(CARD_PADDING_PX))
+            .rounded(px(radius::ROW))
+            .border_1()
+            .font_family(FONT)
+            .map(|card_box| {
+                if card.on_stream {
+                    card_box
+                        .border_color(hsla(with_alpha(t.foreground, 0.25)))
+                        .bg(linear_gradient(
+                            180.,
+                            linear_color_stop(hsla(t.chrome_plate_top), 0.),
+                            linear_color_stop(hsla(t.chrome_plate_bottom), 1.),
+                        )
+                        .color_space(ColorSpace::Oklab))
+                } else {
+                    card_box.border_color(hsla(t.border)).bg(hsla(ground))
+                }
+            })
+            .child(well)
+            .child(name_row)
+            .child(meta_row)
     }
 }
 
@@ -201,6 +275,8 @@ pub struct ScenesSection {
     view: ScenesSectionView,
     /// The scene on stream's fields under the cards (none with no scene).
     on_stream: Option<SceneOnStreamView>,
+    /// Retro LCD (plan 197): the fields draw on one LCD screen (P329).
+    retro: bool,
     /// The Screen field's Screen Recording alert, while the grant is missing.
     screen_alert: Option<ScreenRecordingAlert>,
     /// The alert's action runs.
@@ -279,6 +355,7 @@ impl ScenesSection {
             permissions,
             view: ScenesSectionView::Loading,
             on_stream: None,
+            retro: false,
             screen_alert: None,
             alert_pending: false,
             privacy: ScreenPrivacy::default(),
@@ -353,10 +430,16 @@ impl ScenesSection {
                 cx,
             );
         }
-        if view != self.view || on_stream != self.on_stream || screen_alert != self.screen_alert {
+        let retro = snapshot.settings.studio.retro_lcd_studio();
+        if view != self.view
+            || on_stream != self.on_stream
+            || screen_alert != self.screen_alert
+            || retro != self.retro
+        {
             self.view = view;
             self.on_stream = on_stream;
             self.screen_alert = screen_alert;
+            self.retro = retro;
             cx.notify();
         }
     }
@@ -1331,7 +1414,9 @@ impl ScenesSection {
                         SceneDrag {
                             id: card.id.clone(),
                             index,
-                            name: card.name.clone().into(),
+                            card: card.clone(),
+                            width,
+                            still: still.clone(),
                         },
                         |drag: &SceneDrag, _, _, cx| cx.new(|_| drag.clone()),
                     )

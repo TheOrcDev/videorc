@@ -74,6 +74,8 @@ fn failed(logger: Logger) -> Preview {
         docked_shown: true,
         logger,
         native: None,
+        closed: false,
+        closed_from: WindowMode::Docked,
     }
 }
 
@@ -175,6 +177,8 @@ pub(super) fn new(setup: PreviewSetup, window: &mut Window, cx: &mut App) -> Ent
                 floating: None,
                 opening: false,
             }),
+            closed: false,
+            closed_from: WindowMode::Docked,
         }
     })
 }
@@ -265,7 +269,7 @@ impl Preview {
     /// The child shows while its host is on screen: the floating window, or
     /// the Studio page.
     pub(super) fn apply_linux_visibility(&mut self) {
-        let visible = self.mode == WindowMode::Floating || self.docked_shown;
+        let visible = !self.closed && (self.mode == WindowMode::Floating || self.docked_shown);
         if let Some(native) = self.native.as_mut() {
             native.element.set_visible(visible);
         }
@@ -326,12 +330,19 @@ impl Preview {
         cx.notify();
     }
 
-    /// The user closed the floating window: the child comes home.
+    /// The user closed the floating window: the child comes home and the
+    /// Preview is closed (P131), as on macOS; it opens in its own window
+    /// again.
     pub(super) fn floating_closed_linux(&mut self, cx: &mut Context<Self>) {
         if let Some(native) = self.native.as_mut() {
             native.floating = None;
         }
         self.return_to_dock_linux();
+        self.closed_from = WindowMode::Floating;
+        self.closed = true;
+        self.apply_linux_visibility();
+        self.logger
+            .log(Level::Info, "[preview] the Preview is closed");
         cx.notify();
     }
 
