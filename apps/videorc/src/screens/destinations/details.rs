@@ -86,7 +86,7 @@ impl DestinationsPanel {
     }
 
     pub(super) fn details_section(
-        &self,
+        &mut self,
         state: &DetailsState,
         disabled: bool,
         window: &mut Window,
@@ -211,6 +211,61 @@ impl DestinationsPanel {
                     .text_color(hsla(t.destructive))
                     .child(issue),
             );
+        }
+
+        let youtube_signed_in = self
+            .studio
+            .platforms_now()
+            .account("youtube")
+            .is_some_and(|a| !a.account_id.is_empty());
+        let draft = state.draft.as_ref();
+        section = section.child(self.thumbnail_row(
+            draft.and_then(|d| d.thumbnail_asset_id.as_deref()),
+            youtube_signed_in,
+            disabled || state.save_pending,
+            window,
+            cx,
+        ));
+
+        // Category pickers for Twitch / Kick when those destinations are on.
+        let platforms = self.studio.platforms_now();
+        let capture = self.studio.snapshot().settings.capture_doc.clone();
+        let targets = videorc_app_core::livestream::targets::targets(&capture);
+        for target in &targets {
+            if !target.enabled {
+                continue;
+            }
+            let platform = target.platform.as_str();
+            let override_draft =
+                draft.and_then(|d| d.target_overrides.iter().find(|o| o.platform == platform));
+            match platform {
+                "twitch" if platforms.account("twitch").is_some() => {
+                    section = section.child(self.category_row(
+                        "twitch",
+                        page_copy::TWITCH_CATEGORY,
+                        override_draft.and_then(|o| o.twitch_category_id.as_deref()),
+                        override_draft.and_then(|o| o.twitch_category_name.as_deref()),
+                        disabled || state.save_pending,
+                        window,
+                        cx,
+                    ));
+                }
+                "kick" if platforms.account("kick").is_some() => {
+                    let kick_id = override_draft
+                        .and_then(|o| o.kick_category_id)
+                        .map(|id| id.to_string());
+                    section = section.child(self.category_row(
+                        "kick",
+                        page_copy::KICK_CATEGORY,
+                        kick_id.as_deref(),
+                        override_draft.and_then(|o| o.kick_category_name.as_deref()),
+                        disabled || state.save_pending,
+                        window,
+                        cx,
+                    ));
+                }
+                _ => {}
+            }
         }
 
         section = section.child(

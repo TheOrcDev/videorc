@@ -3,15 +3,19 @@
 //! After the stream, ready), Upcoming, and Discord. Words from
 //! `livestream::copy` and section modules.
 
+mod category;
 mod chat_commands;
 mod cloud;
 mod details;
 mod discord;
 mod quality;
 mod ready;
+mod schedule;
 mod stream_report;
+mod thumbnail;
 mod upcoming;
 mod watchdog;
+mod youtube_consent;
 
 use std::sync::Arc;
 
@@ -34,6 +38,7 @@ use videorc_app_core::{BackendClient, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::dialog::DialogHandle;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::list_row::{GroupedList, ListRow};
@@ -106,6 +111,14 @@ pub struct DestinationsPanel {
     manual_url_drafts: std::collections::BTreeMap<String, Entity<InputState>>,
     /// P1493: keyring LinuxSetupAlert before sign-in (Linux only).
     keyring_issue: Option<videorc_app_core::studio::linux_desktop::LinuxSetupIssue>,
+    youtube_consent: DialogHandle,
+    youtube_consent_accepted: bool,
+    /// Disconnect confirm (P720); platform while the dialog is open.
+    disconnect_confirm: DialogHandle,
+    disconnect_platform: Option<String>,
+    category_picker: Option<category::CategoryPicker>,
+    thumbnail_field: thumbnail::Field,
+    schedule: Option<schedule::ScheduleEditor>,
 }
 
 impl DestinationsPanel {
@@ -208,6 +221,13 @@ impl DestinationsPanel {
             manual_key_drafts: std::collections::BTreeMap::new(),
             manual_url_drafts: std::collections::BTreeMap::new(),
             keyring_issue: None,
+            youtube_consent: DialogHandle::new(false),
+            youtube_consent_accepted: false,
+            disconnect_confirm: DialogHandle::new(false),
+            disconnect_platform: None,
+            category_picker: None,
+            thumbnail_field: thumbnail::Field::default(),
+            schedule: None,
         };
         panel.rebuild_from_studio();
         panel
@@ -415,6 +435,58 @@ impl DestinationsPanel {
         }
     }
 
+    fn sign_in_pending(
+        &self,
+        dest_id: &str,
+        platform: &str,
+        pending: &setup::PendingView,
+        t: &videorc_kit::tokens::Theme,
+        entity: &Entity<Self>,
+    ) -> gpui::AnyElement {
+        let platform = platform.to_string();
+        let row = div().flex().flex_col().gap(px(6.)).child(
+            div()
+                .type_scale(text::META)
+                .text_color(hsla(t.muted_foreground))
+                .child(if pending.has_url {
+                    page_copy::WAITING_FOR_BROWSER.to_string()
+                } else {
+                    pending.other_browser.clone()
+                }),
+        );
+        let mut actions = div().flex().items_center().gap(px(8.));
+        if pending.has_url {
+            actions = actions.child(
+                Button::new(format!("dest-copy-link-{}", dest_id))
+                    .label(pending.copy_label.clone())
+                    .variant(ButtonVariant::Outline)
+                    .on_click({
+                        let entity = entity.clone();
+                        let platform = platform.clone();
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.copy_sign_in_link(&platform, cx);
+                            });
+                        }
+                    }),
+            );
+        }
+        actions = actions.child(
+            Button::new(format!("dest-cancel-sign-in-{}", dest_id))
+                .label(page_copy::CANCEL)
+                .variant(ButtonVariant::Ghost)
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.cancel_sign_in(&platform, cx);
+                        });
+                    }
+                }),
+        );
+        row.child(actions).into_any_element()
+    }
+
     fn destination_card(
         &mut self,
         dest: &DestinationView,
@@ -611,22 +683,116 @@ impl DestinationsPanel {
             if let Some(oauth) = &dest.oauth {
                 match oauth {
                     setup::OAuthView::Account(account) => {
-                        detail = detail.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(
-                                    Badge::new(page_copy::CONNECTED).variant(BadgeVariant::Success),
-                                )
-                                .child(div().type_scale(text::META).child(account.label.clone())),
+                        let platform = dest.platform.clone();
+                        let mut row = div().flex().items_center().gap(px(8.)).child(
+                            Badge::new(if account.reconnect {
+                                page_copy::NEEDS_RECONNECT
+                            } else {
+                                page_copy::CONNECTED
+                            })
+                            .variant(if account.reconnect {
+                                BadgeVariant::Warning
+                            } else {
+                                BadgeVariant::Success
+                            }),
                         );
+                        row = row.child(div().type_scale(text::META).child(account.label.clone()));
+                        if account.reconnect {
+                            let platform = platform.clone();
+                            row = row.child(
+                                Button::new(format!("dest-reconnect-{}", dest.id))
+                                    .label(page_copy::RECONNECT)
+                                    .variant(ButtonVariant::Outline)
+                                    .disabled(dest.disabled)
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_, window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.begin_connect(platform.clone(), window, cx);
+                                            });
+                                        }
+                                    }),
+                            );
+                        }
+                        if account.can_disconnect {
+                            let platform = platform.clone();
+                            row = row.child(
+                                Button::new(format!("dest-disconnect-{}", dest.id))
+                                    .label(page_copy::DISCONNECT)
+                                    .variant(ButtonVariant::Ghost)
+                                    .disabled(dest.disabled)
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_, window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.ask_disconnect(platform.clone(), window, cx);
+                                            });
+                                        }
+                                    }),
+                            );
+                        }
+                        detail = detail.child(row);
                         if !account.handle.is_empty() {
                             detail = detail.child(
                                 div()
                                     .type_scale(text::META)
                                     .text_color(hsla(t.muted_foreground))
                                     .child(account.handle.clone()),
+                            );
+                        }
+                        if account.reconnect && !account.validation_message.is_empty() {
+                            detail = detail.child(
+                                div()
+                                    .type_scale(text::META)
+                                    .text_color(hsla(t.muted_foreground))
+                                    .child(page_copy::LOST_ACCESS),
+                            );
+                        }
+                        if let Some(line) = &account.shared_line {
+                            detail = detail.child(
+                                div()
+                                    .type_scale(text::META)
+                                    .text_color(hsla(t.muted_foreground))
+                                    .child(line.clone()),
+                            );
+                        }
+                        if let Some((message, action)) = &account.permissions {
+                            let platform = platform.clone();
+                            detail = detail.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(8.))
+                                    .child(
+                                        div()
+                                            .type_scale(text::META)
+                                            .text_color(hsla(t.muted_foreground))
+                                            .child(message.clone()),
+                                    )
+                                    .child(
+                                        Button::new(format!("dest-permissions-{}", dest.id))
+                                            .label(action.clone())
+                                            .variant(ButtonVariant::Outline)
+                                            .disabled(dest.disabled)
+                                            .on_click({
+                                                let entity = entity.clone();
+                                                move |_, window, cx| {
+                                                    entity.update(cx, |this, cx| {
+                                                        this.begin_connect(
+                                                            platform.clone(),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    });
+                                                }
+                                            }),
+                                    ),
+                            );
+                        }
+                        if let Some(pending) = &account.pending {
+                            detail = detail.child(
+                                self.sign_in_pending(&dest.id, &platform, pending, t, &entity),
                             );
                         }
                     }
@@ -636,23 +802,25 @@ impl DestinationsPanel {
                         pending,
                         ..
                     } => {
+                        let platform = dest.platform.clone();
                         if let Some(pending) = pending {
                             detail = detail.child(
-                                div()
-                                    .type_scale(text::META)
-                                    .text_color(hsla(t.muted_foreground))
-                                    .child(if pending.has_url {
-                                        page_copy::WAITING_FOR_BROWSER.to_string()
-                                    } else {
-                                        pending.other_browser.clone()
-                                    }),
+                                self.sign_in_pending(&dest.id, &platform, pending, t, &entity),
                             );
                         } else {
                             detail = detail.child(
                                 Button::new(format!("dest-connect-{}", dest.id))
                                     .label(connect_label.clone())
                                     .variant(ButtonVariant::Outline)
-                                    .disabled(!*connect_enabled || dest.disabled),
+                                    .disabled(!*connect_enabled || dest.disabled)
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_, window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.begin_connect(platform.clone(), window, cx);
+                                            });
+                                        }
+                                    }),
                             );
                         }
                     }
@@ -953,6 +1121,9 @@ impl Render for DestinationsPanel {
         };
 
         let command_dialog = self.command_dialog_element(window, cx);
+        let youtube_consent = self.youtube_consent_dialog(window, cx);
+        let disconnect = self.disconnect_dialog(window, cx);
+        let schedule = self.schedule_dialog(window, cx);
 
         div()
             .id("destinations-page")
@@ -989,5 +1160,8 @@ impl Render for DestinationsPanel {
                 ),
             )
             .child(command_dialog)
+            .child(youtube_consent)
+            .child(disconnect)
+            .child(schedule)
     }
 }
