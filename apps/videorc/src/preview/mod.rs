@@ -57,12 +57,13 @@ use {
 /// rounded stage). The floating window is square.
 pub const SLOT_RADIUS: f64 = 12.0;
 
-/// The Scene page's canvas hosts the docked layer (X5, `liveCanvasSupported`)
-/// on macOS, where GPUI composites the native view beneath its own drawing
-/// and paints the stage's chrome over the video. Linux's presenter child
-/// sits above GPUI's drawing, so its Scene canvas stays a layout until it
-/// can take chrome; Windows has no element yet (S2.3b).
-pub const SCENE_HOSTS_DOCKED: bool = cfg!(target_os = "macos");
+/// Why the Scene canvas stays a schematic on X11 (the log's, once): its
+/// child window is opaque and on top, with no transparent sibling for the
+/// editor's chrome.
+#[cfg(target_os = "linux")]
+pub const X11_SCHEMATIC_REASON: &str = "the Scene canvas stays a schematic on X11: the preview's \
+     child window is opaque and above the window's drawing, with no transparent sibling for the \
+     editor's chrome";
 
 /// What the preview needs from the app's core.
 pub struct PreviewSetup {
@@ -299,7 +300,7 @@ impl Preview {
     /// The Scene canvas shows the live picture (X5 `liveCanvasActive`):
     /// the docked layer is here, not in its own window.
     pub fn live_canvas(&self) -> bool {
-        SCENE_HOSTS_DOCKED
+        self.scene_hosts_docked()
             && self.mode == WindowMode::Docked
             && !self.is_closed()
             && self.native_ready()
@@ -335,6 +336,48 @@ impl Preview {
         } else if self.mode == WindowMode::Floating {
             self.bring_to_front(cx);
         }
+    }
+
+    /// The Scene page's canvas hosts the docked preview (X5,
+    /// `liveCanvasSupported`): macOS, where GPUI composites the native view
+    /// beneath its own drawing and paints the stage's chrome over it; and
+    /// Linux on Wayland, where the chrome goes in a subsurface above the
+    /// video ([`Self::set_stage_chrome`]). X11's child has no transparent
+    /// sibling, so its canvas stays a schematic, by name; Windows has no
+    /// element yet (S2.3b).
+    pub fn scene_hosts_docked(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            true
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.native
+                .as_ref()
+                .is_some_and(|native| native.element.chrome_supported())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            false
+        }
+    }
+
+    /// The Scene editor's chrome over the live video, for a host whose
+    /// video sits above the window's drawing (Linux's Wayland subsurface);
+    /// `None` takes it down. macOS needs none: GPUI draws over its view.
+    pub fn set_stage_chrome(&mut self, scene: Option<videorc_preview::chrome::ChromeScene>) {
+        #[cfg(target_os = "linux")]
+        if let Some(native) = self.native.as_mut() {
+            native.element.set_chrome(scene);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = scene;
+    }
+
+    /// The chrome goes in its own surface over the video here (Linux on
+    /// Wayland): the stage sends it instead of drawing it.
+    pub fn stage_chrome_separate(&self) -> bool {
+        cfg!(target_os = "linux") && self.scene_hosts_docked()
     }
 
     /// The element's phase (Starting, Presenting, Healing, Stalled,
@@ -473,6 +516,7 @@ impl Preview {
             "canFloat": self.can_float(),
             "floatingOpen": floating_open,
             "closed": self.is_closed(),
+            "sceneHostsDocked": self.scene_hosts_docked(),
             "words": self.docked_words().map(|words| serde_json::json!({
                 "title": words.title,
                 "detail": words.detail,

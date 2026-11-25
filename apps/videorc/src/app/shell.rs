@@ -562,10 +562,12 @@ impl Shell {
             // A docked slot that is not on screen presents nothing. The
             // Scene page's canvas is the other docked slot (X5).
             self.preview.update(cx, |preview, _| {
-                preview.set_docked_shown(
-                    page == PageId::Studio
-                        || (crate::preview::SCENE_HOSTS_DOCKED && page == PageId::Layouts),
-                )
+                let scene_docked = preview.scene_hosts_docked() && page == PageId::Layouts;
+                preview.set_docked_shown(page == PageId::Studio || scene_docked);
+                // The Scene editor's chrome stays on the Scene page.
+                if page != PageId::Layouts {
+                    preview.set_stage_chrome(None);
+                }
             });
             // Space records only while the Studio page holds focus.
             if page == PageId::Studio {
@@ -574,7 +576,7 @@ impl Shell {
             }
             // P532: the Scene canvas opens a closed Preview docked (one in
             // its own window stays there).
-            if crate::preview::SCENE_HOSTS_DOCKED && page == PageId::Layouts {
+            if page == PageId::Layouts && self.preview.read(cx).scene_hosts_docked() {
                 self.preview
                     .update(cx, |preview, cx| preview.open_docked_if_closed(cx));
             }

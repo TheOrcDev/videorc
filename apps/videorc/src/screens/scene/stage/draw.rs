@@ -23,6 +23,8 @@ use videorc_protocol::{SceneSource, SceneSourceKind};
 use super::super::ScenePage;
 use super::{Entry, GUTTER, PictureFile, StageView, Target};
 use crate::screens::avatar::pictures;
+use videorc_preview::LayerRect;
+use videorc_preview::chrome::{ChromeScene, ChromeShape, Rgba};
 
 /// The handle's drawn square and its hit square (points).
 const HANDLE_SIZE: f32 = 6.0;
@@ -37,6 +39,12 @@ const OFF_SHARE: f32 = 0.4;
 fn faded(mut color: Hsla, share: f32) -> Hsla {
     color.a *= share;
     color
+}
+
+/// A GPUI colour as the chrome bitmap's (straight alpha).
+fn chrome_rgba(color: Hsla) -> Rgba {
+    let rgba = gpui::Rgba::from(color);
+    Rgba::new(rgba.r, rgba.g, rgba.b, rgba.a)
 }
 
 /// A div on `rect`, in fractions of its parent (the canvas).
@@ -119,6 +127,11 @@ impl ScenePage {
             .gesture
             .as_ref()
             .map(|active| (active.motion.kind, active.ghost.guides.clone()));
+        // Linux on Wayland: the video sits above the window's drawing, so the
+        // chrome goes in a surface of its own over it (the shapes below, in
+        // this layer's points), not in GPUI's drawing.
+        let separate = live && self.preview.read(cx).stage_chrome_separate();
+        let mut shapes: Vec<ChromeShape> = Vec::new();
 
         // The canvas: the schematic's ground, and every source and item,
         // clipped to it (a box may hang three canvases off).
@@ -186,7 +199,27 @@ impl ScenePage {
             }
         }
         // P522: one dashed line per snapped axis.
-        if let Some((_, guides)) = &gesture {
+        if let (true, Some((_, guides)), Some(pixels)) = (separate, &gesture, pixels) {
+            let (width, height) = (pixels.width as f32, pixels.height as f32);
+            for guide in guides {
+                let at = guide.position as f32;
+                let (from, to) = match guide.axis {
+                    Axis::X => (
+                        (GUTTER + at * width, GUTTER),
+                        (GUTTER + at * width, GUTTER + height),
+                    ),
+                    Axis::Y => (
+                        (GUTTER, GUTTER + at * height),
+                        (GUTTER + width, GUTTER + at * height),
+                    ),
+                };
+                shapes.push(ChromeShape::Dashed {
+                    from,
+                    to,
+                    color: chrome_rgba(hsla(t.ring)),
+                });
+            }
+        } else if let Some((_, guides)) = &gesture {
             for guide in guides {
                 let line = match guide.axis {
                     Axis::X => div()
@@ -217,11 +250,29 @@ impl ScenePage {
             .right(px(GUTTER))
             .bottom(px(GUTTER));
         if let (Some(entry), Some(pixels)) = (view.selected_entry(), pixels) {
-            chrome = chrome.child(
-                placed(entry.rect)
-                    .border_1()
-                    .border_color(faded(hsla(t.foreground), 0.7)),
-            );
+            // In the layer's points: the canvas starts a gutter in.
+            let at = |x: f64, y: f64| {
+                (
+                    GUTTER + (x * pixels.width) as f32,
+                    GUTTER + (y * pixels.height) as f32,
+                )
+            };
+            if separate {
+                let (x, y) = at(entry.rect.x, entry.rect.y);
+                shapes.push(ChromeShape::Frame {
+                    x,
+                    y,
+                    width: (entry.rect.width * pixels.width) as f32,
+                    height: (entry.rect.height * pixels.height) as f32,
+                    color: chrome_rgba(faded(hsla(t.foreground), 0.7)),
+                });
+            } else {
+                chrome = chrome.child(
+                    placed(entry.rect)
+                        .border_1()
+                        .border_color(faded(hsla(t.foreground), 0.7)),
+                );
+            }
             let mut handles = view.handles(entry, pixels);
             // During a resize only the handle that pulls shows.
             if let Some((GestureKind::Handle(active), _)) = &gesture {
@@ -234,6 +285,31 @@ impl ScenePage {
             let line = faded(hsla(t.foreground), 0.7);
             for (handle, ax, ay) in stage_handle_points(entry.rect) {
                 if !handles.contains(&handle) {
+                    continue;
+                }
+                if separate {
+                    let (x, y) = at(ax, ay);
+                    if offset > 0.0 {
+                        shapes.push(ChromeShape::Line {
+                            from: (x, y),
+                            to: (x + offset, y + offset),
+                            color: chrome_rgba(line),
+                        });
+                    }
+                    shapes.push(ChromeShape::Square {
+                        x: x + offset - HANDLE_SIZE / 2.0,
+                        y: y + offset - HANDLE_SIZE / 2.0,
+                        size: HANDLE_SIZE,
+                        fill: chrome_rgba(hsla(t.background)),
+                        border: chrome_rgba(faded(hsla(t.foreground), 0.8)),
+                    });
+                    cursors.push(CursorArea {
+                        x: GUTTER + (ax * pixels.width) as f32 + offset - HANDLE_HIT / 2.0,
+                        y: GUTTER + (ay * pixels.height) as f32 + offset - HANDLE_HIT / 2.0,
+                        width: HANDLE_HIT,
+                        height: HANDLE_HIT,
+                        style: cursor_of(handle),
+                    });
                     continue;
                 }
                 // A box too small for its handles has them pushed out: a
@@ -288,8 +364,28 @@ impl ScenePage {
         let cell = self.stage.bounds.clone();
         let measured = cx.entity().downgrade();
         let pointer = measured.clone();
+        // The chrome goes to its surface with the layer's place in the
+        // window, once the layer is laid out; elsewhere it comes down.
+        let preview = self.preview.downgrade();
+        if !separate {
+            self.preview
+                .update(cx, |preview, _| preview.set_stage_chrome(None));
+        }
         let measure = canvas(
-            move |bounds, window, _: &mut App| {
+            move |bounds, window, cx: &mut App| {
+                if separate {
+                    let scene = ChromeScene {
+                        rect: LayerRect::new(
+                            f64::from(bounds.origin.x),
+                            f64::from(bounds.origin.y),
+                            f64::from(bounds.size.width),
+                            f64::from(bounds.size.height),
+                        ),
+                        scale: window.scale_factor(),
+                        shapes,
+                    };
+                    let _ = preview.update(cx, |preview, _| preview.set_stage_chrome(Some(scene)));
+                }
                 let before = cell.replace(Some(bounds));
                 if before.map(|before| before.size) != Some(bounds.size) {
                     // The pixel-sized parts (the camera's mask, the handles)
