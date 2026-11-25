@@ -691,8 +691,15 @@ fn main() -> Result<()> {
                 });
                 palette.update(cx, |palette, _| palette.bind_dialogs(dialogs.clone()));
                 cloud_resume.update(cx, |slot, _| slot.bind_dialogs(dialogs.clone()));
-                let sounds =
-                    cx.new(|cx| SoundsPanel::new(studio.clone(), core_handle.clone(), window, cx));
+                let sounds = cx.new(|cx| {
+                    SoundsPanel::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        backend_state.clone(),
+                        window,
+                        cx,
+                    )
+                });
                 // Plan 260 Phase 3 (L1): the Scene page ⌘3.
                 let scene = cx.new(|cx| {
                     screens::scene::ScenePage::new(
@@ -940,7 +947,8 @@ fn main() -> Result<()> {
         let _ = main_window.update(cx, |_shell, window, cx| {
             let shell_weak = cx.weak_entity();
             sources.update(cx, |panel, _| panel.bind_shell(shell_weak.clone()));
-            output.update(cx, |panel, _| panel.bind_shell(shell_weak));
+            output.update(cx, |panel, _| panel.bind_shell(shell_weak.clone()));
+            images.update(cx, |panel, _| panel.bind_shell(shell_weak));
             ExitGuard::watch_main_window(window, cx);
             cx.observe_window_activation(window, move |_, window, cx| {
                 if window.is_window_active() {
