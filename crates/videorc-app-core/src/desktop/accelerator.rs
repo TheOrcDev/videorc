@@ -460,6 +460,15 @@ pub fn code_for_gpui_key(key: &str) -> String {
         return key.to_ascii_uppercase();
     }
     match key {
+        // GPUI sends a lone modifier's release as its own keystroke, named
+        // for the modifier with none held (`dispatch_key_event`). As a
+        // modifier code the recorder reads it as held keys (Electron's
+        // key-up), never "That key can't be part of a shortcut".
+        "shift" => "ShiftLeft",
+        "control" => "ControlLeft",
+        "alt" => "AltLeft",
+        "platform" => "MetaLeft",
+        "function" => "Fn",
         "escape" => "Escape",
         "backspace" => "Backspace",
         "delete" => "Delete",
