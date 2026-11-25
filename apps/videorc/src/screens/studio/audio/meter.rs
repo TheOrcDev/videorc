@@ -5,22 +5,29 @@ use gpui::{IntoElement, SharedString, div, prelude::*, px};
 use videorc_app_core::studio::audio_mixer::{
     LcdMeterView, METER_SEGMENTS, MeterView, segment_zone,
 };
-use videorc_kit::theme::{TypeScale, hsla};
+use videorc_kit::theme::{TypeScale, hsla, with_alpha};
 use videorc_kit::tokens::{Theme, text};
 
-/// One Mixer-scale meter from [`MeterView`].
+/// One Mixer-scale meter from [`MeterView`] (`LevelMeter variant="segmented"`):
+/// a `bg-muted` 8 px track with full rounding; every segment shows its zone
+/// (`--meter-ok`, `--meter-warn`, `--meter-clip`) at 20 % at rest and in
+/// full where the level reaches, with 2 px between segments.
 pub fn segmented_meter(meter: MeterView, muted: bool, theme: &Theme) -> impl IntoElement {
-    let track = hsla(theme.border);
-    let ok = hsla(theme.success);
-    let warn = hsla(theme.warning);
-    let clip = hsla(theme.destructive);
-    let hold = hsla(theme.muted_foreground);
+    let zone = |index: usize| match segment_zone(index) {
+        "clip" => theme.meter_clip,
+        "warn" => theme.meter_warn,
+        _ => theme.meter_ok,
+    };
+    let hold = hsla(with_alpha(theme.foreground, 0.8));
     let mut row = div()
         .w_full()
         .h(px(8.))
         .flex()
         .items_center()
-        .gap(px(1.))
+        .gap(px(2.))
+        .rounded_full()
+        .overflow_hidden()
+        .bg(hsla(theme.muted))
         .opacity(if muted { 0.5 } else { 1.0 });
     for index in 0..METER_SEGMENTS {
         let lit = index < meter.lit;
@@ -28,15 +35,11 @@ pub fn segmented_meter(meter: MeterView, muted: bool, theme: &Theme) -> impl Int
         let color = if is_hold && !lit {
             hold
         } else if lit {
-            match segment_zone(index) {
-                "clip" => clip,
-                "warn" => warn,
-                _ => ok,
-            }
+            hsla(zone(index))
         } else {
-            track
+            hsla(with_alpha(zone(index), 0.2))
         };
-        row = row.child(div().flex_1().h_full().rounded_none().bg(color));
+        row = row.child(div().flex_1().h_full().bg(color));
     }
     row
 }
@@ -66,11 +69,9 @@ pub fn lcd_meter(
                 .child(
                     div()
                         .text_color(if lcd.clipping { lit_ink } else { dim_ink })
-                        .child(if lcd.clipping {
-                            SharedString::from("CLIP")
-                        } else {
-                            SharedString::from("clip")
-                        }),
+                        // The CLIP flag is always printed; it lights when the
+                        // level clips (`LcdMeterClip`).
+                        .child(SharedString::from("CLIP")),
                 ),
         )
 }
