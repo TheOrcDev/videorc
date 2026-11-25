@@ -13,7 +13,7 @@ use videorc_kit::tokens::{Theme, text};
 /// (`--meter-ok`, `--meter-warn`, `--meter-clip`) at 20 % at rest and in
 /// full where the level reaches, with 2 px between segments.
 pub fn segmented_meter(meter: MeterView, muted: bool, theme: &Theme) -> impl IntoElement {
-    let zone = |index: usize| match segment_zone(index) {
+    let zone = |index: u8| match segment_zone(index) {
         "clip" => theme.meter_clip,
         "warn" => theme.meter_warn,
         _ => theme.meter_ok,
