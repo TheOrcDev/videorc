@@ -163,6 +163,9 @@ fn text_width(window: &Window, words: &str, size: f32, weight: FontWeight, color
     )
 }
 
+/// The dragged card's fade (`opacity-40`).
+const DRAGGING_OPACITY: f32 = 0.4;
+
 /// A card being dragged (P281): its scene, its place and its name for the
 /// picture under the pointer.
 #[derive(Clone)]
@@ -1216,6 +1219,9 @@ impl ScenesSection {
             .drag
             .filter(|(_, over)| *over == index)
             .and_then(|(from, _)| drop_edge(from, index));
+        // P281: the card being dragged fades while it moves
+        // (`scene-presets.tsx:188`, `reorder.dragging(scene.id) && 'opacity-40'`).
+        let dragging = cx.has_active_drag() && self.drag.is_some_and(|(from, _)| from == index);
         let ring = hsla(t.ring);
 
         let id = card.id.clone();
@@ -1268,6 +1274,7 @@ impl ScenesSection {
                 }
             })
             .focus_visible(move |style| style.shadow(focused))
+            .when(dragging, |card_box| card_box.opacity(DRAGGING_OPACITY))
             .when(interactive, |card_box| {
                 card_box
                     .cursor_pointer()

@@ -855,6 +855,9 @@ pub struct RuntimeAlertView {
     pub open_library: bool,
     /// Show in Finder: a failed take that saved a file, with its path.
     pub reveal_session_id: Option<String>,
+    /// The saved file Show in Finder reveals (`notice.outputPath`): a
+    /// failed take that saved one.
+    pub reveal_path: Option<String>,
 }
 
 /// `sessionRuntimeNoticeOpensAudio`: a microphone notice that hasn't ended,
@@ -877,6 +880,8 @@ pub fn runtime_alert(snapshot: &StudioSnapshot) -> Option<RuntimeAlertView> {
         let reveal = (saved_file && notice.output_path.is_some())
             .then(|| notice.session_id.clone())
             .flatten();
+        // `savedFile && notice.outputPath` (`session-runtime-alert.tsx:64`).
+        let reveal_path = saved_file.then(|| notice.output_path.clone()).flatten();
         return Some(RuntimeAlertView {
             title: notice.title().to_string(),
             message: notice.message.clone(),
@@ -884,6 +889,7 @@ pub fn runtime_alert(snapshot: &StudioSnapshot) -> Option<RuntimeAlertView> {
             open_audio: false,
             open_library: saved_file,
             reveal_session_id: reveal,
+            reveal_path,
         });
     }
     snapshot
@@ -897,6 +903,7 @@ pub fn runtime_alert(snapshot: &StudioSnapshot) -> Option<RuntimeAlertView> {
             open_audio: microphone_notice_opens_audio(notice),
             open_library: false,
             reveal_session_id: None,
+            reveal_path: None,
         })
 }
 

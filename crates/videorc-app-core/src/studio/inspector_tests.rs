@@ -810,16 +810,27 @@ fn the_runtime_alert_puts_the_failure_before_the_microphone() {
     assert_eq!(alert.title, "Recording stopped unexpectedly");
     assert!(alert.failed && alert.open_library && !alert.open_audio);
     assert_eq!(alert.reveal_session_id.as_deref(), Some("s1"));
-    failed.session.notice.as_mut().unwrap().output_path = None;
+    assert_eq!(alert.reveal_path.as_deref(), Some("/tmp/a.mkv"));
+    // Show in Finder needs the file, not the session id
+    // (`session-runtime-alert.tsx:64`: `savedFile && notice.outputPath`).
+    failed.session.notice.as_mut().unwrap().session_id = None;
     assert_eq!(
-        runtime_alert(&failed).unwrap().reveal_session_id,
-        None,
+        runtime_alert(&failed).unwrap().reveal_path.as_deref(),
+        Some("/tmp/a.mkv")
+    );
+    failed.session.notice.as_mut().unwrap().output_path = None;
+    let no_file = runtime_alert(&failed).unwrap();
+    assert_eq!(
+        no_file.reveal_session_id, None,
         "no file path, nothing to show in Finder"
     );
+    assert_eq!(no_file.reveal_path, None);
+    failed.session.notice.as_mut().unwrap().output_path = Some("/tmp/a.mkv".to_string());
     failed.session.notice.as_mut().unwrap().activity = SessionActivity::LiveStream;
     let live = runtime_alert(&failed).unwrap();
     assert_eq!(live.title, "Livestream stopped unexpectedly");
     assert_eq!(live.reveal_session_id, None, "a stream alone saved no file");
+    assert_eq!(live.reveal_path, None, "a stream alone saved no file");
     assert!(!live.open_library);
     assert_eq!(runtime_alert(&idle()), None);
 }
@@ -850,6 +861,7 @@ fn a_microphone_notice_opens_audio_until_it_ends() {
     let alert = runtime_alert(&snapshot).unwrap();
     assert!(!alert.failed && alert.open_audio && !alert.open_library);
     assert_eq!(alert.reveal_session_id, None);
+    assert_eq!(alert.reveal_path, None);
     let opens = |phase: MicrophonePhase, codes: &[&str]| {
         microphone_notice_opens_audio(&microphone_notice(phase, codes))
     };
