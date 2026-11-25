@@ -30,7 +30,7 @@ use videorc_kit::{
     window_frame::{WindowFrame, WindowHeader},
 };
 
-use super::activity::activity_pane;
+use super::activity::ActivityPane;
 use super::chat::ChatPane;
 use super::frame::{DEFAULT_HEIGHT, DEFAULT_WIDTH, StreamManagerFrame};
 use super::layout::{MIN_HEIGHT, MIN_WIDTH, Pane, Slot, Tier, right_pane_width, slot};
@@ -182,6 +182,7 @@ pub struct StreamManager {
     runtime: tokio::runtime::Handle,
     notices: gpui::Entity<crate::screens::notifications::Centre>,
     chat: gpui::Entity<ChatPane>,
+    activity: gpui::Entity<ActivityPane>,
     panes: Panes,
     facts: Facts,
     stats: StatsView,
@@ -227,6 +228,7 @@ impl StreamManager {
                 cx,
             )
         });
+        let activity = cx.new(|cx| ActivityPane::new(studio.live_chat(), dashboard.clone(), cx));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         frame.moved(window);
@@ -338,6 +340,7 @@ impl StreamManager {
             runtime,
             notices,
             chat,
+            activity,
             panes: Panes::default(),
             facts: Facts {
                 can_send: true,
@@ -451,6 +454,8 @@ impl StreamManager {
     fn confirm_clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear.close(window, cx);
         self.chat.update(cx, |chat, cx| chat.clear_view(cx));
+        self.activity
+            .update(cx, |activity, cx| activity.clear_view(cx));
         cx.notify();
     }
 
@@ -547,7 +552,7 @@ impl StreamManager {
     ) -> Option<gpui::AnyElement> {
         let body = match pane {
             Pane::Chat => self.chat.clone().into_any_element(),
-            Pane::Activity => activity_pane(),
+            Pane::Activity => self.activity.clone().into_any_element(),
             Pane::Sidekick => sidekick_pane(),
         };
         let region = div().h_full().flex().flex_col().min_w(px(0.)).child(body);
