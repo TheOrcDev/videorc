@@ -267,6 +267,38 @@ async function selectRealScreen(smoke) {
   const picked = selectWindowsHideScreen(devices?.devices ?? [])
   if (picked.skip) fail(`BLOCKED: --real-screen needs a DXGI display: ${picked.skip.reason}`)
   const screen = picked.screen
+  if (gpuiApp) {
+    // The GPUI app: the same picks through the Studio smoke handler.
+    await requestSmokeCommand(
+      smoke,
+      'select-camera-device',
+      { off: true, settleMs: 0 },
+      { timeoutMs }
+    )
+    await requestSmokeCommand(
+      smoke,
+      'select-screen-device',
+      { sourceId: screen.id, settleMs: 0 },
+      { timeoutMs }
+    )
+    await requestSmokeCommand(
+      smoke,
+      'select-layout-preset',
+      { preset: 'screen-only', settleMs: 0 },
+      { timeoutMs }
+    )
+    const state = await requestSmokeCommand(smoke, 'studio-scenes-state', {}, { timeoutMs })
+    const visual = state?.visual
+    if (
+      visual?.screenId !== screen.id ||
+      visual?.windowId ||
+      visual?.cameraOff !== true ||
+      visual?.layoutPreset !== 'screen-only'
+    ) {
+      fail(`could not select ${screen.id} on the GPUI app: ${JSON.stringify(visual)}`)
+    }
+    return screen
+  }
   const evaluate = async (code) => {
     const response = await requestSmokeCommand(smoke, 'eval-js', { code }, { timeoutMs })
     return response && typeof response === 'object' && 'result' in response
@@ -550,11 +582,6 @@ let remote = null
 let recorder = null
 try {
   mkdirSync(outputDirectory, { recursive: true })
-  if (gpuiApp && realScreen) {
-    fail(
-      'BLOCKED: --real-screen picks the screen through the renderer; the GPUI app has no select-screen-device yet. Run it without VIDEORC_APP=gpui.'
-    )
-  }
   if (windowsMicrophoneRoute) {
     log(describeWindowsMicrophoneRoute(windowsMicrophoneRoute))
     if (enforce && windowsMicrophoneRoute.route !== 'capture-worker') {
