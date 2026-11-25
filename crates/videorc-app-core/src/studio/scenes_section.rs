@@ -62,10 +62,10 @@ pub mod copy {
     /// The toggle's values (`layoutPresetOrientation`).
     pub const HORIZONTAL: &str = "horizontal";
     pub const VERTICAL: &str = "vertical";
-    /// Each segment's visible words. Electron draws a display and a phone
-    /// glyph; the kit's segments carry words only, so the shapes' ratios.
-    pub const HORIZONTAL_SEGMENT: &str = "16:9";
-    pub const VERTICAL_SEGMENT: &str = "9:16";
+    /// Each segment's accessible name (Electron's `aria-label`). The
+    /// visible body is a Monitor / DeviceMobile icon (`Segment::child`).
+    pub const HORIZONTAL_SEGMENT: &str = "Horizontal studio (16:9)";
+    pub const VERTICAL_SEGMENT: &str = "Vertical studio (9:16)";
     /// Each segment's tooltip.
     pub const HORIZONTAL_TOOLTIP: &str = "Horizontal · 16:9";
     pub const VERTICAL_TOOLTIP: &str = "Vertical · 9:16";
