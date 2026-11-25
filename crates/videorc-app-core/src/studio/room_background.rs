@@ -472,9 +472,12 @@ mod tests {
         let roots = managed_background_roots(root.path(), None);
         assert_eq!(roots, vec![root.path().join(MANAGED_BACKGROUND_DIR)]);
         let roots = vec![root.path().to_path_buf()];
+        // The resolver answers the canonical path (macOS: /var is
+        // /private/var), so compare against the file's canonical path.
+        let canonical = std::fs::canonicalize(&file).unwrap();
         assert_eq!(
             resolve_managed_background_file("beach.webp", &roots).as_deref(),
-            Some(file.as_path())
+            Some(canonical.as_path())
         );
         assert!(resolve_managed_background_file("../beach.webp", &roots).is_none());
     }
