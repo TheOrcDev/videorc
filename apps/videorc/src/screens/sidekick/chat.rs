@@ -255,6 +255,7 @@ pub fn render_chat(
     settings: Option<&CohostSettingsView>,
     widgets: &ChatWidgets,
     errors: (Option<&str>, Option<&str>),
+    wide: bool,
     window: &mut Window,
     cx: &mut Context<SidekickScreen>,
 ) -> AnyElement {
@@ -316,7 +317,7 @@ pub fn render_chat(
     let replies = PanelSection::new("sidekick-replies")
         .title(REPLIES)
         .description(chat::replies_description(&name))
-        .last(true)
+        .last(wide)
         .child(
             FieldGroup::new()
                 .grouped()
@@ -559,6 +560,11 @@ pub fn render_chat(
         .flex_col()
         .flex_1()
         .children(lead)
-        .child(config_grid_pair("sidekick-chat-grid", replies, moderation))
+        .child(config_grid_pair(
+            "sidekick-chat-grid",
+            replies,
+            moderation,
+            wide,
+        ))
         .into_any_element()
 }

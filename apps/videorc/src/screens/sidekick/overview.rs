@@ -26,6 +26,8 @@ use super::{
 
 pub struct OverviewState<'a> {
     pub view: &'a LiveView,
+    /// Two columns (`@min-[940px]/page`).
+    pub wide: bool,
     pub listen: bool,
     pub consented: bool,
     pub cloud_uses: [String; 6],
@@ -210,7 +212,7 @@ pub fn render_overview(
         .title(words::LIVE_SECTION_TITLE)
         .description(words::live_section_description())
         .action(Badge::new(words::LIVE_SECTION_BADGE).variant(BadgeVariant::Outline))
-        .last(true)
+        .last(state.wide)
         .child(
             FieldGroup::new().grouped().child(
                 div().id("sidekick-hears-you").child(field_beside(
@@ -352,6 +354,7 @@ pub fn render_overview(
             "sidekick-overview-grid",
             live_section,
             PageStack::new().child(powers_section).child(cloud),
+            state.wide,
         ))
         .into_any_element()
 }

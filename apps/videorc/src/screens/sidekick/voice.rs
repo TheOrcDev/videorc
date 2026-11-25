@@ -213,6 +213,7 @@ pub fn render_voice(
     settings: Option<&CohostSettingsView>,
     paused: &[&'static str],
     rows: &[RemoveMessagesRow],
+    wide: bool,
     window: &mut Window,
     cx: &mut Context<SidekickScreen>,
 ) -> AnyElement {
@@ -314,7 +315,7 @@ pub fn render_voice(
     let commands = PanelSection::new("sidekick-voice-commands")
         .title(COMMANDS)
         .description(commands_description())
-        .last(true)
+        .last(wide)
         .child(command_list)
         .child(
             FieldGroup::new()
@@ -459,6 +460,11 @@ pub fn render_voice(
         .flex_col()
         .flex_1()
         .when(show_lead, |page| page.child(lead))
-        .child(config_grid_pair("sidekick-voice-grid", commands, remove))
+        .child(config_grid_pair(
+            "sidekick-voice-grid",
+            commands,
+            remove,
+            wide,
+        ))
         .into_any_element()
 }
