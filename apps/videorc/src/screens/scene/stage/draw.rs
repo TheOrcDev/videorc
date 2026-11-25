@@ -9,7 +9,8 @@
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Div, Hitbox, HitboxBehavior,
     Hsla, ImageSource, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, Pixels, Window, canvas, div, img, point, prelude::*, px, relative, size,
+    ObjectFit, PathBuilder, Pixels, Window, canvas, div, img, point, prelude::*, px, relative,
+    size,
 };
 use videorc_app_core::editor::stage::{
     Axis, GestureKind, HandleId, ITEM_CHIP_HIT_WIDTH, PixelSize, SourceShape, StageItemBadge,
@@ -230,9 +231,31 @@ impl ScenePage {
                 entry.rect.width * pixels.width,
                 entry.rect.height * pixels.height,
             ) as f32;
+            let line = faded(hsla(t.foreground), 0.7);
             for (handle, ax, ay) in stage_handle_points(entry.rect) {
                 if !handles.contains(&handle) {
                     continue;
+                }
+                // A box too small for its handles has them pushed out: a
+                // line ties each to its corner (`offset > 0`).
+                if offset > 0.0 {
+                    chrome = chrome.child(
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, _| {
+                                let mut path = PathBuilder::stroke(px(1.));
+                                path.move_to(bounds.origin);
+                                path.line_to(bounds.bottom_right());
+                                if let Ok(path) = path.build() {
+                                    window.paint_path(path, line);
+                                }
+                            },
+                        )
+                        .absolute()
+                        .left(relative(ax as f32))
+                        .top(relative(ay as f32))
+                        .size(px(offset)),
+                    );
                 }
                 chrome = chrome.child(
                     div()
