@@ -36,6 +36,7 @@ use videorc_app_core::{BackendClient, BackendEvent, BackendState, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::DialogHandle;
+use videorc_kit::page::ConfigGrid;
 use videorc_kit::page_tabs::PageTabs;
 use videorc_kit::theme::{FONT, TypeScale, hsla};
 use videorc_kit::toast::{ToastData, ToastKind};
@@ -68,41 +69,17 @@ pub const EVENTS: [&str; 5] = [
 /// Premium changed (a purchase, a refresh): the locks read again.
 const ENTITLEMENTS_UPDATED: &str = "entitlements.updated";
 
-/// `PAGE_WIDE_MIN_PX` (`lib/page-layout.ts`): from this much page width a
-/// config grid puts its two sections side by side (`@min-[940px]/page`).
-const PAGE_WIDE_MIN: f32 = 940.;
-
-/// `ConfigGrid` with `CONFIG_GRID_PAIR` (`components/page.tsx`): two flush
-/// columns from 940 px of page that fill the visible height, so the column
-/// hairline runs the full height however short the tab is; stacked below
-/// that, in the same order. A column's last section passes
-/// `PanelSection::last(wide)` for the lead (`[&>*]:border-b-0`; stacked, its
-/// hairline splits the two) and `last(true)` for the trail.
+/// `ConfigGrid` with `CONFIG_GRID_PAIR` (`components/page.tsx`): the kit's
+/// grid measures the page and puts the two flush columns side by side from
+/// 940 px, filling the visible height so the column hairline runs to the
+/// foot. Each column's last section passes `PanelSection::last(true)`
+/// (`[&>*]:border-b-0`).
 pub(crate) fn config_grid_pair(
+    id: &'static str,
     lead: impl IntoElement,
     trail: impl IntoElement,
-    wide: bool,
-    border: Hsla,
-) -> gpui::Div {
-    if wide {
-        div()
-            .flex()
-            .flex_1()
-            .w_full()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .border_r_1()
-                    .border_color(border)
-                    .child(lead),
-            )
-            .child(div().flex().flex_col().flex_1().min_w_0().child(trail))
-    } else {
-        div().flex().flex_col().w_full().child(lead).child(trail)
-    }
+) -> ConfigGrid {
+    ConfigGrid::new(id).pair(true).child(lead).child(trail)
 }
 
 /// A tab's lead strip (`border-b border-border p-gutter`, `gap-2`): the
@@ -371,9 +348,6 @@ pub struct SidekickScreen {
     posters: Option<gpui::Entity<crate::app::posters::Posters>>,
     /// The shell has Sidekick on screen (Community's living preview ticks).
     page_shown: bool,
-    /// The page's measured width: two columns from [`PAGE_WIDE_MIN`]. It
-    /// starts wide, as the default window is, so the first frame doesn't flip.
-    page_width: f32,
 }
 
 impl SidekickScreen {
@@ -411,7 +385,6 @@ impl SidekickScreen {
             pending_on: false,
             save_error: None,
             page_shown: false,
-            page_width: PAGE_WIDE_MIN,
             chat: None,
             community: None,
             reports: None,
@@ -607,21 +580,6 @@ impl SidekickScreen {
             live: self.live,
             state: Some(&self.state),
         })
-    }
-
-    /// The page's width, measured each frame; draws again only when the
-    /// grids flip between one column and two.
-    fn measured(&mut self, width: f32, cx: &mut Context<Self>) {
-        let flips = (width >= PAGE_WIDE_MIN) != self.wide();
-        self.page_width = width;
-        if flips {
-            cx.notify();
-        }
-    }
-
-    /// Two columns (`@min-[940px]/page`).
-    pub(crate) fn wide(&self) -> bool {
-        self.page_width >= PAGE_WIDE_MIN
     }
 
     pub(crate) fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1404,12 +1362,10 @@ impl Render for SidekickScreen {
         self.ensure_reports(cx);
         self.ensure_clean_cut(window, cx);
         let view = self.view();
-        let wide = self.wide();
         let listen = self.settings.as_ref().map(|s| s.listen).unwrap_or(false);
         let community_settings = community::community_settings(self.settings.as_ref());
         let overview = OverviewState {
             view: &view,
-            wide,
             listen,
             consented: self.consented,
             cloud_uses: cloud_ai_uses(),
@@ -1430,7 +1386,7 @@ impl Render for SidekickScreen {
                     self.save_error(SaveSection::Replies),
                     self.save_error(SaveSection::Moderation),
                 );
-                render_chat(&view, settings, widgets, errors, wide, window, cx)
+                render_chat(&view, settings, widgets, errors, window, cx)
             }
             Tab::Community => {
                 let preview = self.render_community_preview(window, cx);
@@ -1439,7 +1395,6 @@ impl Render for SidekickScreen {
                     self.community.as_ref().expect("community state"),
                     &community_settings,
                     preview,
-                    wide,
                     window,
                     cx,
                 )
@@ -1447,7 +1402,7 @@ impl Render for SidekickScreen {
             Tab::Voice => {
                 let paused = command_availability_lines(self.state.command_availability.as_ref());
                 let rows = remove_messages_rows(&self.studio.platforms_now());
-                render_voice(&view, settings, &paused, &rows, wide, window, cx)
+                render_voice(&view, settings, &paused, &rows, window, cx)
             }
             Tab::Reports => {
                 let reports = self.reports.as_ref().expect("reports state");
@@ -1484,28 +1439,12 @@ impl Render for SidekickScreen {
 
         let consent = overview::consent_dialog(&self.consent, cx);
 
-        // The page's own width (`@container/page`), never the window's: the
-        // config grids put their sections side by side from 940 px.
-        let page = cx.entity().downgrade();
-        let measure = gpui::canvas(
-            move |bounds, _, cx| {
-                let width = f32::from(bounds.size.width);
-                page.update(cx, |screen, cx| screen.measured(width, cx))
-                    .ok();
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full();
-
         div()
             .id("sidekick-screen")
-            .relative()
             .size_full()
             .flex()
             .flex_col()
             .font_family(FONT)
-            .child(measure)
             .child(tabs.child(body))
             .child(consent)
             // Reports' Markers dialog draws itself when open.

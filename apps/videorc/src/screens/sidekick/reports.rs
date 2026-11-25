@@ -5,9 +5,7 @@
 
 use std::collections::HashSet;
 
-use gpui::{
-    AnyElement, Context, Entity, FontWeight, SharedString, Svg, Window, div, prelude::*, px,
-};
+use gpui::{AnyElement, Context, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
 use serde_json::json;
 use videorc_app_core::buddy::copy as words;
 use videorc_app_core::buddy::report_view::{
@@ -22,6 +20,7 @@ use videorc_kit::empty::Empty;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
+use videorc_kit::platform_glyph::PlatformMark;
 use videorc_kit::select::{Select, SelectOption, SelectSize};
 use videorc_kit::spinner::Spinner;
 use videorc_kit::theme::{self, TypeScale, hsla};
@@ -492,7 +491,7 @@ fn report_body(
                 let mut row = ListRow::new(row_id("regulars", index), person.name.clone())
                     .meta(person.streams.clone());
                 for platform in &person.platforms {
-                    row = row.status_icon(platform_mark(*platform, t));
+                    row = row.status_icon(platform_mark(*platform));
                 }
                 row
             },
@@ -506,7 +505,7 @@ fn report_body(
             |index, entry| {
                 ListRow::new(row_id("milestones", index), entry.name.clone())
                     .meta(entry.label.clone())
-                    .status_icon(platform_mark(entry.platform, t))
+                    .status_icon(platform_mark(entry.platform))
             },
         );
         // Side by side at `lg` when both have rows.
@@ -569,7 +568,7 @@ fn report_body(
                     row = row.alias(Badge::new(source).variant(BadgeVariant::Outline));
                 }
                 for platform in &post.platforms {
-                    row = row.status_icon(platform_mark(*platform, t));
+                    row = row.status_icon(platform_mark(*platform));
                 }
                 row
             },
@@ -600,7 +599,7 @@ fn report_body(
                     row = row.alias(Badge::new(rv::HIGH).variant(BadgeVariant::Outline));
                 }
                 for platform in &question.platforms {
-                    row = row.status_icon(platform_mark(*platform, t));
+                    row = row.status_icon(platform_mark(*platform));
                 }
                 if let Some(at) = question.at.as_ref() {
                     row = row.meta(at.clone());
@@ -733,7 +732,7 @@ fn stream_line(view: &ShownReport, t: &'static Theme) -> impl IntoElement {
                 .items_center()
                 .gap(px(4.))
                 .tooltip(tooltip(entry.label.clone()))
-                .child(platform_mark(entry.platform, t))
+                .child(platform_mark(entry.platform))
                 // One platform's count is the total already said.
                 .when(several, |chip| {
                     chip.child(rv::format_report_count(entry.messages))
@@ -892,8 +891,8 @@ fn unlock_button(id: &'static str, action: UnlockAction) -> Button {
         })
 }
 
-/// `ChatPlatformIcon`: the platform's mark in its brand tint.
-fn platform_mark(platform: StreamPlatform, t: &Theme) -> Svg {
+/// `ChatPlatformIcon`: the platform's 20 px mark (YouTube's official one).
+fn platform_mark(platform: StreamPlatform) -> AnyElement {
     let mark = match platform {
         StreamPlatform::Youtube => ChatPlatform::Youtube,
         StreamPlatform::Twitch => ChatPlatform::Twitch,
@@ -904,12 +903,12 @@ fn platform_mark(platform: StreamPlatform, t: &Theme) -> Svg {
         StreamPlatform::Instagram => ChatPlatform::Instagram,
         StreamPlatform::Custom => ChatPlatform::Custom,
     };
-    let glyph = icon(mark.icon(), MARK_PX, mark.tint_hsla(t));
+    let glyph = PlatformMark::new(mark).size(MARK_PX);
     // YouTube keeps clear space of the triangle's width before what
     // follows it (`mr-1`, brand.youtube).
     if mark == ChatPlatform::Youtube {
-        glyph.mr(px(4.))
+        div().flex_none().mr(px(4.)).child(glyph).into_any_element()
     } else {
-        glyph
+        glyph.into_any_element()
     }
 }

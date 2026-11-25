@@ -9,6 +9,7 @@ use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
 use videorc_kit::field::FieldGroup;
 use videorc_kit::icon::{IconName, icon};
+use videorc_kit::page::PageStack;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::shortcut_keys::ShortcutKeys;
 use videorc_kit::status_dot::{StatusDot, StatusTone};
@@ -25,8 +26,6 @@ use super::{
 
 pub struct OverviewState<'a> {
     pub view: &'a LiveView,
-    /// Two columns (`@min-[940px]/page`).
-    pub wide: bool,
     pub listen: bool,
     pub consented: bool,
     pub cloud_uses: [String; 6],
@@ -211,7 +210,7 @@ pub fn render_overview(
         .title(words::LIVE_SECTION_TITLE)
         .description(words::live_section_description())
         .action(Badge::new(words::LIVE_SECTION_BADGE).variant(BadgeVariant::Outline))
-        .last(state.wide)
+        .last(true)
         .child(
             FieldGroup::new().grouped().child(
                 div().id("sidekick-hears-you").child(field_beside(
@@ -350,10 +349,9 @@ pub fn render_overview(
         .flex_1()
         .child(header)
         .child(config_grid_pair(
+            "sidekick-overview-grid",
             live_section,
-            div().flex().flex_col().child(powers_section).child(cloud),
-            state.wide,
-            border,
+            PageStack::new().child(powers_section).child(cloud),
         ))
         .into_any_element()
 }
