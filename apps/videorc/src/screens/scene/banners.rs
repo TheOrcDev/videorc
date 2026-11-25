@@ -5,7 +5,10 @@
 //! (`inspector_view`'s overlay and banner, `banners_section_view`); the
 //! writes are `overlays.layout.set` and the `banners.*` requests.
 
-use gpui::{AnyElement, Context, SharedString, Transformation, div, percentage, prelude::*, px};
+use gpui::{
+    AnyElement, Context, ObjectFit, SharedString, Transformation, div, img, percentage, prelude::*,
+    px,
+};
 use serde_json::{Map, Value, json};
 use tokio::sync::oneshot;
 use videorc_app_core::assets::LOADING_BANNERS;
@@ -27,8 +30,8 @@ use videorc_kit::panel_section::PanelSection;
 use videorc_kit::select::Select;
 use videorc_kit::settings_row::SettingsRow;
 use videorc_kit::switch::Switch;
-use videorc_kit::theme::{TypeScale, hsla};
-use videorc_kit::tokens::{Theme, text};
+use videorc_kit::theme::{TypeScale, hsla, with_alpha};
+use videorc_kit::tokens::{Theme, radius, text};
 
 use super::controls::Knob;
 use super::editor::copy;
@@ -419,9 +422,9 @@ impl ScenePage {
             .into_any_element()
     }
 
-    /// P596–P600: every banner, below the selection's own sections.
-    // TODO(kit): BannerThumbnail (the row's picture, `aspect-video h-5`);
-    // the row shows ImageSquare until the app draws managed files.
+    /// P596–P600: every banner, below the selection's own sections; each
+    /// row's picture is its thumbnail (`BannerThumbnail`, `aspect-video
+    /// h-5`).
     pub(super) fn banners_section(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let view = self.editor.banners.clone();
         let mut section = PanelSection::new("scene-banners")
@@ -483,7 +486,7 @@ impl ScenePage {
             )
             .interactive(true)
             .selected(row.selected)
-            .icon(icon(IconName::ImageSquare, 14., hsla(t.muted_foreground)))
+            .icon(self.banner_thumbnail(&row.id, t))
             .on_click(cx.listener(move |this, _, _, cx| this.select_banner(select_id.clone(), cx)));
             if let Some(timing) = row.timing.clone() {
                 entry = entry.alias(Badge::new(timing).variant(BadgeVariant::Outline));
@@ -494,6 +497,38 @@ impl ScenePage {
             list = list.row(entry.child(toggle));
         }
         section.child(list).into_any_element()
+    }
+
+    /// A banner's thumbnail, 16:9 at 20 px high; its glyph until the file
+    /// is known.
+    fn banner_thumbnail(&self, id: &str, t: &Theme) -> AnyElement {
+        let path = self
+            .editor_state
+            .banners
+            .iter()
+            .find(|banner| banner.id == id)
+            .and_then(|banner| {
+                super::stage::banner_file(&self.user_data_dir, &banner.thumbnail_file)
+            });
+        let frame = div()
+            .h(px(20.))
+            .w(px(36.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .overflow_hidden()
+            .rounded(px(radius::CHIP))
+            .bg(hsla(with_alpha(t.foreground, 0.04)));
+        match path {
+            Some(path) => frame
+                .p(px(2.))
+                .child(img(path).size_full().object_fit(ObjectFit::Contain))
+                .into_any_element(),
+            None => frame
+                .child(icon(IconName::ImageSquare, 14., hsla(t.muted_foreground)))
+                .into_any_element(),
+        }
     }
 
     // ── Actions ───────────────────────────────────────────────────────
