@@ -5,9 +5,13 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, Context, Entity, SharedString, WeakEntity, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString, WeakEntity,
+    Window, actions, div, prelude::*, px,
+};
+use serde_json::json;
 use tokio::sync::oneshot;
 use videorc_app_core::desktop::permissions::{
     MediaAccessSnapshot, PermissionPlatform, SystemPermissionPane,
@@ -18,15 +22,17 @@ use videorc_app_core::desktop::system_access::{
     system_access_visible_detail,
 };
 use videorc_app_core::nav::PageId;
+use videorc_app_core::protocol::SoundboardSettingsParams;
 use videorc_app_core::studio::audio_levels::MicLevels;
 use videorc_app_core::studio::audio_mixer;
-use videorc_app_core::studio::audio_section::IssueAction;
+use videorc_app_core::studio::audio_section::{AudioMeters, AudioMetersView, IssueAction};
 use videorc_app_core::studio::health::HealthTelemetry;
 use videorc_app_core::studio::health_page::OPEN_HEALTH_LABEL;
 use videorc_app_core::studio::source_selection::{PICKER_NONE_VALUE, PickerView, SourceKind};
 use videorc_app_core::studio::sources;
 use videorc_app_core::studio::sources_audio::{
-    SourcesAudioInputs, SourcesAudioView, copy as audio_copy,
+    SOUNDS_VOLUME_DEFAULT, SOUNDS_VOLUME_RANGE, SoundsBoard, SourcesAudioInputs, SourcesAudioView,
+    copy as audio_copy,
 };
 use videorc_app_core::studio::sources_page::{
     ChipTone, GrantAction, GrantRow, GrantState, PermissionInputs, SourcePermissionAlert,
@@ -51,8 +57,25 @@ use videorc_kit::tokens::{size, text};
 
 use crate::app::permissions::Permissions;
 use crate::app::shell::Shell;
+use crate::screens::studio::audio::meter::{lcd_meter, segmented_meter};
 
 pub type AppStudio = Studio<BackendClient>;
+
+actions!(sources_audio, [FocusPreviousStrip, FocusNextStrip]);
+
+/// Key context while focus is inside the Sources Audio mixer (P429).
+pub const KEY_CONTEXT: &str = "SourcesAudio";
+
+/// How often a falling meter redraws while nothing new arrives.
+const METER_TICK: Duration = Duration::from_millis(33);
+
+/// Binds ⌘/Ctrl+↑/↓ for the Sources Audio column; call once at start.
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("secondary-up", FocusPreviousStrip, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-down", FocusNextStrip, Some(KEY_CONTEXT)),
+    ]);
+}
 
 fn runtime_platform() -> &'static str {
     match PermissionPlatform::current() {
@@ -174,33 +197,6 @@ fn more_button(
         .on_click(on_click)
 }
 
-fn meter_bar(
-    peak_db: Option<f64>,
-    show: bool,
-    track: videorc_kit::tokens::Color,
-    fill: videorc_kit::tokens::Color,
-) -> impl IntoElement {
-    let amount = if show {
-        peak_db
-            .map(|db| ((db + 60.0) / 60.0).clamp(0.0, 1.0))
-            .unwrap_or(0.0)
-    } else {
-        0.0
-    };
-    div()
-        .h(px(8.))
-        .w_full()
-        .rounded_full()
-        .bg(hsla(track))
-        .child(
-            div()
-                .h_full()
-                .w(px((amount * 220.0) as f32))
-                .rounded_full()
-                .bg(hsla(fill)),
-        )
-}
-
 fn fill_select(id: impl Into<gpui::ElementId>, picker: &PickerView, disabled: bool) -> Select {
     let selected = picker
         .items
@@ -242,6 +238,7 @@ impl SourcesModel {
         levels: &MicLevels,
         media: &MediaAccessSnapshot,
         refreshing: bool,
+        board: Option<SoundsBoard>,
     ) -> Self {
         let permissions = permission_inputs(snapshot, Some(media));
         Self {
@@ -259,7 +256,7 @@ impl SourcesModel {
                 &SourcesAudioInputs {
                     platform: runtime_platform(),
                     audio: Default::default(),
-                    board: None,
+                    board,
                     warm_microphone_armed: None,
                     warm_microphone_open_failed: false,
                 },
@@ -275,6 +272,7 @@ struct SourcesUi {
     pending_alert: Option<SystemPermissionPane>,
     mic_gain_live: bool,
     sys_gain_live: bool,
+    sounds_gain_live: bool,
     sync_live: bool,
 }
 
@@ -286,9 +284,24 @@ pub struct SourcesPanel {
     shell: Option<WeakEntity<Shell>>,
     ui: SourcesUi,
     refreshing: bool,
+    board: Option<SoundsBoard>,
+    meters: AudioMeters,
+    meters_view: AudioMetersView,
+    retro: bool,
+    settling: bool,
     mic_gain: Entity<SliderState>,
     sys_gain: Entity<SliderState>,
+    sounds_gain: Entity<SliderState>,
     sync_ms: Entity<SliderState>,
+    mic_focus: FocusHandle,
+    sys_focus: FocusHandle,
+    sounds_focus: FocusHandle,
+}
+
+impl Focusable for SourcesPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.mic_focus.clone()
+    }
 }
 
 impl SourcesPanel {
@@ -298,13 +311,18 @@ impl SourcesPanel {
         runtime: tokio::runtime::Handle,
         cx: &mut Context<Self>,
     ) -> Self {
+        let snap = studio.watch().borrow().clone();
+        let levels_now = studio.mic_levels().borrow().clone();
         let model = SourcesModel::of(
-            &*studio.watch().borrow(),
+            &snap,
             &studio.telemetry_now(),
-            &*studio.mic_levels().borrow(),
+            &levels_now,
             &permissions.snapshot(),
             false,
+            None,
         );
+        let mut meters = AudioMeters::default();
+        let meters_view = meters.step(&snap, &levels_now, Instant::now());
         let mic_gain = cx.new(|_| {
             SliderState::new()
                 .min(-24.0)
@@ -324,6 +342,13 @@ impl SourcesPanel {
                 .max(12.0)
                 .step(1.0)
                 .default_value(gain)
+        });
+        let sounds_gain = cx.new(|_| {
+            SliderState::new()
+                .min(SOUNDS_VOLUME_RANGE.0 as f32)
+                .max(SOUNDS_VOLUME_RANGE.1 as f32)
+                .step(1.0)
+                .default_value(model.audio.sounds.volume_db as f32)
         });
         let sync_ms = cx.new(|_| {
             SliderState::new()
@@ -355,6 +380,26 @@ impl SourcesPanel {
             this.run_studio(async move {
                 studio.set_system_audio_gain(value).await;
             });
+            let _ = state;
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe(&sounds_gain, |this, state, event: &SliderEvent, cx| {
+            let value = match event {
+                SliderEvent::Change(v) | SliderEvent::Release(v) => v.end() as i32,
+            };
+            this.ui.sounds_gain_live = matches!(event, SliderEvent::Change(_));
+            if matches!(event, SliderEvent::Release(_)) {
+                this.apply_sounds_settings(
+                    SoundboardSettingsParams {
+                        volume_db: Some(value),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+            } else if let Some(board) = this.board.as_mut() {
+                board.volume_db = value;
+            }
             let _ = state;
             cx.notify();
         })
@@ -396,7 +441,7 @@ impl SourcesPanel {
             }
         })
         .detach();
-        Self {
+        let mut panel = Self {
             studio,
             permissions,
             runtime,
@@ -404,14 +449,95 @@ impl SourcesPanel {
             shell: None,
             ui: SourcesUi::default(),
             refreshing: false,
+            board: None,
+            meters,
+            meters_view,
+            retro: snap.settings.studio.retro_lcd_studio(),
+            settling: false,
             mic_gain,
             sys_gain,
+            sounds_gain,
             sync_ms,
-        }
+            mic_focus: cx.focus_handle(),
+            sys_focus: cx.focus_handle(),
+            sounds_focus: cx.focus_handle(),
+        };
+        panel.load_board(cx);
+        panel
     }
 
     pub fn bind_shell(&mut self, shell: WeakEntity<Shell>) {
         self.shell = Some(shell);
+    }
+
+    fn load_board(&mut self, cx: &mut Context<Self>) {
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move { studio.backend().sounds_list().await })
+                .await;
+            let _ = this.update(cx, |panel, cx| {
+                if let Ok(Ok(board)) = result {
+                    panel.board = Some(SoundsBoard {
+                        volume_db: board.volume_db,
+                        monitor: board.monitor,
+                    });
+                    panel.push_model(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn apply_sounds_settings(
+        &mut self,
+        settings: SoundboardSettingsParams,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(board) = self.board.as_mut() {
+            if let Some(volume_db) = settings.volume_db {
+                board.volume_db = volume_db;
+            }
+            if let Some(monitor) = settings.monitor {
+                board.monitor = monitor;
+            }
+        }
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move {
+                    studio
+                        .backend()
+                        .sounds_request("sounds.settings", json!(settings))
+                        .await
+                })
+                .await;
+            let _ = this.update(cx, |panel, cx| {
+                match result {
+                    Ok(Ok(value)) => {
+                        if let Ok(board) = serde_json::from_value::<
+                            videorc_app_core::protocol::SoundboardState,
+                        >(value)
+                        {
+                            panel.board = Some(SoundsBoard {
+                                volume_db: board.volume_db,
+                                monitor: board.monitor,
+                            });
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        eprintln!("[videorc-app] Sources sounds.settings: {err}");
+                    }
+                    Err(err) => {
+                        eprintln!("[videorc-app] Sources sounds.settings join: {err}");
+                    }
+                }
+                panel.push_model(cx);
+            });
+        })
+        .detach();
     }
 
     fn rebuild(
@@ -422,10 +548,107 @@ impl SourcesPanel {
         media: &MediaAccessSnapshot,
         cx: &mut Context<Self>,
     ) {
-        let next = SourcesModel::of(snapshot, telemetry, levels, media, self.refreshing);
+        self.retro = snapshot.settings.studio.retro_lcd_studio();
+        self.meters_view = self.meters.step(snapshot, levels, Instant::now());
+        self.ensure_meter_ticks(cx);
+        let next = SourcesModel::of(
+            snapshot,
+            telemetry,
+            levels,
+            media,
+            self.refreshing,
+            self.board,
+        );
         if self.model != next {
             self.model = next;
             cx.notify();
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn ensure_meter_ticks(&mut self, cx: &mut Context<Self>) {
+        if self.meters.settled() || self.settling {
+            return;
+        }
+        self.settling = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(METER_TICK).await;
+                let done = this
+                    .update(cx, |panel, cx| {
+                        let snapshot = panel.studio.watch().borrow().clone();
+                        let levels = panel.studio.mic_levels().borrow().clone();
+                        panel.meters_view = panel.meters.step(&snapshot, &levels, Instant::now());
+                        let done = panel.meters.settled();
+                        cx.notify();
+                        done
+                    })
+                    .ok()
+                    .unwrap_or(true);
+                if done {
+                    let _ = this.update(cx, |panel, _| panel.settling = false);
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn focus_previous_strip(
+        &mut self,
+        _: &FocusPreviousStrip,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_strip_focus(-1, window, cx);
+    }
+
+    fn focus_next_strip(
+        &mut self,
+        _: &FocusNextStrip,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_strip_focus(1, window, cx);
+    }
+
+    fn move_strip_focus(&mut self, direction: i8, window: &mut Window, cx: &mut Context<Self>) {
+        let has_system = self.model.audio.system_audio.is_some();
+        let strips: Vec<FocusHandle> = if has_system {
+            vec![
+                self.mic_focus.clone(),
+                self.sys_focus.clone(),
+                self.sounds_focus.clone(),
+            ]
+        } else {
+            vec![self.mic_focus.clone(), self.sounds_focus.clone()]
+        };
+        let current = strips
+            .iter()
+            .position(|handle| handle.contains_focused(window, cx));
+        let index = match current {
+            Some(i) => i as isize,
+            None if direction > 0 => -1,
+            None => strips.len() as isize,
+        };
+        let next = index + direction as isize;
+        if next >= 0 && (next as usize) < strips.len() {
+            window.focus(&strips[next as usize], cx);
+        }
+    }
+
+    fn level_meter(
+        &self,
+        meter: videorc_app_core::studio::audio_mixer::MeterView,
+        lcd: &videorc_app_core::studio::audio_mixer::LcdMeterView,
+        muted: bool,
+        theme: &videorc_kit::tokens::Theme,
+    ) -> AnyElement {
+        if self.retro {
+            lcd_meter(meter, lcd, muted, theme).into_any_element()
+        } else {
+            segmented_meter(meter, muted, theme).into_any_element()
         }
     }
 
@@ -463,6 +686,14 @@ impl SourcesPanel {
             self.sync_ms.update(cx, |state, cx| {
                 if (state.value().end() - sync).abs() >= 5.0 {
                     state.set_value(sync, window, cx);
+                }
+            });
+        }
+        let sounds = self.model.audio.sounds.volume_db as f32;
+        if !self.ui.sounds_gain_live {
+            self.sounds_gain.update(cx, |state, cx| {
+                if (state.value().end() - sounds).abs() >= 0.5 {
+                    state.set_value(sounds, window, cx);
                 }
             });
         }
@@ -785,7 +1016,6 @@ impl Render for SourcesPanel {
         let t = theme::current(window, cx).theme();
         let page = self.model.page.clone();
         let audio = self.model.audio.clone();
-        let levels = self.model.levels.clone();
         let refresh_label = if page.refreshing {
             page_copy::REFRESHING
         } else {
@@ -921,11 +1151,11 @@ impl Render for SourcesPanel {
                             .px(px(12.))
                             .child(self.muted_line(t, audio_mixer::copy::MICROPHONE_LEVEL)),
                     )
-                    .child(div().px(px(12.)).child(meter_bar(
-                        levels.microphone_peak_db,
-                        levels.live_at(Instant::now()) && !muted,
-                        t.border,
-                        t.muted_foreground,
+                    .child(div().px(px(12.)).child(self.level_meter(
+                        self.meters_view.microphone,
+                        &self.meters_view.microphone_lcd,
+                        muted,
+                        t,
                     )));
                 if let Some(line) = mic.level_line {
                     card = card.child(div().px(px(12.)).child(self.muted_line(t, line)));
@@ -1062,7 +1292,15 @@ impl Render for SourcesPanel {
                         );
                 }
             }
-            audio_col = audio_col.child(GroupedList::new().item(card));
+            audio_col = audio_col.child(
+                GroupedList::new().item(
+                    div()
+                        .id("sources-channel-strip-microphone")
+                        .track_focus(&self.mic_focus)
+                        .tab_index(0)
+                        .child(card),
+                ),
+            );
         }
 
         // System audio
@@ -1114,11 +1352,11 @@ impl Render for SourcesPanel {
                         .child(self.muted_line(t, system.facts.clone())),
                 );
             if system.row.show_level {
-                card = card.child(div().px(px(12.)).child(meter_bar(
-                    levels.system_audio_peak_db,
-                    levels.live_at(Instant::now()),
-                    t.border,
-                    t.muted_foreground,
+                card = card.child(div().px(px(12.)).child(self.level_meter(
+                    self.meters_view.system_audio,
+                    &self.meters_view.system_audio_lcd,
+                    false,
+                    t,
                 )));
             } else if system.row.idle_line {
                 card = card.child(
@@ -1236,23 +1474,32 @@ impl Render for SourcesPanel {
                     );
                 }
             }
-            audio_col = audio_col.child(GroupedList::new().item(card));
+            audio_col = audio_col.child(
+                GroupedList::new().item(
+                    div()
+                        .id("sources-channel-strip-system-audio")
+                        .track_focus(&self.sys_focus)
+                        .tab_index(0)
+                        .child(card),
+                ),
+            );
         }
 
         // Sounds
         {
             let sounds = &audio.sounds;
+            let disabled = sounds.disabled;
             let mut card = div()
                 .flex()
                 .flex_col()
                 .gap(px(8.))
                 .child(ListRow::new("sounds-title", audio_copy::SOUNDS));
             if sounds.show_level {
-                card = card.child(div().px(px(12.)).child(meter_bar(
-                    levels.sounds_peak_db,
-                    true,
-                    t.border,
-                    t.muted_foreground,
+                card = card.child(div().px(px(12.)).child(self.level_meter(
+                    self.meters_view.sounds,
+                    &self.meters_view.sounds_lcd,
+                    false,
+                    t,
                 )));
             } else {
                 card = card.child(
@@ -1261,22 +1508,60 @@ impl Render for SourcesPanel {
                         .child(self.muted_line(t, audio_copy::SOUNDS_IDLE)),
                 );
             }
+            let volume_text = sounds.volume_text.clone();
+            card = card.child(
+                ListRow::new("sounds-level", audio_copy::LEVEL)
+                    .meta(volume_text)
+                    .child(
+                        div().w(px(180.)).child(
+                            Slider::new(&self.sounds_gain)
+                                .accessibility_label(audio_copy::SOUNDS_LEVEL)
+                                .disabled(disabled),
+                        ),
+                    ),
+            );
+            if let Some(reset) = sounds.volume_reset.clone() {
+                let entity = cx.entity();
+                card = card.child(
+                    div().px(px(12.)).child(
+                        Button::new("sounds-level-reset")
+                            .label(reset)
+                            .variant(ButtonVariant::Ghost)
+                            .disabled(disabled)
+                            .on_click(move |_, _, cx| {
+                                entity.update(cx, |panel, cx| {
+                                    panel.apply_sounds_settings(
+                                        SoundboardSettingsParams {
+                                            volume_db: Some(SOUNDS_VOLUME_DEFAULT),
+                                            ..Default::default()
+                                        },
+                                        cx,
+                                    );
+                                });
+                            }),
+                    ),
+                );
+            }
+            let entity = cx.entity();
+            let monitor = sounds.monitor;
             card = card
-                .child(
-                    ListRow::new("sounds-level", audio_copy::LEVEL)
-                        .meta(sounds.volume_text.clone()),
-                )
-                .child(
-                    div()
-                        .px(px(12.))
-                        .child(self.muted_line(t, audio_copy::SOUNDS_LEVEL)),
-                )
                 .child(
                     ListRow::new("hear-sounds", audio_copy::HEAR_SOUNDS).child(
                         Switch::new("hear-sounds-switch")
                             .accessibility_label(audio_copy::HEAR_SOUNDS)
-                            .checked(sounds.monitor)
-                            .disabled(sounds.disabled),
+                            .checked(monitor)
+                            .disabled(disabled)
+                            .on_change(move |value, _, cx| {
+                                entity.update(cx, |panel, cx| {
+                                    panel.apply_sounds_settings(
+                                        SoundboardSettingsParams {
+                                            monitor: Some(value),
+                                            ..Default::default()
+                                        },
+                                        cx,
+                                    );
+                                });
+                            }),
                     ),
                 )
                 .child(
@@ -1285,8 +1570,23 @@ impl Render for SourcesPanel {
                         .pb(px(8.))
                         .child(self.muted_line(t, audio_copy::HEAR_SOUNDS_DESCRIPTION)),
                 );
-            audio_col = audio_col.last(true).child(GroupedList::new().item(card));
+            audio_col = audio_col.last(true).child(
+                GroupedList::new().item(
+                    div()
+                        .id("sources-channel-strip-sounds")
+                        .track_focus(&self.sounds_focus)
+                        .tab_index(0)
+                        .child(card),
+                ),
+            );
         }
+
+        let audio_mixer = div()
+            .id("sources-audio-channels")
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(Self::focus_previous_strip))
+            .on_action(cx.listener(Self::focus_next_strip))
+            .child(audio_col);
 
         div()
             .id("sources-page")
@@ -1318,7 +1618,7 @@ impl Render for SourcesPanel {
                                 .items_start()
                                 .gap(px(8.))
                                 .child(div().flex_1().min_w(px(360.)).child(video))
-                                .child(div().flex_1().min_w(px(360.)).child(audio_col)),
+                                .child(div().flex_1().min_w(px(360.)).child(audio_mixer)),
                         ),
                 ),
             )
