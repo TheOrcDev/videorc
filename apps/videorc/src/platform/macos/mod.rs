@@ -4,6 +4,7 @@
 
 pub mod camera_extension;
 pub mod front_app;
+pub mod speech;
 pub mod terminate;
 
 use std::ffi::c_void;

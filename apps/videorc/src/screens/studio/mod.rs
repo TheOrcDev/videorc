@@ -29,6 +29,8 @@ use gpui::{
 };
 use videorc_app_core::StopOrigin;
 use videorc_app_core::studio::screen_views::SHOW_HERE_LABEL;
+#[cfg(target_os = "macos")]
+use videorc_app_core::studio::screen_views::{CLOSE_PREVIEW_LABEL, OPEN_IN_ITS_OWN_WINDOW_LABEL};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
@@ -213,8 +215,9 @@ const KEEP_ON_TOP_LABEL: &str = "Keep on top of other apps";
 
 impl StudioPage {
     /// `preview-stage.tsx`'s dock control under the video: "Pop out" while
-    /// docked, "Show here" while the Preview floats. Close, Bring to front
-    /// and Keep on top wait for the preview crate's window controls.
+    /// docked; "Show here", Bring to front, Close Preview and Keep on top
+    /// while the Preview floats; "Show here" and "Open in its own window"
+    /// while it is closed (P131).
     fn dock_row(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let preview = self.preview.read(cx);
         if !preview.can_float() {
@@ -223,6 +226,40 @@ impl StudioPage {
         let theme = theme::resolve(None, window, cx);
         // Secondary's ink (`button.rs`): `secondary_foreground`.
         let secondary_ink = hsla(theme.secondary_foreground);
+        #[cfg(target_os = "macos")]
+        if preview.is_closed() {
+            let here = self.preview.clone();
+            let away = self.preview.clone();
+            // Outline's ink (`button.rs`): the foreground.
+            let outline_ink = hsla(theme.foreground);
+            return Some(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .justify_end()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        Button::new("preview-open-docked")
+                            .label(SHOW_HERE_LABEL)
+                            .variant(ButtonVariant::Default)
+                            .on_click(move |_, _, cx| {
+                                here.update(cx, |preview, cx| preview.open_docked(cx))
+                            }),
+                    )
+                    .child(
+                        Button::new("preview-open-floating")
+                            .variant(ButtonVariant::Outline)
+                            .accessibility_label(OPEN_IN_ITS_OWN_WINDOW_LABEL)
+                            .child(icon(IconName::ArrowSquareOut, 16., outline_ink))
+                            .child(OPEN_IN_ITS_OWN_WINDOW_LABEL)
+                            .on_click(move |_, _, cx| {
+                                away.update(cx, |preview, cx| preview.open_floating(cx))
+                            }),
+                    )
+                    .into_any_element(),
+            );
+        }
         let button = match preview.mode() {
             WindowMode::Docked => Button::new("preview-pop-out")
                 .variant(ButtonVariant::Secondary)
@@ -254,6 +291,7 @@ impl StudioPage {
         #[cfg(target_os = "macos")]
         let row = if floating {
             let front = self.preview.clone();
+            let shut = self.preview.clone();
             let pin = self.preview.clone();
             row.child(
                 Button::new("preview-bring-to-front")
@@ -262,6 +300,12 @@ impl StudioPage {
                     .on_click(move |_, _, cx| {
                         front.update(cx, |preview, cx| preview.bring_to_front(cx))
                     }),
+            )
+            .child(
+                Button::new("preview-close")
+                    .label(CLOSE_PREVIEW_LABEL)
+                    .variant(ButtonVariant::Outline)
+                    .on_click(move |_, _, cx| shut.update(cx, |preview, cx| preview.close(cx))),
             )
             .child(
                 div()

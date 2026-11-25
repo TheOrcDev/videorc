@@ -183,7 +183,9 @@ impl ShellSmoke for ShellWindows {
         // Electron's `preview-window-state` shape too: whether the preview is
         // on screen, and its own window's content size while it floats.
         let floating = state["mode"] == "floating";
-        let shown = if floating {
+        let shown = if state["closed"] == true {
+            false
+        } else if floating {
             state["floatingOpen"] == true
         } else {
             state["dockedShown"] == true

@@ -101,6 +101,10 @@ pub struct Preview {
     /// shell hands it over ([`Preview::remember_window`]).
     #[cfg(target_os = "macos")]
     frame: Option<frame::PreviewFrame>,
+    /// Close Preview, or its window closed by hand (P131): no window and no
+    /// docked video; the Studio says so and offers both places to open it.
+    #[cfg(target_os = "macos")]
+    closed: bool,
 }
 
 impl Preview {
@@ -239,6 +243,7 @@ impl Preview {
                 floating: None,
                 opening: false,
                 frame: None,
+                closed: false,
             }
         })
     }
@@ -254,6 +259,7 @@ impl Preview {
             floating: None,
             opening: false,
             frame: None,
+            closed: false,
         }
     }
 
@@ -266,6 +272,9 @@ impl Preview {
     pub fn docked_words(&self) -> Option<PreviewWords> {
         if !self.native_ready() {
             return Some(words::FAILED);
+        }
+        if self.is_closed() {
+            return Some(words::LIVES_IN_ITS_OWN_WINDOW);
         }
         match self.mode {
             WindowMode::Floating => Some(words::away(self.phase)),
@@ -309,6 +318,7 @@ impl Preview {
             "dockedShown": self.docked_shown,
             "canFloat": self.can_float(),
             "floatingOpen": floating_open,
+            "closed": self.is_closed(),
             "words": self.docked_words().map(|words| serde_json::json!({
                 "title": words.title,
                 "detail": words.detail,
@@ -329,6 +339,63 @@ impl Preview {
         self.native_ready()
     }
 
+    /// Closed (P131): neither docked nor in its own window.
+    pub fn is_closed(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.closed;
+        #[cfg(not(target_os = "macos"))]
+        false
+    }
+
+    /// Close Preview (P131): the Preview window closes and the Preview stays
+    /// closed, as Electron's `closePreviewWindow`.
+    #[cfg(target_os = "macos")]
+    pub fn close(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.floating.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+        self.set_closed(cx);
+    }
+
+    /// Show here, from closed: the Preview docks in the Studio.
+    #[cfg(target_os = "macos")]
+    pub fn open_docked(&mut self, cx: &mut Context<Self>) {
+        self.closed = false;
+        if self.mode == WindowMode::Floating {
+            self.dock(cx);
+        } else {
+            if let Some(frame) = &self.frame {
+                frame.docked();
+            }
+            self.apply_visibility();
+            cx.notify();
+        }
+    }
+
+    /// Open in its own window, from closed.
+    #[cfg(target_os = "macos")]
+    pub fn open_floating(&mut self, cx: &mut Context<Self>) {
+        self.closed = false;
+        self.apply_visibility();
+        self.float(cx);
+        cx.notify();
+    }
+
+    /// The layer back in the Studio's host, hidden, and the closed state
+    /// saved.
+    #[cfg(target_os = "macos")]
+    fn set_closed(&mut self, cx: &mut Context<Self>) {
+        self.return_to_dock();
+        self.closed = true;
+        self.apply_visibility();
+        if let Some(frame) = &self.frame {
+            frame.closed();
+        }
+        self.logger
+            .log(Level::Info, "[preview] the Preview is closed");
+        cx.notify();
+    }
+
     /// The Preview window's remembered frame, mode and Keep on top.
     #[cfg(target_os = "macos")]
     pub fn remember_window(&mut self, frame: frame::PreviewFrame) {
@@ -346,6 +413,15 @@ impl Preview {
                 .is_some_and(frame::PreviewFrame::floats_at_launch)
         {
             self.float(cx);
+        } else if self
+            .frame
+            .as_ref()
+            .is_some_and(frame::PreviewFrame::closed_at_launch)
+        {
+            // Left closed: the Studio shows it closed.
+            self.closed = true;
+            self.apply_visibility();
+            cx.notify();
         }
     }
 
@@ -458,6 +534,12 @@ impl Preview {
 
     /// Opens the Preview in its own window, or docks it back.
     pub fn toggle_floating(&mut self, cx: &mut gpui::Context<Self>) {
+        // Closed, it opens where it last was: its own window.
+        #[cfg(target_os = "macos")]
+        if self.closed {
+            self.open_floating(cx);
+            return;
+        }
         #[cfg(target_os = "macos")]
         match self.mode {
             WindowMode::Docked => self.float(cx),
@@ -521,7 +603,7 @@ impl Preview {
 
     #[cfg(target_os = "macos")]
     fn apply_visibility(&mut self) {
-        let visible = self.mode == WindowMode::Floating || self.docked_shown;
+        let visible = !self.closed && (self.mode == WindowMode::Floating || self.docked_shown);
         if let Some(native) = self.native.as_mut() {
             native.element.set_visible(visible);
         }
@@ -640,16 +722,13 @@ impl Preview {
         cx.notify();
     }
 
-    /// The user closed the Preview window: the layer comes back to the
-    /// Studio slot.
+    /// The user closed the Preview window: the Preview is closed (P131),
+    /// as Electron's window `closed` event; the layer waits, hidden, in the
+    /// Studio's host.
     #[cfg(target_os = "macos")]
     pub(crate) fn floating_closed(&mut self, cx: &mut Context<Self>) {
         self.floating = None;
-        self.return_to_dock();
-        if let Some(frame) = &self.frame {
-            frame.docked();
-        }
-        cx.notify();
+        self.set_closed(cx);
     }
 
     #[cfg(target_os = "macos")]
