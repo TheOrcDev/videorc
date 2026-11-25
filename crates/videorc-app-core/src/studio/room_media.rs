@@ -175,11 +175,13 @@ pub fn routing_params(program: &crate::soundboard::room::ProgramAudio) -> Value 
     })
 }
 
-/// `cloud.room.screen.set`'s params: a screen or window by its native id
-/// (`screen:…`, `window:…`, the device list's own), or `None` for anything
-/// else; [`stop_screen_params`] takes the share down.
+/// `cloud.room.screen.set`'s params: a screen or window by its device-list
+/// native id (`screen|window:screencapturekit:…`). Capturer forms and other
+/// ids are `None` — `TalkShowRoomHost::share_screen` answers
+/// "This screen can't be shared into the room here."
+/// [`stop_screen_params`] takes the share down.
 pub fn screen_params(source_id: &str) -> Option<Value> {
-    let native = (source_id.starts_with("screen:") || source_id.starts_with("window:"))
+    let native = super::room_screen_source::is_native_screen_id(source_id)
         && source_id.len() <= 512
         && !source_id.contains(['\0', '\r', '\n']);
     native.then(|| json!({ "screen": { "sourceId": source_id } }))
@@ -350,6 +352,8 @@ mod tests {
             Some(json!({ "screen": { "sourceId": "screen:screencapturekit:1" } }))
         );
         assert_eq!(screen_params("camera:1"), None);
+        assert_eq!(screen_params("screen:5:0"), None);
+        assert_eq!(screen_params("screen:wgc:0"), None);
         assert_eq!(stop_screen_params(), json!({ "screen": null }));
         assert_eq!(
             monitor_params(false, true),

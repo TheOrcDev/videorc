@@ -10,8 +10,9 @@ use videorc_app_core::studio::room_background::{
     PICTURE_ENCODE_GAP, background_fit, background_zoom_crop, hex_of, live_background_dim,
     prepare_room_background,
 };
+use videorc_app_core::studio::room_media::screen_params;
 use videorc_app_core::studio::room_screen_source::{
-    RoomScreenKind, RoomScreenSources, RoomScreenWant, capturer_id_for_native,
+    RoomScreenKind, RoomScreenSources, RoomScreenWant, capturer_id_for_native, is_native_screen_id,
     native_id_for_capturer, room_screen_needs_switch, room_screen_needs_switch_native,
     room_screen_want,
 };
@@ -43,6 +44,24 @@ fn screen_source_maps_and_switches() {
         &want,
         Some("window:screencapturekit:7")
     ));
+
+    // Capturer form → native for share_screen; screen_params takes native only.
+    let from_capturer = room_screen_want(RoomScreenSources {
+        screen_id: Some("screen:5:0"),
+        ..Default::default()
+    });
+    assert_eq!(
+        from_capturer,
+        RoomScreenWant::Source {
+            capturer_id: "screen:5:0".into(),
+            source_kind: RoomScreenKind::Screen,
+            native_id: Some("screen:screencapturekit:5".into()),
+        }
+    );
+    assert!(is_native_screen_id("screen:screencapturekit:5"));
+    assert!(!is_native_screen_id("screen:5:0"));
+    assert!(screen_params("screen:screencapturekit:5").is_some());
+    assert!(screen_params("screen:5:0").is_none());
 }
 
 #[test]
