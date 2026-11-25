@@ -451,6 +451,58 @@ fn camera_frame(
     Some(buffer)
 }
 
+/// Plan 260 L1: the backend-host talk-show smoke's room camera, `WxH:RRGGBB`
+/// (a `#` allowed), a flat colour standing in for the preview camera's
+/// device only: the Studio's camera on/off, the processing, the key and the
+/// publish stay production. Debug builds with smoke RPC only.
+pub(crate) const CAMERA_FIXTURE_ENV: &str = "VIDEORC_ROOM_CAMERA_FIXTURE";
+
+/// [`CAMERA_FIXTURE_ENV`]'s camera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CameraFixture {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) rgb: [u8; 3],
+}
+
+impl CameraFixture {
+    /// `WxH:RRGGBB`: even sides from 2 to 4096, six hex digits.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        let (size, colour) = value.trim().split_once(':')?;
+        let (width, height) = size.split_once('x')?;
+        let (width, height) = (width.parse::<u32>().ok()?, height.parse::<u32>().ok()?);
+        let side = |value: u32| (2..=4096).contains(&value) && value % 2 == 0;
+        if !side(width) || !side(height) {
+            return None;
+        }
+        let hex = colour.strip_prefix('#').unwrap_or(colour);
+        if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).ok();
+        Some(Self {
+            width,
+            height,
+            rgb: [channel(0)?, channel(2)?, channel(4)?],
+        })
+    }
+
+    /// The fixture's frame, BGRA as the preview camera gives it.
+    pub(crate) fn bgra(&self) -> Vec<u8> {
+        let [r, g, b] = self.rgb;
+        [b, g, r, 255].repeat(self.width as usize * self.height as usize)
+    }
+}
+
+/// The fixture camera, when every gate is open: a debug build, smoke RPC
+/// and [`CAMERA_FIXTURE_ENV`].
+fn camera_fixture(smoke_rpc_enabled: bool) -> Option<CameraFixture> {
+    if !cfg!(debug_assertions) || !smoke_rpc_enabled {
+        return None;
+    }
+    CameraFixture::parse(&std::env::var(CAMERA_FIXTURE_ENV).ok()?)
+}
+
 /// What the drawn background behind the key was drawn from.
 #[derive(PartialEq)]
 struct BehindKey {
@@ -519,6 +571,17 @@ pub(crate) async fn run_camera(
     let mut behind_drawn: Option<(BehindKey, Arc<Vec<u8>>)> = None;
     let mut pulse = tokio::time::interval(Duration::from_secs_f64(1.0 / CAMERA_FPS));
     pulse.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The debug fixture camera (plan 260 L1): its frame, drawn once, and its
+    // own frame count.
+    let fixture = camera_fixture(state.smoke_rpc_enabled).map(|fixture| {
+        tracing::info!(
+            "The backend's room camera is the debug fixture ({CAMERA_FIXTURE_ENV}={}x{})",
+            fixture.width,
+            fixture.height
+        );
+        (fixture, fixture.bgra())
+    });
+    let mut fixture_sequence = 0u64;
     loop {
         update_media(&state, &show_id, |media| media.camera = published.is_some());
         tokio::select! {
@@ -555,14 +618,23 @@ pub(crate) async fn run_camera(
             unpublish_camera(&room, &mut published).await;
             continue;
         }
-        if crate::preview_camera::camera_lent_to_talk_show(&state).await {
-            continue;
-        }
-        let Some(frame_source) = crate::preview_camera::preview_camera_frame_source(&state).await
-        else {
-            continue;
-        };
-        let taken = {
+        let taken = if let Some((fixture, bytes)) = fixture.as_ref() {
+            fixture_sequence += 1;
+            Some((
+                (0, fixture_sequence),
+                bytes.clone(),
+                fixture.width,
+                fixture.height,
+            ))
+        } else {
+            if crate::preview_camera::camera_lent_to_talk_show(&state).await {
+                continue;
+            }
+            let Some(frame_source) =
+                crate::preview_camera::preview_camera_frame_source(&state).await
+            else {
+                continue;
+            };
             let generation = frame_source.generation();
             frame_source.latest_frame_blocking().and_then(|(frame, _)| {
                 let key = (generation, frame.sequence);
@@ -572,7 +644,6 @@ pub(crate) async fn run_camera(
                     .then(|| (key, frame.bytes.clone(), frame.width, frame.height))
             })
         };
-        drop(frame_source);
         let Some((key, bytes, width, height)) = taken else {
             continue;
         };
@@ -761,6 +832,64 @@ mod tests {
             layout.camera_background = Some(background);
             assert_eq!(background_is_effect(&layout), effect, "{mode:?}");
         }
+    }
+
+    #[test]
+    fn the_fixture_camera_is_a_size_and_a_colour() {
+        assert_eq!(
+            CameraFixture::parse("1280x720:40C0FF"),
+            Some(CameraFixture {
+                width: 1280,
+                height: 720,
+                rgb: [0x40, 0xC0, 0xFF]
+            })
+        );
+        assert_eq!(
+            CameraFixture::parse(" 640x360:#c02020 ").map(|fixture| fixture.rgb),
+            Some([0xC0, 0x20, 0x20])
+        );
+        for refused in [
+            "",
+            "1280x720",
+            "1280x720:",
+            "1281x720:40C0FF",
+            "0x720:40C0FF",
+            "8192x720:40C0FF",
+            "1280x720:40C0F",
+            "1280x720:40C0FFF",
+            "1280x720:+0C0FF",
+            "1280x720:40C0FG",
+            "1280x720:40C0é",
+            "1280:720:40C0FF",
+        ] {
+            assert_eq!(CameraFixture::parse(refused), None, "{refused}");
+        }
+    }
+
+    #[test]
+    fn the_fixture_camera_frame_is_flat_bgra() {
+        let fixture = CameraFixture::parse("4x2:40C0FF").unwrap();
+        let frame = fixture.bgra();
+        assert_eq!(frame.len(), 4 * 2 * 4);
+        assert!(
+            frame
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0xFF, 0xC0, 0x40, 255])
+        );
+        // Through the room camera's own processing with the default layout,
+        // the colour is the colour the smoke's tile probe expects.
+        let layout = crate::protocol::default_layout_settings();
+        let rgba = crate::compositor::camera_role_rgba(&frame, 4, 2, true, &layout, 4, 2).unwrap();
+        assert!(
+            rgba.chunks_exact(4)
+                .all(|pixel| pixel == [0x40, 0xC0, 0xFF, 255]),
+            "{rgba:?}"
+        );
+    }
+
+    #[test]
+    fn the_fixture_camera_needs_a_debug_build_with_smoke_rpc() {
+        assert_eq!(camera_fixture(false), None);
     }
 
     #[test]

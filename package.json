@@ -314,6 +314,7 @@
     "smoke:cloud-solo:vertical": "node scripts/run-with-env.mjs VIDEORC_CLOUD_SOLO_VERTICAL=1 -- node scripts/smoke-cloud-solo-app.mjs",
     "smoke:cloud-talk-show-managed": "node scripts/smoke-cloud-talk-show-managed-app.mjs",
     "smoke:cloud-talk-show": "node scripts/smoke-cloud-talk-show-app.mjs",
+    "smoke:cloud-talk-show:backend-host": "node scripts/run-with-env.mjs VIDEORC_CLOUD_TALK_HOST=backend -- node scripts/smoke-cloud-talk-show-app.mjs",
     "smoke:packaged": "node scripts/smoke-packaged-app.mjs",
     "smoke:packaged:bundled": "node scripts/smoke-packaged-app.mjs --require-bundled-ffmpeg",
     "smoke:packaged:native-preview": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_SMOKE_PACKAGED_APP=1 VIDEORC_EXPECT_NATIVE_METAL_PREVIEW=1 -- node scripts/smoke-preview-surface-app.mjs",

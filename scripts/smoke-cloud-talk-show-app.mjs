@@ -123,6 +123,27 @@ const PEOPLE = {
   ada: { name: 'Ada', color: 'C02020', tone: 1100 },
   bo: { name: 'Bo', color: 'F0F060', tone: 1500 }
 }
+// Plan 260 L1: who holds the host seat. `VIDEORC_CLOUD_TALK_HOST=backend`
+// (`smoke:cloud-talk-show:backend-host`) runs the same 13 steps with the
+// BACKEND in the room as `host:<show>`, the path the GPUI app takes
+// (`VIDEORC_ROOM_HOST=backend`). Chromium's fake devices exist only in the
+// renderer, so the backend's room takes its debug fixtures, made from the
+// host's own colour and tone: a flat camera (`VIDEORC_ROOM_CAMERA_FIXTURE`)
+// in place of the preview camera, and the synthetic microphone
+// (`microphone:coreaudio:4294967295`, `VIDEORC_CAPTION_CONTRACT_TEST`)
+// playing the host's tone bursts (`VIDEORC_ROOM_MICROPHONE_FIXTURE_HZ`)
+// through the room microphone bridge. The Electron renderer still runs: it
+// is the Studio, and it stays out of the room once `cloud.room.owner` says
+// the backend holds the seat.
+const hostMode =
+  process.env.VIDEORC_CLOUD_TALK_HOST ??
+  (process.env.VIDEORC_ROOM_HOST === 'backend' ? 'backend' : 'renderer')
+if (hostMode !== 'renderer' && hostMode !== 'backend') {
+  throw new Error(`VIDEORC_CLOUD_TALK_HOST is renderer or backend, not ${hostMode}`)
+}
+const backendHosts = hostMode === 'backend'
+/** The synthetic microphone (`CAPTION_CONTRACT_TEST_DEVICE_ID`), the DEV catalog's in native microphone mode. */
+const SYNTHETIC_MICROPHONE_ID = 'microphone:coreaudio:4294967295'
 const CONTROL_TONE = 2200
 const PROBE_WIDTH = 320
 const PROBE_HEIGHT = 180
@@ -444,8 +465,23 @@ try {
     VIDEORC_APP_DATA_DIR: appDataDir,
     VIDEORC_USER_DATA_DIR: userDataDir,
     VIDEORC_SMOKE_FAKE_MEDIA_VIDEO: media.host.y4m,
-    VIDEORC_SMOKE_FAKE_MEDIA_AUDIO: media.host.wav
+    VIDEORC_SMOKE_FAKE_MEDIA_AUDIO: media.host.wav,
+    // An explicit choice: a shell's own VIDEORC_ROOM_HOST never decides it.
+    VIDEORC_ROOM_HOST: backendHosts ? 'backend' : '',
+    ...(backendHosts
+      ? {
+          VIDEORC_ROOM_CAMERA_FIXTURE: `1280x720:${PEOPLE.host.color}`,
+          VIDEORC_CAPTION_CONTRACT_TEST: '1',
+          VIDEORC_ROOM_MICROPHONE_FIXTURE_HZ: String(PEOPLE.host.tone)
+        }
+      : {})
   }
+  report.hostMode = hostMode
+  log(
+    backendHosts
+      ? `the backend hosts the room on its fixtures: #${PEOPLE.host.color} and ${PEOPLE.host.tone} Hz bursts`
+      : 'the renderer hosts the room on Chromium fake devices'
+  )
   let launch = await launchApp(appEnv, 1)
   launched = launch.launched
   backend = launch.backend
@@ -493,7 +529,7 @@ try {
         backend,
         (status) => status.room?.client === 'connected',
         40_000,
-        'the renderer to join the room'
+        `the ${hostMode} to join the room`
       )
       const hostIn = await waitFor(
         () => {
@@ -510,6 +546,7 @@ try {
       report.room.hostJoined = true
       report.room.hostParticipant = hostIn
       report.measured.roomOpenToHostSeenSeconds = secondsBetween(openAtMs, Date.now())
+      await checkSeatHolder('open')
       const status = await request(backend, 10_000, 'cloud.status', {})
       report.room.localProblem = status.room?.message ?? null
       log(
@@ -1191,7 +1228,7 @@ try {
           backend,
           (status) => status.room?.client === 'connected',
           40_000,
-          'the renderer to rejoin the room'
+          `the ${hostMode} to rejoin the room`
         )
         const back = await waitFor(
           () => {
@@ -1206,6 +1243,7 @@ try {
         )
         report.resume.hostBack = true
         report.resume.resumeToHostBackSeconds = secondsBetween(resumeAtMs, Date.now())
+        await checkSeatHolder('resume')
         report.resume.peopleAfter = back.participants.filter(
           (p) => !p.identity.startsWith('runner:')
         ).length
@@ -1425,17 +1463,52 @@ async function seedHostDevices(smoke) {
     "the renderer's smoke hooks",
     250
   )
+  if (backendHosts) {
+    // The backend's room opens the microphone Sources names by its native id:
+    // native microphone mode makes the DEV catalog's microphone the
+    // synthetic one, which plays the host's tone. Nothing warm holds it,
+    // and the tone reaches the room at its own level (no gain, offset or
+    // noise suppression on a test tone).
+    await evalJs(
+      'window.__videorcSmokeScenePresets.roomNativeMicrophone(true); window.__videorcSmokeScenePresets.setSettings(current => ({ ...current, keepMicrophoneWarm: false })); return true'
+    )
+  }
   await evalJs(roomFixtureDevicesSource())
+  const microphoneId = backendHosts ? SYNTHETIC_MICROPHONE_ID : 'parity-microphone'
+  if (backendHosts) {
+    await evalJs(
+      "const seam = window.__videorcSmokeScenePresets; const config = seam.streamingState().captureConfig; seam.configure({ audio: { ...config.audio, microphoneGainDb: 0, microphoneNoiseSuppression: 'off', microphoneSyncOffsetMs: 0, microphoneMuted: false } }); return true"
+    )
+  }
   // Sources names the fixture camera and microphone before the room reads them.
   await waitFor(
     () =>
       evalJs(
-        "const s = window.__videorcSmokeScenePresets.streamingState().captureConfig.sources; return s.cameraId === 'parity-camera' && s.microphoneId === 'parity-microphone'"
+        `const s = window.__videorcSmokeScenePresets.streamingState().captureConfig.sources; return s.cameraId === 'parity-camera' && s.microphoneId === ${JSON.stringify(microphoneId)}`
       ),
     15_000,
     'Sources to name the fixture camera and microphone',
     100
   )
+}
+
+/**
+ * Plan 260 L1: who holds the host seat (`cloud.room.owner`) is who this run
+ * says hosts. The renderer asks before it starts a room client of its own,
+ * and stays out when the backend holds the seat; a renderer that raced in
+ * first would take the seat from the backend (a duplicate identity), which
+ * this names instead of a missing camera.
+ */
+async function checkSeatHolder(moment) {
+  const owner = await request(backend, 10_000, 'cloud.room.owner')
+  const holder = owner?.backend ? 'backend' : 'renderer'
+  report.room.seatHolder = { ...report.room.seatHolder, [moment]: holder }
+  log(`[seat] the ${holder} holds the host seat at ${moment}`)
+  if (holder !== hostMode) {
+    throw new Error(
+      `the ${holder} holds the host seat at ${moment}; this run is ${hostMode}-hosted`
+    )
+  }
 }
 
 async function prebuildBackendOrThrow(env, onLine = log) {
