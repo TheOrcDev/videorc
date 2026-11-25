@@ -12,7 +12,7 @@ The pictures live outside the repository; this folder holds their manifest.
   (plan 260 "Verification"; [below](#compare-a-gpui-screen-against-it)).
 - **App:** the dev build of `main` (app code unchanged since 0.37.1),
   isolated profile, seeded with the test pattern, three saved scenes, fake
-  destination keys and two short test recordings. Signed out, except the
+  destination keys and two 12-second test recordings. Signed out, except the
   signed-in Sidekick run (the dev-only mock account and local fakes; no
   real account or service).
 - **Looks:** dark, light, and Increase Contrast over each. Pages and their
