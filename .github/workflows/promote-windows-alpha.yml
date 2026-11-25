@@ -37,10 +37,6 @@ run-name: ${{ inputs.correlation || format('promote-{0}-{1}', inputs.release_id,
 permissions:
   contents: read
   actions: read
-concurrency:
-  group: promote-windows-alpha-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   promote:
     if: ${{ vars.VIDEORC_RELEASE_CONTROLLER_ENABLED != 'true' }}

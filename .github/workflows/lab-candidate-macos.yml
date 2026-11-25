@@ -20,8 +20,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: lab-candidate-macos-${{ github.ref }}
-  cancel-in-progress: true
+  # Its own group: a lab candidate never queues behind or blocks a release.
+  group: lab-candidate
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

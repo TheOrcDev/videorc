@@ -18,9 +18,10 @@ name: Build Windows Alpha Candidate
         type: string
 run-name: ${{ inputs.correlation || format('windows-{0}', inputs.release_id) }}
 concurrency:
-  group: release-windows-alpha-${{ github.ref }}
-  cancel-in-progress: true
-
+  group: >-
+    ${{ vars.VIDEORC_RELEASE_CONTROLLER_ENABLED == 'true' && format('windows-request-{0}',
+    github.run_id) || 'windows-alpha-candidate' }}
+  cancel-in-progress: false
 permissions:
   contents: read
   actions: read

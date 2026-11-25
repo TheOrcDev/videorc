@@ -3,10 +3,6 @@ name: Reconcile release origins
   workflow_dispatch: {}
 permissions:
   contents: read
-concurrency:
-  group: release-sync-origins-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   prepare:
     name: Prepare missing immutable mirror history

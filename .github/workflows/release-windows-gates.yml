@@ -19,10 +19,6 @@ on:
         default: true
 permissions:
   contents: read
-concurrency:
-  group: release-windows-gates-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   # Plan 242 S4: the Rust and JS gates run side by side; `gates` (below) is
   # the one green/red check that needs both. Release reuse
