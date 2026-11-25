@@ -34,6 +34,7 @@ use videorc_kit::{
 
 use super::activity::ActivityPane;
 use super::chat::ChatPane;
+use super::cohost::{self, SidekickEvent};
 use super::frame::{DEFAULT_HEIGHT, DEFAULT_WIDTH, StreamManagerFrame};
 use super::layout::{MIN_HEIGHT, MIN_WIDTH, Pane, Slot, Tier, right_pane_width, slot};
 use super::panes::{PaneKey, Panes, composer_available, key_runs};
@@ -80,6 +81,7 @@ pub fn install(
         KeyBinding::new("secondary-f", SearchChat, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-l", WriteInChat, Some(KEY_CONTEXT)),
     ]);
+    cohost::bind_keys(cx);
     let reopens = frame.reopens();
     cx.set_global(Open {
         frame,
@@ -220,6 +222,8 @@ pub struct StreamManager {
     smoke_marker: Option<gpui::Hsla>,
     focus: FocusHandle,
     _bounds: Subscription,
+    /// Sidekick's Reply, recap, Show on stream and Jump to message.
+    _sidekick: Subscription,
 }
 
 impl StreamManager {
@@ -250,7 +254,12 @@ impl StreamManager {
             )
         });
         let activity = cx.new(|cx| ActivityPane::new(studio.live_chat(), dashboard.clone(), cx));
-        let sidekick = cx.new(|cx| SidekickPane::new(studio.clone(), runtime.clone(), cx));
+        let sidekick = cx.new(|cx| SidekickPane::new(studio.clone(), runtime.clone(), window, cx));
+        let sidekick_events = cx.subscribe_in(
+            &sidekick,
+            window,
+            |sm, _, event: &SidekickEvent, window, cx| sm.on_sidekick(event, window, cx),
+        );
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         frame.moved(window);
@@ -387,7 +396,34 @@ impl StreamManager {
             smoke_marker: None,
             focus,
             _bounds: bounds,
+            _sidekick: sidekick_events,
         }
+    }
+
+    /// Sidekick's asks of the chat pane: a draft in the composer (Chat
+    /// comes forward), a question's message on stream, a flagged message
+    /// in view.
+    fn on_sidekick(&mut self, event: &SidekickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            SidekickEvent::Prefill(text) => {
+                self.panes.prefill();
+                let text = text.clone();
+                self.chat.update(cx, |chat, cx| {
+                    chat.prefill(text, cx);
+                    chat.focus_composer(window, cx);
+                });
+            }
+            SidekickEvent::ShowOnStream(id) => {
+                self.chat.update(cx, |chat, cx| {
+                    chat.press_highlight(id, cx);
+                });
+            }
+            SidekickEvent::JumpTo(id) => {
+                self.panes.pick(Pane::Chat);
+                self.chat.update(cx, |chat, cx| chat.jump_to(id, cx));
+            }
+        }
+        cx.notify();
     }
 
     /// Leave History and return to the live session (P943).
@@ -641,7 +677,10 @@ impl StreamManager {
                 self.chat
                     .update(cx, |chat, cx| chat.focus_composer(window, cx));
             }
-            PaneKey::ShowSidekick => {}
+            PaneKey::ShowSidekick => {
+                self.sidekick
+                    .update(cx, |pane, cx| pane.focus_list(window, cx));
+            }
         }
         cx.notify();
     }
@@ -652,9 +691,18 @@ impl StreamManager {
         tier: Tier,
         width: f32,
         border: gpui::Hsla,
+        nudge: Option<gpui::AnyElement>,
     ) -> Option<gpui::AnyElement> {
         let body = match pane {
-            Pane::Chat => self.chat.clone().into_any_element(),
+            // Sidekick's nudge sits under the chat composer (`CohostNudge`).
+            Pane::Chat => div()
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h(px(0.)).child(self.chat.clone()))
+                .children(nudge)
+                .into_any_element(),
             Pane::Activity => self.activity.clone().into_any_element(),
             Pane::Sidekick => self.sidekick.clone().into_any_element(),
         };
@@ -679,9 +727,20 @@ impl Render for StreamManager {
         let t = theme::resolve(None, window, cx);
         let border = hsla(t.border);
         let mac = cfg!(target_os = "macos");
-        let regions = [Pane::Chat, Pane::Activity, Pane::Sidekick]
+        let mut nudge = self
+            .sidekick
+            .update(cx, |pane, cx| pane.cohost_nudge(window, cx));
+        let regions: Vec<gpui::AnyElement> = [Pane::Chat, Pane::Activity, Pane::Sidekick]
             .into_iter()
-            .filter_map(|pane| self.region(pane, tier, width, border));
+            .filter_map(|pane| {
+                let nudge = if pane == Pane::Chat {
+                    nudge.take()
+                } else {
+                    None
+                };
+                self.region(pane, tier, width, border, nudge)
+            })
+            .collect();
         let pinned = self.pinned;
         let hidden = self.hidden;
         let hide_method = self.hide_method;

@@ -1,7 +1,9 @@
 //! The Sidekick pane (P990–P1006): header with Alpha + Sidekick Live, cards
 //! waiting chrome, empty copy, and the avatar talk controls at the foot.
 //! Card bodies (removal / utterance / command) land in a later slice once
-//! the live drivers are wired; the shell and talk consent are here.
+//! the live drivers are wired; the shell and talk consent are here. The
+//! Co-host pane's parts (P1256–P1280) live beside it: `cohost` (state and
+//! calls), `cohost_list` and `cohost_avatar` (what they draw).
 
 use gpui::{AnyElement, Context, IntoElement, SharedString, Window, div, prelude::*, px};
 use serde_json::json;
@@ -20,11 +22,12 @@ use videorc_kit::empty::Empty;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::switch::Switch;
-use videorc_kit::theme::{self, hsla};
+use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 use videorc_protocol::cohost::{CohostAutoChat, CohostTalkMode};
 
 use super::SharedStudio;
+use super::cohost::Cohost;
 
 const SIDEKICK_EMPTY: &str =
     "Sidekick reads chat during a live stream: questions, flags and the room's mood.";
@@ -34,24 +37,27 @@ const ALLOW: &str = "Allow";
 
 /// The Sidekick pane entity (header, Live, talk, empty / cards chrome).
 pub struct SidekickPane {
-    studio: SharedStudio,
-    runtime: tokio::runtime::Handle,
-    state: CohostState,
-    settings: CohostSettingsView,
-    consented: bool,
+    pub(super) studio: SharedStudio,
+    pub(super) runtime: tokio::runtime::Handle,
+    pub(super) state: CohostState,
+    pub(super) settings: CohostSettingsView,
+    pub(super) consented: bool,
     /// Suggest posting consent (`videorc.buddyAutoChatConsent`).
     posting_consented: bool,
     pending_live: bool,
     pending_talk: Option<CohostTalkMode>,
     live_consent: DialogHandle,
     talk_consent: DialogHandle,
-    avatar_name: Option<String>,
+    pub(super) avatar_name: Option<String>,
+    /// The Co-host pane's own state (`cohost`).
+    pub(super) cohost: Cohost,
 }
 
 impl SidekickPane {
     pub fn new(
         studio: SharedStudio,
         runtime: tokio::runtime::Handle,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let consented = studio.read_ui_settings(families::ai_consent);
@@ -62,33 +68,37 @@ impl SidekickPane {
             loop {
                 match events.recv().await {
                     Ok(BackendEvent::Untyped { event, payload }) => {
-                        let alive = this.update(cx, |pane, cx| match event.as_str() {
-                            "cohost.state" => {
-                                if let Ok(state) =
-                                    serde_json::from_value::<CohostState>(payload.clone())
-                                {
-                                    pane.state = state;
+                        let alive = this.update(cx, |pane, cx| {
+                            match event.as_str() {
+                                "cohost.state" => {
+                                    if let Ok(state) =
+                                        serde_json::from_value::<CohostState>(payload.clone())
+                                    {
+                                        pane.receive_state(state, cx);
+                                    }
+                                }
+                                "cohost.settings.changed" => {
+                                    if let Some(settings) = CohostSettingsView::from_json(&payload)
+                                    {
+                                        pane.settings = settings;
+                                    }
+                                    pane.consented =
+                                        pane.studio.read_ui_settings(families::ai_consent);
+                                    pane.posting_consented = pane
+                                        .studio
+                                        .read_ui_settings(families::buddy_auto_chat_consent);
                                     cx.notify();
                                 }
-                            }
-                            "cohost.settings.changed" => {
-                                if let Some(settings) = CohostSettingsView::from_json(&payload) {
-                                    pane.settings = settings;
+                                "account.changed" => {
+                                    pane.consented =
+                                        studio_for_events.read_ui_settings(families::ai_consent);
+                                    pane.posting_consented = studio_for_events
+                                        .read_ui_settings(families::buddy_auto_chat_consent);
+                                    cx.notify();
                                 }
-                                pane.consented = pane.studio.read_ui_settings(families::ai_consent);
-                                pane.posting_consented = pane
-                                    .studio
-                                    .read_ui_settings(families::buddy_auto_chat_consent);
-                                cx.notify();
+                                _ => {}
                             }
-                            "account.changed" => {
-                                pane.consented =
-                                    studio_for_events.read_ui_settings(families::ai_consent);
-                                pane.posting_consented = studio_for_events
-                                    .read_ui_settings(families::buddy_auto_chat_consent);
-                                cx.notify();
-                            }
-                            _ => {}
+                            pane.cohost_event(&event, &payload, cx);
                         });
                         if alive.is_err() {
                             break;
@@ -119,10 +129,11 @@ impl SidekickPane {
                     .ok()
                     .flatten();
                 let _ = this.update(cx, |pane, cx| {
-                    if let Some(value) = settings {
-                        if let Some(settings) = CohostSettingsView::from_json(&value) {
-                            pane.settings = settings;
-                        }
+                    if let Some(value) = settings
+                        && let Some(settings) = CohostSettingsView::from_json(&value)
+                    {
+                        pane.avatar_name = settings.persona.as_ref().map(|p| p.name.clone());
+                        pane.settings = settings;
                     }
                     pane.consented = pane.studio.read_ui_settings(families::ai_consent);
                     pane.posting_consented = pane
@@ -133,7 +144,8 @@ impl SidekickPane {
             })
             .detach();
         }
-        Self {
+        let cohost = Cohost::new(window, cx);
+        let mut pane = Self {
             studio,
             runtime,
             state: CohostState::default(),
@@ -145,7 +157,10 @@ impl SidekickPane {
             live_consent: DialogHandle::new(false),
             talk_consent: DialogHandle::new(false),
             avatar_name: None,
-        }
+            cohost,
+        };
+        pane.cohost_start(cx);
+        pane
     }
 
     fn enabled(&self) -> bool {
@@ -168,7 +183,7 @@ impl SidekickPane {
         removals + utterances + command
     }
 
-    fn set_live(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_live(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         if on && !self.consented {
             self.pending_live = true;
             self.live_consent.open(window, cx);
@@ -227,7 +242,12 @@ impl SidekickPane {
         .detach();
     }
 
-    fn request_talk(&mut self, next: CohostTalkMode, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn request_talk(
+        &mut self,
+        next: CohostTalkMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if next == self.auto_chat().talk() {
             return;
         }
@@ -291,7 +311,13 @@ impl SidekickPane {
         .detach();
     }
 
-    fn header(&self, muted: gpui::Hsla, border: gpui::Hsla, cx: &mut Context<Self>) -> AnyElement {
+    fn header(
+        &self,
+        muted: gpui::Hsla,
+        border: gpui::Hsla,
+        status: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let enabled = self.enabled();
         let entity = cx.entity();
         div()
@@ -314,6 +340,7 @@ impl SidekickPane {
             )
             .child(Badge::new(words::LIVE_SECTION_BADGE).variant(BadgeVariant::Outline))
             .child(div().flex_1())
+            .child(status)
             .child(
                 Switch::new("sidekick-live")
                     .accessibility_label(words::LIVE_SWITCH_LABEL)
@@ -351,6 +378,7 @@ impl SidekickPane {
         &self,
         muted: gpui::Hsla,
         border: gpui::Hsla,
+        identity: Option<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let auto = self.auto_chat();
@@ -392,6 +420,7 @@ impl SidekickPane {
             .py(px(10.))
             .border_t_1()
             .border_color(border)
+            .children(identity)
             .child(
                 div()
                     .type_scale(text::LABEL)
@@ -412,32 +441,41 @@ impl SidekickPane {
 
 impl Render for SidekickPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.settle_say(window, cx);
         let t = theme::resolve(None, window, cx);
         let muted = hsla(t.muted_foreground);
         let border = hsla(t.border);
         let name = self.avatar_name.clone();
         let empty = self.waiting_count() == 0;
+        let status = self.cohost_status(t, cx);
+        let listen_prompt = self.cohost_listen_prompt(window, cx);
+        let body = self.cohost_body(window, cx).unwrap_or_else(|| {
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .px(px(16.))
+                .when(empty, |body| {
+                    body.child(Empty::new().description(SIDEKICK_EMPTY))
+                })
+                .into_any_element()
+        });
+        let identity = self.cohost_identity(window, cx);
+        let say_footer = self.cohost_say_footer(window, cx);
         div()
             .id("sidekick-pane")
             .size_full()
             .flex()
             .flex_col()
             .aria_label(SIDEKICK_PANE)
-            .child(self.header(muted, border, cx))
+            .child(self.header(muted, border, status, cx))
             .children(self.cards_chrome(muted, border))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .px(px(16.))
-                    .when(empty, |body| {
-                        body.child(Empty::new().description(SIDEKICK_EMPTY))
-                    }),
-            )
-            .child(self.talk_footer(muted, border, cx))
+            .children(listen_prompt)
+            .child(body)
+            .child(self.talk_footer(muted, border, identity, cx))
+            .children(say_footer)
             .child(
                 Dialog::new(
                     "sidekick-live-consent",
