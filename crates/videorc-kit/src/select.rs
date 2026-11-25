@@ -73,6 +73,15 @@ impl SelectOption {
     }
 }
 
+/// Trigger height: default 28 px, xs 24 px (Electron `size="xs"`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SelectSize {
+    #[default]
+    Default,
+    /// 24 px trigger (`h-6`).
+    Xs,
+}
+
 #[derive(IntoElement)]
 pub struct Select {
     id: ElementId,
@@ -82,7 +91,9 @@ pub struct Select {
     disabled: bool,
     /// A search field filters options by label and group (P482).
     searchable: bool,
+    size: SelectSize,
     width: Option<f32>,
+    max_width: Option<f32>,
     ground: Option<Color>,
     accessibility_label: Option<SharedString>,
     on_change: Option<ChangeHandler>,
@@ -98,7 +109,9 @@ impl Select {
             placeholder: SharedString::default(),
             disabled: false,
             searchable: false,
+            size: SelectSize::Default,
             width: None,
+            max_width: None,
             ground: None,
             accessibility_label: None,
             on_change: None,
@@ -143,9 +156,20 @@ impl Select {
         self
     }
 
+    pub fn size(mut self, size: SelectSize) -> Self {
+        self.size = size;
+        self
+    }
+
     /// The trigger's width; it fits its words otherwise (`w-fit`).
     pub fn width(mut self, width: f32) -> Self {
         self.width = Some(width);
+        self
+    }
+
+    /// Cap the trigger width (Electron `max-w-56` = 224).
+    pub fn max_width(mut self, max_width: f32) -> Self {
+        self.max_width = Some(max_width);
         self
     }
 
@@ -358,15 +382,22 @@ impl RenderOnce for Select {
             }
         };
 
+        let trigger_h = match self.size {
+            SelectSize::Default => size::CONTROL,
+            SelectSize::Xs => 24.0,
+        };
         let trigger = div()
             .id("select-trigger")
             .flex()
             .items_center()
             .justify_between()
             .gap(px(6.0))
-            .h(px(size::CONTROL))
+            .h(px(trigger_h))
             .px(px(10.0))
             .when_some(self.width, |trigger, width| trigger.w(px(width)))
+            .when_some(self.max_width, |trigger, max_width| {
+                trigger.max_w(px(max_width))
+            })
             .rounded(px(radius::CHIP))
             .border_1()
             .border_color(hsla(if open {
