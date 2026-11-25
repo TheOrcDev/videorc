@@ -684,7 +684,15 @@ impl Render for LibraryScreen {
             let last = view.rows.len() - 1;
             let mut rows = div().flex().flex_col();
             for (index, row) in view.rows.iter().enumerate() {
-                rows = rows.child(self.row(row, index == last, focused, actions_width, t, cx));
+                rows = rows.child(self.row(
+                    row,
+                    index == last,
+                    focused,
+                    view.bulk_hold,
+                    actions_width,
+                    t,
+                    cx,
+                ));
             }
             panel = panel.child(header).child(
                 div()
@@ -785,11 +793,13 @@ impl LibraryScreen {
     /// `LibraryRow`: one recording on the table's columns
     /// (`LIBRARY_ROW_CLASS`: `border-b py-2`, the accent on hover and
     /// selection).
+    #[allow(clippy::too_many_arguments)]
     fn row(
         &self,
         row: &p::RowView,
         last: bool,
         focused: bool,
+        hold: Option<&'static str>,
         actions_width: f32,
         t: &'static Theme,
         cx: &mut Context<Self>,
@@ -801,7 +811,7 @@ impl LibraryScreen {
         let id = row.id.clone();
         let menu = self.menu(row, cx);
         let reason = if !row.selectable {
-            "This recording is in use."
+            hold.unwrap_or("This recording is in use.")
         } else {
             ""
         };
