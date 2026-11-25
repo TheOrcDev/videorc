@@ -7,12 +7,18 @@
 //! (Still/Alive, Test, the living preview), Reactions and Motion, Greetings,
 //! the onboarding dialog and the Alive creator.
 
+mod bubble;
+mod consent;
+mod gate;
 mod greetings;
 mod library;
+mod look;
 mod persona;
 mod pictures;
+mod preview;
 mod reactions;
 mod status;
+mod test_dialog;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,7 +48,9 @@ pub type AppStudio = Studio<BackendClient>;
 
 /// The events the page follows; `main.rs` adds them to the client's filter.
 /// `account.changed` is already there (Settings').
-pub const EVENTS: [&str; 3] = [
+pub const EVENTS: [&str; 5] = [
+    videorc_app_core::buddy::look::PROGRESS_EVENT,
+    videorc_app_core::buddy::look::DRAFT_EVENT,
     LIBRARY_CHANGED_EVENT,
     SETTINGS_CHANGED_EVENT,
     videorc_app_core::chat::overlay::LAYOUT_EVENT,
@@ -170,11 +178,32 @@ pub struct AvatarScreen {
     save_error: Option<(reactions::SaveSection, String)>,
     /// `cohost.pet.list`: the worn pack's reactions.
     packs: Vec<reactions::PackSummary>,
+    /// The same list as the moves list shows it (name, source, poses).
+    pack_rows: Vec<look::PackRow>,
+    packs_loaded: bool,
+    packs_error: Option<String>,
+    /// The Look section: the look's state, Alive's actions, its dialogs.
+    look_ui: look::LookUi,
+    /// The living preview beside Look, and the draft's.
+    preview: gpui::Entity<preview::PetPreview>,
+    draft_preview: gpui::Entity<preview::PetPreview>,
+    bubbles: bubble::Bubbles,
+    test: test_dialog::TestUi,
     motion: Option<reactions::MotionWidgets>,
     placement: Option<Placement>,
     library: Option<LibraryState>,
     /// `aiCapabilities.cohost.buddyLibrary.alive`: the web keeps imports.
-    library_alive: bool,
+    /// `ai.capabilities.get`: what the web offers (the gates, the lines).
+    capabilities: Option<Value>,
+    /// `account.get`: signed in, Premium (`liveCohost`) and its upgrade link.
+    signed_in: bool,
+    entitled: bool,
+    upgrade_url: Option<String>,
+    /// Cloud AI consent (`families::ai_consent`).
+    consented: bool,
+    consent_handle: DialogHandle,
+    consent_want_open: bool,
+    consent_was_open: bool,
     /// The first `cohost.library.get` has not answered.
     loading: bool,
     pending: Option<Pending>,
@@ -203,8 +232,10 @@ impl AvatarScreen {
         user_data_dir: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
+        let (preview, draft_preview) = look::new_previews(cx);
         let tab = Tab::from_id(UiLocal::in_dir(&user_data_dir).avatar_tab());
         let invitation_dismissed = studio.read_ui_settings(families::buddy_invitation_dismissed);
+        let consented = studio.read_ui_settings(families::ai_consent);
         let screen = Self {
             studio,
             runtime,
@@ -218,10 +249,25 @@ impl AvatarScreen {
             greeting_editor: None,
             save_error: None,
             packs: Vec::new(),
+            pack_rows: Vec::new(),
+            packs_loaded: false,
+            packs_error: None,
+            look_ui: look::LookUi::new(),
+            preview,
+            draft_preview,
+            bubbles: bubble::Bubbles::new(),
+            test: test_dialog::TestUi::new(),
             motion: None,
             placement: None,
             library: None,
-            library_alive: false,
+            capabilities: None,
+            signed_in: false,
+            entitled: false,
+            upgrade_url: None,
+            consented,
+            consent_handle: DialogHandle::new(false),
+            consent_want_open: false,
+            consent_was_open: false,
             loading: true,
             pending: None,
             problem: None,
@@ -249,6 +295,11 @@ impl AvatarScreen {
             return;
         }
         self.active = active;
+        // The previews tick only while the page shows.
+        self.preview
+            .update(cx, |preview, cx| preview.set_active(active, cx));
+        self.draft_preview
+            .update(cx, |preview, cx| preview.set_active(active, cx));
         if active {
             self.sync(cx);
         }
@@ -278,6 +329,12 @@ impl AvatarScreen {
                                 }
                             });
                         }
+                        videorc_app_core::buddy::look::PROGRESS_EVENT
+                        | videorc_app_core::buddy::look::DRAFT_EVENT => {
+                            let name = event.clone();
+                            let _ =
+                                this.update(cx, |screen, cx| screen.look_event(&name, payload, cx));
+                        }
                         SETTINGS_CHANGED_EVENT | "account.changed" => {
                             let _ = this.update(cx, |screen, cx| screen.refresh(cx));
                         }
@@ -301,6 +358,7 @@ impl AvatarScreen {
     /// switches.
     fn refresh(&self, cx: &mut Context<Self>) {
         self.refresh_packs(cx);
+        self.refresh_look(cx);
         let studio = self.studio.clone();
         let read = self.runtime.spawn(async move {
             let backend = studio.backend().clone();
@@ -324,20 +382,21 @@ impl AvatarScreen {
                 .await
                 .ok()
                 .and_then(|layout| Placement::from_layout(&layout));
-            let library_alive = backend
-                .request("ai.capabilities.get", json!({}))
-                .await
-                .ok()
-                .and_then(|value| {
-                    value
-                        .pointer("/cohost/buddyLibrary/alive")
-                        .and_then(Value::as_bool)
-                })
-                .unwrap_or(false);
-            (persona, notes, auto_chat, library, placement, library_alive)
+            let capabilities = backend.request("ai.capabilities.get", json!({})).await.ok();
+            let account = backend.request("account.get", json!({})).await.ok();
+            (
+                persona,
+                notes,
+                auto_chat,
+                library,
+                placement,
+                capabilities,
+                account,
+            )
         });
         cx.spawn(async move |this, cx| {
-            let Ok((persona, notes, auto_chat, library, placement, library_alive)) = read.await
+            let Ok((persona, notes, auto_chat, library, placement, capabilities, account)) =
+                read.await
             else {
                 return;
             };
@@ -354,7 +413,13 @@ impl AvatarScreen {
                 if let Some(library) = library {
                     screen.library_changed(library, cx);
                 }
-                screen.library_alive = library_alive;
+                if capabilities.is_some() {
+                    screen.capabilities = capabilities;
+                }
+                if let Some(account) = account {
+                    screen.account_answered(&account);
+                }
+                screen.consented = screen.studio.read_ui_settings(families::ai_consent);
                 screen.loading = false;
                 if placement.is_some() {
                     screen.placement = placement;
@@ -711,6 +776,12 @@ impl Render for AvatarScreen {
         self.sync_dialogs(window, cx);
         self.ensure_persona_fields(window, cx);
         self.ensure_motion(window, cx);
+        self.sync_consent(window, cx);
+        self.sync_bubble_zoom(window, cx);
+        self.sync_look_dialogs(window, cx);
+        self.sync_test(window, cx);
+        self.ensure_bubble(false, cx);
+        self.sync_previews(cx);
         let body =
             match self.tab {
                 Tab::Profile => div()
@@ -725,6 +796,7 @@ impl Render for AvatarScreen {
                             .p(px(size::GUTTER))
                             .child(library::render_library(self, window, cx))
                             .children(persona::render_persona(self, window, cx))
+                            .children(look::render_look(self, window, cx))
                             .child(
                                 div()
                                     .flex()
@@ -768,5 +840,9 @@ impl Render for AvatarScreen {
             .child(library::edit_dialog(self, window, cx))
             .child(library::delete_dialog(self, window, cx))
             .child(persona::persona_dialogs(self, cx))
+            .child(consent::consent_dialog(self, window, cx))
+            .child(bubble::zoom_dialog(self, window, cx))
+            .child(look::look_dialogs(self, cx))
+            .child(test_dialog::test_dialog(self, window, cx))
     }
 }

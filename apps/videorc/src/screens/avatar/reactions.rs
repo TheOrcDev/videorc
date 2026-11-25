@@ -84,12 +84,30 @@ impl AvatarScreen {
             .runtime
             .spawn(async move { backend.request("cohost.pet.list", json!({})).await });
         cx.spawn(async move |this, cx| {
-            let Ok(Ok(value)) = read.await else {
-                return;
-            };
-            let packs = serde_json::from_value::<Vec<PackSummary>>(value).unwrap_or_default();
+            let answer = read.await;
             let _ = this.update(cx, |screen, cx| {
-                screen.packs = packs;
+                match answer {
+                    Ok(Ok(value)) => {
+                        screen.pack_rows =
+                            serde_json::from_value::<Vec<super::look::PackRow>>(value.clone())
+                                .unwrap_or_default();
+                        screen.packs =
+                            serde_json::from_value::<Vec<PackSummary>>(value).unwrap_or_default();
+                        screen.packs_loaded = true;
+                        screen.packs_error = None;
+                    }
+                    Ok(Err(error)) => {
+                        let copy = videorc_app_core::user_error::user_error_message(
+                            videorc_app_core::user_error::Failure::Rpc(&error),
+                            Some(videorc_app_core::user_error::UserErrorContext {
+                                action: "load",
+                                object: "your avatar's packs",
+                            }),
+                        );
+                        screen.packs_error = Some(format!("{}. {}", copy.title, copy.description));
+                    }
+                    Err(_) => {}
+                }
                 cx.notify();
             });
         })
@@ -175,6 +193,7 @@ pub(super) enum SaveSection {
     Reactions,
     Motion,
     Greetings,
+    Look,
 }
 
 impl SaveSection {
@@ -185,6 +204,7 @@ impl SaveSection {
             Self::Reactions => "the reactions",
             Self::Motion => "the motion",
             Self::Greetings => "the greetings",
+            Self::Look => "your avatar's look",
         }
     }
 }
@@ -199,6 +219,7 @@ pub(super) fn render_reactions(
     let entity = cx.entity();
     let pack = active_reactions(persona, &screen.packs);
     let choosable = choosable_reactions(&pack);
+    let screen_has_preview = screen.preview.read(cx).test_pack().is_some();
 
     let mut section = PanelSection::new("avatar-reactions")
         .title("Reactions")
@@ -244,13 +265,28 @@ pub(super) fn render_reactions(
                 .on_change(move |value, _, cx| {
                     save.update(cx, |screen, cx| screen.set_reaction(trigger, &value, cx))
                 });
-            // The living preview lands with the look; Try waits for it.
+            // Try plays the trigger's outcome in the living preview.
+            let outcome = trigger_outcome(trigger, &persona.reactions, &pack);
+            let try_id = match &outcome {
+                Outcome::Reaction(id) | Outcome::Hop(id) => Some(id.clone()),
+                Outcome::None => None,
+            };
+            let play = entity.clone();
             let try_it = Button::new(SharedString::from(format!("avatar-reaction-try-{key}")))
                 .variant(ButtonVariant::Ghost)
                 .size(ButtonSize::Xs)
                 .label("Try")
                 .accessibility_label(format!("Try the {} reaction", title.to_lowercase()))
-                .disabled(true);
+                .disabled(try_id.is_none() || !screen_has_preview)
+                .on_click(move |_, _, cx| {
+                    if let Some(id) = try_id.clone() {
+                        play.update(cx, |screen, cx| {
+                            screen.preview.update(cx, |preview, cx| {
+                                preview.react(&id, cx);
+                            })
+                        })
+                    }
+                });
             list = list.row(
                 ListRow::new(
                     SharedString::from(format!("avatar-reaction-row-{key}")),
