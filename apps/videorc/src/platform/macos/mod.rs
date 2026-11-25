@@ -73,6 +73,21 @@ fn ns_window(window: &Window) -> OsResult<Retained<NSWindow>> {
         .ok_or_else(|| "the view has no NSWindow".into())
 }
 
+/// The standard About panel (`NSApp orderFrontStandardAboutPanel:`), what
+/// Electron's `about` role shows: the bundle's name, version and credits.
+pub fn show_about_panel() {
+    // SAFETY: AppKit's shared application and a documented selector with a
+    // nil sender, on the main thread (a menu action).
+    unsafe {
+        let app: *mut objc2::runtime::AnyObject =
+            objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+        let _: () = objc2::msg_send![
+            app,
+            orderFrontStandardAboutPanel: std::ptr::null_mut::<objc2::runtime::AnyObject>()
+        ];
+    }
+}
+
 pub struct MacOs;
 
 impl Platform for MacOs {

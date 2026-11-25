@@ -667,13 +667,35 @@ fn main() -> Result<()> {
                 )
             });
         });
+        // About Videorc (P1494): macOS's own About panel, as Electron's
+        // `about` role; elsewhere (no menu bar) Settings → About.
         cx.on_action(move |_: &menus::About, cx| {
+            #[cfg(target_os = "macos")]
+            {
+                cx.activate(true);
+                platform::macos::show_about_panel();
+            }
+            #[cfg(not(target_os = "macos"))]
             let _ = main_window.update(cx, |shell, window, cx| {
                 shell.open_settings(
                     Some(videorc_app_core::settings_page::SettingsTab::About),
                     window,
                     cx,
                 )
+            });
+        });
+        // Window → Preview and ⌘P (P1506, P052): the Preview in its own
+        // window, or docked back; the main window comes up for it.
+        let toggle_preview = preview_slot.clone();
+        cx.on_action(move |_: &menus::TogglePreview, cx| {
+            let Some(preview) = toggle_preview.borrow().clone() else {
+                return;
+            };
+            let _ = main_window.update(cx, |_, window, _| window.activate_window());
+            preview.update(cx, |preview, cx| {
+                if preview.can_float() {
+                    preview.toggle_floating(cx);
+                }
             });
         });
         cx.on_action(move |_: &menus::ShowImages, cx| {
