@@ -16,8 +16,9 @@ run-name: ${{ inputs.correlation }}
         required: true
         type: string
 concurrency:
-  group: windows-alpha-sign-${{ inputs.request_id }}
-  cancel-in-progress: false
+  group: sign-windows-alpha-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   actions: read

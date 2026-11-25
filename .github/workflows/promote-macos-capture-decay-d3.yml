@@ -7,14 +7,17 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-publication
-  cancel-in-progress: false
+  group: promote-macos-capture-decay-d3-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   promote:
+    concurrency:
+      group: release-publication
+      cancel-in-progress: false
     name: Verify and promote sealed candidate
     runs-on: macos-15
     environment: macos-d3-release

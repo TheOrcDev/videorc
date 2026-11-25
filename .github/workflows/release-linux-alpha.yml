@@ -9,8 +9,8 @@ on:
         type: string
 
 concurrency:
-  group: linux-alpha-candidate
-  cancel-in-progress: false
+  group: release-linux-alpha-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
