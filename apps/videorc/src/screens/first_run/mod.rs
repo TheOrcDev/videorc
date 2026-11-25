@@ -40,11 +40,13 @@ use videorc_app_core::{BackendClient, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::chat_platform::ChatPlatform;
 use videorc_kit::chrome::{box_shadow, focus_ring};
 use videorc_kit::empty::Empty;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::list_row::GroupedList;
 use videorc_kit::motion::{Glass, floating};
+use videorc_kit::platform_glyph::PlatformGlyph;
 use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::section_label::SectionLabel;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
@@ -56,7 +58,7 @@ use videorc_kit::status_badge::StatusBadge;
 use videorc_kit::status_dot::StatusTone;
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, FONT, TypeScale, faded_over, hsla, with_alpha};
-use videorc_kit::tokens::{Shadow, Theme, fixed, radius, size, text};
+use videorc_kit::tokens::{Shadow, Theme, radius, size, text};
 use videorc_kit::tooltip::tooltip;
 
 use crate::app::permissions::Permissions;
@@ -910,59 +912,16 @@ fn layout_thumb(preset: &str, vertical: bool, inner: f32, t: &Theme) -> AnyEleme
         .into_any_element()
 }
 
-/// The platform's mark in its 30 x 24 slot (`PlatformGlyph`): YouTube's own
-/// icon untinted, X's square lockup in the theme's ink, every other platform
-/// on its 24 px tinted tile.
-fn platform_glyph(id: &str, t: &Theme) -> AnyElement {
-    let slot = div()
-        .flex_none()
-        .w(px(30.))
-        .h(px(24.))
-        .flex()
-        .items_center()
-        .justify_center();
-    let tile = |fill: gpui::Hsla| {
-        div()
-            .size(px(24.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(radius::CHIP))
-            .bg(fill)
+/// `PlatformGlyph`: the platform's brand tile in its 30 x 24 slot, the
+/// kit's twin of `components/platform-glyph.tsx`.
+fn platform_glyph(id: &str) -> PlatformGlyph {
+    let platform = match id {
+        "youtube" => ChatPlatform::Youtube,
+        "x" => ChatPlatform::X,
+        "kick" => ChatPlatform::Kick,
+        _ => ChatPlatform::Twitch,
     };
-    match id {
-        "youtube" => slot
-            .child(icon(
-                IconName::YoutubeLogo,
-                24.,
-                hsla(fixed::PLATFORM_YOUTUBE),
-            ))
-            .into_any_element(),
-        "x" => slot
-            .child(
-                tile(hsla(t.glass_solid))
-                    .border_1()
-                    .border_color(hsla(t.border))
-                    .child(icon(IconName::XLogo, 16., hsla(t.foreground))),
-            )
-            .into_any_element(),
-        "kick" => slot
-            .child(tile(hsla(fixed::PLATFORM_KICK)).child(icon(
-                IconName::KickLogo,
-                16.,
-                hsla(fixed::PLATFORM_KICK_INK),
-            )))
-            .into_any_element(),
-        _ => slot
-            .child(
-                tile(hsla(with_alpha(fixed::PLATFORM_TWITCH, 0.15))).child(icon(
-                    IconName::TwitchLogo,
-                    16.,
-                    hsla(fixed::PLATFORM_TWITCH_INK),
-                )),
-            )
-            .into_any_element(),
-    }
+    PlatformGlyph::new(platform).id(SharedString::from(format!("first-run-glyph-{id}")))
 }
 
 impl Render for FirstRunScreen {
@@ -2075,7 +2034,7 @@ fn destinations_body(
                 .gap(px(12.))
                 .px(px(12.))
                 .py(px(10.))
-                .child(platform_glyph(id, t))
+                .child(platform_glyph(id))
                 .child(words)
                 .children(sign_in),
         );
