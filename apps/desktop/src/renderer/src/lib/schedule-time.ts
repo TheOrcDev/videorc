@@ -8,13 +8,9 @@
 // and Havana changing clocks). The backend sends each time with its UTC
 // offset, and this file only formats a time at that fixed offset.
 
-/** `Intl`'s `timeZone` for a fixed UTC offset in minutes: -420 is "-07:00". */
-export function offsetTimeZone(minutes: number): string {
-  const sign = minutes < 0 ? '-' : '+'
-  const hours = String(Math.floor(Math.abs(minutes) / 60)).padStart(2, '0')
-  const rest = String(Math.abs(minutes) % 60).padStart(2, '0')
-  return `${sign}${hours}:${rest}`
-}
+import { offsetTimeZone } from '@/lib/offset-time-zone'
+
+export { offsetTimeZone }
 
 /** The `datetime-local` value ("2026-12-15T10:00") of an instant at a fixed UTC offset. */
 export function wallTimeAt(utcMs: number, offsetMinutes: number): string {

@@ -928,7 +928,7 @@ mod tests {
         assert!(
             slot.install_if_current(
                 &opening,
-                7,
+                WarmDevice::CoreAudio(7),
                 InitialAudioSource::warm(test_native_audio_source(settings(0.0))),
                 0.0,
                 false

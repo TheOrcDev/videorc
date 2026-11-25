@@ -117,13 +117,79 @@ test('X routes need an OAuth signature, refuse auto-publish go-live and open-end
     const broadcast = await fetch(`${fixture.origin}/2/broadcasts/${created.data.broadcast_id}`, {
       headers: signed
     }).then((response) => response.json())
-    assert.equal(broadcast.data.share_url, `https://x.com/i/broadcasts/${created.data.broadcast_id}`)
+    assert.equal(
+      broadcast.data.share_url,
+      `https://x.com/i/broadcasts/${created.data.broadcast_id}`
+    )
     assert.equal(broadcast.data.media_id, undefined)
     assert.match(broadcast.data.media_key, /^28_\d+$/)
     assert.ok(
       fixture.calls.every((call) => !call.path.startsWith('/2/users/')),
       'no deprecated user-prefixed route is served'
     )
+  } finally {
+    await fixture.close()
+  }
+})
+
+test('X live categories, a categorized Go Live and a live title/category update', async () => {
+  const fixture = await startScheduledStreamsFixture()
+  const signed = {
+    authorization: 'OAuth oauth_consumer_key="k", oauth_signature="s"',
+    'content-type': 'application/json'
+  }
+  const call = (path, method = 'GET', body) =>
+    fetch(`${fixture.origin}${path}`, {
+      method,
+      headers: signed,
+      ...(body ? { body: JSON.stringify(body) } : {})
+    })
+  try {
+    assert.equal((await fetch(`${fixture.origin}/2/broadcasts/categories`)).status, 401)
+    const categories = await call('/2/broadcasts/categories').then((response) => response.json())
+    assert.deepEqual(
+      categories.data.map((category) => category.id),
+      ['gaming', 'just-chatting', 'science-technology']
+    )
+    const source = await call('/2/sources', 'POST', { name: 'Videorc', region: 'us-east-1' }).then(
+      (response) => response.json()
+    )
+    const goLive = {
+      source_id: source.data.id,
+      title: 'Live',
+      locale: 'en',
+      chat_option: 0,
+      should_not_tweet: true
+    }
+    const unknown = await call('/2/broadcasts', 'POST', { ...goLive, live_category_id: 'nope' })
+    assert.equal(unknown.status, 400)
+    assert.match((await unknown.json()).detail, /live_category_id/)
+    const created = await call('/2/broadcasts', 'POST', {
+      ...goLive,
+      live_category_id: 'just-chatting'
+    })
+    assert.equal(created.status, 201)
+    const broadcast = (await created.json()).data
+    assert.equal(broadcast.live_category_id, 'just-chatting')
+    assert.equal(
+      (await call(`/2/broadcasts/${broadcast.id}`, 'PUT', { title: 'x', region: 'eu' })).status,
+      400
+    )
+    assert.equal((await call(`/2/broadcasts/${broadcast.id}`, 'PUT', { title: ' ' })).status, 400)
+    const updated = await call(`/2/broadcasts/${broadcast.id}`, 'PUT', {
+      title: 'Renamed live',
+      live_category_id: 'gaming'
+    }).then((response) => response.json())
+    assert.equal(updated.data.title, 'Renamed live')
+    assert.equal(updated.data.live_category_id, 'gaming')
+    const cleared = await call(`/2/broadcasts/${broadcast.id}`, 'PUT', {
+      live_category_id: ''
+    }).then((response) => response.json())
+    assert.equal(cleared.data.live_category_id, undefined)
+    assert.equal(fixture.xBroadcasts.get(broadcast.id).title, 'Renamed live')
+    const read = await call(`/2/broadcasts/${broadcast.id}`).then((response) => response.json())
+    assert.equal(read.data.state, 'RUNNING')
+    assert.equal((await call('/2/broadcasts/missing1', 'PUT', { title: 'a' })).status, 404)
   } finally {
     await fixture.close()
   }

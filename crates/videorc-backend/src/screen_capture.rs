@@ -159,7 +159,7 @@ pub fn app_previews(params: AppPreviewsParams) -> Result<Vec<AppPreview>, String
 // (and in tests). Keep the public re-export for callers.
 #[cfg_attr(not(any(test, target_os = "macos")), allow(unused_imports))]
 pub use crate::protocol::scene_pictures::{
-    ScenePicture, ScenePictureOutcome, ScenePictureTarget, ScenePicturesParams, ScenePicturesResult,
+    ScenePictureOutcome, ScenePictureTarget, ScenePicturesParams, ScenePicturesResult,
 };
 
 /// The privacy recheck after the blocking task returns to the async RPC
