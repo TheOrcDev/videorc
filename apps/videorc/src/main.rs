@@ -24,6 +24,7 @@
 //! will.
 
 mod app;
+mod lcd;
 mod platform;
 mod preview;
 mod screens;

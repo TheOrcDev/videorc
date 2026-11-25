@@ -44,6 +44,7 @@ use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
 
 use super::transport::{AppStudio, OpenPage};
+use crate::lcd;
 
 use meter::{lcd_meter, meta_line, segmented_meter};
 
@@ -702,23 +703,20 @@ impl AudioSection {
             controls = controls.child(div().text_color(dim).child(Kbd::new(accel.clone())));
         }
         let mute_words = if muted { words::MUTED } else { "Mute" };
-        controls = controls.child(
-            Button::new("studio-lcd-mic-mute")
-                .variant(if muted {
-                    ButtonVariant::Default
-                } else {
-                    ButtonVariant::Ghost
-                })
-                .size(ButtonSize::Xs)
-                .accessibility_label(words::MUTE_MICROPHONE)
-                .tooltip(if muted {
-                    words::UNMUTE_MICROPHONE
-                } else {
-                    words::MUTE_MICROPHONE
-                })
-                .label(mute_words)
-                .on_click(cx.listener(|this, _, _, _| this.mute_toggle())),
-        );
+        let mute_tip = if muted {
+            words::UNMUTE_MICROPHONE
+        } else {
+            words::MUTE_MICROPHONE
+        };
+        controls = controls.child(lcd::value_button(
+            "studio-lcd-mic-mute",
+            theme,
+            mute_words,
+            muted,
+            false,
+            Some(SharedString::from(mute_tip)),
+            cx.listener(|this, _, _, _| this.mute_toggle()),
+        ));
         header = header.child(controls);
 
         let disabled = mic.disabled_reason.is_some();
@@ -783,7 +781,6 @@ impl AudioSection {
         theme: &videorc_kit::tokens::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let lit = hsla(theme.foreground);
         let mut header = div()
             .flex()
             .items_center()
@@ -792,60 +789,68 @@ impl AudioSection {
             .py(px(6.))
             .child(
                 div()
-                    .text_color(lit)
+                    .text_color(lcd::lit(theme))
                     .type_scale(text::LABEL)
                     .child(words::SYSTEM_AUDIO),
             );
+        // P229–P231: Needs permission / Resume / issue word beside the
+        // On/Off switch, as Electron's RetroSystemAudioValue — not an alert.
         let mut controls = div().flex().items_center().gap(px(8.));
-        if let Some(chip) = row.chip {
-            controls = controls.child(chip_badge(chip.label, chip.tone));
-        }
-        if let Some(accel) = row.toggle_accelerator.as_ref() {
-            controls = controls.child(Kbd::new(accel.clone()));
-        }
-        let checked = row.checked;
-        let entity = cx.entity();
-        controls = controls.child(
-            Switch::new("studio-lcd-system-audio")
-                .accessibility_label(words::SYSTEM_AUDIO)
-                .checked(checked)
-                .disabled(row.disabled)
-                .small(true)
-                .on_change(move |value, _, cx| {
-                    entity.update(cx, |section, _| section.set_system_audio(value));
+        if row.permission_required {
+            let tip = row
+                .issue
+                .clone()
+                .unwrap_or_else(|| "System audio needs Screen Recording permission.".into());
+            controls = controls.child(lcd::value_button(
+                "studio-lcd-open-permissions",
+                theme,
+                "Needs permission",
+                false,
+                false,
+                Some(SharedString::from(tip)),
+                cx.listener(|_, _, _, cx| {
+                    cx.emit(OpenPage::settings(SettingsTab::Permissions));
                 }),
-        );
+            ));
+        } else {
+            if matches!(row.issue_action, Some(IssueAction::Resume)) {
+                let tip = row.issue.clone().map(SharedString::from);
+                controls = controls.child(lcd::value_button(
+                    "studio-lcd-system-audio-resume",
+                    theme,
+                    words::RESUME,
+                    false,
+                    false,
+                    tip,
+                    cx.listener(|this, _, _, _| this.resume_system_audio()),
+                ));
+            } else if let Some(chip) = row.chip {
+                let tip = row.issue.clone().map(SharedString::from);
+                let mut word = div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(lcd::dim(theme))
+                    .child(chip.label);
+                if let Some(tip) = tip {
+                    word = word.tooltip(videorc_kit::tooltip::tooltip(tip));
+                }
+                controls = controls.child(word);
+            }
+            let checked = row.checked;
+            let entity = cx.entity();
+            controls = controls.child(lcd::switch_words(
+                "studio-lcd-system-audio",
+                theme,
+                checked,
+                row.disabled,
+                words::SYSTEM_AUDIO,
+                move |_, _, cx| {
+                    entity.update(cx, |section, _| section.set_system_audio(!checked));
+                },
+            ));
+        }
         header = header.child(controls);
         let mut body = div().flex().flex_col().gap(px(6.)).child(header);
-        if let Some(issue) = row.issue.as_ref() {
-            let action = row.issue_action;
-            let buttons = match action {
-                Some(IssueAction::OpenPermissions) => Some(
-                    Button::new("studio-lcd-open-permissions")
-                        .variant(ButtonVariant::Outline)
-                        .size(ButtonSize::Xs)
-                        .label(words::OPEN_PERMISSIONS)
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            cx.emit(OpenPage::settings(SettingsTab::Permissions));
-                        })),
-                ),
-                Some(IssueAction::Resume) => Some(
-                    Button::new("studio-lcd-system-audio-resume")
-                        .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::Xs)
-                        .label(words::RESUME)
-                        .on_click(cx.listener(|this, _, _, _| this.resume_system_audio())),
-                ),
-                None => None,
-            };
-            let mut alert = Alert::new("studio-lcd-system-audio-issue")
-                .variant(AlertVariant::Warning)
-                .title(issue.clone());
-            if let Some(button) = buttons {
-                alert = alert.action(button);
-            }
-            body = body.child(alert);
-        }
         if row.show_level {
             body = body.child(lcd_meter(
                 self.meters_view.system_audio,
@@ -893,34 +898,50 @@ impl Render for AudioSection {
         // No "Audio" heading (plan 235 D3); the Mixer keeps the name for
         // screen readers via aria-label on the channels column. Each strip
         // is a focus target so ⌘/Ctrl+↑/↓ can move between them (P218).
-        PanelSection::new(STUDIO_AUDIO_FOCUS).child(
-            div()
-                .id("studio-audio-channels")
-                .key_context(KEY_CONTEXT)
-                .on_action(cx.listener(Self::focus_previous_strip))
-                .on_action(cx.listener(Self::focus_next_strip))
-                .flex()
-                .flex_col()
-                .gap(px(0.))
-                .aria_label(words::AUDIO)
-                .child(
-                    div()
-                        .id("studio-channel-strip-microphone")
-                        .track_focus(&self.mic_focus)
-                        .tab_index(0)
-                        .child(mic),
-                )
-                .children(system.map(|row| {
-                    div()
-                        .id("studio-channel-strip-system-audio")
-                        .track_focus(&self.sys_focus)
-                        .tab_index(0)
-                        .border_t_1()
-                        .border_color(border)
-                        .pt(px(size::GUTTER))
-                        .mt(px(size::GUTTER))
-                        .child(row)
-                })),
-        )
+        let mut channels = div()
+            .id("studio-audio-channels")
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(Self::focus_previous_strip))
+            .on_action(cx.listener(Self::focus_next_strip))
+            .flex()
+            .flex_col()
+            .gap(px(0.))
+            .aria_label(words::AUDIO)
+            .child(
+                div()
+                    .id("studio-channel-strip-microphone")
+                    .track_focus(&self.mic_focus)
+                    .tab_index(0)
+                    .child(mic),
+            );
+        if let Some(row) = system {
+            let strip = if self.retro {
+                div()
+                    .id("studio-channel-strip-system-audio")
+                    .track_focus(&self.sys_focus)
+                    .tab_index(0)
+                    .child(lcd::separator(&theme))
+                    .child(row)
+                    .into_any_element()
+            } else {
+                div()
+                    .id("studio-channel-strip-system-audio")
+                    .track_focus(&self.sys_focus)
+                    .tab_index(0)
+                    .border_t_1()
+                    .border_color(border)
+                    .pt(px(size::GUTTER))
+                    .mt(px(size::GUTTER))
+                    .child(row)
+                    .into_any_element()
+            };
+            channels = channels.child(strip);
+        }
+        let body = if self.retro {
+            lcd::panel("studio-lcd-audio", &theme, words::AUDIO, channels).into_any_element()
+        } else {
+            channels.into_any_element()
+        };
+        PanelSection::new(STUDIO_AUDIO_FOCUS).child(body)
     }
 }
