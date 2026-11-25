@@ -366,7 +366,7 @@ pub fn render_overview(
         .into_any_element()
 }
 
-pub fn consent_dialog(handle: &DialogHandle, cx: &mut Context<SidekickScreen>) -> impl IntoElement {
+pub fn consent_dialog(handle: &DialogHandle, cx: &mut Context<SidekickScreen>) -> Dialog {
     let entity = cx.entity();
     let decline = entity.clone();
     Dialog::new("sidekick-consent", handle, words::CONSENT_TITLE)

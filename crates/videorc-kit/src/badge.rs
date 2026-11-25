@@ -241,7 +241,7 @@ impl RenderOnce for Badge {
 
 /// `glass-chip-tinted`: the tone mixed into the rim and the fill, and into
 /// the ink over its base.
-fn tinted(chip: gpui::Div, t: &Theme, tone: Color) -> gpui::Div {
+pub(crate) fn tinted(chip: gpui::Div, t: &Theme, tone: Color) -> gpui::Div {
     chip.border_color(hsla(with_alpha(tone, t.chip_tint_rim)))
         .bg(linear_gradient(
             180.0,
