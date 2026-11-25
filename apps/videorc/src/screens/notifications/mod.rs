@@ -41,6 +41,9 @@ pub enum Navigate {
     /// camera and microphone go to the room after a takeover
     /// (`TalkShowRoomHost::enable_devices`).
     EnableRoomDevices,
+    /// Open Audio (P172 / P180): the Studio with its Microphone strip
+    /// focused and in view (`StudioPage::reveal_audio`), not only the page.
+    StudioAudio,
 }
 impl EventEmitter<Delivery> for Hub {}
 impl EventEmitter<Navigate> for Hub {}
@@ -339,7 +342,11 @@ impl Hub {
                 if let Some(job) = self.watchdog_job(key, id) {
                     self.run_watchdog(job, key, cx);
                 } else if let Some(action) = self.action(key, id) {
-                    self.perform(action, Some(key.to_owned()), cx);
+                    if opens_studio_audio(id, &action) {
+                        cx.emit(Navigate::StudioAudio);
+                    } else {
+                        self.perform(action, Some(key.to_owned()), cx);
+                    }
                 }
             }
         }
@@ -567,4 +574,32 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+/// The bell's Open Audio (a device, health or watchdog `fix:` press) goes to
+/// the Microphone strip, not only the Studio (`use-section-focus.ts`).
+fn opens_studio_audio(id: &str, action: &NoticeAction) -> bool {
+    id.strip_prefix("fix:").unwrap_or(id) == "open-audio"
+        && matches!(
+            action,
+            NoticeAction::OpenPage(videorc_app_core::nav::PageId::Studio)
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::opens_studio_audio;
+    use videorc_app_core::nav::PageId;
+    use videorc_app_core::notices::NoticeAction;
+
+    #[test]
+    fn open_audio_reaches_the_microphone_strip() {
+        let studio = NoticeAction::OpenPage(PageId::Studio);
+        assert!(opens_studio_audio("open-audio", &studio));
+        assert!(opens_studio_audio("fix:open-audio", &studio));
+        assert!(!opens_studio_audio("open-sources", &studio));
+        assert!(!opens_studio_audio(
+            "open-audio",
+            &NoticeAction::OpenPage(PageId::Sources)
+        ));
+    }
 }
