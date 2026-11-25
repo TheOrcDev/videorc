@@ -82,6 +82,16 @@ export const SCREENS = Object.freeze([
     sections: ['Scene ⌘3: Scenes list', 'Scene ⌘3: Layout section', 'Scene ⌘3: Hide screen']
   },
   {
+    id: 'studio-retro',
+    title: 'Studio ⌘1, Retro LCD look',
+    deck: 'shell-studio',
+    open: page('studio'),
+    // Settings → General → Retro LCD Studio, on for this screen only.
+    settings: { key: 'videorc.settings', patch: { retroLcdStudio: true } },
+    baseline: { screen: 'studio-retro', state: 'default' },
+    sections: ['Audio section, Retro LCD look', 'Retro LCD transport']
+  },
+  {
     id: 'palette',
     title: '⌘K command palette',
     deck: 'shell-studio',
@@ -184,7 +194,10 @@ export const SCREENS = Object.freeze([
     title: 'Go Live dialog',
     deck: 'livestream',
     open: page('studio', { dialog: 'go-live' }),
-    close: 'Escape',
+    // GPUI's dialog doesn't take the key focus Escape needs, and the UI
+    // driver's tree doesn't reach real builds yet: Cancel, else a fresh app.
+    close: { click: { name: 'Cancel', role: 'button' } },
+    restart: true,
     baseline: { screen: 'go-live', state: 'dialog' },
     sections: ['Go Live dialog']
   },
