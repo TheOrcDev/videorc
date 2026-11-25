@@ -317,6 +317,7 @@ impl AvatarScreen {
             .update(cx, |preview, cx| preview.set_active(active, cx));
         self.draft_preview
             .update(cx, |preview, cx| preview.set_active(active, cx));
+        self.sync_creator_preview(cx);
         if active {
             self.sync(cx);
         }
@@ -780,6 +781,7 @@ impl AvatarScreen {
         }
         self.tab = tab;
         let _ = UiLocal::in_dir(&self.user_data_dir).set_avatar_tab(tab.id());
+        self.sync_creator_preview(cx);
         cx.notify();
     }
 }
