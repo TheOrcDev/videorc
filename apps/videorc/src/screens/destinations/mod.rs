@@ -55,8 +55,9 @@ pub type AppStudio = Studio<BackendClient>;
 
 /// `LIVESTREAM_SETUP_GRID`'s one breakpoint: two columns from 940 px of page.
 const SETUP_SPLIT_MIN: f32 = 940.;
-/// The shell's sidebar (`app/shell.rs`, L7's): a page is the window less it.
-const SIDEBAR_WIDTH: f32 = 220.;
+/// The shell's sidebar (`app/shell.rs`, L7's `w-52`): a page is the window
+/// less it.
+const SIDEBAR_WIDTH: f32 = 208.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DestinationsTab {

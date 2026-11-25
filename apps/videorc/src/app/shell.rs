@@ -254,6 +254,9 @@ pub struct Shell {
     command_held: bool,
     /// The status bar's state: the session's own words.
     session: Option<Entity<Mirror<SessionWords>>>,
+    /// `guestsVisible`: the Guests row shows with talk shows or a room
+    /// that isn't closed (L2, plan 224 D16).
+    guests_visible: Option<Entity<Mirror<bool>>>,
 }
 
 impl Shell {
@@ -315,6 +318,23 @@ impl Shell {
         let session = session_store.map(|store| super::bridge::mirror(cx, store, SessionWords::of));
         if let Some(session) = &session {
             cx.observe(session, |_, _, cx| cx.notify()).detach();
+        }
+        let cloud_store = cx
+            .try_global::<super::accounts::Shared>()
+            .map(|shared| shared.studio.cloud());
+        let guests_visible = cloud_store.map(|store| {
+            super::bridge::mirror(
+                cx,
+                store,
+                |cloud: &videorc_app_core::studio::cloud::CloudState| {
+                    videorc_app_core::livestream::cloud_status::guests_visible(
+                        cloud.status.as_ref(),
+                    )
+                },
+            )
+        });
+        if let Some(guests_visible) = &guests_visible {
+            cx.observe(guests_visible, |_, _, cx| cx.notify()).detach();
         }
         palette.update(cx, |palette, _| palette.set_notifications_available());
         let command_held = false;
@@ -538,6 +558,7 @@ impl Shell {
             chat_waits,
             command_held,
             session,
+            guests_visible,
         }
     }
 
@@ -758,6 +779,13 @@ impl Shell {
     /// One page row (`sidebar.tsx` `NavRow`): 28 px, 14 px words in the
     /// secondary tier; the page you're on wears the chrome plate at 500 with
     /// its icon in the primary ink, and hover is the flat sidebar block.
+    /// `guestsVisible`, failing closed before the cloud has answered.
+    fn guests_shown(&self, cx: &gpui::App) -> bool {
+        self.guests_visible
+            .as_ref()
+            .is_some_and(|visible| *visible.read(cx).value())
+    }
+
     fn nav_row(&self, page: PageId, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = page == self.page;
         let ink = if selected {
@@ -929,6 +957,10 @@ impl Shell {
                 );
             }
             for &page in pages {
+                // `GuestsNavGate`: the row only while Guests is available.
+                if page == PageId::Guests && !self.guests_shown(cx) {
+                    continue;
+                }
                 zone = zone.child(self.nav_row(page, t, cx));
             }
             nav = nav.child(zone);
