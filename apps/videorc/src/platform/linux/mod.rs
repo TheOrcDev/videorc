@@ -26,6 +26,7 @@ pub mod desktop;
 mod inhibit;
 pub mod secrets;
 pub mod shortcuts;
+pub mod v4l2loopback;
 
 use std::sync::{Arc, Mutex, OnceLock};
 

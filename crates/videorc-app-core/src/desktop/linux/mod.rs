@@ -10,3 +10,4 @@ pub mod portal_shortcuts;
 pub mod secret_store;
 pub mod setup;
 pub mod sleep_inhibit;
+pub mod v4l2loopback;

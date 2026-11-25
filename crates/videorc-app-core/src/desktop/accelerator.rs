@@ -439,6 +439,58 @@ fn named_code(code: &str) -> Option<&'static str> {
     })
 }
 
+/// GPUI's key name (`m`, `5`, `f12`, `up`, `-`; the unmodified key, so ⌥M is
+/// `m`) as the DOM `code` [`KeyInput::code`] carries (`KeyM`, `Digit5`,
+/// `F12`, `ArrowUp`, `Minus`). A key no shortcut can hold is `Unsupported`,
+/// which the recorder refuses.
+pub fn code_for_gpui_key(key: &str) -> String {
+    let mut chars = key.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        if c.is_ascii_alphabetic() {
+            return format!("Key{}", c.to_ascii_uppercase());
+        }
+        if c.is_ascii_digit() {
+            return format!("Digit{c}");
+        }
+    }
+    if key
+        .strip_prefix('f')
+        .is_some_and(|n| n.parse::<u8>().is_ok_and(|n| (1..=24).contains(&n)))
+    {
+        return key.to_ascii_uppercase();
+    }
+    match key {
+        "escape" => "Escape",
+        "backspace" => "Backspace",
+        "delete" => "Delete",
+        "enter" => "Enter",
+        "space" => "Space",
+        "tab" => "Tab",
+        "up" => "ArrowUp",
+        "down" => "ArrowDown",
+        "left" => "ArrowLeft",
+        "right" => "ArrowRight",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" => "PageUp",
+        "pagedown" => "PageDown",
+        "insert" => "Insert",
+        "-" => "Minus",
+        "=" => "Equal",
+        "[" => "BracketLeft",
+        "]" => "BracketRight",
+        "\\" => "Backslash",
+        ";" => "Semicolon",
+        "'" => "Quote",
+        "," => "Comma",
+        "." => "Period",
+        "/" => "Slash",
+        "`" => "Backquote",
+        _ => "Unsupported",
+    }
+    .into()
+}
+
 /// `acceleratorKeyFromCode`: the physical key's Electron name. By `code`,
 /// not `key`: on macOS ⌥M reports `µ`, and a non-US layout would otherwise
 /// save a character Electron cannot register.

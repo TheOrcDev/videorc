@@ -81,6 +81,7 @@ pub mod clips;
 mod clips_actions;
 pub mod clips_ring;
 pub mod cloud;
+pub mod cloud_clips;
 pub mod dashboard;
 pub mod families;
 pub mod follow_runner;
