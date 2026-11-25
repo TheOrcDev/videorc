@@ -304,6 +304,7 @@ impl RenderOnce for ListRow {
 
 #[derive(IntoElement)]
 pub struct GroupedList {
+    id: Option<ElementId>,
     label: Option<SharedString>,
     /// Screen-reader name when there is no visible section label.
     accessibility_label: Option<SharedString>,
@@ -314,11 +315,18 @@ pub struct GroupedList {
 impl GroupedList {
     pub fn new() -> Self {
         GroupedList {
+            id: None,
             label: None,
             accessibility_label: None,
             rows: SmallVec::new(),
             appearance: None,
         }
+    }
+
+    /// Stable ID for an unnamed group, or repeated groups with the same label.
+    pub fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = Some(id.into());
+        self
     }
 
     /// The group's name, as a section label over it.
@@ -362,7 +370,8 @@ impl RenderOnce for GroupedList {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
         let appearance = self.appearance;
-        let a11y = self.accessibility_label.clone();
+        let a11y = self.accessibility_label.clone().or(self.label.clone());
+        let id = self.id.or_else(|| a11y.clone().map(ElementId::from));
         // Divider is painted inside each following row so the row stays 32 px
         // (Electron), not 33 with an external border.
         let rows = self.rows.into_iter().enumerate().map(|(index, row)| {
@@ -378,27 +387,35 @@ impl RenderOnce for GroupedList {
                 )
             })
         });
-        let mut root = div().flex().flex_col().gap(px(6.0)).role(gpui::Role::List);
-        if let Some(name) = a11y {
-            root = root.aria_label(name);
+        let root = div().flex().flex_col().gap(px(6.0));
+        let root = root
+            .children(self.label.map(|label| {
+                let label = SectionLabel::new(label);
+                div().px(px(4.0)).child(match appearance {
+                    Some(appearance) => label.appearance(appearance),
+                    None => label,
+                })
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .rounded(px(radius::ROW))
+                    .border_1()
+                    .border_color(hsla(t.border))
+                    .bg(hsla(t.inset))
+                    .children(rows),
+            );
+        // GPUI accessibility needs a stable element ID. Do not give every
+        // anonymous group one shared ID: sibling groups would collide.
+        match id {
+            Some(id) => root
+                .id(id)
+                .role(gpui::Role::List)
+                .when_some(a11y, |root, name| root.aria_label(name))
+                .into_any_element(),
+            None => root.into_any_element(),
         }
-        root.children(self.label.map(|label| {
-            let label = SectionLabel::new(label);
-            div().px(px(4.0)).child(match appearance {
-                Some(appearance) => label.appearance(appearance),
-                None => label,
-            })
-        }))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .overflow_hidden()
-                .rounded(px(radius::ROW))
-                .border_1()
-                .border_color(hsla(t.border))
-                .bg(hsla(t.inset))
-                .children(rows),
-        )
     }
 }

@@ -107,7 +107,6 @@ impl RenderOnce for StatusBadge {
             .flex()
             .flex_none()
             .h(px(22.0))
-            .w_fit()
             .items_center()
             .gap(px(6.0))
             .overflow_hidden()
