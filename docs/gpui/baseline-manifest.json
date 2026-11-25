@@ -994,9 +994,9 @@
       "width": 1100,
       "height": 720,
       "path": "buddy-clean-cut/locked-1100x720-dark-contrast.png",
-      "bytes": 145154,
-      "sha256": "a6b1d4a1a109a02b00a4d9965659d4cf4ef40d989e85c8674948f1f6a94cfab8",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 175508,
+      "sha256": "6b3d43988b5bfcbc8a7ae1fbc9c7930ffac6a355901347b3b9dc82d7a3c08415",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "buddy-clean-cut",
@@ -1006,9 +1006,9 @@
       "width": 1100,
       "height": 720,
       "path": "buddy-clean-cut/locked-1100x720-dark.png",
-      "bytes": 143435,
-      "sha256": "2ef1f0ac18c988cf12304705d31e666aebe3a42781ceaf3cfc7793535536ccc4",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 172980,
+      "sha256": "a784cec7087ebe815a3b53edae0a0c8c17373d2ccea00ccf029086fae907ee38",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "buddy-clean-cut",
@@ -1018,9 +1018,9 @@
       "width": 1100,
       "height": 720,
       "path": "buddy-clean-cut/locked-1100x720-light-contrast.png",
-      "bytes": 143920,
-      "sha256": "daaaff745650d4b60f8eae3b37d934b40287ca8842fcfe30292c688e24533f37",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 174154,
+      "sha256": "96bc0713c1f58ade87b0217e8c45e24eec0c181fd9bc3b3500e1629739564bc9",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "buddy-clean-cut",
@@ -1030,9 +1030,9 @@
       "width": 1100,
       "height": 720,
       "path": "buddy-clean-cut/locked-1100x720-light.png",
-      "bytes": 143035,
-      "sha256": "e68fafa55ba0b6b431dfbe61916e8952e1485aa6fcf6f6280e70a91654124e74",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 172490,
+      "sha256": "23a319d083d9650d111bd3a53ad63c1a97fa38bc3204b099cc93e0b061ccc275",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "buddy-clean-cut",
@@ -1042,9 +1042,9 @@
       "width": 1280,
       "height": 800,
       "path": "buddy-clean-cut/locked-1280x800-dark-contrast.png",
-      "bytes": 147202,
-      "sha256": "ff76b7abed7703726a68e2ef2f5defc3bb3208e45fa65f1c52376a49d1ed12df",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 176831,
+      "sha256": "12db223c4c0d9d636b1da7b7ca5a71c0564501939e870630521f4abce7ca4ab3",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "buddy-clean-cut",
@@ -1054,9 +1054,9 @@
       "width": 1280,
       "height": 800,
       "path": "buddy-clean-cut/locked-1280x800-dark.png",
-      "bytes": 145465,
-      "sha256": "80aa10f8ee2d19293b4467fb962176dd3ba63dc51d0e5c887ed47a604aa78de5",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 174363,
+      "sha256": "3bcfe1a6288334d0fc246b6fb3e8f971d1b718d3bfdee8be427f656790f4ab32",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "buddy-clean-cut",
@@ -1066,9 +1066,9 @@
       "width": 1280,
       "height": 800,
       "path": "buddy-clean-cut/locked-1280x800-light-contrast.png",
-      "bytes": 145868,
-      "sha256": "9ee5ae8eeb38b8aa75137fd92b24177be967b7e2cf776ae2b7a17931726c86e3",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 175435,
+      "sha256": "e8f81791eaa8da15e04728d9b39f944926d3946f6c088919a3ba3cdb24d1e0c8",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "buddy-clean-cut",
@@ -1078,9 +1078,9 @@
       "width": 1280,
       "height": 800,
       "path": "buddy-clean-cut/locked-1280x800-light.png",
-      "bytes": 145190,
-      "sha256": "ff1aa8d7c2a469570d344228c09f3fefa55f084f21eb9f29d969ea6e6fababb4",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 173987,
+      "sha256": "dd3bc51d1163d9158055383d5825fdb4ffe9ccbdd52ba5dca6645353d20c7c20",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "buddy-clean-cut",
@@ -1090,9 +1090,9 @@
       "width": 960,
       "height": 660,
       "path": "buddy-clean-cut/locked-960x660-dark-contrast.png",
-      "bytes": 141532,
-      "sha256": "3b0dbb0cd73ee3015c0935c230afaa0205b1bed2113b52b0cb8378f1c20bf651",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 170358,
+      "sha256": "626cb6225d4f01d78c207f5024f02af44ed8bd9b0b35777374f7e8df04215367",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "buddy-clean-cut",
@@ -1102,9 +1102,9 @@
       "width": 960,
       "height": 660,
       "path": "buddy-clean-cut/locked-960x660-dark.png",
-      "bytes": 139740,
-      "sha256": "0cad6738b904c2d465e19031ea855f397d4cf08617aec1b38a3b6f330ca05d98",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 167926,
+      "sha256": "a90e77624522a0aa1c4c2a2ef4eceed34fcb8bd173d78852b61a22ef3be161ca",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "buddy-clean-cut",
@@ -1114,9 +1114,9 @@
       "width": 960,
       "height": 660,
       "path": "buddy-clean-cut/locked-960x660-light-contrast.png",
-      "bytes": 140309,
-      "sha256": "060ccc3c76240e68957923cbe0dafd3995a070570974465e108081e163ebb978",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 169170,
+      "sha256": "6e6b4b6e0c2a14ddd14b9971ab22aece4fda837d5f4718d6446801b4952e845c",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "buddy-clean-cut",
@@ -1126,9 +1126,9 @@
       "width": 960,
       "height": 660,
       "path": "buddy-clean-cut/locked-960x660-light.png",
-      "bytes": 139326,
-      "sha256": "d59b9e26cbf57730112dcfd9befd487cf927a60700366596ba1527b10c4b41ec",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 167554,
+      "sha256": "b0037a772547b2d24db82f2b8f4d907550a047fdee19e96a5c55dd4359d6a81c",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "buddy-clean-cut",
@@ -3202,9 +3202,9 @@
       "width": 1280,
       "height": 800,
       "path": "library-player/default-1280x800-dark-contrast.png",
-      "bytes": 200909,
-      "sha256": "34fb9d8110eaa28a25af77ea29c144d4c69db35d4194af406bdf0bfbfab6fc3e",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 226064,
+      "sha256": "70b50ce316170014b5827993d4708bf592716e75d057427ba56f8a59cf6b56ee",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library-player",
@@ -3214,9 +3214,9 @@
       "width": 1280,
       "height": 800,
       "path": "library-player/default-1280x800-dark.png",
-      "bytes": 222682,
-      "sha256": "23e7adeaf3fae3e7cdd9fd682605dd82ad7aa670014a428ef4c177f0cab1da4c",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 222293,
+      "sha256": "ea89c7d1f6a8dece9009a407d9f078c91d27f493f0f8e8f8b7c6be9533c72db8",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library-player",
@@ -3226,9 +3226,9 @@
       "width": 1280,
       "height": 800,
       "path": "library-player/default-1280x800-light-contrast.png",
-      "bytes": 210304,
-      "sha256": "db5e40b57503d10f76e937fa0b65a6e5e66e5e5f1c9022e48aaab5adb22f5daf",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 235171,
+      "sha256": "1589ff8745383f8924a78284d462ac69efca6aef326f97010c59e221f79271ab",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library-player",
@@ -3238,9 +3238,9 @@
       "width": 1280,
       "height": 800,
       "path": "library-player/default-1280x800-light.png",
-      "bytes": 232854,
-      "sha256": "62b15322ad100856cee49de866948a2fcb24758b415a9ff5c9b79d37c171d059",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 232180,
+      "sha256": "a19d5bcef079dc9a0f61b0f873cdf707212d653075cd2269274efccaf8f0029a",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3250,9 +3250,9 @@
       "width": 1100,
       "height": 720,
       "path": "library/default-1100x720-dark-contrast.png",
-      "bytes": 179774,
-      "sha256": "db025dd0c63066e928c5936322136b510a2d095750fe5c4316a201d2f09b6c9c",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 161518,
+      "sha256": "39ed3876c38b1da94bf990e8a4a3443feb37f4274746aa537e0c06de345bca0b",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3262,9 +3262,9 @@
       "width": 1100,
       "height": 720,
       "path": "library/default-1100x720-dark.png",
-      "bytes": 177458,
-      "sha256": "f0dce4d38bd8a6d5179d5961ba5eb6605f2bc30b7e537bad6245b808cefe1dff",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 159381,
+      "sha256": "9bf7b187e42c47068bd6dc4b6f48c10e261756c46b38ea76d92ad831b5fe0c67",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3274,9 +3274,9 @@
       "width": 1100,
       "height": 720,
       "path": "library/default-1100x720-light-contrast.png",
-      "bytes": 178320,
-      "sha256": "aa57d658c51df93f7133a64ece98ab58807336ba3e3ff540bd79ab3ab4efd61b",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 160330,
+      "sha256": "5c795cfa0767f7339d877d8d07742a23c7d1a6033add90b17f987ff9730506dc",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3286,9 +3286,9 @@
       "width": 1100,
       "height": 720,
       "path": "library/default-1100x720-light.png",
-      "bytes": 176725,
-      "sha256": "99d9033274ba811f778ad84be136eabeab422e14513ecd26d5a15d2583d31172",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 158988,
+      "sha256": "1840240dce59501c27d55777f6739533c6c3b096b25aa0d55fcdb4015c9355fd",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3298,9 +3298,9 @@
       "width": 1280,
       "height": 800,
       "path": "library/default-1280x800-dark-contrast.png",
-      "bytes": 193498,
-      "sha256": "0767c599612daf6cee822ce0fbf31d57ba5e0d450c3b7830cf0a9fe55c3bcf54",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 171746,
+      "sha256": "24542e94440b83458c358d35e5f0a2aaaf80a18474634db69ca9074156294828",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3310,9 +3310,9 @@
       "width": 1280,
       "height": 800,
       "path": "library/default-1280x800-dark.png",
-      "bytes": 191390,
-      "sha256": "490218d7082b9d48ab46834fc6dede99df932d3fb8b3504200da0c15382fb001",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 169819,
+      "sha256": "57a482a98753ffbf40d71173d5ce63f4595f6df271aabbefd6ce19dfb91ff5c4",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3322,9 +3322,9 @@
       "width": 1280,
       "height": 800,
       "path": "library/default-1280x800-light-contrast.png",
-      "bytes": 192016,
-      "sha256": "d9f2031ba37b098faedad5a744d448ae35ffe6bd0c3ff5d4bbf725d8636a267e",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 170621,
+      "sha256": "758e9d7d0caeff550055221a494881a5382b346e637133ee8eeaa153466e6eee",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3334,9 +3334,9 @@
       "width": 1280,
       "height": 800,
       "path": "library/default-1280x800-light.png",
-      "bytes": 190483,
-      "sha256": "f91303b7b47f8725a6cf133e3906389820ab443b49eb2f836ca24eb2b9e5cb3f",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 169282,
+      "sha256": "cdee087f154f41a218d44e9f19b71f985998cace88f6940486fef49974d183b5",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3346,9 +3346,9 @@
       "width": 960,
       "height": 660,
       "path": "library/default-960x660-dark-contrast.png",
-      "bytes": 160186,
-      "sha256": "248f4afb63aee217cce01bac265d8fc30869dbb84f3519a0640e34b006ee276b",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 150777,
+      "sha256": "838118ca9eedd172e26efbd4a6da6244c4008161562638bc6a8757c76f7fd4ca",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3358,9 +3358,9 @@
       "width": 960,
       "height": 660,
       "path": "library/default-960x660-dark.png",
-      "bytes": 158153,
-      "sha256": "14f204735fa4735ec8a0adf51772c4cfdec803361867dc4bb30ff8e4dec64823",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 147619,
+      "sha256": "eb2b6c0b31f1ecb6d3fb9b109bc97046cd5ab92839d4ea9e80b678b66cdcac66",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3370,9 +3370,9 @@
       "width": 960,
       "height": 660,
       "path": "library/default-960x660-light-contrast.png",
-      "bytes": 158923,
-      "sha256": "8aa6746ad837c77dcf7d9b4a800b000e27c516265e928fefdb978be2d8ed3c19",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 149627,
+      "sha256": "1109f988699d553e544046f91505ba0352b6453e4acb309701550cd6adb12256",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3382,9 +3382,9 @@
       "width": 960,
       "height": 660,
       "path": "library/default-960x660-light.png",
-      "bytes": 157188,
-      "sha256": "cbb1f01dddfebb0c8019d4d94aef53ef317934da0c57f57c63fa8eb897e2f0e9",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 148241,
+      "sha256": "c9ff8f433bf6432dbdc76ac74a610a0d826b57e28ccd00778520212c0c6b19ef",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3394,9 +3394,9 @@
       "width": 1280,
       "height": 800,
       "path": "library/kebab-menu-1280x800-dark-contrast.png",
-      "bytes": 225833,
-      "sha256": "0d2b2ec425192653d061161a3599fde108494a9d8bfe1dc13ee9e40440ff1bf0",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 209531,
+      "sha256": "ffbf400bdd2e7af92fe7c7758eaa1b2ea2a3bebef9ee1fe77661e3914a7e688b",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3406,9 +3406,9 @@
       "width": 1280,
       "height": 800,
       "path": "library/kebab-menu-1280x800-dark.png",
-      "bytes": 223352,
-      "sha256": "6e062c267a25759a11ab2b296a55c377490696be6493cd5f96baa3f38934ae58",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 207282,
+      "sha256": "c1432e1dfdf80b861872049c46549a8cac9e72a525cac2a1a0e252053aecbd2b",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3418,9 +3418,9 @@
       "width": 1280,
       "height": 800,
       "path": "library/kebab-menu-1280x800-light-contrast.png",
-      "bytes": 230130,
-      "sha256": "5a558a307f5f7b51ac3628e4c93f943aaebd48500b3adf33556ce1639d51fc69",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 213591,
+      "sha256": "562e82f599792b839912b834da969bc0e7174bcf47fdb64e20352d225b710bd2",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "library",
@@ -3430,9 +3430,9 @@
       "width": 1280,
       "height": 800,
       "path": "library/kebab-menu-1280x800-light.png",
-      "bytes": 228578,
-      "sha256": "f05d9e639d406658f12fe5f1868e10fe27d623de97c416a42984590e20ab1256",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
+      "bytes": 212161,
+      "sha256": "5339e429702de061ff2aa19d986ca22fcf120ddb97d491b4f91efeaa2f908a74",
+      "appCommit": "94793b26ad615c0ae8091c1cd4bb0eb9607e1889"
     },
     {
       "screen": "livestream-discord",
