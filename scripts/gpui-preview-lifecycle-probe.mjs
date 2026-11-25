@@ -10,9 +10,10 @@
 //    the phase is back at presenting with frames advancing.
 // 3. ⌘P cycles (P131, P541): Close Preview (`closed: true`, nothing shown),
 //    then ⌘P opens it where it was, presenting again. Repeated
-//    VIDEORC_PREVIEW_LIFECYCLE_CYCLES times (10) so it never sticks. Frames
-//    presented while closed are recorded (an observation, not a gate: the
-//    hidden layer may keep its feed).
+//    VIDEORC_PREVIEW_LIFECYCLE_CYCLES times (10) so it never sticks. A
+//    closed Preview parks (L1's #2207, as Electron's close): no frame
+//    presents while it is closed, and the status says why ("The Preview is
+//    closed: no surface until it opens.").
 // 4. The Preview window (macOS): open, ⌘P closes it and reopens it as a
 //    window, its close button (`preview-window-os-close`, the should-close
 //    path) leaves the Preview closed, ⌘P opens the window again, and
@@ -132,7 +133,18 @@ export async function runGpuiPreviewLifecycleProbe() {
           { budgetMs: 5000, label: phaseOf }
         )
         if (closed.floatingOpen) throw new Error(`cycle ${cycle}: closed with its window open`)
-        whileClosed.push((await presentedAdvance(command, 300)).advance)
+        const parked = await presentedAdvance(command, 300)
+        whileClosed.push(parked.advance)
+        if (parked.advance > 0) {
+          throw new Error(
+            `cycle ${cycle}: the closed Preview still presented ${parked.advance} frames in 300 ms`
+          )
+        }
+        if (!/closed/i.test(parked.last?.message ?? '')) {
+          throw new Error(
+            `cycle ${cycle}: a parked Preview's status should say it is closed, got ${JSON.stringify(parked.last?.message)}`
+          )
+        }
         const opened = Date.now()
         await togglePreview()
         await waitUntil(
