@@ -71,7 +71,21 @@ pub trait ShellSmoke: 'static {
     fn toast(&self, request: &UiToastRequest, cx: &mut App) -> Result<Value, String>;
     /// `open-tab`: the main window shows `page`, as its sidebar row would.
     fn open_page(&self, page: PageId, cx: &mut App) -> Result<(), String>;
+    /// The preview's commands ([`PREVIEW_COMMANDS`]): its state, and its own
+    /// window opened, closed or toggled.
+    fn preview(&self, command: &str, cx: &mut App) -> Result<Value, String>;
 }
+
+/// The preview's commands on the GPUI app. The preview draws in the main
+/// window (docked) or its own (floating, macOS); Electron's surface and
+/// host commands have no GPUI form and stay "not supported".
+pub const PREVIEW_COMMANDS: &[&str] = &[
+    "inspect-native-preview-runtime",
+    "preview-window-close",
+    "preview-window-open",
+    "preview-window-state",
+    "preview-window-toggle",
+];
 
 /// `open-tab {tab, waitFor?}` on the main window. `tab` is Electron's
 /// trigger id (`studio`, `sources`, `layout`, `streaming`, …) or a page's own
@@ -83,15 +97,22 @@ pub struct ShellCommands {
 
 impl SmokeCommandHandler for ShellCommands {
     fn handles(&self, command: &str) -> bool {
-        command == "open-tab"
+        command == "open-tab" || PREVIEW_COMMANDS.contains(&command)
     }
 
     fn run<'a>(
         &'a self,
-        _command: &'a str,
+        command: &'a str,
         params: serde_json::Map<String, Value>,
     ) -> videorc_app_core::smoke::CommandFuture<'a> {
         Box::pin(async move {
+            if PREVIEW_COMMANDS.contains(&command) {
+                let command = command.to_string();
+                return self
+                    .ui
+                    .run(move |cx| shell(cx)?.preview(&command, cx))
+                    .await?;
+            }
             let tab = params
                 .get("tab")
                 .and_then(Value::as_str)

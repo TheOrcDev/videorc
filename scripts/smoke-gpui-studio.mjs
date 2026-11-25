@@ -10,7 +10,9 @@
 // 1. Isolation: the backend's database, secrets and recordings live in the
 //    smoke's own directory.
 // 2. Preview: the compositor renders the committed scene
-//    (`sceneRevision == frameSceneRevision`) and its frames advance.
+//    (`sceneRevision == frameSceneRevision`) and its frames advance; the
+//    preview element is docked and presenting, and on macOS its own window
+//    opens and docks back (`preview-window-open` / `-close` / `-state`).
 // 3. The Studio page: the Record button (`session-record`) is in the main
 //    window's tree and says "Record".
 // 4. Session: a smoke run picks no devices, so Record first says why it is
@@ -89,6 +91,38 @@ async function main() {
       `gpui-studio: preview renders scene ${latest.sceneRevision}, ` +
         `${latest.framesRendered - first.framesRendered} new frames ✓`
     )
+
+    // 2b. The preview element itself: docked in the Studio and presenting,
+    // then (macOS) its own window opened and docked back.
+    const previewState = (command = 'preview-window-state') =>
+      requestSmokeCommand(smoke, command, {})
+    const waitPreview = async (what, holds) => {
+      const until = Date.now() + previewBudgetMs
+      let seen = await previewState('inspect-native-preview-runtime')
+      while (!holds(seen)) {
+        if (Date.now() > until) {
+          throw new Error(`gpui-studio: FAIL — the preview never ${what}: ${JSON.stringify(seen)}`)
+        }
+        await new Promise((done) => setTimeout(done, 250))
+        seen = await previewState()
+      }
+      return seen
+    }
+    await waitPreview(
+      'presented docked',
+      (seen) => seen?.mode === 'docked' && seen?.phase === 'presenting'
+    )
+    console.log('gpui-studio: preview docked and presenting ✓')
+    if (process.platform === 'darwin') {
+      await previewState('preview-window-open')
+      await waitPreview('opened its own window', (seen) => seen?.floatingOpen === true)
+      await previewState('preview-window-close')
+      await waitPreview(
+        'docked back',
+        (seen) => seen?.mode === 'docked' && seen?.floatingOpen === false
+      )
+      console.log('gpui-studio: Preview window opened and docked back ✓')
+    }
 
     // 3. The Studio page.
     const record = await ui.waitFor(RECORD, { timeoutMs: 15000 })

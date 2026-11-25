@@ -284,6 +284,35 @@ impl Preview {
         false
     }
 
+    /// The smoke driver's view of the preview (`inspect-native-preview-runtime`,
+    /// `preview-window-state`): where it is, its phase, and what it says.
+    pub fn smoke_state(&self) -> serde_json::Value {
+        #[cfg(target_os = "macos")]
+        let floating_open = self.floating.is_some();
+        #[cfg(not(target_os = "macos"))]
+        let floating_open = false;
+        serde_json::json!({
+            "mode": self.mode.as_str(),
+            "phase": self.phase.as_str(),
+            "nativeReady": self.native_ready(),
+            "dockedShown": self.docked_shown,
+            "canFloat": self.can_float(),
+            "floatingOpen": floating_open,
+            "words": self.docked_words().map(|words| serde_json::json!({
+                "title": words.title,
+                "detail": words.detail,
+            })),
+        })
+    }
+
+    /// The Preview's own window while it is open (macOS), for the driver.
+    pub fn floating_window(&self) -> Option<gpui::AnyWindowHandle> {
+        #[cfg(target_os = "macos")]
+        return self.floating.map(Into::into);
+        #[cfg(not(target_os = "macos"))]
+        None
+    }
+
     /// Whether the Preview can open in its own window here.
     pub fn can_float(&self) -> bool {
         self.native_ready()
