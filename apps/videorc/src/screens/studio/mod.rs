@@ -10,8 +10,10 @@
 
 pub mod alerts;
 pub mod audio;
+pub mod background;
 pub mod chat;
 pub mod layout;
+pub mod quick_settings;
 pub mod scenes;
 pub mod session;
 pub mod space;
@@ -39,6 +41,7 @@ use alerts::{CloudResumeSlot, StudioRequest};
 use audio::AudioSection;
 use chat::ChatSection;
 use layout::{INSPECTOR_MAX_PX, StudioLayout};
+use quick_settings::QuickSettingsSection;
 use scenes::ScenesSection;
 use session::SessionSection;
 use space::{KEY_CONTEXT, SPACE, SpaceAction, SpacePress, ToggleRecord, space_action};
@@ -62,6 +65,8 @@ pub struct StudioPage {
     /// Chat in Studio (P188): draws nothing until it shows.
     chat: Entity<ChatSection>,
     audio: Entity<AudioSection>,
+    /// Camera / Captions / Chat mirrors (P248–P263).
+    quick_settings: Entity<QuickSettingsSection>,
     takeover: Entity<TakeoverSection>,
     /// The Scenes section under the preview (P273: Scenes first in the
     /// bottom row; Soundboard and the vertical leg fill in after it).
@@ -90,6 +95,7 @@ impl StudioPage {
         session: Entity<SessionSection>,
         chat: Entity<ChatSection>,
         audio: Entity<AudioSection>,
+        quick_settings: Entity<QuickSettingsSection>,
         takeover: Entity<TakeoverSection>,
         scenes: Entity<ScenesSection>,
         window: &mut Window,
@@ -117,6 +123,8 @@ impl StudioPage {
         .detach();
         cx.subscribe(&audio, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
+        cx.subscribe(&quick_settings, |_, _, open: &OpenPage, cx| cx.emit(*open))
+            .detach();
         cx.subscribe(&takeover, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
         cx.subscribe(&scenes, |_, _, open: &OpenPage, cx| cx.emit(*open))
@@ -136,6 +144,7 @@ impl StudioPage {
             session,
             chat,
             audio,
+            quick_settings,
             takeover,
             scenes,
             width: 0.,
@@ -330,8 +339,7 @@ impl Render for StudioPage {
                     .flatten(),
             );
         // "Session inspector" (P114): cloud resume, the session section,
-        // chat, audio, quick settings and takeover, in that order. Chat and
-        // quick settings fill their slots as they land.
+        // chat, audio, quick settings and takeover, in that order.
         let inspector = div()
             .id("studio-session-inspector")
             .flex()
@@ -342,6 +350,7 @@ impl Render for StudioPage {
             .child(self.session.clone())
             .child(self.chat.clone())
             .child(self.audio.clone())
+            .child(self.quick_settings.clone())
             .child(self.takeover.clone());
         let transport = self.transport.clone();
         // `StudioDashboardBottomRow`: under the preview stage, in the
