@@ -36,7 +36,7 @@ use videorc_kit::tokens::{Theme, radius, text};
 
 use super::controls::Knob;
 use super::editor::copy;
-use super::inspector::meta_line;
+use super::inspector::{adjust_icon, meta_line};
 use super::{SceneNavigate, ScenePage};
 
 /// A banner row's checkerboard: 4 px squares over the 36 × 20 thumbnail.
@@ -57,8 +57,7 @@ fn labelled(label: &'static str, body: impl IntoElement) -> gpui::Div {
 
 impl ScenePage {
     /// P589–P595: the overlay item's section.
-    // TODO(kit): AdjustIcon (SlidersHorizontal) on the title, CaptionsIcon
-    // on the Live captions row.
+    // TODO(kit): CaptionsIcon on the Live captions row.
     pub(super) fn overlay_section(
         &self,
         view: &InspectorView,
@@ -70,7 +69,9 @@ impl ScenePage {
         };
         let item = overlay.item;
         let blocked = overlay.blocked.is_some();
-        let mut section = PanelSection::new("scene-overlay-item").title(view.title.clone());
+        let mut section = PanelSection::new("scene-overlay-item")
+            .icon(adjust_icon(t))
+            .title(view.title.clone());
         if let Some(line) = overlay.off_line {
             section = section.description(line);
         }
@@ -116,7 +117,7 @@ impl ScenePage {
                 ] {
                     let page = cx.entity().downgrade();
                     section = section.child(
-                        SettingsRow::new(id, label).child(
+                        SettingsRow::new(id, label).flush(true).child(
                             Switch::new(SharedString::from(format!("{id}-switch")))
                                 .accessibility_label(label)
                                 .checked(on)
@@ -373,17 +374,18 @@ impl ScenePage {
             let repeat_id = banner.id.clone();
             timing = timing
                 .child(
-                    SettingsRow::new("scene-banner-hide-after-row", copy::HIDE_AFTER).child(
-                        hide_after.on_change(move |value, _, cx| {
+                    SettingsRow::new("scene-banner-hide-after-row", copy::HIDE_AFTER)
+                        .flush(true)
+                        .child(hide_after.on_change(move |value, _, cx| {
                             let id = hide_id.clone();
                             let _ = hide_page.update(cx, |page, cx| {
                                 page.set_banner_number(id, "hideAfterSec", &value, cx)
                             });
-                        }),
-                    ),
+                        })),
                 )
                 .child(
                     SettingsRow::new("scene-banner-repeat-row", copy::SHOW_EVERY)
+                        .flush(true)
                         .description(inspector_copy::BANNER_REPEAT_DESCRIPTION)
                         .child(repeat.on_change(move |value, _, cx| {
                             let id = repeat_id.clone();
@@ -396,14 +398,13 @@ impl ScenePage {
         section = section.child(timing);
 
         // P610.
-        // TODO(kit): ArrowRight (inline-end); CaretRight stands in.
         section
             .child(
                 div().flex().justify_end().child(
                     Button::new("scene-banner-manage")
                         .label(inspector_copy::MANAGE_IN_IMAGES)
                         .variant(ButtonVariant::Ghost)
-                        .child(icon(IconName::CaretRight, 14., hsla(t.foreground)))
+                        .child(icon(IconName::ArrowRight, 16., hsla(t.foreground)))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.navigate(SceneNavigate::Page(PageId::Assets), cx)
                         })),

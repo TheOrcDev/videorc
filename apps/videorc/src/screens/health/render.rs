@@ -5,10 +5,11 @@ use videorc_app_core::studio::cloud_program_health::{self as cloud_health, Progr
 use videorc_app_core::studio::virtual_camera::camera_copy;
 use videorc_kit::{
     Alert, AlertVariant, Button, ButtonSize, ButtonVariant, GroupedList, ListRow, PanelSection,
+    StatusBadge,
     dialog::Dialog,
     icon::{IconName, icon},
     scroll_area::ScrollArea,
-    status_dot::{StatusDot, StatusTone},
+    status_dot::StatusTone,
     theme::{self, FONT, TypeScale, hsla},
     tokens::{Theme, radius, size, text},
 };
@@ -255,11 +256,7 @@ impl HealthScreen {
                             SharedString::from(format!("{id}-stage-{index}")),
                             label.clone(),
                         )
-                        .child(
-                            StatusDot::new(SharedString::from(format!("{id}-state-{index}")))
-                                .tone(tone(words.tone))
-                                .label(words.value.clone()),
-                        ),
+                        .child(StatusBadge::new(words.value.clone()).tone(tone(words.tone))),
                     )
                     .child(detail.clone()),
             );
@@ -317,11 +314,7 @@ impl HealthScreen {
                     ListRow::new(SharedString::from(row.id.clone()), row.label.clone())
                         .compact(true)
                         .context(row.detail.clone())
-                        .child(
-                            StatusDot::new(SharedString::from(format!("{}-status", row.id)))
-                                .tone(program_tone(row.tone))
-                                .label(row.status.clone()),
-                        ),
+                        .child(StatusBadge::new(row.status.clone()).tone(program_tone(row.tone))),
                 );
             }
             body = body.child(list);
@@ -344,9 +337,9 @@ impl Render for HealthScreen {
         {
             shown += 1;
             checks = checks.child(
-                StatusDot::new(check.id)
-                    .tone(tone(check.tone))
-                    .label(format!("{} · {}", check.label, check.value)),
+                StatusBadge::new(check.value.clone())
+                    .label(check.label)
+                    .tone(tone(check.tone)),
             );
         }
         let check_list = div()
@@ -432,6 +425,7 @@ impl Render for HealthScreen {
                     } else {
                         h::SUPPORT_BUNDLE_LABEL
                     })
+                    .icon(IconName::Bug)
                     .variant(ButtonVariant::Outline)
                     .disabled(self.export_pending || !self.studio.is_connected())
                     .on_click(cx.listener(|this, _, _, cx| this.export(cx))),

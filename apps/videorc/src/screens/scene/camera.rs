@@ -38,7 +38,7 @@ use videorc_protocol::SceneSourceKind;
 
 use super::controls::{Field, Knob};
 use super::editor::copy;
-use super::inspector::meta_line;
+use super::inspector::{adjust_icon, meta_line};
 use super::model::copy as list_copy;
 use super::{SceneNavigate, ScenePage};
 use crate::screens::studio::background::image_tiles;
@@ -144,9 +144,10 @@ impl ScenePage {
 
         // P544, P556: the name section.
         // TODO(kit): ResetIcon (ArrowCounterClockwise) on Reset camera
-        // settings; AdjustIcon on the title.
+        // settings.
         sections.push(
             PanelSection::new("scene-camera-section")
+                .icon(adjust_icon(t))
                 .title(view.title.clone())
                 .children(self.visibility_row(view, cx))
                 .child(
@@ -295,16 +296,18 @@ impl ScenePage {
             let mirror_page = cx.entity().downgrade();
             section = section
                 .child(
-                    SettingsRow::new("scene-camera-mirror", copy::MIRROR_CAMERA).child(
-                        Switch::new("scene-camera-mirror-switch")
-                            .accessibility_label(copy::MIRROR_CAMERA)
-                            .checked(lens.mirror)
-                            .on_change(move |on, _, cx| {
-                                let _ = mirror_page.update(cx, |page, _| {
-                                    page.patch_layout("cameraMirror", json!(on))
-                                });
-                            }),
-                    ),
+                    SettingsRow::new("scene-camera-mirror", copy::MIRROR_CAMERA)
+                        .flush(true)
+                        .child(
+                            Switch::new("scene-camera-mirror-switch")
+                                .accessibility_label(copy::MIRROR_CAMERA)
+                                .checked(lens.mirror)
+                                .on_change(move |on, _, cx| {
+                                    let _ = mirror_page.update(cx, |page, _| {
+                                        page.patch_layout("cameraMirror", json!(on))
+                                    });
+                                }),
+                        ),
                 )
                 .child(self.knob_row(Knob::CameraZoom, copy::ZOOM, false, None, t, cx))
                 .child(self.knob_row(Knob::PanX, copy::PAN_X, false, None, t, cx))

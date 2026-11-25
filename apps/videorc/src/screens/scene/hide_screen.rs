@@ -231,7 +231,8 @@ impl ScenePage {
         let search = InputGroup::new("add-app-search", &self.add_app_search)
             .accessibility_label(copy::SEARCH_OPEN_APPS_LABEL)
             .start(InputGroupAddon::start().child(icon(IconName::MagnifyingGlass, 14., muted)));
-        let mut list = GroupedList::new().label(copy::OPEN_APPS);
+        // cmdk's `CommandList label`: a name for assistive tech only.
+        let mut list = GroupedList::new().accessibility_label(copy::OPEN_APPS);
         for app in matching {
             let (bundle_id, name) = (app.bundle_id.clone(), app.name.clone());
             list = list.row(
