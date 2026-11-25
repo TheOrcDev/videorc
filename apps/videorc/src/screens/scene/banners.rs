@@ -22,6 +22,7 @@ use videorc_app_core::nav::PageId;
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::collapsible::Collapsible;
 use videorc_kit::empty::Empty;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::label::Label;
@@ -308,39 +309,62 @@ impl ScenePage {
                 .child(back),
         ));
 
-        // P608, P609: Timing, closed until opened for this banner.
-        // TODO(kit): Collapsible; the trigger turns CaretDown by hand.
+        // P608, P609: Timing, closed until opened for this banner
+        // (`<Collapsible>`, its trigger in an `<h3>`).
         let open = self.controls.timing_open_for.as_deref() == Some(banner.id.as_str());
         let trigger_id = banner.id.clone();
         let mut caret = icon(IconName::CaretDown, 14., hsla(t.muted_foreground));
         if open {
             caret = caret.with_transformation(Transformation::rotate(percentage(0.5)));
         }
-        let mut timing = div().flex().flex_col().gap(px(8.)).child(
-            div()
-                .id("scene-banner-timing")
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .min_w_0()
-                .child(div().flex_none().child(Label::new(copy::TIMING)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child(banner.timing_summary.clone().unwrap_or_default()),
-                )
-                .child(caret)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let opened =
-                        this.controls.timing_open_for.as_deref() == Some(trigger_id.as_str());
-                    this.controls.timing_open_for = (!opened).then(|| trigger_id.clone());
+        let summary = banner.timing_summary.clone().unwrap_or_default();
+        // A heading's text never names the button it sits in, so the
+        // header carries Electron's name: the title, then the summary.
+        let timing_name = if summary.is_empty() {
+            copy::TIMING.to_string()
+        } else {
+            format!("{}, {summary}", copy::TIMING)
+        };
+        let accent = hsla(t.accent);
+        // `-mx-2 px-2 py-1.5 rounded-row hover:bg-accent`: the label keeps
+        // the other fields' left edge, the hover block reaches past it.
+        let trigger = div()
+            .id("scene-banner-timing")
+            .role(gpui::Role::Heading)
+            .aria_level(3)
+            .flex()
+            .items_center()
+            .w_full()
+            .min_w_0()
+            .gap(px(8.))
+            .px(px(8.))
+            .py(px(6.))
+            .rounded(px(radius::ROW))
+            .hover(move |style| style.bg(accent))
+            .child(div().flex_none().child(Label::new(copy::TIMING)))
+            .child(
+                div()
+                    .ml_auto()
+                    .min_w_0()
+                    .truncate()
+                    .type_scale(text::META)
+                    .text_color(hsla(t.muted_foreground))
+                    .child(summary),
+            )
+            .child(caret);
+        let timing_page = cx.entity().downgrade();
+        let mut timing = Collapsible::new("scene-banner-timing-toggle")
+            .unstyled(true)
+            .open(open)
+            .accessibility_label(timing_name)
+            .trigger(trigger)
+            .on_toggle(move |opened, _, cx| {
+                let id = trigger_id.clone();
+                let _ = timing_page.update(cx, |page, cx| {
+                    page.controls.timing_open_for = opened.then_some(id);
                     cx.notify();
-                })),
-        );
+                });
+            });
         if open {
             let mut hide_after = Select::new("scene-banner-hide-after")
                 .accessibility_label(copy::HIDE_AFTER)
@@ -372,30 +396,41 @@ impl ScenePage {
             let hide_id = banner.id.clone();
             let repeat_page = cx.entity().downgrade();
             let repeat_id = banner.id.clone();
-            timing = timing
-                .child(
-                    SettingsRow::new("scene-banner-hide-after-row", copy::HIDE_AFTER)
-                        .flush(true)
-                        .child(hide_after.on_change(move |value, _, cx| {
-                            let id = hide_id.clone();
-                            let _ = hide_page.update(cx, |page, cx| {
-                                page.set_banner_number(id, "hideAfterSec", &value, cx)
-                            });
-                        })),
-                )
-                .child(
-                    SettingsRow::new("scene-banner-repeat-row", copy::SHOW_EVERY)
-                        .flush(true)
-                        .description(inspector_copy::BANNER_REPEAT_DESCRIPTION)
-                        .child(repeat.on_change(move |value, _, cx| {
-                            let id = repeat_id.clone();
-                            let _ = repeat_page.update(cx, |page, cx| {
-                                page.set_banner_number(id, "repeatEveryMin", &value, cx)
-                            });
-                        })),
-                );
+            // `CollapsibleContent className="flex flex-col gap-3 pt-2"`, back
+            // on the fields' edge.
+            timing = timing.content(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .pt(px(8.))
+                    .px(px(8.))
+                    .child(
+                        SettingsRow::new("scene-banner-hide-after-row", copy::HIDE_AFTER)
+                            .flush(true)
+                            .child(hide_after.on_change(move |value, _, cx| {
+                                let id = hide_id.clone();
+                                let _ = hide_page.update(cx, |page, cx| {
+                                    page.set_banner_number(id, "hideAfterSec", &value, cx)
+                                });
+                            })),
+                    )
+                    .child(
+                        SettingsRow::new("scene-banner-repeat-row", copy::SHOW_EVERY)
+                            .flush(true)
+                            .description(inspector_copy::BANNER_REPEAT_DESCRIPTION)
+                            .child(repeat.on_change(move |value, _, cx| {
+                                let id = repeat_id.clone();
+                                let _ = repeat_page.update(cx, |page, cx| {
+                                    page.set_banner_number(id, "repeatEveryMin", &value, cx)
+                                });
+                            })),
+                    ),
+            );
         }
-        section = section.child(timing);
+        // The wrapper's `-mx-2` widens the header button itself, so the
+        // whole hover block toggles.
+        section = section.child(div().mx(px(-8.)).child(timing));
 
         // P610.
         section
