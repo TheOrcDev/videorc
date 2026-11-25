@@ -20,7 +20,7 @@ mod onboarding;
 mod onboarding_view;
 mod persona;
 pub(crate) mod pictures;
-pub(crate) mod preview;
+mod preview;
 mod reactions;
 mod status;
 mod test_dialog;
