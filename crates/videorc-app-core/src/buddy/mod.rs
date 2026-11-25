@@ -27,6 +27,7 @@ pub mod motion;
 pub mod persona;
 pub mod pet_pack;
 pub mod pet_player;
+pub mod reactions;
 pub mod test_view;
 
 /// `DEFAULT_AVATAR_NAME` (`shared/avatar-name.ts`, plan 239 D2): the official
