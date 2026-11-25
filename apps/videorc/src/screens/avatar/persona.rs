@@ -471,7 +471,10 @@ pub(super) fn render_persona(
         .w(px(288.))
         .max_w_full()
         .child(
+            // `text-base font-medium`.
             Input::new("avatar-name", &fields.name)
+                .text_size(16.)
+                .font_weight(gpui::FontWeight::MEDIUM)
                 .accessibility_label(words::NAME_LABEL)
                 .invalid(fields.name_invalid),
         )
@@ -529,6 +532,7 @@ pub(super) fn render_persona(
         words::PERSONALITY_LABEL,
         Some(words::personality_description(&persona.name)),
         Textarea::new("avatar-personality", &fields.personality)
+            .min_height(80.)
             .accessibility_label(words::PERSONALITY_LABEL)
             .invalid(text_length(&personality_draft) > PERSONALITY_MAX_CHARS)
             .into_any_element(),
@@ -553,6 +557,7 @@ pub(super) fn render_persona(
         words::ABOUT_FIELD_LABEL,
         Some(words::ABOUT_HELP.to_string()),
         Textarea::new("avatar-about", &fields.about)
+            .min_height(96.)
             .accessibility_label(words::ABOUT_FIELD_LABEL)
             .invalid(text_length(&about_draft) > CONTEXT_MAX_CHARS)
             .into_any_element(),
@@ -585,11 +590,7 @@ pub(super) fn render_persona(
                     .size(ButtonSize::Icon)
                     .accessibility_label(words::BUBBLE_ZOOM)
                     .tooltip(words::BUBBLE_ZOOM_HINT)
-                    .child(icon(
-                        IconName::MagnifyingGlass,
-                        16.,
-                        hsla(t.muted_foreground),
-                    ))
+                    .child(icon(IconName::MagnifyingGlassPlus, 16., hsla(t.foreground)))
                     .on_click(move |_, _, cx| {
                         zoom_button.update(cx, |screen, cx| screen.open_bubble_zoom(cx))
                     }),
