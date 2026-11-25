@@ -679,6 +679,7 @@ fn main() -> Result<()> {
                 let talk_show_host = cx.new(|cx| {
                     screens::studio::talk_show_host::TalkShowRoomHost::new(
                         studio.clone(),
+                        core_handle.clone(),
                         talk_show.clone(),
                         cx,
                     )
