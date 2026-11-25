@@ -356,8 +356,11 @@ impl SidekickScreen {
                             reports.payload = payload;
                             reports.error = None;
                         }
-                        Ok(Err(error)) | Err(error) => {
+                        Ok(Err(error)) => {
                             reports.error = Some(error);
+                        }
+                        Err(error) => {
+                            reports.error = Some(error.to_string());
                         }
                     }
                 }
