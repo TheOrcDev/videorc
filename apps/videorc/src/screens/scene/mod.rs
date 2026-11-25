@@ -111,6 +111,8 @@ pub struct ScenePage {
     dialogs: Entity<SceneDialogs>,
     /// The global keys: a key the OS refused shows why on its chip (P461).
     hotkeys: crate::app::hotkeys::Hotkeys,
+    /// A row drag: (the dragged row's index, the row under the pointer).
+    row_drag: Option<(usize, usize)>,
     /// The scene rows' stills, by `picture_key` (P458).
     row_stills: std::collections::HashMap<String, Arc<gpui::Image>>,
     /// Hide screen's Add app… popover, and its search.
@@ -220,6 +222,7 @@ impl ScenePage {
             dialogs,
             hotkeys,
             row_stills: Default::default(),
+            row_drag: None,
             add_app_open: false,
             add_app_search,
             status_timer: None,

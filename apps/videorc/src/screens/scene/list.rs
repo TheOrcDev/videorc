@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 
 use gpui::{
-    AnyElement, Context, FontWeight, KeyDownEvent, SharedString, Window, div, prelude::*, px,
+    AnyElement, Context, DragMoveEvent, FontWeight, KeyDownEvent, Render, SharedString, Window,
+    div, prelude::*, px,
 };
 use serde_json::Value;
 use videorc_app_core::client::methods::ScenePicturesGet;
@@ -24,6 +25,7 @@ use videorc_app_core::scenes::thumb::{ThumbCorner, ThumbPart, ThumbSize, row_fra
 use videorc_app_core::studio::Connection;
 use videorc_app_core::studio::scene_on_stream::SCREEN_PRIVACY_GET_METHOD;
 use videorc_app_core::studio::scenes_section::copy::EDIT_SCENE;
+use videorc_app_core::studio::scenes_section::{DropEdge, drop_edge};
 use videorc_app_core::studio::transport::transport_active;
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
@@ -244,14 +246,63 @@ impl ScenePage {
 
         let index = row.index;
         let count = self.model.list.rows.len();
+        // P464: the drop line, 2 px in the ring's tone, on the edge the
+        // dragged row lands on (only while a drag runs).
+        let edge = self
+            .row_drag
+            .filter(|(_, over)| *over == index && cx.has_active_drag())
+            .and_then(|(from, _)| drop_edge(from, index));
+        let ring = hsla(t.ring);
         let mut host = div()
             .id(SharedString::from(format!("scene-row-{id}")))
+            .relative()
             .group(KEBAB_HOST)
-            .child(line);
+            .child(line)
+            .children(edge.map(|edge| {
+                let line = div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .h(px(2.))
+                    .rounded_full()
+                    .bg(ring);
+                match edge {
+                    DropEdge::Before => line.top(px(-1.)),
+                    DropEdge::After => line.bottom(px(-1.)),
+                }
+            }));
         if let Some(reason) = row.disabled_reason.clone() {
             host = host.tooltip(tooltip(reason));
         }
         if !read_only {
+            let drop_id = id.clone();
+            host = host
+                .on_drag(
+                    RowDrag {
+                        id: id.clone(),
+                        index,
+                        name: row.name.clone().into(),
+                    },
+                    |drag: &RowDrag, _, _, cx| cx.new(|_| drag.clone()),
+                )
+                .on_drag_move(
+                    cx.listener(move |this, event: &DragMoveEvent<RowDrag>, _, cx| {
+                        if event.bounds.contains(&event.event.position) {
+                            let from = event.drag(cx).index;
+                            if this.row_drag != Some((from, index)) {
+                                this.row_drag = Some((from, index));
+                                cx.notify();
+                            }
+                        }
+                    }),
+                )
+                .on_drop(cx.listener(move |this, drag: &RowDrag, _, cx| {
+                    this.row_drag = None;
+                    cx.notify();
+                    if drag.id != drop_id {
+                        this.move_scene(&drag.id, index);
+                    }
+                }));
             let moved = id.clone();
             host = host.on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                 let Some(step) = move_step(event) else {
@@ -542,6 +593,31 @@ impl ScenePage {
             let added = studio.insert_scenes(&[copy], None, &HashMap::new()).await;
             eprintln!("[videorc-app] Scene duplicate: {added}");
         });
+    }
+}
+
+/// A dragged scene row (P464): its name under the pointer.
+#[derive(Clone)]
+struct RowDrag {
+    id: String,
+    index: usize,
+    name: SharedString,
+}
+
+impl Render for RowDrag {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme::resolve(None, window, cx);
+        div()
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(radius::CHIP))
+            .border_1()
+            .border_color(hsla(t.glass_float_rim))
+            .bg(hsla(t.glass_float))
+            .font_family(theme::FONT)
+            .type_scale(text::META)
+            .text_color(hsla(t.popover_foreground))
+            .child(self.name.clone())
     }
 }
 
