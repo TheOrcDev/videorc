@@ -69,6 +69,8 @@ pub struct PreviewSetup {
     pub runtime: tokio::runtime::Handle,
     pub backend: watch::Receiver<BackendState>,
     pub logger: Logger,
+    /// The Studio, whose scene the preview shows (S3.1b).
+    pub studio: std::sync::Arc<videorc_app_core::Studio<videorc_app_core::BackendClient>>,
 }
 
 /// Where the layer is.
@@ -133,7 +135,7 @@ impl Preview {
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            let _ = (setup.runtime, setup.backend, window);
+            let _ = (setup.runtime, setup.backend, setup.studio, window);
             setup.logger.log(
                 Level::Warn,
                 "[preview] no preview element on this platform yet (S2.3b on Windows)",
@@ -153,8 +155,9 @@ impl Preview {
             runtime,
             backend,
             logger,
+            studio,
         } = setup;
-        let choice = scene::choose(|name| std::env::var(name).ok());
+        let choice = scene::choose(|name| std::env::var(name).ok(), Some((&studio, &runtime)));
         logger.log(
             Level::Info,
             &format!("[preview] the preview shows {}", choice.described),

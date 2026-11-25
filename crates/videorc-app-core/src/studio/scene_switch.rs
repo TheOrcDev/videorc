@@ -2791,6 +2791,13 @@ impl<B: StudioBackend> Studio<B> {
         }
     }
 
+    /// The newest layout transaction's scene revision (0 before any): the
+    /// preview feed adopts the scene a transaction committed instead of
+    /// reloading it (`skipNextConfigSceneReloadRef`, plan 220 S3.1e).
+    pub fn layout_commit_revision(&self) -> u64 {
+        self.lock().scenes.switch.committed_revision()
+    }
+
     /// What the preview feed's idle reload (`loadScene`) reads before its
     /// request.
     pub fn scene_reload_mark(&self) -> ReloadMark {

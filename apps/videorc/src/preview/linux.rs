@@ -85,8 +85,9 @@ pub(super) fn new(setup: PreviewSetup, window: &mut Window, cx: &mut App) -> Ent
         runtime,
         backend,
         logger,
+        studio,
     } = setup;
-    let choice = scene::choose(|name| std::env::var(name).ok());
+    let choice = scene::choose(|name| std::env::var(name).ok(), Some((&studio, &runtime)));
     logger.log(
         Level::Info,
         &format!("[preview] the preview shows {}", choice.described),
