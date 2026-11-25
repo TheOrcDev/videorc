@@ -13,14 +13,13 @@ use videorc_app_core::editor::inspector::{
     HideScreenView, LayoutInput, LayoutSectionView, hide_screen_view, layout_section_view,
 };
 use videorc_app_core::scenes::list::saved_scene_blocked_reason;
-use videorc_app_core::scenes::model::{
-    SavedScene, same_scene_audio, scene_audio, scene_source_problems,
-};
+use videorc_app_core::scenes::model::{SavedScene, scene_audio, scene_source_problems};
 use videorc_app_core::scenes::section::{
     scene_card_words, scene_cards_camera_gaps, scene_slot_keys_line,
 };
 use videorc_app_core::scenes::store::{DeleteRule, can_delete_scene};
 use videorc_app_core::scenes::v2::SceneShows;
+use videorc_app_core::studio::scenes_section::scene_keeps_audio;
 use videorc_app_core::studio::transport::transport_active;
 
 /// The scene list's words (`scene-entries.tsx`, `scene-dialogs.tsx`,
@@ -272,7 +271,10 @@ impl SceneModel {
                         .into_iter()
                         .map(|(_, accelerator)| accelerator)
                         .collect(),
-                    save_audio_reason: same_scene_audio(scene.audio.as_ref(), &working_audio)
+                    // Electron's menu rule, the Studio's too: off only when
+                    // the saved audio is exactly the working audio (a scene
+                    // with none saved can save it).
+                    save_audio_reason: scene_keeps_audio(scene.audio.as_ref(), &working_audio)
                         .then_some(copy::SAVE_AUDIO_SAME),
                     delete,
                     delete_switch_to,
