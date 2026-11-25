@@ -82,6 +82,16 @@ export const SCREENS = Object.freeze([
     sections: ['Scene ⌘3: Scenes list', 'Scene ⌘3: Layout section', 'Scene ⌘3: Hide screen']
   },
   {
+    id: 'studio-retro',
+    title: 'Studio ⌘1, Retro LCD look',
+    deck: 'shell-studio',
+    open: page('studio'),
+    // Settings → General → Retro LCD Studio, on for this screen only.
+    settings: { key: 'videorc.settings', patch: { retroLcdStudio: true } },
+    baseline: { screen: 'studio-retro', state: 'default' },
+    sections: ['Audio section, Retro LCD look', 'Retro LCD transport']
+  },
+  {
     id: 'palette',
     title: '⌘K command palette',
     deck: 'shell-studio',

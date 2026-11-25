@@ -319,6 +319,21 @@ function electronOnly({ screens, baselineDir, parsed }) {
   }
 }
 
+/**
+ * Merges `patch` into the JSON object the settings store keeps under `key`;
+ * answers a function that puts the old value back.
+ */
+async function patchSetting(rpc, { key, patch }) {
+  const current = await rpc('ui.settings.get', { keys: [key] })
+  const stored = current?.entries?.[key]
+  const parsed = typeof stored === 'string' ? JSON.parse(stored) : (stored ?? {})
+  await rpc('ui.settings.set', { put: { [key]: JSON.stringify({ ...parsed, ...patch }) } })
+  return () =>
+    stored === undefined
+      ? rpc('ui.settings.set', { delete: [key] })
+      : rpc('ui.settings.set', { put: { [key]: stored } })
+}
+
 async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed }) {
   const jxa = join(stateDir, 'windows.js')
   writeFileSync(jxa, WINDOWS_JXA)
@@ -331,6 +346,8 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
   const command = (name, params = {}, timeoutMs = 20_000) =>
     requestSmokeCommand(smoke, name, params, { timeoutMs })
   const ui = createUiDriver(smoke, { app: 'gpui' })
+  const ws = await connectBackend(app.connections['backend-ready'], 60_000)
+  const rpc = (method, params = {}) => request(ws, 60_000, method, params)
   const entries = []
   try {
     await command('resize-window', WINDOW)
@@ -352,6 +369,10 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
         parity: rowsFor(parsed, screen),
         shots: []
       }
+      // A look the app keeps in a setting (Retro LCD): on for this screen,
+      // then back as it was. The app applies store changes live.
+      const restore = screen.settings ? await patchSetting(rpc, screen.settings) : null
+      if (restore) await sleep(SETTLE_MS)
       for (const look of LOOKS) {
         const shot = { look }
         const name = shotName(screen.id, look, 'gpui')
@@ -402,11 +423,13 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
         if (electron) shot.electron = electron
         entry.shots.push(shot)
       }
+      if (restore) await restore().catch((error) => log(`${screen.id}: ${error.message}`))
       if (screen.toast) await sleep(200)
       entries.push(entry)
       log(`${screen.id}: ${entry.shots.filter((s) => s.gpui?.image).length}/${LOOKS.length} shot`)
     }
   } finally {
+    ws.close()
     await app.stop()
   }
   return { sha, date: new Date().toISOString().slice(0, 10), window: WINDOW, screens: entries }
