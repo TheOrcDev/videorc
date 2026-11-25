@@ -95,7 +95,12 @@ impl SettingsScreen {
             f::Step::Permissions => self.permission_page(window, cx),
             f::Step::Goal => {
                 let mut choices = GroupedList::new();
-                for (goal, label, line) in [(f::Goal::Record, "Recordings", "Tutorials, demos and videos, saved on this Mac."), (f::Goal::Stream, "Livestreams", "Go live on YouTube, Twitch, Kick or X."), (f::Goal::Both, "Both", "Record and go live.")] {
+                // `goalChoices(deviceNoun)`: "saved on this Mac / PC / computer".
+                let record_line = format!(
+                    "Tutorials, demos and videos, saved on this {}.",
+                    videorc_app_core::format::device_noun(crate::app::hotkeys::node_platform())
+                );
+                for (goal, label, line) in [(f::Goal::Record, "Recordings", record_line), (f::Goal::Stream, "Livestreams", "Go live on YouTube, Twitch, Kick or X.".to_string()), (f::Goal::Both, "Both", "Record and go live.".to_string())] {
                     choices = choices.item(div().child(ListRow::new(label,label).child(Button::new(label).label(label).variant(ButtonVariant::Outline).disabled(locked).on_click(cx.listener(move |this, _, window, cx| { this.setup.goal = Some(goal); this.setup_next(window,cx); })))).child(line));
                 }
                 div().child("Pick what you'll do most. It only changes the next steps.").child(choices).into_any_element()
