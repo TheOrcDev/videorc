@@ -89,6 +89,8 @@ pub type AppStudio = Studio<BackendClient>;
 const DEFAULT_SETTLE_MS: u64 = 600;
 /// How long the switch may take to read back on (Electron's 5 s).
 const SWITCH_WAIT: Duration = Duration::from_secs(5);
+/// How long a settings write waits for the first `ui.settings.get`.
+const SETTINGS_WAIT: Duration = Duration::from_secs(30);
 /// How long a take may take to start or stop by default.
 const DEFAULT_SESSION_WAIT_MS: u64 = 30_000;
 /// The longest wait a smoke may ask for.
@@ -315,7 +317,25 @@ async fn wait_for(
 }
 
 impl StudioSmoke {
+    /// Waits until `ui.settings.get` has answered: before that a settings
+    /// write is refused (`ui-settings-not-hydrated`), and a smoke sent at
+    /// launch would race it.
+    async fn settings_ready(&self) -> Result<(), String> {
+        if self.studio.snapshot().settings.hydrated {
+            return Ok(());
+        }
+        wait_for(
+            self.studio.watch(),
+            SETTINGS_WAIT,
+            "the UI settings to load",
+            |snapshot| snapshot.settings.hydrated,
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn enable_synthetic_source(&self, params: Map<String, Value>) -> Result<Value, String> {
+        self.settings_ready().await?;
         let settle = Duration::from_millis(millis(&params, "settleMs", DEFAULT_SETTLE_MS));
         let snapshot = self.studio.snapshot();
         if test_pattern(&snapshot) {
@@ -381,6 +401,7 @@ impl StudioSmoke {
 
 impl StudioSmoke {
     async fn capture_configure(&self, params: Map<String, Value>) -> Result<Value, String> {
+        self.settings_ready().await?;
         let patch = params
             .get("config")
             .filter(|config| config.is_object())
