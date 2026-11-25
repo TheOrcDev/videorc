@@ -290,8 +290,10 @@ impl DestinationsPanel {
                                     2 => "everyone",
                                     _ => "none",
                                 };
+                                // Electron's plain `<SegmentedControl>` in a
+                                // SettingsRow: `w-fit`, the default size.
                                 SegmentedControl::new("discord-ping")
-                                    .small(true)
+                                    .fit(true)
                                     .accessibility_label(page_copy::PING)
                                     .value(Some(SharedString::from(value)))
                                     .option(Segment::new("none", page_copy::NO_PING))

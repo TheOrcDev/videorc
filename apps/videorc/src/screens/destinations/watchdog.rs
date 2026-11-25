@@ -83,8 +83,10 @@ impl DestinationsPanel {
         let mic_value = view
             .mic_muted_after_seconds
             .map(|seconds| SharedString::from(seconds.to_string()));
+        // Electron's `<SegmentedControl size="sm">` in a SettingsRow: `w-fit`.
         let mut mic_control = SegmentedControl::new("watchdog-mic-muted-after")
             .small(true)
+            .fit(true)
             .accessibility_label(ALERT_ME_AFTER)
             .value(mic_value)
             .on_change({
