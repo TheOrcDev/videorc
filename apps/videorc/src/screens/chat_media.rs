@@ -32,7 +32,7 @@ impl Picture {
 /// Decode route bytes into a [`Picture`].
 pub fn picture_from_bytes(bytes: Vec<u8>) -> Picture {
     match images::image_kind(&bytes) {
-        Ok(kind) => {
+        Some(kind) => {
             let format = match kind {
                 ImageKind::Png => ImageFormat::Png,
                 ImageKind::Jpeg => ImageFormat::Jpeg,
@@ -41,7 +41,7 @@ pub fn picture_from_bytes(bytes: Vec<u8>) -> Picture {
             };
             Picture::Ready(Arc::new(Image::from_bytes(format, bytes)))
         }
-        Err(_) => Picture::Failed,
+        None => Picture::Failed,
     }
 }
 
@@ -172,7 +172,7 @@ fn gif_block(gif: &Gif, pictures: &HashMap<String, Picture>, height_px: f32) -> 
                     .w_auto()
                     .max_w_full()
                     .object_fit(ObjectFit::Contain)
-                    .rounded(px(6.)),
+                    .rounded(px(videorc_kit::tokens::radius::CHIP)),
             )
             .into_any_element(),
         None => div()

@@ -643,7 +643,7 @@ mod tests {
             // The fixture nests participants under room; RoomStatus needs phase.
             let mut room = value.clone();
             if let Some(map) = room.as_object_mut() {
-                map.entry("phase".into()).or_insert(json!("open"));
+                map.entry("phase").or_insert(json!("open"));
             }
             RoomStatus::from_value(&room)
         });
@@ -693,7 +693,7 @@ mod tests {
                     ])
                 })
                 .collect();
-            assert_eq!(got, vector["expected"], "{name}");
+            assert_eq!(Value::Array(got), vector["expected"], "{name}");
             if let Some(includes) = vector.get("detailIncludes").and_then(Value::as_object) {
                 for (id, words) in includes {
                     let detail = rows

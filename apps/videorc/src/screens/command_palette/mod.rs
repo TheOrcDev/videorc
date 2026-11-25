@@ -8,7 +8,8 @@ use serde_json::json;
 use std::sync::Arc;
 use videorc_app_core::protocol::SoundboardState;
 use videorc_app_core::studio::{
-    camera_background_view, families, inspector::StartGates, transport::TransportView,
+    StudioBackend, camera_background_view, families, inspector::StartGates,
+    transport::TransportView,
 };
 use videorc_app_core::{BackendClient, StopOrigin, Studio};
 use videorc_app_core::{

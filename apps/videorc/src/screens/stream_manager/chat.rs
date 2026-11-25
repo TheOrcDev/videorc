@@ -657,7 +657,7 @@ impl ChatPane {
             return;
         };
         self.requesting.push(message.id.clone());
-        let toast_id = removal::undo_toast_id(&message.id);
+        let toast_id = SharedString::from(removal::undo_toast_id(&message.id));
         let title = removal::undo_toast_title(&message.author_name);
         let message_id = message.id.clone();
         let toaster = self.toaster.clone();
@@ -701,7 +701,10 @@ impl ChatPane {
         let studio = self.studio.clone();
         let runtime = self.runtime.clone();
         let message_id = message_id.to_string();
-        let job = runtime.spawn(async move { studio.request_chat_removal(&message_id).await });
+        let job = {
+            let message_id = message_id.clone();
+            runtime.spawn(async move { studio.request_chat_removal(&message_id).await })
+        };
         cx.spawn(async move |this, cx| {
             let result = job.await;
             let _ = this.update(cx, |pane, cx| {

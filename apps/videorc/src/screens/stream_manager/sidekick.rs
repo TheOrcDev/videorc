@@ -512,7 +512,7 @@ impl Render for SidekickPane {
                     Button::new("talk-consent-not-now")
                         .label(NOT_NOW)
                         .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::Sm)
+                        .size(ButtonSize::Default)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.answer_talk_consent(false, window, cx)
                         })),
@@ -520,7 +520,7 @@ impl Render for SidekickPane {
                 .footer(
                     Button::new("talk-consent-allow")
                         .label(ALLOW)
-                        .size(ButtonSize::Sm)
+                        .size(ButtonSize::Default)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.answer_talk_consent(true, window, cx)
                         })),

@@ -204,7 +204,7 @@ impl RenderOnce for Input {
                 state.update(cx, |state, cx| {
                     state.set_value(restore, window, cx);
                 });
-                window.blur();
+                window.blur(cx);
                 cx.stop_propagation();
             });
         }
