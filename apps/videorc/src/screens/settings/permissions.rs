@@ -7,7 +7,6 @@ use videorc_app_core::desktop::{
     },
 };
 use videorc_kit::{
-    badge::{Badge, BadgeVariant},
     button::{Button, ButtonVariant},
     empty::Empty,
     icon::{IconName, icon},
@@ -15,16 +14,18 @@ use videorc_kit::{
     panel_section::PanelSection,
     settings_row::SettingsRow,
     spinner::Spinner,
+    status_badge::StatusBadge,
+    status_dot::StatusTone,
 };
 
-/// `StatusBadge`'s tone: the colour lives in the dot.
-fn status_variant(tone: &str) -> BadgeVariant {
+/// `StatusBadge`'s `tone`: the colour lives in the dot.
+fn status_tone(tone: &str) -> StatusTone {
     match tone {
-        "good" => BadgeVariant::Success,
-        "warn" => BadgeVariant::Warning,
-        "neutral" => BadgeVariant::Neutral,
-        "bad" | "error" => BadgeVariant::Destructive,
-        _ => BadgeVariant::Outline,
+        "good" => StatusTone::Good,
+        "warn" => StatusTone::Warn,
+        "bad" | "error" => StatusTone::Error,
+        "live" => StatusTone::Live,
+        _ => StatusTone::Neutral,
     }
 }
 
@@ -113,7 +114,7 @@ impl SettingsScreen {
                         .text_color(hsla(t.foreground))
                         .child(row.label),
                 )
-                .child(Badge::new(row.status).variant(status_variant(row.tone)));
+                .child(StatusBadge::new(row.status).tone(status_tone(row.tone)));
             if row.spinning {
                 heading = heading.child(
                     Spinner::new(("permission-checking", index))

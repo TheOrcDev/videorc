@@ -12,7 +12,6 @@ use videorc_kit::{
     panel_section::PanelSection,
     progress::Progress,
     settings_row::SettingsRow,
-    tokens::font,
 };
 
 /// `OPEN_HEALTH_LABEL`.
@@ -104,7 +103,7 @@ impl SettingsScreen {
                                     .child("Version")
                                     .child(
                                         div()
-                                            .font_family(font::MONO[0])
+                                            .font_family(crate::lcd::SCREEN_FONT)
                                             .child(env!("CARGO_PKG_VERSION")),
                                     ),
                             )

@@ -52,9 +52,11 @@ use videorc_kit::select::Select;
 use videorc_kit::skeleton::Skeleton;
 use videorc_kit::slider::{Slider, SliderEvent, SliderState};
 use videorc_kit::spinner::Spinner;
+use videorc_kit::status_badge::StatusBadge;
+use videorc_kit::status_dot::StatusTone;
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, FONT, TypeScale, faded_over, hsla, with_alpha};
-use videorc_kit::tokens::{Shadow, Theme, fixed, font, radius, size, text};
+use videorc_kit::tokens::{Shadow, Theme, fixed, radius, size, text};
 use videorc_kit::tooltip::tooltip;
 
 use crate::app::permissions::Permissions;
@@ -735,12 +737,14 @@ fn meta_line(words: impl Into<SharedString>, t: &Theme) -> gpui::Div {
         .child(words.into())
 }
 
-/// `systemAccessStatus`'s tone as a status chip's variant.
-fn status_variant(tone: &str) -> BadgeVariant {
+/// `systemAccessStatus`'s tone as `StatusBadge`'s: the colour lives in the
+/// dot.
+fn status_tone(tone: &str) -> StatusTone {
     match tone {
-        "good" => BadgeVariant::Success,
-        "warn" => BadgeVariant::Warning,
-        _ => BadgeVariant::Neutral,
+        "good" => StatusTone::Good,
+        "warn" => StatusTone::Warn,
+        "bad" | "error" => StatusTone::Error,
+        _ => StatusTone::Neutral,
     }
 }
 
@@ -1302,7 +1306,7 @@ fn permissions_body(
                     .items_center()
                     .gap(px(8.))
                     .child(row_title(row.label, t))
-                    .child(Badge::new(status).variant(status_variant(tone)))
+                    .child(StatusBadge::new(status).tone(status_tone(tone)))
                     .children(checking.then(|| {
                         Spinner::new(("first-run-checking", index))
                             .accessibility_label("Checking permission…")
@@ -1918,7 +1922,7 @@ fn sound_body(
                     .min_w(px(56.))
                     .flex()
                     .justify_end()
-                    .font_family(font::MONO[0])
+                    .font_family(crate::lcd::SCREEN_FONT)
                     .type_scale(text::META)
                     .text_color(muted)
                     .child(format_db(gain)),
@@ -2037,15 +2041,15 @@ fn destinations_body(
                     .gap(px(8.))
                     .child(row_title(name, t))
                     .child(
-                        Badge::new(if connected {
+                        StatusBadge::new(if connected {
                             "Connected"
                         } else {
                             "Not connected"
                         })
-                        .variant(if connected {
-                            BadgeVariant::Success
+                        .tone(if connected {
+                            StatusTone::Good
                         } else {
-                            BadgeVariant::Neutral
+                            StatusTone::Neutral
                         }),
                     )
                     .children(account_label.map(|label| meta_line(label, t).truncate())),
