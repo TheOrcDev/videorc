@@ -70,8 +70,6 @@ fn fill_select(id: &'static str, picker: &PickerView, disabled: bool) -> Select 
             "Choose…".to_string()
         })
         .disabled(disabled)
-        // `trigger="inline"` fits its words (the kit Select is `w-fit`
-        // without a width); its ghost look is a kit request.
         .accessibility_label(section_copy::CAMERA)
         .value(selected.map(SharedString::from));
     for item in &picker.items {
@@ -250,13 +248,15 @@ impl QuickSettingsSection {
         let disabled = camera.row.disabled_reason.is_some();
         let entity = cx.entity().downgrade();
 
-        let picker = fill_select("quick-settings-camera", &camera.row.picker, disabled).on_change(
-            move |value, _, cx| {
+        // `trigger="inline"` (`quick-settings.tsx:92-111`): the row's value,
+        // borderless and right-aligned, its list 288 px at the end.
+        let picker = fill_select("quick-settings-camera", &camera.row.picker, disabled)
+            .inline(true)
+            .on_change(move |value, _, cx| {
                 let _ = entity.update(cx, |section, _| {
                     section.select_camera(value.to_string());
                 });
-            },
-        );
+            });
 
         let open = cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Sources)));
         // `InspectorRow`: `min-h-row py-0.5 pr-1 pl-3 gap-2.5`, the label
@@ -590,6 +590,7 @@ impl QuickSettingsSection {
                         .gap(px(8.))
                         .child(
                             fill_select("quick-settings-lcd-camera", &camera.row.picker, disabled)
+                                .trigger_with(lcd::picker_trigger(t))
                                 .on_change(move |value, _, cx| {
                                     let _ = entity.update(cx, |section, _| {
                                         section.select_camera(value.to_string());

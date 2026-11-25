@@ -238,6 +238,10 @@ pub struct FirstRunScreen {
     /// moving between them, and Look's first background card.
     goal_focus: [FocusHandle; 3],
     look_focus: FocusHandle,
+    /// The first enabled control in Permissions, Sound and Destinations'
+    /// body (a grant button, the microphone, Sign in…), and the primary.
+    body_focus: FocusHandle,
+    primary_focus: FocusHandle,
     /// The step that already took the keyboard (`shownStep`), so a step
     /// focuses its control once, when it appears.
     focused_step: Option<Step>,
@@ -326,6 +330,8 @@ impl FirstRunScreen {
             poster_started: false,
             goal_focus: std::array::from_fn(|_| cx.focus_handle()),
             look_focus: cx.focus_handle(),
+            body_focus: cx.focus_handle(),
+            primary_focus: cx.focus_handle(),
             focused_step: None,
         };
         screen.try_auto_show(cx);
@@ -1020,12 +1026,35 @@ impl Render for FirstRunScreen {
             .child(top)
             .child(heading);
 
+        // The step's first enabled control takes `body_focus` (once).
+        let mut first_control = Some(self.body_focus.clone());
+        let body = match self.step {
+            Step::Permissions => permissions_body(self, &entity, locked, &mut first_control, t),
+            Step::Goal => goal_body(noun, self.goal, &self.goal_focus, &entity, locked, t),
+            Step::Look => look_body(self, &snapshot, &entity, locked, t),
+            Step::Sound => sound_body(
+                self,
+                &snapshot,
+                &entity,
+                locked,
+                offline,
+                noun,
+                &mut first_control,
+                t,
+            ),
+            Step::Destinations => {
+                destinations_body(self, &entity, locked, offline, &mut first_control, t)
+            }
+        };
+        let body_has_control = first_control.is_none();
+
         // A new step takes the keyboard (`first-run-setup.tsx`): its marked
-        // control, else its first one. Goal marks the chosen row (the first
-        // when none is chosen); Look's first card is No background. The
-        // other steps' first controls are kit Buttons and Selects, which
-        // take a focus handle once K-L4-4 lands.
-        if self.focused_step != Some(self.step) {
+        // control, else its first enabled one, else the primary. Goal marks
+        // the chosen row (the first when none is chosen); Look's first card
+        // is No background. Permissions waits until its rows are real
+        // (`permissions-step.tsx`), never focusing a placeholder.
+        let waiting = self.step == Step::Permissions && !self.rows_ready();
+        if self.focused_step != Some(self.step) && !waiting {
             self.focused_step = Some(self.step);
             let target = match self.step {
                 Step::Goal => {
@@ -1037,20 +1066,15 @@ impl Render for FirstRunScreen {
                     Some(self.goal_focus[index].clone())
                 }
                 Step::Look if !locked => Some(self.look_focus.clone()),
+                Step::Look => None,
+                _ if body_has_control => Some(self.body_focus.clone()),
+                _ if !locked => Some(self.primary_focus.clone()),
                 _ => None,
             };
             if let Some(target) = target {
                 cx.on_next_frame(window, move |_, window, cx| window.focus(&target, cx));
             }
         }
-
-        let body = match self.step {
-            Step::Permissions => permissions_body(self, &entity, locked, t),
-            Step::Goal => goal_body(noun, self.goal, &self.goal_focus, &entity, locked, t),
-            Step::Look => look_body(self, &snapshot, &entity, locked, t),
-            Step::Sound => sound_body(self, &snapshot, &entity, locked, offline, noun, t),
-            Step::Destinations => destinations_body(self, &entity, locked, offline, t),
-        };
 
         // Back at the left, the step's one primary at the right; Your goal
         // has none (its rows are the action).
@@ -1073,6 +1097,7 @@ impl Render for FirstRunScreen {
         } else if self.step == Step::Permissions && !grants_ready {
             Some(
                 Button::new("first-run-next")
+                    .track_focus(&self.primary_focus)
                     .label("Skip for now")
                     .variant(ButtonVariant::Outline)
                     .disabled(locked)
@@ -1084,6 +1109,7 @@ impl Render for FirstRunScreen {
         } else {
             Some(
                 Button::new("first-run-next")
+                    .track_focus(&self.primary_focus)
                     .variant(ButtonVariant::Default)
                     .disabled(locked)
                     .child(next_label(self.mode, last))
@@ -1222,6 +1248,7 @@ fn permissions_body(
     screen: &FirstRunScreen,
     entity: &Entity<FirstRunScreen>,
     locked: bool,
+    first_control: &mut Option<FocusHandle>,
     t: &Theme,
 ) -> AnyElement {
     if screen.platform() == "linux" {
@@ -1332,10 +1359,15 @@ fn permissions_body(
             (Some(action), Some(label)) if row.id != SystemAccessRowId::SystemAudio => {
                 let pane = row.id.pane();
                 let busy = screen.pending_permission == Some(pane);
+                let disabled = locked || screen.pending_permission.is_some();
                 let mut button = Button::new(("first-run-grant", index))
                     .variant(ButtonVariant::Outline)
                     .accessibility_label(format!("{}: {label}", row.label))
-                    .disabled(locked || screen.pending_permission.is_some());
+                    .disabled(disabled);
+                // The first row with something to press takes the keyboard.
+                if !disabled && let Some(handle) = first_control.take() {
+                    button = button.track_focus(&handle);
+                }
                 if busy {
                     button = button.child(
                         Spinner::new(("first-run-grant-busy", index))
@@ -1859,6 +1891,7 @@ fn sound_body(
     locked: bool,
     offline: bool,
     noun: &str,
+    first_control: &mut Option<FocusHandle>,
     t: &Theme,
 ) -> AnyElement {
     let muted = hsla(t.muted_foreground);
@@ -1881,6 +1914,12 @@ fn sound_body(
         if device.kind == DeviceKind::Microphone {
             picker = picker.option(device.id.clone(), device.name.clone());
         }
+    }
+    // The microphone is the step's first control.
+    if !(locked || offline)
+        && let Some(handle) = first_control.take()
+    {
+        picker = picker.track_focus(&handle);
     }
     picker = picker.on_change({
         let entity = entity.clone();
@@ -1948,6 +1987,11 @@ fn sound_body(
             .child(
                 div().flex_1().min_w(px(0.)).flex().items_center().child(
                     Slider::new(&screen.mic_gain)
+                        // A fader from 0 dB, as the Studio's gain.
+                        .origin(
+                            -MICROPHONE_GAIN_RANGE.0
+                                / (MICROPHONE_GAIN_RANGE.1 - MICROPHONE_GAIN_RANGE.0),
+                        )
                         .accessibility_label("Microphone gain")
                         .disabled(locked),
                 ),
@@ -1958,7 +2002,7 @@ fn sound_body(
                     .min_w(px(56.))
                     .flex()
                     .justify_end()
-                    .font_family(crate::lcd::SCREEN_FONT)
+                    .font_family(videorc_kit::theme::FONT_MONO)
                     .type_scale(text::META)
                     .text_color(muted)
                     .child(format_db(gain)),
@@ -2049,6 +2093,7 @@ fn destinations_body(
     entity: &Entity<FirstRunScreen>,
     locked: bool,
     offline: bool,
+    first_control: &mut Option<FocusHandle>,
     t: &Theme,
 ) -> AnyElement {
     let platforms = screen.studio.platforms_now();
@@ -2096,13 +2141,18 @@ fn destinations_body(
                     t,
                 )
             }));
-        let sign_in = (!connected && !unavailable).then(|| {
+        let shows_sign_in = !connected && !unavailable;
+        let sign_in_focus = (shows_sign_in && !(locked || offline))
+            .then(|| first_control.take())
+            .flatten();
+        let sign_in = shows_sign_in.then(|| {
             Button::new(format!("first-run-signin-{id}"))
                 .label("Sign in…")
                 .variant(ButtonVariant::Outline)
                 .accessibility_label(format!("{name}: Sign in…"))
                 .disabled(locked || offline)
                 .tooltip("Finish sign-in in Destinations.")
+                .when_some(sign_in_focus, |button, handle| button.track_focus(&handle))
         });
         list = list.item(
             div()
@@ -2116,6 +2166,9 @@ fn destinations_body(
                 .children(sign_in),
         );
     }
+    // Open Destinations takes the keyboard when no Sign in… did.
+    let open_disabled = locked || !PageId::Live.ported();
+    let open_focus = (!open_disabled).then(|| first_control.take()).flatten();
     div()
         .flex()
         .flex_col()
@@ -2143,7 +2196,8 @@ fn destinations_body(
                     Button::new("first-run-open-destinations")
                         .label("Open Destinations")
                         .variant(ButtonVariant::Outline)
-                        .disabled(locked || !PageId::Live.ported())
+                        .disabled(open_disabled)
+                        .when_some(open_focus, |button, handle| button.track_focus(&handle))
                         .on_click({
                             let entity = entity.clone();
                             move |_, _, cx| {

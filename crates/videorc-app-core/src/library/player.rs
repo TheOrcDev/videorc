@@ -1022,7 +1022,10 @@ mod tests {
         ];
         let this = include_str!("player.rs");
         let this = &this[..this.find("#[cfg(test)]").unwrap()];
-        let (checked, missing) = super::super::copy::tests::unseen_constants(this, &sources);
+        let (checked, mut missing) = super::super::copy::tests::unseen_constants(this, &sources);
+        // GPUI's own words: Electron has no platform where the player plays
+        // without its picture (Windows until S2.3b's presenter).
+        missing.retain(|name| name != "NO_PICTURE_HERE_YET");
         assert!(
             checked >= 12,
             "found {checked} constants; the scan is broken"

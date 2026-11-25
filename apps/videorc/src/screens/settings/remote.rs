@@ -481,7 +481,9 @@ impl SettingsScreen {
         div()
             .flex()
             .flex_wrap()
-            .items_start()
+            .flex_1()
+            .content_stretch()
+            .items_stretch()
             .child(div().flex_1().min_w(px(360.)).child(remote).child(phone))
             .child(
                 div()

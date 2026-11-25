@@ -346,11 +346,13 @@ mod tests {
             entry(&store, "cloud-download:rec-1").title,
             "Cloud recording saved"
         );
+        // Another recording: a second event on rec-1's key would be a
+        // repeat and read "Twice. Disk full" (`repeatWords`, as Electron).
         store.publish(
-            cloud_download_failed("rec-1", "Couldn't download", Some("Disk full")),
+            cloud_download_failed("rec-2", "Couldn't download", Some("Disk full")),
             2_000,
         );
-        let download = entry(&store, "cloud-download:rec-1");
+        let download = entry(&store, "cloud-download:rec-2");
         assert_eq!(download.kind, "work-failed");
         assert_eq!(download.detail.as_deref(), Some("Disk full"));
 

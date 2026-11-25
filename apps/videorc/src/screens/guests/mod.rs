@@ -28,8 +28,9 @@ use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle, DialogSize};
 use videorc_kit::empty::Empty;
-use videorc_kit::icon::IconName;
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
+use videorc_kit::input_group::{InputGroup, InputGroupAddon};
 use videorc_kit::kebab_menu::{KebabMenu, KebabMenuItem, KebabReveal};
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
@@ -146,6 +147,8 @@ pub struct GuestsPanel {
     facts: Option<CloudRoomFacts>,
     profile: Option<ManagedOutputProfile>,
     full_profile: Option<talk_show_outputs::ManagedOutputProfile>,
+    /// Invite link's read-only field.
+    invite: Option<Entity<InputState>>,
     /// `talkShowOutputPlan`: what a room would open with now, or why not.
     output_plan: talk_show_outputs::TalkShowOutputPlan,
     connected: bool,
@@ -202,6 +205,7 @@ impl GuestsPanel {
             facts: None,
             profile: None,
             full_profile: None,
+            invite: None,
             output_plan,
             connected: false,
             session_active: false,
@@ -230,6 +234,27 @@ impl GuestsPanel {
         };
         panel.rebuild(cx);
         panel
+    }
+
+    /// The invite link's field, holding the room's link (or empty, so its
+    /// placeholder shows).
+    fn invite_input(
+        &mut self,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        let input = self
+            .invite
+            .get_or_insert_with(|| {
+                cx.new(|cx| InputState::new(window, cx).placeholder(INVITE_PLACEHOLDER))
+            })
+            .clone();
+        if input.read(cx).value().as_ref() != url {
+            let url = url.to_string();
+            input.update(cx, |input, cx| input.set_value(url, window, cx));
+        }
+        input
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
@@ -681,20 +706,20 @@ impl Render for GuestsPanel {
             );
         }
 
+        // `StatusDot` before the phase ("● Room closed"), pulsing while it
+        // opens or closes; the counts and the button trail.
         let room_row = SettingsRow::new("guests-room-row", phase_label)
-            .description(guests::ROOM_BACKSTAGE_TIME_LINE)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(StatusDot::new("guests-phase").tone(if room_open {
+            .label_leading(
+                StatusDot::new("guests-phase")
+                    .tone(if room_open {
                         StatusTone::Good
                     } else {
                         StatusTone::Neutral
-                    }))
-                    .child(room_trailing),
-            );
+                    })
+                    .pulse(room_pending || phase == RoomPhase::Closing),
+            )
+            .description(guests::ROOM_BACKSTAGE_TIME_LINE)
+            .child(room_trailing);
 
         let mut room_section = PanelSection::new("guests-room")
             .title(ROOM_SECTION)
@@ -752,6 +777,7 @@ impl Render for GuestsPanel {
             .and_then(|r| r.invite_url.clone())
             .unwrap_or_default();
         let no_link = invite_url.is_empty();
+        let invite_input = self.invite_input(&invite_url, window, cx);
         let mut invite = PanelSection::new("guests-invite").title(INVITE_SECTION);
         if let Some(line) = &limits_line {
             invite = invite.description(line.clone());
@@ -762,27 +788,20 @@ impl Render for GuestsPanel {
                     .flex()
                     .items_center()
                     .gap(px(8.))
+                    // `InputGroup` with a read-only input: it selects and
+                    // copies, never edits.
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .px(px(10.))
-                            .py(px(6.))
-                            .rounded(px(radius::CHIP))
-                            .bg(hsla(t.muted))
-                            .type_scale(text::META)
-                            .text_color(hsla(if no_link {
-                                t.muted_foreground
-                            } else {
-                                t.foreground
-                            }))
-                            .child(if no_link {
-                                INVITE_PLACEHOLDER.to_string()
-                            } else {
-                                invite_url.clone()
-                            })
-                            .id("guests-invite-url")
-                            .aria_label(INVITE_ARIA),
+                        div().flex_1().min_w(px(0.)).child(
+                            InputGroup::new("guests-invite-url", &invite_input)
+                                .start(InputGroupAddon::start().child(icon(
+                                    IconName::LinkSimple,
+                                    16.,
+                                    hsla(t.muted_foreground),
+                                )))
+                                .readonly(true)
+                                .disabled(disabled || no_link)
+                                .accessibility_label(INVITE_ARIA),
+                        ),
                     )
                     .child(
                         Button::new("guests-invite-copy")
@@ -805,6 +824,7 @@ impl Render for GuestsPanel {
                     .child(
                         Button::new("guests-invite-rotate")
                             .label(if self.rotating { MAKING } else { NEW_LINK })
+                            .icon(IconName::ArrowClockwise)
                             .variant(ButtonVariant::Outline)
                             .disabled(disabled || !room_open || self.rotating)
                             .when(!disabled && !room_open, |b| {

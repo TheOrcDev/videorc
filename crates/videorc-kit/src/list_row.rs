@@ -255,6 +255,7 @@ impl RenderOnce for ListRow {
                 .overflow_hidden()
                 .child(icon)
         });
+        let row_name = self.title.clone();
         let words = div()
             .min_w(px(0.0))
             .flex()
@@ -286,6 +287,11 @@ impl RenderOnce for ListRow {
             }))
             .children(self.alias);
         let has_status = !self.status_icons.is_empty();
+        // A row button with a control in it (a Switch in the meta slot) is
+        // Electron's ListRowButton: the button is stretched over the row
+        // (`after:absolute after:inset-0`) and the control sits on top of
+        // it, never inside it.
+        let stretched = self.on_click.is_some() && self.meta_element.is_some();
         let end = div()
             .flex_none()
             .flex()
@@ -314,8 +320,9 @@ impl RenderOnce for ListRow {
         let min_height = self.min_height.unwrap_or(height);
         let pad_y = self.py.unwrap_or(6.0);
         let gap = self.gap.unwrap_or(10.0);
-        let content = |row: gpui::Div| {
+        let content = |row: gpui::Div, overlay: Option<AnyElement>| {
             row.w_full()
+                .relative()
                 .when(!auto_height, |row| row.h(px(height)))
                 .when(auto_height, |row| row.min_h(px(min_height)).py(px(pad_y)))
                 .flex()
@@ -326,6 +333,9 @@ impl RenderOnce for ListRow {
                 .text_size(px(14.0))
                 .line_height(px(20.0))
                 .when(self.selected, |row| row.bg(hsla(t.accent)))
+                // Painted first, so everything after it (the words pass
+                // clicks through; a control takes its own) is on top.
+                .children(overlay)
                 .children(self.leading)
                 .children(tile)
                 .child(words)
@@ -333,6 +343,27 @@ impl RenderOnce for ListRow {
                 .child(end)
         };
         match self.on_click {
+            Some(on_click) if stretched => {
+                let ring = focus_ring(t);
+                let overlay = gpui_base::Button::new(self.id.clone())
+                    .disabled(self.disabled)
+                    .accessibility_label(row_name)
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .rounded(px(corner))
+                    .focus_visible(move |style| style.shadow(vec![ring]))
+                    .on_click(move |event, window, cx| on_click(event, window, cx))
+                    .into_any_element();
+                content(div(), Some(overlay))
+                    .id(SharedString::from(format!("{}/row", self.id)))
+                    .when(interactive, |row| {
+                        row.hover(|style| style.bg(hsla(t.accent)))
+                    })
+                    .when(self.disabled, |row| row.opacity(0.5))
+                    .into_any_element()
+            }
             Some(on_click) => {
                 let ring = focus_ring(t);
                 gpui_base::Button::new(self.id)
@@ -346,10 +377,10 @@ impl RenderOnce for ListRow {
                     .when(self.disabled, |row| row.opacity(0.5))
                     .focus_visible(move |style| style.shadow(vec![ring]))
                     .on_click(move |event, window, cx| on_click(event, window, cx))
-                    .child(content(div()))
+                    .child(content(div(), None))
                     .into_any_element()
             }
-            None => content(div())
+            None => content(div(), None)
                 .id(self.id)
                 .when(interactive, |row| {
                     row.hover(|style| style.bg(hsla(t.accent)))
