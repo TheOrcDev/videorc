@@ -64,6 +64,16 @@ pub trait Platform: Send + Sync {
         ))
     }
 
+    /// The smokes' `preview-window-os-close`: the window closes as a click
+    /// on its close button closes it, so the app's own should-close path
+    /// runs (never `remove_window`, which skips it).
+    fn perform_close(&self, _window: &Window) -> OsResult<()> {
+        Err(format!(
+            "Closing a window as its close button does isn't written for {} yet (plan 260 S2.6)",
+            std::env::consts::OS
+        ))
+    }
+
     /// The smokes' `raise-window`: the window at `level`, in front, without
     /// taking focus.
     fn raise_window(&self, _window: &Window, _level: SmokeWindowLevel) -> OsResult<()> {

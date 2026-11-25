@@ -96,6 +96,9 @@ pub const PREVIEW_COMMANDS: &[&str] = &[
     "preview-retry",
     "preview-window-close",
     "preview-window-open",
+    // The Preview window closed as its close button closes it (the app's
+    // should-close path): the Preview is then closed (P131).
+    "preview-window-os-close",
     "preview-window-state",
     "preview-window-toggle",
 ];

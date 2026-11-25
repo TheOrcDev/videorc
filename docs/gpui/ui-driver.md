@@ -149,15 +149,28 @@ core), `smoke:preview-real-launch` (on GPUI the main side of the chain is `inspe
 this computer as the Output page starts it). The GPUI watchdog's `[preview] healing` / `stalled` lines count as
 Electron's `[preview-watch]` ones.
 
+### The GPUI native preview probes (L6, 2026-11-25)
+
+`VIDEORC_APP=gpui pnpm probe:preview-lifecycle` runs `scripts/gpui-preview-lifecycle-probe.mjs` (Electron's
+probe hands over; no new package script while the 0.38 guard holds). It drives the paths a person takes and
+reads L1's preview through the smoke server: docked and presenting (`presentedFrameId` advances), Retry while
+presenting (`retried: true`, `retry preview (n)`, `reset-native-path` on macOS, back at presenting), ⌘P close and
+reopen cycles (`VIDEORC_PREVIEW_LIFECYCLE_CYCLES`, 10), the Preview window (macOS: ⌘P, its close button through
+`preview-window-os-close`, docking back), and Retry after `preview.surface.destroy`. A forced first-frame fallback
+has no switch yet: a named SKIP. `preview-window-os-close` closes the Preview window as its close button does
+(`performClose:`, so `on_window_should_close` runs). `VIDEORC_GPUI_APP_BINARY` runs a prebuilt app
+(`~/cloud-test/gpui-builds/latest`) instead of building one. Evidence: `gpui-preview-lifecycle.json` in the
+output folder.
+
 Wait for a GPUI product path or new commands first:
 
-| Smoke                                                                                                                                            | Missing on GPUI                                                                                                                                                 |
-| ------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `smoke:captions-live`                                                                                                                            | the renderer's caption frame submissions (live PNG and cue frames)                                                                                              |
-| `smoke:html-overlay`                                                                                                                             | the Chromium page host (`videorc-page-host` / P5-D10); `html-overlay-stats` answers `{ stats: null }` until then (named SKIP on GPUI)                           |
-| `smoke:screens` theme screenshots                                                                                                                | the port itself (C1): `capture-page` captures the composited window on macOS now (gap 3)                                                                        |
-| `smoke:preview-pump-diagnostics`, `smoke:preview-click-focus`                                                                                    | Electron's present-pump and click-focus probes                                                                                                                  |
-| `smoke:recording-native-preview`, `smoke:preview-surface`, `probe:preview-lifecycle`, `probe:preview-window`, `smoke:preview-interaction-stress` | Electron's native-surface and window commands; they need GPUI-specific probes, not a port                                                                       |
+| Smoke                                                                                                                                            | Missing on GPUI                                                                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `smoke:captions-live`                                                                                                                            | the renderer's caption frame submissions (live PNG and cue frames)                                                                                                                                             |
+| `smoke:html-overlay`                                                                                                                             | the Chromium page host (`videorc-page-host` / P5-D10); `html-overlay-stats` answers `{ stats: null }` until then (named SKIP on GPUI)                                                                          |
+| `smoke:screens` theme screenshots                                                                                                                | the port itself (C1): `capture-page` captures the composited window on macOS now (gap 3)                                                                                                                       |
+| `smoke:preview-pump-diagnostics`, `smoke:preview-click-focus`                                                                                    | Electron's present-pump and click-focus probes                                                                                                                                                                 |
+| `smoke:recording-native-preview`, `smoke:preview-surface`, `probe:preview-lifecycle`, `probe:preview-window`, `smoke:preview-interaction-stress` | Electron's native-surface and window commands; they need GPUI-specific probes, not a port                                                                                                                      |
 | `probe:comments-window`                                                                                                                          | Electron fixtures (`push-*`/`seed-*`/person-card/layout-metrics) stay Electron-only. GPUI path: `comments-window-probe-gpui.mjs` (open/place/raise/hide + `#2142` composited capture on macOS; Win/Linux SKIP) |
 
 ### The Notes and Stream Manager windows on GPUI (2026-11-25)
