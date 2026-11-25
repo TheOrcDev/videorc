@@ -29,7 +29,23 @@ fn lock<T>(slot: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 pub(crate) fn set_avatar(params: CloudRoomAvatarSetParams) {
+    // Plan 260 S1.8 (L1): `build: true` asks the backend to build the
+    // content itself (`room_avatar_build`); content the client built turns
+    // that off.
+    crate::room_avatar_build::set_build(params.build == Some(true) && params.content.is_none());
     *lock(&AVATAR) = Some(params);
+    CHANGED.notify_waiters();
+}
+
+/// The content the backend built (`room_avatar_build`), under the client's
+/// own guests switch; nothing once the client stopped asking for it.
+pub(crate) fn set_built_avatar(content: serde_json::Value) {
+    let mut avatar = lock(&AVATAR);
+    let Some(held) = avatar.as_mut().filter(|held| held.build == Some(true)) else {
+        return;
+    };
+    held.content = Some(content);
+    drop(avatar);
     CHANGED.notify_waiters();
 }
 
@@ -71,6 +87,7 @@ pub(crate) fn scene() -> Option<(u64, CloudRoomSceneCommitParams)> {
 
 /// A hold ended: nothing the Studio sent before carries over.
 pub(crate) fn clear() {
+    crate::room_avatar_build::set_build(false);
     *lock(&AVATAR) = None;
     *lock(&SCENE) = None;
     *lock(&SCENE_STATUS) = None;
