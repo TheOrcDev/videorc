@@ -769,8 +769,8 @@ describe('UI settings store (plan 220 S1.4a)', () => {
         delete: deletes,
         at: Object.fromEntries([...Object.keys(put), ...deletes].map((key) => [key, at]))
       })
-    // Enumerated newest first: the t20 journal before the t10 one. orcleTab
-    // never existed: its t20 delete must still outrank the t10 put.
+    // Enumerated newest first: the t20 journal before the t10 one. The deleted
+    // key never existed: its t20 delete must still outrank the t10 put.
     const storage = fakeStorage({
       [`${UI_SETTINGS_JOURNAL_PREFIX}window-new`]: journal(
         { 'videorc.theme': 'v2' },
