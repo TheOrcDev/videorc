@@ -682,7 +682,8 @@ pub fn preview_stage(
 
 /// The degraded preview's alert (`StudioPreviewPanel`'s `healthErrorRow`,
 /// B-26, `studio-tab.tsx:437`): what it means, why, and the door to Health.
-/// "Retry preview" waits for a re-arm of the native path in the GPUI app.
+/// The Studio adds "Retry preview" (`RETRY_PREVIEW_LABEL`), which re-arms the
+/// native path (`Preview::retry`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewHealthAlertView {
     /// `previewHealth.value` ("Degraded").

@@ -5,9 +5,9 @@
 //!   the Session facts and above the refused start;
 //! - the cloud's Resume notice above Session (`CloudResumeSlot` and
 //!   `cloud-resume-notice.tsx`, plan 184 C5 and plan 243 C5);
-//! - the degraded preview's alert under the stage, with Open Health, and the
-//!   performance check's line for the docked row (`PreviewNotes`,
-//!   `studio-tab.tsx:437`, `preview-stage.tsx:397`).
+//! - the degraded preview's alert under the stage, with Retry preview and
+//!   Open Health, and the performance check's line for the docked row
+//!   (`PreviewNotes`, `studio-tab.tsx:437`, `preview-stage.tsx:397`).
 //!
 //! Every word, tone and enabled state is app-core's
 //! (`studio::screen_views`); these draw them and run the named actions. The
@@ -34,9 +34,10 @@ use videorc_app_core::studio::health_page::{Fields, current_platform, studio_hea
 use videorc_app_core::studio::inspector::{StartGates, live_stream_blocked_reason};
 use videorc_app_core::studio::screen_views::{
     CardTone, CloudResumeCardView, CloudResumeInputs, END_TAKEOVER_FIX_FAILED,
-    PreviewHealthAlertView, QuietAction, ResumeTarget, UNMUTE_FIX_FAILED, WatchdogCardView,
-    WatchdogFixAction, cloud_resume_card, end_cloud_show_question, preview_health_alert,
-    preview_hold_label, silence_notice_shown, watchdog_cards, watchdog_fix_action,
+    PreviewHealthAlertView, QuietAction, RETRY_PREVIEW_LABEL, ResumeTarget, UNMUTE_FIX_FAILED,
+    WatchdogCardView, WatchdogFixAction, cloud_resume_card, end_cloud_show_question,
+    preview_health_alert, preview_hold_label, silence_notice_shown, watchdog_cards,
+    watchdog_fix_action,
 };
 use videorc_app_core::studio::transport::transport_active;
 use videorc_app_core::studio::watchdog_alerts::{SnoozeScope, WatchdogState};
@@ -46,6 +47,7 @@ use videorc_kit::tokens::{size, text};
 use videorc_kit::{Alert, AlertVariant, Button, ButtonSize, ButtonVariant};
 
 use super::transport::{AppStudio, OpenPage};
+use crate::preview::Preview;
 use crate::screens::dialogs::{ConfirmRequest, ConfirmVariant, DialogsHost};
 
 /// What a watchdog fix asks of the Studio page besides a page door.
@@ -561,10 +563,11 @@ fn preview_notes_of(
 }
 
 /// The Preview's own notes (P117/P118, P138): the degraded preview's alert
-/// under the stage, with its door to Health, and the performance check's
-/// line the docked frame's row carries. "Retry preview" is left out: the
-/// GPUI preview has no re-arm of its native path yet.
+/// under the stage, with Retry preview and its door to Health, and the
+/// performance check's line the docked frame's row carries.
 pub struct PreviewNotes {
+    /// The preview Retry preview re-arms (`refreshPreview`).
+    preview: Entity<Preview>,
     alert: Option<PreviewHealthAlertView>,
     checking: Option<String>,
 }
@@ -573,8 +576,10 @@ impl EventEmitter<OpenPage> for PreviewNotes {}
 
 impl PreviewNotes {
     /// Follows the telemetry and the snapshot; it redraws only when the
-    /// alert or the line changes.
-    pub fn new(studio: Arc<AppStudio>, cx: &mut Context<Self>) -> Self {
+    /// alert or the line changes, or when the preview's state does (Retry
+    /// preview's enabled state).
+    pub fn new(studio: Arc<AppStudio>, preview: Entity<Preview>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&preview, |_, _, cx| cx.notify()).detach();
         let mut telemetry = studio.telemetry();
         let mut snapshot = studio.watch();
         let (alert, checking) = preview_notes_of(&telemetry.borrow(), &snapshot.borrow());
@@ -604,7 +609,11 @@ impl PreviewNotes {
             }
         })
         .detach();
-        Self { alert, checking }
+        Self {
+            preview,
+            alert,
+            checking,
+        }
     }
 
     /// The degraded alert shows (the stage's column leaves no gap for it
@@ -624,6 +633,16 @@ impl Render for PreviewNotes {
         let Some(alert) = self.alert.clone() else {
             return div().id("capture-health-slot").into_any_element();
         };
+        // B-26's other way out: try the preview again (`studio-tab.tsx:442`),
+        // while the native path has something to re-arm.
+        let retry = Button::new("capture-health-retry")
+            .label(RETRY_PREVIEW_LABEL)
+            .variant(ButtonVariant::Ghost)
+            .size(ButtonSize::Xs)
+            .disabled(!self.preview.read(cx).can_retry())
+            .on_click(cx.listener(|notes, _, _, cx| {
+                let _ = notes.preview.update(cx, |preview, cx| preview.retry(cx));
+            }));
         // The door to Health (plan 174 D9): the details live there.
         let door = Button::new("capture-health-open")
             .label(alert.open_health_label)
@@ -633,7 +652,12 @@ impl Render for PreviewNotes {
         Alert::new("capture-health-alert")
             .variant(AlertVariant::Destructive)
             .title(alert.title)
-            .description(div().min_w_0().line_clamp(3).child(alert.detail))
+            .description(
+                div()
+                    .min_w_0()
+                    .child(div().line_clamp(3).child(alert.detail))
+                    .child(actions().child(retry)),
+            )
             .action(door)
             .into_any_element()
     }
