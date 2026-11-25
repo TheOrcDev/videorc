@@ -175,10 +175,21 @@ impl Platform for MacOs {
     }
 
     /// `performClose:`: what the close button does, `windowShouldClose:`
-    /// (GPUI's `on_window_should_close`) first.
+    /// (GPUI's `on_window_should_close`) first. It runs on the run loop's
+    /// next pass, never now: the caller is inside a GPUI update, and AppKit
+    /// calls `windowShouldClose:` synchronously, which would re-enter GPUI
+    /// while it is borrowed (the close then never ran; L6's lifecycle run on
+    /// bca6ce49b). A real click arrives the same way, from the run loop.
     fn perform_close(&self, window: &Window) -> OsResult<()> {
         let ns = ns_window(window)?;
-        ns.performClose(None);
+        unsafe {
+            let _: () = objc2::msg_send![
+                &*ns,
+                performSelector: objc2::sel!(performClose:),
+                withObject: std::ptr::null::<objc2::runtime::AnyObject>(),
+                afterDelay: 0.0f64
+            ];
+        }
         Ok(())
     }
 
