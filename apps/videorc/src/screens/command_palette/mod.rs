@@ -356,7 +356,15 @@ impl CommandPalette {
         }
         // Pages: one verb for every page, in sidebar order, Health last.
         // The shell routes every page, as its sidebar row does.
+        // `command-palette.tsx:444`: Guests only while it is available
+        // (`guestsVisible`), as its sidebar row.
+        let guests = videorc_app_core::livestream::cloud_status::guests_visible(
+            self.studio.cloud_now().status.as_ref(),
+        );
         for page in nav::SIDEBAR_ORDER.into_iter().chain([PageId::Diagnostics]) {
+            if page == PageId::Guests && !guests {
+                continue;
+            }
             rows.push(
                 Row::new(
                     format!("page-{}", page.id()),
