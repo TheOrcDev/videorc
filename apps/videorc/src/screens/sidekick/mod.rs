@@ -19,16 +19,21 @@ use serde_json::json;
 use videorc_app_core::buddy::chat::{self as buddy_chat, RULES_MAX};
 use videorc_app_core::buddy::copy as words;
 use videorc_app_core::stream_manager::buddy::{
-    CLOUD_AI_KEEPS, CohostSettingsView, CohostState, cloud_ai_uses,
+    CLOUD_AI_KEEPS, CohostSettingsView, CohostState, cloud_ai_uses, command_availability_lines,
+    listen_allowance_label,
 };
 use videorc_app_core::studio::families::{
     self, clean_cut_auto, write_ai_consent, write_clean_cut_auto,
 };
 use videorc_app_core::studio::ui_local::UiLocal;
+use videorc_app_core::user_error::{
+    Failure, UserErrorContext, UserErrorKind, toast_user_error, user_error_message,
+};
 use videorc_app_core::{BackendClient, BackendEvent, Studio};
 use videorc_kit::dialog::DialogHandle;
 use videorc_kit::page_tabs::PageTabs;
 use videorc_kit::theme::FONT;
+use videorc_kit::toast::{ToastData, ToastKind};
 use videorc_protocol::cohost::CohostAutoChat;
 use videorc_protocol::{
     CleanCutGetResult, CleanCutJob, CleanCutJobDetail, CleanCutMode, CohostReportPayload,
@@ -41,7 +46,7 @@ use live::{LiveInput, LiveView, live_view};
 use overview::{OverviewState, render_overview};
 use reports::{ReportsState, render_reports};
 use videorc_app_core::buddy::community::CommunitySummary;
-use voice::render_voice;
+use voice::{remove_messages_rows, render_voice};
 
 pub type AppStudio = Studio<BackendClient>;
 
@@ -115,6 +120,33 @@ impl Tab {
     }
 }
 
+/// Where a failed settings save shows: under its section's card (Overview's
+/// listening, Replies, Moderation), or as a toast (Voice).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SaveSection {
+    Listen,
+    Replies,
+    Moderation,
+    Voice,
+}
+
+const SAVE_SETTINGS: UserErrorContext = UserErrorContext {
+    action: "save",
+    object: "Sidekick settings",
+};
+const SAVE_VOICE_SETTING: UserErrorContext = UserErrorContext {
+    action: "save",
+    object: "the voice command setting",
+};
+const TURN_ON_LIVE: UserErrorContext = UserErrorContext {
+    action: "turn on",
+    object: "Sidekick Live",
+};
+const TURN_OFF_LIVE: UserErrorContext = UserErrorContext {
+    action: "turn off",
+    object: "Sidekick Live",
+};
+
 pub struct SidekickScreen {
     studio: Arc<AppStudio>,
     runtime: tokio::runtime::Handle,
@@ -128,6 +160,8 @@ pub struct SidekickScreen {
     live: bool,
     consent: DialogHandle,
     pending_on: bool,
+    /// A failed save, under the section it belongs to (`SaveError`).
+    save_error: Option<(SaveSection, String)>,
     chat: Option<ChatWidgets>,
     community: Option<CommunityState>,
     reports: Option<ReportsState>,
@@ -156,6 +190,7 @@ impl SidekickScreen {
             live: false,
             consent: DialogHandle::new(false),
             pending_on: false,
+            save_error: None,
             chat: None,
             community: None,
             reports: None,
@@ -173,6 +208,7 @@ impl SidekickScreen {
         if let Some(widgets) = self.chat.as_ref() {
             widgets.sync_cooldowns(self.settings.as_ref(), window, cx);
         }
+        self.sync_rule_inputs(window, cx);
     }
 
     fn ensure_clean_cut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -959,7 +995,7 @@ impl SidekickScreen {
             cx.notify();
             return;
         }
-        self.apply_live(on, cx);
+        self.apply_live(on, false, cx);
     }
 
     pub(crate) fn answer_consent(
@@ -969,23 +1005,33 @@ impl SidekickScreen {
         cx: &mut Context<Self>,
     ) {
         self.consent.close(window, cx);
-        if !accept {
-            self.pending_on = false;
-            cx.notify();
-            return;
-        }
-        let studio = self.studio.clone();
         let turn_on = self.pending_on;
         self.pending_on = false;
+        if accept {
+            self.consent_and_turn_on(turn_on, cx);
+        }
+        cx.notify();
+    }
+
+    /// `answerBuddyConsent(true)`: grants cloud AI, then turns Sidekick Live
+    /// on when the switch asked. A failure is one toast with Retry.
+    fn consent_and_turn_on(&mut self, turn_on: bool, cx: &mut Context<Self>) {
+        let studio = self.studio.clone();
         let write = self
             .runtime
             .spawn(async move { studio.write_settings(vec![write_ai_consent(true)]).await });
         cx.spawn(async move |this, cx| {
-            let _ = write.await;
+            let answer = write.await;
             let _ = this.update(cx, |screen, cx| {
-                screen.consented = true;
-                if turn_on {
-                    screen.apply_live(true, cx);
+                match answer {
+                    Ok(Ok(())) => {
+                        screen.consented = true;
+                        if turn_on {
+                            screen.apply_live(true, true, cx);
+                        }
+                    }
+                    Ok(Err(error)) => screen.consent_failed(&error, turn_on, cx),
+                    Err(_) => {}
                 }
                 cx.notify();
             });
@@ -993,20 +1039,66 @@ impl SidekickScreen {
         .detach();
     }
 
-    fn apply_live(&mut self, on: bool, cx: &mut Context<Self>) {
+    /// The consent dialog's failure: "Couldn't turn on Sidekick Live" with
+    /// Retry (`BuddyTabConsentDialog`, id `buddy-live-consent`).
+    fn consent_failed(
+        &mut self,
+        error: &videorc_app_core::client::RpcError,
+        turn_on: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let copy = user_error_message(Failure::Rpc(error), Some(TURN_ON_LIVE));
+        if copy.kind == UserErrorKind::Canceled {
+            return;
+        }
+        let kind = if copy.warning {
+            ToastKind::Warning
+        } else {
+            ToastKind::Error
+        };
+        let entity = cx.entity();
+        let toast = ToastData::new(kind, copy.title)
+            .description(copy.description)
+            .action(words::RETRY, move |_, cx| {
+                entity.update(cx, |screen, cx| screen.consent_and_turn_on(turn_on, cx));
+            });
+        let hub = cx
+            .global::<crate::screens::notifications::Shared>()
+            .0
+            .clone();
+        hub.update(cx, |hub, cx| {
+            hub.press_toast("buddy-live-consent".to_string(), toast, cx)
+        });
+    }
+
+    /// `setBuddyLive(on)`. A failed switch is a toast; one that came from
+    /// the consent dialog offers Retry.
+    fn apply_live(&mut self, on: bool, from_consent: bool, cx: &mut Context<Self>) {
         let backend = self.studio.backend().clone();
         let job = self.runtime.spawn(async move {
             backend
                 .request("cohost.settings.set", json!({ "enabled": on }))
                 .await
         });
+        let studio = self.studio.clone();
         cx.spawn(async move |this, cx| {
             let result = job.await;
             let _ = this.update(cx, |screen, cx| {
-                if let Ok(Ok(value)) = result {
-                    screen.settings = CohostSettingsView::from_json(&value);
-                } else if let Ok(Err(error)) = result {
-                    eprintln!("[videorc-app] Sidekick Live: {error}");
+                match result {
+                    Ok(Ok(value)) => screen.settings = CohostSettingsView::from_json(&value),
+                    Ok(Err(error)) if from_consent => screen.consent_failed(&error, true, cx),
+                    Ok(Err(error)) => {
+                        let context = if on { TURN_ON_LIVE } else { TURN_OFF_LIVE };
+                        let id = if on {
+                            "buddy-live-on"
+                        } else {
+                            "buddy-live-off"
+                        };
+                        if let Some(command) = toast_user_error(Failure::Rpc(&error), context, id) {
+                            studio.post_notices(vec![command]);
+                        }
+                    }
+                    Err(_) => {}
                 }
                 cx.notify();
             });
@@ -1015,22 +1107,7 @@ impl SidekickScreen {
     }
 
     pub(crate) fn set_listen(&mut self, on: bool, cx: &mut Context<Self>) {
-        let backend = self.studio.backend().clone();
-        let job = self.runtime.spawn(async move {
-            backend
-                .request("cohost.settings.set", json!({ "listen": on }))
-                .await
-        });
-        cx.spawn(async move |this, cx| {
-            let result = job.await;
-            let _ = this.update(cx, |screen, cx| {
-                if let Ok(Ok(value)) = result {
-                    screen.settings = CohostSettingsView::from_json(&value);
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        self.patch_section(json!({ "listen": on }), SaveSection::Listen, cx);
     }
 
     pub(crate) fn set_consent(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -1053,21 +1130,60 @@ impl SidekickScreen {
     }
 
     pub(crate) fn patch_settings(&mut self, patch: serde_json::Value, cx: &mut Context<Self>) {
+        self.patch_settings_in(patch, None, cx);
+    }
+
+    /// `patchCohostSettings` for one section: its failure shows there.
+    pub(crate) fn patch_section(
+        &mut self,
+        patch: serde_json::Value,
+        section: SaveSection,
+        cx: &mut Context<Self>,
+    ) {
+        self.patch_settings_in(patch, Some(section), cx);
+    }
+
+    fn patch_settings_in(
+        &mut self,
+        patch: serde_json::Value,
+        section: Option<SaveSection>,
+        cx: &mut Context<Self>,
+    ) {
+        if section.is_some() {
+            self.save_error = None;
+        }
         let backend = self.studio.backend().clone();
         let job = self
             .runtime
             .spawn(async move { backend.request("cohost.settings.set", patch).await });
+        let studio = self.studio.clone();
         cx.spawn(async move |this, cx| {
             let result = job.await;
             let _ = this.update(cx, |screen, cx| {
-                match result {
-                    Ok(Ok(value)) => {
+                match (result, section) {
+                    (Ok(Ok(value)), _) => {
                         screen.settings = CohostSettingsView::from_json(&value);
                     }
-                    Ok(Err(error)) => {
+                    (Ok(Err(error)), Some(SaveSection::Voice)) => {
+                        if let Some(command) = toast_user_error(
+                            Failure::Rpc(&error),
+                            SAVE_VOICE_SETTING,
+                            "buddy-voice-setting",
+                        ) {
+                            studio.post_notices(vec![command]);
+                        }
+                    }
+                    (Ok(Err(error)), Some(section)) => {
+                        let copy = user_error_message(Failure::Rpc(&error), Some(SAVE_SETTINGS));
+                        if copy.kind != UserErrorKind::Canceled {
+                            screen.save_error =
+                                Some((section, format!("{}. {}", copy.title, copy.description)));
+                        }
+                    }
+                    (Ok(Err(error)), None) => {
                         eprintln!("[videorc-app] Sidekick settings: {error}");
                     }
-                    Err(error) => {
+                    (Err(error), _) => {
                         eprintln!("[videorc-app] Sidekick settings: {error}");
                     }
                 }
@@ -1075,6 +1191,14 @@ impl SidekickScreen {
             });
         })
         .detach();
+    }
+
+    /// The failed save under `section`, if that is where it belongs.
+    pub(crate) fn save_error(&self, section: SaveSection) -> Option<&str> {
+        self.save_error
+            .as_ref()
+            .filter(|(failed, _)| *failed == section)
+            .map(|(_, message)| message.as_str())
     }
 
     pub(crate) fn patch_auto_behaviour(
@@ -1108,7 +1232,22 @@ impl SidekickScreen {
             }
             _ => return,
         }
-        self.patch_settings(json!({ "autoChat": next }), cx);
+        self.patch_section(json!({ "autoChat": next }), SaveSection::Replies, cx);
+    }
+
+    /// The saved chat rules.
+    pub(crate) fn saved_rules(&self) -> Vec<String> {
+        self.settings
+            .as_ref()
+            .and_then(|settings| settings.raw.get("rules"))
+            .and_then(serde_json::Value::as_array)
+            .map(|rules| {
+                rules
+                    .iter()
+                    .filter_map(|rule| rule.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn add_chat_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1119,46 +1258,40 @@ impl SidekickScreen {
         let Some(rule) = buddy_chat::rule_to_save(&draft) else {
             return;
         };
-        let mut rules: Vec<String> = self
-            .settings
-            .as_ref()
-            .and_then(|s| s.raw.get("rules"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut rules = self.saved_rules();
         if rules.len() >= RULES_MAX {
             return;
         }
         rules.push(rule);
-        if let Some(widgets) = self.chat.as_ref() {
-            widgets
-                .rule_draft
-                .update(cx, |input, cx| input.set_value("", window, cx));
+        widgets
+            .rule_draft
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.patch_section(json!({ "rules": rules }), SaveSection::Moderation, cx);
+    }
+
+    /// A rule edited in place: saved on blur or Enter; emptied, it goes.
+    pub(crate) fn edit_chat_rule(&mut self, index: usize, text: &str, cx: &mut Context<Self>) {
+        let mut rules = self.saved_rules();
+        let Some(current) = rules.get(index).cloned() else {
+            return;
+        };
+        match buddy_chat::rule_to_save(text) {
+            Some(next) if next == current => return,
+            Some(next) => rules[index] = next,
+            None => {
+                rules.remove(index);
+            }
         }
-        self.patch_settings(json!({ "rules": rules }), cx);
+        self.patch_section(json!({ "rules": rules }), SaveSection::Moderation, cx);
     }
 
     pub(crate) fn remove_chat_rule(&mut self, index: usize, cx: &mut Context<Self>) {
-        let mut rules: Vec<String> = self
-            .settings
-            .as_ref()
-            .and_then(|s| s.raw.get("rules"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut rules = self.saved_rules();
         if index >= rules.len() {
             return;
         }
         rules.remove(index);
-        self.patch_settings(json!({ "rules": rules }), cx);
+        self.patch_section(json!({ "rules": rules }), SaveSection::Moderation, cx);
     }
 }
 
@@ -1183,17 +1316,33 @@ impl Render for SidekickScreen {
             consented: self.consented,
             cloud_uses: cloud_ai_uses(),
             cloud_keeps: CLOUD_AI_KEEPS,
+            allowance: self
+                .state
+                .listening
+                .as_ref()
+                .and_then(listen_allowance_label),
+            listen_error: self.save_error(SaveSection::Listen),
         };
         let settings = self.settings.as_ref();
         let widgets = self.chat.as_ref().expect("chat widgets");
         let community = self.community.as_ref().expect("community state");
         let body = match self.tab {
             Tab::Overview => render_overview(overview, window, cx),
-            Tab::Chat => render_chat(&view, settings, widgets, window, cx),
+            Tab::Chat => {
+                let errors = (
+                    self.save_error(SaveSection::Replies),
+                    self.save_error(SaveSection::Moderation),
+                );
+                render_chat(&view, settings, widgets, errors, window, cx)
+            }
             Tab::Community => {
                 render_community(&view, self.entitled, community, remember, window, cx)
             }
-            Tab::Voice => render_voice(&view, settings, window, cx),
+            Tab::Voice => {
+                let paused = command_availability_lines(self.state.command_availability.as_ref());
+                let rows = remove_messages_rows(&self.studio.platforms_now());
+                render_voice(&view, settings, &paused, &rows, window, cx)
+            }
             Tab::Reports => {
                 let reports = self.reports.as_ref().expect("reports state");
                 let buddy_on = self.settings.as_ref().map(|s| s.enabled).unwrap_or(false);

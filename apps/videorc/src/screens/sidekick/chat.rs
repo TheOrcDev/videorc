@@ -1,23 +1,26 @@
 //! Sidekick → Chat (`BuddyRepliesSection`, `BuddyModerationSection`).
 
 use gpui::{AnyElement, Context, Entity, Window, div, prelude::*, px};
+use gpui_base::input::InputEvent;
 use videorc_app_core::buddy::chat::{self, RULES_MAX, SENSITIVITIES, SHOW_ON_STREAM, TONES};
 use videorc_app_core::buddy::copy as words;
 use videorc_app_core::stream_manager::buddy::CohostSettingsView;
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
+use videorc_kit::shortcut_keys::ShortcutKeys;
 use videorc_kit::slider::{Slider, SliderEvent, SliderState};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
 use videorc_protocol::cohost::CohostAutoChat;
 
-use super::SidekickScreen;
 use super::live::{LiveView, UnlockAction};
+use super::{SaveSection, SidekickScreen};
 
 const ANSWERS: &str = "Answers";
 const BANTER: &str = "Banter";
@@ -50,6 +53,9 @@ pub struct ChatWidgets {
     pub answers_cooldown: Entity<SliderState>,
     pub banter_cooldown: Entity<SliderState>,
     pub rule_draft: Entity<InputState>,
+    /// One input per saved rule, keyed on the saved text: a save (or the
+    /// backend's trim) rebuilds the row with the stored value.
+    rule_inputs: Vec<(String, Entity<InputState>)>,
     answers_live: bool,
     banter_live: bool,
 }
@@ -72,6 +78,16 @@ impl ChatWidgets {
         });
         let rule_draft = cx.new(|cx| InputState::new(window, cx).placeholder(ADD_A_RULE));
         cx.observe(&rule_draft, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &rule_draft,
+            window,
+            |screen, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    screen.add_chat_rule(window, cx);
+                }
+            },
+        )
+        .detach();
 
         cx.subscribe(&answers_cooldown, |screen, _, event: &SliderEvent, cx| {
             let value = match event {
@@ -104,6 +120,7 @@ impl ChatWidgets {
             answers_cooldown,
             banter_cooldown,
             rule_draft,
+            rule_inputs: Vec::new(),
             answers_live: false,
             banter_live: false,
         }
@@ -135,15 +152,63 @@ impl ChatWidgets {
     }
 }
 
+impl SidekickScreen {
+    /// Rebuilds the rule inputs when the saved rules changed.
+    pub(super) fn sync_rule_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let saved = self.saved_rules();
+        let Some(widgets) = self.chat.as_mut() else {
+            return;
+        };
+        let same = widgets.rule_inputs.len() == saved.len()
+            && widgets
+                .rule_inputs
+                .iter()
+                .zip(&saved)
+                .all(|((shown, _), rule)| shown == rule);
+        if same {
+            return;
+        }
+        let mut inputs = Vec::with_capacity(saved.len());
+        for (index, rule) in saved.into_iter().enumerate() {
+            let input = cx.new(|cx| InputState::new(window, cx).default_value(rule.clone()));
+            cx.subscribe_in(
+                &input,
+                window,
+                move |screen, input, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        let text = input.read(cx).value().to_string();
+                        screen.edit_chat_rule(index, &text, cx);
+                    }
+                },
+            )
+            .detach();
+            inputs.push((rule, input));
+        }
+        widgets.rule_inputs = inputs;
+    }
+}
+
+fn save_error_line(message: Option<&str>, color: gpui::Hsla) -> Option<gpui::Div> {
+    message.map(|message| {
+        div()
+            .type_scale(text::META)
+            .text_color(color)
+            .child(message.to_string())
+    })
+}
+
 pub fn render_chat(
     view: &LiveView,
     settings: Option<&CohostSettingsView>,
     widgets: &ChatWidgets,
+    errors: (Option<&str>, Option<&str>),
     window: &mut Window,
     cx: &mut Context<SidekickScreen>,
 ) -> AnyElement {
     let theme = theme::resolve(None, window, cx);
     let muted = hsla(theme.muted_foreground);
+    let destructive = hsla(theme.destructive);
+    let (replies_error, moderation_error) = errors;
     let locked = view.unlock.is_some();
     let auto = auto_chat(settings);
     let name =
@@ -267,8 +332,9 @@ pub fn render_chat(
                                         entity.update(cx, |screen, cx| {
                                             let mut next = auto_chat(screen.settings.as_ref());
                                             next.greetings.ai = value;
-                                            screen.patch_settings(
+                                            screen.patch_section(
                                                 serde_json::json!({ "autoChat": next }),
+                                                SaveSection::Replies,
                                                 cx,
                                             );
                                         });
@@ -289,11 +355,16 @@ pub fn render_chat(
                     control.on_change(move |value, _, cx| {
                         let tone = value.to_string();
                         entity.update(cx, |screen, cx| {
-                            screen.patch_settings(serde_json::json!({ "tone": tone }), cx);
+                            screen.patch_section(
+                                serde_json::json!({ "tone": tone }),
+                                SaveSection::Replies,
+                                cx,
+                            );
                         });
                     })
                 })),
-        );
+        )
+        .children(save_error_line(replies_error, destructive));
 
     let rules: Vec<String> = settings
         .and_then(|s| s.raw.get("rules"))
@@ -305,6 +376,7 @@ pub fn render_chat(
         })
         .unwrap_or_default();
     let rules_full = rules.len() >= RULES_MAX;
+    let draft_empty = widgets.rule_draft.read(cx).value().trim().is_empty();
     let sensitivity = settings
         .and_then(|s| s.raw.get("sensitivity"))
         .and_then(|v| v.as_str())
@@ -326,25 +398,26 @@ pub fn render_chat(
             .text_color(muted)
             .child(RULES_HELP),
     );
-    for (index, rule) in rules.iter().enumerate() {
-        let rule_text = rule.clone();
+    for (index, (_, input)) in widgets.rule_inputs.iter().enumerate() {
+        let number = index + 1;
         rules_list = rules_list.child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(8.))
                 .child(
-                    div()
-                        .min_w(px(0.))
-                        .flex_1()
-                        .type_scale(text::META)
-                        .child(rule_text),
+                    div().min_w(px(0.)).flex_1().child(
+                        Input::new(format!("chat-rule-{index}"), input)
+                            .accessibility_label(format!("Chat rule {number}"))
+                            .disabled(locked),
+                    ),
                 )
                 .child(
                     Button::new(format!("remove-rule-{index}"))
                         .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::Xs)
-                        .label("Remove")
+                        .size(ButtonSize::IconXs)
+                        .accessibility_label(format!("Remove chat rule {number}"))
+                        .child(icon(IconName::X, 14., muted))
                         .disabled(locked)
                         .on_click({
                             let entity = entity.clone();
@@ -372,8 +445,9 @@ pub fn render_chat(
                     Button::new("add-chat-rule")
                         .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
-                        .label(if rules_full { RULES_FULL } else { "Add" })
-                        .disabled(locked || rules_full)
+                        .label("Add")
+                        .child(ShortcutKeys::accelerator("Enter"))
+                        .disabled(locked || rules_full || draft_empty)
                         .on_click({
                             let entity = entity.clone();
                             move |_, window, cx| {
@@ -411,8 +485,9 @@ pub fn render_chat(
                         control.on_change(move |value, _, cx| {
                             let sensitivity = value.to_string();
                             entity.update(cx, |screen, cx| {
-                                screen.patch_settings(
+                                screen.patch_section(
                                     serde_json::json!({ "sensitivity": sensitivity }),
+                                    SaveSection::Moderation,
                                     cx,
                                 );
                             });
@@ -437,17 +512,19 @@ pub fn render_chat(
                             _ => (false, false),
                         };
                         entity.update(cx, |screen, cx| {
-                            screen.patch_settings(
+                            screen.patch_section(
                                 serde_json::json!({
                                     "autoHighlight": auto,
                                     "voiceHighlight": voice
                                 }),
+                                SaveSection::Moderation,
                                 cx,
                             );
                         });
                     })
                 })),
-        );
+        )
+        .children(save_error_line(moderation_error, destructive));
 
     div()
         .flex()

@@ -24,6 +24,10 @@ pub struct OverviewState<'a> {
     pub consented: bool,
     pub cloud_uses: [String; 6],
     pub cloud_keeps: &'static str,
+    /// "4 h 20 min of listening left this month" (`CohostListenAllowance`).
+    pub allowance: Option<String>,
+    /// A failed listening save, under its card.
+    pub listen_error: Option<&'a str>,
 }
 
 fn status_tone(kind: StatusKind) -> StatusTone {
@@ -169,7 +173,18 @@ pub fn render_overview(
                             }),
                     ),
             ),
-        );
+        )
+        .children(
+            state
+                .allowance
+                .map(|line| div().type_scale(text::META).text_color(muted).child(line)),
+        )
+        .children(state.listen_error.map(|line| {
+            div()
+                .type_scale(text::META)
+                .text_color(hsla(theme.destructive))
+                .child(line.to_string())
+        }));
 
     let mut powers = GroupedList::new();
     for (title, description, tab) in words::POWERS {
