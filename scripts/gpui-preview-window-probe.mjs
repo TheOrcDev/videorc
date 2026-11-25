@@ -1,26 +1,22 @@
 // Plan 260 Phase 3 (L6): `probe:preview-window` on the GPUI app
 // (VIDEORC_APP=gpui; scripts/preview-window-probe.mjs hands over here).
 // Electron's probe proves its surface stays glued to the window it shows in;
-// this proves the same of the GPUI native preview with one oracle: the
-// Preview on screen (`preview-surface-sample`, the composited window
-// captured) against the frame the backend presents (`preview.debug.sample`,
-// the debug backend's lease-free read), cell by cell over a 4 × 4 grid of the
-// canvas. A layer that is off its slot, scaled wrong or not letterboxed the
-// way the canvas fits reads other colours than the frame.
+// this proves the same of the GPUI native preview with a geometry oracle that
+// no animation can fool: after every move and resize, the rect Core Animation
+// DISPLAYS for the video layer (`displayedFrame`, the presentation tree) must
+// be the rect the app SET (`layerFrame`), and that must fill the slot the
+// preview was laid out in (`slot`), each within 1 point
+// (`native-preview-surface-status`). A colour comparison of the screen with
+// the backend's frame can't serve: the test pattern animates its whole
+// background, and a window capture takes about a second.
 //
 // 1. Docked in the Studio, at the main window's size.
 // 2. Docked, after the main window is resized smaller and larger.
 // 3. The Preview window (macOS): opened, then moved, then sized to a
-//    non-16:9 frame (the video contain-fits inside), each aligned.
+//    non-16:9 frame, each aligned.
 // 4. Closed by its close button: `closed`, no window; reopened with ⌘P,
 //    aligned again; docked back with `preview-window-close`.
 // 5. Docked on the Scene page (`sceneHostsDocked`): aligned in the canvas.
-//
-// A cell matches when every channel is within VIDEORC_PREVIEW_WINDOW_TOLERANCE
-// (48: a screen capture goes through the display's colour profile); a place
-// passes when at least 13 of 16 cells match (the test pattern's moving strip
-// may differ between the two reads). Needs Screen Recording for the app
-// process (the capture) and the debug backend (the oracle).
 
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -33,29 +29,49 @@ import {
   sleep,
   waitUntil
 } from './lib/gpui-preview-probe.mjs'
-import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const presentBudgetMs = Number(process.env.VIDEORC_GPUI_PREVIEW_BUDGET_MS ?? 20000)
-const tolerance = Number(process.env.VIDEORC_PREVIEW_WINDOW_TOLERANCE ?? 48)
-const MIN_MATCHING_CELLS = 13
-const SETTLE_MS = 600
 
-/** The 4 × 4 grid of canvas cells. */
-export const GRID = Array.from({ length: 16 }, (_, index) => ({
-  x: (index % 4) * 0.25,
-  y: Math.floor(index / 4) * 0.25,
-  w: 0.25,
-  h: 0.25
-}))
+/** Within `limit` points. */
+const near = (a, b, limit = 1) =>
+  typeof a === 'number' && typeof b === 'number' && Math.abs(a - b) <= limit
 
-/** The cells whose screen colour is within `tolerance` of the frame's. Pure. */
-export function alignedCells(screen, frame, limit = tolerance) {
-  return screen.map((cell, index) => {
-    const other = frame[index]
-    if (!cell || !other) return false
-    return ['r', 'g', 'b'].every((channel) => Math.abs(cell[channel] - other[channel]) <= limit)
-  })
+/**
+ * Why the layer is not where the slot is, or null when it is: the displayed
+ * rect matches the set one, and the set one fills the slot. Pure.
+ */
+export function geometryMismatch(status) {
+  const { layerFrame: set, displayedFrame: shown, slot } = status ?? {}
+  if (!set || !shown || !slot) return `no geometry yet (${JSON.stringify({ set, shown, slot })})`
+  for (const key of ['x', 'y', 'width', 'height']) {
+    if (!near(set[key], shown[key])) {
+      return `Core Animation shows ${key} ${shown[key]}, the app set ${set[key]}`
+    }
+  }
+  if (!near(set.width, slot.width) || !near(set.height, slot.height)) {
+    return `the layer is ${set.width}x${set.height} in a ${slot.width}x${slot.height} slot`
+  }
+  return null
+}
+
+/** Waits up to 2 s for the layer to sit on its slot; throws with why not. */
+export async function geometryAligned(command, where) {
+  const until = Date.now() + 2000
+  let status
+  let why
+  while (true) {
+    status = await command('native-preview-surface-status')
+    why = geometryMismatch(status)
+    if (!why) {
+      return {
+        cells: 'aligned',
+        slot: `${status.slot.width}x${status.slot.height}`
+      }
+    }
+    if (Date.now() > until) throw new Error(`${where}: ${why}`)
+    await sleep(100)
+  }
 }
 
 const steps = []
@@ -84,36 +100,12 @@ export async function runGpuiPreviewWindowProbe() {
     timeoutMs,
     verbose: process.env.VIDEORC_SMOKE_VERBOSE === '1'
   })
-  const ws = await connectBackend(app.connections['backend-ready'], timeoutMs)
-  const rpc = (method, params = {}) => request(ws, 15000, method, params)
   const state = () => command('preview-window-state')
   const presenting = (seen) => seen?.phase === 'presenting' && seen?.closed !== true
   const settleAt = (what, holds) =>
     waitUntil(what, state, holds, { budgetMs: presentBudgetMs, label: describePreview })
 
-  /** The screen against the frame, over the grid; throws on a misaligned place. */
-  const aligned = async (where) => {
-    await sleep(SETTLE_MS)
-    const screen = await command('preview-surface-sample', { rects: GRID })
-    if (screen.error) throw new Error(`${where}: the capture says ${screen.error}`)
-    const frame = await rpc('preview.debug.sample', { rects: GRID })
-    const matches = alignedCells(screen.samples ?? [], frame.samples ?? [])
-    const count = matches.filter(Boolean).length
-    const detail = {
-      cells: `${count}/16`,
-      stage: screen.stage,
-      captured: `${screen.width}x${screen.height}`,
-      frame: `${frame.width}x${frame.height}`
-    }
-    if (count < MIN_MATCHING_CELLS) {
-      const off = matches.flatMap((match, index) => (match ? [] : [index]))
-      throw new Error(
-        `${where}: only ${count}/16 cells match the presented frame (off: ${off.join(', ')}; ` +
-          `screen ${JSON.stringify(screen.samples?.[off[0]])} vs frame ${JSON.stringify(frame.samples?.[off[0]])}; ${JSON.stringify(detail)})`
-      )
-    }
-    return detail
-  }
+  const aligned = (where) => geometryAligned(command, where)
 
   try {
     await step('docked in the Studio', async () => {
@@ -122,12 +114,6 @@ export async function runGpuiPreviewWindowProbe() {
         'the docked preview never presented',
         (seen) => presenting(seen) && seen.mode === 'docked'
       )
-      const probe = await rpc('preview.debug.sample', { rects: [GRID[5]] }).catch((error) => ({
-        error: error.message
-      }))
-      if (probe.error) {
-        throw new Error(`the oracle needs the debug backend (preview.debug.sample: ${probe.error})`)
-      }
       return { summary: JSON.stringify(await aligned('docked')) }
     })
 
@@ -214,11 +200,10 @@ export async function runGpuiPreviewWindowProbe() {
       return { summary: `scene canvas ${scene.cells}` }
     })
   } finally {
-    ws.close()
     await app.stop()
     await writeFile(
       join(stateDir, 'gpui-preview-window.json'),
-      JSON.stringify({ platform: process.platform, tolerance, steps }, null, 2)
+      JSON.stringify({ platform: process.platform, steps }, null, 2)
     )
     console.log(`gpui-preview-window: evidence ${join(stateDir, 'gpui-preview-window.json')}`)
   }

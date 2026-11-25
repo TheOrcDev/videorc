@@ -587,6 +587,19 @@ impl Preview {
                 "frameHeight": telemetry.frame_height,
                 "presentedSceneRevision": telemetry.presented_scene_revision,
                 "message": status.reason.or(telemetry.surface_message),
+                // The window probe's geometry oracle: the rect the app set on
+                // the layer, the one Core Animation displays, and the slot it
+                // was laid out in (window points).
+                "layerFrame": native.element.frame().map(rect_json),
+                "displayedFrame": native.element.displayed_frame().map(rect_json),
+                "slot": self.smoke_slot().map(|slot| {
+                    serde_json::json!({
+                        "x": f32::from(slot.origin.x),
+                        "y": f32::from(slot.origin.y),
+                        "width": f32::from(slot.size.width),
+                        "height": f32::from(slot.size.height),
+                    })
+                }),
             });
         }
         serde_json::json!({
@@ -1217,4 +1230,15 @@ fn words_card(words: PreviewWords) -> impl IntoElement {
         );
     }
     card
+}
+
+/// A layer rect for the smoke driver's answers.
+#[cfg(target_os = "macos")]
+fn rect_json(rect: videorc_preview::LayerRect) -> serde_json::Value {
+    serde_json::json!({
+        "x": rect.x,
+        "y": rect.y,
+        "width": rect.width,
+        "height": rect.height,
+    })
 }
