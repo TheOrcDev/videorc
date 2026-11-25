@@ -98,6 +98,13 @@ impl ChatPane {
         }
     }
 
+    /// Clear view: empty the chat list in this window (Library keeps history).
+    pub fn clear_view(&mut self, cx: &mut Context<Self>) {
+        self.messages.clear();
+        self.filter = ChatFilter::default();
+        cx.notify();
+    }
+
     fn set_platform(&mut self, platform: Option<String>, cx: &mut Context<Self>) {
         self.filter.platform = platform;
         cx.notify();

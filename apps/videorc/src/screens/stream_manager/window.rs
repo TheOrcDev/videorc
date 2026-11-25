@@ -31,6 +31,8 @@ use videorc_app_core::desktop::capture_protection::{
 use videorc_app_core::desktop::permissions::PermissionPlatform;
 use videorc_app_core::stream_manager::copy::WINDOW_NAME;
 use videorc_app_core::stream_manager::dashboard::{LiveDashboard, SessionState};
+use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::dialog::{Dialog, DialogHandle};
 use videorc_kit::{
     theme::{self, hsla},
     window,
@@ -168,6 +170,7 @@ pub struct StreamManager {
     pinned: bool,
     hidden: bool,
     hide_method: HideMethod,
+    clear: DialogHandle,
     focus: FocusHandle,
     _bounds: Subscription,
 }
@@ -248,9 +251,21 @@ impl StreamManager {
             pinned,
             hidden,
             hide_method,
+            clear: DialogHandle::new(false),
             focus,
             _bounds: bounds,
         }
+    }
+
+    fn request_clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear.open(window, cx);
+        cx.notify();
+    }
+
+    fn confirm_clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear.close(window, cx);
+        self.chat.update(cx, |chat, cx| chat.clear_view(cx));
+        cx.notify();
     }
 
     fn set_pinned(&mut self, pinned: bool, window: &Window, cx: &mut Context<Self>) {
@@ -335,7 +350,38 @@ impl Render for StreamManager {
         let hide_method = self.hide_method;
         let this = cx.entity().downgrade();
         let pin = this.clone();
-        let hide = this;
+        let hide = this.clone();
+        let clear = this.clone();
+        let clear_dialog = Dialog::new("stream-manager-clear", &self.clear, "Clear the view?")
+            .description(
+                "Chat and Activity in this window are emptied and the messages per minute start over. The Library keeps the history.",
+            )
+            .close_button(false)
+            .footer(
+                Button::new("clear-cancel")
+                    .variant(ButtonVariant::Ghost)
+                    .label("Cancel")
+                    .on_click({
+                        let this = this.clone();
+                        move |_, window, app| {
+                            let _ = this.update(app, |sm, cx| {
+                                sm.clear.close(window, cx);
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+            .footer(
+                Button::new("clear-confirm")
+                    .variant(ButtonVariant::Destructive)
+                    .label("Clear view")
+                    .on_click({
+                        let this = this;
+                        move |_, window, app| {
+                            let _ = this.update(app, |sm, cx| sm.confirm_clear(window, cx));
+                        }
+                    }),
+            );
         WindowFrame::new().child(
             div()
                 .size_full()
@@ -379,7 +425,11 @@ impl Render for StreamManager {
                     move |next, _, window, app| {
                         let _ = hide.update(app, |this, cx| this.set_hidden(next, window, cx));
                     },
+                    move |window, app| {
+                        let _ = clear.update(app, |this, cx| this.request_clear(window, cx));
+                    },
                 ))
+                .child(clear_dialog)
                 .child(self.notices.read(cx).toasts()),
         )
     }

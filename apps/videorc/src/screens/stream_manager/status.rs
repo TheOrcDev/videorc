@@ -2,6 +2,8 @@
 //! the remaining window actions as shells (Clip, Clear, Commands, Preview,
 //! Highlight position, Banners, Sounds, Hide screen, More).
 
+use std::rc::Rc;
+
 use gpui::{AnyElement, App, ClickEvent, IntoElement, Window, div, prelude::*};
 use videorc_app_core::desktop::capture_protection::HideMethod;
 use videorc_app_core::stream_manager::copy::{
@@ -40,6 +42,7 @@ pub fn status_bar(
     width: f32,
     on_pin: impl Fn(bool, &ClickEvent, &mut Window, &mut App) + 'static,
     on_hide: impl Fn(bool, &ClickEvent, &mut Window, &mut App) + 'static,
+    on_clear: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let tier = Tier::of(width);
     let labels = full_labels(width);
@@ -63,6 +66,7 @@ pub fn status_bar(
     let clip_long = clip_length_label(60);
     let preview = open_preview();
     let actions_wide = tier != Tier::Narrow;
+    let on_clear = Rc::new(on_clear);
 
     bar = bar
         .child(
@@ -145,7 +149,10 @@ pub fn status_bar(
                 StatusBarAction::new("clear-view", CLEAR_VIEW)
                     .text(CLEAR)
                     .hint(CLEAR_HINT)
-                    .on_click(|_, _, _| {}),
+                    .on_click({
+                        let clear = on_clear.clone();
+                        move |_, window, app| clear(window, app)
+                    }),
             );
         if labels {
             bar = bar.child(
@@ -188,18 +195,25 @@ pub fn status_bar(
                             .size(ButtonSize::Xs)
                             .accessibility_label(MORE_ACTIONS),
                     )
-                    .menu(move |_, _| {
-                        Menu::new()
-                            .item(MenuItem::new(HIDE_SCREEN).on_select(|_, _| {}))
-                            .item(MenuItem::new(HIGHLIGHT_POSITION).on_select(|_, _| {}))
-                            .item(MenuItem::new(clip_short_menu.clone()).on_select(|_, _| {}))
-                            .item(MenuItem::new(clip_long_menu.clone()).on_select(|_, _| {}))
-                            .item(MenuItem::new(BANNERS).on_select(|_, _| {}))
-                            .item(MenuItem::new(format!("{SOUNDS}…")).on_select(|_, _| {}))
-                            .item(MenuItem::new("Chat commands…").on_select(|_, _| {}))
-                            .item(MenuItem::new(preview_menu.clone()).on_select(|_, _| {}))
-                            .separator()
-                            .item(MenuItem::new(CLEAR_VIEW).on_select(|_, _| {}))
+                    .menu({
+                        let clear = on_clear.clone();
+                        move |_, _| {
+                            let clear = clear.clone();
+                            Menu::new()
+                                .item(MenuItem::new(HIDE_SCREEN).on_select(|_, _| {}))
+                                .item(MenuItem::new(HIGHLIGHT_POSITION).on_select(|_, _| {}))
+                                .item(MenuItem::new(clip_short_menu.clone()).on_select(|_, _| {}))
+                                .item(MenuItem::new(clip_long_menu.clone()).on_select(|_, _| {}))
+                                .item(MenuItem::new(BANNERS).on_select(|_, _| {}))
+                                .item(MenuItem::new(format!("{SOUNDS}…")).on_select(|_, _| {}))
+                                .item(MenuItem::new("Chat commands…").on_select(|_, _| {}))
+                                .item(MenuItem::new(preview_menu.clone()).on_select(|_, _| {}))
+                                .separator()
+                                .item(
+                                    MenuItem::new(CLEAR_VIEW)
+                                        .on_select(move |window, app| clear(window, app)),
+                                )
+                        }
                     }),
             );
     }
