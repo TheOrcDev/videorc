@@ -783,16 +783,33 @@ async fn rename_duplicate_import_and_markers_ask_the_backend_by_name() {
     assert_eq!(markers[0].label.as_deref(), Some("Intro"));
     assert_eq!(cursor.as_deref(), Some("n"));
     library.rename_marker("s1", "m1", None).await.unwrap();
+    // Compared as JSON values, not strings: serde_json's key order depends
+    // on whether a crate in the build turns on `preserve_order`.
     let calls = fake.calls();
-    for wanted in [
-        "sessions.rename {\"sessionId\":\"s1\",\"title\":\"New name\"}",
-        "sessions.duplicate {\"sessionId\":\"s1\"}",
-        "sessions.import {\"sourceCapability\":\"resource:1\"}",
-        "session.marker.rename {\"markerId\":\"m1\",\"sessionId\":\"s1\"}",
+    let asked: Vec<(&str, serde_json::Value)> = calls
+        .iter()
+        .filter_map(|call| {
+            let (method, params) = call.split_once(' ')?;
+            Some((method, serde_json::from_str(params).ok()?))
+        })
+        .collect();
+    for (method, params) in [
+        (
+            "sessions.rename",
+            json!({"sessionId": "s1", "title": "New name"}),
+        ),
+        ("sessions.duplicate", json!({"sessionId": "s1"})),
+        ("sessions.import", json!({"sourceCapability": "resource:1"})),
+        (
+            "session.marker.rename",
+            json!({"markerId": "m1", "sessionId": "s1"}),
+        ),
     ] {
         assert!(
-            calls.iter().any(|call| call == wanted),
-            "{wanted} in {calls:?}"
+            asked
+                .iter()
+                .any(|(asked, sent)| *asked == method && *sent == params),
+            "{method} {params} in {calls:?}"
         );
     }
 }

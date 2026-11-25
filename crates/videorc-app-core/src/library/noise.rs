@@ -662,9 +662,16 @@ mod tests {
     /// The words are still Electron's.
     #[test]
     fn every_constant_is_still_in_the_renderer() {
-        let sources = [include_str!(
-            "../../../../apps/desktop/src/renderer/src/lib/noise-cleanup-view.ts"
-        )];
+        // The view's words, the job event (`use-studio.tsx`'s
+        // `noiseCleanupJobs`) and the completed entry's detail
+        // (`session-runtime-recovery.ts`).
+        let sources = [
+            include_str!("../../../../apps/desktop/src/renderer/src/lib/noise-cleanup-view.ts"),
+            include_str!("../../../../apps/desktop/src/renderer/src/hooks/use-studio.tsx"),
+            include_str!(
+                "../../../../apps/desktop/src/renderer/src/lib/session-runtime-recovery.ts"
+            ),
+        ];
         let this = include_str!("noise.rs");
         let this = &this[..this.find("#[cfg(test)]").unwrap()];
         let (checked, missing) = super::super::copy::tests::unseen_constants(this, &sources);
