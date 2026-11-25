@@ -21,17 +21,21 @@ use videorc_app_core::buddy::copy as words;
 use videorc_app_core::stream_manager::buddy::{
     CLOUD_AI_KEEPS, CohostSettingsView, CohostState, cloud_ai_uses,
 };
-use videorc_app_core::studio::families::{self, write_ai_consent};
+use videorc_app_core::studio::families::{
+    self, clean_cut_auto, write_ai_consent, write_clean_cut_auto,
+};
 use videorc_app_core::studio::ui_local::UiLocal;
 use videorc_app_core::{BackendClient, BackendEvent, Studio};
 use videorc_kit::dialog::DialogHandle;
 use videorc_kit::page_tabs::PageTabs;
 use videorc_kit::theme::FONT;
-use videorc_protocol::CohostReportPayload;
 use videorc_protocol::cohost::CohostAutoChat;
+use videorc_protocol::{
+    CleanCutGetResult, CleanCutJob, CleanCutJobDetail, CleanCutMode, CohostReportPayload,
+};
 
 use chat::{ChatWidgets, render_chat};
-use clean_cut::render_clean_cut;
+use clean_cut::{CleanCutState, RecordingRow, render_clean_cut};
 use community::{CommunityState, LinkSuggestion, PersonDetail, PersonRow, render_community};
 use live::{LiveInput, LiveView, live_view};
 use overview::{OverviewState, render_overview};
@@ -117,6 +121,7 @@ pub struct SidekickScreen {
     chat: Option<ChatWidgets>,
     community: Option<CommunityState>,
     reports: Option<ReportsState>,
+    clean_cut: Option<CleanCutState>,
 }
 
 impl SidekickScreen {
@@ -144,6 +149,7 @@ impl SidekickScreen {
             chat: None,
             community: None,
             reports: None,
+            clean_cut: None,
         };
         screen.refresh(cx);
         screen.watch(cx);
@@ -156,6 +162,19 @@ impl SidekickScreen {
         }
         if let Some(widgets) = self.chat.as_ref() {
             widgets.sync_cooldowns(self.settings.as_ref(), window, cx);
+        }
+    }
+
+    fn ensure_clean_cut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.clean_cut.is_none() {
+            self.clean_cut = Some(CleanCutState::new(&self.local_dir, window, cx));
+        }
+        if self.tab == Tab::CleanCut {
+            if let Some(clean) = self.clean_cut.as_ref() {
+                if !clean.loaded {
+                    self.refresh_clean_cut(cx);
+                }
+            }
         }
     }
 
@@ -216,6 +235,19 @@ impl SidekickScreen {
                                             cx.notify();
                                         });
                                     }
+                                }
+                                if event == "cleanCut.status" {
+                                    let job = serde_json::from_value::<CleanCutJob>(payload.clone()).ok();
+                                    let _ = this.update(cx, |screen, cx| {
+                                        if let (Some(job), Some(clean)) = (job, screen.clean_cut.as_mut()) {
+                                            if let Some(slot) = clean.jobs.iter_mut().find(|j| j.id == job.id) {
+                                                *slot = job;
+                                            } else {
+                                                clean.jobs.insert(0, job);
+                                            }
+                                        }
+                                        cx.notify();
+                                    });
                                 }
                                 if event == "cohost.report.saved" {
                                     let _ = this.update(cx, |screen, cx| {
@@ -318,7 +350,247 @@ impl SidekickScreen {
         if tab == Tab::Reports {
             self.refresh_reports(cx);
         }
+        if tab == Tab::CleanCut {
+            self.refresh_clean_cut(cx);
+        }
         cx.notify();
+    }
+
+    pub(crate) fn refresh_clean_cut(&mut self, cx: &mut Context<Self>) {
+        let backend = self.studio.backend().clone();
+        let job = self.runtime.spawn(async move {
+            let jobs = backend
+                .request("cleanCut.list", serde_json::json!({}))
+                .await
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("jobs")
+                        .cloned()
+                        .or_else(|| value.as_array().cloned().map(serde_json::Value::Array))
+                })
+                .and_then(|value| serde_json::from_value::<Vec<CleanCutJob>>(value).ok())
+                .unwrap_or_default();
+            let recordings = backend
+                .request("sessions.list", serde_json::json!({ "limit": 50 }))
+                .await
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("sessions")
+                        .cloned()
+                        .or_else(|| value.get("items").cloned())
+                })
+                .and_then(|value| serde_json::from_value::<Vec<RecordingRow>>(value).ok())
+                .unwrap_or_default();
+            (jobs, recordings)
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok((jobs, recordings)) = job.await else {
+                return;
+            };
+            let _ = this.update(cx, |screen, cx| {
+                if let Some(clean) = screen.clean_cut.as_mut() {
+                    clean.jobs = jobs;
+                    clean.recordings = recordings;
+                    clean.loaded = true;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn set_clean_cut_auto(&mut self, on: bool, cx: &mut Context<Self>) {
+        let studio = self.studio.clone();
+        let write = self
+            .runtime
+            .spawn(async move { studio.write_settings(vec![write_clean_cut_auto(on)]).await });
+        cx.spawn(async move |this, cx| {
+            let _ = write.await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
+    pub(crate) fn start_clean_cut(&mut self, cx: &mut Context<Self>) {
+        let Some(clean) = self.clean_cut.as_ref() else {
+            return;
+        };
+        let Some(session_id) = clean.selected_session.clone() else {
+            return;
+        };
+        let mode = clean.mode;
+        let consented = self.consented;
+        let backend = self.studio.backend().clone();
+        let job = self.runtime.spawn(async move {
+            backend
+                .request(
+                    "cleanCut.start",
+                    serde_json::json!({
+                        "sessionId": session_id,
+                        "mode": mode,
+                        "consentToUploadAudio": consented
+                    }),
+                )
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<CleanCutJob>(value).ok())
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(started) = job.await else {
+                return;
+            };
+            let _ = this.update(cx, |screen, cx| {
+                if let (Some(started), Some(clean)) = (started, screen.clean_cut.as_mut()) {
+                    clean.jobs.insert(0, started);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn cancel_clean_cut(&mut self, job_id: String, cx: &mut Context<Self>) {
+        let backend = self.studio.backend().clone();
+        let job = self.runtime.spawn(async move {
+            backend
+                .request("cleanCut.cancel", serde_json::json!({ "jobId": job_id }))
+                .await
+        });
+        cx.spawn(async move |this, cx| {
+            let _ = job.await;
+            let _ = this.update(cx, |screen, cx| screen.refresh_clean_cut(cx));
+        })
+        .detach();
+    }
+
+    pub(crate) fn open_clean_cut_review(&mut self, job_id: String, cx: &mut Context<Self>) {
+        let Some(job) = self
+            .clean_cut
+            .as_ref()
+            .and_then(|clean| clean.jobs.iter().find(|job| job.id == job_id).cloned())
+        else {
+            return;
+        };
+        let session_id = job.source_session_id.clone();
+        let backend = self.studio.backend().clone();
+        let fetch = self.runtime.spawn(async move {
+            backend
+                .request(
+                    "cleanCut.get",
+                    serde_json::json!({ "sessionId": session_id }),
+                )
+                .await
+                .ok()
+        });
+        cx.spawn(async move |this, cx| {
+            let value = fetch.await.ok().flatten();
+            let detail = value
+                .and_then(|value| serde_json::from_value::<CleanCutGetResult>(value).ok())
+                .and_then(|result| {
+                    result
+                        .jobs
+                        .into_iter()
+                        .find(|detail| detail.job.id == job_id)
+                })
+                .unwrap_or(CleanCutJobDetail {
+                    job,
+                    edl: None,
+                    condensed_keeps: Vec::new(),
+                });
+            let _ = this.update(cx, |screen, cx| {
+                if let Some(clean) = screen.clean_cut.as_mut() {
+                    let drafts = clean.load_drafts();
+                    clean.draft =
+                        videorc_app_core::buddy::clean_cut_drafts::read(&drafts, &detail.job.id);
+                    clean.saved_removals = detail
+                        .edl
+                        .as_ref()
+                        .map(|edl| edl.removals.clone())
+                        .unwrap_or_default();
+                    clean.review_job = Some(detail);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn persist_clean_cut_draft(&mut self, _cx: &mut Context<Self>) {
+        let Some(clean) = self.clean_cut.as_mut() else {
+            return;
+        };
+        let Some(job_id) = clean
+            .review_job
+            .as_ref()
+            .map(|detail| detail.job.id.clone())
+        else {
+            return;
+        };
+        let draft = clean.draft.clone();
+        let drafts = clean.load_drafts();
+        if let Some(next) =
+            videorc_app_core::buddy::clean_cut_drafts::write(&drafts, &job_id, &draft)
+        {
+            clean.persist_drafts(&next);
+        }
+    }
+
+    pub(crate) fn discard_clean_cut_review(&mut self, cx: &mut Context<Self>) {
+        if let Some(clean) = self.clean_cut.as_mut() {
+            if let Some(job_id) = clean
+                .review_job
+                .as_ref()
+                .map(|detail| detail.job.id.clone())
+            {
+                let empty = videorc_app_core::buddy::clean_cut_review::Draft::default();
+                let drafts = clean.load_drafts();
+                if let Some(next) =
+                    videorc_app_core::buddy::clean_cut_drafts::write(&drafts, &job_id, &empty)
+                {
+                    clean.persist_drafts(&next);
+                }
+            }
+            clean.draft = videorc_app_core::buddy::clean_cut_review::Draft::default();
+            clean.review_job = None;
+            clean.saved_removals.clear();
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn save_clean_cut_review(&mut self, job_id: String, cx: &mut Context<Self>) {
+        let Some(clean) = self.clean_cut.as_ref() else {
+            return;
+        };
+        let Some(detail) = clean.review_job.as_ref() else {
+            return;
+        };
+        if detail.job.id != job_id {
+            return;
+        }
+        let params = videorc_app_core::buddy::clean_cut_review::update_edl_payload(
+            &job_id,
+            detail.job.edl_revision,
+            &clean.draft,
+        );
+        let backend = self.studio.backend().clone();
+        let job = self.runtime.spawn(async move {
+            backend
+                .request(
+                    "cleanCut.updateEdl",
+                    serde_json::to_value(params).unwrap_or_default(),
+                )
+                .await
+        });
+        cx.spawn(async move |this, cx| {
+            let _ = job.await;
+            let _ = this.update(cx, |screen, cx| {
+                screen.discard_clean_cut_review(cx);
+                screen.refresh_clean_cut(cx);
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn refresh_reports(&mut self, cx: &mut Context<Self>) {
@@ -885,6 +1157,7 @@ impl Render for SidekickScreen {
         self.ensure_chat(window, cx);
         self.ensure_community(window, cx);
         self.ensure_reports(cx);
+        self.ensure_clean_cut(window, cx);
         let view = self.view();
         let listen = self.settings.as_ref().map(|s| s.listen).unwrap_or(false);
         let remember = self
@@ -916,7 +1189,11 @@ impl Render for SidekickScreen {
                 let buddy_on = self.settings.as_ref().map(|s| s.enabled).unwrap_or(false);
                 render_reports(&view, reports, buddy_on, window, cx)
             }
-            Tab::CleanCut => render_clean_cut(&view, self.consented, window, cx),
+            Tab::CleanCut => {
+                let clean = self.clean_cut.as_ref().expect("clean cut state");
+                let auto = self.studio.read_ui_settings(clean_cut_auto);
+                render_clean_cut(&view, self.consented, auto, clean, window, cx)
+            }
         };
 
         let entity = cx.entity();
