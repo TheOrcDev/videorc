@@ -296,3 +296,100 @@ fn the_status_line_waits_a_moment_and_says_when() {
     assert_eq!(status.title, "Talk · Getting ready…");
     assert_eq!(status.detail, None);
 }
+
+#[test]
+fn each_card_asks_a_still_of_what_it_shows_and_none_without_a_screen() {
+    let gallery = Fixture::new().gallery();
+    assert_eq!(
+        gallery.cards[0].picture, None,
+        "Camera only draws no screen"
+    );
+    assert_eq!(
+        gallery.cards[1].picture,
+        Some(ScenePictureTarget::Display {
+            screen_id: "screen:1".into()
+        })
+    );
+    assert_eq!(
+        gallery.cards[2].picture,
+        Some(ScenePictureTarget::App {
+            bundle_id: "com.figma.Desktop".into()
+        })
+    );
+    assert_eq!(
+        gallery.cards[2].glyph,
+        SceneGlyph::App {
+            bundle_id: "com.figma.Desktop".into()
+        }
+    );
+    assert_eq!(gallery.cards[1].glyph, SceneGlyph::Display);
+    assert!(!gallery.read_only);
+}
+
+#[test]
+fn a_dragged_card_lands_on_the_far_side_of_the_one_under_it() {
+    assert_eq!(drop_edge(0, 2), Some(DropEdge::After));
+    assert_eq!(drop_edge(3, 1), Some(DropEdge::Before));
+    assert_eq!(drop_edge(1, 1), None);
+}
+
+fn key(name: &str, alt: bool, shift: bool) -> MoveKey<'_> {
+    MoveKey {
+        key: name,
+        alt,
+        ctrl: false,
+        meta: false,
+        shift,
+    }
+}
+
+#[test]
+fn option_and_an_arrow_move_the_card_one_place_within_the_list() {
+    assert_eq!(
+        card_move_target(key("ArrowLeft", true, false), 1, 3, false),
+        Some(0)
+    );
+    assert_eq!(
+        card_move_target(key("ArrowRight", true, false), 1, 3, false),
+        Some(2)
+    );
+    // Past either end, another axis, another modifier, or read-only.
+    assert_eq!(
+        card_move_target(key("ArrowLeft", true, false), 0, 3, false),
+        None
+    );
+    assert_eq!(
+        card_move_target(key("ArrowRight", true, false), 2, 3, false),
+        None
+    );
+    assert_eq!(
+        card_move_target(key("ArrowUp", true, false), 1, 3, false),
+        None
+    );
+    assert_eq!(
+        card_move_target(key("ArrowLeft", true, true), 1, 3, false),
+        None
+    );
+    assert_eq!(
+        card_move_target(key("ArrowLeft", false, false), 1, 3, false),
+        None
+    );
+    assert_eq!(
+        card_move_target(key("ArrowLeft", true, false), 1, 3, true),
+        None
+    );
+}
+
+#[test]
+fn a_cut_line_shows_the_whole_name_and_the_cut_meta() {
+    assert_eq!(cut_tooltip("Talk", false, Some("No screen"), false), None);
+    assert_eq!(
+        cut_tooltip("A very long scene name", true, Some("No screen"), false).as_deref(),
+        Some("A very long scene name")
+    );
+    assert_eq!(
+        cut_tooltip("Figma", false, Some("Figma · front window"), true).as_deref(),
+        Some("Figma\nFigma · front window")
+    );
+    assert_eq!(cut_tooltip("Talk", false, None, true), None);
+}

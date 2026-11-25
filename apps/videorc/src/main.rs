@@ -226,7 +226,8 @@ fn main() -> Result<()> {
                     .chain(screens::studio::chat::EVENTS)
                     .chain(videorc_app_core::library::LIBRARY_EVENTS)
                     .chain(["session.log"])
-                    // Follow the app in front hears the hide state.
+                    // The hide state: Follow the app in front, and Studio's
+                    // Scenes section (Hide screen).
                     .chain(["screen.privacy.changed"]),
             ),
             logger: logger.clone(),
@@ -577,6 +578,8 @@ fn main() -> Result<()> {
                         studio_state.clone(),
                         talk_show.clone(),
                         global_keys.clone(),
+                        permissions.clone(),
+                        window,
                         cx,
                     )
                 });

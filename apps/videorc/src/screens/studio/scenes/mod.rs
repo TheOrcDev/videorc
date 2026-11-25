@@ -8,44 +8,64 @@
 //! 16:9 / 9:16 toggle, Follow the app in front (macOS), the library's
 //! error, one card per scene (its layout diagram, name, check, meta words
 //! and keys), the switch's status line and the camera's reason. A click on
-//! a card puts it on stream. Add scene…, reorder, the stills, ⋯ and the
-//! scene on stream's own fields are later parts.
+//! a card puts it on stream.
+//!
+//! Part 2 adds each card's glyph and still picture ([`pictures`]), the
+//! reorder (a drag, or ⌥← ⌥→ on a focused card), the whole name or meta on
+//! hover when a line cut it, and under the cards the scene on stream's own
+//! fields ([`on_stream`]): Screen with Hide screen, Layout, Framing and the
+//! Vertical stream. Add scene…, Change screen… and ⋯ wait for the picker
+//! and the dialogs.
 //!
 //! The status line shows a moment after a switch starts. The section asks
 //! the core when, and draws once more then: no frame loop.
 
+mod on_stream;
+mod pictures;
+
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnyElement, ColorSpace, Context, Entity, EventEmitter, FontWeight, Hsla, Role, Window, canvas,
-    div, linear_color_stop, linear_gradient, prelude::*, px,
+    AnyElement, ColorSpace, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, FontWeight,
+    Hsla, KeyDownEvent, ObjectFit, Role, SharedString, TextRun, Window, canvas, div, img,
+    linear_color_stop, linear_gradient, prelude::*, px,
 };
 use tokio::sync::watch;
 use videorc_app_core::StudioSnapshot;
 use videorc_app_core::nav::PageId;
+use videorc_app_core::scenes::list::{MoveKey, SceneGlyph};
+use videorc_app_core::scenes::pictures::picture_key;
 use videorc_app_core::scenes::switch_progress::{
     SCENE_SWITCH_PENDING_LABEL, SceneSwitchStatusLine,
 };
 use videorc_app_core::scenes::thumb::{ThumbCorner, ThumbPart, ThumbSize, card_frame, thumb_areas};
 use videorc_app_core::studio::families::{FollowSettings, save_follow_settings};
+use videorc_app_core::studio::scene_on_stream::{
+    SceneOnStreamView, ScreenRecordingAlert, screen_recording_alert,
+};
 use videorc_app_core::studio::scenes_section::{
-    CardKey, SceneCardView, ScenesExtras, ScenesGalleryView, ScenesLine, ScenesSectionView, copy,
+    CardKey, DropEdge, SceneCardView, ScenesExtras, ScenesGalleryView, ScenesLine,
+    ScenesSectionView, card_move_target, copy, cut_tooltip, drop_edge, session_active,
 };
 use videorc_app_core::studio::screen_views::TalkShowRoomView;
-use videorc_kit::chrome::box_shadow;
+use videorc_kit::chrome::{box_shadow, focus_ring};
 use videorc_kit::icon::{IconName, icon};
-use videorc_kit::theme::{self, TypeScale, faded_over, hsla, with_alpha};
+use videorc_kit::theme::{self, FONT, TypeScale, faded_over, hsla, with_alpha};
 use videorc_kit::tokens::{Color, Shadow, Theme, radius, text};
 use videorc_kit::tooltip::tooltip;
 use videorc_kit::{
     Button, ButtonSize, ButtonVariant, Kbd, PanelSection, Segment, SegmentedControl, Skeleton,
     Spinner, Switch,
 };
+use videorc_protocol::ScreenPrivacy;
 
 use super::transport::{AppStudio, OpenPage};
 use crate::app::bridge::Mirror;
 use crate::app::hotkeys::{Hotkeys, node_platform};
+use crate::app::permissions::Permissions;
+use pictures::Stills;
 
 /// Cards are at least this wide: a picture big enough to read, and
 /// "Screen + camera" on one line (`minmax(160px, 1fr)`).
@@ -87,12 +107,97 @@ fn now_ms() -> u64 {
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
+/// `SceneGlyphIcon` without the apps' own icons: the GPUI app has no
+/// `getAppIcons` yet, so an app (and a window) shows the generic scene glyph,
+/// as `AppIconImage` does while main has no icon.
+fn glyph_icon(glyph: &SceneGlyph) -> IconName {
+    match glyph {
+        SceneGlyph::Display => IconName::Monitor,
+        SceneGlyph::Camera => IconName::VideoCamera,
+        SceneGlyph::App { .. } | SceneGlyph::Window => IconName::SquaresFour,
+    }
+}
+
+/// The width `words` take on one line at `size` px in the system font.
+fn text_width(window: &Window, words: &str, size: f32, weight: FontWeight, color: Hsla) -> f32 {
+    if words.is_empty() {
+        return 0.;
+    }
+    let mut font = gpui::font(FONT);
+    font.weight = weight;
+    let run = TextRun {
+        len: words.len(),
+        font,
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    f32::from(
+        window
+            .text_system()
+            .shape_line(
+                SharedString::from(words.to_string()),
+                px(size),
+                &[run],
+                None,
+            )
+            .width(),
+    )
+}
+
+/// A card being dragged (P281): its scene, its place and its name for the
+/// picture under the pointer.
+#[derive(Clone)]
+struct SceneDrag {
+    id: String,
+    index: usize,
+    name: SharedString,
+}
+
+impl Render for SceneDrag {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme::resolve(None, window, cx);
+        div()
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(radius::CHIP))
+            .border_1()
+            .border_color(hsla(t.glass_float_rim))
+            .bg(hsla(t.glass_float))
+            .font_family(FONT)
+            .type_scale(text::META)
+            .text_color(hsla(t.popover_foreground))
+            .child(self.name.clone())
+    }
+}
+
 pub struct ScenesSection {
     studio: Arc<AppStudio>,
     runtime: tokio::runtime::Handle,
     talk_show: Entity<Mirror<TalkShowRoomView>>,
     hotkeys: Hotkeys,
+    permissions: Arc<Permissions>,
     view: ScenesSectionView,
+    /// The scene on stream's fields under the cards (none with no scene).
+    on_stream: Option<SceneOnStreamView>,
+    /// The Screen field's Screen Recording alert, while the grant is missing.
+    screen_alert: Option<ScreenRecordingAlert>,
+    /// The alert's action runs.
+    alert_pending: bool,
+    /// The last Hide screen state the backend gave (`screen.privacy.*`).
+    privacy: ScreenPrivacy,
+    /// Bumped by every change, so an older read can't land over it.
+    privacy_revision: u64,
+    /// The cards' still pictures.
+    stills: Stills,
+    /// Each card's focus, by scene: it follows the card when it moves.
+    focus: HashMap<String, FocusHandle>,
+    /// Each card's room for its name and its meta words, by scene, at the
+    /// last paint (P292).
+    text_room: HashMap<String, (f32, f32)>,
+    /// A drag over a card: where it came from and the card under it.
+    drag: Option<(usize, usize)>,
     /// The status line's instant this section will draw again at.
     wake: Option<u64>,
     /// The cards' row width at the last paint.
@@ -102,16 +207,29 @@ pub struct ScenesSection {
 impl EventEmitter<OpenPage> for ScenesSection {}
 
 impl ScenesSection {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         studio: Arc<AppStudio>,
         runtime: tokio::runtime::Handle,
         mut snapshot: watch::Receiver<StudioSnapshot>,
         talk_show: Entity<Mirror<TalkShowRoomView>>,
         hotkeys: Hotkeys,
+        permissions: Arc<Permissions>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&talk_show, |section, _, cx| section.refresh(cx))
             .detach();
+        // The stills ask again when the window comes back to the front.
+        // The Screen Recording alert reads the grant again then too: it may
+        // have been made in System Settings meanwhile.
+        cx.observe_window_activation(window, |section, window, cx| {
+            if window.is_window_active() {
+                section.window_activated(cx);
+                section.refresh(cx);
+            }
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             loop {
                 if snapshot.changed().await.is_err() {
@@ -132,10 +250,21 @@ impl ScenesSection {
             runtime,
             talk_show,
             hotkeys,
+            permissions,
             view: ScenesSectionView::Loading,
+            on_stream: None,
+            screen_alert: None,
+            alert_pending: false,
+            privacy: ScreenPrivacy::default(),
+            privacy_revision: 0,
+            stills: Stills::default(),
+            focus: HashMap::new(),
+            text_room: HashMap::new(),
+            drag: None,
             wake: None,
             width: 0.,
         };
+        section.watch_privacy(cx);
         section.refresh(cx);
         section
     }
@@ -171,8 +300,36 @@ impl ScenesSection {
         {
             self.wake_at(at, now, cx);
         }
-        if view != self.view {
+        let on_stream = SceneOnStreamView::from_snapshot(snapshot, &self.privacy, None);
+        // Only under the fields: no scene on stream, no OS read.
+        let screen_alert = on_stream.as_ref().and_then(|_| {
+            screen_recording_alert(
+                &snapshot.sources.devices.devices,
+                videorc_app_core::desktop::permissions::PermissionPlatform::current(),
+                Some(&self.permissions.snapshot()),
+            )
+        });
+        if let ScenesSectionView::Gallery(gallery) = &view {
+            // A scene that left the list takes its focus and room along.
+            self.focus
+                .retain(|id, _| gallery.cards.iter().any(|card| &card.id == id));
+            self.text_room
+                .retain(|id, _| gallery.cards.iter().any(|card| &card.id == id));
+            self.update_stills(
+                gallery,
+                session_active(snapshot),
+                snapshot.connection_generation,
+                matches!(
+                    snapshot.connection,
+                    videorc_app_core::studio::Connection::Connected { .. }
+                ),
+                cx,
+            );
+        }
+        if view != self.view || on_stream != self.on_stream || screen_alert != self.screen_alert {
             self.view = view;
+            self.on_stream = on_stream;
+            self.screen_alert = screen_alert;
             cx.notify();
         }
     }
@@ -199,6 +356,34 @@ impl ScenesSection {
     fn measured(&mut self, width: f32, cx: &mut Context<Self>) {
         if (width - self.width).abs() >= 0.5 {
             self.width = width;
+            cx.notify();
+        }
+    }
+
+    /// A card's room for its name or meta words (`name` picks which).
+    fn measured_text(&mut self, id: &str, name: bool, width: f32, cx: &mut Context<Self>) {
+        let room = self.text_room.entry(id.to_string()).or_insert((0., 0.));
+        let slot = if name { &mut room.0 } else { &mut room.1 };
+        if (width - *slot).abs() >= 0.5 {
+            *slot = width;
+            cx.notify();
+        }
+    }
+
+    /// `move` (D5): the position keys move with the positions.
+    fn move_scene(&mut self, id: String, to_index: usize) {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            if !studio.move_scene(&id, to_index).await {
+                eprintln!("[videorc-app] Scenes: the scene didn't move");
+            }
+        });
+    }
+
+    /// A drag over the card at `index` (P281), from the card at `from`.
+    fn drag_over(&mut self, from: usize, index: usize, cx: &mut Context<Self>) {
+        if self.drag != Some((from, index)) {
+            self.drag = Some((from, index));
             cx.notify();
         }
     }
@@ -249,6 +434,12 @@ struct Paint {
     camera: Hsla,
     pip_rim: Hsla,
     well: Hsla,
+    /// What the screen area shows, in the secondary tier.
+    screen_glyph: Hsla,
+    /// The camera's glyph on its plate (`text-foreground/45`), opaque.
+    camera_glyph: Hsla,
+    /// A disabled card's picture is half over the card's ground.
+    still_veil: Option<Hsla>,
 }
 
 impl Paint {
@@ -265,7 +456,18 @@ impl Paint {
         };
         // A neutral plate, opaque over a picture: foreground/25 on the solid.
         let camera = faded_over(t.foreground, t.glass_solid, 0.25);
+        let camera_glyph = faded_over(t.foreground, camera, 0.45);
+        let dim = |color: Color| {
+            if disabled {
+                faded_over(color, ground, 0.5)
+            } else {
+                color
+            }
+        };
         Self {
+            screen_glyph: hsla(dim(t.muted_foreground)),
+            camera_glyph: hsla(dim(camera_glyph)),
+            still_veil: disabled.then(|| hsla(with_alpha(ground, 0.5))),
             frame_top: hsla(fade(with_alpha(t.muted, 0.4))),
             frame_bottom: hsla(fade(with_alpha(t.muted, 0.7))),
             frame_border: hsla(fade(t.border)),
@@ -287,9 +489,60 @@ fn card_ground(t: &Theme) -> Color {
     faded_over(t.foreground, t.glass_solid, 0.04)
 }
 
+/// The screen area's content (`ThumbScreen`, P286, P288): the scene's still
+/// when one came back, else its glyph at card size, else the empty fill.
+fn thumb_screen(
+    card: &SceneCardView,
+    still: Option<&Arc<gpui::Image>>,
+    glyph: bool,
+    corner: f32,
+    paint: &Paint,
+) -> Option<AnyElement> {
+    if let Some(still) = still {
+        return Some(
+            div()
+                .relative()
+                .size_full()
+                .child(
+                    img(still.clone())
+                        .size_full()
+                        .rounded(px(corner))
+                        .object_fit(ObjectFit::Cover),
+                )
+                .when_some(paint.still_veil, |area, veil| {
+                    area.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .rounded(px(corner))
+                            .bg(veil),
+                    )
+                })
+                .into_any_element(),
+        );
+    }
+    glyph.then(|| {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon(glyph_icon(&card.glyph), 24., paint.screen_glyph))
+            .into_any_element()
+    })
+}
+
 /// The layout diagram (`LayoutThumb`, P288): its frame and areas; a 9:16
-/// one upright in a 4:3 well. Never the live program, and no still yet.
-fn layout_thumb(card: &SceneCardView, inner: f32, paint: &Paint) -> AnyElement {
+/// one upright in a 4:3 well. Never the live program: the screen area holds
+/// the scene's still or glyph, the camera plate its glyph.
+fn layout_thumb(
+    card: &SceneCardView,
+    inner: f32,
+    paint: &Paint,
+    still: Option<&Arc<gpui::Image>>,
+) -> AnyElement {
     let frame_box = card_frame(card.vertical, inner);
     let (frame_w, frame_h) = (frame_box.width, frame_box.height);
     let areas = thumb_areas(
@@ -314,13 +567,32 @@ fn layout_thumb(card: &SceneCardView, inner: f32, paint: &Paint) -> AnyElement {
             linear_color_stop(paint.frame_bottom, 1.),
         ))
         .children(areas.into_iter().map(|area| {
+            let corner = corner_px(area.corner);
+            let content = match area.part {
+                ThumbPart::Screen => thumb_screen(card, still, area.glyph, corner, paint),
+                // `size-3.5 max-h-[60%]`: 14 px, never over 60% of the plate.
+                ThumbPart::Camera => area.glyph.then(|| {
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon(
+                            IconName::VideoCamera,
+                            (area.height * 0.6).min(14.),
+                            paint.camera_glyph,
+                        ))
+                        .into_any_element()
+                }),
+            };
             div()
                 .absolute()
                 .left(px(area.left))
                 .top(px(area.top))
                 .w(px(area.width))
                 .h(px(area.height))
-                .rounded(px(corner_px(area.corner)))
+                .overflow_hidden()
+                .rounded(px(corner))
                 .bg(match area.part {
                     ThumbPart::Camera => paint.camera,
                     ThumbPart::Screen => paint.screen,
@@ -328,6 +600,7 @@ fn layout_thumb(card: &SceneCardView, inner: f32, paint: &Paint) -> AnyElement {
                 .when(area.rim, |plate| {
                     plate.border_1().border_color(paint.pip_rim)
                 })
+                .children(content)
         }));
     if !card.vertical {
         return frame.into_any_element();
@@ -417,13 +690,39 @@ fn status_line(status: &SceneSwitchStatusLine, t: &Theme) -> AnyElement {
 }
 
 impl ScenesSection {
-    /// One scene card (`SceneCard`, P288–P290, P293).
+    /// A card's room measure: a canvas over its line that reports the
+    /// line's width at paint (P292).
+    fn text_measure(&self, id: &str, name: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let weak = cx.entity().downgrade();
+        let id = id.to_string();
+        canvas(
+            move |bounds, _, cx| {
+                let width = f32::from(bounds.size.width);
+                weak.update(cx, |section, cx| {
+                    section.measured_text(&id, name, width, cx)
+                })
+                .ok();
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    }
+
+    /// One scene card (`SceneCard`, P281, P282, P286, P288–P290, P292,
+    /// P293).
+    #[allow(clippy::too_many_arguments)]
     fn card(
-        &self,
+        &mut self,
         index: usize,
         card: &SceneCardView,
+        count: usize,
+        read_only: bool,
         width: f32,
         t: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let paint = Paint::of(t, card.disabled);
@@ -436,13 +735,17 @@ impl ScenesSection {
             foreground
         };
         let inner = width - 2. * (CARD_PADDING_PX + CARD_BORDER_PX);
+        let still = card
+            .picture
+            .as_ref()
+            .and_then(|target| self.stills.image(&picture_key(target)));
 
         // The well, and the ring a 2 px gap off it on the scene on stream:
         // the text's own tone, never a colour.
         let well = div()
             .relative()
             .flex_none()
-            .child(layout_thumb(card, inner, &paint))
+            .child(layout_thumb(card, inner, &paint, still.as_ref()))
             .when(card.on_stream, |well| {
                 well.child(
                     div()
@@ -457,6 +760,8 @@ impl ScenesSection {
                 )
             });
 
+        // The icon of what it shows before the name (`SceneGlyphIcon`),
+        // faded with a disabled card.
         let name_row = div()
             .mt(px(8.))
             .h(px(20.))
@@ -464,15 +769,18 @@ impl ScenesSection {
             .flex()
             .items_center()
             .gap(px(4.))
+            .child(icon(glyph_icon(&card.glyph), 16., paint.screen_glyph))
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .type_scale(text::LABEL)
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(name_ink)
-                    .child(card.name.clone()),
+                    .child(card.name.clone())
+                    .child(self.text_measure(&card.id, true, cx)),
             )
             .child(
                 div()
@@ -504,10 +812,12 @@ impl ScenesSection {
                 .into_any_element()
         } else {
             div()
+                .relative()
                 .flex_1()
                 .min_w_0()
                 .truncate()
                 .child(card.meta.clone().unwrap_or_default())
+                .child(self.text_measure(&card.id, false, cx))
                 .into_any_element()
         };
         let meta_row = div()
@@ -522,13 +832,82 @@ impl ScenesSection {
             .child(meta)
             .children(card_keys(&card.keys));
 
+        // P292: the whole name, and the meta words when they were cut, on
+        // hover, only when a line cut them. GPUI can't say whether text was
+        // cut, so the words' shaped width is held against the line's room.
+        let (name_room, meta_room) = self.text_room.get(&card.id).copied().unwrap_or_default();
+        let name_cut = name_room > 0.
+            && text_width(
+                window,
+                &card.name,
+                text::LABEL.size,
+                FontWeight::MEDIUM,
+                name_ink,
+            ) > name_room + 0.5;
+        let meta_words = (!card.pending).then_some(card.meta.as_deref()).flatten();
+        let meta_cut = meta_room > 0.
+            && meta_words.is_some_and(|words| {
+                text_width(
+                    window,
+                    words,
+                    text::META.size,
+                    FontWeight(text::META.weight),
+                    muted,
+                ) > meta_room + 0.5
+            });
+        let cut = cut_tooltip(&card.name, name_cut, meta_words, meta_cut);
+
         let interactive = !card.on_stream && !card.disabled;
         let accent = hsla(t.accent);
+        let focus = self
+            .focus
+            .entry(card.id.clone())
+            .or_insert_with(|| cx.focus_handle())
+            .clone();
+        // The selected plate's light and shade, and the keyboard's ring.
+        let plate = if card.on_stream {
+            vec![
+                box_shadow(&Shadow {
+                    inset: true,
+                    x: 0.,
+                    y: 1.,
+                    blur: 0.,
+                    spread: 0.,
+                    color: t.chrome_plate_hi,
+                }),
+                box_shadow(&Shadow {
+                    inset: true,
+                    x: 0.,
+                    y: 0.,
+                    blur: 0.,
+                    spread: 1.,
+                    color: t.chrome_plate_rim,
+                }),
+            ]
+        } else {
+            Vec::new()
+        };
+        let mut focused = plate.clone();
+        focused.push(focus_ring(t));
+
+        // P281: where a dragged card would land beside this one.
+        let edge = self
+            .drag
+            .filter(|(_, over)| *over == index)
+            .and_then(|(from, _)| drop_edge(from, index));
+        let ring = hsla(t.ring);
+
         let id = card.id.clone();
+        let key_id = card.id.clone();
+        let drop_id = card.id.clone();
+        let disabled = card.disabled;
         div()
             .id(("scene-card", index))
             .role(Role::Button)
             .aria_label(card.name.clone())
+            .track_focus(&focus)
+            .tab_index(0)
+            .relative()
             .flex_none()
             .w(px(width))
             .flex()
@@ -547,54 +926,117 @@ impl ScenesSection {
                             linear_color_stop(hsla(t.chrome_plate_bottom), 1.),
                         )
                         .color_space(ColorSpace::Oklab))
-                        .shadow(vec![
-                            box_shadow(&Shadow {
-                                inset: true,
-                                x: 0.,
-                                y: 1.,
-                                blur: 0.,
-                                spread: 0.,
-                                color: t.chrome_plate_hi,
-                            }),
-                            box_shadow(&Shadow {
-                                inset: true,
-                                x: 0.,
-                                y: 0.,
-                                blur: 0.,
-                                spread: 1.,
-                                color: t.chrome_plate_rim,
-                            }),
-                        ])
+                        .shadow(plate)
                 } else {
                     card_box
                         .border_color(hsla(t.border))
                         .bg(hsla(with_alpha(t.foreground, 0.04)))
                 }
             })
+            .focus_visible(move |style| style.shadow(focused))
             .when(interactive, |card_box| {
                 card_box
                     .cursor_pointer()
                     .hover(move |style| style.bg(accent))
             })
-            .when(!card.disabled, |card_box| {
+            .when(!disabled, |card_box| {
                 card_box.on_click(cx.listener(move |section, _, _, _| {
                     section.apply(id.clone());
                 }))
             })
-            .when_some(
-                card.disabled_reason.clone().filter(|_| card.disabled),
-                |card_box, reason| card_box.tooltip(tooltip(reason)),
+            // ⌥← ⌥→ move the card (P282), on the card itself, while it can't
+            // go on too; Enter and Space put it on stream, as its button.
+            .on_key_down(cx.listener(move |section, event: &KeyDownEvent, _, cx| {
+                let keystroke = &event.keystroke;
+                let modifiers = &keystroke.modifiers;
+                let dom_key = match keystroke.key.as_str() {
+                    "left" => "ArrowLeft",
+                    "right" => "ArrowRight",
+                    "up" => "ArrowUp",
+                    "down" => "ArrowDown",
+                    other => other,
+                };
+                let key = MoveKey {
+                    key: dom_key,
+                    alt: modifiers.alt,
+                    ctrl: modifiers.control,
+                    meta: modifiers.platform,
+                    shift: modifiers.shift,
+                };
+                if let Some(target) = card_move_target(key, index, count, read_only) {
+                    cx.stop_propagation();
+                    section.move_scene(key_id.clone(), target);
+                    return;
+                }
+                let plain =
+                    !modifiers.alt && !modifiers.control && !modifiers.platform && !modifiers.shift;
+                if plain && !disabled && matches!(keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    section.apply(key_id.clone());
+                }
+            }))
+            .when(!read_only, |card_box| {
+                card_box
+                    .on_drag(
+                        SceneDrag {
+                            id: card.id.clone(),
+                            index,
+                            name: card.name.clone().into(),
+                        },
+                        |drag: &SceneDrag, _, _, cx| cx.new(|_| drag.clone()),
+                    )
+                    .on_drag_move(cx.listener(
+                        move |section, event: &DragMoveEvent<SceneDrag>, _, cx| {
+                            if event.bounds.contains(&event.event.position) {
+                                let from = event.drag(cx).index;
+                                section.drag_over(from, index, cx);
+                            }
+                        },
+                    ))
+                    .on_drop(cx.listener(move |section, drag: &SceneDrag, _, cx| {
+                        section.drag = None;
+                        cx.notify();
+                        if drag.id != drop_id {
+                            section.move_scene(drag.id.clone(), index);
+                        }
+                    }))
+            })
+            .map(
+                |card_box| match card.disabled_reason.clone().filter(|_| disabled) {
+                    // A card's own reason wins over the cut words (P293).
+                    Some(reason) => card_box.tooltip(tooltip(reason)),
+                    None => match cut {
+                        Some(words) => card_box.tooltip(tooltip(words)),
+                        None => card_box,
+                    },
+                },
             )
             .child(well)
             .child(name_row)
             .child(meta_row)
+            // The drop line, 2 px in the ring's tone, in the gap beside the
+            // card (`before:w-0.5 before:bg-ring`, 5 px out).
+            .children(edge.map(|edge| {
+                let line = div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(2.))
+                    .rounded_full()
+                    .bg(ring);
+                match edge {
+                    DropEdge::Before => line.left(px(-5.)),
+                    DropEdge::After => line.right(px(-5.)),
+                }
+            }))
             .into_any_element()
     }
 
     fn gallery(
-        &self,
+        &mut self,
         gallery: &ScenesGalleryView,
         t: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PanelSection {
         let entity = cx.entity();
@@ -677,12 +1119,11 @@ impl ScenesSection {
             .children(follow);
 
         let card_w = card_width(self.width);
-        let cards: Vec<AnyElement> = gallery
-            .cards
-            .iter()
-            .enumerate()
-            .map(|(index, card)| self.card(index, card, card_w, t, cx))
-            .collect();
+        let count = gallery.cards.len();
+        let mut cards: Vec<AnyElement> = Vec::with_capacity(count);
+        for (index, card) in gallery.cards.iter().enumerate() {
+            cards.push(self.card(index, card, count, gallery.read_only, card_w, t, window, cx));
+        }
         let weak = entity.downgrade();
         let measure = canvas(
             move |bounds, _, cx| {
@@ -731,18 +1172,26 @@ impl ScenesSection {
                         ),
                 )
         });
+        // Plan 231 D8: under the cards, the scene on stream's own fields.
+        let fields = self.on_stream_fields(t, window, cx);
         section
             .child(controls)
             .children(error)
             .child(grid)
             .children(status)
             .children(reason)
+            .children(fields)
     }
 }
 
 impl Render for ScenesSection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme::resolve(None, window, cx);
+        // A drag that ended anywhere (dropped elsewhere, or let go outside
+        // the window) takes its drop line along.
+        if self.drag.is_some() && !cx.has_active_drag() {
+            self.drag = None;
+        }
         match self.view.clone() {
             // P272: while the room is open the Show stage's layouts are
             // what goes on air.
@@ -753,7 +1202,7 @@ impl Render for ScenesSection {
             ScenesSectionView::Loading => PanelSection::new("studio-scenes")
                 .title(copy::TITLE)
                 .child(Skeleton::new("scenes-loading").w_full().h(px(320.))),
-            ScenesSectionView::Gallery(gallery) => self.gallery(&gallery, t, cx),
+            ScenesSectionView::Gallery(gallery) => self.gallery(&gallery, t, window, cx),
         }
     }
 }

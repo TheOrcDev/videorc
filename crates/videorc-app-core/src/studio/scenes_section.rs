@@ -17,6 +17,10 @@
 //!   (P277), "Follow the app in front" on macOS (P278), the library's error
 //!   (P279), one card per scene in library order (P288–P291, P293), the
 //!   switch's status line (P284) and the camera's one reason (P285).
+//! - each card's still picture's target (P286, [`crate::scenes::pictures`]
+//!   says when they are asked for), its glyph (P288), where a dragged card
+//!   lands (P281), the place ⌥← ⌥→ moves it to (P282) and the tooltip a
+//!   cut name or meta line shows (P292).
 //!
 //! The status line has a clock: it shows a moment after a switch starts.
 //! The view says when ([`ScenesGalleryView::status_at`]) so the UI draws
@@ -33,10 +37,14 @@ use super::scenes::ScenesView;
 use crate::desktop::accelerator::{accelerator_label, global_shortcut_conflict_reason};
 use crate::guests::view::SCENES_OFF_WHILE_ROOM_OPEN;
 use crate::scenes::list::{
-    SceneGlyph, saved_scene_blocked_reason, scene_glyph, scene_shortcut_bindings,
+    MoveAxis, MoveKey, SceneGlyph, saved_scene_blocked_reason, scene_glyph, scene_move_key_step,
+    scene_shortcut_bindings,
 };
 use crate::scenes::model::{SavedScene, scene_source_problems};
-use crate::scenes::section::{scene_card_words, scene_cards_camera_gaps, scene_slot_keys_line};
+use crate::scenes::section::{
+    ScenePictureTarget, scene_card_words, scene_cards_camera_gaps, scene_picture_target,
+    scene_slot_keys_line,
+};
 use crate::scenes::switch_progress::{SceneSwitchStatusLine, SwitchCamera};
 use crate::scenes::v2::{Orientation, layout_preset};
 
@@ -114,8 +122,12 @@ pub struct SceneCardView {
     /// The meta row's words while not pending: why it can't go on, "Resolve
     /// sources", or what it shows (none when that would repeat its name).
     pub meta: Option<String>,
-    /// What it shows, for the glyph in its screen area.
+    /// What it shows, for the glyph in its screen area and before its
+    /// name.
     pub glyph: SceneGlyph,
+    /// The still its screen area shows once one came back (D7): the app,
+    /// window or display it shows, or none when its layout draws no screen.
+    pub picture: Option<ScenePictureTarget>,
     /// The layout it draws in the studio's orientation.
     pub preset: String,
     /// A 9:16 layout (drawn upright in a 4:3 well).
@@ -132,6 +144,8 @@ pub struct ScenesGalleryView {
     pub line: ScenesLine,
     /// The studio is 9:16.
     pub vertical: bool,
+    /// A library from a newer Videorc: no card moves (drag, ⌥← ⌥→).
+    pub read_only: bool,
     /// Why the toggle is off (a session runs), or none.
     pub orientation_locked: Option<&'static str>,
     /// "Follow the app in front" and whether it is on; none off macOS
@@ -267,6 +281,58 @@ pub fn card_keys(
         .collect()
 }
 
+/// Where a dragged card would land beside the one under the pointer
+/// (`SceneDropEdge`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropEdge {
+    Before,
+    After,
+}
+
+/// `dropEdge`: a card dragged from `dragging` over the card at `index`
+/// lands after it when it came from before, else before it; none over
+/// itself. A drop there moves it to `index`.
+pub fn drop_edge(dragging: usize, index: usize) -> Option<DropEdge> {
+    match dragging.cmp(&index) {
+        std::cmp::Ordering::Less => Some(DropEdge::After),
+        std::cmp::Ordering::Greater => Some(DropEdge::Before),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+/// `onMoveKey` on the card at `index` of `count`: ⌥← or ⌥→ alone moves it
+/// one place (D8, WCAG 2.1.1), and the keys move with the places. None for
+/// any other key, past either end, or in a library this build can't change.
+pub fn card_move_target(
+    key: MoveKey<'_>,
+    index: usize,
+    count: usize,
+    read_only: bool,
+) -> Option<usize> {
+    if read_only {
+        return None;
+    }
+    let step = scene_move_key_step(key, MoveAxis::Horizontal)?;
+    let target = index.checked_add_signed(step as isize)?;
+    (target < count).then_some(target)
+}
+
+/// The card's tooltip while a line cut its words (P292): the whole name,
+/// then the meta words only when they were the ones cut; none when nothing
+/// was cut.
+pub fn cut_tooltip(
+    name: &str,
+    name_cut: bool,
+    meta: Option<&str>,
+    meta_cut: bool,
+) -> Option<String> {
+    let meta = meta.filter(|_| meta_cut);
+    (name_cut || meta.is_some()).then(|| match meta {
+        Some(meta) => format!("{name}\n{meta}"),
+        None => name.to_string(),
+    })
+}
+
 impl ScenesSectionView {
     /// The line under the title while a room is open.
     pub fn room_open_line() -> &'static str {
@@ -354,6 +420,7 @@ impl ScenesSectionView {
                     disabled_reason,
                     meta,
                     glyph: scene_glyph(&scene.visual, devices),
+                    picture: scene_picture_target(&scene.visual),
                     vertical: Orientation::of_preset(&preset) == Orientation::Vertical,
                     fit: layout.get("verticalScreenFraming").and_then(Value::as_str) == Some("fit"),
                     preset,
@@ -383,6 +450,7 @@ impl ScenesSectionView {
         Self::Gallery(ScenesGalleryView {
             line: scenes_line(input.shortcuts, extras.platform),
             vertical: Orientation::of_layout(input.layout) == Orientation::Vertical,
+            read_only: scenes.read_only,
             orientation_locked: input.session_active.then_some(copy::ORIENTATION_LOCKED),
             follow_front_app: (extras.platform == Some("darwin")).then_some(input.follow_front_app),
             error: scenes.error,
