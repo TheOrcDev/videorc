@@ -140,11 +140,14 @@ export async function runGpuiPreviewLifecycleProbe() {
             `cycle ${cycle}: the closed Preview still presented ${parked.advance} frames in 300 ms`
           )
         }
-        if (!/closed/i.test(parked.last?.message ?? '')) {
-          throw new Error(
-            `cycle ${cycle}: a parked Preview's status should say it is closed, got ${JSON.stringify(parked.last?.message)}`
-          )
-        }
+        // The status names the closed Preview once its 750 ms status tick
+        // catches up (until then the surface's own words show through).
+        await waitUntil(
+          `cycle ${cycle}: a parked Preview's status never said it is closed`,
+          () => command('native-preview-surface-status'),
+          (status) => /closed/i.test(status?.message ?? ''),
+          { budgetMs: 1500, everyMs: 100, label: (status) => status?.message ?? null }
+        )
         const opened = Date.now()
         await togglePreview()
         await waitUntil(
