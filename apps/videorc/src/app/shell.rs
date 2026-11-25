@@ -91,7 +91,7 @@ fn chrome_top() -> gpui::Pixels {
 /// Electron's sidebar / ⌘K page glyphs (`workspace-nav.tsx`,
 /// `page-row-icons.tsx`): each `PageId` wears the same Phosphor mark the
 /// React twin draws, including `UserSound` for Sidekick.
-fn page_icon(page: PageId) -> IconName {
+pub(crate) fn page_icon(page: PageId) -> IconName {
     match page {
         PageId::Studio => IconName::VideoCamera,
         PageId::Sources => IconName::Monitor,
