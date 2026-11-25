@@ -31,7 +31,7 @@ use crate::{
     icon::{IconName, icon},
     popover::popup_surface,
     theme::{Appearance, FONT, current, hsla, is_dark, with_alpha},
-    tokens::{Color, Theme, radius, size},
+    tokens::{Color, Theme, size},
 };
 
 /// What the toast says by its icon's colour.
@@ -129,6 +129,11 @@ impl ToastData {
 const TICK: Duration = Duration::from_millis(50);
 /// Each window shows at most three.
 const VISIBLE: usize = 3;
+
+/// Sonner's `[data-button]` radius for the action and cancel chips: 4 px,
+/// below the stylesheet's radius tiers, so it lives here rather than in the
+/// generated tokens.
+const ACTION_RADIUS: f32 = 4.0;
 
 /// Sonner description ink: near-title strength (not muted-foreground).
 /// Light `#3f3f3f`, dark hsl(0 0% 91%). Allowlisted in design guards.
@@ -273,7 +278,7 @@ fn toast_action_chip(
         .flex_none()
         .h(px(24.0))
         .px(px(8.0))
-        .rounded(px(radius::TOAST_ACTION))
+        .rounded(px(ACTION_RADIUS))
         .flex()
         .items_center()
         .justify_center()
@@ -305,7 +310,7 @@ fn toast_cancel_chip(
         .flex_none()
         .h(px(24.0))
         .px(px(8.0))
-        .rounded(px(radius::TOAST_ACTION))
+        .rounded(px(ACTION_RADIUS))
         .flex()
         .items_center()
         .justify_center()

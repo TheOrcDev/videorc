@@ -28,6 +28,8 @@ pub struct Input {
     id: ElementId,
     state: Entity<InputState>,
     disabled: bool,
+    /// Selectable and copyable, never editable (`readOnly`): Guests' invite link.
+    readonly: bool,
     invalid: bool,
     /// No own rim, fill or focus ring: an [`crate::input_group::InputGroup`] owns them.
     plain: bool,
@@ -46,6 +48,7 @@ impl Input {
             id: id.into(),
             state: state.clone(),
             disabled: false,
+            readonly: false,
             invalid: false,
             plain: false,
             revert_on_escape: false,
@@ -75,6 +78,13 @@ impl Input {
     }
 
     /// `aria-invalid`: the destructive rim and ring.
+    /// `readOnly`: the value can be selected and copied but not edited. The
+    /// field keeps its full colours and focus ring, as Electron's does.
+    pub fn readonly(mut self, readonly: bool) -> Self {
+        self.readonly = readonly;
+        self
+    }
+
     pub fn invalid(mut self, invalid: bool) -> Self {
         self.invalid = invalid;
         self
@@ -122,8 +132,12 @@ impl RenderOnce for Input {
         let t = resolve(self.appearance, window, cx);
         let ground = self.ground.unwrap_or(t.glass_solid);
         let disabled = self.disabled;
+        let readonly = self.readonly;
+        // Inside an InputGroup the group fades as one (`opacity-50`), so a
+        // plain control keeps its colours rather than fading twice.
+        let fades = disabled && !self.plain;
         let fade = |color: Color| {
-            if disabled {
+            if fades {
                 faded_over(color, ground, 0.5)
             } else {
                 color
@@ -154,6 +168,9 @@ impl RenderOnce for Input {
             // Only on a change: setting it notifies the editor.
             if state.presentation().is_disabled() != disabled {
                 state.set_disabled(disabled, cx);
+            }
+            if state.presentation().is_readonly() != readonly {
+                state.set_readonly(readonly, cx);
             }
             state.set_editor_style(InputEditorStyle {
                 foreground: hsla(fade(t.foreground)),
@@ -226,7 +243,11 @@ impl RenderOnce for Input {
         };
         let state_up = self.state.clone();
         let state_down = self.state.clone();
-        let disabled = self.disabled;
+        // Two stepped fields under one parent must not share the buttons'
+        // keyed state.
+        let up_id = SharedString::from(format!("{}/step-up", self.id));
+        let down_id = SharedString::from(format!("{}/step-down", self.id));
+        let disabled = self.disabled || readonly;
         div()
             .relative()
             .w_full()
@@ -243,14 +264,14 @@ impl RenderOnce for Input {
                     .w(px(16.0))
                     .justify_between()
                     .child(stepper_btn(
-                        "input-step-up",
+                        up_id,
                         IconName::CaretUp,
                         disabled,
                         t.muted_foreground,
                         move |window, cx| nudge_number(&state_up, step, window, cx),
                     ))
                     .child(stepper_btn(
-                        "input-step-down",
+                        down_id,
                         IconName::CaretDown,
                         disabled,
                         t.muted_foreground,
@@ -262,7 +283,7 @@ impl RenderOnce for Input {
 }
 
 fn stepper_btn(
-    id: &'static str,
+    id: SharedString,
     name: IconName,
     disabled: bool,
     ink: Color,
@@ -270,6 +291,10 @@ fn stepper_btn(
 ) -> impl IntoElement {
     gpui_base::Button::new(id)
         .disabled(disabled)
+        // The field keeps focus: a press neither moves the focus ring nor
+        // blurs the field (which reset an unfocused Output field's value on
+        // the next redraw). The field's own arrow keys stay the keyboard path.
+        .focusable(false)
         .flex_none()
         .h(px(11.0))
         .w(px(16.0))

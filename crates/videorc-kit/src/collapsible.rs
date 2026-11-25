@@ -2,15 +2,20 @@
 //! its trigger visible and shows or hides a panel. The caller owns `open`
 //! and updates it from [`Collapsible::on_toggle`], as React's
 //! `Collapsible` root does with `open` / `onOpenChange`.
+//!
+//! The header is a real button, as Base UI's `Collapsible.Trigger` is: it
+//! takes Tab focus (a focus-visible ring), toggles on click, Enter and Space,
+//! and tells assistive tech whether the panel is expanded.
 
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Div, ElementId, InteractiveElement, IntoElement, SharedString,
-    StyleRefinement, Window, div, prelude::*, px,
+    AnyElement, App, Div, ElementId, IntoElement, SharedString, StyleRefinement, Window, div,
+    prelude::*, px,
 };
 
 use crate::{
+    chrome::focus_ring,
     icon::{IconName, icon},
     theme::{Appearance, hsla, resolve},
     tokens::radius,
@@ -24,6 +29,7 @@ pub struct Collapsible {
     open: bool,
     disabled: bool,
     trigger: AnyElement,
+    accessibility_label: Option<SharedString>,
     content: Option<AnyElement>,
     on_toggle: Option<ToggleHandler>,
     /// Electron Base UI Collapsible is unstyled; the kit chrome is opt-in.
@@ -39,6 +45,7 @@ impl Collapsible {
             open: false,
             disabled: false,
             trigger: SharedString::from("").into_any_element(),
+            accessibility_label: None,
             content: None,
             on_toggle: None,
             unstyled: false,
@@ -60,6 +67,13 @@ impl Collapsible {
     /// The always-visible header (title row, chevron, etc.).
     pub fn trigger(mut self, trigger: impl IntoElement) -> Self {
         self.trigger = trigger.into_any_element();
+        self
+    }
+
+    /// The header button's name for assistive tech, when the trigger is not
+    /// plain text (a status dot and a title, Health's groups).
+    pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessibility_label = Some(label.into());
         self
     }
 
@@ -101,7 +115,24 @@ impl RenderOnce for Collapsible {
         let on_toggle = self.on_toggle;
         let unstyled = self.unstyled;
 
-        let mut header = div().id(self.id).flex().w_full().items_center();
+        let ring = focus_ring(t);
+        // `Collapsible.Trigger` is a button: Tab focus, Enter and Space, and
+        // `aria-expanded`. gpui-base's Button centres its content; the header
+        // reads from the leading edge.
+        let mut header = gpui_base::Button::new(self.id)
+            .disabled(disabled)
+            .aria_expanded(open)
+            .when_some(self.accessibility_label, |header, label| {
+                header.accessibility_label(label)
+            })
+            .flex()
+            .w_full()
+            .items_center()
+            .justify_start()
+            // gpui-base sets a 1.0 line box; keep text-sm's 20 px so a plain
+            // trigger label keeps its descenders.
+            .line_height(px(20.0))
+            .focus_visible(move |style| style.shadow(vec![ring]));
         if unstyled {
             header = header.child(div().flex_1().min_w(px(0.0)).child(self.trigger));
         } else {

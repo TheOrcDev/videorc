@@ -111,6 +111,8 @@ pub struct Select {
     max_width: Option<f32>,
     ground: Option<Color>,
     accessibility_label: Option<SharedString>,
+    /// A caller-owned handle for the trigger (first run's autofocus).
+    track_focus: Option<FocusHandle>,
     on_change: Option<ChangeHandler>,
     appearance: Option<Appearance>,
 }
@@ -129,6 +131,7 @@ impl Select {
             max_width: None,
             ground: None,
             accessibility_label: None,
+            track_focus: None,
             on_change: None,
             appearance: None,
         }
@@ -196,6 +199,13 @@ impl Select {
 
     pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
         self.accessibility_label = Some(label.into());
+        self
+    }
+
+    /// The trigger takes this focus handle instead of its own, so a page can
+    /// focus it (`autoFocus`) or ask whether it holds focus.
+    pub fn track_focus(mut self, handle: &FocusHandle) -> Self {
+        self.track_focus = Some(handle.clone());
         self
     }
 
@@ -288,6 +298,12 @@ impl RenderOnce for Select {
                 }
             });
             state.update(cx, |s, _| s._search_sub = Some(sub));
+        }
+        if let Some(handle) = self.track_focus.as_ref()
+            && state.read(cx).trigger_focus != *handle
+        {
+            // Closing the popup hands focus back through the state's handle.
+            state.update(cx, |s, _| s.trigger_focus = handle.clone());
         }
         let (open, highlighted, bounds, trigger_focus, content_focus, search, query) = {
             let s = state.read(cx);

@@ -46,10 +46,19 @@ pub struct ListRow {
     alias: Option<AnyElement>,
     status_icons: SmallVec<[AnyElement; 2]>,
     meta: Option<SharedString>,
+    /// An element in the meta slot (a Switch, a StatusBadge).
+    meta_element: Option<AnyElement>,
     children: SmallVec<[AnyElement; 2]>,
     selected: bool,
     interactive: Option<bool>,
     compact: bool,
+    /// `h-auto`: the row grows with its content (a poster, two lines) from
+    /// `min_height`, padded `py`.
+    auto_height: bool,
+    min_height: Option<f32>,
+    py: Option<f32>,
+    /// The gap between the row's parts (10 px; Clean cut's recordings `gap-3`).
+    gap: Option<f32>,
     /// No horizontal padding (Electron `px-0` flush rows).
     flush: bool,
     disabled: bool,
@@ -70,10 +79,15 @@ impl ListRow {
             alias: None,
             status_icons: SmallVec::new(),
             meta: None,
+            meta_element: None,
             children: SmallVec::new(),
             selected: false,
             interactive: None,
             compact: false,
+            auto_height: false,
+            min_height: None,
+            py: None,
+            gap: None,
             flush: false,
             disabled: false,
             grouped: false,
@@ -131,6 +145,13 @@ impl ListRow {
         self
     }
 
+    /// An element in the right-aligned meta slot, after any meta text:
+    /// Electron's ListRowButton puts a Switch there (Avatar Profile).
+    pub fn meta_element(mut self, meta: impl IntoElement) -> Self {
+        self.meta_element = Some(meta.into_any_element());
+        self
+    }
+
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
         self
@@ -149,7 +170,33 @@ impl ListRow {
         self
     }
 
-    /// A row that is a button, disabled.
+    /// `h-auto py-1.5`: the row grows with its content (Clean cut's 64×36
+    /// poster makes a 48 px row) and never falls under its usual height or
+    /// [`Self::min_height`].
+    pub fn auto_height(mut self, auto: bool) -> Self {
+        self.auto_height = auto;
+        self
+    }
+
+    /// The least height of an [`Self::auto_height`] row (Sources' device rows: 40).
+    pub fn min_height(mut self, height: f32) -> Self {
+        self.min_height = Some(height);
+        self
+    }
+
+    /// Vertical padding of an [`Self::auto_height`] row (6 px by default).
+    pub fn py(mut self, py: f32) -> Self {
+        self.py = Some(py);
+        self
+    }
+
+    /// The gap between the leading control, icon, words and end cluster.
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.gap = Some(gap);
+        self
+    }
+
+    /// A row that is a button, disabled: faded, its title in muted ink.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -217,7 +264,11 @@ impl RenderOnce for ListRow {
                 div()
                     .min_w(px(0.0))
                     .truncate()
-                    .text_color(hsla(t.foreground))
+                    .text_color(hsla(if self.disabled {
+                        t.muted_foreground
+                    } else {
+                        t.foreground
+                    }))
                     .font_weight(FontWeight::MEDIUM)
                     .child(self.title)
                     .children(self.title_count.map(|count| {
@@ -256,14 +307,20 @@ impl RenderOnce for ListRow {
                     .type_scale(text::META)
                     .text_color(hsla(t.muted_foreground))
                     .child(meta)
-            }));
+            }))
+            .children(self.meta_element);
         let pad_x = if self.flush { 0.0 } else { 12.0 };
+        let auto_height = self.auto_height;
+        let min_height = self.min_height.unwrap_or(height);
+        let pad_y = self.py.unwrap_or(6.0);
+        let gap = self.gap.unwrap_or(10.0);
         let content = |row: gpui::Div| {
             row.w_full()
-                .h(px(height))
+                .when(!auto_height, |row| row.h(px(height)))
+                .when(auto_height, |row| row.min_h(px(min_height)).py(px(pad_y)))
                 .flex()
                 .items_center()
-                .gap(px(10.0))
+                .gap(px(gap))
                 .px(px(pad_x))
                 .rounded(px(corner))
                 .text_size(px(14.0))

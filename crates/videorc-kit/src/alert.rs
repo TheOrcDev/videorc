@@ -82,6 +82,8 @@ impl AlertVariant {
 
 enum AlertIcon {
     Tone,
+    /// A subject's glyph, drawn as the tone's own is (fill weight, tone ink).
+    Glyph(IconName),
     Own(AnyElement),
     None,
 }
@@ -128,13 +130,23 @@ impl Alert {
         self
     }
 
-    /// `AlertAction`: a control pinned to the top right (Retry, Dismiss).
+    /// `AlertAction`: a control pinned to the top right (Retry, Dismiss),
+    /// out of flow as Electron's is.
     pub fn action(mut self, action: impl IntoElement) -> Self {
         self.action = Some(action.into_any_element());
         self
     }
 
-    /// A subject's own mark in place of the tone's icon, 16 px.
+    /// A subject's glyph in place of the tone's (Sparkle, UploadSimple,
+    /// ArrowsClockwise), at Phosphor's fill weight in the tone's colour, as
+    /// Electron's `icon` prop draws every alert icon (`weight="fill"`).
+    pub fn glyph(mut self, name: IconName) -> Self {
+        self.icon = AlertIcon::Glyph(name);
+        self
+    }
+
+    /// A subject's own mark in place of the tone's icon, 16 px, drawn as
+    /// given (a platform's brand mark).
     pub fn icon(mut self, icon: impl IntoElement) -> Self {
         self.icon = AlertIcon::Own(icon.into_any_element());
         self
@@ -162,9 +174,17 @@ impl RenderOnce for Alert {
             AlertIcon::Tone => {
                 Some(icon(variant.icon(), 16.0, hsla(variant.icon_color(t))).into_any_element())
             }
+            AlertIcon::Glyph(name) => {
+                Some(icon(name.filled(), 16.0, hsla(variant.icon_color(t))).into_any_element())
+            }
             AlertIcon::Own(mark) => Some(mark),
             AlertIcon::None => None,
         };
+        // Electron lays the alert out as a grid whose icon spans two rows
+        // (`*:[svg]:row-span-2`): beside a single line of text the second row
+        // is empty but its `gap-0.5` stays, so the row is 42 px, not 40.
+        let lines = usize::from(self.title.is_some()) + usize::from(has_description);
+        let empty_row = leading.is_some() && lines == 1;
         // The 16 px icon sits 2 px down, on the first line of 20 px text.
         let leading = leading.map(|mark| {
             div()
@@ -207,8 +227,10 @@ impl RenderOnce for Alert {
             .items_start()
             .gap(px(10.0))
             .px(px(12.0))
-            .py(px(10.0))
-            // The action's room: 72 px on the right.
+            .pt(px(10.0))
+            .pb(px(if empty_row { 12.0 } else { 10.0 }))
+            // The action's room: 72 px on the right (`pr-18`); the action
+            // itself is absolute (`top-2.5 right-3`) and never grows the row.
             .when(has_action, |alert| alert.pr(px(72.0)))
             .rounded(px(radius::ROW))
             .bg(hsla(with_alpha(t.foreground, 0.04)))
