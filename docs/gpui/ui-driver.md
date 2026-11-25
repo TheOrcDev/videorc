@@ -183,6 +183,10 @@ alignment read) and a main-window storm (`main-window-set-bounds`, now on GPUI) 
 the preview stood still longer than `VIDEORC_PREVIEW_STRESS_MAX_STILL_MS` (1000), left presenting, or presented
 nothing; a layout the backend refuses without a real device makes the scene phase a named SKIP.
 
+`session-player-geometry` reads every live session player (the Library's, and any a page hosts) the same way:
+`{ players: [{ mode, active, open, layerFrame, displayedFrame, slot }] }`. On macOS `displayedFrame` must equal
+`layerFrame` and fill `slot`, as the live preview's do; it uses the same `VideoLayer` (`tune_video_layer`).
+
 Wait for a GPUI product path or new commands first:
 
 | Smoke                                                                                                                                            | Missing on GPUI                                                                                                                                                                                                |

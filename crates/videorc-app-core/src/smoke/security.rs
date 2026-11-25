@@ -239,6 +239,9 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     "scene-stage-reveal",
     "scene-stage-select",
     "scene-stage-state",
+    // L6: the session player's layer (set, displayed, slot), as the live
+    // preview's geometry oracle reads it.
+    "session-player-geometry",
     // S2.3b: the Studio slot's rect, which Electron's probes read from the
     // DOM with `eval-js`.
     "studio-dock-slot",

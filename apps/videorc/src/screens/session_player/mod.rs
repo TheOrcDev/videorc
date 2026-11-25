@@ -121,7 +121,17 @@ pub struct Player {
     deleting: std::collections::BTreeMap<String, std::rc::Rc<std::cell::Cell<bool>>>,
     delete_flushes: std::collections::BTreeMap<String, std::rc::Rc<dyn Fn(&mut gpui::App)>>,
     native: Option<native::Native>,
+    /// The slot the layer was last placed in (the player's own points), for
+    /// the smokes' geometry read.
+    smoke_slot: Option<gpui::Bounds<gpui::Pixels>>,
 }
+
+/// The live players, for the smoke driver's `session-player-geometry`.
+#[derive(Default)]
+pub struct SmokePlayers(pub Vec<gpui::WeakEntity<Player>>);
+
+impl gpui::Global for SmokePlayers {}
+
 impl Player {
     pub fn new(
         core: Arc<Core>,
@@ -134,6 +144,12 @@ impl Player {
     ) -> Self {
         // A percentage slider keeps one entity throughout the recording;
         // backend milliseconds are converted at the input/output boundary.
+        {
+            let weak = cx.weak_entity();
+            let players = cx.default_global::<SmokePlayers>();
+            players.0.retain(|player| player.upgrade().is_some());
+            players.0.push(weak);
+        }
         let slider = cx.new(|_| SliderState::new().min(0.).max(100.).step(0.01));
         let input = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe_in(&slider, window, |this, _, event: &SliderEvent, _, cx| {
@@ -233,6 +249,7 @@ impl Player {
             deleting: Default::default(),
             delete_flushes: Default::default(),
             native: None,
+            smoke_slot: None,
         }
     }
     pub fn open(&mut self, session: &SessionListItem, window: &mut Window, cx: &mut Context<Self>) {
@@ -490,5 +507,47 @@ impl Drop for Player {
         {
             self.native.take();
         }
+    }
+}
+
+impl Player {
+    /// `session-player-geometry`: where the player's layer is. On macOS the
+    /// rect the app set, the rect Core Animation displays, and the slot,
+    /// which must agree as the live preview's do (`probe:preview-window`).
+    pub fn smoke_geometry(&self) -> serde_json::Value {
+        let rect = |rect: videorc_preview::LayerRect| serde_json::json!({ "x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height });
+        #[cfg(target_os = "macos")]
+        let (set, shown) = self
+            .native
+            .as_ref()
+            .and_then(|native| native.element.as_ref())
+            .map(|element| {
+                (
+                    element.frame().map(rect),
+                    element.displayed_frame().map(rect),
+                )
+            })
+            .unwrap_or((None, None));
+        #[cfg(not(target_os = "macos"))]
+        let (set, shown): (Option<serde_json::Value>, Option<serde_json::Value>) = {
+            let _ = rect;
+            (None, None)
+        };
+        serde_json::json!({
+            "mode": match self.mode {
+                Mode::Dialog => "dialog",
+                Mode::Embedded => "embedded",
+            },
+            "active": self.active,
+            "open": self.session.is_some(),
+            "layerFrame": set,
+            "displayedFrame": shown,
+            "slot": self.smoke_slot.map(|slot| serde_json::json!({
+                "x": f32::from(slot.origin.x),
+                "y": f32::from(slot.origin.y),
+                "width": f32::from(slot.size.width),
+                "height": f32::from(slot.size.height),
+            })),
+        })
     }
 }
