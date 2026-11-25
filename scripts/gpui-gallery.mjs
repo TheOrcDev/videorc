@@ -318,7 +318,14 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
             })
             await sleep(900)
           } else {
-            await command('open-tab', screen.open)
+            const opened = await command('open-tab', screen.open)
+            // A build before open-tab's extras ignores subTab and dialog and
+            // would show the wrong screen; it answers without `subTab`.
+            if ((screen.open.subTab || screen.open.dialog) && !('subTab' in (opened ?? {}))) {
+              throw new Error(
+                "this build's open-tab has no subTab or dialog yet (they land with the gallery's PR)"
+              )
+            }
             await sleep(screen.open.dialog ? SETTLE_MS + 800 : SETTLE_MS)
           }
           const png = join(gpuiDir, `${name}.png`)
