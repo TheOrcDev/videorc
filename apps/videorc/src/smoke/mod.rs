@@ -11,6 +11,8 @@
 //! - [`driver`]: `ui-tree`, `ui-find`, `ui-click`, `ui-type`, `ui-key`,
 //!   `ui-scroll`, `ui-set-value`, `ui-appearance`, `ui-toast` and
 //!   `resize-window` over each window's AccessKit tree.
+//! - [`windows`]: the Notes and Stream Manager windows' commands and
+//!   `raise-window`.
 //! - [`activate`]: turns GPUI's accessibility on for a smoke run, as a
 //!   screen reader would, so the tree exists without one.
 //!
@@ -40,6 +42,7 @@
 pub mod activate;
 pub mod driver;
 pub mod shell;
+pub mod windows;
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -276,6 +279,7 @@ pub fn start(cx: &mut App, start: SmokeStart) -> bool {
         start.quit,
     )
     .with_handler(Arc::new(driver::UiDriver::new(ui.clone(), output_dir)))
+    .with_handler(Arc::new(windows::WindowCommands::new(ui.clone())))
     .with_handler(Arc::new(ShellCommands { ui }));
     if let Some(studio) = start.studio {
         commands = commands.with_handler(studio);
