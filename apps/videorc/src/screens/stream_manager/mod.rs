@@ -8,6 +8,8 @@
 //! - `window`: the window and its view.
 //! - `stats` / `chat` / `activity` / `sidekick` / `status`: the kit-drawn
 //!   regions (header via `WindowHeader`, stats bar, panes, status bar).
+//! - `cohost` / `cohost_list` / `cohost_avatar`: the Sidekick pane's
+//!   Co-host parts (the triage list, its cards, the avatar's Say footer).
 //!
 //! The core's views (`videorc_app_core::stream_manager`) hold the rows, the
 //! filters and the copy; the kit draws them.
@@ -18,6 +20,9 @@ use videorc_app_core::{BackendClient, Studio};
 
 pub mod activity;
 pub mod chat;
+pub mod cohost;
+mod cohost_avatar;
+mod cohost_list;
 pub mod frame;
 pub mod layout;
 pub mod panes;

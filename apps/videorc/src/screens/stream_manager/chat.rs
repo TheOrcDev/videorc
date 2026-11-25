@@ -607,6 +607,25 @@ impl ChatPane {
         }
     }
 
+    /// A Sidekick reply or recap lands in the composer (`setPrefill`); the
+    /// draft is replaced on the next render.
+    pub fn prefill(&mut self, text: String, cx: &mut Context<Self>) {
+        self.pending_draft = Some(text);
+        cx.notify();
+    }
+
+    /// Sidekick's Jump to message: the row comes into view and the list
+    /// stops following the newest. Nothing when no shown row is `id`.
+    pub fn jump_to(&mut self, id: &str, cx: &mut Context<Self>) {
+        let shown = chat_pane_messages(&self.messages, &self.filter, &self.mention_names);
+        let Some(index) = shown.iter().position(|message| message.id == id) else {
+            return;
+        };
+        self.following = false;
+        self.scroll.scroll_to_item(index);
+        cx.notify();
+    }
+
     /// Clear view: empty the chat list in this window (Library keeps history).
     pub fn clear_view(&mut self, cx: &mut Context<Self>) {
         self.messages.clear();

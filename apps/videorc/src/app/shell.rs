@@ -563,6 +563,10 @@ impl Shell {
             self.avatar.update(cx, |avatar, cx| {
                 avatar.set_active(page == PageId::Avatar, cx)
             });
+            // Clean cut's review plays in a native layer: it stops off the page.
+            self.sidekick.update(cx, |sidekick, cx| {
+                sidekick.set_page_shown(page == PageId::Ai, cx)
+            });
             if let Some(captions) = &self.captions {
                 captions.update(cx, |captions, cx| {
                     captions.set_active(page == PageId::Captions, cx)

@@ -58,6 +58,7 @@ pub struct CohostState {
     pub promise_reminder: Option<CohostPromiseReminder>,
     pub recap: Option<CohostRecap>,
     pub say_hi: Vec<CohostSayHi>,
+    pub welcome_back: Vec<CohostWelcomeBack>,
     pub dead_air_nudge: Option<CohostDeadAirNudge>,
     pub command: Option<CohostCommand>,
     pub command_availability: Option<CohostCommandAvailability>,
@@ -94,6 +95,7 @@ impl Default for CohostState {
             promise_reminder: None,
             recap: None,
             say_hi: Vec::new(),
+            welcome_back: Vec::new(),
             dead_air_nudge: None,
             command: None,
             command_availability: None,
@@ -222,6 +224,19 @@ pub struct CohostSayHi {
     pub author_key: String,
     pub name: String,
     pub platform: String,
+    pub first_seen_at: String,
+}
+
+/// `cohost.state.welcomeBack[]` (plan 225 D11): a returning person not
+/// welcomed yet, under "Say hi", for 15 minutes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CohostWelcomeBack {
+    pub person_id: String,
+    pub author_key: String,
+    pub name: String,
+    pub platform: String,
+    pub arrival: Option<crate::chat::model::ViewerArrival>,
     pub first_seen_at: String,
 }
 
@@ -2084,6 +2099,153 @@ pub fn cards_waiting(count: usize) -> Option<String> {
     (count > 1).then(|| format!("{count} waiting"))
 }
 
+// --- The Co-host pane (`components/cohost-pane.tsx`) -----------------------
+
+/// A key on the triage list (`handleKeyDown`), while the list has focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowKey {
+    /// R.
+    Reply,
+    /// H.
+    ShowOnStream,
+    /// A.
+    Answered,
+    /// Backspace or Delete.
+    Dismiss,
+    /// Enter: Reply on a question, Jump to message on a flag.
+    Primary,
+}
+
+/// What a key or an action bar button does to the selected row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowCommand {
+    /// The question's id.
+    Reply(String),
+    ShowOnStream(String),
+    Answered(String),
+    DismissQuestion(String),
+    /// The flagged message's id.
+    DismissFlag(String),
+    /// The flagged message's id.
+    Jump(String),
+}
+
+/// `handleKeyDown`'s rules on the selected row, resolved as the list
+/// resolves it: R, H and A act on a question only, Backspace dismisses
+/// either, Enter replies to a question and jumps to a flag's message.
+/// Remove from chat (Shift+Backspace) is not here: it never falls back to a
+/// dismissal.
+pub fn row_command(rows: &[PaneRow], selected: Option<&str>, key: RowKey) -> Option<RowCommand> {
+    let active = resolve_selection(rows, selected)?;
+    let row = rows.iter().find(|row| row.key == active)?;
+    let id = row.id.clone();
+    Some(match (key, row.question) {
+        (RowKey::Reply | RowKey::Primary, true) => RowCommand::Reply(id),
+        (RowKey::ShowOnStream, true) => RowCommand::ShowOnStream(id),
+        (RowKey::Answered, true) => RowCommand::Answered(id),
+        (RowKey::Dismiss, true) => RowCommand::DismissQuestion(id),
+        (RowKey::Dismiss, false) => RowCommand::DismissFlag(id),
+        (RowKey::Primary, false) => RowCommand::Jump(id),
+        (RowKey::Reply | RowKey::ShowOnStream | RowKey::Answered, false) => return None,
+    })
+}
+
+/// The Say box's cap (`maxLength={200}`; the backend takes 1 to 200).
+pub const SAY_MAX_CHARS: usize = 200;
+
+/// What the Say box says: at most 200 characters, trimmed; nothing when
+/// only spaces are left.
+pub fn say_text(draft: &str) -> Option<String> {
+    let capped: String = draft.chars().take(SAY_MAX_CHARS).collect();
+    let text = capped.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// `overlayLayout.buddy`'s two switches: (on stream, in the recording).
+pub fn buddy_outputs(layout: &Value) -> Option<(bool, bool)> {
+    let buddy = layout.get("buddy")?;
+    Some((
+        buddy.get("showOnStream").and_then(Value::as_bool) == Some(true),
+        buddy.get("showInRecording").and_then(Value::as_bool) == Some(true),
+    ))
+}
+
+/// "{name} on stream" (the Studio's `buddy-show-on-stream`): the layout
+/// with `buddy.showOnStream` set, or `None` when it already reads so or the
+/// layout has no avatar item.
+pub fn with_buddy_on_stream(layout: &Value, show: bool) -> Option<Value> {
+    let buddy = layout.get("buddy")?.as_object()?;
+    if buddy.get("showOnStream").and_then(Value::as_bool) == Some(show) {
+        return None;
+    }
+    let mut next = layout.clone();
+    next["buddy"]["showOnStream"] = Value::Bool(show);
+    Some(next)
+}
+
+/// The Co-host pane's words, as Electron spells them (`cohost-pane.tsx`,
+/// `cohost-question-row.tsx`, `cohost-nudge.tsx`).
+pub mod words {
+    pub const NUDGE: &str =
+        "Sidekick is off. It can group your chat's questions and draft replies.";
+    pub const TURN_ON: &str = "Turn on";
+    pub const DISMISS: &str = "Dismiss";
+    pub const NEEDS_CLOUD_AI: &str = "Sidekick needs cloud AI";
+    pub const ALLOW_CLOUD_AI: &str = "Allow cloud AI…";
+    pub const TREND_DETAIL: &str = "Several viewers said this in chat in the last two minutes.";
+    pub const TALKING_ABOUT: &str = "Talking about:";
+    pub const LIST_LABEL: &str = "Sidekick questions and flags";
+    pub const ON_TOPIC: &str = "On topic";
+    pub const ON_TOPIC_HINT: &str = "About what you're talking about right now";
+    pub const FROM_NOTES: &str = "Answered from About you";
+    pub const TALKING_ABOUT_THIS: &str = "Talking about this";
+    pub const TALKING_ABOUT_THIS_HINT: &str = "You're talking about this question";
+    pub const ON_STREAM: &str = "On stream";
+    pub const REPLY: &str = "Reply";
+    pub const SHOW_ON_STREAM: &str = "Show on stream";
+    pub const ANSWERED: &str = "Answered";
+    pub const JUMP: &str = "Jump to message";
+    pub const RECAP_HINT: &str = "For viewers who just arrived.";
+    pub const DRAFT_RECAP: &str = "Draft a recap";
+    pub const RECAP_TITLE: &str = "Recap";
+    pub const RECAP_LABEL: &str = "Recap for viewers who just arrived";
+    pub const EDIT_IN_CHAT_BOX: &str = "Edit in chat box";
+    pub const ANSWERED_ON_AIR: &str = "Answered on air:";
+    pub const RESTORE: &str = "Restore";
+    pub const PROMISES: &str = "Promises";
+    pub const DONE: &str = "Done";
+    pub const SAY_HI: &str = "Say hi";
+    pub const SAY_HI_HINT: &str =
+        "First time in your chat. Say their name and Sidekick takes them off.";
+    pub const GREETED: &str = "Greeted";
+    pub const WELCOME_BACK: &str = "Welcome back";
+    pub const WELCOME_BACK_HINT: &str =
+        "Back in your chat. Wave and Sidekick waves on stream; nothing goes to chat.";
+    pub const WAVE: &str = "Wave";
+    pub const SAY_PLACEHOLDER: &str = "Say something on stream";
+    pub const SAY_IT: &str = "Say it";
+    pub const SAY_IT_LAUGHING: &str = "Say it laughing";
+    pub const REACT_ON_STREAM: &str = "React on stream";
+    pub const LISTEN_TITLE: &str = "Sidekick can hear you while you're live";
+    pub const NOT_NOW: &str = "Not now";
+
+    /// "+2"'s name: "2 more answered on air".
+    pub fn answered_more(count: usize) -> String {
+        format!("{count} more answered on air")
+    }
+
+    /// The Say box's name: "Say something as Grum".
+    pub fn say_as(name: &str) -> String {
+        format!("Say something as {name}")
+    }
+
+    /// A reaction chip's hint and the overlay switch: "Laugh on stream",
+    /// "Grum on stream".
+    pub fn on_stream(what: &str) -> String {
+        format!("{what} on stream")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2793,5 +2955,157 @@ mod tests {
                 &format!("return '{}'", utterance_status_label(status)),
             );
         }
+    }
+
+    // --- The Co-host pane ---------------------------------------------------
+
+    #[test]
+    fn row_keys_follow_electrons_rules() {
+        let state = CohostState {
+            questions: vec![question("q1", "normal", "2026-11-11T10:00:00Z")],
+            flags: vec![CohostFlag {
+                message_id: "m1".into(),
+                at: "2026-11-11T10:00:00Z".into(),
+                ..CohostFlag::default()
+            }],
+            ..CohostState::default()
+        };
+        let rows = pane_rows(&state);
+        // Nothing picked: the top row, the question.
+        assert_eq!(
+            row_command(&rows, None, RowKey::Primary),
+            Some(RowCommand::Reply("q1".into()))
+        );
+        assert_eq!(
+            row_command(&rows, Some("q:q1"), RowKey::ShowOnStream),
+            Some(RowCommand::ShowOnStream("q1".into()))
+        );
+        assert_eq!(
+            row_command(&rows, Some("q:q1"), RowKey::Answered),
+            Some(RowCommand::Answered("q1".into()))
+        );
+        assert_eq!(
+            row_command(&rows, Some("q:q1"), RowKey::Dismiss),
+            Some(RowCommand::DismissQuestion("q1".into()))
+        );
+        // A flag: Enter jumps, Backspace dismisses, R/H/A do nothing.
+        assert_eq!(
+            row_command(&rows, Some("f:m1"), RowKey::Primary),
+            Some(RowCommand::Jump("m1".into()))
+        );
+        assert_eq!(
+            row_command(&rows, Some("f:m1"), RowKey::Dismiss),
+            Some(RowCommand::DismissFlag("m1".into()))
+        );
+        for key in [RowKey::Reply, RowKey::ShowOnStream, RowKey::Answered] {
+            assert_eq!(row_command(&rows, Some("f:m1"), key), None);
+        }
+        assert_eq!(row_command(&[], None, RowKey::Primary), None);
+    }
+
+    #[test]
+    fn the_say_box_trims_and_caps_at_200() {
+        assert_eq!(say_text("  hi  "), Some("hi".into()));
+        assert_eq!(say_text("   "), None);
+        let long = "a".repeat(250);
+        assert_eq!(say_text(&long).map(|text| text.chars().count()), Some(200));
+    }
+
+    #[test]
+    fn the_avatar_switch_writes_only_buddy_show_on_stream() {
+        let layout = json!({
+            "buddy": { "showOnStream": false, "showInRecording": true, "x": 1 },
+            "chat": { "showOnStream": true }
+        });
+        assert_eq!(buddy_outputs(&layout), Some((false, true)));
+        let next = with_buddy_on_stream(&layout, true).expect("a change");
+        assert_eq!(next["buddy"]["showOnStream"], json!(true));
+        assert_eq!(next["buddy"]["x"], json!(1));
+        assert_eq!(next["chat"], layout["chat"]);
+        assert_eq!(with_buddy_on_stream(&next, true), None);
+        assert_eq!(with_buddy_on_stream(&json!({}), true), None);
+        assert_eq!(buddy_outputs(&json!({})), None);
+    }
+
+    #[test]
+    fn welcome_back_reads_from_the_state() {
+        let state: CohostState = serde_json::from_value(json!({
+            "status": "listening",
+            "welcomeBack": [{
+                "personId": "p1", "authorKey": "twitch:ada", "name": "Ada",
+                "platform": "twitch", "firstSeenAt": "2026-11-11T10:00:00Z",
+                "arrival": { "streams": 14, "regular": true, "inARow": 3 }
+            }]
+        }))
+        .expect("reads");
+        let entry = &state.welcome_back[0];
+        assert_eq!(entry.person_id, "p1");
+        assert_eq!(
+            entry.arrival.as_ref().map(|arrival| arrival.streams),
+            Some(14)
+        );
+        assert!(CohostState::default().welcome_back.is_empty());
+    }
+
+    #[test]
+    fn the_pane_words_match_electron() {
+        const NUDGE: &str =
+            include_str!("../../../../apps/desktop/src/renderer/src/components/cohost-nudge.tsx");
+        const QUESTION_ROW: &str = include_str!(
+            "../../../../apps/desktop/src/renderer/src/components/cohost-question-row.tsx"
+        );
+        let jsx = |line: &str| line.replace('\'', "&apos;");
+        says(NUDGE, "cohost-nudge.tsx", &jsx(words::NUDGE));
+        for line in [
+            words::ON_TOPIC,
+            words::ON_TOPIC_HINT,
+            words::FROM_NOTES,
+            words::TALKING_ABOUT_THIS,
+            words::TALKING_ABOUT_THIS_HINT,
+            words::ON_STREAM,
+        ] {
+            says(QUESTION_ROW, "cohost-question-row.tsx", line);
+        }
+        for line in [
+            words::NEEDS_CLOUD_AI,
+            words::ALLOW_CLOUD_AI,
+            words::TREND_DETAIL,
+            words::TALKING_ABOUT,
+            words::LIST_LABEL,
+            words::RECAP_HINT,
+            words::DRAFT_RECAP,
+            words::RECAP_LABEL,
+            words::EDIT_IN_CHAT_BOX,
+            words::ANSWERED_ON_AIR,
+            words::PROMISES,
+            words::SAY_HI_HINT,
+            words::WELCOME_BACK_HINT,
+            words::SAY_PLACEHOLDER,
+            words::SAY_IT_LAUGHING,
+            words::REACT_ON_STREAM,
+        ] {
+            says(COHOST_PANE, "cohost-pane.tsx", line);
+        }
+        says(COHOST_PANE, "cohost-pane.tsx", &jsx(words::LISTEN_TITLE));
+        for label in [
+            words::REPLY,
+            words::SHOW_ON_STREAM,
+            words::ANSWERED,
+            words::JUMP,
+        ] {
+            says(
+                COHOST_PANE,
+                "cohost-pane.tsx",
+                &format!("label=\"{label}\""),
+            );
+        }
+        says(
+            COHOST_PANE,
+            "cohost-pane.tsx",
+            "`${older.length} more answered on air`",
+        );
+        assert_eq!(words::answered_more(2), "2 more answered on air");
+        assert_eq!(words::say_as("Grum"), "Say something as Grum");
+        assert_eq!(words::on_stream("Laugh"), "Laugh on stream");
     }
 }
