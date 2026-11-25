@@ -74,7 +74,7 @@ pub struct CloudSettings {
     pub hold_image_screen_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CloudShow {
     pub id: String,
@@ -86,6 +86,8 @@ pub struct CloudShow {
     pub resumable: bool,
     /// `solo`, `talk` or `test`.
     pub kind: Option<String>,
+    /// Plan 249 S17: what the open room reported it sends (Guests "Sends").
+    pub output_profile: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

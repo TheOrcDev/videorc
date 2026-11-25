@@ -4,22 +4,29 @@
 
 use std::sync::Arc;
 
-use gpui::{Context, Window, div, prelude::*, px};
+use gpui::{App, Context, Entity, SharedString, Window, div, prelude::*, px};
 use videorc_app_core::guests::view::{
-    self as guests, CloudRoomFacts, GuestsAccess, RoomPerson, declined_line, guest_consent_line,
-    guests_access, new_link_asks_first, request_device, request_title, room_counts, room_is_full,
-    room_limits, room_limits_line, room_people, room_phase_label,
+    self as guests, CloudRoomFacts, GUEST_NAME_MAX_CHARS, GuestsAccess, ManagedOutputProfile,
+    NEW_LINK_AFTER_BAN, RoomPerson, ScreenShareAction, Tone, ban_guest_copy, close_room_asks_first,
+    declined_line, guest_consent_line, guest_screen_share, guests_access,
+    managed_profile_description, mic_toggle_label, new_link_asks_first, output_profile_chips,
+    quality_status, remove_guest_copy, renamed_guest_name, request_device, request_title,
+    room_counts, room_is_full, room_limits, room_limits_line, room_people, room_phase_label,
+    unmute_hint,
 };
 use videorc_app_core::guests::wire::{RecordingStatus, RoomPhase, RoomRequest, RoomStatus};
 use videorc_app_core::livestream::cloud_status::CloudStatus;
 use videorc_app_core::livestream::copy as livestream_copy;
 use videorc_app_core::livestream::targets;
+use videorc_app_core::notices::{NoticeCommand, ToastRequest};
 use videorc_app_core::{BackendClient, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
-use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle, DialogSize};
 use videorc_kit::empty::Empty;
+use videorc_kit::input::{Input, InputState};
+use videorc_kit::kebab_menu::{KebabMenu, KebabMenuItem, KebabReveal};
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::scroll_area::ScrollArea;
@@ -28,6 +35,7 @@ use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
 use videorc_kit::tokens::{radius, size, text};
+use videorc_kit::tooltip::tooltip;
 
 pub type AppStudio = Studio<BackendClient>;
 
@@ -50,9 +58,18 @@ const BACKSTAGE: &str = "Backstage";
 const LET_IN: &str = "Let in";
 const DECLINE: &str = "Decline";
 const CANCEL: &str = "Cancel";
+const CLOSE_ROOM_CONFIRM_TITLE: &str = "Close the room?";
 const OFFLINE_LOCK: &str = "Videorc is reconnecting. These controls come back in a moment.";
 const CONSENT_PREFIX: &str = "Guests read this before they ask to join: “";
 const CONSENT_SUFFIX: &str = "”";
+const RENAME_TITLE: &str = "Rename guest";
+const RENAME_NAME: &str = "Name";
+const RENAME_DESCRIPTION: &str = "Viewers see it under their tile, and so does the guest.";
+const SAVE: &str = "Save";
+const REMOVING: &str = "Removing…";
+const BANNING: &str = "Banning…";
+const UNMUTE_TOAST_ID: &str = "videorc-guests-unmute";
+const NEW_LINK_TOAST_ID: &str = "videorc-guests-new-link";
 
 fn cloud_facts(status: Option<&CloudStatus>) -> Option<CloudRoomFacts> {
     status.map(|status| CloudRoomFacts {
@@ -75,17 +92,56 @@ fn asking_badge(count: usize) -> String {
     }
 }
 
+fn tone_to_status(tone: Tone) -> StatusTone {
+    match tone {
+        Tone::Good => StatusTone::Good,
+        Tone::Warn => StatusTone::Warn,
+        Tone::Error => StatusTone::Error,
+        Tone::Live => StatusTone::Live,
+        Tone::Neutral => StatusTone::Neutral,
+    }
+}
+
+fn output_profile(status: Option<&CloudStatus>) -> Option<ManagedOutputProfile> {
+    status
+        .and_then(|s| s.show.as_ref())
+        .and_then(|show| show.output_profile.as_ref())
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+}
+
+enum Pending {
+    Rename {
+        guest_id: String,
+        name: String,
+        input: Entity<InputState>,
+    },
+    Remove {
+        guest_id: String,
+        name: String,
+    },
+    Ban {
+        guest_id: String,
+        name: String,
+    },
+}
+
 pub struct GuestsPanel {
     studio: Arc<AppStudio>,
     runtime: tokio::runtime::Handle,
     facts: Option<CloudRoomFacts>,
+    profile: Option<ManagedOutputProfile>,
     connected: bool,
     session_active: bool,
     opening: bool,
     closing: bool,
     rotating: bool,
     copied: bool,
+    busy: bool,
     new_link: DialogHandle,
+    close_confirm: DialogHandle,
+    rename: DialogHandle,
+    confirm: DialogHandle,
+    pending: Option<Pending>,
 }
 
 impl GuestsPanel {
@@ -111,13 +167,19 @@ impl GuestsPanel {
             studio,
             runtime,
             facts: None,
+            profile: None,
             connected: false,
             session_active: false,
             opening: false,
             closing: false,
             rotating: false,
             copied: false,
+            busy: false,
             new_link: DialogHandle::new(false),
+            close_confirm: DialogHandle::new(false),
+            rename: DialogHandle::new(false),
+            confirm: DialogHandle::new(false),
+            pending: None,
         };
         panel.rebuild(cx);
         panel
@@ -127,13 +189,16 @@ impl GuestsPanel {
         let cloud = self.studio.cloud_now();
         let snapshot = self.studio.snapshot();
         let facts = cloud_facts(cloud.status.as_ref());
+        let profile = output_profile(cloud.status.as_ref());
         let connected = self.studio.is_connected();
         let session_active = snapshot.session.phase.is_active();
         if self.facts != facts
+            || self.profile != profile
             || self.connected != connected
             || self.session_active != session_active
         {
             self.facts = facts;
+            self.profile = profile;
             self.connected = connected;
             self.session_active = session_active;
             let phase = self
@@ -198,11 +263,24 @@ impl GuestsPanel {
         .detach();
     }
 
-    fn close_room(&mut self, cx: &mut Context<Self>) {
+    fn ask_or_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closing {
+            return;
+        }
+        if close_room_asks_first(self.facts.as_ref()) {
+            self.close_confirm.open(window, cx);
+            cx.notify();
+        } else {
+            self.close_room(window, cx);
+        }
+    }
+
+    fn close_room(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.closing {
             return;
         }
         self.closing = true;
+        self.close_confirm.close(window, cx);
         cx.notify();
         let studio = self.studio.clone();
         let runtime = self.runtime.clone();
@@ -273,6 +351,157 @@ impl GuestsPanel {
             studio.decide_talk_guest(&request_id, decision).await;
         });
     }
+
+    fn toast_info(&self, id: &str, title: String) {
+        self.studio.post_notices(vec![NoticeCommand::Show(
+            ToastRequest::info(title).id(id).finish(),
+        )]);
+    }
+
+    fn act_guest(
+        &mut self,
+        guest_id: String,
+        action: &'static str,
+        name: Option<String>,
+        after: Option<(&'static str, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        cx.notify();
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let ok = runtime
+                .spawn(async move { studio.act_talk_guest(&guest_id, action, name).await })
+                .await
+                .unwrap_or(false);
+            let _ = this.update(cx, |this, cx| {
+                this.busy = false;
+                if ok {
+                    if let Some((id, title)) = after {
+                        this.toast_info(id, title);
+                    }
+                }
+                this.rebuild(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn toggle_mute(&mut self, person: &RoomPerson, cx: &mut Context<Self>) {
+        let Some(guest_id) = person.guest_id.clone() else {
+            return;
+        };
+        let action = if person.muted { "unmute" } else { "mute" };
+        let after = (action == "unmute").then(|| (UNMUTE_TOAST_ID, unmute_hint(&person.name)));
+        self.act_guest(guest_id, action, None, after, cx);
+    }
+
+    fn toggle_screen_share(&mut self, person: &RoomPerson, cx: &mut Context<Self>) {
+        let Some(guest_id) = person.guest_id.clone() else {
+            return;
+        };
+        let action = match guest_screen_share(person).action {
+            ScreenShareAction::Allow => "allow-screen-share",
+            ScreenShareAction::Disallow => "disallow-screen-share",
+        };
+        self.act_guest(guest_id, action, None, None, cx);
+    }
+
+    fn open_rename(&mut self, person: &RoomPerson, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(guest_id) = person.guest_id.clone() else {
+            return;
+        };
+        let name = person.name.clone();
+        let input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx)
+                .validate(|value, _| value.encode_utf16().count() <= GUEST_NAME_MAX_CHARS);
+            input.set_value(name.clone(), window, cx);
+            input
+        });
+        cx.observe(&input, |_, _, cx| cx.notify()).detach();
+        self.pending = Some(Pending::Rename {
+            guest_id,
+            name,
+            input,
+        });
+        self.rename.open(window, cx);
+        cx.notify();
+    }
+
+    fn open_remove(&mut self, person: &RoomPerson, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(guest_id) = person.guest_id.clone() else {
+            return;
+        };
+        self.pending = Some(Pending::Remove {
+            guest_id,
+            name: person.name.clone(),
+        });
+        self.confirm.open(window, cx);
+        cx.notify();
+    }
+
+    fn open_ban(&mut self, person: &RoomPerson, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(guest_id) = person.guest_id.clone() else {
+            return;
+        };
+        self.pending = Some(Pending::Ban {
+            guest_id,
+            name: person.name.clone(),
+        });
+        self.confirm.open(window, cx);
+        cx.notify();
+    }
+
+    fn clear_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.rename.close(window, cx);
+        self.confirm.close(window, cx);
+        self.pending = None;
+        cx.notify();
+    }
+
+    fn run_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        self.rename.close(window, cx);
+        self.confirm.close(window, cx);
+        match pending {
+            Pending::Rename {
+                guest_id,
+                name,
+                input,
+            } => {
+                let typed: String = input.read(cx).value().to_string();
+                let Some(next) = renamed_guest_name(&name, &typed) else {
+                    self.pending = Some(Pending::Rename {
+                        guest_id,
+                        name,
+                        input,
+                    });
+                    return;
+                };
+                self.act_guest(guest_id, "rename", Some(next), None, cx);
+            }
+            Pending::Remove { guest_id, .. } => {
+                self.act_guest(guest_id, "remove", None, None, cx);
+            }
+            Pending::Ban { guest_id, .. } => {
+                self.act_guest(
+                    guest_id,
+                    "ban",
+                    None,
+                    Some((NEW_LINK_TOAST_ID, NEW_LINK_AFTER_BAN.into())),
+                    cx,
+                );
+            }
+        }
+        cx.notify();
+    }
 }
 
 impl Render for GuestsPanel {
@@ -298,6 +527,8 @@ impl Render for GuestsPanel {
             .map(|r| r.requests.clone())
             .unwrap_or_default();
         let declined = declined_line(room.as_ref().map(|r| r.declined_count).unwrap_or(0));
+        let chips = output_profile_chips(self.profile.as_ref());
+        let profile_line = managed_profile_description(self.profile.as_ref());
         let entity = cx.entity();
 
         let mut notices = div().flex().flex_col().gap(px(8.));
@@ -357,7 +588,9 @@ impl Render for GuestsPanel {
                     .disabled(disabled || self.closing || phase == RoomPhase::Closing)
                     .on_click({
                         let entity = entity.clone();
-                        move |_, _, cx| entity.update(cx, |this, cx| this.close_room(cx))
+                        move |_, window, cx| {
+                            entity.update(cx, |this, cx| this.ask_or_close(window, cx))
+                        }
                     }),
             );
         } else {
@@ -396,6 +629,39 @@ impl Render for GuestsPanel {
             .description(ROOM_DESCRIPTION)
             .child(notices)
             .child(SettingsGroup::new().row(room_row));
+        if room_open && !chips.is_empty() {
+            let mut sends = div()
+                .flex()
+                .min_w(px(0.))
+                .flex_wrap()
+                .items_center()
+                .gap(px(6.))
+                .px(px(4.))
+                .type_scale(text::META)
+                .text_color(hsla(t.muted_foreground))
+                .child("Sends");
+            for (index, chip) in chips.iter().enumerate() {
+                sends = sends.child(Badge::new(chip.facts.join(" · ")).variant(if chip.differs {
+                    BadgeVariant::Warning
+                } else {
+                    BadgeVariant::Outline
+                }));
+                let _ = index;
+            }
+            room_section = room_section.child(
+                sends
+                    .id("cloud-output-profile")
+                    .tooltip(tooltip(profile_line.clone())),
+            );
+        } else if room_open || self.profile.is_some() {
+            room_section = room_section.child(
+                div()
+                    .px(px(4.))
+                    .type_scale(text::META)
+                    .text_color(hsla(t.muted_foreground))
+                    .child(profile_line.clone()),
+            );
+        }
         if let Some(message) = room.as_ref().and_then(|r| r.message.clone()) {
             room_section = room_section.child(
                 Alert::new("guests-room-message")
@@ -542,7 +808,7 @@ impl Render for GuestsPanel {
             if !on_stage.is_empty() {
                 let mut list = GroupedList::new().label(format!("{ON_STAGE} · {}", on_stage.len()));
                 for person in on_stage {
-                    list = list.item(person_row(person));
+                    list = list.item(person_row(person, disabled || self.busy, &entity));
                 }
                 people_section = people_section.child(list);
             }
@@ -550,7 +816,7 @@ impl Render for GuestsPanel {
                 let mut list =
                     GroupedList::new().label(format!("{BACKSTAGE} · {}", backstage.len()));
                 for person in backstage {
-                    list = list.item(person_row(person));
+                    list = list.item(person_row(person, disabled || self.busy, &entity));
                 }
                 people_section = people_section.child(list);
             }
@@ -590,6 +856,40 @@ impl Render for GuestsPanel {
                     }),
             );
 
+        let close_dialog = Dialog::new(
+            "guests-close-room-confirm",
+            &self.close_confirm,
+            CLOSE_ROOM_CONFIRM_TITLE,
+        )
+        .size(DialogSize::Sm)
+        .description(guests::CLOSE_ROOM_CONFIRM_DESCRIPTION)
+        .footer(
+            Button::new("guests-close-cancel")
+                .label(CANCEL)
+                .variant(ButtonVariant::Ghost)
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, window, cx| {
+                        entity.update(cx, |this, cx| this.close_confirm.close(window, cx))
+                    }
+                }),
+        )
+        .footer(
+            Button::new("guests-close-confirm")
+                .label(if self.closing {
+                    CLOSING
+                } else {
+                    guests::CLOSE_THE_ROOM_LABEL
+                })
+                .disabled(self.closing)
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, window, cx| entity.update(cx, |this, cx| this.close_room(window, cx))
+                }),
+        );
+
+        let moderation = moderation_dialogs(self, &entity, cx);
+
         div()
             .id("guests-page")
             .flex()
@@ -614,13 +914,128 @@ impl Render for GuestsPanel {
                 ),
             )
             .child(new_link_dialog)
+            .child(close_dialog)
+            .children(moderation)
     }
+}
+
+fn moderation_dialogs(
+    panel: &GuestsPanel,
+    entity: &Entity<GuestsPanel>,
+    cx: &App,
+) -> Vec<gpui::AnyElement> {
+    let mut out = Vec::new();
+    match &panel.pending {
+        Some(Pending::Rename { name, input, .. }) => {
+            let typed: String = input.read(cx).value().to_string();
+            let next = renamed_guest_name(name, &typed);
+            let entity = entity.clone();
+            out.push(
+                Dialog::new("guest-rename-dialog", &panel.rename, RENAME_TITLE)
+                    .size(DialogSize::Sm)
+                    .description(RENAME_DESCRIPTION)
+                    .child(
+                        Input::new("guest-rename-name", input)
+                            .accessibility_label(RENAME_NAME)
+                            .disabled(panel.busy),
+                    )
+                    .footer(
+                        Button::new("guest-rename-cancel")
+                            .label(CANCEL)
+                            .variant(ButtonVariant::Ghost)
+                            .on_click({
+                                let entity = entity.clone();
+                                move |_, window, cx| {
+                                    entity.update(cx, |this, cx| this.clear_pending(window, cx))
+                                }
+                            }),
+                    )
+                    .footer(
+                        Button::new("guest-rename-save")
+                            .label(SAVE)
+                            .disabled(panel.busy || next.is_none())
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |this, cx| this.run_pending(window, cx))
+                            }),
+                    )
+                    .into_any_element(),
+            );
+        }
+        Some(Pending::Remove { name, .. }) => {
+            let copy = remove_guest_copy(name);
+            let entity = entity.clone();
+            out.push(
+                Dialog::new("guest-remove", &panel.confirm, copy.title.clone())
+                    .size(DialogSize::Sm)
+                    .description(copy.description.clone())
+                    .footer(
+                        Button::new("guest-remove-cancel")
+                            .label(CANCEL)
+                            .variant(ButtonVariant::Ghost)
+                            .on_click({
+                                let entity = entity.clone();
+                                move |_, window, cx| {
+                                    entity.update(cx, |this, cx| this.clear_pending(window, cx))
+                                }
+                            }),
+                    )
+                    .footer(
+                        Button::new("guest-remove-confirm")
+                            .label(if panel.busy {
+                                REMOVING.into()
+                            } else {
+                                copy.confirm.clone()
+                            })
+                            .disabled(panel.busy)
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |this, cx| this.run_pending(window, cx))
+                            }),
+                    )
+                    .into_any_element(),
+            );
+        }
+        Some(Pending::Ban { name, .. }) => {
+            let copy = ban_guest_copy(name);
+            let entity = entity.clone();
+            out.push(
+                Dialog::new("guest-ban", &panel.confirm, copy.title.clone())
+                    .size(DialogSize::Sm)
+                    .description(copy.description.clone())
+                    .footer(
+                        Button::new("guest-ban-cancel")
+                            .label(CANCEL)
+                            .variant(ButtonVariant::Ghost)
+                            .on_click({
+                                let entity = entity.clone();
+                                move |_, window, cx| {
+                                    entity.update(cx, |this, cx| this.clear_pending(window, cx))
+                                }
+                            }),
+                    )
+                    .footer(
+                        Button::new("guest-ban-confirm")
+                            .label(if panel.busy {
+                                BANNING.into()
+                            } else {
+                                copy.confirm.clone()
+                            })
+                            .disabled(panel.busy)
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |this, cx| this.run_pending(window, cx))
+                            }),
+                    )
+                    .into_any_element(),
+            );
+        }
+        None => {}
+    }
+    out
 }
 
 fn request_row(
     request: &RoomRequest,
     disabled: bool,
-    entity: &gpui::Entity<GuestsPanel>,
+    entity: &Entity<GuestsPanel>,
 ) -> impl IntoElement {
     let id = request.request_id.clone();
     let entity = entity.clone();
@@ -659,13 +1074,101 @@ fn request_row(
     )
 }
 
-fn person_row(person: &RoomPerson) -> impl IntoElement {
+fn person_row(
+    person: &RoomPerson,
+    disabled: bool,
+    entity: &Entity<GuestsPanel>,
+) -> impl IntoElement {
+    let (tone, quality_label) = quality_status(person.quality);
     let mut trailing = div().flex().items_center().gap(px(8.));
+    trailing = trailing.child(
+        StatusDot::new(SharedString::from(format!(
+            "guests-quality-{}",
+            person.identity
+        )))
+        .tone(tone_to_status(tone))
+        .label(quality_label),
+    );
     if person.away {
         trailing = trailing.child(Badge::new("Away").variant(BadgeVariant::Warning));
     }
     if let Some((label, _)) = guests::guest_mic_status(person.mic, &person.name) {
         trailing = trailing.child(Badge::new(label).variant(BadgeVariant::Outline));
+    }
+    if let Some(guest_id) = person.guest_id.clone() {
+        let _ = guest_id;
+        let mute_label = mic_toggle_label(person, false);
+        let share = guest_screen_share(person);
+        let person_mute = person.clone();
+        let person_share = person.clone();
+        let person_rename = person.clone();
+        let person_remove = person.clone();
+        let person_ban = person.clone();
+        let entity_mute = entity.clone();
+        let entity_share = entity.clone();
+        trailing = trailing
+            .child(
+                Button::new(SharedString::from(format!(
+                    "guests-mute-{}",
+                    person.identity
+                )))
+                .label(mute_label)
+                .size(ButtonSize::Xs)
+                .variant(ButtonVariant::Ghost)
+                .disabled(disabled)
+                .on_click(move |_, _, cx| {
+                    entity_mute.update(cx, |this, cx| this.toggle_mute(&person_mute, cx))
+                }),
+            )
+            .child(
+                Button::new(SharedString::from(format!(
+                    "guests-share-{}",
+                    person.identity
+                )))
+                .label(share.action_label.clone())
+                .size(ButtonSize::Xs)
+                .variant(ButtonVariant::Ghost)
+                .disabled(disabled)
+                .tooltip(share.hint.clone())
+                .on_click(move |_, _, cx| {
+                    entity_share.update(cx, |this, cx| this.toggle_screen_share(&person_share, cx))
+                }),
+            )
+            .child(
+                KebabMenu::new(
+                    SharedString::from(format!("guests-more-{}", person.identity)),
+                    vec![
+                        {
+                            let entity = entity.clone();
+                            KebabMenuItem::new("rename", "Rename…", move |window, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.open_rename(&person_rename, window, cx)
+                                })
+                            })
+                            .group("guest")
+                        },
+                        {
+                            let entity = entity.clone();
+                            KebabMenuItem::new("remove", "Remove…", move |window, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.open_remove(&person_remove, window, cx)
+                                })
+                            })
+                            .destructive(true)
+                        },
+                        {
+                            let entity = entity.clone();
+                            KebabMenuItem::new("ban", "Ban…", move |window, cx| {
+                                entity.update(cx, |this, cx| this.open_ban(&person_ban, window, cx))
+                            })
+                            .destructive(true)
+                        },
+                    ],
+                )
+                .label(format!("More for {}", person.name))
+                .reveal(KebabReveal::Hover)
+                .disabled(disabled),
+            );
     }
     ListRow::new(
         format!("guests-person-{}", person.identity),

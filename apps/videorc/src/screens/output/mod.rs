@@ -13,7 +13,9 @@ use gpui::{
 use serde_json::{Value, json};
 use videorc_app_core::desktop::camera_extension::camera_extension_approval_url;
 use videorc_app_core::desktop::{accelerator as accel, global_shortcuts as keys};
-use videorc_app_core::protocol::VirtualCameraStatus;
+use videorc_app_core::protocol::{
+    EncoderPreferenceState, VirtualCameraStatus, WindowsH264EncoderPreference,
+};
 use videorc_app_core::shortcuts as recorder;
 use videorc_app_core::studio::Connection;
 use videorc_app_core::studio::capture_config::{self, VIDEO_PRESETS};
@@ -28,6 +30,7 @@ use videorc_app_core::studio::virtual_camera::{
 };
 use videorc_app_core::{BackendClient, Studio, StudioSnapshot};
 use videorc_kit::alert::{Alert, AlertVariant};
+use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
@@ -62,10 +65,30 @@ const CAMERA_SECTION_DESCRIPTION: &str =
 const CAMERA_DESCRIPTION: &str = "Shows your program as a camera in Meet, Zoom, Teams and Discord. No sound. Meet shows you a mirror image; everyone else sees it right.";
 const FOLDER_SECTION_DESCRIPTION: &str =
     "The folder each recording is saved to, and what Videorc keeps there.";
+const ENCODER_LABEL: &str = "Fallback video encoder";
+const ENCODER_DESCRIPTION: &str = "Used only when this PC's hardware encoder can't start. Intel Quick Sync encodes on the Intel graphics chip instead of the processor, and falls back to software if its own check fails.";
+const ENCODER_ENV_DESCRIPTION: &str = "Set by a launch setting for this run.";
 /// The two clip keys (plan 199 D5): the 30-second clip, then the minute.
 const CLIP_KEY_ACTIONS: [&str; 2] = ["clip-mark", "clip-mark-long"];
 /// The recorder gives up after this long without a key (Settings' rule).
 const RECORDER_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn encoder_preference_value(preference: WindowsH264EncoderPreference) -> SharedString {
+    SharedString::from(match preference {
+        WindowsH264EncoderPreference::Auto => "auto",
+        WindowsH264EncoderPreference::QuickSync => "quick-sync",
+        WindowsH264EncoderPreference::Software => "software",
+    })
+}
+
+fn parse_encoder_preference(value: &str) -> Option<WindowsH264EncoderPreference> {
+    match value {
+        "auto" => Some(WindowsH264EncoderPreference::Auto),
+        "quick-sync" => Some(WindowsH264EncoderPreference::QuickSync),
+        "software" => Some(WindowsH264EncoderPreference::Software),
+        _ => None,
+    }
+}
 
 const RECORDING_PRESETS: &[&str] = &[
     "tutorial-540p30",
@@ -274,6 +297,7 @@ pub struct OutputPanel {
     camera_pending: bool,
     camera_action: Option<CameraAction>,
     camera_error: Option<String>,
+    encoder: Option<EncoderPreferenceState>,
     command_copied: bool,
     recorder: Recorder,
     cloud: CloudClips,
@@ -351,7 +375,7 @@ impl OutputPanel {
             }
         })
         .detach();
-        Self {
+        let mut panel = Self {
             studio,
             runtime,
             hotkeys,
@@ -360,13 +384,16 @@ impl OutputPanel {
             camera_pending: false,
             camera_action: None,
             camera_error: None,
+            encoder: None,
             command_copied: false,
             recorder: Recorder::default(),
             cloud: CloudClips::default(),
             active: false,
             shell: None,
             facts_ticket: 0,
-        }
+        };
+        panel.refresh_encoder(cx);
+        panel
     }
 
     pub fn bind_shell(&mut self, shell: WeakEntity<Shell>) {
@@ -380,9 +407,72 @@ impl OutputPanel {
             self.schedule_folder_facts(cx);
             self.follow_room(cx);
             self.read_cloud_clips(cx);
+            self.refresh_encoder(cx);
         } else {
             self.disarm_recorder(cx);
         }
+    }
+
+    fn refresh_encoder(&mut self, cx: &mut Context<Self>) {
+        if !cfg!(windows) {
+            return;
+        }
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let state = runtime
+                .spawn(async move {
+                    let answer = studio
+                        .backend()
+                        .request("encoder.preference.get", Value::Null)
+                        .await
+                        .ok()?;
+                    serde_json::from_value::<EncoderPreferenceState>(answer).ok()
+                })
+                .await
+                .ok()
+                .flatten();
+            let _ = this.update(cx, |panel, cx| {
+                if panel.encoder != state {
+                    panel.encoder = state;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn set_encoder_preference(
+        &mut self,
+        preference: WindowsH264EncoderPreference,
+        cx: &mut Context<Self>,
+    ) {
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let state = runtime
+                .spawn(async move {
+                    let answer = studio
+                        .backend()
+                        .request(
+                            "encoder.preference.set",
+                            json!({ "preference": preference }),
+                        )
+                        .await
+                        .ok()?;
+                    serde_json::from_value::<EncoderPreferenceState>(answer).ok()
+                })
+                .await
+                .ok()
+                .flatten();
+            let _ = this.update(cx, |panel, cx| {
+                if let Some(state) = state {
+                    panel.encoder = Some(state);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     // ── Cloud Clips (P666–P668) ──────────────────────────────────────────
@@ -1339,6 +1429,56 @@ impl Render for OutputPanel {
                         )),
                 ),
         );
+        if let Some(encoder) = self
+            .encoder
+            .as_ref()
+            .filter(|state| state.quick_sync_available)
+        {
+            let entity = cx.entity();
+            let env_override = encoder.env_override;
+            let mut select = Select::new("encoder-preference")
+                .accessibility_label(ENCODER_LABEL)
+                .disabled(env_override || !model.connected)
+                .width(180.0)
+                .value(Some(encoder_preference_value(encoder.preference)));
+            for &(preference, label) in &[
+                (WindowsH264EncoderPreference::Auto, "Automatic"),
+                (WindowsH264EncoderPreference::QuickSync, "Intel Quick Sync"),
+                (WindowsH264EncoderPreference::Software, "Software only"),
+            ] {
+                select = select.option(encoder_preference_value(preference), label);
+            }
+            select = select.on_change(move |value, _, cx| {
+                if let Some(preference) = parse_encoder_preference(value.as_ref()) {
+                    entity.update(cx, |this, cx| this.set_encoder_preference(preference, cx));
+                }
+            });
+            local_rows = local_rows.item(
+                div()
+                    .child(
+                        ListRow::new("output-encoder-preference", ENCODER_LABEL).child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(Badge::new("Beta").variant(BadgeVariant::Outline))
+                                .child(select),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .px(px(12.))
+                            .pb(px(8.))
+                            .type_scale(text::META)
+                            .text_color(hsla(t.muted_foreground))
+                            .child(if env_override {
+                                ENCODER_ENV_DESCRIPTION
+                            } else {
+                                ENCODER_DESCRIPTION
+                            }),
+                    ),
+            );
+        }
         local = local.child(local_rows);
 
         let clips = if self.cloud.show_id.is_some() {

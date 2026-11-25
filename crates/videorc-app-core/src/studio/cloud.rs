@@ -630,6 +630,36 @@ impl<B: StudioBackend> Studio<B> {
         )
         .await;
     }
+
+    /// `cloud.guest.act` (mute / unmute / remove / ban / rename /
+    /// allow-screen-share / disallow-screen-share). True once the web
+    /// answers; false when toasted.
+    pub async fn act_talk_guest(&self, guest_id: &str, action: &str, name: Option<String>) -> bool {
+        let mut params = json!({ "guestId": guest_id, "action": action });
+        if let Some(name) = name.filter(|n| !n.is_empty()) {
+            params["name"] = json!(name);
+        }
+        let (verb, object) = match action {
+            "mute" => ("mute", "the guest"),
+            "unmute" => ("unmute", "the guest"),
+            "remove" => ("remove", "the guest"),
+            "ban" => ("ban", "the guest"),
+            "rename" => ("rename", "the guest"),
+            "allow-screen-share" => ("allow", "screen sharing"),
+            "disallow-screen-share" => ("stop", "screen sharing"),
+            _ => ("change", "the guest"),
+        };
+        match self.cloud_request("cloud.guest.act", params).await {
+            Ok(status) => {
+                self.commit_cloud(status).await;
+                true
+            }
+            Err(error) => {
+                self.toast_cloud_error(&error, verb, object);
+                false
+            }
+        }
+    }
 }
 
 #[cfg(test)]
