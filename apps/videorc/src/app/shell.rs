@@ -4,6 +4,7 @@
 //! line. The screens fill the pages in Phase 3; the kit (`videorc-kit`)
 //! replaces these plain elements when it lands.
 
+use crate::screens::avatar::{AvatarScreen, OpenPage as AvatarOpenPage};
 use crate::screens::command_palette::{Command, CommandPalette};
 use crate::screens::dialogs::{DialogsHost, OpenPage as DialogOpenPage};
 use crate::screens::notifications::{Centre, Hub, Navigate as NoticeNavigate, ToggleNotifications};
@@ -89,6 +90,8 @@ pub struct Shell {
     destinations: Entity<DestinationsPanel>,
     /// Phase 3: Guests ⌘7.
     guests: Entity<GuestsPanel>,
+    /// Phase 3: Avatar ⌘8.
+    avatar: Entity<AvatarScreen>,
     /// Phase 3: Sidekick ⌘9.
     sidekick: Entity<SidekickScreen>,
     /// Phase 3: Images ⇧⌘G.
@@ -119,6 +122,7 @@ impl Shell {
         output: Entity<OutputPanel>,
         destinations: Entity<DestinationsPanel>,
         guests: Entity<GuestsPanel>,
+        avatar: Entity<AvatarScreen>,
         sidekick: Entity<SidekickScreen>,
         images: Entity<ImagesPanel>,
         sounds: Entity<SoundsPanel>,
@@ -189,6 +193,13 @@ impl Shell {
         cx.observe(&output, |_, _, cx| cx.notify()).detach();
         cx.observe(&destinations, |_, _, cx| cx.notify()).detach();
         cx.observe(&guests, |_, _, cx| cx.notify()).detach();
+        cx.observe(&avatar, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &avatar,
+            window,
+            |this, _, open: &AvatarOpenPage, window, cx| this.open_page(open.0, window, cx),
+        )
+        .detach();
         cx.observe(&sidekick, |_, _, cx| cx.notify()).detach();
         cx.observe(&images, |_, _, cx| cx.notify()).detach();
         cx.observe(&sounds, |_, _, cx| cx.notify()).detach();
@@ -254,6 +265,7 @@ impl Shell {
             output,
             destinations,
             guests,
+            avatar,
             sidekick,
             images,
             sounds,
@@ -315,6 +327,9 @@ impl Shell {
             });
             self.output.update(cx, |output, cx| {
                 output.set_active(page == PageId::Recording, cx)
+            });
+            self.avatar.update(cx, |avatar, cx| {
+                avatar.set_active(page == PageId::Avatar, cx)
             });
             if page == PageId::Library {
                 self.library
@@ -405,6 +420,7 @@ impl Render for Shell {
         let output = self.output.clone();
         let destinations = self.destinations.clone();
         let guests = self.guests.clone();
+        let avatar = self.avatar.clone();
         let sidekick = self.sidekick.clone();
         let images = self.images.clone();
         let sounds = self.sounds.clone();
@@ -499,6 +515,15 @@ impl Render for Shell {
                             .gap(px(8.))
                             .child(div().type_scale(text::SECTION).child(page.label()))
                             .child(guests)
+                    } else if page == PageId::Avatar {
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .child(avatar)
                     } else if page == PageId::Ai {
                         div()
                             .flex_1()
