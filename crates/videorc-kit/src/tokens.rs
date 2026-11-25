@@ -1172,6 +1172,8 @@ pub mod radius {
     pub const ROW: f32 = 8.0;
     pub const CHIP: f32 = 6.0;
     pub const TAG: f32 = 7.0;
+    /// Sonner toast action / cancel chip (`[data-button]` radius 4 px).
+    pub const TOAST_ACTION: f32 = 4.0;
 }
 
 /// The desktop scale in px: one toolbar, one status bar, one row and one control height.
