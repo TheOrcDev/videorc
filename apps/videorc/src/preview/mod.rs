@@ -463,11 +463,13 @@ impl Preview {
 
     /// What the Studio slot says, or nothing while a frame shows there.
     pub fn docked_words(&self) -> Option<PreviewWords> {
-        if !self.native_ready() {
-            return Some(words::FAILED);
-        }
+        // Closed first: a closed Preview without the native path (Windows
+        // today) reads as closed, not as failed.
         if self.is_closed() {
             return Some(words::LIVES_IN_ITS_OWN_WINDOW);
+        }
+        if !self.native_ready() {
+            return Some(words::FAILED);
         }
         #[cfg(target_os = "linux")]
         if self.mode == WindowMode::Docked

@@ -972,17 +972,15 @@ fn main() -> Result<()> {
         });
         // Window → Preview and ⌘P (P1506, P052): an open Preview closes, a
         // closed one opens where it was; the main window comes up for it.
+        // Every platform: without a floating window (Windows today) it still
+        // toggles the closed state, and `toggle_open` docks it.
         let toggle_preview = preview_slot.clone();
         cx.on_action(move |_: &menus::TogglePreview, cx| {
             let Some(preview) = toggle_preview.borrow().clone() else {
                 return;
             };
             let _ = main_window.update(cx, |_, window, _| window.activate_window());
-            preview.update(cx, |preview, cx| {
-                if preview.can_float() {
-                    preview.toggle_open(cx);
-                }
-            });
+            preview.update(cx, |preview, cx| preview.toggle_open(cx));
         });
         cx.on_action(move |_: &menus::ShowImages, cx| {
             let _ = main_window.update(cx, |shell, window, cx| {
