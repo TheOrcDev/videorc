@@ -271,6 +271,7 @@ impl ShowStage {
             };
             well = well.child(
                 div()
+                    .id("show-stage-joining-status")
                     .absolute()
                     .top(px(12.))
                     .left(px(12.))
@@ -865,7 +866,14 @@ impl Render for ShowStage {
             .min_h_0()
             .min_w_0()
             .overflow_hidden()
-            .child(div().flex_1().min_h_0().overflow_y_scroll().child(section))
+            .child(
+                div()
+                    .id("show-stage-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(section),
+            )
             .child(close_dialog)
     }
 }

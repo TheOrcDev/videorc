@@ -286,7 +286,7 @@ impl SessionSection {
                 .py(px(8.))
                 .child(
                     div()
-                        .shrink_0()
+                        .flex_shrink_0()
                         .text_color(lcd::dim(theme))
                         .child(fact.label.clone()),
                 )

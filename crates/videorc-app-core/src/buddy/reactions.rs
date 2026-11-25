@@ -25,7 +25,7 @@ pub const REACTION_DEFAULT: &str = "__default";
 const SLEEP_CHOICES: [u32; 5] = [0, 60, 180, 300, 600];
 const SLEEP_AFTER_MAX_SECONDS: u32 = 1800;
 /// The Motion slider's ticks; Calm is page-pet's default.
-const MOTION_TICKS: [(&str, f32); 3] = [("Off", 0.0), ("Calm", 0.45), ("Lively", 1.0)];
+pub const MOTION_TICKS: [(&str, f32); 3] = [("Off", 0.0), ("Calm", 0.45), ("Lively", 1.0)];
 
 /// The Reactions list, sectioned: what viewers do, then what the stream
 /// does.

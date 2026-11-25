@@ -594,7 +594,7 @@ impl FirstRunScreen {
             .capture
             .audio
             .microphone_gain_db;
-        let next = fr::sound::gain_db(current, peak) as f32;
+        let next = fr::sound::gain_db(f64::from(current), peak) as f32;
         let studio = self.studio.clone();
         self.runtime
             .spawn(async move { studio.set_microphone_gain(next).await });

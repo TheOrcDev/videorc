@@ -4,7 +4,7 @@
 //! (`gpui_base::input::InputState`), found among the fields the app has
 //! made. With no field focused there is nothing to say, as in Electron.
 
-use gpui::{App, Global, WeakEntity, Window};
+use gpui::{App, Focusable, Global, WeakEntity, Window};
 use gpui_base::input::InputState;
 
 /// Every text field made so far, while it lives.
@@ -33,7 +33,7 @@ pub fn focused_text(window: &Window, cx: &App) -> Option<String> {
         .0
         .iter()
         .filter_map(WeakEntity::upgrade)
-        .find(|field| field.read(cx).focus_handle().is_focused(window))?;
+        .find(|field| field.read(cx).focus_handle(cx).is_focused(window))?;
     let state = field.read(cx);
     let selected = state.selected_value();
     Some(if selected.is_empty() {

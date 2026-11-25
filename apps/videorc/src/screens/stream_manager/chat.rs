@@ -99,7 +99,7 @@ impl ChatPane {
                 this.completion_index = 0;
                 cx.notify();
             }
-            InputEvent::PressEnter => {
+            InputEvent::PressEnter { .. } => {
                 let draft = state.read(cx).value().to_string();
                 let completions = composer_completions(&draft);
                 if let Some(row) = completions.get(this.completion_index) {
