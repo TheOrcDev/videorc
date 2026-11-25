@@ -198,7 +198,9 @@ Scene stills (plan 231 S5): ordered app/window/display targets, JPEG bytes,
 per-target unavailability, Hide screen refusal, and unsupported platforms.
 Optional flags are omitted, never null. Both languages read this fixture:
 
-- Rust: `cargo test -p videorc-backend scene_pictures`
+- Rust: `cargo test -p videorc-protocol scene_pictures` (the wire types,
+  `videorc_protocol::scene_pictures`, since plan 260) and
+  `cargo test -p videorc-backend scene_pictures` (the handler's answers)
 - TypeScript: `pnpm --filter @videorc/desktop test -- backend-rpc-contract.test.ts`
 
 ## `scene-layout-retention.json`

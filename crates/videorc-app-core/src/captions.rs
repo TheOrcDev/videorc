@@ -41,6 +41,8 @@ pub const ELSEWHERE_LABEL: &str = "Captions on other pages";
 pub const STYLE: &str = "Style";
 pub const STYLE_DESCRIPTION: &str = "Appearance updates live without restarting captions.";
 pub const STYLE_LABEL: &str = "Caption style";
+/// The words on each Style chip's swatch.
+pub const STYLE_SAMPLE: &str = "Make every word count";
 pub const TEXT_SIZE: &str = "Text size";
 pub const TEXT_SIZE_LABEL: &str = "Caption text size";
 pub const LANGUAGE: &str = "Spoken language";

@@ -13177,7 +13177,11 @@ async fn handle_text_message_with_role(
                     {
                         Ok(Ok(result)) => ServerResponse::ok(
                             command.id,
-                            result.guard_privacy(privacy_start, state.screen_privacy.view()),
+                            screen_capture::GuardScenePictures::guard_privacy(
+                                result,
+                                privacy_start,
+                                state.screen_privacy.view(),
+                            ),
                         ),
                         Ok(Err(error)) => {
                             ServerResponse::error(command.id, "scene-pictures-failed", error)

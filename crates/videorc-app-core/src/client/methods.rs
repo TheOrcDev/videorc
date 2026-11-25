@@ -21,6 +21,7 @@ use serde_json::Value;
 use videorc_protocol::playback::{
     PlaybackMuteParams, PlaybackOpenParams, PlaybackSeekParams, PlaybackStatus,
 };
+use videorc_protocol::scene_pictures::{ScenePicturesParams, ScenePicturesResult};
 use videorc_protocol::{
     AudioProcessingUpdateParams, AudioProcessingUpdateResult, BackendHealth, CompositorStatus,
     DeviceList, PreviewScreenStartParams, PreviewScreenStatus, PreviewSurfaceBoundsParams,
@@ -83,6 +84,12 @@ method!(
     /// Commits the idle scene built from a capture config (sources, layout,
     /// video). Answers whether it applied and the compositor's state.
     SceneLoadFromCaptureConfig, "scene.load_from_capture_config", SceneConfigParams => SceneCommitStatus
+);
+method!(
+    /// A still of the screen each scene shows (plan 231 D7), for the Scene
+    /// page's cards and the scene picker: JPEG base64 per target, or why
+    /// there is none. macOS only; elsewhere every target is `unsupported`.
+    ScenePicturesGet, "sources.scene_pictures", ScenePicturesParams => ScenePicturesResult
 );
 method!(
     /// The compositor's status (10 s deadline).
