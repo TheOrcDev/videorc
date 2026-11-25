@@ -6,6 +6,7 @@ use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
@@ -13,7 +14,7 @@ use videorc_kit::shortcut_keys::ShortcutKeys;
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::{size, text};
+use videorc_kit::tokens::{radius, size, text};
 
 use super::SidekickScreen;
 use super::live::{LiveView, StatusKind, UnlockAction};
@@ -63,21 +64,40 @@ pub fn render_overview(
         );
     }
 
-    let mut status_row = div().flex().flex_wrap().items_center().gap(px(12.)).child(
-        div()
-            .flex()
-            .min_w(px(0.))
-            .flex_1()
-            .flex_col()
-            .gap(px(2.))
-            .child(
-                div()
-                    .type_scale(text::LABEL)
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(words::PAGE_TITLE),
-            )
-            .child(status_words),
-    );
+    // `SidekickMark` (lg): the page glyph on a quiet tile, monochrome.
+    let mark = div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(56.))
+        .rounded(px(radius::PANEL))
+        .bg(hsla(theme.muted))
+        .border_1()
+        .border_color(border)
+        .child(icon(IconName::UserSound, 28., hsla(theme.foreground)));
+
+    let mut status_row = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(12.))
+        .child(mark)
+        .child(
+            div()
+                .flex()
+                .min_w(px(0.))
+                .flex_1()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .type_scale(text::LABEL)
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(words::PAGE_TITLE),
+                )
+                .child(status_words),
+        );
 
     let checked = view.checked;
     let disabled = view.switch_disabled;
