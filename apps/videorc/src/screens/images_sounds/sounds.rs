@@ -1,6 +1,7 @@
 //! Sounds ⇧⌘S: the soundboard's sounds.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{Context, Entity, PathPromptOptions, SharedString, Window, div, prelude::*, px};
@@ -11,9 +12,16 @@ use videorc_app_core::resources::{
     capability::{IssueOptions, ResourceKind},
     issue_capability,
 };
+use videorc_app_core::soundboard::starters::{
+    RESTORE_TOAST_ID, STARTER_IMPORT_FAILED, StarterImportOutcome, StarterRow, is_offline_message,
+    limit_refusal, read_starter_rows, starter_import_params,
+};
 use videorc_app_core::soundboard::{self, ImportPhase, SOUND_VOLUME_DB_MAX, SOUND_VOLUME_DB_MIN};
 use videorc_app_core::studio::StudioBackend;
 use videorc_app_core::studio::audio_mixer::format_db;
+use videorc_app_core::user_error::{
+    Failure, OFFLINE_REASON, UserErrorContext, toast_offline, toast_user_error,
+};
 use videorc_app_core::{BackendClient, BackendState, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
@@ -50,6 +58,10 @@ pub struct SoundsPanel {
     playing: std::collections::BTreeSet<String>,
     import_phase: ImportPhase,
     restoring: bool,
+    /// The starter sounds the app ships (`sounds/starter`), read once.
+    starters: Vec<(StarterRow, PathBuf)>,
+    /// The once-per-profile seeding ran (or is running) on this connection.
+    seed_tried: bool,
     load_epoch: u64,
     load_failures: usize,
     rename: DialogHandle,
@@ -91,6 +103,15 @@ impl SoundsPanel {
             playing: std::collections::BTreeSet::new(),
             import_phase: ImportPhase::Idle,
             restoring: false,
+            starters: {
+                let (rows, refused) =
+                    read_starter_rows(&videorc_app_core::bundled::current().starter_sounds);
+                for line in refused {
+                    eprintln!("[videorc-app] starter sounds: {line}");
+                }
+                rows
+            },
+            seed_tried: false,
             load_epoch: 0,
             load_failures: 0,
             rename: DialogHandle::new(false),
@@ -111,6 +132,7 @@ impl SoundsPanel {
             self.connected = connected;
             if connected && !was {
                 self.load_failures = 0;
+                self.seed_tried = false;
                 self.refresh(cx);
             }
             if !connected {
@@ -144,6 +166,7 @@ impl SoundsPanel {
                         panel.board = Some(board);
                         panel.board_state = BoardState::Ready;
                         panel.load_failures = 0;
+                        panel.seed_starters(cx);
                     }
                     _ => {
                         panel.load_failures = panel.load_failures.saturating_add(1);
@@ -178,6 +201,124 @@ impl SoundsPanel {
                 if panel.load_epoch == epoch && panel.board_state == BoardState::Loading {
                     panel.refresh(cx);
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// The shipped starters the board doesn't have (`missingStarterSlugs`),
+    /// with their files, in manifest order.
+    fn missing_starters(&self) -> Vec<(StarterRow, PathBuf)> {
+        let have: BTreeSet<&str> = self
+            .sounds()
+            .iter()
+            .filter_map(|sound| sound.starter.as_deref())
+            .collect();
+        self.starters
+            .iter()
+            .filter(|(row, _)| !have.contains(row.slug.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    /// The keys the board's sounds already have.
+    fn taken_hotkeys(&self) -> BTreeSet<String> {
+        self.sounds()
+            .iter()
+            .filter_map(|sound| sound.hotkey.clone())
+            .collect()
+    }
+
+    /// `seedStarterSounds`: once per profile, quietly (nothing toasts at
+    /// first launch), the starters are imported and the board marked seeded.
+    /// A run cut short by the connection, or a build without the starter
+    /// files, marks nothing and tries again on the next connection.
+    fn seed_starters(&mut self, cx: &mut Context<Self>) {
+        let seeded = self
+            .board
+            .as_ref()
+            .is_none_or(|board| board.starters_seeded);
+        if seeded || self.seed_tried || self.starters.is_empty() {
+            return;
+        }
+        self.seed_tried = true;
+        let files = self.missing_starters();
+        let taken = self.taken_hotkeys();
+        let studio = self.studio.clone();
+        let backend = self.backend.clone();
+        let job = self.runtime.spawn(async move {
+            let outcome = import_starters(&studio, &backend, files, taken).await;
+            if outcome.offline {
+                return false;
+            }
+            studio
+                .backend()
+                .sounds_request("sounds.settings", json!({ "startersSeeded": true }))
+                .await
+                .is_ok()
+        });
+        cx.spawn(async move |this, cx| {
+            let _ = job.await;
+            let _ = this.update(cx, |panel, cx| panel.refresh(cx));
+        })
+        .detach();
+    }
+
+    /// Restore starter sounds (`restoreStarters`): the starters the board
+    /// no longer has. A limit refusal, a lost connection or a failed import
+    /// says so in the one restore toast.
+    fn restore_starters(&mut self, cx: &mut Context<Self>) {
+        if self.restoring || !self.connected {
+            return;
+        }
+        let files = self.missing_starters();
+        if files.is_empty() {
+            return;
+        }
+        self.restoring = true;
+        cx.notify();
+        let taken = self.taken_hotkeys();
+        let studio = self.studio.clone();
+        let backend = self.backend.clone();
+        let job = self
+            .runtime
+            .spawn(async move { import_starters(&studio, &backend, files, taken).await });
+        cx.spawn(async move |this, cx| {
+            let outcome = job.await.unwrap_or_default();
+            let _ = this.update(cx, |panel, cx| {
+                panel.restoring = false;
+                let context = UserErrorContext {
+                    action: "restore",
+                    object: "the starter sounds",
+                };
+                let notice = if let Some(refusal) = outcome.refusal.as_deref() {
+                    toast_user_error(
+                        Failure::Sentence {
+                            text: refusal,
+                            warning: true,
+                        },
+                        context,
+                        RESTORE_TOAST_ID,
+                    )
+                } else if outcome.offline {
+                    Some(toast_offline(context))
+                } else if outcome.failed > 0 {
+                    toast_user_error(
+                        Failure::Sentence {
+                            text: STARTER_IMPORT_FAILED,
+                            warning: false,
+                        },
+                        context,
+                        RESTORE_TOAST_ID,
+                    )
+                } else {
+                    None
+                };
+                if let Some(notice) = notice {
+                    panel.studio.post_notices(vec![notice]);
+                }
+                panel.refresh(cx);
+                cx.notify();
             });
         })
         .detach();
@@ -683,20 +824,34 @@ impl Render for SoundsPanel {
             ));
         }
 
-        // Starter restore shows when the board is known; without a starters
-        // manifest in app-core yet, offer it whenever the board is empty after
-        // a successful load (Electron shows it when starters are missing).
-        if loaded && sounds.is_empty() {
-            section = section.child(
-                Button::new("sound-restore-starters")
-                    .label(if self.restoring {
-                        soundboard::RESTORING
-                    } else {
-                        soundboard::RESTORE_STARTERS
-                    })
-                    .variant(ButtonVariant::Ghost)
-                    .disabled(offline || self.restoring),
-            );
+        // Restore starter sounds shows while a shipped starter is missing
+        // from the loaded board (`missingStarters.length > 0`).
+        if loaded && !self.missing_starters().is_empty() {
+            let glyph = if self.restoring {
+                Spinner::new("sound-restore-spinner")
+                    .size(16.)
+                    .into_any_element()
+            } else {
+                icon(IconName::ArrowCounterClockwise, 16., hsla(t.foreground)).into_any_element()
+            };
+            let mut restore = Button::new("sound-restore-starters")
+                .variant(ButtonVariant::Ghost)
+                .disabled(offline || self.restoring)
+                .child(glyph)
+                .child(if self.restoring {
+                    soundboard::RESTORING
+                } else {
+                    soundboard::RESTORE_STARTERS
+                })
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| entity.update(cx, |panel, cx| panel.restore_starters(cx))
+                });
+            // `DisabledReason`: why it is off, on hover.
+            if offline {
+                restore = restore.tooltip(OFFLINE_REASON);
+            }
+            section = section.child(div().flex().child(restore));
         }
 
         let rename_dialog = Dialog::new("sound-rename", &self.rename, soundboard::RENAME_TITLE)
@@ -784,4 +939,74 @@ fn parse_mode(value: &str) -> Option<SoundMode> {
         "hold" => Some(SoundMode::Hold),
         _ => None,
     }
+}
+
+/// `importStarterFiles`: the starters one after another (the backend's one
+/// AssetImport lane). A key another sound already has is left off; a limit
+/// refusal or a lost connection ends the run.
+async fn import_starters(
+    studio: &AppStudio,
+    backend: &watch::Receiver<BackendState>,
+    files: Vec<(StarterRow, PathBuf)>,
+    mut taken: BTreeSet<String>,
+) -> StarterImportOutcome {
+    let mut outcome = StarterImportOutcome::default();
+    for (row, path) in files {
+        let bootstrap = backend.borrow().bootstrap().cloned();
+        let Some(bootstrap) = bootstrap else {
+            outcome.offline = true;
+            return outcome;
+        };
+        let issued = match issue_capability(
+            &bootstrap,
+            &path,
+            ResourceKind::InputFile,
+            IssueOptions::default(),
+        )
+        .await
+        {
+            Ok((_, issued)) => issued,
+            Err(message) => {
+                if is_offline_message(&message) {
+                    outcome.offline = true;
+                    return outcome;
+                }
+                outcome.failed += 1;
+                eprintln!(
+                    "[videorc-app] the starter sound {} was not added: {message}",
+                    row.slug
+                );
+                continue;
+            }
+        };
+        let params = starter_import_params(&row, &issued.capability_id, &taken);
+        match studio
+            .backend()
+            .sounds_request("sounds.import", params)
+            .await
+        {
+            Ok(_) => {
+                outcome.imported += 1;
+                if let Some(hotkey) = &row.hotkey {
+                    taken.insert(hotkey.clone());
+                }
+            }
+            Err(error) => {
+                if let Some(refusal) = limit_refusal(&error.message) {
+                    outcome.refusal = Some(refusal.to_string());
+                    return outcome;
+                }
+                if is_offline_message(&error.message) {
+                    outcome.offline = true;
+                    return outcome;
+                }
+                outcome.failed += 1;
+                eprintln!(
+                    "[videorc-app] the starter sound {} was not added: {}",
+                    row.slug, error.message
+                );
+            }
+        }
+    }
+    outcome
 }
