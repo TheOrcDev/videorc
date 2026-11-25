@@ -11,6 +11,9 @@ use videorc_app_core::chat::LiveChat;
 use videorc_app_core::chat::model::LiveChatMessage;
 use videorc_app_core::chat::store::DeliveryCursor;
 use videorc_app_core::chat::view::{self, platform_label};
+use videorc_app_core::stream_manager::completions::{
+    ComposerCompletion, EDIT_CHAT_COMMANDS, composer_completions,
+};
 use videorc_app_core::stream_manager::copy::{
     CHAT_MESSAGES, CHAT_ON_STREAM, CHAT_PANE, START_A_LIVESTREAM,
 };
@@ -23,7 +26,7 @@ use videorc_app_core::stream_manager::send::{
 use videorc_kit::{
     badge::{Badge, BadgeVariant},
     button::{Button, ButtonSize, ButtonVariant},
-    command::InputEvent,
+    command::{CommandItem, CommandList, InputEvent},
     dropdown_menu::{DropdownMenu, Menu},
     empty::Empty,
     icon::{IconName, icon},
@@ -57,6 +60,10 @@ pub struct ChatPane {
     sending: bool,
     /// Clear the draft on the next render (after a successful send).
     clear_draft: bool,
+    /// Replace the draft on the next render (after picking a completion).
+    pending_draft: Option<String>,
+    /// Selected row in the composer completion list.
+    completion_index: usize,
     /// Follow the newest message (Electron's pinned follow).
     following: bool,
     unread: usize,
@@ -87,10 +94,21 @@ impl ChatPane {
                 cx.notify();
             }
         });
-        let draft_sub = cx.subscribe(&draft, |_, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
+        let draft_sub = cx.subscribe(&draft, |this, state, event: &InputEvent, cx| match event {
+            InputEvent::Change => {
+                this.completion_index = 0;
                 cx.notify();
             }
+            InputEvent::PressEnter => {
+                let draft = state.read(cx).value().to_string();
+                let completions = composer_completions(&draft);
+                if let Some(row) = completions.get(this.completion_index) {
+                    this.apply_completion(row, cx);
+                } else {
+                    this.send_draft(cx);
+                }
+            }
+            _ => {}
         });
         let seed = live_chat.borrow().clone();
         let (messages, platforms, mention_names, can_send) = view_from_chat(&seed);
@@ -125,6 +143,8 @@ impl ChatPane {
             composer: live,
             sending: false,
             clear_draft: false,
+            pending_draft: None,
+            completion_index: 0,
             following: true,
             unread: 0,
             incomplete: false,
@@ -197,6 +217,26 @@ impl ChatPane {
     /// Whether a send can go out (writable destinations + a session).
     pub fn can_send(&self) -> bool {
         self.can_send
+    }
+
+    fn apply_completion(&mut self, row: &ComposerCompletion, cx: &mut Context<Self>) {
+        if row.value == EDIT_CHAT_COMMANDS {
+            // Settings → Chat commands waits on that page's driver.
+            self.completion_index = 0;
+            cx.notify();
+            return;
+        }
+        let value = if matches!(
+            row.value,
+            "/marker" | "/banner" | "/sound" | "/sidekick" | "/buddy"
+        ) {
+            format!("{} ", row.value)
+        } else {
+            row.value.to_string()
+        };
+        self.pending_draft = Some(value);
+        self.completion_index = 0;
+        cx.notify();
     }
 
     fn send_draft(&mut self, cx: &mut Context<Self>) {
@@ -481,6 +521,10 @@ impl Render for ChatPane {
             self.draft
                 .update(cx, |draft, cx| draft.set_value("", window, cx));
         }
+        if let Some(value) = self.pending_draft.take() {
+            self.draft
+                .update(cx, |draft, cx| draft.set_value(&value, window, cx));
+        }
         let width = f32::from(window.viewport_size().width);
         let tier = Tier::of(width);
         let labels = full_labels(width);
@@ -491,12 +535,20 @@ impl Render for ChatPane {
         let filtering = self.filter.filtering();
         let draft = self.draft.read(cx).value().to_string();
         let draft_len = draft_length(draft.trim());
+        let completions = composer_completions(&draft);
+        if !completions.is_empty() {
+            self.completion_index = self.completion_index.min(completions.len() - 1);
+        } else {
+            self.completion_index = 0;
+        }
+        let selected = self.completion_index;
         let can_send = self.can_send
             && !self.sending
             && validate_chat_draft(&draft, CHAT_SEND_MAX_CHARS).is_some();
         let filters = self.filters_bar(tier, labels, window, cx);
         let live = self.live;
         let this = cx.entity().downgrade();
+        let completion_scroll = ScrollHandle::new();
         let show_jump = !self.following && !shown.is_empty();
         let (jump_label, jump_name) = view::jump_chip(self.unread, self.incomplete);
         let list: AnyElement = if shown.is_empty() {
@@ -623,7 +675,36 @@ impl Render for ChatPane {
                                             }
                                         }),
                                 ),
-                        ),
+                        )
+                        .when(!completions.is_empty(), |composer| {
+                            let this = this.clone();
+                            let rows = completions.clone();
+                            composer.child(
+                                CommandList::new("chat-completions", &completion_scroll).children(
+                                    rows.into_iter().enumerate().map(|(index, row)| {
+                                        let this = this.clone();
+                                        let picked = row.clone();
+                                        let title = if row.value == EDIT_CHAT_COMMANDS {
+                                            "Edit chat commands…".into()
+                                        } else {
+                                            format!("{}{}", row.value, row.hint)
+                                        };
+                                        CommandItem::new(
+                                            SharedString::from(format!("completion-{index}")),
+                                            title,
+                                        )
+                                        .selected(index == selected)
+                                        .on_click(
+                                            move |_, _, app| {
+                                                let _ = this.update(app, |pane, cx| {
+                                                    pane.apply_completion(&picked, cx);
+                                                });
+                                            },
+                                        )
+                                    }),
+                                ),
+                            )
+                        }),
                 )
             })
     }
