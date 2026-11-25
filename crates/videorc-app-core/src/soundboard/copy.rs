@@ -45,6 +45,36 @@ pub const SOUND_VOLUME_DB_MAX: i32 = 6;
 pub const SOUND_NAME_MAX_CHARS: usize = 64;
 pub const SOUND_HOTKEYS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
 
+// Studio → Soundboard (`soundboard-section.tsx`, `lib/sounds.ts`).
+pub const STUDIO_TITLE: &str = "Soundboard";
+pub const STOP_ALL: &str = "Stop all";
+pub const ADD_IN_SOUNDS: &str = "Add in Sounds";
+pub const STUDIO_NO_SOUNDS: &str = "No sounds yet.";
+pub const IDLE_DESCRIPTION: &str = "Only you hear sounds until you record or go live.";
+pub const SOUNDS_CANT_REACH_SESSION: &str =
+    "Sounds can't reach this recording or stream. Only you hear them.";
+pub const SESSION_DESCRIPTION_MONITOR: &str = "Sounds play in your recording and stream.";
+pub const SESSION_DESCRIPTION_NO_MONITOR: &str =
+    "Sounds play in your recording and stream. You don't hear them yourself.";
+pub const SOUNDS_ONCE_CONNECTED: &str = "Sounds play once Videorc is connected.";
+
+// Room sounds / routing (`room-sounds.tsx`, `room-audio-routing.tsx`).
+pub const ROOM_SOUNDS_LABEL: &str = "Room sounds · Preview";
+pub const TRY_ROOM_SOUNDS: &str = "Try room sounds for this room";
+pub const TURN_OFF_ROOM_SOUNDS: &str = "Turn off room sounds";
+pub const SYSTEM_AUDIO_LABEL: &str = "System audio";
+pub const SHARE_SYSTEM_AUDIO: &str = "Share system audio for this room";
+pub const STOP_SHARING_SYSTEM_AUDIO: &str = "Stop sharing system audio";
+pub const MUTE_SYSTEM_AUDIO: &str = "Mute system audio";
+pub const UNMUTE_SYSTEM_AUDIO: &str = "Unmute system audio";
+pub const MUTE_PROGRAM_SPEECH: &str = "Mute program speech";
+pub const UNMUTE_PROGRAM_SPEECH: &str = "Unmute program speech";
+pub const MUTE_PROGRAM_AUX: &str = "Mute program auxiliary audio";
+pub const UNMUTE_PROGRAM_AUX: &str = "Unmute program auxiliary audio";
+pub const TAKEOVER_SILENCES: &str =
+    "Takeover silences program speech; deliberately enabled music and sounds continue.";
+pub const PROGRAM_ROUTING_FOOTNOTE: &str = "Conversation audio is independent. Older program pages use all-program takeover silence. Program gain changes require a current routing-capable page.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
