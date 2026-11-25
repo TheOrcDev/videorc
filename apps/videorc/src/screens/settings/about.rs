@@ -103,7 +103,7 @@ impl SettingsScreen {
                                     .child("Version")
                                     .child(
                                         div()
-                                            .font_family(crate::lcd::SCREEN_FONT)
+                                            .font_family(videorc_kit::theme::FONT_MONO)
                                             .child(env!("CARGO_PKG_VERSION")),
                                     ),
                             )

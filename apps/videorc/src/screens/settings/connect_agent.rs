@@ -537,7 +537,7 @@ impl ConnectAgentDialog {
             .border_color(hsla(t.border))
             .bg(hsla(t.muted))
             .p(px(12.))
-            .font_family(crate::lcd::SCREEN_FONT)
+            .font_family(videorc_kit::theme::FONT_MONO)
             .type_scale(text::META)
             .text_color(hsla(t.foreground))
             .child(line_display(&shown.line, &shown.token, self.shown));
