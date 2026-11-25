@@ -945,6 +945,335 @@ impl BuddyAnimator {
         }
         VIEWER_GAZE
     }
+
+    // --- The cloud twin (plan 249 S5, plan 260 S1.8 R6b) ------------------------------------
+
+    /// One public input ([`cloud::PublicEvent`], what [`public_event`]
+    /// projects) applied as the TS twin's `handle` applies it: a reaction
+    /// carries its resolved chain, so no persona table is read. The
+    /// compositor never calls this; its inputs stay [`BuddyAnimatorEvent`].
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the room's motion stream
+    pub(crate) fn handle_public(&mut self, event: &cloud::PublicEvent, at: f64) {
+        use cloud::PublicEvent as Public;
+        match event {
+            Public::Utterance {
+                mood,
+                chars,
+                bubble_seconds,
+            } => self.handle(
+                BuddyAnimatorEvent::UtteranceStart {
+                    state: *mood,
+                    chars: *chars,
+                    bubble_seconds: *bubble_seconds,
+                },
+                at,
+            ),
+            Public::UtteranceEnd => self.handle(BuddyAnimatorEvent::UtteranceEnd, at),
+            Public::Think => self.handle(BuddyAnimatorEvent::ThinkStart, at),
+            Public::ThinkSettle => self.handle(BuddyAnimatorEvent::ThinkSettle, at),
+            Public::Reaction { chain, activity } => {
+                if *activity {
+                    self.note_activity(at);
+                }
+                self.enqueue(chain.clone(), at);
+            }
+            Public::Highlight { ttl_seconds } => self.handle(
+                BuddyAnimatorEvent::HighlightLive {
+                    ttl_seconds: *ttl_seconds,
+                },
+                at,
+            ),
+            Public::HighlightIdle => self.handle(BuddyAnimatorEvent::HighlightIdle, at),
+            Public::Chat => self.handle(BuddyAnimatorEvent::ChatSeen, at),
+            Public::Settings(motion) => self.set_settings(BuddyAnimatorSettings {
+                motion: *motion,
+                reactions: self.settings.reactions.clone(),
+            }),
+        }
+    }
+
+    /// Everything the animator carries, as the TS twin's `AnimatorState`
+    /// JSON (`buddy-animator.ts` `saveState()`), the random source included
+    /// (`rng`: the SplitMix64 state in lowercase hex), so a program page
+    /// continues from a keyframe exactly where this animator is. The
+    /// persona's reaction table is not in it (the cloud's events carry
+    /// resolved chains); `lead` is the leg's index (`h` 0, `v` 1, Preview 2).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the room's motion stream
+    pub fn save_state(&self) -> serde_json::Value {
+        use serde_json::json;
+        let speech = match self.speech {
+            Speech::Quiet => json!({ "kind": "quiet" }),
+            Speech::Think => json!({ "kind": "think" }),
+            Speech::Bubble(mood) => json!({
+                "kind": "bubble",
+                "mood": CohostAvatarState::from(mood).as_str(),
+            }),
+        };
+        let motion = self.settings.motion;
+        json!({
+            "settings": {
+                "intensity": motion.intensity,
+                "sleepAfterSeconds": motion.sleep_after_seconds,
+                "breathing": motion.breathing,
+            },
+            "motion": self.motion.save_state(),
+            "rng": format!("{:x}", self.rng.0),
+            "frame": self.frame,
+            "lead": self.lead.map(BuddySpriteLeg::index),
+            "speech": speech,
+            "talk": self.talk.map(|talk| json!({
+                "until": talk.until,
+                "steps": talk.steps,
+                "nextStepAt": talk.next_step_at,
+            })),
+            "highlight": self.highlight.map(|show| json!({ "since": show.since, "ttl": show.ttl })),
+            "glance": self.glance.map(|glance| json!({ "point": glance.point, "until": glance.until })),
+            "nextGlanceAt": self.next_glance_at,
+            "blink": self.blink.map(|blink| json!({ "serial": blink.serial, "until": blink.until })),
+            "blinkSerial": self.blink_serial,
+            "nextBlinkAt": self.next_blink_at,
+            "lastActivity": self.last_activity,
+            "asleep": self.asleep,
+            "wake": self.wake.map(|wake| json!({ "until": wake.until, "moved": wake.moved })),
+            "playing": self.playing.as_ref().map(|playing| json!({
+                "cell": playing.cell,
+                "until": playing.until,
+            })),
+            "queue": self
+                .queue
+                .iter()
+                .map(|queued| json!({ "chain": queued.chain, "at": queued.at }))
+                .collect::<Vec<_>>(),
+            "legs": self
+                .legs
+                .iter()
+                .map(|leg| json!({
+                    "gaze": leg.gaze,
+                    "cardSince": leg.card_since,
+                    "blink": leg.blink.map(|(serial, shows)| json!([serial, shows])),
+                }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// An animator continuing from [`save_state`](Self::save_state)'s JSON
+    /// or the TS twin's (`BuddyAnimator.fromState`), its shape and bounds
+    /// checked as `parseAnimatorState` checks them. The reaction table is
+    /// empty: a consumer's reactions arrive resolved.
+    #[cfg_attr(not(test), allow(dead_code))] // a consumer's side; the tests replay keyframes
+    pub fn load_state(saved: &serde_json::Value) -> Result<Self, String> {
+        use serde_json::Value;
+        let saved = saved
+            .as_object()
+            .ok_or("The animator state is not an object.")?;
+        let field = |name: &str| {
+            saved
+                .get(name)
+                .ok_or_else(|| format!("The animator state has no {name}."))
+        };
+        let off = |name: &str| format!("The animator state's {name} is off.");
+        let object =
+            |value: &Value, name: &str| -> Result<Option<serde_json::Map<String, Value>>, String> {
+                match value {
+                    Value::Null => Ok(None),
+                    Value::Object(map) => Ok(Some(map.clone())),
+                    _ => Err(off(name)),
+                }
+            };
+
+        let settings = cloud::parse_settings(field("settings")?).ok_or_else(|| off("settings"))?;
+        let rng = field("rng")?
+            .as_str()
+            .filter(|hex| {
+                (1..=16).contains(&hex.len())
+                    && hex
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+            .ok_or_else(|| off("rng"))?;
+        let mut animator = Self::new(
+            BuddyAnimatorSettings {
+                motion: settings,
+                reactions: BTreeMap::new(),
+            },
+            rng,
+        );
+        animator.motion.load_state(field("motion")?)?;
+        animator.frame = state_time(field("frame")?).ok_or_else(|| off("frame"))?;
+        animator.lead = match field("lead")? {
+            Value::Null => None,
+            value => Some(match state_integer(Some(value), 2.0) {
+                Some(0) => BuddySpriteLeg::Primary,
+                Some(1) => BuddySpriteLeg::Auxiliary,
+                Some(2) => BuddySpriteLeg::Preview,
+                _ => return Err(off("lead")),
+            }),
+        };
+        let speech = field("speech")?.as_object().ok_or_else(|| off("speech"))?;
+        animator.speech = match (speech.get("kind").and_then(Value::as_str), speech.len()) {
+            (Some("quiet"), 1) => Speech::Quiet,
+            (Some("think"), 1) => Speech::Think,
+            (Some("bubble"), 2) => Speech::Bubble(
+                speech
+                    .get("mood")
+                    .and_then(Value::as_str)
+                    .and_then(cloud::parse_mood)
+                    .ok_or_else(|| off("speech"))?,
+            ),
+            _ => return Err(off("speech")),
+        };
+        animator.talk = match object(field("talk")?, "talk")? {
+            None => None,
+            Some(talk) => Some(Talk {
+                until: state_number(talk.get("until"), -1e7, 1e7).ok_or_else(|| off("talk"))?,
+                steps: state_integer(talk.get("steps"), 1e7).ok_or_else(|| off("talk"))? as usize,
+                next_step_at: state_number(talk.get("nextStepAt"), -1e7, 1e7)
+                    .ok_or_else(|| off("talk"))?,
+            }),
+        };
+        animator.highlight = match object(field("highlight")?, "highlight")? {
+            None => None,
+            Some(show) => Some(HighlightShow {
+                since: state_number(show.get("since"), -1e7, 1e7)
+                    .ok_or_else(|| off("highlight"))?,
+                ttl: state_number(show.get("ttl"), 0.0, 600.0).ok_or_else(|| off("highlight"))?,
+            }),
+        };
+        animator.glance = match object(field("glance")?, "glance")? {
+            None => None,
+            Some(glance) => Some(Glance {
+                point: glance
+                    .get("point")
+                    .and_then(state_pair)
+                    .ok_or_else(|| off("glance"))?,
+                until: state_number(glance.get("until"), -1e7, 1e7).ok_or_else(|| off("glance"))?,
+            }),
+        };
+        animator.next_glance_at =
+            state_time(field("nextGlanceAt")?).ok_or_else(|| off("nextGlanceAt"))?;
+        animator.blink = match object(field("blink")?, "blink")? {
+            None => None,
+            Some(blink) => Some(Blink {
+                serial: state_integer(blink.get("serial"), 1e9).ok_or_else(|| off("blink"))?,
+                until: state_number(blink.get("until"), -1e7, 1e7).ok_or_else(|| off("blink"))?,
+            }),
+        };
+        animator.blink_serial =
+            state_integer(Some(field("blinkSerial")?), 1e9).ok_or_else(|| off("blinkSerial"))?;
+        animator.next_blink_at =
+            state_time(field("nextBlinkAt")?).ok_or_else(|| off("nextBlinkAt"))?;
+        animator.last_activity =
+            state_time(field("lastActivity")?).ok_or_else(|| off("lastActivity"))?;
+        animator.asleep = field("asleep")?.as_bool().ok_or_else(|| off("asleep"))?;
+        animator.wake = match object(field("wake")?, "wake")? {
+            None => None,
+            Some(wake) => Some(Wake {
+                until: state_number(wake.get("until"), -1e7, 1e7).ok_or_else(|| off("wake"))?,
+                moved: wake
+                    .get("moved")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| off("wake"))?,
+            }),
+        };
+        animator.playing = match object(field("playing")?, "playing")? {
+            None => None,
+            Some(playing) => Some(Playing {
+                cell: match playing.get("cell") {
+                    Some(Value::Null) => None,
+                    Some(Value::String(id)) if crate::buddy_pet::reaction_id_ok(id) => {
+                        Some(id.clone())
+                    }
+                    _ => return Err(off("playing")),
+                },
+                until: state_number(playing.get("until"), -1e7, 1e7)
+                    .ok_or_else(|| off("playing"))?,
+            }),
+        };
+        let queue = field("queue")?
+            .as_array()
+            .filter(|queue| queue.len() <= REACTION_QUEUE_MAX + 1)
+            .ok_or_else(|| off("queue"))?;
+        animator.queue = queue
+            .iter()
+            .map(|queued| {
+                let chain = queued
+                    .get("chain")
+                    .and_then(Value::as_array)
+                    .filter(|chain| (1..=PUBLIC_REACTION_CHAIN_MAX).contains(&chain.len()))?
+                    .iter()
+                    .map(|id| {
+                        id.as_str()
+                            .filter(|id| crate::buddy_pet::reaction_id_ok(id))
+                            .map(str::to_string)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(QueuedReaction {
+                    chain,
+                    at: state_number(queued.get("at"), -1e7, 1e7)?,
+                })
+            })
+            .collect::<Option<VecDeque<_>>>()
+            .ok_or_else(|| off("queue"))?;
+        let legs = field("legs")?
+            .as_array()
+            .filter(|legs| legs.len() == animator.legs.len())
+            .ok_or_else(|| off("legs"))?;
+        for (memory, leg) in animator.legs.iter_mut().zip(legs) {
+            let leg = leg.as_object().ok_or_else(|| off("legs"))?;
+            memory.gaze = match leg.get("gaze") {
+                Some(Value::Null) => None,
+                Some(value) => Some(state_pair(value).ok_or_else(|| off("legs"))?),
+                None => return Err(off("legs")),
+            };
+            memory.card_since = state_time(leg.get("cardSince").ok_or_else(|| off("legs"))?)
+                .ok_or_else(|| off("legs"))?;
+            memory.blink = match leg.get("blink") {
+                Some(Value::Null) => None,
+                Some(Value::Array(pair)) if pair.len() == 2 => Some((
+                    state_integer(pair.first(), 1e9).ok_or_else(|| off("legs"))?,
+                    pair[1].as_bool().ok_or_else(|| off("legs"))?,
+                )),
+                _ => return Err(off("legs")),
+            };
+        }
+        Ok(animator)
+    }
+}
+
+/// `parseAnimatorState`'s `finite`: a finite number within `min..=max`.
+#[cfg_attr(not(test), allow(dead_code))]
+fn state_number(value: Option<&serde_json::Value>, min: f64, max: f64) -> Option<f64> {
+    value?
+        .as_f64()
+        .filter(|number| number.is_finite() && (min..=max).contains(number))
+}
+
+/// `parseAnimatorState`'s `int(v, 0, max)`: a whole number (JSON `3` or `3.0`).
+#[cfg_attr(not(test), allow(dead_code))]
+fn state_integer(value: Option<&serde_json::Value>, max: f64) -> Option<u64> {
+    state_number(value, 0.0, max)
+        .filter(|number| number.fract() == 0.0)
+        .map(|number| number as u64)
+}
+
+/// `nullableTime`: `null`, or a finite number within ±1e7. `None` when off.
+#[cfg_attr(not(test), allow(dead_code))]
+fn state_time(value: &serde_json::Value) -> Option<Option<f64>> {
+    if value.is_null() {
+        return Some(None);
+    }
+    state_number(Some(value), -1e7, 1e7).map(Some)
+}
+
+/// `pair(v, -1, 1)`: a gaze point.
+#[cfg_attr(not(test), allow(dead_code))]
+fn state_pair(value: &serde_json::Value) -> Option<[f64; 2]> {
+    let pair = value.as_array().filter(|pair| pair.len() == 2)?;
+    Some([
+        state_number(pair.first(), -1.0, 1.0)?,
+        state_number(pair.get(1), -1.0, 1.0)?,
+    ])
 }
 
 /// page-pet's tracking vector from the pet's head anchor (the top of the
@@ -1219,6 +1548,14 @@ fn greeting_reaction(
         .filter(|template| template.platform.is_none() || template.platform == platform)
         .find_map(|template| template.reaction.clone())
 }
+
+/// The cloud twin's driver and producer (plan 249 S5's motion stream, sent
+/// by the backend's room since plan 260 S1.8 R6b).
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "only the macOS room sends the motion stream")
+)]
+pub(crate) mod cloud;
 
 #[cfg(test)]
 pub(crate) mod tests;

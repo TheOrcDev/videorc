@@ -1715,3 +1715,905 @@ fn the_public_projection_carries_moods_lengths_and_resolved_chains_only() {
         })
     );
 }
+
+// --- Plan 260 S1.8 (R6b): the cloud twin, pinned to the TS driver ------------------------------
+
+mod cloud_twin {
+    use std::collections::{HashMap, VecDeque};
+
+    use serde_json::Value;
+
+    use super::*;
+    use crate::buddy_animator::cloud::{
+        MotionEvent, MotionInputs, MotionProducer, MotionSim, Orientation, PublicEvent,
+        StampedEvent, parse_settings,
+    };
+
+    /// Written by `cloud-avatar-motion.test.ts` (`WRITE_BUDDY_ANIMATOR_VECTORS=1`).
+    const EVENTS_FIXTURE: &str =
+        include_str!("../../../../protocol-fixtures/buddy-animator-events.json");
+    /// The fixture's numbers are rounded to 1e-4.
+    const TOLERANCE: f64 = 1e-4;
+    /// The TS test's fake wall clock at show time 0.
+    const START_MS: f64 = 1_700_000_000_000.0;
+
+    fn fixture() -> Value {
+        serde_json::from_str(EVENTS_FIXTURE).expect("the fixture parses")
+    }
+
+    fn fixture_events(fixture: &Value) -> Vec<StampedEvent> {
+        fixture["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .map(|raw| StampedEvent::parse(raw).unwrap_or_else(|| panic!("event {raw}")))
+            .collect()
+    }
+
+    fn fixture_seed(fixture: &Value) -> u64 {
+        u64::from_str_radix(fixture["seed"].as_str().expect("seed"), 16).expect("hex seed")
+    }
+
+    /// `MotionSim.start(seed, settings, inputs)` as the fixture names them.
+    fn start(fixture: &Value) -> MotionSim {
+        MotionSim::start(
+            fixture_seed(fixture),
+            parse_settings(&fixture["settings"]).expect("settings"),
+            MotionInputs::parse(&fixture["inputs"]).expect("inputs"),
+        )
+    }
+
+    /// The fixture's samples by tick.
+    fn samples(fixture: &Value) -> Vec<Value> {
+        fixture["samples"].as_array().expect("samples").clone()
+    }
+
+    /// One sample (`{ tick, h, v }`, each `{ cell, affine, translate }` or
+    /// `null`) against the simulation's last stepped tick.
+    fn assert_sample(sim: &MotionSim, sample: &Value) {
+        let tick = sample["tick"].as_u64().expect("tick");
+        for orientation in Orientation::ALL {
+            let key = orientation.key();
+            let want = &sample[key];
+            match (sim.sample(orientation), want.is_null()) {
+                (None, true) => {}
+                (Some((cell, affine, translate)), false) => {
+                    assert_eq!(
+                        cell,
+                        want["cell"].as_str().expect("cell"),
+                        "tick {tick} {key}"
+                    );
+                    let close = |name: &str, got: &[f32], want: &Value| {
+                        let want = want.as_array().expect(name);
+                        assert_eq!(got.len(), want.len(), "tick {tick} {key} {name}");
+                        for (index, (got, want)) in got.iter().zip(want).enumerate() {
+                            let want = want.as_f64().expect("a number");
+                            assert!(
+                                (f64::from(*got) - want).abs() <= TOLERANCE,
+                                "tick {tick} {key} {name}[{index}]: rust {got} fixture {want}"
+                            );
+                        }
+                    };
+                    close("affine", &affine[..], &want["affine"]);
+                    close("translate", &translate[..], &want["translate"]);
+                }
+                (got, _) => panic!("tick {tick} {key}: rust {got:?} fixture {want}"),
+            }
+        }
+    }
+
+    /// Add every event due by `tick` (the producer's own pace: nothing is
+    /// known before it happened). Applied or queued ids are ignored.
+    fn add_due(sim: &mut MotionSim, events: &[StampedEvent], tick: u64) {
+        let now = tick as f64 / 60.0;
+        for event in events.iter().filter(|event| event.at <= now) {
+            sim.add(event.clone());
+        }
+    }
+
+    #[test]
+    fn the_cloud_driver_replays_the_typescript_vectors_sample_by_sample() {
+        let fixture = fixture();
+        assert_eq!(fixture["version"], 1);
+        assert_eq!(fixture["tickHz"], 60);
+        let events = fixture_events(&fixture);
+        assert_eq!(events.len(), 36);
+        // Every pinned event survives the Rust parser and writer unchanged.
+        for event in &events {
+            assert_eq!(
+                MotionEvent::parse(&event.event.to_json()).as_ref(),
+                Some(&event.event)
+            );
+            assert_eq!(StampedEvent::parse(&event.to_json()).as_ref(), Some(event));
+        }
+        // `MotionSim.start` + every event up front + `advanceTo(sample.tick)`.
+        let mut sim = start(&fixture);
+        for event in events {
+            assert!(sim.add(event));
+        }
+        let samples = samples(&fixture);
+        assert_eq!(samples.len(), 480);
+        for sample in &samples {
+            let tick = sample["tick"].as_u64().expect("tick");
+            sim.advance_to(tick);
+            assert_eq!(sim.tick(), tick);
+            assert_sample(&sim, sample);
+        }
+    }
+
+    #[test]
+    fn a_saved_state_loads_into_a_fresh_animator_and_continues_identically() {
+        let fixture = fixture();
+        let events = fixture_events(&fixture);
+        // A card, talk frames, think, a laugh, a full queue, a waiting
+        // reaction, the still pack's bob, sleep, the wake, the second card.
+        for at in [
+            200_u64, 400, 1000, 1100, 1445, 1815, 2730, 4600, 5702, 6245, 7000,
+        ] {
+            let mut original = start(&fixture);
+            for tick in 1..=at {
+                add_due(&mut original, &events, tick);
+                original.advance_to(tick);
+            }
+            let keyframe = original.keyframe();
+            let saved = &keyframe["animator"];
+            assert!(
+                ts::parse_animator_state(saved),
+                "tick {at}: the TS parser refuses {saved}"
+            );
+            // Through text, as a page receives it.
+            let text: Value = serde_json::from_str(&keyframe.to_string()).expect("JSON");
+            assert!(ts::parse_animator_state(&text["animator"]), "tick {at}");
+            // `load_state` reads back exactly what `save_state` wrote.
+            let loaded = BuddyAnimator::load_state(saved).expect("loads");
+            assert_eq!(&loaded.save_state(), saved, "tick {at}");
+            // A fresh simulation from the keyframe continues tick for tick.
+            let mut resumed = MotionSim::from_keyframe(&keyframe).expect("a keyframe");
+            assert_eq!(resumed.tick(), at);
+            for tick in at + 1..=at + 600 {
+                add_due(&mut original, &events, tick);
+                add_due(&mut resumed, &events, tick);
+                original.advance_to(tick);
+                resumed.advance_to(tick);
+                assert_eq!(original.draws(), resumed.draws(), "from {at}, tick {tick}");
+                for orientation in Orientation::ALL {
+                    assert_eq!(
+                        original.sample(orientation),
+                        resumed.sample(orientation),
+                        "from {at}, tick {tick}"
+                    );
+                }
+            }
+            assert_eq!(
+                original.keyframe()["animator"],
+                resumed.keyframe()["animator"],
+                "from {at}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fresh_animator_saves_the_typescript_shape() {
+        let saved = BuddyAnimator::new(defaults(), SEED).save_state();
+        assert!(ts::parse_animator_state(&saved), "{saved}");
+        assert_eq!(saved["rng"], "5eed168c");
+        assert_eq!(saved["frame"], Value::Null);
+        assert_eq!(saved["lead"], Value::Null);
+        assert_eq!(saved["speech"], serde_json::json!({ "kind": "quiet" }));
+        assert_eq!(saved["queue"], serde_json::json!([]));
+        assert_eq!(
+            saved["legs"][2],
+            serde_json::json!({ "gaze": null, "cardSince": null, "blink": null })
+        );
+        assert_eq!(
+            saved["settings"],
+            serde_json::json!({ "intensity": 0.45, "sleepAfterSeconds": 180, "breathing": true })
+        );
+        assert_eq!(saved["motion"]["envelope"], Value::Null);
+        assert_eq!(saved["motion"]["lastNow"], Value::Null);
+        // A state the TS parser refuses does not load either.
+        for (field, bad) in [
+            ("rng", serde_json::json!("XYZ")),
+            ("lead", serde_json::json!(3)),
+            ("speech", serde_json::json!({ "kind": "bubble" })),
+            ("queue", serde_json::json!([{ "chain": [], "at": 1.0 }])),
+            ("legs", serde_json::json!([])),
+        ] {
+            let mut broken = saved.clone();
+            broken[field] = bad;
+            assert!(!ts::parse_animator_state(&broken), "{field}");
+            assert!(BuddyAnimator::load_state(&broken).is_err(), "{field}");
+        }
+    }
+
+    #[test]
+    fn the_producer_stamps_steps_and_sends_as_the_typescript_producer() {
+        let fixture = fixture();
+        let expected = fixture_events(&fixture);
+        // The TS script pushed each event at its show second; the producer
+        // stamped it 1 ms later (never at the simulated tick itself).
+        let mut script = expected
+            .iter()
+            .map(|event| {
+                (
+                    ((event.at * 1000.0).round() - 1.0) / 1000.0,
+                    event.event.clone(),
+                )
+            })
+            .collect::<VecDeque<_>>();
+        let mut producer = MotionProducer::new(
+            "show-1".to_string(),
+            "PA_host".to_string(),
+            "epoch-0001".to_string(),
+            fixture_seed(&fixture),
+            parse_settings(&fixture["settings"]).expect("settings"),
+            MotionInputs::parse(&fixture["inputs"]).expect("inputs"),
+            START_MS,
+        );
+        let samples = samples(&fixture)
+            .into_iter()
+            .map(|sample| (sample["tick"].as_u64().expect("tick"), sample))
+            .collect::<HashMap<_, _>>();
+        let mut stamped = Vec::new();
+        let mut messages: Vec<(u64, Value)> = Vec::new();
+        for tick in 1..=120 * 60_u64 {
+            let ms = START_MS + (tick as f64 * 1000.0) / 60.0;
+            while script
+                .front()
+                .is_some_and(|(seconds, _)| seconds * 1000.0 + START_MS <= ms)
+            {
+                let (seconds, event) = script.pop_front().expect("an event");
+                stamped.push(producer.push(event, START_MS + seconds * 1000.0));
+            }
+            producer.advance(ms);
+            if tick % 2 == 0 {
+                for message in producer.flush(false, ms) {
+                    messages.push((tick, message));
+                }
+            }
+            if tick % 15 == 0 {
+                assert_eq!(producer.sim().tick(), tick);
+                assert_sample(producer.sim(), &samples[&tick]);
+            }
+        }
+        // The same ids, times and events as the TS producer stamped.
+        assert_eq!(stamped.len(), expected.len());
+        for (got, want) in stamped.iter().zip(&expected) {
+            assert_eq!(got.id, want.id);
+            assert!((got.at - want.at).abs() < 1e-9, "{} vs {}", got.at, want.at);
+            assert_eq!(got.event, want.event, "event {}", want.id);
+        }
+        // Every message passes the pages' parser, within 16 KiB, numbered
+        // 1, 2, 3...; every event goes exactly once, in order; a keyframe
+        // first and then at least every 2 s.
+        let mut sent = Vec::new();
+        let mut last_keyframe: Option<u64> = None;
+        for (index, (tick, message)) in messages.iter().enumerate() {
+            assert!(
+                ts::parse_motion_message(message, "show-1", "PA_host"),
+                "tick {tick}: the TS parser refuses {message}"
+            );
+            assert!(message.to_string().len() <= 16 * 1024, "tick {tick}");
+            assert_eq!(message["seq"], index as u64 + 1);
+            assert_eq!(message["origin"], 1_700_000_000_000_i64);
+            for event in message["events"].as_array().expect("events") {
+                sent.push(event["id"].as_u64().expect("id"));
+            }
+            if !message["keyframe"].is_null() {
+                if let Some(last) = last_keyframe {
+                    assert!(tick - last <= 2 * 60 + 2, "keyframes at {last} and {tick}");
+                }
+                last_keyframe = Some(*tick);
+            } else {
+                assert!(
+                    last_keyframe.is_some(),
+                    "the first message carries a keyframe"
+                );
+            }
+        }
+        assert_eq!(sent, (1..=expected.len() as u64).collect::<Vec<_>>());
+        // A page that joins late starts from a keyframe and the events after
+        // it, and draws what every other page draws.
+        let (join, keyframe) = messages
+            .iter()
+            .enumerate()
+            .find(|(_, (tick, message))| *tick >= 2700 && !message["keyframe"].is_null())
+            .map(|(index, (_, message))| (index, message["keyframe"].clone()))
+            .expect("a keyframe after 45 s");
+        let mut late = MotionSim::from_keyframe(&keyframe).expect("the keyframe loads");
+        for (_, message) in &messages[join..] {
+            for event in message["events"].as_array().expect("events") {
+                late.add(StampedEvent::parse(event).expect("an event"));
+            }
+        }
+        let mut compared = 0;
+        let mut ticks = samples.keys().copied().collect::<Vec<_>>();
+        ticks.sort_unstable();
+        let joined = late.tick();
+        for tick in ticks.into_iter().filter(|tick| *tick > joined) {
+            late.advance_to(tick);
+            assert_sample(&late, &samples[&tick]);
+            compared += 1;
+        }
+        assert!(compared > 200, "{compared}");
+    }
+
+    #[test]
+    fn the_message_builder_keeps_the_pages_limits() {
+        let fixture = fixture();
+        let inputs = MotionInputs::parse(&fixture["inputs"]).expect("inputs");
+        let settings = parse_settings(&fixture["settings"]).expect("settings");
+        let mut producer = MotionProducer::new(
+            String::new(),
+            "PA_backend".to_string(),
+            "0123456789abcdef".to_string(),
+            7,
+            settings,
+            inputs,
+            START_MS,
+        );
+        // Nothing queued, a keyframe due: one message with the keyframe.
+        let first = producer.flush(false, START_MS + 10.0);
+        assert_eq!(first.len(), 1);
+        assert!(!first[0]["keyframe"].is_null());
+        assert!(ts::parse_motion_message(&first[0], "", "PA_backend"));
+        // Nothing queued, no keyframe due: nothing.
+        assert!(producer.flush(false, START_MS + 500.0).is_empty());
+        // Forty events at once: 16 + 16 + 8, the keyframe on the last only.
+        for _ in 0..40 {
+            producer.push(MotionEvent::Animator(PublicEvent::Chat), START_MS + 600.0);
+        }
+        let burst = producer.flush(true, START_MS + 700.0);
+        assert_eq!(
+            burst
+                .iter()
+                .map(|message| message["events"].as_array().map_or(0, Vec::len))
+                .collect::<Vec<_>>(),
+            vec![16, 16, 8]
+        );
+        assert_eq!(
+            burst
+                .iter()
+                .map(|message| !message["keyframe"].is_null())
+                .collect::<Vec<_>>(),
+            vec![false, false, true]
+        );
+        for message in &burst {
+            assert!(
+                ts::parse_motion_message(message, "", "PA_backend"),
+                "{message}"
+            );
+            assert!(message["sentAt"].as_i64() >= message["origin"].as_i64());
+        }
+        // A pile beyond 64 unsent events keeps the newest 64.
+        for _ in 0..100 {
+            producer.push(MotionEvent::Animator(PublicEvent::Chat), START_MS + 800.0);
+        }
+        let piled = producer.flush(false, START_MS + 900.0);
+        let ids = piled
+            .iter()
+            .flat_map(|message| message["events"].as_array().cloned().unwrap_or_default())
+            .map(|event| event["id"].as_u64().expect("id"))
+            .collect::<Vec<_>>();
+        assert_eq!(ids, (77..=140).collect::<Vec<_>>());
+        // Every stamp lands after the simulated time and never goes back.
+        let late = producer.push(MotionEvent::Animator(PublicEvent::Chat), START_MS + 100.0);
+        assert!(late.at >= 0.9, "{}", late.at);
+    }
+
+    #[test]
+    fn the_backends_own_projection_passes_the_pages_event_rules() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert(BuddyTrigger::Follow, "kiss".to_string());
+        for event in [
+            talk(30, 2.5),
+            BuddyAnimatorEvent::UtteranceEnd,
+            BuddyAnimatorEvent::ThinkStart,
+            BuddyAnimatorEvent::ThinkSettle,
+            follow(),
+            BuddyAnimatorEvent::Trigger {
+                trigger: BuddyTrigger::DestinationFailed,
+                reaction: None,
+            },
+            BuddyAnimatorEvent::React {
+                reaction: "wave".to_string(),
+            },
+            BuddyAnimatorEvent::HighlightLive { ttl_seconds: 10.0 },
+            BuddyAnimatorEvent::HighlightIdle,
+            BuddyAnimatorEvent::ChatSeen,
+            BuddyAnimatorEvent::Settings(defaults()),
+        ] {
+            let projected = public_event(&event, &overrides);
+            assert!(ts::parse_motion_event(Some(&projected)), "{projected}");
+            let parsed = PublicEvent::parse(&projected).unwrap_or_else(|| panic!("{projected}"));
+            assert_eq!(parsed.to_json(), projected);
+        }
+        // The pages refuse anything extra, malformed or unbounded.
+        for refused in [
+            serde_json::json!({ "kind": "utterance", "mood": "talk", "chars": 3, "bubbleSeconds": 1, "text": "hi" }),
+            serde_json::json!({ "kind": "reaction", "chain": ["Not An Id"], "activity": true }),
+            serde_json::json!({ "kind": "reaction", "chain": ["a", "b", "c", "d", "e", "f", "g", "h", "i"], "activity": true }),
+            serde_json::json!({ "kind": "settings", "settings": { "intensity": 0.5, "sleepAfterSeconds": 10, "breathing": true } }),
+            serde_json::json!({ "kind": "highlight", "ttlSeconds": 601 }),
+            serde_json::json!({ "kind": "wave" }),
+        ] {
+            assert!(!ts::parse_motion_event(Some(&refused)), "{refused}");
+            assert_eq!(PublicEvent::parse(&refused), None, "{refused}");
+        }
+    }
+
+    /// The pages' parsers (`cloud-avatar-motion.ts` `parseMotionMessage`,
+    /// `parseAnimatorState`, `parseMotionEvent`, `parseInputs`, and
+    /// `cloud-avatar-atlas-meta.ts` `parseAnimatorPack`) rule by rule, on raw
+    /// JSON read as JavaScript reads it: a missing field is `undefined`
+    /// (never `null`), `3.0` is the integer 3.
+    mod ts {
+        use serde_json::{Map, Value};
+
+        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        const MOODS: [&str; 3] = ["talk", "laugh", "think"];
+        const STATES: [&str; 4] = ["idle", "talk", "laugh", "think"];
+
+        fn finite(value: Option<&Value>, min: f64, max: f64) -> bool {
+            value
+                .and_then(Value::as_f64)
+                .is_some_and(|number| number.is_finite() && (min..=max).contains(&number))
+        }
+
+        fn int(value: Option<&Value>, min: f64, max: f64) -> bool {
+            value
+                .and_then(Value::as_f64)
+                .is_some_and(|number| number.fract() == 0.0 && number.abs() <= MAX_SAFE_INTEGER)
+                && finite(value, min, max)
+        }
+
+        fn number(value: Option<&Value>) -> f64 {
+            value.and_then(Value::as_f64).unwrap_or(f64::NAN)
+        }
+
+        fn boolean(value: Option<&Value>) -> bool {
+            value.is_some_and(Value::is_boolean)
+        }
+
+        fn is_null(value: Option<&Value>) -> bool {
+            matches!(value, Some(Value::Null))
+        }
+
+        fn pair(value: Option<&Value>, min: f64, max: f64) -> bool {
+            value.and_then(Value::as_array).is_some_and(|values| {
+                values.len() == 2
+                    && finite(values.first(), min, max)
+                    && finite(values.get(1), min, max)
+            })
+        }
+
+        fn nullable_time(value: Option<&Value>) -> bool {
+            is_null(value) || finite(value, -1e7, 1e7)
+        }
+
+        fn channels(value: Option<&Value>) -> bool {
+            value.and_then(Value::as_array).is_some_and(|values| {
+                values.len() == 5 && values.iter().all(|n| finite(Some(n), -1e4, 1e4))
+            })
+        }
+
+        fn reaction_id(value: Option<&Value>) -> bool {
+            value
+                .and_then(Value::as_str)
+                .is_some_and(crate::buddy_pet::reaction_id_ok)
+        }
+
+        fn matches_class(value: &str, min: usize, max: usize, extra: &[u8]) -> bool {
+            (min..=max).contains(&value.len())
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || extra.contains(&byte))
+        }
+
+        fn hash(value: Option<&Value>) -> bool {
+            value.and_then(Value::as_str).is_some_and(|hash| {
+                hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+        }
+
+        /// `null`, or an object passing `check`; `undefined` fails.
+        fn nullable_object(
+            value: Option<&Value>,
+            check: impl Fn(&Map<String, Value>) -> bool,
+        ) -> bool {
+            match value {
+                Some(Value::Null) => true,
+                Some(Value::Object(object)) => check(object),
+                _ => false,
+            }
+        }
+
+        fn one_of(value: Option<&Value>, allowed: &[&str]) -> bool {
+            value
+                .and_then(Value::as_str)
+                .is_some_and(|value| allowed.contains(&value))
+        }
+
+        fn parse_settings(value: Option<&Value>) -> bool {
+            let Some(object) = value.and_then(Value::as_object) else {
+                return false;
+            };
+            if !finite(object.get("intensity"), 0.0, 1.0) || !boolean(object.get("breathing")) {
+                return false;
+            }
+            let sleep = object.get("sleepAfterSeconds");
+            int(sleep, 0.0, 1800.0) && (number(sleep) == 0.0 || number(sleep) >= 30.0)
+        }
+
+        fn parse_rect(value: Option<&Value>) -> bool {
+            let Some(object) = value.and_then(Value::as_object) else {
+                return false;
+            };
+            let [x, y, w, h] = ["x", "y", "w", "h"].map(|key| object.get(key));
+            if ![x, y, w, h].into_iter().all(|v| finite(v, 0.0, 1.0)) {
+                return false;
+            }
+            let [x, y, w, h] = [x, y, w, h].map(number);
+            w > 0.0 && h > 0.0 && x + w <= 1.00001 && y + h <= 1.00001
+        }
+
+        fn parse_orientations(
+            value: Option<&Value>,
+            item: impl Fn(Option<&Value>) -> bool,
+        ) -> bool {
+            value
+                .and_then(Value::as_object)
+                .is_some_and(|object| item(object.get("h")) && item(object.get("v")))
+        }
+
+        fn rect_or_null(value: Option<&Value>) -> bool {
+            is_null(value) || parse_rect(value)
+        }
+
+        pub fn parse_animator_pack(value: Option<&Value>) -> bool {
+            let Some(object) = value.and_then(Value::as_object) else {
+                return false;
+            };
+            let Some(cells) = object.get("cells").and_then(Value::as_array) else {
+                return false;
+            };
+            if cells.is_empty() || cells.len() > 64 {
+                return false;
+            }
+            if !pair(object.get("pivot"), 0.0, 1.0)
+                || !finite(object.get("headTop"), 0.0, 1.0)
+                || !object.get("neutral").is_some_and(Value::is_string)
+            {
+                return false;
+            }
+            let Some(talk) = object.get("talk").and_then(Value::as_array) else {
+                return false;
+            };
+            if talk.len() > 4 {
+                return false;
+            }
+            let mut known: Vec<(&str, &str)> = Vec::new();
+            for cell in cells {
+                let Some(cell) = cell.as_object() else {
+                    return false;
+                };
+                let id = cell.get("id");
+                if !reaction_id(id) {
+                    return false;
+                }
+                let id = id.and_then(Value::as_str).unwrap_or_default();
+                if known.iter().any(|(known, _)| *known == id) {
+                    return false;
+                }
+                match cell.get("kind").and_then(Value::as_str) {
+                    Some("gaze") if pair(cell.get("gaze"), -1.0, 1.0) => known.push((id, "gaze")),
+                    Some("reaction") if is_null(cell.get("gaze")) => known.push((id, "reaction")),
+                    _ => return false,
+                }
+            }
+            let neutral = object
+                .get("neutral")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !known
+                .iter()
+                .any(|(id, kind)| *id == neutral && *kind == "gaze")
+            {
+                return false;
+            }
+            let mut seen: Vec<&str> = Vec::new();
+            for id in talk {
+                let Some(id) = id.as_str() else {
+                    return false;
+                };
+                if !known.iter().any(|(known, _)| *known == id) || seen.contains(&id) {
+                    return false;
+                }
+                seen.push(id);
+            }
+            true
+        }
+
+        pub fn parse_motion_event(value: Option<&Value>) -> bool {
+            let Some(object) = value.and_then(Value::as_object) else {
+                return false;
+            };
+            let Some(kind) = object.get("kind").and_then(Value::as_str) else {
+                return false;
+            };
+            let allowed: &[&str] = match kind {
+                "utterance" => &["mood", "chars", "bubbleSeconds"],
+                "reaction" => &["chain", "activity"],
+                "highlight" => &["ttlSeconds"],
+                "settings" => &["settings"],
+                "state" => &["state"],
+                "layout" => &["rects"],
+                "cards" => &["cards"],
+                "pack" => &["atlasHash", "pack"],
+                _ => &[],
+            };
+            if !object
+                .keys()
+                .all(|key| key == "kind" || allowed.contains(&key.as_str()))
+            {
+                return false;
+            }
+            match kind {
+                "utterance" => {
+                    one_of(object.get("mood"), &MOODS)
+                        && int(object.get("chars"), 0.0, 4000.0)
+                        && finite(object.get("bubbleSeconds"), 0.0, 120.0)
+                }
+                "utterance-end" | "think" | "think-settle" | "highlight-idle" | "chat" => true,
+                "reaction" => {
+                    object
+                        .get("chain")
+                        .and_then(Value::as_array)
+                        .is_some_and(|chain| {
+                            chain.len() <= 8 && chain.iter().all(|id| reaction_id(Some(id)))
+                        })
+                        && boolean(object.get("activity"))
+                }
+                "highlight" => finite(object.get("ttlSeconds"), 0.0, 600.0),
+                "settings" => parse_settings(object.get("settings")),
+                "state" => one_of(object.get("state"), &STATES),
+                "layout" => parse_orientations(object.get("rects"), parse_rect),
+                "cards" => parse_orientations(object.get("cards"), rect_or_null),
+                "pack" => parse_animator_pack(object.get("pack")) && hash(object.get("atlasHash")),
+                _ => false,
+            }
+        }
+
+        /// `parseStamped`: the event's id when it passes.
+        fn parse_stamped(value: &Value) -> Option<f64> {
+            let object = value.as_object()?;
+            (int(object.get("id"), 1.0, MAX_SAFE_INTEGER)
+                && finite(object.get("at"), 0.0, 7.0 * 24.0 * 3600.0)
+                && parse_motion_event(object.get("event")))
+            .then(|| number(object.get("id")))
+        }
+
+        fn parse_inputs(value: Option<&Value>) -> bool {
+            value.and_then(Value::as_object).is_some_and(|object| {
+                one_of(object.get("avatarState"), &STATES)
+                    && parse_orientations(object.get("rects"), parse_rect)
+                    && parse_orientations(object.get("cards"), rect_or_null)
+                    && parse_animator_pack(object.get("pack"))
+                    && hash(object.get("atlasHash"))
+            })
+        }
+
+        pub fn parse_animator_state(value: &Value) -> bool {
+            let Some(v) = value.as_object() else {
+                return false;
+            };
+            if !parse_settings(v.get("settings")) {
+                return false;
+            }
+            let Some(m) = v.get("motion").and_then(Value::as_object) else {
+                return false;
+            };
+            if !channels(m.get("state")) || !channels(m.get("velocity")) {
+                return false;
+            }
+            if !boolean(m.get("springRunning"))
+                || !boolean(m.get("idle"))
+                || !finite(m.get("breathGain"), 0.0, 1.0)
+                || !nullable_time(m.get("lastNow"))
+            {
+                return false;
+            }
+            let envelope = nullable_object(m.get("envelope"), |e| {
+                finite(e.get("start"), -1e7, 1e7)
+                    && finite(e.get("total"), 0.0, 60.0)
+                    && e.get("segments")
+                        .and_then(Value::as_array)
+                        .is_some_and(|segments| {
+                            segments.len() <= 8
+                                && segments.iter().all(|s| {
+                                    let Some(s) = s.as_object() else {
+                                        return false;
+                                    };
+                                    let Some(ease) = s.get("ease").and_then(Value::as_object)
+                                    else {
+                                        return false;
+                                    };
+                                    let kind = ease.get("kind").and_then(Value::as_str);
+                                    let ease_ok = if kind == Some("elastic") {
+                                        finite(ease.get("period"), 0.0, 10.0) && ease.len() == 2
+                                    } else {
+                                        matches!(kind, Some("cubic" | "quartic" | "sine"))
+                                            && ease.len() == 1
+                                    };
+                                    ease_ok
+                                        && finite(s.get("duration"), 0.0, 60.0)
+                                        && channels(s.get("from"))
+                                        && channels(s.get("to"))
+                                        && boolean(s.get("yoyo"))
+                                })
+                        })
+            });
+            if !envelope {
+                return false;
+            }
+            let rng_ok = v.get("rng").and_then(Value::as_str).is_some_and(|rng| {
+                (1..=16).contains(&rng.len())
+                    && rng
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            });
+            if !rng_ok || !nullable_time(v.get("frame")) {
+                return false;
+            }
+            let lead = v.get("lead");
+            if !(is_null(lead) || [0.0, 1.0, 2.0].contains(&number(lead))) {
+                return false;
+            }
+            let Some(speech) = v.get("speech").and_then(Value::as_object) else {
+                return false;
+            };
+            let kind = speech.get("kind");
+            if !one_of(kind, &["quiet", "think", "bubble"]) {
+                return false;
+            }
+            let speech_ok = if one_of(kind, &["bubble"]) {
+                one_of(speech.get("mood"), &MOODS) && speech.len() == 2
+            } else {
+                speech.len() == 1
+            };
+            if !speech_ok {
+                return false;
+            }
+            let time = |o: &Map<String, Value>, key: &str| finite(o.get(key), -1e7, 1e7);
+            if !nullable_object(v.get("talk"), |t| {
+                time(t, "until") && int(t.get("steps"), 0.0, 1e7) && time(t, "nextStepAt")
+            }) || !nullable_object(v.get("highlight"), |h| {
+                time(h, "since") && finite(h.get("ttl"), 0.0, 600.0)
+            }) || !nullable_object(v.get("glance"), |g| {
+                pair(g.get("point"), -1.0, 1.0) && time(g, "until")
+            }) || !nullable_object(v.get("blink"), |b| {
+                int(b.get("serial"), 0.0, 1e9) && time(b, "until")
+            }) {
+                return false;
+            }
+            if !nullable_time(v.get("nextGlanceAt"))
+                || !nullable_time(v.get("nextBlinkAt"))
+                || !nullable_time(v.get("lastActivity"))
+                || !int(v.get("blinkSerial"), 0.0, 1e9)
+                || !boolean(v.get("asleep"))
+            {
+                return false;
+            }
+            if !nullable_object(v.get("wake"), |w| {
+                time(w, "until") && boolean(w.get("moved"))
+            }) || !nullable_object(v.get("playing"), |p| {
+                (is_null(p.get("cell")) || reaction_id(p.get("cell"))) && time(p, "until")
+            }) {
+                return false;
+            }
+            let queue_ok = v
+                .get("queue")
+                .and_then(Value::as_array)
+                .is_some_and(|queue| {
+                    queue.len() <= 3
+                        && queue.iter().all(|q| {
+                            q.as_object().is_some_and(|q| {
+                                time(q, "at")
+                                    && q.get("chain").and_then(Value::as_array).is_some_and(
+                                        |chain| {
+                                            (1..=8).contains(&chain.len())
+                                                && chain.iter().all(|id| reaction_id(Some(id)))
+                                        },
+                                    )
+                            })
+                        })
+                });
+            let legs_ok = v.get("legs").and_then(Value::as_array).is_some_and(|legs| {
+                legs.len() == 3
+                    && legs.iter().all(|leg| {
+                        leg.as_object().is_some_and(|leg| {
+                            (is_null(leg.get("gaze")) || pair(leg.get("gaze"), -1.0, 1.0))
+                                && nullable_time(leg.get("cardSince"))
+                                && (is_null(leg.get("blink"))
+                                    || leg.get("blink").and_then(Value::as_array).is_some_and(
+                                        |blink| {
+                                            blink.len() == 2
+                                                && int(blink.first(), 0.0, 1e9)
+                                                && boolean(blink.get(1))
+                                        },
+                                    ))
+                        })
+                    })
+            });
+            queue_ok && legs_ok
+        }
+
+        pub fn parse_motion_message(value: &Value, show: &str, publisher_sid: &str) -> bool {
+            let Some(v) = value.as_object() else {
+                return false;
+            };
+            if number(v.get("version")) != 1.0
+                || v.get("show").and_then(Value::as_str) != Some(show)
+                || v.get("publisherSid").and_then(Value::as_str) != Some(publisher_sid)
+            {
+                return false;
+            }
+            let sid_ok = publisher_sid
+                .strip_prefix("PA_")
+                .is_some_and(|rest| matches_class(rest, 1, 64, b""));
+            let epoch_ok = v
+                .get("epoch")
+                .and_then(Value::as_str)
+                .is_some_and(|epoch| matches_class(epoch, 8, 64, b"_-"));
+            if !sid_ok || !epoch_ok {
+                return false;
+            }
+            if !int(v.get("seq"), 1.0, MAX_SAFE_INTEGER)
+                || !int(v.get("sentAt"), 1.0, 8.64e15)
+                || !int(v.get("origin"), 1.0, 8.64e15)
+                || number(v.get("origin")) > number(v.get("sentAt"))
+            {
+                return false;
+            }
+            let Some(events) = v.get("events").and_then(Value::as_array) else {
+                return false;
+            };
+            if events.len() > 16 {
+                return false;
+            }
+            let mut last = 0.0;
+            for event in events {
+                match parse_stamped(event) {
+                    Some(id) if id > last => last = id,
+                    _ => return false,
+                }
+            }
+            match v.get("keyframe") {
+                Some(Value::Null) => true,
+                Some(Value::Object(k)) => {
+                    if !int(k.get("tick"), 0.0, 7.0 * 24.0 * 3600.0 * 60.0)
+                        || !int(k.get("lastEventId"), 0.0, MAX_SAFE_INTEGER)
+                    {
+                        return false;
+                    }
+                    let last_event_id = number(k.get("lastEventId"));
+                    let animator_ok = k.get("animator").is_some_and(parse_animator_state);
+                    animator_ok
+                        && parse_inputs(k.get("inputs"))
+                        && k.get("pending")
+                            .and_then(Value::as_array)
+                            .is_some_and(|pending| {
+                                pending.len() <= 16
+                                    && pending.iter().all(|event| {
+                                        parse_stamped(event).is_some_and(|id| id > last_event_id)
+                                    })
+                            })
+                }
+                _ => false,
+            }
+        }
+    }
+}
