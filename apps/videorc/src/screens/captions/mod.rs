@@ -13,6 +13,15 @@ pub mod page;
 pub mod reader;
 
 use gpui::{App, AppContext, Entity, Global};
+
+/// The backend events the caption feed reads: the main client's include
+/// list must carry them, or the page, the reader and the caption bar on the
+/// outputs never hear a line (`overlays.layout` rides with the chat's list).
+pub const EVENTS: [&str; 3] = [
+    videorc_app_core::captions::methods::UPDATE_EVENT,
+    videorc_app_core::captions::methods::CLEARED_EVENT,
+    videorc_app_core::captions::methods::ENTITLEMENTS_EVENT,
+];
 use std::sync::Arc;
 
 /// The page, built once with the feed, for the main window's shell.
