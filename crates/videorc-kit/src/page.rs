@@ -44,6 +44,8 @@ fn record_width(state: &Entity<f32>, bounds: Bounds<Pixels>, window: &mut Window
     }
 }
 
+type SectionsFor = Box<dyn FnOnce(bool) -> Vec<AnyElement>>;
+
 /// Flush sections in one column, two from 940 px of page with a hairline
 /// between the columns. Rows stretch: a short section leaves the pane's
 /// background below it. [`ConfigGrid::pair`] is `CONFIG_GRID_PAIR`: two
@@ -55,6 +57,8 @@ pub struct ConfigGrid {
     two_columns: Option<bool>,
     pair: bool,
     children: SmallVec<[AnyElement; 4]>,
+    /// Sections built once the grid knows its column count.
+    sections_for: Option<SectionsFor>,
     appearance: Option<Appearance>,
 }
 
@@ -65,6 +69,7 @@ impl ConfigGrid {
             two_columns: None,
             pair: false,
             children: SmallVec::new(),
+            sections_for: None,
             appearance: None,
         }
     }
@@ -80,6 +85,17 @@ impl ConfigGrid {
     /// (`flex-1`), and in two columns its row stretches to fill it.
     pub fn pair(mut self, pair: bool) -> Self {
         self.pair = pair;
+        self
+    }
+
+    /// Builds the sections once the grid has chosen its columns: `build`
+    /// gets `true` for two. CONFIG_GRID_PAIR's sections drop their bottom
+    /// hairline in two columns (`[&>*]:border-b-0`, the column rule divides
+    /// them) and keep it stacked, where it separates the halves; a screen
+    /// draws that from the flag instead of measuring the page itself. Runs
+    /// after any `child`ren.
+    pub fn children_for(mut self, build: impl FnOnce(bool) -> Vec<AnyElement> + 'static) -> Self {
+        self.sections_for = Some(Box::new(build));
         self
     }
 
@@ -104,6 +120,10 @@ impl RenderOnce for ConfigGrid {
             .two_columns
             .unwrap_or_else(|| *width.read(cx) >= CONFIG_GRID_TWO_COLUMNS);
         let pair = self.pair;
+        let mut children = self.children;
+        if let Some(build) = self.sections_for {
+            children.extend(build(two));
+        }
         let grid = div()
             .id(self.id)
             .w_full()
@@ -112,12 +132,12 @@ impl RenderOnce for ConfigGrid {
             .when(pair, |grid| grid.flex_1().min_h(px(0.0)))
             .on_prepaint(move |bounds, window, cx| record_width(&width, bounds, window, cx));
         if !two {
-            return grid.children(self.children);
+            return grid.children(children);
         }
         // Rows of two: the left cell carries the column hairline
         // (`[&>*:nth-child(odd)]:border-r`).
         let mut rows: Vec<AnyElement> = Vec::new();
-        let mut cells = self.children.into_iter().peekable();
+        let mut cells = children.into_iter().peekable();
         while let Some(left) = cells.next() {
             let right = cells.next();
             rows.push(
