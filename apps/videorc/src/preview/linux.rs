@@ -13,12 +13,21 @@
 //! editor's Linux pass, whose handles draw over the video. X11 is always
 //! above.
 //!
-//! Docked only for now: Linux's floating Preview window is its own follow-up
-//! (`can_float` says no here, so the Studio offers no Pop out).
+//! Docked or floating: Pop out opens a GPUI window of its own, and the
+//! child moves into it at that window's first layout (the presenter builds
+//! its child in whichever window it attaches to, without restarting the
+//! backend's surface); docking back, or closing the window, moves it home at
+//! the Studio slot's next layout. Wayland lets no app keep a window on top
+//! or out of capture (`platform::linux`), so the floating window is a
+//! normal one there.
 
 use std::sync::Arc;
 
-use gpui::{App, AppContext, AsyncApp, Bounds, Context, Entity, Pixels, WeakEntity, Window};
+use gpui::{
+    App, AppContext, AsyncApp, Bounds, Context, Entity, Pixels, TitlebarOptions, WeakEntity,
+    Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, canvas, div, prelude::*, px,
+    rgb, size,
+};
 use videorc_app_core::{Level, Logger};
 use videorc_preview::LayerRect;
 use videorc_preview::bounds::WindowGeometry;
@@ -28,7 +37,14 @@ use videorc_preview::lifecycle::WindowMode;
 use videorc_preview::linux::Stacking;
 use videorc_protocol::PreviewSurfaceSource;
 
-use super::{Preview, PreviewSetup, SLOT_RADIUS, scene};
+use super::{Preview, PreviewSetup, SLOT_RADIUS, scene, words_card};
+
+/// Where the child is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Host {
+    Docked,
+    Floating,
+}
 
 /// The Linux half: the element, and the watchdog's reset waiting for a
 /// window to rebuild the child in.
@@ -37,6 +53,13 @@ pub(super) struct Native {
     /// `reset-native-path` asked for: done at the slot's next layout, where
     /// the window is at hand (the watchdog's request carries none).
     pub(super) reset_pending: bool,
+    /// The window the child is in.
+    pub(super) host: Host,
+    /// The child moves to this host at its next layout (Pop out, dock).
+    pub(super) attach_pending: Option<Host>,
+    pub(super) floating: Option<WindowHandle<FloatingPreview>>,
+    /// Pop out was pressed and the window is opening.
+    pub(super) opening: bool,
 }
 
 /// Where the child sits against GPUI's drawing (see the module's notes).
@@ -144,6 +167,10 @@ pub(super) fn new(setup: PreviewSetup, window: &mut Window, cx: &mut App) -> Ent
             native: Some(Native {
                 element,
                 reset_pending: false,
+                host: Host::Docked,
+                attach_pending: None,
+                floating: None,
+                opening: false,
             }),
         }
     })
@@ -180,34 +207,143 @@ fn slot_rect(slot: Bounds<Pixels>) -> LayerRect {
 }
 
 impl Preview {
-    /// The docked slot laid out: a pending reset rebuilds the child first,
-    /// then the child follows the slot in the same pass.
+    /// A host's slot laid out (the Studio's, or the floating window's): a
+    /// child due in this host moves here first, a pending reset rebuilds it,
+    /// then the child follows the slot in the same pass. Another host's
+    /// layout places nothing.
     pub(super) fn place_linux(
         &mut self,
+        host: Host,
         window: &Window,
         slot: Bounds<Pixels>,
         geometry: WindowGeometry,
     ) {
-        let Some(native) = self.native.as_mut() else {
-            return;
-        };
-        if std::mem::take(&mut native.reset_pending)
-            && let Err(error) = native.element.reset_native_path(window)
+        let mut moved = false;
         {
-            self.logger.log(
-                Level::Error,
-                &format!("[preview] reset-native-path failed: {error}"),
-            );
+            let Some(native) = self.native.as_mut() else {
+                return;
+            };
+            if native.attach_pending == Some(host) {
+                native.attach_pending = None;
+                match native.element.attach(window) {
+                    Ok(()) => {
+                        native.host = host;
+                        moved = true;
+                    }
+                    Err(error) => self.logger.log(
+                        Level::Error,
+                        &format!("[preview] the Linux presenter could not move: {error}"),
+                    ),
+                }
+            }
+            if native.host != host {
+                return;
+            }
+            if std::mem::take(&mut native.reset_pending)
+                && let Err(error) = native.element.reset_native_path(window)
+            {
+                self.logger.log(
+                    Level::Error,
+                    &format!("[preview] reset-native-path failed: {error}"),
+                );
+            }
+            native.element.place(slot_rect(slot), geometry);
         }
-        native.element.place(slot_rect(slot), geometry);
+        if moved {
+            if host == Host::Floating {
+                self.mode = WindowMode::Floating;
+                self.logger
+                    .log(Level::Info, "[preview] the Preview is in its own window");
+            }
+            self.apply_linux_visibility();
+        }
     }
 
-    /// A slot that is not on screen presents nothing.
+    /// The child shows while its host is on screen: the floating window, or
+    /// the Studio page.
     pub(super) fn apply_linux_visibility(&mut self) {
-        let visible = self.docked_shown;
+        let visible = self.mode == WindowMode::Floating || self.docked_shown;
         if let Some(native) = self.native.as_mut() {
             native.element.set_visible(visible);
         }
+    }
+
+    /// Pop out: the window opens once this update has ended (its first draw
+    /// places through this entity), and the child moves in at that draw.
+    pub(super) fn float_linux(&mut self, cx: &mut Context<Self>) {
+        let Some(native) = self.native.as_mut() else {
+            return;
+        };
+        if native.floating.is_some() || native.opening {
+            return;
+        }
+        native.opening = true;
+        let weak = cx.entity().downgrade();
+        cx.defer(move |cx| open_floating(weak, cx));
+    }
+
+    /// The floating window opened (or did not): the child is due there.
+    fn floated_linux(
+        &mut self,
+        opened: anyhow::Result<WindowHandle<FloatingPreview>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(native) = self.native.as_mut() else {
+            // Stopped while the window opened (quit): nothing to show in it.
+            if let Ok(handle) = opened {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            }
+            return;
+        };
+        native.opening = false;
+        match opened {
+            Ok(handle) => {
+                native.floating = Some(handle);
+                native.attach_pending = Some(Host::Floating);
+                let _ = handle.update(cx, |_, window, _| window.refresh());
+            }
+            Err(error) => self.logger.log(
+                Level::Error,
+                &format!("[preview] the Preview window did not open: {error:#}"),
+            ),
+        }
+        cx.notify();
+    }
+
+    /// Docks the preview back and closes its window (the Studio's button).
+    pub(super) fn dock_linux(&mut self, cx: &mut Context<Self>) {
+        self.return_to_dock_linux();
+        if let Some(handle) = self
+            .native
+            .as_mut()
+            .and_then(|native| native.floating.take())
+        {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+        cx.notify();
+    }
+
+    /// The user closed the floating window: the child comes home.
+    pub(super) fn floating_closed_linux(&mut self, cx: &mut Context<Self>) {
+        if let Some(native) = self.native.as_mut() {
+            native.floating = None;
+        }
+        self.return_to_dock_linux();
+        cx.notify();
+    }
+
+    /// The child is due in the Studio slot at its next layout.
+    fn return_to_dock_linux(&mut self) {
+        if self.mode == WindowMode::Docked {
+            return;
+        }
+        if let Some(native) = self.native.as_mut() {
+            native.attach_pending = Some(Host::Docked);
+        }
+        self.mode = WindowMode::Docked;
+        self.apply_linux_visibility();
+        self.logger
+            .log(Level::Info, "[preview] the Preview is docked in the Studio");
     }
 
     /// The watchdog's UI half: place the child again (`present-kick`), or
@@ -229,11 +365,97 @@ impl Preview {
         }
     }
 
-    /// Stops the feed, the watchdog and the presenter, before the backend.
-    pub(super) fn stop_linux(&mut self) {
-        if let Some(native) = self.native.take() {
+    /// Stops the feed, the watchdog and the presenter, and closes the
+    /// floating window, before the backend stops.
+    pub(super) fn stop_linux(&mut self, cx: &mut Context<Self>) {
+        if let Some(mut native) = self.native.take() {
+            if let Some(handle) = native.floating.take() {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            }
             native.element.stop();
             self.logger.log(Level::Info, "[preview] stopped");
+        }
+    }
+}
+
+/// Opens the floating Preview window, outside any update of the Preview
+/// entity (see [`Preview::float_linux`]), and hands it to the Preview.
+fn open_floating(preview: WeakEntity<Preview>, cx: &mut App) {
+    let bounds = Bounds::centered(None, size(px(960.), px(540.)), cx);
+    let builder = preview.clone();
+    let opened = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Preview".into()),
+                ..Default::default()
+            }),
+            kind: WindowKind::Floating,
+            app_id: Some(crate::APP_ID.into()),
+            ..Default::default()
+        },
+        move |window, cx| FloatingPreview::build(builder, window, cx),
+    );
+    let window = opened.as_ref().ok().copied();
+    if preview
+        .update(cx, |preview, cx| preview.floated_linux(opened, cx))
+        .is_err()
+        && let Some(window) = window
+    {
+        // The Preview went while the window opened (the app is quitting).
+        let _ = window.update(cx, |_, window, _| window.remove_window());
+    }
+}
+
+/// The floating Preview window on Linux: black, square-cornered, the child
+/// placed on its whole content; over it the words the Studio slot would say
+/// while no frame shows. It redraws when the Preview notifies, never per
+/// frame.
+pub(super) struct FloatingPreview {
+    preview: WeakEntity<Preview>,
+}
+
+impl FloatingPreview {
+    fn build(preview: WeakEntity<Preview>, window: &mut Window, cx: &mut App) -> Entity<Self> {
+        let closing = preview.clone();
+        window.on_window_should_close(cx, move |_, cx| {
+            let _ = closing.update(cx, |preview, cx| preview.floating_closed_linux(cx));
+            true
+        });
+        cx.new(|cx: &mut Context<Self>| {
+            if let Some(entity) = preview.upgrade() {
+                cx.observe(&entity, |_, _, cx| cx.notify()).detach();
+            }
+            Self { preview }
+        })
+    }
+}
+
+impl Render for FloatingPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let words = self
+            .preview
+            .upgrade()
+            .and_then(|preview| preview.read(cx).floating_words());
+        let preview = self.preview.clone();
+        let slot = div().size_full().relative().bg(rgb(0x000000)).child(
+            canvas(
+                move |bounds, window, cx| {
+                    let geometry = geometry_of(window, bounds, cx);
+                    let _ = preview.update(cx, |preview, _| {
+                        preview.place_linux(Host::Floating, window, bounds, geometry)
+                    });
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        );
+        match words {
+            Some(words) => slot.child(words_card(words)),
+            None => slot,
         }
     }
 }
