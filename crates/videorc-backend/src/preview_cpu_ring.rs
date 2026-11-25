@@ -1183,7 +1183,16 @@ mod tests {
             // 0.5329*112 = 83.6 (the float reference rounds to 84).
             assert_eq!(&leased.pixels()[..4], &[0, 84, 0, 255]);
         }
-        let status = service.status();
+        // The writer publishes a frame before it counts it, so a reader can
+        // see frame 2 a moment before the status does: wait for the count.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            let status = service.status();
+            if status.frames_written >= 2 || Instant::now() >= deadline {
+                break status;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
         assert_eq!(status.frames_written, 2);
         assert_eq!(status.rings_created, 1);
         assert_eq!(status.last_source_sequence, Some(2));
