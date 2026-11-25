@@ -35,9 +35,7 @@ use videorc_kit::page_tabs::PageTabs;
 use videorc_kit::theme::FONT;
 use videorc_kit::toast::{ToastData, ToastKind};
 use videorc_protocol::cohost::CohostAutoChat;
-use videorc_protocol::{
-    CleanCutGetResult, CleanCutJob, CleanCutJobDetail, CleanCutMode, CohostReportPayload,
-};
+use videorc_protocol::{CleanCutGetResult, CleanCutJob, CleanCutJobDetail, CleanCutMode};
 
 use chat::{ChatWidgets, render_chat};
 use clean_cut::{CleanCutState, RecordingRow, render_clean_cut};
@@ -225,15 +223,9 @@ impl SidekickScreen {
     }
 
     fn ensure_reports(&mut self, cx: &mut Context<Self>) {
-        if self.reports.is_none() {
-            self.reports = Some(ReportsState::default());
-        }
-        if self.tab == Tab::Reports {
-            if let Some(reports) = self.reports.as_ref() {
-                if !reports.loaded && !reports.loading {
-                    self.refresh_reports(cx);
-                }
-            }
+        let reports = self.reports.get_or_insert_with(ReportsState::default);
+        if self.tab == Tab::Reports && !reports.loaded && !reports.loading {
+            self.refresh_reports(cx);
         }
     }
 
@@ -634,55 +626,6 @@ impl SidekickScreen {
             let _ = this.update(cx, |screen, cx| {
                 screen.discard_clean_cut_review(cx);
                 screen.refresh_clean_cut(cx);
-            });
-        })
-        .detach();
-    }
-
-    pub(crate) fn refresh_reports(&mut self, cx: &mut Context<Self>) {
-        if let Some(reports) = self.reports.as_mut() {
-            reports.loading = true;
-            reports.error = None;
-        }
-        cx.notify();
-        let backend = self.studio.backend().clone();
-        let job = self.runtime.spawn(async move {
-            match backend
-                .request("cohost.report.latest", serde_json::json!({}))
-                .await
-            {
-                Ok(value) => {
-                    if value.is_null() {
-                        Ok(None)
-                    } else {
-                        serde_json::from_value::<CohostReportPayload>(value)
-                            .map(Some)
-                            .map_err(|e| e.to_string())
-                    }
-                }
-                Err(error) => Err(error.to_string()),
-            }
-        });
-        cx.spawn(async move |this, cx| {
-            let result = job.await;
-            let _ = this.update(cx, |screen, cx| {
-                if let Some(reports) = screen.reports.as_mut() {
-                    reports.loading = false;
-                    reports.loaded = true;
-                    match result {
-                        Ok(Ok(payload)) => {
-                            reports.payload = payload;
-                            reports.error = None;
-                        }
-                        Ok(Err(error)) => {
-                            reports.error = Some(error);
-                        }
-                        Err(error) => {
-                            reports.error = Some(error.to_string());
-                        }
-                    }
-                }
-                cx.notify();
             });
         })
         .detach();
@@ -1346,7 +1289,12 @@ impl Render for SidekickScreen {
             Tab::Reports => {
                 let reports = self.reports.as_ref().expect("reports state");
                 let buddy_on = self.settings.as_ref().map(|s| s.enabled).unwrap_or(false);
-                render_reports(&view, reports, buddy_on, window, cx)
+                let name = self
+                    .settings
+                    .as_ref()
+                    .and_then(|s| s.persona.as_ref())
+                    .map(|persona| persona.name.as_str());
+                render_reports(&view, reports, buddy_on, name, window, cx)
             }
             Tab::CleanCut => {
                 let clean = self.clean_cut.as_ref().expect("clean cut state");
