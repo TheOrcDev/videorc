@@ -33,7 +33,8 @@ test('lab candidate workflow is dispatch-only with a required ref input', () => 
   assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch'])
   assert.equal(workflow.on.workflow_dispatch.inputs.ref.required, true)
   assert.deepEqual(workflow.permissions, { contents: 'read' })
-  assert.equal(workflow.concurrency.group, 'lab-candidate')
+  assert.equal(workflow.concurrency.group, 'lab-candidate-macos-${{ github.ref }}')
+  assert.equal(workflow.concurrency['cancel-in-progress'], true)
   assert.equal(workflow.jobs.candidate.permissions, undefined)
 })
 
