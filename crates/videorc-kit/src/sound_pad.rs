@@ -7,16 +7,16 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, FontWeight, IntoElement, MouseButton, MouseDownEvent,
-    MouseUpEvent, SharedString, Toggled, Window, canvas, div, prelude::*, px, relative,
+    canvas, div, prelude::*, px, relative, AnyElement, App, ClickEvent, ElementId, FontWeight,
+    IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, SharedString, Toggled, Window,
 };
 use smallvec::SmallVec;
 
 use crate::{
     chrome,
     kbd::Kbd,
-    theme::{Appearance, faded_over, hsla, resolve, with_alpha},
-    tokens::{Color, radius},
+    theme::{faded_over, hsla, resolve, with_alpha, Appearance},
+    tokens::{radius, Color},
 };
 
 /// How presses map to trigger and stop.
