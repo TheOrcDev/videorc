@@ -200,6 +200,8 @@ mod performance_check;
 mod pipeline;
 mod platform_stream_watch;
 mod playback;
+#[cfg(target_os = "macos")]
+mod playback_avf;
 mod playback_cpu_ring;
 mod posters;
 mod preflight;
@@ -10143,6 +10145,8 @@ async fn websocket_session_with_handler_role_and_redaction(
         None => (None, None),
     };
     let mut preview_frame_lease = None;
+    // Plan 260 (L2): the macOS Library player's frame lease, socket-owned.
+    let mut playback_frame_lease: playback::PlaybackFrameLease = None;
     let mut preview_handover = preview_handover::HeldPreviewHandover::default();
     // Plan 260 S1.7: the CPU preview ring this socket opened; dropping it
     // (the socket closed) closes the ring.
@@ -10384,6 +10388,25 @@ async fn websocket_session_with_handler_role_and_redaction(
                     continue;
                 }
 
+                if let Some(response) = playback::handle_playback_frame_lease_control(
+                    &state,
+                    role,
+                    &mut playback_frame_lease,
+                    text.as_str(),
+                ) {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
                 if let Some(response) = handle_preview_frame_lease_control(
                     &state,
                     role,
@@ -10499,6 +10522,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     // accepted queue so native/source mutations are never canceled halfway.
     // (Remote client count is decremented by RemoteClientCountGuard's Drop.)
     drop(preview_frame_lease);
+    drop(playback_frame_lease);
     drop(preview_handover);
     drop(preview_cpu_ring_owner);
     drop(playback_cpu_ring_owner);
@@ -13501,7 +13525,9 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<crate::protocol::playback::PlaybackMuteParams>(
                 command.params,
             ) {
-                Ok(params) => ServerResponse::ok(command.id, playback::mute(state, params.muted)),
+                Ok(params) => {
+                    ServerResponse::ok(command.id, playback::mute(state, params.muted).await)
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
