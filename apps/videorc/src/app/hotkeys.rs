@@ -21,12 +21,12 @@ use std::time::{Duration, Instant};
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use gpui::App;
-use videorc_app_core::Logger;
 use videorc_app_core::desktop::accelerator::normalize_accelerator;
 use videorc_app_core::desktop::global_shortcuts::{
-    GlobalShortcutGate, GlobalShortcutsConfig, RegistrationNotice, ShortcutRegistry,
     global_shortcut_entries, global_shortcut_label, registration_notice, unavailable_reason,
+    GlobalShortcutGate, GlobalShortcutsConfig, RegistrationNotice, ShortcutRegistry,
 };
+use videorc_app_core::Logger;
 
 /// `SHORTCUT_RECORDER_IDLE_MS`: an armed recorder with no disarm hands the
 /// keys back after this long.
@@ -56,9 +56,7 @@ pub trait ShortcutActions {
     fn run(&self, action: &str);
 }
 
-/// Actions already owned by the Studio. Go Live waits for its confirmation
-/// route; Hide screen waits for the app's privacy controller, so neither
-/// steals a global key for a no-op.
+/// Actions the Studio runs: Record, Go Live, Hide screen, mic, scenes, clips.
 pub struct StudioActions {
     pub studio: std::sync::Arc<videorc_app_core::Studio<videorc_app_core::BackendClient>>,
     pub runtime: tokio::runtime::Handle,
@@ -67,6 +65,8 @@ pub fn supported(action: &str) -> bool {
     matches!(
         action,
         "record-toggle"
+            | "stream-toggle"
+            | "screen-hide-toggle"
             | "mic-toggle"
             | "system-audio-toggle"
             | "clip-mark"
@@ -84,6 +84,9 @@ impl ShortcutActions for StudioActions {
         let studio = self.studio.clone();
         let action = action.to_string();
         self.runtime.spawn(async move {
+            use serde_json::Value;
+            use videorc_app_core::protocol::ScreenPrivacy;
+            use videorc_app_core::studio::scene_on_stream::screen_privacy_request;
             use videorc_app_core::studio::MicrophoneMode;
             use videorc_app_core::{SessionPhase, StopOrigin};
             let snapshot = studio.snapshot();
@@ -97,6 +100,31 @@ impl ShortcutActions for StudioActions {
                     }
                     _ => {}
                 },
+                // Electron `executeGlobalShortcut('stream-toggle')`: end any
+                // active session, otherwise open Go Live (plan 174 S3.1).
+                "stream-toggle" => {
+                    if snapshot.session.phase.is_active() {
+                        studio.request_stop(StopOrigin::GlobalHotkey).await;
+                    } else {
+                        studio.open_go_live().await;
+                    }
+                }
+                // Electron `toggleScreenHidden`: read `screen.privacy.get`,
+                // then `screen.hide` / `screen.show`.
+                "screen-hide-toggle" => {
+                    let hidden = match studio
+                        .backend()
+                        .request("screen.privacy.get", Value::Null)
+                        .await
+                    {
+                        Ok(value) => serde_json::from_value::<ScreenPrivacy>(value)
+                            .map(|privacy| privacy.hidden)
+                            .unwrap_or(false),
+                        Err(_) => false,
+                    };
+                    let (method, params) = screen_privacy_request(hidden);
+                    let _ = studio.backend().request(method, params).await;
+                }
                 "mic-toggle" => {
                     studio.set_microphone_muted(MicrophoneMode::Toggle).await;
                 }
@@ -230,16 +258,14 @@ impl Hotkeys {
             })),
         };
         let pump = hotkeys.clone();
-        cx.spawn(async move |cx| {
-            loop {
-                cx.background_executor().timer(POLL).await;
-                while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-                    if event.state == HotKeyState::Pressed {
-                        pump.fire(event.id);
-                    }
+        cx.spawn(async move |cx| loop {
+            cx.background_executor().timer(POLL).await;
+            while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+                if event.state == HotKeyState::Pressed {
+                    pump.fire(event.id);
                 }
-                pump.disarm_if_idle();
             }
+            pump.disarm_if_idle();
         })
         .detach();
         hotkeys
