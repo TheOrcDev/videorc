@@ -92,12 +92,17 @@ impl RenderOnce for PageTabs {
         }
 
         // PaneStrip: hairline below, gutter at the sides, never scrolls away.
+        // Flex row so the Tabs track sits left and hugs its labels (Electron
+        // TabsList is `inline-flex w-fit` in the strip); a block strip would
+        // stretch the track to the page width.
         // The strip carries the list's accessible name (React's TabsList
         // aria-label); Tabs itself has no label slot yet.
         let strip = div()
             .id(SharedString::from(format!("{}/strip", self.id)))
+            .flex()
             .flex_none()
             .w_full()
+            .items_center()
             .px(px(size::GUTTER))
             .py(px(8.0))
             .border_b_1()
