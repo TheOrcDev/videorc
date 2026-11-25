@@ -74,7 +74,7 @@ import {
   stopScreenMotionStimulus,
   stimulusWindowOptionsForSource
 } from './lib/screen-motion-stimulus.mjs'
-import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
+import { launchDevApp, repoRoot, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { describeNotifications, READ_NOTIFICATIONS_CODE } from './lib/notifications-smoke.mjs'
 import { resolveExistingSiblingFfprobe } from './lib/ffmpeg-sibling-paths.mjs'
 import {
@@ -132,6 +132,10 @@ const { values: args } = parseArgs({
 })
 
 const selectedCases = args.cases.split(',').map((name) => name.trim())
+// Plan 260 Phase 3: on the GPUI app the seed and the gain go through the Studio
+// smoke handler (studio-capture-configure), the tones come from the Node
+// player as before, and the self case is a named SKIP (see cases.self).
+const gpuiApp = smokeAppIsGpui()
 for (const name of selectedCases) {
   if (!ALL_CASES.includes(name)) fail(`unknown case "${name}" (known: ${ALL_CASES.join(', ')})`)
 }
@@ -505,6 +509,36 @@ async function waitForBackendState(ws, method, predicate, label) {
 }
 
 async function seedRenderer(smoke, sources) {
+  if (gpuiApp) {
+    const noMicrophone = !args.microphone
+    await requestSmokeCommand(
+      smoke,
+      'studio-capture-configure',
+      {
+        config: {
+          video: {
+            preset: 'tutorial-1080p30',
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrateKbps: 6000
+          },
+          layout: { layoutPreset: 'screen-only' },
+          audio: { systemAudioEnabled: selectedCases[0] === 'clips-idle', systemAudioGainDb: -6 },
+          ...(sources
+            ? { sources }
+            : noMicrophone
+              ? { sources: { microphoneId: null, microphoneName: null, microphoneOff: true } }
+              : {}),
+          recordEnabled: true,
+          streamEnabled: false,
+          replayBuffer: { enabled: true, explicit: false }
+        }
+      },
+      { timeoutMs }
+    )
+    return
+  }
   await requestSmokeCommand(
     smoke,
     'eval-js',
@@ -591,6 +625,15 @@ async function playRendererTone(smoke, seconds) {
 
 /** Best-effort: the renderer's visible start-failure copy, for diagnostics. */
 async function describeRendererFailure(smoke) {
+  if (gpuiApp) {
+    try {
+      const state = await requestSmokeCommand(smoke, 'studio-state', {}, { timeoutMs: 5000 })
+      const said = [state?.startFailure, state?.lastError].filter(Boolean)
+      return said.length > 0 ? ` The Studio says: ${said.join(' | ')}` : ''
+    } catch {
+      return ''
+    }
+  }
   try {
     const response = await requestSmokeCommand(
       smoke,
@@ -810,6 +853,15 @@ const cases = {
       ctx.recorder.events.findLast(ringStatus) ??
       (await ctx.recorder.waitFor('clips-idle recording.status(replayOnly: true)', ringStatus))
     const configureGain = async (gainDb) => {
+      if (gpuiApp) {
+        await requestSmokeCommand(
+          ctx.smoke,
+          'studio-capture-configure',
+          { config: { audio: { systemAudioGainDb: gainDb } } },
+          { timeoutMs }
+        )
+        return
+      }
       const response = await requestSmokeCommand(
         ctx.smoke,
         'eval-js',
@@ -1048,6 +1100,15 @@ const cases = {
   },
 
   async self(ctx) {
+    if (gpuiApp) {
+      // Self-exclusion needs a sound from Videorc's own process during a take.
+      // The GPUI app has no renderer to play one; its only sound is the
+      // backend's soundboard, which lands in the recording mix by design.
+      const reason =
+        'the GPUI app has no monitor-only sound to play during a take (no renderer; the soundboard mixes into the recording)'
+      log(`self: SKIPPED on the GPUI app: ${reason}`)
+      return { pass: true, skipped: reason, failures: [], evidence: {} }
+    }
     let rendererAt
     let renderer
     let controlAt
