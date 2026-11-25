@@ -1,0 +1,193 @@
+//! Plan 260 S1.8 (L1): the room's avatar content built by the backend, for a
+//! client that cannot build it (the GPUI app; Electron builds it in its
+//! renderer, `renderCloudAvatar`, and hands it over through
+//! `cloud.room.avatar.set`'s `content`).
+//!
+//! The client asks with `cloud.room.avatar.set { build: true }`. While the
+//! backend holds the room, this draws the pet and its bubble the way the
+//! stream draws them (the sprite slot's Preview leg and the caption slots'
+//! bubble, [`compose_buddy_layer`]: the same pixels the outputs burn in) for
+//! each lane's room canvas (1920×1080 landscape, 1080×1920 portrait), as one
+//! static PNG layer per lane, and puts it where the room's avatar publisher
+//! reads the content ([`crate::room_content`]). The pet is the still at a
+//! fixed clock (Electron sends the pack's neutral frame), so a new layer
+//! goes out only when the pet, the bubble or the place changes, never every
+//! animation frame. The bubble rides on the landscape lane only: the caption
+//! slots raster it for the primary canvas.
+//!
+//! Not yet: the atlas variant and the motion topic for animating pages
+//! (`animated`, `cloud.room.avatar.motion`); those pages draw this still.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use base64::Engine as _;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+use crate::buddy_sprite::{BuddyLegRequest, BuddySpriteLeg};
+use crate::preview_buddy_layer::compose_buddy_layer;
+use crate::state::AppState;
+
+/// The client asked the backend to build the avatar content.
+static BUILD: AtomicBool = AtomicBool::new(false);
+
+/// The room program's canvas per lane (web `STAGE_CANVAS`).
+const LANES: [(&str, (u32, u32)); 2] = [("h", (1920, 1080)), ("v", (1080, 1920))];
+/// How often the content is looked at (a change goes out within this).
+const POLL: Duration = Duration::from_millis(250);
+/// The still's clock: a fixed instant, so an idle pet's still never changes.
+const STILL_CLOCK_SECONDS: f64 = 0.0;
+/// `AVATAR_MAX_BYTES` (`cloud-avatar.ts`): one layer's PNG at most.
+const AVATAR_MAX_BYTES: usize = 512 * 1024;
+
+pub(crate) fn set_build(build: bool) {
+    BUILD.store(build, Ordering::Release);
+}
+
+pub(crate) fn building() -> bool {
+    BUILD.load(Ordering::Acquire)
+}
+
+/// One lane's static layer from a composed straight-alpha BGRA frame: a
+/// PNG named by its SHA-256 (`avatarHash`), its rect in canvas fractions.
+/// `None` when it would not fit the avatar's budget.
+pub(crate) fn png_layer(canvas: (u32, u32), rect: [u32; 4], bgra: &[u8]) -> Option<Value> {
+    use image::ImageEncoder as _;
+    let [x, y, width, height] = rect;
+    if width == 0 || height == 0 || bgra.len() < width as usize * height as usize * 4 {
+        return None;
+    }
+    let mut rgba = Vec::with_capacity(bgra.len());
+    for pixel in bgra.chunks_exact(4) {
+        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    }
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
+        .ok()?;
+    if bytes.len() > AVATAR_MAX_BYTES {
+        return None;
+    }
+    let hash = format!("{:x}", Sha256::digest(&bytes));
+    let png = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let (canvas_width, canvas_height) = (f64::from(canvas.0), f64::from(canvas.1));
+    Some(json!({
+        "kind": "avatar",
+        "rect": {
+            "x": f64::from(x) / canvas_width,
+            "y": f64::from(y) / canvas_height,
+            "w": f64::from(width) / canvas_width,
+            "h": f64::from(height) / canvas_height,
+        },
+        "asset": { "hash": hash, "png": png, "width": width, "height": height },
+        "expiresAt": null,
+    }))
+}
+
+/// The content as `cloud.room.avatar.set` carries it.
+pub(crate) fn content(h: Vec<Value>, v: Vec<Value>, stream: bool, recording: bool) -> Value {
+    json!({ "h": h, "v": v, "stream": stream, "recording": recording })
+}
+
+/// Builds the content while asked and while the backend holds the room;
+/// one task for the backend's life.
+pub(crate) async fn run(state: AppState) {
+    let mut last_key: Option<String> = None;
+    loop {
+        tokio::time::sleep(POLL).await;
+        if !building() || !crate::room_host::holds_seat() {
+            last_key = None;
+            continue;
+        }
+        let layout = state.buddy_sprite.layout();
+        let bubble = crate::captions::current_caption_overlays(&state.buddy_overlay).primary;
+        let mut key = format!(
+            "{}:{}:{:?}",
+            layout.show_on_stream,
+            layout.show_in_recording,
+            bubble
+                .as_ref()
+                .map(|bubble| (bubble.revision, bubble.width, bubble.height))
+        );
+        let mut lanes: Vec<Vec<Value>> = Vec::with_capacity(LANES.len());
+        for (lane, canvas) in LANES {
+            let frame = state.buddy_sprite.leg_frame_at(
+                BuddyLegRequest {
+                    leg: BuddySpriteLeg::Preview,
+                    canvas,
+                    now_seconds: STILL_CLOCK_SECONDS,
+                    highlight_rect: None,
+                    caption_rect: None,
+                },
+                None,
+            );
+            key.push_str(&format!(
+                "|{lane}:{:?}:{:?}",
+                frame
+                    .sprite
+                    .as_ref()
+                    .map(|sprite| (sprite.atlas.revision, sprite.draw)),
+                (
+                    frame.bubble_anchor.x.to_bits(),
+                    frame.bubble_anchor.y.to_bits()
+                ),
+            ));
+            let lane_bubble = if lane == "h" { bubble.as_ref() } else { None };
+            let layer = compose_buddy_layer(canvas, &frame, lane_bubble)
+                .and_then(|composed| png_layer(canvas, composed.rect, &composed.bgra));
+            lanes.push(layer.into_iter().collect());
+        }
+        if last_key.as_ref() == Some(&key) {
+            continue;
+        }
+        last_key = Some(key);
+        let v = lanes.pop().unwrap_or_default();
+        let h = lanes.pop().unwrap_or_default();
+        crate::room_content::set_built_avatar(content(
+            h,
+            v,
+            layout.show_on_stream,
+            layout.show_in_recording,
+        ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_layer_is_a_png_named_by_its_hash_in_canvas_fractions() {
+        // 2×1 pixels: one opaque red (BGRA), one clear.
+        let bgra = [0, 0, 255, 255, 0, 0, 0, 0];
+        let layer = png_layer((100, 50), [10, 5, 2, 1], &bgra).expect("a layer");
+        assert_eq!(layer["kind"], "avatar");
+        assert_eq!(
+            layer["rect"],
+            json!({ "x": 0.1, "y": 0.1, "w": 0.02, "h": 0.02 })
+        );
+        assert_eq!(layer["asset"]["width"], 2);
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(layer["asset"]["png"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(
+            layer["asset"]["hash"],
+            format!("{:x}", Sha256::digest(&png))
+        );
+        assert_eq!(layer["expiresAt"], Value::Null);
+        // Short pixels or an empty rect: none.
+        assert!(png_layer((100, 50), [0, 0, 2, 2], &bgra).is_none());
+        assert!(png_layer((100, 50), [0, 0, 0, 1], &bgra).is_none());
+    }
+
+    #[test]
+    fn the_content_names_its_lanes_and_outputs() {
+        let content = content(vec![json!(1)], Vec::new(), true, false);
+        assert_eq!(
+            content,
+            json!({ "h": [1], "v": [], "stream": true, "recording": false })
+        );
+    }
+}

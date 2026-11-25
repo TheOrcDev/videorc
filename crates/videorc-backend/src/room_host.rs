@@ -76,6 +76,9 @@ pub(crate) fn start(state: AppState) {
         return;
     }
     tracing::info!("{SWITCH_ENV}=1: the backend holds the talk show's host seat (no media yet)");
+    // Plan 260 S1.8 (L1): the avatar content a client asks the backend to
+    // build (`cloud.room.avatar.set { build: true }`).
+    tokio::spawn(crate::room_avatar_build::run(state.clone()));
     tokio::spawn(follow(state));
 }
 

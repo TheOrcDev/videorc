@@ -1040,6 +1040,11 @@ pub struct CloudRoomAvatarSetParams {
     /// The host's opt-in to show the stream's public layers to guest pages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guests: Option<bool>,
+    /// Plan 260 S1.8 (L1): the backend builds the content itself from the
+    /// stream's own pet and bubble (`room_avatar_build`), for a client that
+    /// cannot (the GPUI app); sent with `content: null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<bool>,
 }
 
 /// The host's media for the backend's room (plan 260 S1.8c), one method per
