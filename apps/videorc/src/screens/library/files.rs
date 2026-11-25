@@ -149,7 +149,25 @@ fn trash(path: &Path) -> Result<(), String> {
             .map_err(|_| "Couldn't move the recording to the Trash.".into())
     })
 }
-#[cfg(not(target_os = "macos"))]
+/// Linux: the desktop's Trash through GIO (`gio trash`), as Electron's
+/// `shell.trashItem` does there: the freedesktop Trash, restorable from the
+/// file manager, on the recording's own filesystem.
+#[cfg(target_os = "linux")]
+fn trash(path: &Path) -> Result<(), String> {
+    let output = std::process::Command::new("gio")
+        .arg("trash")
+        .arg("--")
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|_| "Couldn't move the recording to the Trash.".to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err("Couldn't move the recording to the Trash.".into())
+    }
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn trash(_: &Path) -> Result<(), String> {
     Err("Moving recordings to the Trash isn't available on this platform yet.".into())
 }
