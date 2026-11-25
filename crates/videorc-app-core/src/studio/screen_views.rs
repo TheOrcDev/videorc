@@ -15,6 +15,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::cloud::CloudState;
 use super::session::{END_LIVESTREAM_LABEL, END_LIVESTREAM_TITLE, KEEP_STREAMING_LABEL};
 use super::watchdog_alerts::SnoozeScope;
 use crate::livestream::cloud_show::{
@@ -342,13 +343,21 @@ fn read<T: Default + for<'de> Deserialize<'de>>(value: Option<&Value>) -> Option
     value.map(|value| serde_json::from_value(value.clone()).unwrap_or_default())
 }
 
+/// Record's words while the room's cloud recording runs (`recordStopLabel`).
+pub const STOP_CLOUD_RECORDING_LABEL: &str = "Stop recording";
+/// `RecordButton`'s `stopping` words.
+pub const STOPPING_LABEL: &str = "Stopping…";
+
 /// The transport's own outputs while the room is open (`talkShowOutputs`):
 /// the cloud recording and the room's platform legs, and Stop recording
-/// runs `talkShow.stopCloudRecording`.
+/// runs `talkShow.stopCloudRecording` (`Studio::stop_cloud_recording`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TalkShowOutputs {
     pub recording: bool,
     pub live: bool,
+    /// Stop recording's request is out: Record reads "Stopping…"
+    /// (`stopRequestPending`).
+    pub stopping: bool,
 }
 
 /// The talk show's room as the Studio screen reads it.
@@ -370,6 +379,8 @@ pub struct TalkShowRoomView {
     pub recording_since: Option<String>,
     pub recording_seconds: u64,
     pub recording_problem: Option<String>,
+    /// `Studio::stop_cloud_recording` is waiting on the backend.
+    pub recording_stopping: bool,
     /// Plan 224 D7 (C-G5): the Show stage replaces the Preview while the
     /// room is open.
     pub preview_replaced: bool,
@@ -385,8 +396,24 @@ impl TalkShowRoomView {
         self.open.then(|| TalkShowOutputs {
             recording: self.recording,
             live: self.live,
+            stopping: self.recording_stopping,
         })
     }
+}
+
+/// `talk_show_room` over the Studio's whole cloud state: the status, and
+/// whether Stop recording's request is out.
+pub fn talk_show_room_in(state: &CloudState) -> TalkShowRoomView {
+    TalkShowRoomView {
+        recording_stopping: state.recording_stop_pending,
+        ..talk_show_room(state.status.as_ref())
+    }
+}
+
+/// Whether a status says the cloud recording runs (`cloudStatus.recording.active`).
+pub fn cloud_recording_active(status: Option<&CloudStatus>) -> bool {
+    read::<RecordingFacts>(status.and_then(|status| status.recording.as_ref()))
+        .is_some_and(|recording| recording.active)
 }
 
 /// `use-talk-show-room.ts`'s reading of `cloudStatus.room` and `.recording`.
@@ -416,6 +443,7 @@ pub fn talk_show_room(status: Option<&CloudStatus>) -> TalkShowRoomView {
         recording_since: recording.since,
         recording_seconds: recording.seconds,
         recording_problem: recording.problem,
+        recording_stopping: false,
         preview_replaced: open,
         host_identity: show_id.filter(|_| open).map(|id| format!("host:{id}")),
         guests_row: open,
@@ -490,9 +518,6 @@ pub const PREVIEW_SECTION_TITLE: &str = "Preview";
 /// card while the talk-show room is open (P122 / P147).
 pub const PREVIEW_REPLACED_BY_SHOW_STAGE: &str =
     "The Show stage replaces the Preview while the room is open.";
-/// `talkShow.stopCloudRecording` is L7's; the Studio stubs the click until then.
-pub const STOP_CLOUD_RECORDING_UNAVAILABLE: &str =
-    "Stopping the cloud recording isn't available yet.";
 /// Closing the room from the Preview card waits for the Guests lane's close.
 pub const CLOSE_THE_ROOM_UNAVAILABLE: &str = "Closing the room isn't available yet.";
 

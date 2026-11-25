@@ -11,6 +11,7 @@
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
+use super::screen_views::cloud_recording_active;
 use super::{Studio, StudioBackend};
 use crate::client::RpcError;
 use crate::livestream::cloud_outputs::{self, CloudTestOutput};
@@ -20,7 +21,7 @@ use crate::livestream::cloud_status::CloudStatus;
 use crate::livestream::cloud_view::{CLOUD_TOAST_ID, UploadPlan};
 use crate::livestream::platform_owner::Owner;
 use crate::notices::{NoticeCommand, ToastRequest};
-use crate::user_error::{UserErrorContext, backend_error_toast};
+use crate::user_error::{Failure, UserErrorContext, backend_error_toast, toast_user_error};
 
 /// The backend's push of the whole status.
 pub const CHANGED_EVENT: &str = "cloud.state";
@@ -34,6 +35,12 @@ const SHOW_END: &str = "cloud.show.end";
 const SHOW_HAND_OFF: &str = "cloud.show.handOff";
 const SHOW_CHECK: &str = "cloud.show.check";
 const SELFTEST_RUN: &str = "cloud.selftest.run";
+const RECORDING_STOP: &str = "cloud.recording.stop";
+/// `stopCloudRecording`'s failure: "Couldn't stop the cloud recording".
+const STOP_THE_CLOUD_RECORDING: UserErrorContext = UserErrorContext {
+    action: "stop the cloud recording",
+    object: "",
+};
 
 /// What the Destinations' cloud section and the Studio read.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -44,7 +51,21 @@ pub struct CloudState {
     /// Plan 243 D7: the session, recording and show ids a hand-off stopped.
     /// Their platform cleanup is the other device's (`latchHandOff`).
     pub handed_off: Vec<String>,
+    /// Stop recording's `cloud.recording.stop` is out (`stopRequestPending`
+    /// in a talk show): Record reads "Stopping…" and a second click waits.
+    pub recording_stop_pending: bool,
     checked_at_ms: u64,
+}
+
+/// Clears `recording_stop_pending` however the stop ends, a dropped future
+/// included.
+struct RecordingStopPending<'a>(&'a watch::Sender<CloudState>);
+
+impl Drop for RecordingStopPending<'_> {
+    fn drop(&mut self) {
+        self.0
+            .send_if_modified(|state| std::mem::take(&mut state.recording_stop_pending));
+    }
 }
 
 /// `here`: this computer is on air, not waiting for a device.
@@ -273,6 +294,82 @@ impl<B: StudioBackend> Studio<B> {
             "Videorc Cloud",
         )
         .await;
+    }
+
+    /// `talkShow.stopCloudRecording`: Record's Stop recording while the room
+    /// is open (`stopOutput('recording')` in a talk show). True once the
+    /// answer says this show's cloud recording stopped.
+    ///
+    /// As in Electron, a stop that did not happen (not recording, the show
+    /// handed off, an error or an answer that still records) ends on one
+    /// toast under the cloud's id: "Couldn't stop the cloud recording". A
+    /// click while the request is out does nothing.
+    pub async fn stop_cloud_recording(&self) -> bool {
+        let mut waiting = false;
+        let mut began = false;
+        let mut show_id = None;
+        self.edit_cloud(|state| {
+            if state.recording_stop_pending {
+                waiting = true;
+                return false;
+            }
+            show_id = state
+                .status
+                .as_ref()
+                .and_then(|status| status.show.as_ref())
+                .map(|show| show.id.clone())
+                .filter(|id| !id.is_empty());
+            began = cloud_recording_active(state.status.as_ref())
+                && show_id
+                    .as_ref()
+                    .is_some_and(|id| !state.handed_off.contains(id));
+            state.recording_stop_pending = began;
+            began
+        });
+        if waiting {
+            return false;
+        }
+        if !began {
+            self.toast_recording_not_stopped();
+            return false;
+        }
+        let _pending = RecordingStopPending(&self.cloud_tx);
+        let stopped = match self.cloud_request(RECORDING_STOP, Value::Null).await {
+            Ok(status) => {
+                let stopped = status.show.as_ref().map(|show| &show.id) == show_id.as_ref()
+                    && !cloud_recording_active(Some(&status));
+                self.commit_cloud(status).await;
+                stopped
+            }
+            Err(error) => {
+                self.config.logger.warn(format!(
+                    "Studio: \"{RECORDING_STOP}\" failed ({}).",
+                    error.message
+                ));
+                false
+            }
+        };
+        if !stopped {
+            self.toast_recording_not_stopped();
+        }
+        stopped
+    }
+
+    /// `onError(new Error('The cloud recording has not stopped.'), …)`: the
+    /// generic reason, under the cloud's id.
+    fn toast_recording_not_stopped(&self) {
+        let error = RpcError::new(
+            RECORDING_STOP,
+            "not-stopped",
+            "The cloud recording has not stopped.",
+        );
+        if let Some(command) = toast_user_error(
+            Failure::Rpc(&error),
+            STOP_THE_CLOUD_RECORDING,
+            CLOUD_TOAST_ID,
+        ) {
+            self.post(vec![command]);
+        }
     }
 
     /// `cloud.room.open` (Guests ⌘7).

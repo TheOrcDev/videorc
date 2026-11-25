@@ -286,9 +286,41 @@ fn an_open_room_replaces_the_preview_and_brings_its_outputs() {
         room.transport_outputs(),
         Some(TalkShowOutputs {
             recording: true,
-            live: true
+            live: true,
+            stopping: false
         })
     );
+    assert!(cloud_recording_active(Some(&status)));
+}
+
+#[test]
+fn the_cloud_state_adds_stop_recordings_request_to_the_room() {
+    let mut state = CloudState::default();
+    state.status = Some(cloud(json!({
+        "show": { "id": "show-7", "kind": "talk" },
+        "room": { "phase": "open", "live": false },
+        "recording": { "active": true }
+    })));
+    assert_eq!(
+        talk_show_room_in(&state).transport_outputs(),
+        Some(TalkShowOutputs {
+            recording: true,
+            live: false,
+            stopping: false
+        })
+    );
+    state.recording_stop_pending = true;
+    let room = talk_show_room_in(&state);
+    assert!(room.recording_stopping);
+    assert_eq!(
+        room,
+        TalkShowRoomView {
+            recording_stopping: true,
+            ..talk_show_room(state.status.as_ref())
+        }
+    );
+    assert!(room.transport_outputs().unwrap().stopping);
+    assert!(!cloud_recording_active(None));
 }
 
 #[test]

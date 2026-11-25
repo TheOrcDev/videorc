@@ -7,8 +7,8 @@
 //! `Studio::request_stop`).
 //!
 //! While a talk-show room is open (P123, P151), Record and Go Live follow
-//! `talkShowOutputs`: cloud recording and the room's live legs. Stopping the
-//! cloud recording is stubbed until L7 adds it.
+//! `talkShowOutputs`: cloud recording and the room's live legs. Stop recording
+//! stops the cloud recording (`Studio::stop_cloud_recording`).
 //!
 //! No state word or clock here (plan 235 D1): those are the status bar's.
 //! Go Live opens the confirmation dialog (`studio::go_live::open_go_live`);
@@ -22,7 +22,8 @@ use videorc_app_core::settings_page::SettingsTab;
 use videorc_app_core::studio::cloud::CloudState;
 use videorc_app_core::studio::inspector::StartGates;
 use videorc_app_core::studio::screen_views::{
-    STOP_CLOUD_RECORDING_UNAVAILABLE, TalkShowOutputs, TalkShowRoomView, talk_show_room,
+    STOP_CLOUD_RECORDING_LABEL, STOPPING_LABEL, TalkShowOutputs, TalkShowRoomView,
+    talk_show_room_in,
 };
 use videorc_app_core::studio::session::{END_LIVESTREAM_LABEL, StopConfirmation};
 use videorc_app_core::studio::transport::{RecordButtonState, TransportView, stop_overrun_copy};
@@ -60,7 +61,7 @@ impl SessionControls {
 
 /// The talk-show room as the transport and the Preview stage read it.
 pub fn talk_show_of(cloud: &CloudState) -> TalkShowRoomView {
-    talk_show_room(cloud.status.as_ref())
+    talk_show_room_in(cloud)
 }
 
 /// Record's face: its words, whether it is lit, and why it is off.
@@ -74,7 +75,7 @@ pub struct RecordFace {
     pub disabled: bool,
     /// A click stops the session instead of starting one.
     pub stops: bool,
-    /// A click stops the talk-show cloud recording (stubbed until L7).
+    /// A click stops the talk-show cloud recording.
     pub stops_cloud: bool,
     pub reason: Option<String>,
 }
@@ -92,16 +93,21 @@ impl RecordFace {
     pub fn of(view: &TransportView, talk_show: Option<&TalkShowOutputs>) -> Self {
         if let Some(outputs) = talk_show {
             if outputs.recording {
-                // Room open + cloud recording: fixed "Stop recording", lit.
-                // The click is stubbed until L7 adds `stopCloudRecording`.
+                // Room open + cloud recording: "Stop recording", lit, and
+                // "Stopping…" while its request is out (Electron keeps it
+                // clickable; the core ignores a second click).
                 return Self {
-                    label: "Stop recording",
+                    label: if outputs.stopping {
+                        STOPPING_LABEL
+                    } else {
+                        STOP_CLOUD_RECORDING_LABEL
+                    },
                     shortcut: false,
                     lit: true,
                     disabled: false,
                     stops: false,
                     stops_cloud: true,
-                    reason: Some(STOP_CLOUD_RECORDING_UNAVAILABLE.to_string()),
+                    reason: None,
                 };
             }
         }
@@ -244,10 +250,14 @@ impl Transport {
         });
     }
 
-    /// `talkShow.stopCloudRecording`: L7 adds `cloud.recording.stop`. Until
-    /// then the button keeps Electron's words and names why it does nothing.
+    /// `talkShow.stopCloudRecording`: `cloud.recording.stop`; a stop that
+    /// did not happen is the core's toast.
     fn stop_cloud_recording(&self) {
-        eprintln!("[videorc-app] Stop cloud recording: {STOP_CLOUD_RECORDING_UNAVAILABLE}");
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            let stopped = studio.stop_cloud_recording().await;
+            eprintln!("[videorc-app] Stop cloud recording: stopped={stopped}");
+        });
     }
 }
 
@@ -476,14 +486,21 @@ mod tests {
         let outputs = TalkShowOutputs {
             recording: true,
             live: true,
+            stopping: false,
         };
         let record = RecordFace::of(&running, Some(&outputs));
         assert_eq!(record.label, "Stop recording");
-        assert!(record.lit && record.stops_cloud && !record.stops);
-        assert_eq!(
-            record.reason.as_deref(),
-            Some(STOP_CLOUD_RECORDING_UNAVAILABLE)
+        assert!(record.lit && record.stops_cloud && !record.stops && !record.disabled);
+        assert_eq!(record.reason, None);
+        let stopping = RecordFace::of(
+            &running,
+            Some(&TalkShowOutputs {
+                stopping: true,
+                ..outputs.clone()
+            }),
         );
+        assert_eq!(stopping.label, STOPPING_LABEL);
+        assert!(stopping.lit && stopping.stops_cloud && !stopping.disabled);
         let go_live = GoLiveFace::of(&running, Some(&outputs)).unwrap();
         assert_eq!(go_live.label, END_LIVESTREAM_LABEL);
         assert!(go_live.ends_livestream);
@@ -494,6 +511,7 @@ mod tests {
         let outputs = TalkShowOutputs {
             recording: false,
             live: false,
+            stopping: false,
         };
         let go_live = GoLiveFace::of(&idle(), Some(&outputs)).unwrap();
         assert_eq!(go_live.label, "Go Live");
