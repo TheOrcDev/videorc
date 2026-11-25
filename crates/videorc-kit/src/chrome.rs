@@ -200,16 +200,25 @@ pub(crate) fn rasterise_for_kit(svg: &str, w: u32, h: u32) -> Option<Arc<RenderI
 }
 
 fn rasterise(svg: &str, w: u32, h: u32) -> Option<Arc<RenderImage>> {
-    if let Some(hit) = RASTERS.with(|cache| cache.borrow().get(svg).cloned()) {
+    // One raster per SVG and pixel size: the same mark at two sizes (a
+    // brand mark at 1x and 2x) must not reuse the first one's pixels.
+    let key = format!("{w}x{h}:{svg}");
+    if let Some(hit) = RASTERS.with(|cache| cache.borrow().get(&key).cloned()) {
         return Some(hit);
     }
     let tree = resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default()).ok()?;
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(w.max(1), h.max(1))?;
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::default(),
-        &mut pixmap.as_mut(),
+    let (w, h) = (w.max(1), h.max(1));
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+    // Scale the drawing to the pixmap. resvg draws at the SVG's own size, so
+    // a 28.6×20 mark asked for at 2x (57×40) filled only the top-left
+    // quarter and painted at half size. The fills and beads, whose SVGs
+    // are already the pixmap's size, scale by 1.
+    let size = tree.size();
+    let transform = resvg::tiny_skia::Transform::from_scale(
+        w as f32 / size.width().max(1.0),
+        h as f32 / size.height().max(1.0),
     );
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
     let (width, height) = (pixmap.width(), pixmap.height());
     let mut data = pixmap.take();
     for pixel in data.as_chunks_mut::<4>().0 {
@@ -231,7 +240,7 @@ fn rasterise(svg: &str, w: u32, h: u32) -> Option<Arc<RenderImage>> {
     let image = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
         buffer
     )]));
-    RASTERS.with(|cache| cache.borrow_mut().insert(svg.to_string(), image.clone()));
+    RASTERS.with(|cache| cache.borrow_mut().insert(key, image.clone()));
     Some(image)
 }
 
