@@ -3,6 +3,7 @@
 //! proved them under GPUI 0.3.14.
 
 pub mod camera_extension;
+pub mod terminate;
 
 use std::ffi::c_void;
 use std::sync::Arc;

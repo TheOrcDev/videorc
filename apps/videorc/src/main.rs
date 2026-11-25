@@ -40,7 +40,9 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use gpui::{App, AppContext, Bounds, WindowOptions, px, size};
+use videorc_app_core::StopOrigin;
 use videorc_app_core::desktop::deep_link::{DeepLinks, LinkSource};
+use videorc_app_core::desktop::exit_guard::AppExitKind;
 use videorc_app_core::desktop::global_shortcuts::GlobalShortcutsConfig;
 use videorc_app_core::desktop::single_instance::{
     self, Acquired, HANDOFF_WAIT, RELAUNCH_LOCK_WAIT,
@@ -360,6 +362,25 @@ fn main() -> Result<()> {
         videorc_kit::init(cx);
         // The menu bar from the core's template, and the keys it names.
         ExitGuard::install(cx, &exit_runtime, exit_events);
+        // The question is the Studio's stop request (Quit or Close Window as
+        // its origin), which the shell's End livestream dialog shows; its yes
+        // lets the exit through (`screens::dialogs::end_livestream`).
+        let answer_studio = studio.clone();
+        let answer_runtime = exit_runtime.clone();
+        ExitGuard::set_answerer(
+            Rc::new(move |kind, _| {
+                let origin = match kind {
+                    AppExitKind::Quit => StopOrigin::Quit,
+                    AppExitKind::Close => StopOrigin::CloseWindow,
+                };
+                let studio = answer_studio.clone();
+                answer_runtime.spawn(async move {
+                    let outcome = studio.request_stop(origin).await;
+                    eprintln!("[videorc-app] {origin:?} while on air: {outcome:?}");
+                });
+            }),
+            cx,
+        );
         menus::install(cx);
         studio_screen::bind_keys(cx);
         screens::notifications::install_keys(cx);
@@ -584,7 +605,7 @@ fn main() -> Result<()> {
             Ok(handle) => handle,
             Err(error) => {
                 eprintln!("[videorc-app] the main window did not open: {error:#}");
-                cx.quit();
+                ExitGuard::quit_unasked(cx);
                 return;
             }
         };
@@ -628,7 +649,7 @@ fn main() -> Result<()> {
         );
         cx.spawn(async move |cx| {
             if smoke_quit_rx.recv().await.is_some() {
-                cx.update(|cx| cx.quit());
+                cx.update(ExitGuard::quit_unasked);
             }
         })
         .detach();
@@ -740,7 +761,7 @@ fn main() -> Result<()> {
                 cx.background_executor()
                     .timer(Duration::from_secs_f64(seconds))
                     .await;
-                cx.update(|cx| cx.quit());
+                cx.update(ExitGuard::quit_unasked);
             })
             .detach();
         }

@@ -1,18 +1,25 @@
 //! End livestream on the kit's Dialog (P1436–P1439). Hosted by the shell so
 //! a stop from any page asks the same question. "Keep streaming" is Escape;
 //! no close button. A managed cloud show may offer the hand-off answer.
+//!
+//! A quit or a main-window close while on air asks here too (P1515,
+//! `app::exit`): once the livestream ended or the show was handed off, that
+//! exit goes on (`exitAfterLivestreamEnded`).
 
 use gpui::{AnyElement, Context, Window, div, prelude::*};
+use tokio::sync::oneshot;
 use videorc_app_core::livestream::cloud_show::{
     hand_off_label, hand_off_question_body, offers_hand_off,
 };
 use videorc_app_core::studio::session::{
-    KEEP_STREAMING_LABEL, end_livestream_body, end_livestream_confirm_label, end_livestream_title,
+    KEEP_STREAMING_LABEL, StopExit, end_livestream_body, end_livestream_confirm_label,
+    end_livestream_title, exit_for_stop_origin,
 };
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogSize};
 
 use super::DialogsHost;
+use crate::app::exit::{ExitGuard, exit_kind};
 
 impl DialogsHost {
     pub(super) fn end_livestream_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -80,10 +87,13 @@ impl DialogsHost {
             self.end.close(window, cx);
         }
         let studio = self.studio.clone();
+        let (tx, rx) = oneshot::channel();
         self.runtime.spawn(async move {
-            let (answered, _) = studio.confirm_stop().await;
+            let (answered, exit) = studio.confirm_stop().await;
             eprintln!("[videorc-app] End livestream: answered {answered}");
+            let _ = tx.send(exit.filter(|_| answered));
         });
+        Self::exit_when_answered(rx, cx);
         cx.notify();
     }
 
@@ -92,14 +102,36 @@ impl DialogsHost {
         if self.end.is_open() {
             self.end.close(window, cx);
         }
+        // The exit the question held ("Quit and keep it live"), before the
+        // question is cleared.
+        let exit = self
+            .controls
+            .read(cx)
+            .value()
+            .stop_question
+            .as_ref()
+            .and_then(|question| exit_for_stop_origin(question.origin));
         // Clear the question without ending; the hand-off stops the feed.
         self.studio.cancel_stop();
         let studio = self.studio.clone();
+        let (tx, rx) = oneshot::channel();
         self.runtime.spawn(async move {
             let ok = studio.hand_off_cloud_show().await;
             eprintln!("[videorc-app] Hand off livestream: confirmed={ok}");
+            let _ = tx.send(exit.filter(|_| ok));
         });
+        Self::exit_when_answered(rx, cx);
         cx.notify();
+    }
+
+    /// The held quit or close goes once the answer landed.
+    fn exit_when_answered(rx: oneshot::Receiver<Option<StopExit>>, cx: &mut Context<Self>) {
+        cx.spawn(async move |_, cx| {
+            if let Ok(Some(exit)) = rx.await {
+                cx.update(|cx| ExitGuard::exit_after_livestream_ended(exit_kind(exit), cx));
+            }
+        })
+        .detach();
     }
 
     /// Opens when the core asks; Escape / backdrop keeps streaming.
