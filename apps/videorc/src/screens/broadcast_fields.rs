@@ -83,6 +83,8 @@ pub fn broadcast_info_fields(
                 fields.description,
             )
             .accessibility_label(page_copy::DESCRIPTION)
+            // `className="min-h-20"`.
+            .min_height(80.)
             .disabled(fields.disabled)
             .invalid(fields.description_error.is_some()),
         )
