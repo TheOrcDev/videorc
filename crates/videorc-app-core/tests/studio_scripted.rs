@@ -4888,7 +4888,16 @@ async fn resume_starts_the_solo_show_again_bound_to_it_with_nothing_set_up() {
         // Output page asks for.
         assert!(params.output.stream_enabled && params.output.record_enabled);
         let streaming = params.streaming.as_ref().expect("the saved destinations");
-        assert_eq!(streaming.targets[0].id, "twitch");
+        // The saved streaming settings come normalized: every card in
+        // `STREAM_TARGET_DEFS` order (YouTube first), with the user's
+        // Twitch the one enabled.
+        assert_eq!(streaming.enabled_target_ids, ["twitch"]);
+        let twitch = streaming
+            .targets
+            .iter()
+            .find(|target| target.id == "twitch")
+            .expect("the Twitch card");
+        assert!(twitch.enabled);
     }
     assert_eq!(
         studio.snapshot().session.status.session_id.as_deref(),
