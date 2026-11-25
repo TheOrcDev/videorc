@@ -20,7 +20,11 @@ use std::sync::OnceLock;
 
 use crate::studio::room_background::{MANAGED_BACKGROUND_DIR, managed_background_roots};
 
-/// Overrides where a package keeps its resources.
+/// Overrides where a package keeps its resources. Setting it makes the run
+/// a package: on a dev build it also moves [`run_root`] to the executable's
+/// folder (`target/<profile>`) unless `--workspace` or
+/// `VIDEORC_WORKSPACE_ROOT` names the checkout, which is useful for testing a
+/// package's layout from a checkout.
 pub const RESOURCES_DIR_ENV: &str = "VIDEORC_RESOURCES_DIR";
 
 /// electron-builder's destinations under the resources directory.
