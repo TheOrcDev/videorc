@@ -7,8 +7,8 @@
 //! bezel is a chip-like recess on glass.
 
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, Hsla, IntoElement, SharedString, Window, div,
-    prelude::*, px,
+    AnyElement, App, ClickEvent, Div, ElementId, Hsla, IntoElement, SharedString, Stateful, Window,
+    div, prelude::*, px,
 };
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{TypeScale, hsla, with_alpha};
@@ -52,6 +52,7 @@ pub fn panel(
     let glass = hsla(with_alpha(theme.glass_solid, 0.35));
     div()
         .id(id)
+        .aria_label(aria)
         .flex()
         .flex_col()
         .rounded(px(radius::CHIP))
@@ -69,7 +70,6 @@ pub fn panel(
                 .py(px(4.))
                 .font_family(font::MONO[0])
                 .type_scale(text::META)
-                .aria_label(aria)
                 .child(child),
         )
 }
@@ -113,7 +113,7 @@ pub fn header(
         row = row.child(
             div()
                 .flex()
-                .shrink_0()
+                .flex_shrink_0()
                 .items_center()
                 .gap(px(12.))
                 .child(action),
@@ -247,7 +247,12 @@ pub fn nav_row(
         .hover(|style| style.bg(unlit(theme)))
         .cursor_pointer()
         .on_click(on_navigate)
-        .child(div().shrink_0().text_color(dim(theme)).child(label.into()))
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(dim(theme))
+                .child(label.into()),
+        )
         .child(
             div()
                 .flex()
@@ -288,7 +293,11 @@ pub fn press_row(
             .on_click(on_press);
     }
     row.child(div().min_w_0().truncate().child(label.into()))
-        .child(div().shrink_0().child(if pressed { "On" } else { "Off" }))
+        .child(
+            div()
+                .flex_shrink_0()
+                .child(if pressed { "On" } else { "Off" }),
+        )
 }
 
 /// A value button on the screen (Mute, Needs permission, Resume, On/Off).
@@ -300,7 +309,7 @@ pub fn value_button(
     disabled: bool,
     tip: Option<SharedString>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let fill = solid(theme);
     let lit_ink = lit(theme);
     let dim_ink = dim(theme);
@@ -339,7 +348,5 @@ pub fn switch_words(
     on_change: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let words = if checked { "On" } else { "Off" };
-    div().aria_label(aria).child(value_button(
-        id, theme, words, checked, disabled, None, on_change,
-    ))
+    value_button(id, theme, words, checked, disabled, None, on_change).aria_label(aria)
 }

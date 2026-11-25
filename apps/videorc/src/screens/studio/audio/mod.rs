@@ -845,6 +845,7 @@ impl AudioSection {
             } else if let Some(chip) = row.chip {
                 let tip = row.issue.clone().map(SharedString::from);
                 let mut word = div()
+                    .id("studio-lcd-system-audio-status")
                     .min_w_0()
                     .truncate()
                     .text_color(lcd::dim(theme))
