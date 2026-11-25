@@ -30,7 +30,7 @@ import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { parseArgs } from 'node:util'
 
-import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
+import { launchDevApp, repoRoot, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { describeNotifications, READ_NOTIFICATIONS_CODE } from './lib/notifications-smoke.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import {
@@ -151,6 +151,9 @@ const enforce = args.enforce
 const systemAudio = args['system-audio']
 const replayBuffer = !args['no-replay-buffer']
 const realScreen = args['real-screen']
+// Plan 260 Phase 3: VIDEORC_APP=gpui drives the GPUI app; its seed, clip buffer and
+// failure readout go through the Studio smoke handler instead of eval-js.
+const gpuiApp = smokeAppIsGpui()
 if (realScreen && process.platform !== 'win32') fail('--real-screen is Windows only')
 // The Windows budgets are calibrated on the test pattern (CPU compositor).
 if (realScreen && enforce) fail('--real-screen is report-only; drop --enforce')
@@ -203,6 +206,25 @@ function log(message) {
  * requested video profile and reload so the Record path uses it.
  */
 async function seedRendererVideoProfile(smoke) {
+  if (gpuiApp) {
+    // The GPUI app: the same seed through the Studio smoke handler, which
+    // merges it over the capture config; no reload is needed.
+    await requestSmokeCommand(
+      smoke,
+      'studio-capture-configure',
+      {
+        config: {
+          video: videoProfile,
+          layout: { layoutPreset: 'screen-only' },
+          recordEnabled: true,
+          streamEnabled: false,
+          ...(systemAudio ? { audio: { systemAudioEnabled: true } } : {})
+        }
+      },
+      { timeoutMs }
+    )
+    return
+  }
   await requestSmokeCommand(
     smoke,
     'eval-js',
@@ -297,6 +319,15 @@ async function selectRealScreen(smoke) {
 
 /** Best-effort: the renderer's visible start-failure copy, for diagnostics. */
 async function describeRendererFailure(smoke) {
+  if (gpuiApp) {
+    try {
+      const state = await requestSmokeCommand(smoke, 'studio-state', {}, { timeoutMs: 5000 })
+      const said = [state?.startFailure, state?.lastError].filter(Boolean)
+      return said.length > 0 ? ` The Studio says: ${said.join(' | ')}` : ''
+    } catch {
+      return ''
+    }
+  }
   try {
     const response = await requestSmokeCommand(
       smoke,
@@ -519,6 +550,11 @@ let remote = null
 let recorder = null
 try {
   mkdirSync(outputDirectory, { recursive: true })
+  if (gpuiApp && realScreen) {
+    fail(
+      'BLOCKED: --real-screen picks the screen through the renderer; the GPUI app has no select-screen-device yet. Run it without VIDEORC_APP=gpui.'
+    )
+  }
   if (windowsMicrophoneRoute) {
     log(describeWindowsMicrophoneRoute(windowsMicrophoneRoute))
     if (enforce && windowsMicrophoneRoute.route !== 'capture-worker') {
@@ -595,16 +631,27 @@ try {
   // The Output switch's own path, through the renderer's smoke hook: on at
   // the measured length (the default already armed it), or off for the bare
   // baseline.
-  await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
-  const switched = await requestSmokeCommand(
-    smoke,
-    'eval-js',
-    {
-      code: `return window.__videorcSmokeSetReplayBuffer?.(${replayBuffer}, ${REPLAY_BUFFER_SECONDS}) ?? null`
-    },
-    { timeoutMs }
-  )
-  if (switched?.result !== true) fail('the renderer has no clip buffer smoke hook')
+  if (gpuiApp) {
+    const armed = await requestSmokeCommand(
+      smoke,
+      'studio-replay-buffer',
+      { armed: replayBuffer, seconds: REPLAY_BUFFER_SECONDS },
+      { timeoutMs }
+    )
+    if (armed?.armed !== replayBuffer)
+      fail(`the clip buffer did not switch: ${JSON.stringify(armed)}`)
+  } else {
+    await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
+    const switched = await requestSmokeCommand(
+      smoke,
+      'eval-js',
+      {
+        code: `return window.__videorcSmokeSetReplayBuffer?.(${replayBuffer}, ${REPLAY_BUFFER_SECONDS}) ?? null`
+      },
+      { timeoutMs }
+    )
+    if (switched?.result !== true) fail('the renderer has no clip buffer smoke hook')
+  }
   if (replayBuffer) {
     await waitForReplayBufferOn('the first buffer-only session')
     log(`clip buffer on (${REPLAY_BUFFER_SECONDS} s); every Record hands over from it`)

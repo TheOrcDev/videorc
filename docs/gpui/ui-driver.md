@@ -103,3 +103,14 @@ The preview's commands (`PREVIEW_COMMANDS` in `apps/videorc/src/smoke/mod.rs`): 
 `preview-window-state` answer where the preview is (`mode`, `phase`, `nativeReady`, `dockedShown`, `canFloat`,
 `floatingOpen`, `words`); `preview-window-open`, `-close` and `-toggle` float it in its own window or dock it back
 (macOS; elsewhere opening is refused by name). Electron's surface and host commands have no GPUI form.
+
+## Recording smokes on the GPUI app
+
+Run with `VIDEORC_APP=gpui`:
+
+- `smoke:record-latency` seeds its video profile with `studio-capture-configure`, arms the clip buffer with
+  `studio-replay-buffer {armed, seconds}` (`Studio::set_clips_for_run`), and reads a refused start from
+  `studio-state`. Its cycles already press Record and Stop through the remote surface, which the core's Studio serves.
+  `--real-screen` stays Electron-only until the GPUI app has `select-screen-device`.
+- `smoke:recording-matrix` drives the backend directly (`session.start` with the test pattern) and needs only
+  `authorize-smoke-resource`, so it runs unchanged.
