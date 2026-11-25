@@ -4,8 +4,8 @@
 //! tints the glass itself.
 
 use gpui::{
-    App, ColorSpace, FontWeight, IntoElement, SharedString, Window, div, linear_color_stop,
-    linear_gradient, prelude::*, px,
+    AnyElement, App, ColorSpace, FontWeight, IntoElement, SharedString, Window, div,
+    linear_color_stop, linear_gradient, prelude::*, px,
 };
 
 use crate::{
@@ -41,6 +41,10 @@ pub enum BadgeVariant {
 pub struct Badge {
     label: SharedString,
     variant: BadgeVariant,
+    /// Leading mark (`data-icon="inline-start"`): EyeSlash on Screen hidden,
+    /// a platform glyph on chat arrival chips. On status variants it replaces
+    /// the glowing dot (Electron StatusBadge's `icon`).
+    icon: Option<AnyElement>,
     appearance: Option<Appearance>,
 }
 
@@ -49,12 +53,19 @@ impl Badge {
         Badge {
             label: label.into(),
             variant: BadgeVariant::Default,
+            icon: None,
             appearance: None,
         }
     }
 
     pub fn variant(mut self, variant: BadgeVariant) -> Self {
         self.variant = variant;
+        self
+    }
+
+    /// 12–14 px leading icon before the label (Screen hidden EyeSlash, chat marks).
+    pub fn icon(mut self, icon: impl IntoElement) -> Self {
+        self.icon = Some(icon.into_any_element());
         self
     }
 
@@ -153,38 +164,66 @@ impl RenderOnce for Badge {
                 .font_weight(FontWeight::MEDIUM)
         };
         let words = div().relative().child(self.label);
-        let status = |tone: Color, glow: f32| {
+        let leading = self.icon.map(|mark| {
+            div()
+                .relative()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .child(mark)
+        });
+        let status = |tone: Color, glow: f32, leading: Option<gpui::Div>| {
+            let mark = match leading {
+                Some(icon) => icon.into_any_element(),
+                None => div().relative().child(dot(tone, glow)).into_any_element(),
+            };
             glass_chip(chip(), t)
                 .gap(px(6.0))
                 .text_color(hsla(t.foreground))
-                .child(dot(tone, glow))
+                .child(mark)
         };
         match self.variant {
             BadgeVariant::Default => glass_chip(chip(), t)
                 .text_color(hsla(t.foreground))
+                .children(leading)
                 .child(words),
             BadgeVariant::Outline => glass_chip(chip(), t)
                 .text_color(hsla(t.muted_foreground))
+                .children(leading)
                 .child(words),
-            BadgeVariant::Ghost => chip().text_color(hsla(t.muted_foreground)).child(words),
-            BadgeVariant::Success => status(t.success, t.chip_dot_glow).child(words),
-            BadgeVariant::Warning => status(t.warning, t.chip_dot_glow).child(words),
-            BadgeVariant::Neutral => status(t.muted_foreground, 0.0)
+            BadgeVariant::Ghost => chip()
+                .text_color(hsla(t.muted_foreground))
+                .children(leading)
+                .child(words),
+            BadgeVariant::Success => status(t.success, t.chip_dot_glow, leading).child(words),
+            BadgeVariant::Warning => status(t.warning, t.chip_dot_glow, leading).child(words),
+            BadgeVariant::Neutral => status(t.muted_foreground, 0.0, leading)
                 .text_color(hsla(t.muted_foreground))
                 .child(words),
-            BadgeVariant::Destructive => tinted(chip(), t, t.destructive).child(words),
-            BadgeVariant::Live => tinted(chip(), t, t.live).child(words),
-            BadgeVariant::Chrome => chip()
-                .gap(px(6.0))
-                .shadow(chrome::shadows(t.chrome_fill_shadow))
-                .text_color(hsla(t.chrome_fill_ink))
-                .child(chrome::metal(
-                    t.chrome_fill_stops,
-                    [radius::TAG; 4],
-                    Direction::Down,
-                ))
-                .child(div().relative().child(dot(t.success, t.chip_dot_glow)))
+            BadgeVariant::Destructive => tinted(chip(), t, t.destructive)
+                .children(leading)
                 .child(words),
+            BadgeVariant::Live => tinted(chip(), t, t.live).children(leading).child(words),
+            BadgeVariant::Chrome => {
+                let mark = match leading {
+                    Some(icon) => icon.into_any_element(),
+                    None => div()
+                        .relative()
+                        .child(dot(t.success, t.chip_dot_glow))
+                        .into_any_element(),
+                };
+                chip()
+                    .gap(px(6.0))
+                    .shadow(chrome::shadows(t.chrome_fill_shadow))
+                    .text_color(hsla(t.chrome_fill_ink))
+                    .child(chrome::metal(
+                        t.chrome_fill_stops,
+                        [radius::TAG; 4],
+                        Direction::Down,
+                    ))
+                    .child(mark)
+                    .child(words)
+            }
             BadgeVariant::Plate => chip()
                 .bg(linear_gradient(
                     180.0,
@@ -194,6 +233,7 @@ impl RenderOnce for Badge {
                 .color_space(ColorSpace::Oklab))
                 .shadow(plate_shadows(t))
                 .text_color(hsla(t.foreground))
+                .children(leading)
                 .child(words),
         }
     }

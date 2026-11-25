@@ -46,7 +46,12 @@
     "separator",
     "collapsible",
     "avatar",
-    "chat-platform"
+    "chat-platform",
+    "label",
+    "field",
+    "input-group",
+    "bar-visualizer",
+    "live-waveform"
   ],
   "keepLocal": []
 }
