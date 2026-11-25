@@ -59,7 +59,12 @@ jobs:
           cache-on-failure: true
 
       - name: Compile GPUI and test targets without running tests
-        run: cargo check --locked -p videorc-app-core -p videorc-kit -p videorc-protocol -p videorc-app --all-targets
+        env:
+          BUILD_ARTIFACTS: ${{ inputs.artifacts }}
+        run: |
+          lock_args=(--locked)
+          if [ "$BUILD_ARTIFACTS" = true ]; then lock_args=(); fi
+          cargo check "${lock_args[@]}" -p videorc-app-core -p videorc-kit -p videorc-protocol -p videorc-app --all-targets
 
       - name: Build Linux debug app and backend
         if: github.event_name == 'workflow_dispatch' && inputs.artifacts
