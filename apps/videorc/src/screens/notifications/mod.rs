@@ -579,7 +579,7 @@ impl Centre {
 }
 pub fn install_keys(cx: &mut gpui::App) {
     cx.bind_keys([KeyBinding::new(
-        "secondary-shift-b",
+        secondary!("shift-b"),
         ToggleNotifications,
         Some("!Dialog && !Menu && !Select"),
     )]);

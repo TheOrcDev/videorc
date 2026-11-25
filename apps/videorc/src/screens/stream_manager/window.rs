@@ -77,9 +77,9 @@ pub fn install(
     runtime: tokio::runtime::Handle,
 ) {
     cx.bind_keys([
-        KeyBinding::new("secondary-j", ShowSidekick, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-f", SearchChat, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-l", WriteInChat, Some(KEY_CONTEXT)),
+        KeyBinding::new(secondary!("j"), ShowSidekick, Some(KEY_CONTEXT)),
+        KeyBinding::new(secondary!("f"), SearchChat, Some(KEY_CONTEXT)),
+        KeyBinding::new(secondary!("l"), WriteInChat, Some(KEY_CONTEXT)),
     ]);
     cohost::bind_keys(cx);
     let reopens = frame.reopens();
