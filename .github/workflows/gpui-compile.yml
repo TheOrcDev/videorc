@@ -6,6 +6,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      artifacts:
+        description: Build downloadable Linux debug app and backend binaries
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -20,7 +26,7 @@ jobs:
   compile:
     name: gpui compile
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: ${{ inputs.artifacts && 60 || 30 }}
     env:
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -39,6 +45,10 @@ jobs:
             libxrandr-dev libxinerama-dev libxcursor-dev libegl1-mesa-dev \
             libvulkan-dev
 
+      - name: Install Linux backend headers
+        if: github.event_name == 'workflow_dispatch' && inputs.artifacts
+        run: sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libspa-0.2-dev
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -49,7 +59,44 @@ jobs:
           cache-on-failure: true
 
       - name: Compile GPUI and test targets without running tests
-        run: cargo check --locked -p videorc-app-core -p videorc-kit -p videorc-protocol -p videorc-app --all-targets
+        env:
+          BUILD_ARTIFACTS: ${{ inputs.artifacts }}
+        run: |
+          lock_args=(--locked)
+          if [ "$BUILD_ARTIFACTS" = true ]; then lock_args=(); fi
+          cargo check "${lock_args[@]}" -p videorc-app-core -p videorc-kit -p videorc-protocol -p videorc-app --all-targets
+
+      - name: Build Linux debug app and backend
+        if: github.event_name == 'workflow_dispatch' && inputs.artifacts
+        env:
+          CARGO_BUILD_JOBS: 1
+        # Separate invocations avoid unifying main's backend ashpd/tokio with
+        # GPUI's async-io until held #2189 lands. No --locked: its branch may
+        # need Cargo to prune the feature edges. Never change release inputs.
+        run: |
+          cargo build -p videorc-app
+          cargo build -p videorc-backend
+
+      - name: Bundle executable Linux debug binaries
+        if: github.event_name == 'workflow_dispatch' && inputs.artifacts
+        run: |
+          artifact_dir="$RUNNER_TEMP/gpui-linux-x64"
+          mkdir -p "$artifact_dir"
+          cp target/debug/Videorc target/debug/videorc-backend "$artifact_dir/"
+          cp Cargo.lock "$artifact_dir/"
+          printf '%s\n' "$GITHUB_SHA" > "$artifact_dir/SOURCE_SHA"
+          # Tar preserves executable permissions across upload/download.
+          tar -czf "$RUNNER_TEMP/gpui-linux-x64.tar.gz" -C "$artifact_dir" .
+
+      - name: Upload Linux debug binaries
+        if: github.event_name == 'workflow_dispatch' && inputs.artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpui-linux-x64-${{ github.sha }}
+          path: ${{ runner.temp }}/gpui-linux-x64.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
 
   compile-windows:
     name: gpui compile (Windows)
