@@ -297,6 +297,12 @@ impl<B: StudioBackend> Studio<B> {
             if inner.bootstrap_generation != generation {
                 return;
             }
+            // A backend that restarted mid-check never sends `completed`:
+            // the read on the new connection ends the hold.
+            if !state.running {
+                inner.performance.hold = false;
+                inner.performance.progress = None;
+            }
             inner.performance.state = Some(state);
         }
         self.publish();
