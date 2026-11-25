@@ -19,7 +19,7 @@ use videorc_app_core::desktop::capture_protection::{
     HideMethod, WindowRole, stream_manager_hide_method,
 };
 use videorc_app_core::desktop::permissions::PermissionPlatform;
-use videorc_app_core::protocol::{ScreenPrivacy, ScreenPrivacyReason};
+use videorc_app_core::protocol::{Banner, ScreenPrivacy, ScreenPrivacyReason};
 use videorc_app_core::stream_manager::copy::WINDOW_NAME;
 use videorc_app_core::stream_manager::dashboard::{LiveDashboard, SessionState};
 use videorc_app_core::{BackendClient, Studio};
@@ -38,7 +38,7 @@ use super::layout::{MIN_HEIGHT, MIN_WIDTH, Pane, Slot, Tier, right_pane_width, s
 use super::panes::{PaneKey, Panes, composer_available, key_runs};
 use super::sidekick::sidekick_pane;
 use super::stats::{StatsView, stats_bar};
-use super::status::status_bar;
+use super::status::{BannerRow, status_bar};
 use crate::app::hide::HideFromStream;
 use crate::app::menus::ToggleStreamManager;
 use crate::platform;
@@ -193,6 +193,8 @@ pub struct StreamManager {
     /// Hide screen (frost) state from `screen.privacy.*`.
     screen_hidden: bool,
     screen_blocked: Option<String>,
+    /// `None` while loading; empty when Images has none.
+    banners: Option<Vec<BannerRow>>,
     clear: DialogHandle,
     focus: FocusHandle,
     _bounds: Subscription,
@@ -283,6 +285,23 @@ impl StreamManager {
             })
             .detach();
         }
+        // Banners menu: seed from `banners.list`.
+        {
+            let studio = studio.clone();
+            let runtime = runtime.clone();
+            cx.spawn(async move |this, cx| {
+                let answer = runtime.spawn(async move { studio.banners().await }).await;
+                let rows = match answer {
+                    Ok(Ok(value)) => Some(parse_banner_rows(value)),
+                    _ => Some(Vec::new()),
+                };
+                let _ = this.update(cx, |sm, cx| {
+                    sm.banners = rows;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         Self {
             frame,
             studio,
@@ -303,10 +322,75 @@ impl StreamManager {
             hide_method,
             screen_hidden: false,
             screen_blocked: None,
+            banners: None,
             clear: DialogHandle::new(false),
             focus,
             _bounds: bounds,
         }
+    }
+
+    fn refresh_banners(&mut self, cx: &mut Context<Self>) {
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let answer = runtime.spawn(async move { studio.banners().await }).await;
+            let rows = match answer {
+                Ok(Ok(value)) => Some(parse_banner_rows(value)),
+                _ => Some(Vec::new()),
+            };
+            let _ = this.update(cx, |sm, cx| {
+                sm.banners = rows;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_banner_shown(&mut self, id: String, show: bool, cx: &mut Context<Self>) {
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let _ = runtime
+                .spawn(async move {
+                    if show {
+                        studio.show_banner(&id).await
+                    } else {
+                        studio.hide_banner(&id).await
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |sm, cx| sm.refresh_banners(cx));
+        })
+        .detach();
+    }
+
+    fn hide_all_banners(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self
+            .banners
+            .as_ref()
+            .map(|list| {
+                list.iter()
+                    .filter(|b| b.shown)
+                    .map(|b| b.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if ids.is_empty() {
+            return;
+        }
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let _ = runtime
+                .spawn(async move {
+                    for id in ids {
+                        let _ = studio.hide_banner(&id).await;
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |sm, cx| sm.refresh_banners(cx));
+        })
+        .detach();
     }
 
     fn request_clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -445,12 +529,15 @@ impl Render for StreamManager {
         let hide_method = self.hide_method;
         let screen_hidden = self.screen_hidden;
         let screen_blocked = self.screen_blocked.clone();
+        let banners = self.banners.clone();
         let this = cx.entity().downgrade();
         let pin = this.clone();
         let hide = this.clone();
         let clear = this.clone();
         let clip = this.clone();
         let screen = this.clone();
+        let banner = this.clone();
+        let banner_all = this.clone();
         let clear_dialog = Dialog::new("stream-manager-clear", &self.clear, "Clear the view?")
             .description(
                 "Chat and Activity in this window are emptied and the messages per minute start over. The Library keeps the history.",
@@ -535,9 +622,38 @@ impl Render for StreamManager {
                     move |hide, _window, app| {
                         let _ = screen.update(app, |this, cx| this.set_screen_hidden(hide, cx));
                     },
+                    banners,
+                    move |id, show, _window, app| {
+                        let _ = banner.update(app, |this, cx| this.set_banner_shown(id, show, cx));
+                    },
+                    move |_window, app| {
+                        let _ = banner_all.update(app, |this, cx| this.hide_all_banners(cx));
+                    },
                 ))
                 .child(clear_dialog)
                 .child(self.notices.read(cx).toasts()),
         )
     }
+}
+
+fn parse_banner_rows(value: Value) -> Vec<BannerRow> {
+    let banners = if let Ok(list) = serde_json::from_value::<Vec<Banner>>(value.clone()) {
+        list
+    } else if let Some(list) = value
+        .get("banners")
+        .cloned()
+        .and_then(|v| serde_json::from_value::<Vec<Banner>>(v).ok())
+    {
+        list
+    } else {
+        return Vec::new();
+    };
+    banners
+        .into_iter()
+        .map(|b| BannerRow {
+            id: b.id,
+            name: b.name,
+            shown: b.shown,
+        })
+        .collect()
 }
