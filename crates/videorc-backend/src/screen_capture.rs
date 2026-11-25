@@ -155,6 +155,9 @@ pub fn app_previews(params: AppPreviewsParams) -> Result<Vec<AppPreview>, String
 
 // `sources.scene_pictures`' wire types are the protocol's (plan 260, L2);
 // the TS mirror reads the same fixture.
+// Params/Result are used on every OS; the picture types are used on macOS
+// (and in tests). Keep the public re-export for callers.
+#[cfg_attr(not(any(test, target_os = "macos")), allow(unused_imports))]
 pub use crate::protocol::scene_pictures::{
     ScenePicture, ScenePictureOutcome, ScenePictureTarget, ScenePicturesParams, ScenePicturesResult,
 };

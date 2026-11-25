@@ -350,6 +350,8 @@ pub struct AudioMetersView {
     /// segment does).
     pub microphone_lcd: LcdMeterView,
     pub system_audio_lcd: LcdMeterView,
+    /// Sources Sounds meter readout while Retro LCD is on.
+    pub sounds_lcd: LcdMeterView,
 }
 
 impl AudioMeters {
@@ -394,6 +396,11 @@ impl AudioMeters {
             },
             system_audio_lcd: if retro {
                 self.system_audio.lcd_view(now)
+            } else {
+                LcdMeterView::default()
+            },
+            sounds_lcd: if retro {
+                self.sounds.lcd_view(now)
             } else {
                 LcdMeterView::default()
             },

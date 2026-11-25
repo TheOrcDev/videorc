@@ -399,6 +399,7 @@ fn main() -> Result<()> {
         );
         menus::install(cx);
         studio_screen::bind_keys(cx);
+        screens::sources::bind_keys(cx);
         screens::scene::bind_keys(cx);
         screens::notifications::install_keys(cx);
         let notices = cx.new(|cx| {

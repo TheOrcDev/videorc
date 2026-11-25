@@ -594,12 +594,26 @@ impl QuickSettingsSection {
             self.view.captions.clone(),
             cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Captions))),
         );
-        let chat_value = self
-            .view
-            .chat
-            .new_label
-            .clone()
-            .unwrap_or_else(|| format!("{} · ⌘⇧J", section_copy::STREAM_MANAGER));
+        // ShortcutKeys from the keymap (same as the default Chat row): never
+        // a hand-typed key glyph (gpui-design-guards).
+        let chat_value: AnyElement = if let Some(new_label) = &self.view.chat.new_label {
+            div().truncate().child(new_label.clone()).into_any_element()
+        } else {
+            div()
+                .flex()
+                .min_w_0()
+                .items_center()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(section_copy::STREAM_MANAGER),
+                )
+                .child(div().text_color(lcd::dim(t)).child("·"))
+                .child(ShortcutKeys::for_action(&ToggleStreamManager).style(ShortcutStyle::Text))
+                .into_any_element()
+        };
         let chat = lcd::nav_row(
             "quick-settings-lcd-chat",
             t,

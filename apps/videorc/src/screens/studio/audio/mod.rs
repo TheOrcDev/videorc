@@ -7,7 +7,7 @@
 //! ⌘/Ctrl+↑/↓ (P218) moves focus between the channel strips, as Electron's
 //! MixerChannels does for `[data-slot=channel-strip]`.
 
-mod meter;
+pub mod meter;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
