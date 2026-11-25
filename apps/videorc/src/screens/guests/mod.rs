@@ -28,6 +28,7 @@ use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle, DialogSize};
 use videorc_kit::empty::Empty;
+use videorc_kit::icon::IconName;
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::kebab_menu::{KebabMenu, KebabMenuItem, KebabReveal};
 use videorc_kit::list_row::{GroupedList, ListRow};
@@ -751,6 +752,11 @@ impl Render for GuestsPanel {
                     .child(
                         Button::new("guests-invite-copy")
                             .label(if self.copied { COPIED } else { COPY })
+                            .icon(if self.copied {
+                                IconName::Check
+                            } else {
+                                IconName::Copy
+                            })
                             .variant(ButtonVariant::Secondary)
                             .disabled(disabled || no_link)
                             .when(!disabled && no_link, |b| {

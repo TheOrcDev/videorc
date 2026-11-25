@@ -23,6 +23,7 @@ use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle, DialogSize};
+use videorc_kit::icon::IconName;
 use videorc_kit::input::InputState;
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::section_label::SectionLabel;
@@ -444,11 +445,19 @@ impl GoLiveDialog {
                     format!("go-live-dest-{}", dest.target_id),
                     destination_label(&dest.label),
                 )
+                .icon(crate::screens::platform_glyph(&dest.platform))
                 .context(context)
                 .child(badge),
             );
-            // `go-live-destination-body`: 8 px apart, 12 px below.
-            let mut body = div().flex().flex_col().gap(px(8.)).px(px(12.)).pb(px(12.));
+            // `go-live-destination-body`: under the title (`pl-13`), 8 px
+            // apart, 12 px below.
+            let mut body = div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .pl(px(52.))
+                .pr(px(12.))
+                .pb(px(12.));
             if let Some(scheduled) = &dest.scheduled {
                 let title = scheduled
                     .get("title")
@@ -573,6 +582,7 @@ impl GoLiveDialog {
                             format!("go-live-excluded-{id}"),
                             destination_label(&target.label),
                         )
+                        .icon(crate::screens::platform_glyph(&target.platform))
                         .context(context)
                         .child(Badge::new(copy::LEFT_OUT).variant(BadgeVariant::Outline)),
                     )
@@ -581,8 +591,9 @@ impl GoLiveDialog {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .px(px(12.))
-                            .pb(px(8.))
+                            .pl(px(52.))
+                            .pr(px(12.))
+                            .pb(px(12.))
                             .child(
                                 div()
                                     .flex_1()
@@ -866,6 +877,7 @@ impl Render for GoLiveDialog {
                 Button::new("go-live-confirm")
                     .label(self.confirm_label.clone())
                     .variant(ButtonVariant::GoLive)
+                    .icon(IconName::Broadcast)
                     .disabled(!can_confirm)
                     .when(
                         !pending && self.gate_blocked && self.state.partial.is_none(),

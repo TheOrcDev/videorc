@@ -29,3 +29,19 @@ pub mod sources;
 #[allow(dead_code)]
 pub mod stream_manager;
 pub mod studio;
+
+/// `PlatformGlyph` for a destination's platform id (anything else is
+/// Custom RTMP's).
+pub fn platform_glyph(platform: &str) -> videorc_kit::PlatformGlyph {
+    use videorc_kit::chat_platform::ChatPlatform;
+    videorc_kit::PlatformGlyph::new(match platform {
+        "youtube" => ChatPlatform::Youtube,
+        "twitch" => ChatPlatform::Twitch,
+        "kick" => ChatPlatform::Kick,
+        "x" => ChatPlatform::X,
+        "facebook" => ChatPlatform::Facebook,
+        "tiktok" => ChatPlatform::Tiktok,
+        "instagram" => ChatPlatform::Instagram,
+        _ => ChatPlatform::Custom,
+    })
+}

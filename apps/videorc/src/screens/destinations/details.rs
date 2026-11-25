@@ -7,6 +7,7 @@ use videorc_app_core::livestream::details;
 use videorc_app_core::livestream::{DetailsState, details as details_mod};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::InputState;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::textarea::TextareaState;
@@ -106,8 +107,9 @@ impl DestinationsPanel {
 
         let dirty = self.details_dirty;
         let status = details_mod::details_status(dirty, state.validation.as_ref());
-        let mut section =
-            PanelSection::new("destinations-details").title(page_copy::STREAM_DETAILS);
+        let mut section = PanelSection::new("destinations-details")
+            .title(page_copy::STREAM_DETAILS)
+            .icon(icon(IconName::TextAa, 16., hsla(t.muted_foreground)));
         // The header's end: the status, then Save (`variant="secondary"`).
         let mut action = div().flex().items_center().gap(px(8.));
         if let Some((tone, label)) = status {
@@ -126,6 +128,7 @@ impl DestinationsPanel {
                     page_copy::SAVE
                 })
                 .variant(ButtonVariant::Secondary)
+                .icon(IconName::FloppyDisk)
                 .disabled(disabled || state.save_pending)
                 .on_click({
                     let entity = entity.clone();

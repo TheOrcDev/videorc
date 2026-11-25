@@ -558,6 +558,7 @@ impl DestinationsPanel {
 
         let mut card = div().child(
             ListRow::new(format!("dest-{}", dest.id), dest.label.clone())
+                .icon(crate::screens::platform_glyph(&dest.platform))
                 .context(dest.context.clone())
                 .interactive(true)
                 .child(trailing)

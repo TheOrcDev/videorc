@@ -3,16 +3,14 @@
 //! apart. Destinations' Stream details and the Go live dialog draw the same
 //! fields from the same draft.
 //!
-//! Each field is the shadcn `Field` in source order: the label (with the
-//! title's counter at the end of its line), the control, then its
-//! description or error under it.
+//! Each field is the kit's `Field` (label, control, description, error),
+//! the title's counter at the end of its label line.
 
 use gpui::{AnyElement, App, Entity, SharedString, Window, div, prelude::*, px};
 use videorc_app_core::livestream::copy as page_copy;
 use videorc_app_core::livestream::details::Privacy;
-use videorc_kit::icon::{IconName, icon};
+use videorc_kit::field::Field;
 use videorc_kit::input::{Input, InputState};
-use videorc_kit::label::Label;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::textarea::{Textarea, TextareaState};
 use videorc_kit::theme::{TypeScale, hsla};
@@ -52,28 +50,6 @@ pub fn privacy_from_value(value: &str) -> Privacy {
     }
 }
 
-/// `FieldError`: the mark and the words under the control.
-fn field_error(t: &Theme, words: String) -> AnyElement {
-    div()
-        .flex()
-        .items_start()
-        .gap(px(6.))
-        .type_scale(text::META)
-        .text_color(hsla(t.foreground))
-        .child(icon(IconName::XCircleFill, 14., hsla(t.destructive)))
-        .child(div().min_w(px(0.)).child(words))
-        .into_any_element()
-}
-
-/// `FieldDescription`.
-fn field_description(t: &Theme, words: impl Into<SharedString>) -> AnyElement {
-    div()
-        .type_scale(text::META)
-        .text_color(hsla(t.muted_foreground))
-        .child(words.into())
-        .into_any_element()
-}
-
 /// The fields, 16 px apart (`flex flex-col gap-4`).
 pub fn broadcast_info_fields(
     t: &Theme,
@@ -82,24 +58,14 @@ pub fn broadcast_info_fields(
 ) -> AnyElement {
     let id = fields.id;
     let on_privacy: PrivacyChange = Box::new(on_privacy);
-    let title = div()
-        .flex()
-        .flex_col()
-        .gap(px(8.))
-        .child(
+    let title = Field::new(SharedString::from(format!("{id}-title-field")))
+        .label(page_copy::TITLE)
+        // The counter is a fact about the field, not its description.
+        .label_end(
             div()
-                .flex()
-                .items_baseline()
-                .justify_between()
-                .gap(px(12.))
-                .child(Label::new(page_copy::TITLE).disabled(fields.disabled))
-                // The counter is a fact about the field, not its description.
-                .child(
-                    div()
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child(fields.title_counter),
-                ),
+                .type_scale(text::META)
+                .text_color(hsla(t.muted_foreground))
+                .child(fields.title_counter),
         )
         .child(
             Input::new(SharedString::from(format!("{id}-title")), fields.title)
@@ -107,13 +73,10 @@ pub fn broadcast_info_fields(
                 .disabled(fields.disabled)
                 .invalid(fields.title_error.is_some()),
         )
-        .children(fields.title_error.map(|error| field_error(t, error)));
+        .when_some(fields.title_error, |field, error| field.error(error));
 
-    let description = div()
-        .flex()
-        .flex_col()
-        .gap(px(8.))
-        .child(Label::new(page_copy::DESCRIPTION).disabled(fields.disabled))
+    let description = Field::new(SharedString::from(format!("{id}-description-field")))
+        .label(page_copy::DESCRIPTION)
         .child(
             Textarea::new(
                 SharedString::from(format!("{id}-description")),
@@ -123,7 +86,7 @@ pub fn broadcast_info_fields(
             .disabled(fields.disabled)
             .invalid(fields.description_error.is_some()),
         )
-        .children(fields.description_error.map(|error| field_error(t, error)));
+        .when_some(fields.description_error, |field, error| field.error(error));
 
     let privacy = fields.privacy.map(|privacy| {
         let mut control = SegmentedControl::new(SharedString::from(format!("{id}-privacy")))
@@ -136,16 +99,10 @@ pub fn broadcast_info_fields(
         for option in Privacy::ALL {
             control = control.option(Segment::new(privacy_value(option), option.label()));
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(Label::new(page_copy::PRIVACY).disabled(fields.disabled))
+        Field::new(SharedString::from(format!("{id}-privacy-field")))
+            .label(page_copy::PRIVACY)
+            .description(format!("{} {}", privacy.hint(), page_copy::PRIVACY_NOTE))
             .child(control)
-            .child(field_description(
-                t,
-                format!("{} {}", privacy.hint(), page_copy::PRIVACY_NOTE),
-            ))
     });
 
     div()
