@@ -960,7 +960,7 @@ pub async fn open(state: &AppState, params: PlaybackOpenParams) -> PlaybackStatu
         .await;
         return match opened {
             Ok(Ok(player)) => {
-                let status = player.pause();
+                let status = player.status();
                 *state.playback.mac.lock().unwrap_or_else(|p| p.into_inner()) = Some(player);
                 state.emit_event(PLAYBACK_STATUS_EVENT, &status);
                 status

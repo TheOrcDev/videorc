@@ -260,6 +260,8 @@ impl MacPlayer {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+        // Open, with the first frame there: paused at the top.
+        shared.update(|status| status.state = PlaybackState::Paused);
         Ok(this)
     }
 
