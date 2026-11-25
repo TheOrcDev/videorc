@@ -160,7 +160,7 @@ impl RenderOnce for LiveWaveform {
 
         self.base
             .id(self.id)
-            .role(gpui::Role::Img)
+            .role(gpui::Role::Image)
             .aria_label(self.accessibility_label)
             .relative()
             .flex()
