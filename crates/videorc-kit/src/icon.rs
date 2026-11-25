@@ -69,6 +69,12 @@ pub enum IconName {
     VideoCamera,
     /// `SceneIcon` (Phosphor's SquaresFour).
     SquaresFour,
+    /// `SparkleIcon` / `PublishIcon` (Phosphor's Sparkle).
+    Sparkle,
+    /// `UploadIcon` (Phosphor's UploadSimple).
+    UploadSimple,
+    /// `SyncIcon` (Phosphor's ArrowsClockwise).
+    ArrowsClockwise,
 }
 
 impl IconName {
@@ -105,6 +111,9 @@ impl IconName {
             IconName::Layout => include_bytes!("../icons/layout.svg"),
             IconName::VideoCamera => include_bytes!("../icons/video-camera.svg"),
             IconName::SquaresFour => include_bytes!("../icons/squares-four.svg"),
+            IconName::Sparkle => include_bytes!("../icons/sparkle.svg"),
+            IconName::UploadSimple => include_bytes!("../icons/upload-simple.svg"),
+            IconName::ArrowsClockwise => include_bytes!("../icons/arrows-clockwise.svg"),
         }
     }
 }
