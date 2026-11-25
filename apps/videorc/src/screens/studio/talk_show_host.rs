@@ -31,7 +31,7 @@ use videorc_app_core::cloud_scene::{
 };
 use videorc_app_core::guests::session::ControllerFacts;
 use videorc_app_core::guests::view::stage_with_screen;
-use videorc_app_core::guests::wire::RoomStatus;
+use videorc_app_core::guests::wire::{RoomStatus, Stage};
 use videorc_app_core::library::cloud::{CloudRecordingStop, CloudRecordingWatch};
 use videorc_app_core::studio::preview_scene::studio_scene_params;
 use videorc_app_core::studio::room_background::{self, LiveClockMemory};
@@ -535,6 +535,30 @@ impl TalkShowRoomHost {
         let _ = self.request(SCREEN_SET, room_media::stop_screen_params());
     }
 
+    /// The whole stage in one frame (`cloud.stage.set`), as Electron's
+    /// `setStage`. The Show stage uses this for layouts, Bring on / Send
+    /// backstage, and Screens cards.
+    pub fn set_stage(
+        &self,
+        stage: Stage,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Result<(), String>> {
+        let camera_shape = self.studio.snapshot().settings.capture.layout.camera_shape;
+        let shape = match camera_shape {
+            videorc_protocol::CameraShape::Circle => Some("circle"),
+            _ => Some("rounded"),
+        };
+        let params = stage_set_params(&stage, host_shape_for_camera(shape));
+        let request = self.request(STAGE_SET, params);
+        cx.background_executor().spawn(async move {
+            match request.await {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err("The room is not open.".into()),
+            }
+        })
+    }
+
     /// Puts the host's published screen on the program (`cloud.stage.set`),
     /// as Electron's `applySceneToRoom` does when the stage names no screen.
     pub fn set_stage_with_host_screen(
@@ -557,21 +581,8 @@ impl TalkShowRoomHost {
         else {
             return gpui::Task::ready(Err("The room is not open.".into()));
         };
-        let camera_shape = self.studio.snapshot().settings.capture.layout.camera_shape;
-        let shape = match camera_shape {
-            videorc_protocol::CameraShape::Circle => Some("circle"),
-            _ => Some("rounded"),
-        };
         let next = stage_with_screen(&room.stage, Some(host.as_str()));
-        let params = stage_set_params(&next, host_shape_for_camera(shape));
-        let request = self.request(STAGE_SET, params);
-        cx.background_executor().spawn(async move {
-            match request.await {
-                Ok(Ok(_)) => Ok(()),
-                Ok(Err(error)) => Err(error),
-                Err(_) => Err("The room is not open.".into()),
-            }
-        })
+        self.set_stage(next, cx)
     }
 
     /// The Program monitor on or off: the backend's room takes the runner's
