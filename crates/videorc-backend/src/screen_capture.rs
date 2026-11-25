@@ -154,10 +154,11 @@ pub fn app_previews(params: AppPreviewsParams) -> Result<Vec<AppPreview>, String
 }
 
 // `sources.scene_pictures`' wire types are the protocol's (plan 260, L2);
-// the TS mirror reads the same fixture.
-pub use crate::protocol::scene_pictures::{
-    ScenePicture, ScenePictureOutcome, ScenePictureTarget, ScenePicturesParams, ScenePicturesResult,
-};
+// the TS mirror reads the same fixture. Params/Result are shared; the
+// picture/outcome/target names are only named on the macOS capture path.
+#[cfg(any(target_os = "macos", test))]
+pub use crate::protocol::scene_pictures::{ScenePictureOutcome, ScenePictureTarget};
+pub use crate::protocol::scene_pictures::{ScenePicturesParams, ScenePicturesResult};
 
 /// The privacy recheck after the blocking task returns to the async RPC
 /// dispatcher too: a hide or show during the batch refuses every picture.
