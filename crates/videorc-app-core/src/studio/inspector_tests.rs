@@ -1002,3 +1002,46 @@ fn the_session_section_lists_the_facts_and_their_pages() {
         Some("Claude Desktop connected")
     );
 }
+
+/// `useSessionCloud` over `dashboardCloudFromStatus`: the show carries this
+/// session only, in a carrying phase, and an active hold counts down.
+#[test]
+fn the_cloud_show_carrying_this_session_feeds_the_stream_reading() {
+    let cloud = |value: serde_json::Value| -> CloudStatus {
+        serde_json::from_value(value).expect("a cloud status")
+    };
+    let holding = cloud(json!({
+        "phase": "hold",
+        "sessionId": "s1",
+        "hold": { "active": true, "remainingSeconds": 1650 }
+    }));
+    let show = session_cloud_show(Some(&holding), Some("s1")).expect("carries s1");
+    assert_eq!(show.phase, "hold");
+    assert_eq!(show.phase_label, "Be right back");
+    assert_eq!(show.hold_countdown.as_deref(), Some("28 min"));
+    assert_eq!(
+        cloud_stream_reading(Some(&show)).as_deref(),
+        Some("Be right back · 28 min left")
+    );
+
+    // Another session's show, no session, an off show, no status: none.
+    assert_eq!(session_cloud_show(Some(&holding), Some("s2")), None);
+    assert_eq!(session_cloud_show(Some(&holding), None), None);
+    let off = cloud(json!({ "phase": "off", "sessionId": "s1" }));
+    assert_eq!(session_cloud_show(Some(&off), Some("s1")), None);
+    assert_eq!(session_cloud_show(None, Some("s1")), None);
+
+    // A hold that isn't active has no countdown; resuming reads as such.
+    let resuming = cloud(json!({
+        "phase": "resuming",
+        "sessionId": "s1",
+        "hold": { "active": false, "remainingSeconds": 40 }
+    }));
+    let show = session_cloud_show(Some(&resuming), Some("s1")).expect("carries s1");
+    assert_eq!(show.hold_countdown, None);
+    assert_eq!(show.phase_label, "Resuming…");
+    assert_eq!(
+        cloud_stream_reading(Some(&show)).as_deref(),
+        Some("Cloud resuming")
+    );
+}

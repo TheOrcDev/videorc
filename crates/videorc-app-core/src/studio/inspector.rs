@@ -39,10 +39,13 @@ use super::session::{SESSION_START_FAILED_TOAST_TITLE, SessionStartIntent, sessi
 use super::source_selection::{scene_source_off_blocked_reason, scene_sources_turned_off};
 use super::transport::OPEN_DESTINATIONS_LABEL;
 use super::{StudioSnapshot, connection_blocked_reason, start_blocked_copy};
+use crate::livestream::cloud_status::CloudStatus;
+use crate::livestream::on_air::{cloud_phase_label, format_cloud_countdown};
 use crate::nav::PageId;
 use crate::notices::{MicrophoneNotice, MicrophonePhase, microphone_notice_title};
 use crate::scenes::model::using_visual_sources;
 use crate::scenes::window::{AppWindowFailure, SceneAppState, app_window_failure_copy};
+use crate::stream_manager::dashboard::CLOUD_PHASES;
 
 /// The inspector's words that depend on the session.
 pub mod copy {
@@ -444,6 +447,35 @@ pub fn cloud_stream_reading(cloud: Option<&CloudShow>) -> Option<String> {
         "resuming" => Some(copy::CLOUD_RESUMING.to_string()),
         _ => None,
     }
+}
+
+/// `useSessionCloud` (`session-panel.tsx:501`): the show while it carries
+/// this session, through `dashboardCloudFromStatus`
+/// (`shared/live-dashboard.ts:302`). None for another session's show, an
+/// off show, or no session. The labels are `cloudPhaseLabel` and
+/// `formatCloudCountdown` of an active hold's seconds.
+pub fn session_cloud_show(
+    status: Option<&CloudStatus>,
+    session_id: Option<&str>,
+) -> Option<CloudShow> {
+    let status = status?;
+    let session_id = session_id?;
+    if status.session_id.as_deref() != Some(session_id)
+        || !CLOUD_PHASES.contains(&status.phase.as_str())
+    {
+        return None;
+    }
+    let hold_countdown = status
+        .hold
+        .as_ref()
+        .filter(|hold| hold.active)
+        .and_then(|hold| hold.remaining_seconds)
+        .map(|seconds| format_cloud_countdown(seconds as f64));
+    Some(CloudShow {
+        phase: status.phase.clone(),
+        phase_label: cloud_phase_label(&status.phase),
+        hold_countdown,
+    })
 }
 
 /// `cloudDestinationProblem`: one "Videorc Cloud" row for the feed legs,
