@@ -199,6 +199,10 @@ export const COLOUR_LITERAL_ALLOWLIST = new Map([
   [
     'crates/videorc-kit/src/toast.rs',
     "sonner toast description / close-button ink (Electron sonner styles.css; near-title strength, not muted-foreground)"
+  ],
+  [
+    'crates/videorc-kit/src/platform_glyph.rs',
+    "X partner-kit lockup fallback: pure black/white by theme (plan 167), never a theme token"
   ]
 ])
 

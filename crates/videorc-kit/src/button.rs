@@ -28,6 +28,7 @@ use crate::{
         self, Direction, MASK_BLACK, MASK_WHITE, box_shadow, conic_mask, paint_corners,
         ring_sprite, sample,
     },
+    icon::{IconName, icon},
     theme::{Appearance, faded_over, hsla, is_dark, motion, resolve, with_alpha},
     tokens::{Color, Shadow, Stop, Theme, radius, size},
 };
@@ -81,6 +82,8 @@ pub struct Button {
     /// Horizontal padding of 6 px at the control height (Electron account
     /// trigger `px-1.5`). Not a size: the twin Size enum stays the React cva.
     dense: bool,
+    /// Leading icon in the button's ink (`data-icon="inline-start"`).
+    leading_icon: Option<IconName>,
     disabled: bool,
     lit: bool,
     selected: bool,
@@ -100,6 +103,7 @@ impl Button {
             variant: ButtonVariant::Default,
             size: ButtonSize::Default,
             dense: false,
+            leading_icon: None,
             disabled: false,
             lit: false,
             selected: false,
@@ -131,6 +135,13 @@ impl Button {
     /// account-menu trigger: `h-7` + `px-1.5`). Default pad is 12 px.
     pub fn dense(mut self, dense: bool) -> Self {
         self.dense = dense;
+        self
+    }
+
+    /// Leading icon in the button's ink, with Electron leading-icon padding
+    /// (`pl-2.5` default / `pl-2` at Xs).
+    pub fn icon(mut self, name: IconName) -> Self {
+        self.leading_icon = Some(name);
         self
     }
 
@@ -280,7 +291,38 @@ impl RenderOnce for Button {
             pad = 6.0;
         }
         let square = matches!(self.size, ButtonSize::Icon | ButtonSize::IconXs);
+        let has_leading = self.leading_icon.is_some() && !square;
+        // Electron `has-data-[icon=inline-start]:pl-2.5` / xs `pl-2`.
+        let (pad_l, pad_r) = if has_leading {
+            let left = match self.size {
+                ButtonSize::Xs => 8.0,
+                _ => 10.0,
+            };
+            (left, pad)
+        } else {
+            (pad, pad)
+        };
         let r = radius::CHIP;
+        let ink = match self.variant {
+            ButtonVariant::Default | ButtonVariant::Record | ButtonVariant::GoLive => {
+                metal_of(t, self.variant, self.lit)
+                    .map(|m| m.ink)
+                    .unwrap_or(t.foreground)
+            }
+            ButtonVariant::Solid => t.primary_foreground,
+            ButtonVariant::Secondary => t.secondary_foreground,
+            ButtonVariant::Destructive => t.destructive,
+            ButtonVariant::Link => t.primary,
+            ButtonVariant::Outline | ButtonVariant::Ghost | ButtonVariant::Chromatic => {
+                t.foreground
+            }
+        };
+        let ink = fade(ink);
+        let icon_px = if matches!(self.size, ButtonSize::Xs | ButtonSize::IconXs) {
+            12.0
+        } else {
+            16.0
+        };
 
         let expanded = self.selected;
         let mut button = gpui_base::Button::new(self.id)
@@ -301,7 +343,7 @@ impl RenderOnce for Button {
         button = if square {
             button.w(px(height))
         } else {
-            button.px(px(pad))
+            button.pl(px(pad_l)).pr(px(pad_r))
         };
         if let Some(label) = self.accessibility_label {
             button = button.accessibility_label(label);
@@ -319,6 +361,7 @@ impl RenderOnce for Button {
             .flex()
             .items_center()
             .gap(px(gap))
+            .children(self.leading_icon.map(|name| icon(name, icon_px, hsla(ink))))
             .children(self.label)
             .children(self.children);
 

@@ -38,6 +38,8 @@ pub trait GroupedRow: IntoElement {
 pub struct ListRow {
     id: ElementId,
     title: SharedString,
+    /// Normal-weight count after the semibold title ("Moments · 1").
+    title_count: Option<SharedString>,
     leading: Option<AnyElement>,
     icon: Option<AnyElement>,
     context: Option<SharedString>,
@@ -48,6 +50,8 @@ pub struct ListRow {
     selected: bool,
     interactive: Option<bool>,
     compact: bool,
+    /// No horizontal padding (Electron `px-0` flush rows).
+    flush: bool,
     disabled: bool,
     grouped: bool,
     on_click: Option<ClickHandler>,
@@ -59,6 +63,7 @@ impl ListRow {
         ListRow {
             id: id.into(),
             title: title.into(),
+            title_count: None,
             leading: None,
             icon: None,
             context: None,
@@ -69,11 +74,24 @@ impl ListRow {
             selected: false,
             interactive: None,
             compact: false,
+            flush: false,
             disabled: false,
             grouped: false,
             on_click: None,
             appearance: None,
         }
+    }
+
+    /// Count in normal weight beside the semibold title (" · 1").
+    pub fn title_count(mut self, count: impl Into<SharedString>) -> Self {
+        self.title_count = Some(count.into());
+        self
+    }
+
+    /// Drop horizontal padding (`px-0`).
+    pub fn flush(mut self, flush: bool) -> Self {
+        self.flush = flush;
+        self
     }
 
     /// A control before the title (a sound's play button), never clipped
@@ -201,7 +219,12 @@ impl RenderOnce for ListRow {
                     .truncate()
                     .text_color(hsla(t.foreground))
                     .font_weight(FontWeight::MEDIUM)
-                    .child(self.title),
+                    .child(self.title)
+                    .children(self.title_count.map(|count| {
+                        div()
+                            .font_weight(FontWeight::NORMAL)
+                            .child(format!(" · {count}"))
+                    })),
             )
             .children(self.context.map(|context| {
                 div()
@@ -234,13 +257,14 @@ impl RenderOnce for ListRow {
                     .text_color(hsla(t.muted_foreground))
                     .child(meta)
             }));
+        let pad_x = if self.flush { 0.0 } else { 12.0 };
         let content = |row: gpui::Div| {
             row.w_full()
                 .h(px(height))
                 .flex()
                 .items_center()
                 .gap(px(10.0))
-                .px(px(12.0))
+                .px(px(pad_x))
                 .rounded(px(corner))
                 .text_size(px(14.0))
                 .line_height(px(20.0))

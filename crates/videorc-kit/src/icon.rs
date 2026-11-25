@@ -147,6 +147,10 @@ pub enum IconName {
     Heartbeat,
     /// `TerminalIcon` / Agents row (Phosphor's Terminal).
     Terminal,
+    /// Electron `MarkersIcon` (Phosphor's BookmarkSimple): Sidekick Markers.
+    BookmarkSimple,
+    /// Electron `TextIcon` (Phosphor's TextAa): Stream details section title.
+    TextAa,
     /// `FolderIcon` (Phosphor's FolderOpen).
     FolderOpen,
     /// `WaveformMutedIcon` (Phosphor's WaveformSlash).
@@ -250,6 +254,8 @@ impl IconName {
             IconName::Pulse => include_bytes!("../icons/pulse.svg"),
             IconName::Heartbeat => include_bytes!("../icons/heartbeat.svg"),
             IconName::Terminal => include_bytes!("../icons/terminal.svg"),
+            IconName::BookmarkSimple => include_bytes!("../icons/bookmark-simple.svg"),
+            IconName::TextAa => include_bytes!("../icons/text-aa.svg"),
             IconName::FolderOpen => include_bytes!("../icons/folder-open.svg"),
             IconName::WaveformSlash => include_bytes!("../icons/waveform-slash.svg"),
             IconName::Desktop => include_bytes!("../icons/desktop.svg"),
