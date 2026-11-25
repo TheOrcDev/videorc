@@ -114,6 +114,24 @@ pub fn dock_hidden(reason: DockHiddenReason) -> Option<PreviewWords> {
     }
 }
 
+/// `permission-required` (P141): the title, and what the source waits for.
+pub fn needs_permission(status: PermissionStatus) -> PreviewWords {
+    words(NEEDS_PERMISSION, permission_message(status))
+}
+
+/// The grant the preview's sources wait for: the screen's or window's
+/// first, then the camera's, or none. Electron's supervisor hears it from
+/// the surface; the GPUI host reads it off the device list.
+pub fn permission_wait(screen_waits: bool, camera_waits: bool) -> Option<PermissionStatus> {
+    if screen_waits {
+        Some(PermissionStatus::ScreenRecordingRequired)
+    } else if camera_waits {
+        Some(PermissionStatus::CameraRequired)
+    } else {
+        None
+    }
+}
+
 /// `previewPermissionMessage`: what the source waits for.
 pub fn permission_message(status: PermissionStatus) -> &'static str {
     match status {
@@ -138,6 +156,25 @@ pub fn permission(status: PermissionStatus) -> PreviewWords {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_screen_grant_is_named_before_a_camera_grant() {
+        assert_eq!(
+            permission_wait(true, true),
+            Some(PermissionStatus::ScreenRecordingRequired)
+        );
+        assert_eq!(
+            permission_wait(false, true),
+            Some(PermissionStatus::CameraRequired)
+        );
+        assert_eq!(permission_wait(false, false), None);
+        let camera = needs_permission(PermissionStatus::CameraRequired);
+        assert_eq!(camera.title, "Preview needs permission");
+        assert_eq!(
+            camera.detail,
+            "Camera permission is required for camera sources."
+        );
+    }
 
     const PREVIEW_STAGE: &str =
         include_str!("../../../apps/desktop/src/renderer/src/components/preview-stage.tsx");

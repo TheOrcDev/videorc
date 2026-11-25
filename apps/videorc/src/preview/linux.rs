@@ -76,6 +76,7 @@ fn failed(logger: Logger) -> Preview {
         native: None,
         closed: false,
         closed_from: WindowMode::Docked,
+        studio: None,
     }
 }
 
@@ -89,6 +90,7 @@ pub(super) fn new(setup: PreviewSetup, window: &mut Window, cx: &mut App) -> Ent
         logger,
         studio,
     } = setup;
+    let words_studio = studio.clone();
     let choice = scene::choose(|name| std::env::var(name).ok(), Some((&studio, &runtime)));
     logger.log(
         Level::Info,
@@ -179,6 +181,7 @@ pub(super) fn new(setup: PreviewSetup, window: &mut Window, cx: &mut App) -> Ent
             }),
             closed: false,
             closed_from: WindowMode::Docked,
+            studio: Some(words_studio),
         }
     })
 }

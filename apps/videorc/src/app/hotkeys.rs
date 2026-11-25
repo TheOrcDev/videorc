@@ -21,12 +21,12 @@ use std::time::{Duration, Instant};
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use gpui::App;
+use videorc_app_core::Logger;
 use videorc_app_core::desktop::accelerator::normalize_accelerator;
 use videorc_app_core::desktop::global_shortcuts::{
-    global_shortcut_entries, global_shortcut_label, registration_notice, unavailable_reason,
     GlobalShortcutGate, GlobalShortcutsConfig, RegistrationNotice, ShortcutRegistry,
+    global_shortcut_entries, global_shortcut_label, registration_notice, unavailable_reason,
 };
-use videorc_app_core::Logger;
 
 /// `SHORTCUT_RECORDER_IDLE_MS`: an armed recorder with no disarm hands the
 /// keys back after this long.
@@ -86,8 +86,8 @@ impl ShortcutActions for StudioActions {
         self.runtime.spawn(async move {
             use serde_json::Value;
             use videorc_app_core::protocol::ScreenPrivacy;
-            use videorc_app_core::studio::scene_on_stream::screen_privacy_request;
             use videorc_app_core::studio::MicrophoneMode;
+            use videorc_app_core::studio::scene_on_stream::screen_privacy_request;
             use videorc_app_core::{SessionPhase, StopOrigin};
             let snapshot = studio.snapshot();
             match action.as_str() {
@@ -258,14 +258,16 @@ impl Hotkeys {
             })),
         };
         let pump = hotkeys.clone();
-        cx.spawn(async move |cx| loop {
-            cx.background_executor().timer(POLL).await;
-            while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-                if event.state == HotKeyState::Pressed {
-                    pump.fire(event.id);
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor().timer(POLL).await;
+                while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+                    if event.state == HotKeyState::Pressed {
+                        pump.fire(event.id);
+                    }
                 }
+                pump.disarm_if_idle();
             }
-            pump.disarm_if_idle();
         })
         .detach();
         hotkeys

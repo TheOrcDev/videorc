@@ -117,6 +117,8 @@ pub struct Preview {
     closed: bool,
     /// Where a closed Preview opens again: where it was when it closed.
     closed_from: WindowMode,
+    /// The Studio, for the grants the preview's sources wait for (P141).
+    studio: Option<std::sync::Arc<videorc_app_core::Studio<videorc_app_core::BackendClient>>>,
 }
 
 impl Preview {
@@ -135,7 +137,7 @@ impl Preview {
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            let _ = (setup.runtime, setup.backend, setup.studio, window);
+            let _ = (setup.runtime, setup.backend, window);
             setup.logger.log(
                 Level::Warn,
                 "[preview] no preview element on this platform yet (S2.3b on Windows)",
@@ -147,6 +149,7 @@ impl Preview {
                 logger: setup.logger,
                 closed: false,
                 closed_from: WindowMode::Docked,
+                studio: Some(setup.studio),
             })
         }
     }
@@ -159,6 +162,7 @@ impl Preview {
             logger,
             studio,
         } = setup;
+        let words_studio = studio.clone();
         let choice = scene::choose(|name| std::env::var(name).ok(), Some((&studio, &runtime)));
         logger.log(
             Level::Info,
@@ -260,6 +264,7 @@ impl Preview {
                 frame: None,
                 closed: false,
                 closed_from: WindowMode::Docked,
+                studio: Some(words_studio),
             }
         })
     }
@@ -277,6 +282,7 @@ impl Preview {
             frame: None,
             closed: false,
             closed_from: WindowMode::Docked,
+            studio: None,
         }
     }
 
@@ -375,6 +381,31 @@ impl Preview {
         }
     }
 
+    /// P141 `permission-required`: while no frame presents, a selected
+    /// screen, window or camera that waits for its grant names it (the
+    /// device list says so; Electron's supervisor hears it from the
+    /// surface).
+    fn permission_words(&self) -> Option<PreviewWords> {
+        if self.phase == Phase::Presenting {
+            return None;
+        }
+        let watch = self.studio.as_ref()?.watch();
+        let snapshot = watch.borrow();
+        let devices = &snapshot.sources.devices.devices;
+        let sources = &snapshot.settings.capture.sources;
+        let waits = |id: &Option<String>| {
+            id.as_deref().is_some_and(|id| {
+                devices.iter().any(|device| {
+                    device.id == id
+                        && device.status == videorc_protocol::DeviceStatus::PermissionRequired
+                })
+            })
+        };
+        let screen = waits(&sources.screen_id) || waits(&sources.window_id);
+        let camera = waits(&sources.camera_id);
+        words::permission_wait(screen, camera).map(words::needs_permission)
+    }
+
     /// What the Studio slot says, or nothing while a frame shows there.
     pub fn docked_words(&self) -> Option<PreviewWords> {
         if !self.native_ready() {
@@ -382,6 +413,9 @@ impl Preview {
         }
         if self.is_closed() {
             return Some(words::LIVES_IN_ITS_OWN_WINDOW);
+        }
+        if let Some(waiting) = self.permission_words() {
+            return Some(waiting);
         }
         match self.mode {
             WindowMode::Floating => Some(words::away(self.phase)),
@@ -393,7 +427,7 @@ impl Preview {
     /// there (opening, failed or stalled), or nothing.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub(crate) fn floating_words(&self) -> Option<PreviewWords> {
-        words::phase(self.phase)
+        self.permission_words().or_else(|| words::phase(self.phase))
     }
 
     #[cfg(target_os = "macos")]
