@@ -38,6 +38,11 @@ export const BASELINE_ENABLED_DESTINATIONS = Object.freeze([
 /** Rows each fake platform sends: few and quick, so every look sees the same ones. */
 export const BASELINE_CHAT_ROWS = 8
 
+/** Each seeded test recording's length. Over Clean cut's 10 s minimum
+ * (`CLEAN_CUT_MIN_SOURCE_MS`, Electron's `cleanCutEligibility`), so Clean
+ * cut lists both takes, with their posters, in both apps. */
+export const BASELINE_TAKE_MS = 12_000
+
 /** The fake chat connector's destinations (smoke:live-chat-fake-providers' shape). */
 export const BASELINE_CHAT_TARGETS = Object.freeze({
   youtube: 'baseline-youtube',
@@ -394,7 +399,7 @@ export async function seedBaselineBackend({ rpc, smoke, fixtures, recordingsDir,
         }
       })
       if (!started?.sessionId) throw new Error(`session.start answered ${JSON.stringify(started)}`)
-      await sleep(3000)
+      await sleep(BASELINE_TAKE_MS)
       await rpc('session.stop')
       await sleep(1500)
     }
