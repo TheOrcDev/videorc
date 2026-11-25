@@ -55,7 +55,7 @@ use videorc_kit::slider::{Slider, SliderEvent, SliderState};
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
-use videorc_kit::tokens::{Theme, font, size, text};
+use videorc_kit::tokens::{Theme, size, text};
 
 use crate::app::permissions::Permissions;
 use crate::app::shell::Shell;
@@ -275,8 +275,10 @@ fn labelled_switch(
 
 /// A control row's readout: `font-mono text-xs text-muted-foreground`.
 fn value_text(t: &Theme, words: impl Into<SharedString>) -> gpui::Div {
+    // `font::MONO[0]` is the CSS `ui-monospace`, which GPUI can't load (kit
+    // request); the LCD's loadable mono face until the token carries one.
     div()
-        .font_family(font::MONO[0])
+        .font_family(crate::lcd::SCREEN_FONT)
         .type_scale(text::META)
         .whitespace_nowrap()
         .text_color(hsla(t.muted_foreground))

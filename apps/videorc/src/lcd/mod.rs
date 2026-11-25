@@ -330,9 +330,11 @@ pub fn key(
             .hover(|style| style.bg(border).text_color(ink_fill))
             .on_click(on_click);
     }
+    // `whitespace-nowrap` with no truncation (`lcd-panel.tsx:193`): a long
+    // label runs into the key's padding, as Electron's does, never "RECO…".
     button
         .children(leading)
-        .child(div().truncate().child(caps(label)))
+        .child(div().flex_none().whitespace_nowrap().child(caps(label)))
         .children(trailing)
 }
 
