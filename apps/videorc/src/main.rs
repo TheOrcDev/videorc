@@ -600,6 +600,29 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let vertical_stream = cx.new(|cx| {
+                    screens::studio::vertical_stream::VerticalStreamSection::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        studio_state.clone(),
+                        cx,
+                    )
+                });
+                let show_stage = cx.new(|cx| {
+                    screens::studio::show_stage::ShowStage::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        talk_show.clone(),
+                        cx,
+                    )
+                });
+                let talk_show_host = cx.new(|cx| {
+                    screens::studio::talk_show_host::TalkShowRoomHost::new(
+                        studio.clone(),
+                        talk_show.clone(),
+                        cx,
+                    )
+                });
                 let studio_page = cx.new(|cx| {
                     StudioPage::new(
                         transport.clone(),
@@ -611,6 +634,9 @@ fn main() -> Result<()> {
                         quick_settings,
                         takeover,
                         scenes,
+                        vertical_stream,
+                        show_stage,
+                        talk_show_host,
                         window,
                         cx,
                     )
