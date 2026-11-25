@@ -9,8 +9,8 @@
 //! reject them anywhere else.
 
 use gpui::{
-    Action, App, FontWeight, IntoElement, Keystroke, Modifiers, SharedString, Window, div,
-    prelude::*,
+    Action, App, FontWeight, IntoElement, Keystroke, Modifiers, OperatingSystem, SharedString,
+    Window, div, prelude::*,
 };
 
 use crate::{kbd::Kbd, theme::Appearance, tokens::Color};
@@ -54,9 +54,16 @@ impl ShortcutKeys {
     /// keymap without `Box::leak`.
     pub fn keystrokes_owned(source: impl Into<SharedString>) -> Self {
         let source = source.into();
+        let os = if cfg!(target_os = "macos") {
+            OperatingSystem::Mac
+        } else if cfg!(target_os = "windows") {
+            OperatingSystem::Windows
+        } else {
+            OperatingSystem::Linux
+        };
         let strokes = source
             .split_whitespace()
-            .filter_map(|stroke| Keystroke::parse(stroke).ok())
+            .filter_map(|stroke| Keystroke::parse_with_os(stroke, os).ok())
             .collect();
         Self::from_source(Source::Keystrokes(strokes))
     }
@@ -242,7 +249,12 @@ fn parse_one_accelerator(source: &str, mac: bool) -> Option<Keystroke> {
         parts.push("cmd");
     }
     parts.push(key.as_str());
-    Keystroke::parse(&parts.join("-")).ok()
+    let os = if mac {
+        OperatingSystem::Mac
+    } else {
+        OperatingSystem::Windows
+    };
+    Keystroke::parse_with_os(&parts.join("-"), os).ok()
 }
 
 /// A keystroke sequence as the platform's menus print it: macOS glyphs in
