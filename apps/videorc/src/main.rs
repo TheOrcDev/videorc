@@ -338,6 +338,8 @@ fn main() -> Result<()> {
     let main_frame = MainFrame::new(&paths.user_data_dir, logger.clone());
     let stream_manager_frame = StreamManagerFrame::new(&paths.user_data_dir, logger.clone());
     let notes_frame = NotesFrame::new(&paths.user_data_dir, logger.clone());
+    let captions_frame =
+        screens::captions::reader::CaptionsFrame::new(&paths.user_data_dir, logger.clone());
     let quit_guard = sleep_guard.clone();
     let quit_permissions = permissions.clone();
     let focus_permissions = permissions.clone();
@@ -453,6 +455,8 @@ fn main() -> Result<()> {
             SourcesPanel::new(studio.clone(), permissions.clone(), core_handle.clone(), cx)
         });
         let output = cx.new(|cx| OutputPanel::new(studio.clone(), core_handle.clone(), cx));
+        // Captions ⌘4 and the reader share one caption feed (plan 260, L2).
+        screens::captions::install(studio.clone(), core_handle.clone(), cx);
         let destinations =
             cx.new(|cx| DestinationsPanel::new(studio.clone(), core_handle.clone(), cx));
         let guests = cx.new(|cx| GuestsPanel::new(studio.clone(), core_handle.clone(), cx));
@@ -634,6 +638,7 @@ fn main() -> Result<()> {
             core_handle.clone(),
         );
         screens::notes::window::install(cx, notes_frame, APP_ID);
+        screens::captions::reader::install(cx, captions_frame, APP_ID);
 
         // The smoke command server and the UI driver (plan 260 S2.5), when a
         // smoke asked for them; off, this does nothing. `app-quit` reaches

@@ -26,6 +26,7 @@ pub enum Command {
     Preview,
     StreamManager,
     Notes,
+    CaptionsReader,
     Notifications,
     Record,
     Stop,
@@ -260,8 +261,8 @@ impl CommandPalette {
             "Captions reader",
             "Windows",
             "Captions reader",
-            Command::Unavailable,
-            false,
+            Command::CaptionsReader,
+            true,
         ));
         rows.push(Row::new(
             "add-scene",
@@ -372,6 +373,7 @@ impl CommandPalette {
             | Command::Preview
             | Command::StreamManager
             | Command::Notes
+            | Command::CaptionsReader
             | Command::Notifications => cx.emit(command),
             _ => {
                 if command == Command::Stop {
