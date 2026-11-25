@@ -836,6 +836,76 @@ pub fn save_stats_layout(layout: &StatsLayout) -> SettingWrite {
     )
 }
 
+/// `moveStat`: move `id` to `to_index`. A move that would push the clock or
+/// the viewer count out of the main slots is refused.
+pub fn move_stat(layout: &StatsLayout, id: &str, to_index: usize) -> StatsLayout {
+    let Some(from) = layout.order.iter().position(|candidate| candidate == id) else {
+        return layout.clone();
+    };
+    let mut order: Vec<String> = layout
+        .order
+        .iter()
+        .filter(|candidate| candidate.as_str() != id)
+        .cloned()
+        .collect();
+    let index = to_index.min(order.len());
+    order.insert(index, id.to_string());
+    if order.iter().zip(layout.order.iter()).all(|(a, b)| a == b)
+        && order.len() == layout.order.len()
+    {
+        return layout.clone();
+    }
+    let locked_in_main = LOCKED_STATS.iter().all(|locked| {
+        order
+            .iter()
+            .position(|candidate| candidate == locked)
+            .is_some_and(|index| index < MAIN_SLOTS)
+    });
+    if locked_in_main {
+        StatsLayout {
+            order,
+            hidden: layout.hidden.clone(),
+        }
+    } else {
+        layout.clone()
+    }
+}
+
+/// `setStatHidden`.
+pub fn set_stat_hidden(layout: &StatsLayout, id: &str, hidden: bool) -> StatsLayout {
+    if LOCKED_STATS.contains(&id) {
+        return layout.clone();
+    }
+    let without: Vec<String> = layout
+        .hidden
+        .iter()
+        .filter(|candidate| candidate.as_str() != id)
+        .cloned()
+        .collect();
+    StatsLayout {
+        order: layout.order.clone(),
+        hidden: if hidden {
+            let mut next = without;
+            next.push(id.to_string());
+            next
+        } else {
+            without
+        },
+    }
+}
+
+/// Visible stats ids in layout order (`arrangeStats` without the models).
+pub fn arranged_stat_ids(layout: &StatsLayout) -> Vec<String> {
+    let hidden: std::collections::HashSet<&str> =
+        layout.hidden.iter().map(String::as_str).collect();
+    layout
+        .order
+        .iter()
+        .filter(|id| !hidden.contains(id.as_str()))
+        .cloned()
+        .collect()
+}
+
 // --- every family at once ---
 
 /// Every family's reading of the store, for the snapshot.

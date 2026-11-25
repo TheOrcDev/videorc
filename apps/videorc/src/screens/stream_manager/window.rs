@@ -22,6 +22,7 @@ use videorc_app_core::desktop::permissions::PermissionPlatform;
 use videorc_app_core::protocol::{Banner, ScreenPrivacy, ScreenPrivacyReason, SoundboardState};
 use videorc_app_core::stream_manager::copy::WINDOW_NAME;
 use videorc_app_core::stream_manager::dashboard::{LiveDashboard, SessionState};
+use videorc_app_core::studio::families::{self, StatsLayout};
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
 use videorc_kit::{
@@ -186,6 +187,7 @@ pub struct StreamManager {
     panes: Panes,
     facts: Facts,
     stats: StatsView,
+    stats_layout: StatsLayout,
     pinned: bool,
     hidden: bool,
     hide_method: HideMethod,
@@ -245,6 +247,7 @@ impl StreamManager {
         }
         let now = chrono::Utc::now().timestamp_millis();
         let stats = StatsView::from_dashboard(&dashboard.borrow(), now);
+        let stats_layout = studio.read_ui_settings(families::stats_layout);
         cx.spawn(async move |this, cx| {
             loop {
                 tokio::select! {
@@ -349,6 +352,7 @@ impl StreamManager {
                 ..Facts::default()
             },
             stats,
+            stats_layout,
             pinned,
             hidden,
             hide_method,
@@ -360,6 +364,19 @@ impl StreamManager {
             focus,
             _bounds: bounds,
         }
+    }
+
+    fn apply_stats_layout(&mut self, layout: StatsLayout, cx: &mut Context<Self>) {
+        if self.stats_layout == layout {
+            return;
+        }
+        self.stats_layout = layout.clone();
+        let studio = self.studio.clone();
+        let write = families::save_stats_layout(&layout);
+        self.runtime.spawn(async move {
+            let _ = studio.write_settings(vec![write]).await;
+        });
+        cx.notify();
     }
 
     fn play_sound(&self, id: String) {
@@ -648,7 +665,13 @@ impl Render for StreamManager {
                     this.run(PaneKey::WriteInChat, window, cx)
                 }))
                 .child(WindowHeader::new(TITLE).mac(mac))
-                .child(stats_bar(t, &self.stats, width))
+                .child({
+                    let this = cx.entity().downgrade();
+                    let layout = self.stats_layout.clone();
+                    stats_bar(t, &self.stats, &layout, width, move |next, app| {
+                        let _ = this.update(app, |sm, cx| sm.apply_stats_layout(next, cx));
+                    })
+                })
                 .child(
                     div()
                         .flex_1()
