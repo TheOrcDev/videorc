@@ -27,7 +27,7 @@ pub(crate) mod macos;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod scene;
 
-use gpui::{AnyElement, App, AppContext, Entity, FontWeight, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, AppContext, Context, Entity, FontWeight, Window, div, prelude::*, px};
 use videorc_kit::theme::hsla;
 // The video ground and its words are the same in every appearance.
 use tokio::sync::watch;
@@ -42,7 +42,7 @@ use gpui::canvas;
 #[cfg(target_os = "macos")]
 use {
     gpui::{
-        AsyncApp, Bounds, Context, Pixels, TitlebarOptions, WeakEntity, WindowBounds, WindowHandle,
+        AsyncApp, Bounds, Pixels, TitlebarOptions, WeakEntity, WindowBounds, WindowHandle,
         WindowKind, WindowOptions, canvas, size,
     },
     std::sync::Arc,
@@ -112,10 +112,10 @@ pub struct Preview {
     frame: Option<frame::PreviewFrame>,
     /// Close Preview, or its window closed by hand (P131): no window and no
     /// docked video; the Studio says so and offers both places to open it.
-    #[cfg(target_os = "macos")]
+    /// Every platform keeps it (P530, P541: Windows has no preview yet, and
+    /// its Open / Close Preview still agree).
     closed: bool,
     /// Where a closed Preview opens again: where it was when it closed.
-    #[cfg(target_os = "macos")]
     closed_from: WindowMode,
 }
 
@@ -145,6 +145,8 @@ impl Preview {
                 mode: WindowMode::Docked,
                 docked_shown: true,
                 logger: setup.logger,
+                closed: false,
+                closed_from: WindowMode::Docked,
             })
         }
     }
@@ -295,25 +297,82 @@ impl Preview {
     /// Show preview here (P540): a closed Preview opens docked, one in its
     /// own window comes back to the dock.
     pub fn show_docked(&mut self, cx: &mut gpui::Context<Self>) {
-        #[cfg(target_os = "macos")]
         if self.closed {
             self.open_docked(cx);
         } else if self.mode == WindowMode::Floating {
+            #[cfg(target_os = "macos")]
             self.dock(cx);
+            #[cfg(target_os = "linux")]
+            self.dock_linux(cx);
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = cx;
     }
 
     /// The Scene page's entry (P532): a closed Preview opens docked there;
     /// one in its own window stays where it is.
     pub fn open_docked_if_closed(&mut self, cx: &mut gpui::Context<Self>) {
-        #[cfg(target_os = "macos")]
         if self.closed {
             self.open_docked(cx);
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = cx;
+    }
+
+    /// The layout-only line's action (P530, Electron `openPreviewWindow`):
+    /// a closed Preview opens where it was; one in its own window comes to
+    /// the front.
+    pub fn open_or_show(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.closed {
+            self.toggle_open(cx);
+        } else if self.mode == WindowMode::Floating {
+            self.bring_to_front(cx);
+        }
+    }
+
+    /// The element's phase (Starting, Presenting, Healing, Stalled,
+    /// Fallback; Disconnected): the Studio's preview health reads it.
+    pub fn phase(&self) -> Phase {
+        self.phase
+    }
+
+    /// Retry preview has something to re-arm: the native element started.
+    /// (A refused start, or Windows today, has none: Retry stays off.)
+    pub fn can_retry(&self) -> bool {
+        self.native_ready()
+    }
+
+    /// Retry preview (P117, P146; Electron's `refreshPreview`): the native
+    /// path is rebuilt on the host that holds it (the presenter, the layer
+    /// or child, and a fresh backend surface), the Studio's scene is
+    /// committed again, and the watchdog starts the first-frame contract
+    /// over with a fresh budget and healing ladder. True when it ran.
+    pub fn retry(&mut self, cx: &mut Context<Self>) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            if self.native.is_none() {
+                return false;
+            }
+            self.on_request(UiRequest::ResetNativePath);
+            if let Some(native) = self.native.as_mut() {
+                native.element.rearm();
+            }
+            cx.notify();
+            true
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let Some(native) = self.native.as_mut() else {
+                return false;
+            };
+            // The child is rebuilt at its host's next layout, where the
+            // window is.
+            native.reset_pending = true;
+            native.element.rearm();
+            cx.notify();
+            true
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = cx;
+            false
+        }
     }
 
     /// What the Studio slot says, or nothing while a frame shows there.
@@ -389,10 +448,7 @@ impl Preview {
 
     /// Closed (P131): neither docked nor in its own window.
     pub fn is_closed(&self) -> bool {
-        #[cfg(target_os = "macos")]
-        return self.closed;
-        #[cfg(not(target_os = "macos"))]
-        false
+        self.closed
     }
 
     /// Close Preview (P131): the Preview window closes and the Preview stays
@@ -405,18 +461,73 @@ impl Preview {
         self.set_closed(cx);
     }
 
+    /// Close Preview off macOS (P541): Linux's child goes home from its own
+    /// window and hides; Windows (no preview yet) keeps the state alone.
+    #[cfg(not(target_os = "macos"))]
+    pub fn close(&mut self, cx: &mut Context<Self>) {
+        self.closed_from = self.mode;
+        #[cfg(target_os = "linux")]
+        if self.mode == WindowMode::Floating {
+            self.dock_linux(cx);
+        }
+        self.closed = true;
+        #[cfg(target_os = "linux")]
+        self.apply_linux_visibility();
+        self.logger
+            .log(Level::Info, "[preview] the Preview is closed");
+        cx.notify();
+    }
+
     /// Window → Preview, ⌘P and the palette's Open/Close Preview (P1506,
-    /// Electron's `togglePreviewWindow`): an open Preview closes where it
-    /// is; a closed one opens where it was.
-    #[cfg(target_os = "macos")]
+    /// P541, Electron's `togglePreviewWindow`): an open Preview closes
+    /// where it is; a closed one opens where it was.
     pub fn toggle_open(&mut self, cx: &mut Context<Self>) {
         if !self.closed {
             self.close(cx);
-        } else if self.closed_from == WindowMode::Floating {
+        } else if self.closed_from == WindowMode::Floating && self.can_float() {
             self.open_floating(cx);
         } else {
             self.open_docked(cx);
         }
+    }
+
+    /// Show here, from closed, off macOS: the Preview docks in the Studio.
+    #[cfg(not(target_os = "macos"))]
+    pub fn open_docked(&mut self, cx: &mut Context<Self>) {
+        self.closed = false;
+        #[cfg(target_os = "linux")]
+        if self.mode == WindowMode::Floating {
+            self.dock_linux(cx);
+        }
+        #[cfg(target_os = "linux")]
+        self.apply_linux_visibility();
+        cx.notify();
+    }
+
+    /// Open in its own window, from closed, off macOS (Linux; Windows has
+    /// no Preview window, so it opens docked).
+    #[cfg(not(target_os = "macos"))]
+    pub fn open_floating(&mut self, cx: &mut Context<Self>) {
+        self.closed = false;
+        #[cfg(target_os = "linux")]
+        {
+            self.apply_linux_visibility();
+            if self.mode == WindowMode::Docked {
+                self.float_linux(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Bring to front off macOS: Linux's Preview window comes up.
+    #[cfg(not(target_os = "macos"))]
+    pub fn bring_to_front(&self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        if let Some(handle) = self.native.as_ref().and_then(|native| native.floating) {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = cx;
     }
 
     /// Show here, from closed: the Preview docks in the Studio.
@@ -613,8 +724,7 @@ impl Preview {
 
     /// Opens the Preview in its own window, or docks it back.
     pub fn toggle_floating(&mut self, cx: &mut gpui::Context<Self>) {
-        // Closed, it opens where it last was: its own window.
-        #[cfg(target_os = "macos")]
+        // Closed, it opens in its own window.
         if self.closed {
             self.open_floating(cx);
             return;

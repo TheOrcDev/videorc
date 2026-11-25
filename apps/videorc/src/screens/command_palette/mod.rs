@@ -298,7 +298,9 @@ impl CommandPalette {
             "Windows",
             "Open/Close Preview",
             Command::Preview,
-            cfg!(target_os = "macos"),
+            // A Preview window exists on macOS and Linux (none on Windows
+            // yet).
+            cfg!(any(target_os = "macos", target_os = "linux")),
         ));
         rows.push(Row::new(
             "manager",

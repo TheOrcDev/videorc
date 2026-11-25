@@ -353,15 +353,11 @@ impl Shell {
                     this.first_run
                         .update(cx, |setup, cx| setup.open_replay(return_to, cx));
                 }
-                // Open/Close Preview (macOS only, as the row is).
-                #[cfg(target_os = "macos")]
+                // Open/Close Preview: closes where it is, opens where it was
+                // (every platform keeps the closed state, P541).
                 Command::Preview => this
                     .preview
                     .update(cx, |preview, cx| preview.toggle_open(cx)),
-                #[cfg(not(target_os = "macos"))]
-                Command::Preview => this
-                    .preview
-                    .update(cx, |preview, cx| preview.toggle_floating(cx)),
                 Command::StreamManager => {
                     window.dispatch_action(Box::new(super::menus::ToggleStreamManager), cx)
                 }
@@ -973,17 +969,7 @@ impl Render for Shell {
                         ),
                     )
                     .child({
-                        let preview_open = {
-                            #[cfg(target_os = "macos")]
-                            {
-                                !self.preview.read(cx).is_closed()
-                            }
-                            #[cfg(not(target_os = "macos"))]
-                            {
-                                self.preview.read(cx).mode()
-                                    == videorc_preview::lifecycle::WindowMode::Floating
-                            }
-                        };
+                        let preview_open = !self.preview.read(cx).is_closed();
                         StatusBarHint::new(
                             "preview",
                             "Preview",
@@ -991,12 +977,8 @@ impl Render for Shell {
                         )
                         .pressed(preview_open)
                         .on_click(cx.listener(|this, _, _, cx| {
-                            #[cfg(target_os = "macos")]
                             this.preview
                                 .update(cx, |preview, cx| preview.toggle_open(cx));
-                            #[cfg(not(target_os = "macos"))]
-                            this.preview
-                                .update(cx, |preview, cx| preview.toggle_floating(cx));
                         }))
                     })
                     .child(

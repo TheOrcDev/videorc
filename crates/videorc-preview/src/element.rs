@@ -22,6 +22,7 @@
 //! its first is on screen), then the old one stops; the layer hides or
 //! shows in that same step. No frame is blank or stale on the way.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -481,6 +482,9 @@ pub struct PreviewElement {
     texture: Option<TextureSink>,
     watchdog: Option<JoinHandle<()>>,
     status: watch::Receiver<PreviewStatus>,
+    /// Retry preview's count: the watchdog starts the first-frame contract
+    /// again, with a fresh budget, whenever it moves.
+    rearm: Arc<AtomicU64>,
     logger: Logger,
 }
 
@@ -513,12 +517,14 @@ impl PreviewElement {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let route = Route::Texture;
         let (status_tx, status) = watch::channel(PreviewStatus::initial());
+        let rearm = Arc::new(AtomicU64::new(0));
         let watchdog = handle.spawn(watchdog(
             feed.telemetry_handle(),
             feed.sender(),
             config.notify,
             config.logger.clone(),
             status_tx,
+            rearm.clone(),
         ));
         let mut element = Self {
             handle: handle.clone(),
@@ -535,6 +541,7 @@ impl PreviewElement {
             texture: config.texture,
             watchdog: Some(watchdog),
             status,
+            rearm,
             logger: config.logger,
         };
         if route == Route::Texture {
@@ -923,6 +930,27 @@ impl PreviewElement {
         self.native.reapply_frame();
     }
 
+    /// Retry preview (Electron's `refreshPreview`, P117/P146): after a
+    /// failure or a stall, the watchdog starts the first-frame contract
+    /// again with a fresh budget and healing ladder, the Studio's scene is
+    /// committed again, and the freshest frame goes through once more. The
+    /// host rebuilds its native path first ([`Self::reset_native_path`]),
+    /// on the window that holds the layer, so this one is platform-free.
+    pub fn rearm(&mut self) {
+        let count = self.rearm.fetch_add(1, Ordering::Relaxed) + 1;
+        self.logger.log(
+            Level::Info,
+            &format!("[preview] retry preview ({count}): the first-frame contract starts again"),
+        );
+        if let Some(feed) = &self.feed {
+            // The answer (the committed revision, or why not) is the log's.
+            let (answer, _) = tokio::sync::oneshot::channel();
+            feed.send(FeedCommand::CommitScene(answer));
+            feed.send(FeedCommand::Kick);
+        }
+        self.kick();
+    }
+
     /// `reset-native-path`: the presenter and the layer are retired and built
     /// again, and the feed gets a fresh surface. A failure leaves the native
     /// path down with its reason in the status.
@@ -1116,7 +1144,9 @@ async fn watchdog(
     notify: Arc<dyn Fn(UiRequest) + Send + Sync>,
     logger: Logger,
     status_tx: watch::Sender<PreviewStatus>,
+    rearm: Arc<AtomicU64>,
 ) {
+    let mut seen_rearm = rearm.load(Ordering::Relaxed);
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut mode = Mode::FirstFrame {
@@ -1178,9 +1208,14 @@ async fn watchdog(
             );
             continue;
         }
-        if !was_connected {
-            // A fresh session: the first-frame contract starts again.
+        let rearmed = rearm.load(Ordering::Relaxed);
+        if !was_connected || rearmed != seen_rearm {
+            // A fresh session, or Retry preview: the first-frame contract
+            // starts again, its budget and its ladder from the top.
             was_connected = true;
+            seen_rearm = rearmed;
+            last_frames_rendered = None;
+            last_presented = None;
             mode = Mode::FirstFrame {
                 started_at: Instant::now(),
                 ledger: Ledger::default(),

@@ -979,10 +979,7 @@ fn main() -> Result<()> {
             let _ = main_window.update(cx, |_, window, _| window.activate_window());
             preview.update(cx, |preview, cx| {
                 if preview.can_float() {
-                    #[cfg(target_os = "macos")]
                     preview.toggle_open(cx);
-                    #[cfg(not(target_os = "macos"))]
-                    preview.toggle_floating(cx);
                 }
             });
         });
