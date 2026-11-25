@@ -55,6 +55,15 @@ pub const MOVE_EARLIER: &str = "Move earlier";
 pub const MOVE_LATER: &str = "Move later";
 pub const DELETE_ELLIPSIS: &str = "Delete…";
 pub const SHOWING: &str = "Showing";
+/// A live background tile's tag (`live-backgrounds-group.tsx`).
+pub const LIVE_BADGE: &str = "Live";
+/// An HTML banner's tag (plan 232).
+pub const HTML_BADGE: &str = "HTML";
+/// `BANNER_MAX_SHOWN` and its refusal (plan 186 D7).
+pub const BANNER_MAX_SHOWN: usize = 4;
+pub const BANNER_SHOWN_LIMIT_REASON: &str = "Four banners are showing. Hide one first.";
+pub const BANNER_ALREADY_FIRST: &str = "This banner is already first.";
+pub const BANNER_ALREADY_LAST: &str = "This banner is already last.";
 
 pub const TAKEOVERS: &str = "Takeovers";
 pub const TAKEOVERS_DESCRIPTION: &str = "Full-frame images that cover the output, turned on from the Studio. Turning one on mutes your microphone until you turn it off. Drop images here to import them.";

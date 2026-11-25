@@ -13,19 +13,23 @@ use videorc_app_core::resources::{
 };
 use videorc_app_core::soundboard::{self, ImportPhase, SOUND_VOLUME_DB_MAX, SOUND_VOLUME_DB_MIN};
 use videorc_app_core::studio::StudioBackend;
+use videorc_app_core::studio::audio_mixer::format_db;
 use videorc_app_core::{BackendClient, BackendState, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle, DialogSize};
 use videorc_kit::empty::Empty;
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
-use videorc_kit::list_row::{GroupedList, ListRow};
+use videorc_kit::kebab_menu::{KEBAB_HOST, KebabMenu, KebabMenuItem, KebabReveal};
+use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::select::Select;
 use videorc_kit::slider::{Slider, SliderEvent, SliderState};
+use videorc_kit::spinner::Spinner;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
-use videorc_kit::tokens::{size, text};
+use videorc_kit::tokens::{font, size, text};
 
 pub type AppStudio = Studio<BackendClient>;
 
@@ -416,27 +420,33 @@ impl Render for SoundsPanel {
 
         let import_button = |id: &'static str, reason: Option<&'static str>, phase: ImportPhase| {
             let entity = entity.clone();
-            Button::new(id)
-                .label(soundboard::import_label(phase))
+            let glyph = if phase == ImportPhase::Idle {
+                icon(IconName::UploadSimple, 16., hsla(t.foreground)).into_any_element()
+            } else {
+                Spinner::new(SharedString::from(format!("{id}-spinner")))
+                    .size(16.)
+                    .into_any_element()
+            };
+            let mut button = Button::new(id)
                 .variant(ButtonVariant::Outline)
                 .disabled(reason.is_some())
-                .on_click(move |_, _, cx| {
-                    if reason.is_none() {
-                        entity.update(cx, |panel, cx| panel.import_sounds(cx));
-                    }
-                })
+                .child(glyph)
+                .child(soundboard::import_label(phase));
+            // `DisabledReason`: why it is off, on hover.
+            if let Some(reason) = reason {
+                button = button.tooltip(reason);
+            }
+            button.on_click(move |_, _, cx| {
+                if reason.is_none() {
+                    entity.update(cx, |panel, cx| panel.import_sounds(cx));
+                }
+            })
         };
 
-        let mut notices = div().flex().flex_col().gap(px(8.));
-        if offline {
-            notices = notices.child(
-                Alert::new("sounds-offline")
-                    .variant(AlertVariant::Locked)
-                    .title(soundboard::OFFLINE_LOCK),
-            );
-        }
-
+        // `PanelSection` with its SpeakerOn mark; the offline alert leads
+        // its content.
         let mut section = PanelSection::new("sounds-section")
+            .icon(icon(IconName::SpeakerHigh, 16., hsla(t.muted_foreground)))
             .title(soundboard::SECTION)
             .description(description)
             .last(true)
@@ -445,9 +455,17 @@ impl Render for SoundsPanel {
                 import_reason,
                 self.import_phase,
             ));
+        if offline {
+            section = section.child(
+                Alert::new("sounds-offline")
+                    .variant(AlertVariant::Locked)
+                    .title(soundboard::OFFLINE_LOCK),
+            );
+        }
 
         if !sounds.is_empty() {
-            let mut list = GroupedList::new().label(soundboard::SECTION);
+            // Electron names the list for assistive tech only (`aria-label`).
+            let mut list = GroupedList::new();
             for (index, sound) in sounds.iter().enumerate() {
                 let playing = self.playing.contains(&sound.id);
                 let id = sound.id.clone();
@@ -503,128 +521,134 @@ impl Render for SoundsPanel {
                     }
                 });
 
-                let row = ListRow::new(format!("sound-{}", sound.id), sound.name.clone())
-                    .context(duration)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                Button::new(format!("sound-play-{}", sound.id))
-                                    .label(if playing { "Stop" } else { "Play" })
-                                    .size(ButtonSize::Xs)
-                                    .variant(ButtonVariant::Ghost)
-                                    .disabled(offline)
-                                    .tooltip(pad)
-                                    .on_click({
-                                        let entity = entity.clone();
-                                        let id = id.clone();
-                                        move |_, _, cx| {
-                                            entity.update(cx, |panel, cx| {
-                                                panel.play_or_stop(id.clone(), cx)
-                                            })
-                                        }
-                                    }),
-                            )
-                            .child(mode_select)
-                            .child({
-                                let volume_db = self
-                                    .volume
-                                    .get(&sound.id)
-                                    .map(|slider| slider.read(cx).value().end().round() as i32)
-                                    .unwrap_or(sound.volume_db);
-                                let mut volume_row =
-                                    div().flex().items_center().gap(px(6.)).w(px(140.));
-                                if let Some(slider) = self.volume.get(&sound.id) {
-                                    volume_row = volume_row.child(
-                                        div().w(px(88.)).child(
-                                            Slider::new(slider)
-                                                .accessibility_label(format!(
-                                                    "{} volume",
-                                                    sound.name
-                                                ))
-                                                .disabled(offline),
-                                        ),
-                                    );
-                                }
-                                volume_row.child(
-                                    div()
-                                        .w(px(48.))
-                                        .type_scale(text::META)
-                                        .text_color(hsla(t.muted_foreground))
-                                        .child(soundboard::format_volume_db(volume_db)),
-                                )
-                            })
-                            .child(key_select)
-                            .child(
-                                Button::new(format!("sound-rename-{}", sound.id))
-                                    .label(soundboard::RENAME_ELLIPSIS)
-                                    .size(ButtonSize::Xs)
-                                    .variant(ButtonVariant::Ghost)
-                                    .disabled(offline)
-                                    .on_click({
-                                        let entity = entity.clone();
-                                        let sound = sound.clone();
-                                        move |_, window, cx| {
-                                            entity.update(cx, |panel, cx| {
-                                                panel.open_rename(&sound, window, cx)
-                                            })
-                                        }
-                                    }),
-                            )
-                            .child(
-                                Button::new(format!("sound-up-{}", sound.id))
-                                    .label(soundboard::MOVE_UP)
-                                    .size(ButtonSize::Xs)
-                                    .variant(ButtonVariant::Ghost)
-                                    .disabled(offline || first)
-                                    .on_click({
-                                        let entity = entity.clone();
-                                        let id = id.clone();
-                                        let target = index.saturating_sub(1);
-                                        move |_, _, cx| {
-                                            entity.update(cx, |panel, cx| {
-                                                panel.move_sound(id.clone(), target, cx)
-                                            })
-                                        }
-                                    }),
-                            )
-                            .child(
-                                Button::new(format!("sound-down-{}", sound.id))
-                                    .label(soundboard::MOVE_DOWN)
-                                    .size(ButtonSize::Xs)
-                                    .variant(ButtonVariant::Ghost)
-                                    .disabled(offline || last)
-                                    .on_click({
-                                        let entity = entity.clone();
-                                        let id = id.clone();
-                                        let target = index + 1;
-                                        move |_, _, cx| {
-                                            entity.update(cx, |panel, cx| {
-                                                panel.move_sound(id.clone(), target, cx)
-                                            })
-                                        }
-                                    }),
-                            )
-                            .child(
-                                Button::new(format!("sound-remove-{}", sound.id))
-                                    .label(soundboard::REMOVE)
-                                    .size(ButtonSize::Xs)
-                                    .variant(ButtonVariant::Ghost)
-                                    .disabled(offline)
-                                    .on_click({
-                                        let entity = entity.clone();
-                                        let id = id.clone();
-                                        move |_, _, cx| {
-                                            entity.update(cx, |panel, cx| {
-                                                panel.remove_sound(id.clone(), cx)
-                                            })
-                                        }
-                                    }),
-                            ),
+                // `SoundRow`: play or stop at the start, the name and its
+                // length, then how a press plays it, its volume, its key and
+                // the rare actions in ⋯.
+                let volume_db = self
+                    .volume
+                    .get(&sound.id)
+                    .map(|slider| slider.read(cx).value().end().round() as i32)
+                    .unwrap_or(sound.volume_db);
+                let mut volume = div()
+                    .flex_none()
+                    .w(px(144.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.));
+                if let Some(slider) = self.volume.get(&sound.id) {
+                    volume = volume.child(
+                        div().flex_1().min_w(px(0.)).child(
+                            Slider::new(slider)
+                                .accessibility_label(format!("{} volume", sound.name))
+                                .disabled(offline),
+                        ),
                     );
-                list = list.item(row);
+                }
+                let volume = volume.child(
+                    div()
+                        .flex_none()
+                        // `w-[7ch] text-right font-mono text-xs`.
+                        .w(px(52.))
+                        .flex()
+                        .justify_end()
+                        .font_family(font::MONO[0])
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .font_weight(gpui::FontWeight::NORMAL)
+                        .text_color(hsla(t.muted_foreground))
+                        .child(format_db(volume_db as f32)),
+                );
+
+                let rename = KebabMenuItem::new("rename", soundboard::RENAME_ELLIPSIS, {
+                    let entity = entity.clone();
+                    let sound = sound.clone();
+                    move |window, cx| {
+                        entity.update(cx, |panel, cx| panel.open_rename(&sound, window, cx))
+                    }
+                })
+                .group("edit");
+                let mut move_up = KebabMenuItem::new("move-up", soundboard::MOVE_UP, {
+                    let entity = entity.clone();
+                    let id = id.clone();
+                    let target = index.saturating_sub(1);
+                    move |_, cx| {
+                        entity.update(cx, |panel, cx| panel.move_sound(id.clone(), target, cx))
+                    }
+                })
+                .group("order");
+                if first {
+                    move_up = move_up
+                        .disabled(true)
+                        .disabled_reason(soundboard::ALREADY_FIRST);
+                }
+                let mut move_down = KebabMenuItem::new("move-down", soundboard::MOVE_DOWN, {
+                    let entity = entity.clone();
+                    let id = id.clone();
+                    let target = index + 1;
+                    move |_, cx| {
+                        entity.update(cx, |panel, cx| panel.move_sound(id.clone(), target, cx))
+                    }
+                })
+                .group("order");
+                if last {
+                    move_down = move_down
+                        .disabled(true)
+                        .disabled_reason(soundboard::ALREADY_LAST);
+                }
+                let remove = KebabMenuItem::new("remove", soundboard::REMOVE, {
+                    let entity = entity.clone();
+                    let id = id.clone();
+                    move |_, cx| entity.update(cx, |panel, cx| panel.remove_sound(id.clone(), cx))
+                })
+                .destructive(true)
+                .group("remove");
+
+                let row = ListRow::new(format!("sound-{}", sound.id), sound.name.clone())
+                    .grouped()
+                    .leading(
+                        Button::new(format!("sound-play-{}", sound.id))
+                            .size(ButtonSize::IconXs)
+                            .variant(ButtonVariant::Ghost)
+                            .disabled(offline)
+                            .accessibility_label(pad.clone())
+                            .tooltip(pad)
+                            .child(icon(
+                                if playing {
+                                    IconName::StopFill
+                                } else {
+                                    IconName::Play
+                                },
+                                12.,
+                                hsla(t.foreground),
+                            ))
+                            .on_click({
+                                let entity = entity.clone();
+                                let id = id.clone();
+                                move |_, _, cx| {
+                                    entity
+                                        .update(cx, |panel, cx| panel.play_or_stop(id.clone(), cx))
+                                }
+                            }),
+                    )
+                    .context(duration)
+                    .child(mode_select)
+                    .child(volume)
+                    .child(key_select)
+                    .child(
+                        KebabMenu::new(
+                            SharedString::from(format!("sound-actions-{}", sound.id)),
+                            vec![rename, move_up, move_down, remove],
+                        )
+                        .label(format!("Actions for {name}"))
+                        .disabled(offline)
+                        .reveal(KebabReveal::Hover),
+                    );
+                list = list.item(
+                    div()
+                        .id(SharedString::from(format!("sound-host-{}", sound.id)))
+                        .group(KEBAB_HOST)
+                        .child(row),
+                );
             }
             section = section.child(list);
         } else if !loaded {
@@ -713,34 +737,34 @@ impl Render for SoundsPanel {
             .bg(hsla(t.glass_solid))
             .text_color(hsla(t.foreground))
             .type_scale(text::META)
+            // The toolbar's title; the shell gives this page no toolbar yet.
             .child(
-                ScrollArea::new("sounds-scroll").child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .px(px(size::GUTTER))
-                        .py(px(8.))
-                        .gap(px(16.))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.))
-                                .child(
-                                    div()
-                                        .type_scale(text::SECTION)
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(soundboard::TITLE),
-                                )
-                                .child(
-                                    div()
-                                        .type_scale(text::META)
-                                        .text_color(hsla(t.muted_foreground))
-                                        .child(soundboard::PAGE_DESCRIPTION),
-                                ),
-                        )
-                        .child(notices)
-                        .child(section),
+                div()
+                    .flex_none()
+                    .px(px(size::GUTTER))
+                    .pb(px(8.))
+                    .type_scale(text::SECTION)
+                    .child(soundboard::TITLE),
+            )
+            .child(
+                div().flex_1().min_h(px(0.)).child(
+                    ScrollArea::new("sounds-scroll").child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            // `PageHeader`: `px-gutter pt-3 pb-1`, text-xs.
+                            .child(
+                                div()
+                                    .px(px(size::GUTTER))
+                                    .pt(px(12.))
+                                    .pb(px(4.))
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .text_color(hsla(t.muted_foreground))
+                                    .child(soundboard::PAGE_DESCRIPTION),
+                            )
+                            .child(section),
+                    ),
                 ),
             )
             .child(rename_dialog)
