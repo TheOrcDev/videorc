@@ -11,6 +11,9 @@
 //! streamer turns the devices on (plan 249 S24); and it keeps what the room
 //! publishes and who is in it (`cloud.room.presentation`'s media) for the
 //! Show stage, the guest tiles and the Program monitor ([`Self::room_media`]).
+//! Plan 260 S1.8 (C3): when room scenes are opted in, a Studio scene switch
+//! also resolves and commits through `cloud.room.scene.commit`, settling on
+//! the presentation's scene entry (5 s), as `room-scene-backend.ts` did.
 //! The join chime and the scripted smoke room (P396, P398) wait.
 
 use std::collections::HashMap;
@@ -20,15 +23,25 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gpui::{Context, Entity, Image, ImageFormat, Window, div, prelude::*};
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
+use videorc_app_core::cloud_scene::types::SceneOrientation;
+use videorc_app_core::cloud_scene::{
+    ROOM_SCENES_OFF, USE_SCENES, cloud_scene_from_native, room_scene_canvas, room_sources_ready,
+};
 use videorc_app_core::guests::session::ControllerFacts;
 use videorc_app_core::library::cloud::{CloudRecordingStop, CloudRecordingWatch};
+use videorc_app_core::studio::preview_scene::studio_scene_params;
 use videorc_app_core::studio::room_frames::{self, FrameCursor, FramePoll, RemoteSource};
 use videorc_app_core::studio::room_media::{
     self, AVATAR_SET, CAMERA_SET, HTML_SET, MICROPHONE_SET, MONITOR_SET, PRESENTATION_EVENT,
     PRESENTATION_SET, RETURN_SET, RoomMedia, SCREEN_SET,
 };
+use videorc_app_core::studio::room_scene::{
+    self, BACKEND_SCENE_COMMIT_WAIT, PreparedBackgroundAsset, RoomSceneCommit, SCENE_COMMIT,
+    SCENE_RESOLVE, SceneCommitAnswer, SceneCommitSettle, SceneContent,
+};
 use videorc_app_core::studio::screen_views::TalkShowRoomView;
 use videorc_app_core::{BackendEvent, ConnectionState};
+use videorc_protocol::Scene;
 
 use super::transport::AppStudio;
 use crate::app::bridge::Mirror;
@@ -84,6 +97,16 @@ pub struct TalkShowRoomHost {
     /// R4: the Program monitor takes the runner's return, and Listen.
     monitor: bool,
     listening: bool,
+    /// Per-room opt-in for Studio scenes on the program (off by default;
+    /// `ROOM_SCENES_OFF` / `USE_SCENES`).
+    scenes_enabled: bool,
+    /// Show id the scenes opt-in was set for; a new show drops it.
+    scenes_show_id: Option<String>,
+    /// Last Studio layout-commit revision sent to the room (0 before any).
+    last_scene_layout_revision: u64,
+    /// Content the backend refused (`held: false`); resent once presentation
+    /// shows it holds the seat again.
+    pending_scene: Option<(Option<SceneContent>, Vec<PreparedBackgroundAsset>)>,
 }
 
 impl TalkShowRoomHost {
@@ -101,12 +124,19 @@ impl TalkShowRoomHost {
         })
         .detach();
         // The Sources microphone and camera, and the controller, change on
-        // the Studio's snapshots and its cloud state.
+        // the Studio's snapshots and its cloud state. A layout commit while
+        // room scenes are on also reaches the room.
         let snapshots = studio.clone();
         cx.spawn(async move |this, cx| {
             let mut watch = snapshots.watch();
             while watch.changed().await.is_ok() {
-                if this.update(cx, |host, cx| host.sync_room(cx)).is_err() {
+                if this
+                    .update(cx, |host, cx| {
+                        host.sync_room(cx);
+                        host.sync_room_scene_from_layout(cx);
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -137,13 +167,13 @@ impl TalkShowRoomHost {
                 if event != PRESENTATION_EVENT {
                     continue;
                 }
-                let Some((_, media)) = room_media::presentation_media(&payload) else {
-                    continue;
-                };
+                let media = room_media::presentation_media(&payload);
                 let alive = this.update(cx, |host, cx| {
-                    if host.room_open() && host.room_media.as_ref() != Some(&media) {
-                        host.room_media = Some(media);
-                        cx.notify();
+                    if let Some((_, media)) = media {
+                        if host.room_open() && host.room_media.as_ref() != Some(&media) {
+                            host.room_media = Some(media);
+                            cx.notify();
+                        }
                     }
                     // The backend holds the room now: anything it refused
                     // before its join goes again.
@@ -154,6 +184,10 @@ impl TalkShowRoomHost {
                             }
                         }
                         host.sync_room(cx);
+                    }
+                    // A scene commit answered held:false is resent once.
+                    if host.pending_scene.is_some() {
+                        host.retry_pending_scene(cx);
                     }
                 });
                 if alive.is_err() {
@@ -237,12 +271,17 @@ impl TalkShowRoomHost {
             frames: HashMap::new(),
             monitor: false,
             listening: false,
+            scenes_enabled: false,
+            scenes_show_id: None,
+            last_scene_layout_revision: 0,
+            pending_scene: None,
         };
         host.on_talk_show(&initial);
         host
     }
 
-    fn room_open(&self) -> bool {
+    /// Whether the talk-show room is open for this show.
+    pub fn room_open(&self) -> bool {
         self.studio
             .cloud_now()
             .status
@@ -251,6 +290,40 @@ impl TalkShowRoomHost {
             .and_then(|room| room.get("phase"))
             .and_then(Value::as_str)
             == Some("open")
+    }
+
+    fn show_id(&self) -> Option<String> {
+        self.studio
+            .cloud_now()
+            .status
+            .as_ref()
+            .and_then(|status| status.show.as_ref())
+            .map(|show| show.id.clone())
+    }
+
+    /// Per-room opt-in for Studio scenes on the program (default off).
+    pub fn scenes_enabled(&self) -> bool {
+        let Some(show_id) = self.show_id() else {
+            return false;
+        };
+        self.scenes_enabled && self.scenes_show_id.as_deref() == Some(show_id.as_str())
+    }
+
+    /// Turn room scenes on or off for the current show (`USE_SCENES` /
+    /// `ROOM_SCENES_OFF`). Off by default; a new show starts off again.
+    pub fn set_scenes_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.scenes_show_id = self.show_id();
+        self.scenes_enabled = enabled;
+        if enabled && self.room_open() {
+            self.last_scene_layout_revision = 0;
+            self.sync_room_scene_from_layout(cx);
+        }
+        cx.notify();
+    }
+
+    /// Copy for a scene command while scenes are off in this room.
+    pub fn room_scenes_off_copy() -> (&'static str, &'static str) {
+        (ROOM_SCENES_OFF, USE_SCENES)
     }
 
     fn controller(&self) -> Option<ControllerFacts> {
@@ -479,6 +552,7 @@ impl TalkShowRoomHost {
         if !self.room_open() {
             self.sent = Default::default();
             self.refused = [false; SLOTS];
+            self.pending_scene = None;
             if self.room_media.take().is_some() || !self.frames.is_empty() {
                 self.frames.clear();
                 cx.notify();
@@ -601,6 +675,223 @@ impl TalkShowRoomHost {
     /// The last cloud recording stop this host saw (Library).
     pub fn last_recording_stop(&self) -> Option<CloudRecordingStop> {
         self.recording_watch.last_stop()
+    }
+
+    /// Commit scene content into the backend's room (`cloud.room.scene.commit`)
+    /// and settle on the matching `cloud.room.presentation` scene entry for
+    /// up to 5 s. No-ops (returns `None`) when the room is closed or the
+    /// backend does not hold the seat.
+    pub fn commit_scene(
+        &mut self,
+        content: Option<SceneContent>,
+        assets: Vec<PreparedBackgroundAsset>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Option<RoomSceneCommit>> {
+        if !self.room_open() {
+            return gpui::Task::ready(None);
+        }
+        let Some(show_id) = self.show_id() else {
+            return gpui::Task::ready(None);
+        };
+        self.pending_scene = None;
+        let params = room_scene::scene_commit_params(content.as_ref(), &assets);
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        let content_retry = content.clone();
+        let assets_retry = assets.clone();
+        cx.spawn(async move |this, cx| {
+            let mut events = studio.backend().subscribe();
+            let request = runtime.spawn({
+                let studio = studio.clone();
+                async move {
+                    studio
+                        .backend()
+                        .request(SCENE_COMMIT, params)
+                        .await
+                        .map_err(|error| error.to_string())
+                }
+            });
+            let mut settle = SceneCommitSettle::new();
+            let deadline = tokio::time::Instant::now() + BACKEND_SCENE_COMMIT_WAIT;
+            let mut request = request;
+            let answer = loop {
+                tokio::select! {
+                    biased;
+                    answer = &mut request => break answer,
+                    event = events.recv() => {
+                        match event {
+                            Ok(BackendEvent::Untyped { event, payload })
+                                if event == PRESENTATION_EVENT =>
+                            {
+                                if let Some((sid, scene)) =
+                                    room_scene::presentation_scene(&payload)
+                                {
+                                    if sid == show_id {
+                                        settle.note(scene);
+                                    }
+                                }
+                            }
+                            Err(RecvError::Closed) => break request.await,
+                            Err(RecvError::Lagged(_)) | Ok(_) => {}
+                        }
+                    }
+                }
+            };
+            let Ok(Ok(value)) = answer else {
+                return None;
+            };
+            let answer = SceneCommitAnswer::from_value(&value);
+            if !answer.held {
+                let _ = this.update(cx, |host, _| {
+                    host.pending_scene = Some((content_retry, assets_retry));
+                });
+                return None;
+            }
+            let Some(generation) = answer.generation else {
+                return None;
+            };
+            settle.begin(generation, answer.status);
+            while settle.needs_wait() {
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(left) => break,
+                    event = events.recv() => {
+                        match event {
+                            Ok(BackendEvent::Untyped { event, payload })
+                                if event == PRESENTATION_EVENT =>
+                            {
+                                if let Some((sid, scene)) =
+                                    room_scene::presentation_scene(&payload)
+                                {
+                                    if sid == show_id && settle.note(scene) {
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(RecvError::Closed) => break,
+                            Err(RecvError::Lagged(_)) | Ok(_) => {}
+                        }
+                    }
+                }
+            }
+            Some(settle.result())
+        })
+    }
+
+    /// Resolve the Studio's current capture scene for the room canvas,
+    /// translate it, and commit when room scenes are on. No-ops when the
+    /// room is closed or scenes are off.
+    pub fn send_studio_scene_to_room(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Option<RoomSceneCommit>> {
+        if !self.room_open() || !self.scenes_enabled() {
+            return gpui::Task::ready(None);
+        }
+        let snapshot = self.studio.snapshot();
+        let mut params =
+            studio_scene_params(&snapshot.settings.capture, &snapshot.settings.studio, false);
+        let orientation = if snapshot.settings.capture.layout.layout_preset.is_vertical() {
+            SceneOrientation::V
+        } else {
+            SceneOrientation::H
+        };
+        let canvas = room_scene_canvas(orientation);
+        if let Some(video) = params.video.as_mut() {
+            video.width = canvas.width.round().max(1.0) as u32;
+            video.height = canvas.height.round().max(1.0) as u32;
+        }
+        if let Some(background) = snapshot.scenes.working_background.clone() {
+            params.background = serde_json::from_value(background).ok();
+        }
+        let animate = snapshot.settings.studio.animate_scene_changes();
+        let camera_off = snapshot.settings.capture_doc["sources"]["cameraOff"]
+            .as_bool()
+            .unwrap_or(false);
+        let media = self.room_media.clone();
+        let layout_value = serde_json::to_value(&params.layout).unwrap_or(Value::Null);
+        let background_value = params
+            .background
+            .as_ref()
+            .and_then(|background| serde_json::to_value(background).ok());
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        let Ok(resolve_params) = serde_json::to_value(&params) else {
+            return gpui::Task::ready(None);
+        };
+        cx.spawn(async move |this, cx| {
+            let resolve = runtime.spawn({
+                let studio = studio.clone();
+                async move {
+                    studio
+                        .backend()
+                        .request(SCENE_RESOLVE, resolve_params)
+                        .await
+                        .map_err(|error| error.to_string())
+                }
+            });
+            let Ok(Ok(value)) = resolve.await else {
+                return None;
+            };
+            let Ok(resolved) = serde_json::from_value::<Scene>(value) else {
+                return None;
+            };
+            let translation = cloud_scene_from_native(
+                &resolved,
+                &layout_value,
+                background_value.as_ref(),
+                orientation,
+                None,
+            );
+            let camera_published = media.as_ref().is_some_and(|media| media.camera);
+            let screen_published = media
+                .as_ref()
+                .and_then(|media| media.screen.as_ref())
+                .is_some_and(|screen| screen.published);
+            if let Err(message) = room_sources_ready(
+                translation.needs.camera,
+                translation.needs.screen,
+                camera_published,
+                camera_off,
+                screen_published,
+                false,
+            ) {
+                eprintln!("[videorc-app] Talk-show host: room scene: {message}");
+                return None;
+            }
+            let content =
+                room_scene::scene_content_for_orientation(orientation, translation.scene, animate);
+            let Ok(task) = this.update(cx, |host, cx| {
+                host.commit_scene(Some(content), Vec::new(), cx)
+            }) else {
+                return None;
+            };
+            task.await
+        })
+    }
+
+    /// After a Studio layout commit, send the scene into the room when
+    /// scenes are opted in.
+    fn sync_room_scene_from_layout(&mut self, cx: &mut Context<Self>) {
+        if !self.room_open() || !self.scenes_enabled() {
+            return;
+        }
+        let revision = self.studio.layout_commit_revision();
+        if revision == 0 || revision <= self.last_scene_layout_revision {
+            return;
+        }
+        self.last_scene_layout_revision = revision;
+        self.send_studio_scene_to_room(cx).detach();
+    }
+
+    fn retry_pending_scene(&mut self, cx: &mut Context<Self>) {
+        let Some((content, assets)) = self.pending_scene.take() else {
+            return;
+        };
+        self.commit_scene(content, assets, cx).detach();
     }
 }
 
