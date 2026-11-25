@@ -28,7 +28,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { buildFixtureApps, FIXTURE_SOURCE_PATH } from './fixtures/build-fixture-apps.mjs'
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { reloadKeepingSeedJs, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { decodeSceneFrames } from './lib/scene-artifact-frames.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
@@ -113,6 +113,10 @@ const video = { preset: 'custom', width: 1920, height: 1080, fps: 30, bitrateKbp
 const streamVideo = { ...video, bitrateKbps: 6000 }
 const summaryPath = join(outputDirectory, 'smart-scenes-summary.json')
 const ELECTRON_BUNDLE_ID = 'com.github.Electron'
+// Plan 260 Phase 3: VIDEORC_APP=gpui drives the GPUI app. Its Studio smoke
+// handler stands in for the renderer's `__videorcSmokeScenePresets`; see
+// createRendererDriver and docs/gpui/ui-driver.md ("smart-scenes on GPUI").
+const gpuiApp = smokeAppIsGpui()
 
 mkdirSync(outputDirectory, { recursive: true })
 log(`evidence directory ${outputDirectory}`)
@@ -238,9 +242,11 @@ try {
   const renderer = createRendererDriver(smoke)
   await renderer.waitFor(() => true, 'renderer scene-preset actions ready')
   await openTab(smoke, 'studio', '[data-videorc-preview-card]')
-  await renderer.evaluate(
-    `window.__videorcSmokeScenePresets.configure({video: ${JSON.stringify(video)}}); return true`
-  )
+  if (gpuiApp) await renderer.command('studio-capture-configure', { config: { video } })
+  else
+    await renderer.evaluate(
+      `window.__videorcSmokeScenePresets.configure({video: ${JSON.stringify(video)}}); return true`
+    )
   await renderer.setClips(false)
   await waitForRecordingIdle()
   await renderer.applyLayout(
@@ -254,6 +260,14 @@ try {
   // Figma/T3 Code stand-ins. Camera Off is this host's selected device, not
   // something a migrated scene may change. Follow remains on.
   summary.steps.migration = await step('migration', async () => {
+    if (gpuiApp)
+      return {
+        skipped: true,
+        ok: true,
+        failures: [],
+        detail:
+          'SKIP on GPUI: the plan-210 migration is a renderer settings seed and reload; core unit tests cover scenes::migration'
+      }
     const before = await renderer.state()
     const now = '2026-10-30T09:00:00.000Z'
     const scenes = [alpha, beta].map((fixture, index) => ({
@@ -299,9 +313,7 @@ try {
       (state) => state.canSave && state.scenes[0]?.id === scenes[0].id,
       'plan 210 migration settled'
     )
-    const library = await renderer.evaluate(
-      `return JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2'))`
-    )
+    const library = await renderer.storedLibrary()
     assert.deepEqual(
       library.scenes.map((scene) => scene.name),
       ['Figma', 'T3 Code', 'Screen + camera', 'Camera only', 'Side by side']
@@ -349,8 +361,37 @@ try {
   summary.steps.newScenes = await step('new-scenes', async () => {
     await openTab(smoke, 'layout', '[data-testid="scene-new"]')
     const before = await renderer.state()
+    // GPUI: its Scene page has no Add scene… dialog yet, so the smoke makes
+    // the app scenes as the dialog would (v2 scenes from the first stored
+    // scene's layouts, Follow on, the app's name, "<name> 2" for a second)
+    // and inserts them through the Studio's own insert.
+    let gpuiSceneCount = 0
+    const gpuiAdd = async (bundleIds) => {
+      const current = await renderer.state()
+      const template = current.library[0]
+      if (!template) throw new Error('GPUI: no stored scene to model the app scenes on')
+      const now = new Date().toISOString()
+      const scenes = bundleIds.map((bundleId) => {
+        const app = Object.values(fixtures.apps).find((entry) => entry.bundleId === bundleId)
+        const taken = current.scenes.filter((scene) => scene.name.startsWith(app.name)).length
+        gpuiSceneCount += 1
+        return {
+          ...template,
+          id: `scene-gpui-${gpuiSceneCount}`,
+          name: taken === 0 ? app.name : `${app.name} ${taken + 1}`,
+          createdAt: now,
+          updatedAt: now,
+          shows: { kind: 'app', bundleId, name: app.name, follows: true },
+          audio: undefined
+        }
+      })
+      await renderer.command('studio-scene-insert', { scenes })
+      return true
+    }
     const add = async (ids) =>
-      renderer.evaluate(`
+      gpuiApp
+        ? gpuiAdd(ids)
+        : renderer.evaluate(`
       const closeDeadline = performance.now() + 8000;
       while (document.querySelector('[data-testid="add-scene-dialog"]') && performance.now() < closeDeadline) await sleep(50);
       if (document.querySelector('[data-testid="add-scene-dialog"]')) throw new Error('Previous Add scene dialog did not close');
@@ -396,14 +437,22 @@ try {
     return {
       ...verdict,
       scenes: added,
-      detail: 'three app scenes at the end; existing keys and program unchanged'
+      detail: `three app scenes at the end; existing keys and program unchanged${gpuiApp ? ' (GPUI: inserted through studio-scene-insert, no Add scene… dialog on its Scene page yet)' : ''}`
     }
   })
   if (!summary.steps.newScenes.ok) fail('every later step needs the app scenes')
   summary.steps.reorder = await step('reorder', async () => {
     const before = await renderer.state()
     const last = before.scenes.at(-1)
-    await renderer.evaluate(`
+    // GPUI: the row's Alt+Arrow needs a focused row (no clicks yet, driver
+    // gap 1), so the move goes through the Studio's own move.
+    if (gpuiApp)
+      await renderer.command('studio-scene-move', {
+        id: last.id,
+        toIndex: before.scenes.length - 2
+      })
+    else
+      await renderer.evaluate(`
       const button = await waitFor('[data-saved-scene="${last.id}"] [data-slot="list-row-button"]');
       button.focus(); button.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true }));
       return true;
@@ -413,9 +462,13 @@ try {
       'keyboard reorder'
     )
     assert.equal(state.activeId, before.activeId)
-    const rows = await renderer.evaluate(
-      `return [...document.querySelectorAll('[data-saved-scene]')].map((row) => ({ id: row.getAttribute('data-saved-scene'), key: row.querySelector('[data-slot="scene-shortcut-keys"]')?.textContent }))`
-    )
+    // GPUI: each scene's position key from the Studio (its rows' key chips
+    // are Kbd children that only debug builds name).
+    const rows = gpuiApp
+      ? state.keys.map((entry) => ({ id: entry.id, key: entry.key ?? '' }))
+      : await renderer.evaluate(
+          `return [...document.querySelectorAll('[data-saved-scene]')].map((row) => ({ id: row.getAttribute('data-saved-scene'), key: row.querySelector('[data-slot="scene-shortcut-keys"]')?.textContent }))`
+        )
     for (let i = 0; i < Math.min(9, state.scenes.length); i += 1) {
       assert.match(
         rows.find((row) => row.id === state.scenes[i].id)?.key ?? '',
@@ -426,7 +479,7 @@ try {
       ok: true,
       failures: [],
       rows,
-      detail: 'reorder kept program; position chips follow the new order'
+      detail: `reorder kept program; position chips follow the new order${gpuiApp ? " (GPUI: studio-scene-move and the Studio's position keys)" : ''}`
     }
   })
   if (!summary.steps.reorder.ok) fail('reorder acceptance failed')
@@ -570,9 +623,11 @@ try {
         detail: 'SKIP: no camera grant'
       }
     await requestSmokeCommand(smoke, 'select-camera-device', { settleMs: 500 }, { timeoutMs })
-    const base = await renderer.evaluate(
-      `return JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2')).scenes.find((scene) => scene.id === ${JSON.stringify(targets.alpha.sceneId)})`
-    )
+    const base = gpuiApp
+      ? (await renderer.state()).library.find((scene) => scene.id === targets.alpha.sceneId)
+      : await renderer.evaluate(
+          `return JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2')).scenes.find((scene) => scene.id === ${JSON.stringify(targets.alpha.sceneId)})`
+        )
     const cameraScene = {
       ...base,
       id: 'acceptance-camera-only',
@@ -583,12 +638,14 @@ try {
         vertical: { ...base.layouts.vertical, layoutPreset: 'vertical-camera-only' }
       }
     }
-    assert.equal(
-      await renderer.evaluate(
-        `return window.__videorcSmokeScenePresets.add([${JSON.stringify(cameraScene)}])`
-      ),
-      true
-    )
+    if (gpuiApp) await renderer.command('studio-scene-insert', { scenes: [cameraScene] })
+    else
+      assert.equal(
+        await renderer.evaluate(
+          `return window.__videorcSmokeScenePresets.add([${JSON.stringify(cameraScene)}])`
+        ),
+        true
+      )
     await renderer.waitFor(
       (state) => state.scenes.some((scene) => scene.id === cameraScene.id),
       'Camera only added'
@@ -689,8 +746,52 @@ try {
     const first = state.scenes.findIndex((scene) => scene.id === targets.beta.sceneId) + 1
     const second = state.scenes.findIndex((scene) => scene.id === targets.alpha.sceneId) + 1
     let firstPending = null
+    // GPUI: the two keys through studio-shortcut, the pending wait and the
+    // 1.5 s trace polled from the Studio as fast as it answers. Its trace has
+    // no renderer diagnostics (layout intent, queued key, resolve
+    // generation): those stay null, and the gate reads only the frames and
+    // the final state.
+    const gpuiRapidKeys = async () => {
+      const read = () => renderer.command('studio-scenes-state')
+      await renderer.command('studio-shortcut', { action: `scene-slot-${first}` })
+      const deadline = Date.now() + 8000
+      let pending = await read()
+      while (pending.pendingSceneId !== targets.beta.sceneId && Date.now() < deadline)
+        pending = await read()
+      if (pending.pendingSceneId !== targets.beta.sceneId)
+        throw new Error('The first position key never entered a pending switch')
+      const proof = {
+        pendingId: pending.pendingSceneId,
+        activeId: pending.onStreamId ?? null,
+        atMs: Date.now()
+      }
+      await renderer.command('studio-shortcut', { action: `scene-slot-${second}` })
+      const trace = []
+      const end = Date.now() + 1500
+      while (Date.now() < end) {
+        const current = await read()
+        const row = {
+          atMs: Date.now(),
+          activeId: current.onStreamId ?? null,
+          pendingId: current.pendingSceneId ?? null,
+          windowId: current.working?.sources?.windowId,
+          intent: null,
+          queued: null,
+          requested: null,
+          generation: null
+        }
+        if (
+          !trace.length ||
+          JSON.stringify({ ...trace.at(-1), atMs: 0 }) !== JSON.stringify({ ...row, atMs: 0 })
+        )
+          trace.push(row)
+      }
+      return { ...proof, trace }
+    }
     const run = await recordWhile('rapid-keys', smoke, async (variant) => {
-      firstPending = await renderer.evaluate(`
+      firstPending = gpuiApp
+        ? await gpuiRapidKeys()
+        : await renderer.evaluate(`
         window.__videorcSmokeScenePresets.shortcut('scene-slot-${first}');
         const deadline = performance.now() + 8000;
         let pending = window.__videorcSmokeScenePresets.state();
@@ -766,9 +867,7 @@ try {
   summary.steps.verticalKeys = await step('vertical-keys', async () => {
     await renderer.goTo(targets.alpha)
     // Different layouts on both orientations make a stale leg observable.
-    const library = await renderer.evaluate(
-      `return JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2'))`
-    )
+    const library = await renderer.storedLibrary()
     for (const target of Object.values(targets)) {
       const scene = library.scenes.find((scene) => scene.id === target.sceneId)
       scene.layouts.vertical = {
@@ -776,12 +875,7 @@ try {
         layoutPreset: 'vertical-screen-only',
         verticalScreenFraming: 'fill'
       }
-      assert.equal(
-        await renderer.evaluate(
-          `return window.__videorcSmokeScenePresets.edit(${JSON.stringify(scene)})`
-        ),
-        true
-      )
+      assert.equal(await renderer.editScene(scene), true)
     }
     const port = await freeTcpPort(rtmpPortBase)
     const receiver = startReceiver({
@@ -817,9 +911,11 @@ try {
       defaultOutputPreset: 'custom',
       defaultBitrateKbps: 6000
     }
-    await renderer.evaluate(
-      `window.__videorcSmokeScenePresets.configure({streamEnabled: true, streaming: ${JSON.stringify(streaming)}}); return true`
-    )
+    if (gpuiApp) await renderer.configure({ streamEnabled: true, streaming })
+    else
+      await renderer.evaluate(
+        `window.__videorcSmokeScenePresets.configure({streamEnabled: true, streaming: ${JSON.stringify(streaming)}}); return true`
+      )
     await sleep(500)
     const active = library.scenes.find((scene) => scene.id === targets.alpha.sceneId)
     const run = await recordWhile(
@@ -838,20 +934,13 @@ try {
           await sleep(SETTLE_MS)
           current = next
         }
-        const stored = await renderer.evaluate(
-          `return JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2'))`
-        )
+        const stored = await renderer.storedLibrary()
         const noScreen = stored.scenes.find((scene) => scene.id === 'acceptance-camera-only')
         if (noScreen) {
           const own = stored.scenes.find((scene) => scene.id === targets.beta.sceneId)
           noScreen.shows = own.shows
           noScreen.layouts.vertical = own.layouts.vertical
-          assert.equal(
-            await renderer.evaluate(
-              `return window.__videorcSmokeScenePresets.edit(${JSON.stringify(noScreen)})`
-            ),
-            true
-          )
+          assert.equal(await renderer.editScene(noScreen), true)
           const requestedAtMs = await renderer.requestSlot(noScreen.id)
           await renderer.waitFor(
             (state) => state.activeId === noScreen.id && !state.pendingId,
@@ -868,24 +957,14 @@ try {
             arrangementMode: 'preset',
             sourceTransformOverrides: {}
           }
-          assert.equal(
-            await renderer.evaluate(
-              `return window.__videorcSmokeScenePresets.edit(${JSON.stringify(noScreen)})`
-            ),
-            true
-          )
+          assert.equal(await renderer.editScene(noScreen), true)
           await renderer.goTo({ key: 'Camera only on both legs', sceneId: noScreen.id })
           const kept = await request(ws, timeoutMs, 'preview.screen.status')
           assert.equal(kept.sourceId, alpha.windowId, 'no-screen legs retain Alpha')
           noScreen.shows = own.shows
           noScreen.layouts.vertical = own.layouts.vertical
           const editedAtMs = Date.now()
-          assert.equal(
-            await renderer.evaluate(
-              `return window.__videorcSmokeScenePresets.edit(${JSON.stringify(noScreen)})`
-            ),
-            true
-          )
+          assert.equal(await renderer.editScene(noScreen), true)
           await renderer.waitFor(
             (state) =>
               state.activeId === noScreen.id &&
@@ -963,9 +1042,11 @@ try {
       assert.equal(row.afterCutBlackFrames, 0, 'STOP: vertical-only black frame')
       assert.equal(row.wrongLayoutFrames, 0, 'STOP: vertical-only wrong-layout frame')
     }
-    await renderer.evaluate(
-      `window.__videorcSmokeScenePresets.configure({streamEnabled: false}); return true`
-    )
+    if (gpuiApp) await renderer.configure({ streamEnabled: false })
+    else
+      await renderer.evaluate(
+        `window.__videorcSmokeScenePresets.configure({streamEnabled: false}); return true`
+      )
     return {
       ok: true,
       failures: [],
@@ -991,9 +1072,15 @@ try {
     await stopFixtureApp(beta)
     await sleep(800)
     const refusedAt = Date.now()
-    const refused = await renderer.evaluate(
-      `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(targets.beta.sceneId)})`
-    )
+    // GPUI: a refused apply is an error answer, read as false.
+    const refused = gpuiApp
+      ? await renderer.command('studio-scene-apply', { id: targets.beta.sceneId }).then(
+          () => true,
+          () => false
+        )
+      : await renderer.evaluate(
+          `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(targets.beta.sceneId)})`
+        )
     const afterRefusal = await renderer.state()
     beta = await launchFixture(fixtures.apps.beta, { x: 200, y: 230 })
     targets.beta.fixture = beta
@@ -1051,7 +1138,9 @@ try {
     await activateApp('/System/Library/CoreServices/Finder.app')
     await waitForFrontApp((front) => front.bundleId === 'com.apple.finder')
     await sleep(SMART_SCENES_BUDGET.followSettleMs + 400)
-    const electronApps = lsappinfoCount(ELECTRON_BUNDLE_ID)
+    // GPUI: Videorc is no Electron app; the "Videorc in front" row is
+    // Electron's (the dev GPUI binary has no bundle to bring to front).
+    const electronApps = gpuiApp ? 0 : lsappinfoCount(ELECTRON_BUNDLE_ID)
     const electronPath = electronApps === 1 ? lsappinfoBundlePath(ELECTRON_BUNDLE_ID) : null
     const plan = [
       { label: 'Fixture Beta in front', target: targets.beta, expect: 'switch' },
@@ -1444,9 +1533,11 @@ try {
       (scene) => scene.visual.sources.app
     )) {
       const target = { sceneId: scene.id }
-      await renderer.evaluate(
-        `return await window.__videorcSmokeScenePresets.remove(${JSON.stringify(target.sceneId)})`
-      )
+      if (gpuiApp) await renderer.command('studio-scene-delete', { id: target.sceneId })
+      else
+        await renderer.evaluate(
+          `return await window.__videorcSmokeScenePresets.remove(${JSON.stringify(target.sceneId)})`
+        )
     }
     await renderer.waitFor(
       (state) =>
@@ -1468,7 +1559,15 @@ try {
     await waitForScreenLive(display.id)
 
     await openTab(smoke, 'layout', '[data-testid="password-manager-add"]')
-    await renderer.evaluate(`
+    // GPUI: its Hide screen section has no Add app… picker yet, so the app
+    // goes on the list through the Studio's own privacy settings.
+    if (gpuiApp)
+      await renderer.command('studio-privacy-add-app', {
+        bundleId: fixtures.apps.beta.bundleId,
+        name: fixtures.apps.beta.name
+      })
+    else
+      await renderer.evaluate(`
       (await waitFor('[data-testid="password-manager-add"]', 8000)).click();
       const picker = await waitFor('[data-testid="password-manager-picker"]', 8000);
       const deadline = performance.now() + 20000;
@@ -1487,7 +1586,9 @@ try {
     const listed = await renderer
       .waitFor(() => true, 'privacy settings stored')
       .then(() =>
-        renderer.evaluate(`
+        gpuiApp
+          ? renderer.command('studio-privacy-state')
+          : renderer.evaluate(`
         const raw = window.__videorcUiSettings?.getItem('videorc.privacySettings.v1');
         return raw ? JSON.parse(raw) : null;
       `)
@@ -1969,12 +2070,73 @@ function analyzeFile(file, flashes) {
 
 function createRendererDriver(smoke) {
   const evaluate = async (code) => {
+    if (gpuiApp) throw new Error('eval-js has no GPUI form; this step needs a GPUI branch')
     const response = await requestSmokeCommand(smoke, 'eval-js', { code }, { timeoutMs })
     return response && typeof response === 'object' && 'result' in response
       ? response.result
       : response
   }
-  const state = () => evaluate(scenePresetStateReadCode)
+  const command = (name, params = {}, waitMs = timeoutMs) =>
+    requestSmokeCommand(smoke, name, params, { timeoutMs: waitMs })
+  /** The renderer's scene-preset state, from the GPUI Studio smoke handler. */
+  const gpuiState = async () => {
+    const [scenes, studio] = await Promise.all([
+      command('studio-scenes-state'),
+      command('studio-state')
+    ])
+    return {
+      canSave: scenes.loaded === true && !scenes.readOnly,
+      scenes: scenes.scenes ?? [],
+      library: scenes.library ?? [],
+      keys: scenes.keys ?? [],
+      activeId: scenes.onStreamId ?? null,
+      pendingId: scenes.pendingSceneId ?? null,
+      modified: scenes.modified,
+      visual: { sources: scenes.working?.sources ?? {}, layout: scenes.working?.layout ?? {} },
+      recording: studio.status?.state ?? null,
+      diagnostics: { wsStatus: studio.connection?.state, phase: studio.phase }
+    }
+  }
+  const state = () => (gpuiApp ? gpuiState() : evaluate(scenePresetStateReadCode))
+  /** What a refused apply said: the Studio's start failure and last error. */
+  const gpuiReasons = async () => {
+    const studio = await command('studio-state').catch(() => null)
+    return [studio?.startFailure, studio?.lastError].filter(Boolean)
+  }
+  /** `apply(id)`: true once on stream; false with the reason otherwise. */
+  const applyScene = async (sceneId) => {
+    if (!gpuiApp)
+      return evaluate(
+        `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(sceneId)})`
+      )
+    try {
+      await command('studio-scene-apply', { id: sceneId })
+      return true
+    } catch (error) {
+      log(`studio-scene-apply ${sceneId}: ${error?.message ?? error}`)
+      return false
+    }
+  }
+  let gpuiSwitch = null
+  /** The stored v2 library (`videorc.scenes.v2`): `{scenes: [...]}`. */
+  const storedLibrary = async () =>
+    gpuiApp
+      ? { scenes: (await gpuiState()).library }
+      : evaluate(`return JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2'))`)
+  /** `edit(scene)`: a stored v2 scene in its place; true when saved. */
+  const editScene = async (scene) => {
+    if (!gpuiApp)
+      return evaluate(`return window.__videorcSmokeScenePresets.edit(${JSON.stringify(scene)})`)
+    await command('studio-scene-edit', { scene })
+    return true
+  }
+  /** `configure(patch)`: a patch over the capture config. */
+  const configure = async (patch) => {
+    if (gpuiApp) return command('studio-capture-configure', { config: patch })
+    return evaluate(
+      `window.__videorcSmokeScenePresets.configure(${JSON.stringify(patch)}); return true`
+    )
+  }
   const waitFor = async (predicate, description, waitMs = timeoutMs) => {
     const until = Date.now() + waitMs
     let lastState = null
@@ -2004,9 +2166,11 @@ function createRendererDriver(smoke) {
   ) => {
     let lastError = null
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      await evaluate(
-        `window.__videorcSmokeScenePresets.layout(${JSON.stringify(patch)}); return true`
-      )
+      if (gpuiApp) await command('studio-scene-layout', { patch }).catch(() => undefined)
+      else
+        await evaluate(
+          `window.__videorcSmokeScenePresets.layout(${JSON.stringify(patch)}); return true`
+        )
       try {
         return await waitFor(predicate, `${description} (attempt ${attempt})`, waitMs)
       } catch (error) {
@@ -2017,7 +2181,8 @@ function createRendererDriver(smoke) {
     throw lastError
   }
   const chooseCameraOff = async () => {
-    await evaluate(`return await window.__videorcSmokeScenePresets.pickCameraOff()`)
+    if (gpuiApp) await command('select-camera-device', { off: true, settleMs: 0 })
+    else await evaluate(`return await window.__videorcSmokeScenePresets.pickCameraOff()`)
     return waitFor(
       (current) =>
         current.canSave &&
@@ -2032,6 +2197,12 @@ function createRendererDriver(smoke) {
    * as smoke:replay-buffer uses it) stops a running buffer-only session too.
    */
   const setClips = async (enabled) => {
+    if (gpuiApp) {
+      const armed = await command('studio-replay-buffer', { armed: enabled, seconds: 60 })
+      if (armed?.armed !== enabled)
+        throw new Error(`studio-replay-buffer answered ${JSON.stringify(armed)}`)
+      return
+    }
     await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
     const outcome = await evaluate(
       `return window.__videorcSmokeSetReplayBuffer?.(${enabled ? 'true' : 'false'}, 60) ?? null`
@@ -2051,9 +2222,11 @@ function createRendererDriver(smoke) {
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
         const before = await state()
-        await evaluate(
-          `return await window.__videorcSmokeScenePresets.pickScreen(${JSON.stringify(device.id)})`
-        )
+        if (gpuiApp) await command('select-screen-device', { sourceId: device.id, settleMs: 0 })
+        else
+          await evaluate(
+            `return await window.__videorcSmokeScenePresets.pickScreen(${JSON.stringify(device.id)})`
+          )
         await waitFor(settled, `working scene on ${device.name} (attempt ${attempt})`, 5000)
         await sleep(1000)
         const held = await state()
@@ -2106,7 +2279,9 @@ function createRendererDriver(smoke) {
   }
   /** The refusal copy a scene apply toasts, so a refused switch names its reason. */
   const toasts = () =>
-    evaluate(`
+    gpuiApp
+      ? gpuiReasons()
+      : evaluate(`
       return Array.from(document.querySelectorAll('[data-sonner-toast]')).map((node) =>
         (node.textContent ?? '').replace(/\\s+/g, ' ').trim()
       );
@@ -2114,9 +2289,7 @@ function createRendererDriver(smoke) {
   const goTo = async (target, { attempts = 3 } = {}) => {
     let ok = null
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      ok = await evaluate(
-        `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(target.sceneId)})`
-      )
+      ok = await applyScene(target.sceneId)
       if (ok === true) break
       const reasons = await toasts()
       log(
@@ -2133,8 +2306,14 @@ function createRendererDriver(smoke) {
       `scene ${target.key} active`
     )
   }
-  const requestSwitch = (sceneId) =>
-    evaluate(`
+  const requestSwitch = async (sceneId) => {
+    if (gpuiApp) {
+      const reqAt = Date.now()
+      gpuiSwitch = { sceneId, reqAt }
+      await command('studio-scene-apply', { id: sceneId, wait: false })
+      return reqAt
+    }
+    return evaluate(`
       window.__vrcSmokeSwitch = { reqAt: Date.now(), done: null };
       window.__videorcSmokeScenePresets.apply(${JSON.stringify(sceneId)}).then(
         (ok) => { window.__vrcSmokeSwitch.done = { ok, at: Date.now() }; },
@@ -2142,9 +2321,15 @@ function createRendererDriver(smoke) {
       );
       return window.__vrcSmokeSwitch.reqAt;
     `)
+  }
   const requestSlot = async (sceneId) => {
     const position = (await state()).scenes.findIndex((scene) => scene.id === sceneId) + 1
     assert.ok(position >= 1 && position <= 9)
+    if (gpuiApp) {
+      const requested = Date.now()
+      await command('studio-shortcut', { action: `scene-slot-${position}` })
+      return requested
+    }
     return evaluate(`
       const requested = Date.now();
       window.__videorcSmokeScenePresets.shortcut('scene-slot-${position}');
@@ -2154,6 +2339,16 @@ function createRendererDriver(smoke) {
   const waitForSwitchDone = async (waitMs) => {
     const until = Date.now() + waitMs
     while (Date.now() < until) {
+      if (gpuiApp) {
+        // The GPUI apply runs on in the app: done once its scene is on
+        // stream with nothing pending (a refusal shows as never done).
+        const scenes = await command('studio-scenes-state')
+        if (gpuiSwitch && scenes.onStreamId === gpuiSwitch.sceneId && !scenes.pendingSceneId) {
+          return { ok: true, at: Date.now() }
+        }
+        await sleep(25)
+        continue
+      }
       const done = await evaluate(`return window.__vrcSmokeSwitch?.done ?? null`)
       if (done) return done
       await sleep(25)
@@ -2161,15 +2356,28 @@ function createRendererDriver(smoke) {
     return { ok: false, error: 'renderer never settled the switch', at: null }
   }
   /** The Screen row's Hide screen / Show screen button on the Studio page. */
-  const togglePrivacy = () =>
-    evaluate(`
+  const togglePrivacy = async () => {
+    if (gpuiApp) {
+      // The Studio's Hide screen / Show screen, as the streamer's own.
+      const current = await request(ws, timeoutMs, 'screen.privacy.get', {})
+      if (current?.unavailable)
+        throw new Error(`Hide screen is unavailable: ${current.unavailable}`)
+      await command('studio-screen-privacy', { hidden: !current?.hidden })
+      return true
+    }
+    return evaluate(`
       const button = await waitFor('[data-videorc-screen-privacy]', 8000);
       if (button.disabled) throw new Error('Hide screen is disabled: ' + (button.getAttribute('aria-label') ?? button.textContent));
       button.click();
       return true;
     `)
+  }
   return {
     evaluate,
+    command,
+    storedLibrary,
+    editScene,
+    configure,
     state,
     waitFor,
     applyLayout,

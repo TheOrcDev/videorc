@@ -114,27 +114,17 @@ impl ShortcutActions for StudioActions {
                     studio.mark_clip(Some(60)).await;
                 }
                 _ => {
-                    let scenes = &snapshot.scenes.scenes;
-                    let id = if let Some(id) = action.strip_prefix("scene:") {
-                        Some(id.to_string())
-                    } else if let Some(position) =
-                        videorc_app_core::desktop::global_shortcuts::scene_slot_position(&action)
-                    {
-                        scenes.get(position as usize - 1).map(|s| s.id.clone())
-                    } else if !scenes.is_empty() {
-                        let current = scenes
-                            .iter()
-                            .position(|s| Some(&s.id) == snapshot.scenes.on_stream_id.as_ref())
-                            .unwrap_or(0);
-                        let next = if action == "layout-previous" {
-                            (current + scenes.len() - 1) % scenes.len()
-                        } else {
-                            (current + 1) % scenes.len()
-                        };
-                        Some(scenes[next].id.clone())
-                    } else {
-                        None
-                    };
+                    let ids: Vec<&str> = snapshot
+                        .scenes
+                        .scenes
+                        .iter()
+                        .map(|s| s.id.as_str())
+                        .collect();
+                    let id = videorc_app_core::desktop::global_shortcuts::scene_for_action(
+                        &action,
+                        &ids,
+                        snapshot.scenes.on_stream_id.as_deref(),
+                    );
                     if let Some(id) = id {
                         studio.apply_saved_scene_by_id(&id).await;
                     }

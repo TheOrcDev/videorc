@@ -146,6 +146,65 @@ pub fn scene_slot_position(action: &str) -> Option<u8> {
     (1..=9).contains(&position).then_some(position)
 }
 
+/// The scene a scene key puts on stream: `scene:<id>`, a position key
+/// (`scene-slot-N`, the Nth scene), or `layout-next` / `layout-previous`
+/// around the scene on stream. `scene_ids` are the library's, in order.
+pub fn scene_for_action(
+    action: &str,
+    scene_ids: &[&str],
+    on_stream: Option<&str>,
+) -> Option<String> {
+    if let Some(id) = action.strip_prefix("scene:") {
+        return Some(id.to_string());
+    }
+    if let Some(position) = scene_slot_position(action) {
+        return scene_ids
+            .get(position as usize - 1)
+            .map(|id| id.to_string());
+    }
+    if !matches!(action, "layout-next" | "layout-previous") || scene_ids.is_empty() {
+        return None;
+    }
+    let current = scene_ids
+        .iter()
+        .position(|id| Some(*id) == on_stream)
+        .unwrap_or(0);
+    let next = if action == "layout-previous" {
+        (current + scene_ids.len() - 1) % scene_ids.len()
+    } else {
+        (current + 1) % scene_ids.len()
+    };
+    Some(scene_ids[next].to_string())
+}
+
+#[cfg(test)]
+mod scene_action_tests {
+    use super::scene_for_action;
+
+    #[test]
+    fn scene_keys_name_their_scene() {
+        let ids = ["a", "b", "c"];
+        assert_eq!(
+            scene_for_action("scene:z", &ids, None).as_deref(),
+            Some("z")
+        );
+        assert_eq!(
+            scene_for_action("scene-slot-2", &ids, None).as_deref(),
+            Some("b")
+        );
+        assert_eq!(scene_for_action("scene-slot-9", &ids, None), None);
+        assert_eq!(
+            scene_for_action("layout-next", &ids, Some("c")).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            scene_for_action("layout-previous", &ids, Some("a")).as_deref(),
+            Some("c")
+        );
+        assert_eq!(scene_for_action("record-toggle", &ids, None), None);
+    }
+}
+
 /// `sceneSlotAccelerator`: the position's key, or the platform default
 /// (`Control+Alt+3` on macOS, `Control+Alt+Shift+3` elsewhere). An empty
 /// string is a released key and stays empty.
