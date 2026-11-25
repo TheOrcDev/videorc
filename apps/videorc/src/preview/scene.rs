@@ -1,17 +1,36 @@
-//! Which scene the preview shows (plan 260 S2.3a).
+//! Which scene the preview shows (plan 260 S2.3a, S3.1b, S3.1e).
 //!
-//! The product follows the Studio's scene: `SceneFeed::following` over the
-//! Studio's request, with `note_scene_reloaded` called from the feed's
-//! `on_committed` hook (D11 autosave, #1784; the plan's S2.3a note). The
-//! Studio's state lands in the core with S1.6a, so until then the preview
-//! shows the capture config's default scene, and a pinned test pattern when
-//! `VIDEORC_PREVIEW_CANVAS=WxH[@fps]` is set (the measurement's canvas, and
-//! what `probe:preview-lifecycle` and `probe:preview-window` drive).
+//! The product follows the Studio's scene: [`follow_studio`] feeds
+//! `SceneFeed::following` with the core's `preview_scene_request` from
+//! every snapshot (the capture config's scene while nothing holds it, none
+//! while a session, a start or a stop does). A scene the Studio's own layout
+//! transaction already committed is adopted, not reloaded
+//! (`skipNextConfigSceneReloadRef`), and each reload the feed commits is the
+//! confirmed working setup (`note_scene_reloaded`, D11 autosave, #1784). A
+//! pinned test pattern shows instead when `VIDEORC_PREVIEW_CANVAS=WxH[@fps]`
+//! is set (the measurement's canvas, and what `probe:preview-lifecycle` and
+//! `probe:preview-window` drive). The Scene page's canvas and the Studio's
+//! slot show the same feed.
 
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use tokio::sync::watch;
+use videorc_app_core::smoke;
 use videorc_app_core::studio::capture_config::CaptureConfig;
+use videorc_app_core::studio::preview_scene::preview_scene_request;
+use videorc_app_core::{BackendClient, Studio};
 use videorc_preview::bounds::Canvas;
-use videorc_preview::feed::SceneFeed;
+use videorc_preview::feed::{SceneCommitted, SceneFeed};
 use videorc_protocol::{SceneConfigParams, SourceSelection, VideoPreset, VideoSettings};
+
+type AppStudio = Studio<BackendClient>;
+
+/// How long after a layout transaction's commit the capture config's next
+/// scene is taken as that commit's (the settle writes the capture config
+/// once the commit is proven). Electron's skip has no limit; a bound keeps
+/// a later, unrelated change from being adopted instead of committed.
+const ADOPT_WINDOW: Duration = Duration::from_secs(3);
 
 /// The variable that pins the canvas to the test pattern.
 pub const CANVAS_VAR: &str = "VIDEORC_PREVIEW_CANVAS";
@@ -37,9 +56,12 @@ pub fn parse_canvas(text: &str) -> Option<(u32, u32, u32)> {
     (width > 0 && height > 0 && fps > 0).then_some((width, height, fps))
 }
 
-/// The scene for this run: the pinned test pattern, or the capture
-/// config's default scene at the slot's own size.
-pub fn choose(env: impl Fn(&str) -> Option<String>) -> SceneChoice {
+/// The scene for this run: the pinned test pattern, or the Studio's scene
+/// at the slot's own size.
+pub fn choose(
+    env: impl Fn(&str) -> Option<String>,
+    studio: Option<(&Arc<AppStudio>, &tokio::runtime::Handle)>,
+) -> SceneChoice {
     let config = CaptureConfig::default();
     if let Some((width, height, fps)) = env(CANVAS_VAR).as_deref().and_then(parse_canvas) {
         let params = SceneConfigParams {
@@ -70,6 +92,15 @@ pub fn choose(env: impl Fn(&str) -> Option<String>) -> SceneChoice {
         };
     }
     let fps = config.video.fps.max(1);
+    if let Some((studio, runtime)) = studio {
+        let smoke_preview = env(smoke::vars::PREVIEW_MOTION).as_deref() == Some("1");
+        return SceneChoice {
+            feed: follow_studio(studio, runtime, smoke_preview),
+            canvas: Canvas::Slot,
+            fps,
+            described: "the Studio's scene".to_string(),
+        };
+    }
     let params = SceneConfigParams {
         sources: config.sources,
         layout: config.layout,
@@ -82,9 +113,84 @@ pub fn choose(env: impl Fn(&str) -> Option<String>) -> SceneChoice {
         feed: SceneFeed::fixed(params),
         canvas: Canvas::Slot,
         fps,
-        described: "the capture config's default scene (the Studio's scene comes with S1.6a)"
-            .to_string(),
+        described: "the capture config's default scene".to_string(),
     }
+}
+
+/// S3.1b, S3.1e: the Studio's scene as it changes, the transaction commits
+/// to adopt, and the working setup confirmed after each reload.
+fn follow_studio(
+    studio: &Arc<AppStudio>,
+    runtime: &tokio::runtime::Handle,
+    smoke_preview: bool,
+) -> SceneFeed {
+    let mut snapshots = studio.watch();
+    let first = preview_scene_request(&snapshots.borrow(), smoke_preview);
+    let (requests, request_rx) = watch::channel(first);
+    let (adopt, adopt_rx) = watch::channel::<Option<(u64, SceneConfigParams)>>(None);
+    // `loadScene` reads the mark before its request: a reload a switch or
+    // a key overtook confirms nothing.
+    let mark = Arc::new(Mutex::new(studio.scene_reload_mark()));
+
+    let hook_studio = studio.clone();
+    let hook_mark = mark.clone();
+    let hook_runtime = runtime.clone();
+    let on_committed: SceneCommitted = Arc::new(move |params: &SceneConfigParams| {
+        let Ok(mark) = hook_mark.lock().map(|mark| mark.clone()) else {
+            return;
+        };
+        let layout = serde_json::to_value(&params.layout).unwrap_or_default();
+        let sources = serde_json::to_value(&params.sources).unwrap_or_default();
+        let background = params
+            .background
+            .as_ref()
+            .and_then(|background| serde_json::to_value(background).ok());
+        let studio = hook_studio.clone();
+        hook_runtime.spawn(async move {
+            studio
+                .note_scene_reloaded(mark, &layout, &sources, background)
+                .await;
+        });
+    });
+
+    let studio = studio.clone();
+    runtime.spawn(async move {
+        let mut seen_commit = studio.layout_commit_revision();
+        // A transaction committed: the request it leaves behind, when it
+        // changes, is that commit's scene.
+        let mut armed: Option<(u64, Option<SceneConfigParams>, Instant)> = None;
+        loop {
+            let request = preview_scene_request(&snapshots.borrow_and_update(), smoke_preview);
+            let commit = studio.layout_commit_revision();
+            if commit > seen_commit {
+                seen_commit = commit;
+                armed = Some((commit, requests.borrow().clone(), Instant::now()));
+            }
+            if let Some((commit, before, at)) = &armed {
+                if at.elapsed() > ADOPT_WINDOW {
+                    armed = None;
+                } else if let Some(params) =
+                    request.as_ref().filter(|now| Some(*now) != before.as_ref())
+                {
+                    adopt.send_replace(Some((*commit, params.clone())));
+                    armed = None;
+                }
+            }
+            if *requests.borrow() != request {
+                if let Ok(mut held) = mark.lock() {
+                    *held = studio.scene_reload_mark();
+                }
+                requests.send_replace(request);
+            }
+            if snapshots.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+
+    SceneFeed::following(request_rx)
+        .with_adopted(adopt_rx)
+        .on_committed(on_committed)
 }
 
 #[cfg(test)]
@@ -104,7 +210,10 @@ mod tests {
 
     #[test]
     fn the_pinned_canvas_is_the_test_pattern() {
-        let choice = choose(|name| (name == CANVAS_VAR).then(|| "1280x720@30".to_string()));
+        let choice = choose(
+            |name| (name == CANVAS_VAR).then(|| "1280x720@30".to_string()),
+            None,
+        );
         assert_eq!(
             choice.canvas,
             Canvas::Pinned {
@@ -120,7 +229,7 @@ mod tests {
 
     #[test]
     fn without_a_pin_the_slot_sizes_the_canvas() {
-        let choice = choose(|_| None);
+        let choice = choose(|_| None, None);
         assert_eq!(choice.canvas, Canvas::Slot);
         assert!(choice.feed.current().is_some());
     }

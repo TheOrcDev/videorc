@@ -528,6 +528,7 @@ fn main() -> Result<()> {
                         runtime: preview_runtime.clone(),
                         backend: backend_state.clone(),
                         logger: preview_logger.clone(),
+                        studio: studio.clone(),
                     },
                     window,
                     cx,

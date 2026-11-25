@@ -473,6 +473,12 @@ impl Shell {
                 let focus = self.studio.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             }
+            // P532: the Scene canvas opens a closed Preview docked (one in
+            // its own window stays there).
+            if crate::preview::SCENE_HOSTS_DOCKED && page == PageId::Layouts {
+                self.preview
+                    .update(cx, |preview, cx| preview.open_docked_if_closed(cx));
+            }
             // ⌘Z undoes a layout change while the Scene page holds focus.
             if page == PageId::Layouts {
                 let focus = self.scene.read(cx).focus_handle();

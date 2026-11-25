@@ -69,6 +69,8 @@ pub struct PreviewSetup {
     pub runtime: tokio::runtime::Handle,
     pub backend: watch::Receiver<BackendState>,
     pub logger: Logger,
+    /// The Studio, whose scene the preview shows (S3.1b).
+    pub studio: std::sync::Arc<videorc_app_core::Studio<videorc_app_core::BackendClient>>,
 }
 
 /// Where the layer is.
@@ -133,7 +135,7 @@ impl Preview {
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            let _ = (setup.runtime, setup.backend, window);
+            let _ = (setup.runtime, setup.backend, setup.studio, window);
             setup.logger.log(
                 Level::Warn,
                 "[preview] no preview element on this platform yet (S2.3b on Windows)",
@@ -153,8 +155,9 @@ impl Preview {
             runtime,
             backend,
             logger,
+            studio,
         } = setup;
-        let choice = scene::choose(|name| std::env::var(name).ok());
+        let choice = scene::choose(|name| std::env::var(name).ok(), Some((&studio, &runtime)));
         logger.log(
             Level::Info,
             &format!("[preview] the preview shows {}", choice.described),
@@ -283,7 +286,34 @@ impl Preview {
     /// The Scene canvas shows the live picture (X5 `liveCanvasActive`):
     /// the docked layer is here, not in its own window.
     pub fn live_canvas(&self) -> bool {
-        SCENE_HOSTS_DOCKED && self.mode == WindowMode::Docked && self.native_ready()
+        SCENE_HOSTS_DOCKED
+            && self.mode == WindowMode::Docked
+            && !self.is_closed()
+            && self.native_ready()
+    }
+
+    /// Show preview here (P540): a closed Preview opens docked, one in its
+    /// own window comes back to the dock.
+    pub fn show_docked(&mut self, cx: &mut gpui::Context<Self>) {
+        #[cfg(target_os = "macos")]
+        if self.closed {
+            self.open_docked(cx);
+        } else if self.mode == WindowMode::Floating {
+            self.dock(cx);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = cx;
+    }
+
+    /// The Scene page's entry (P532): a closed Preview opens docked there;
+    /// one in its own window stays where it is.
+    pub fn open_docked_if_closed(&mut self, cx: &mut gpui::Context<Self>) {
+        #[cfg(target_os = "macos")]
+        if self.closed {
+            self.open_docked(cx);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = cx;
     }
 
     /// What the Studio slot says, or nothing while a frame shows there.
