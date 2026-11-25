@@ -191,6 +191,10 @@ export const COLOUR_LITERAL_ALLOWLIST = new Map([
   [
     'crates/videorc-kit/src/chrome.rs',
     "the chromatic ring's mask channels (MASK_WHITE, MASK_BLACK): a sprite's opacity is its mask, tinted to light or shade"
+  ],
+  [
+    'crates/videorc-kit/src/qr_code.rs',
+    'QR codes stay black on white for scanners in both themes (Electron Phone Pair / watchdog)'
   ]
 ])
 

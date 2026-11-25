@@ -52,7 +52,8 @@
     "input-group",
     "bar-visualizer",
     "live-waveform",
-    "sound-pad"
+    "sound-pad",
+    "qr-code"
   ],
   "keepLocal": []
 }
