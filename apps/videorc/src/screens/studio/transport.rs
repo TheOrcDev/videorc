@@ -398,6 +398,8 @@ impl Transport {
         let local_active = view.active;
         let talk_show = outputs.is_some();
 
+        let record_ink = lcd::record_tone(theme);
+        let ink = lcd::lit(theme);
         let keys = if local_active && !talk_show {
             // Single stop key while a local session holds the transport.
             div()
@@ -411,6 +413,7 @@ impl Transport {
                     record.label,
                     lcd::KeyTone::Record,
                     record.disabled,
+                    Some(icon(IconName::Stop, 14., record_ink).into_any_element()),
                     None,
                     cx.listener(move |this, _, _, _| this.stop(StopOrigin::Button)),
                 ))
@@ -418,6 +421,11 @@ impl Transport {
             let shortcut = record
                 .shortcut
                 .then(|| ShortcutKeys::for_action(&ToggleRecord).into_any_element());
+            let record_icon = if record.stops || record.stops_cloud {
+                IconName::Stop
+            } else {
+                IconName::Record
+            };
             let mut row = div()
                 .flex()
                 .flex_wrap()
@@ -429,6 +437,7 @@ impl Transport {
                     record.label,
                     lcd::KeyTone::Record,
                     record.disabled,
+                    Some(icon(record_icon, 14., record_ink).into_any_element()),
                     shortcut,
                     cx.listener(move |this, _, _, _| {
                         if stops_cloud {
@@ -448,6 +457,7 @@ impl Transport {
                     go_live.label,
                     lcd::KeyTone::Ink,
                     go_live.disabled,
+                    Some(icon(IconName::Broadcast, 14., ink).into_any_element()),
                     None,
                     cx.listener(move |this, _, _, _| {
                         if ends {

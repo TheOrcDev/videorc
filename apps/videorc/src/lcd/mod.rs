@@ -183,6 +183,7 @@ pub fn key(
     label: impl Into<SharedString>,
     tone: KeyTone,
     disabled: bool,
+    leading: Option<AnyElement>,
     trailing: Option<AnyElement>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -214,6 +215,7 @@ pub fn key(
             .on_click(on_click);
     }
     button
+        .children(leading)
         .child(div().truncate().child(label.into()))
         .children(trailing)
 }

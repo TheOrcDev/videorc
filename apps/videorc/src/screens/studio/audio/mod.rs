@@ -35,6 +35,7 @@ use videorc_app_core::{Studio, StudioSnapshot};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::kbd::Kbd;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::select::Select;
@@ -708,15 +709,32 @@ impl AudioSection {
         } else {
             words::MUTE_MICROPHONE
         };
-        controls = controls.child(lcd::value_button(
-            "studio-lcd-mic-mute",
-            theme,
-            mute_words,
-            muted,
-            false,
-            Some(SharedString::from(mute_tip)),
-            cx.listener(|this, _, _, _| this.mute_toggle()),
-        ));
+        let speaker = if muted {
+            IconName::SpeakerSlash
+        } else {
+            IconName::SpeakerHigh
+        };
+        let mute_ink = if muted {
+            lcd::solid(theme)
+        } else {
+            lcd::dim(theme)
+        };
+        controls = controls.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(icon(speaker, 14., mute_ink))
+                .child(lcd::value_button(
+                    "studio-lcd-mic-mute",
+                    theme,
+                    mute_words,
+                    muted,
+                    false,
+                    Some(SharedString::from(mute_tip)),
+                    cx.listener(|this, _, _, _| this.mute_toggle()),
+                )),
+        );
         header = header.child(controls);
 
         let disabled = mic.disabled_reason.is_some();
