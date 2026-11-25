@@ -22,7 +22,7 @@ use videorc_kit::empty::Empty;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
-use videorc_kit::select::{Select, SelectOption};
+use videorc_kit::select::{Select, SelectOption, SelectSize};
 use videorc_kit::spinner::Spinner;
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{Theme, radius, text};
@@ -275,6 +275,7 @@ pub fn render_reports(
         section = section.action(
             Button::new("report-markers")
                 .variant(ButtonVariant::Ghost)
+                .icon(IconName::BookmarkSimple)
                 .label(rv::MARKERS)
                 .on_click(move |_, window, cx| {
                     open.update(cx, |screen, cx| {
@@ -372,7 +373,10 @@ fn stream_picker(
     entity: &Entity<SidekickScreen>,
     t: &'static Theme,
 ) -> Select {
+    // `SelectTrigger size="xs" className="max-w-56"`.
     let mut select = Select::new("sidekick-report-stream")
+        .size(SelectSize::Xs)
+        .max_width(224.)
         .accessibility_label(rv::STREAM)
         .placeholder(rv::STREAM)
         .value(Some(SharedString::from(selected)));

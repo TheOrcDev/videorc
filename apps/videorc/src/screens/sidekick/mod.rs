@@ -16,7 +16,7 @@ mod voice;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{Context, FontWeight, Hsla, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, FontWeight, Hsla, SharedString, Window, div, prelude::*, px};
 use serde_json::json;
 use videorc_app_core::account::entitlements::{live_cohost_gate, read_snapshot};
 use videorc_app_core::buddy::chat::{self as buddy_chat, RULES_MAX};
@@ -146,33 +146,83 @@ pub(crate) fn unlock_alert(
     alert
 }
 
-/// A Field's words beside its control (`FieldLabel` 14 px / 500 over a
-/// 12 px secondary `FieldDescription`, `gap-0.5`).
+/// `FieldLabel`: 14 px / 500 in primary text.
+fn field_label(label: SharedString, t: &Theme) -> gpui::Div {
+    div()
+        .text_size(px(14.))
+        .line_height(px(20.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(hsla(t.foreground))
+        .child(label)
+}
+
+/// `FieldDescription`: 12 px secondary text at `leading-normal` (18 px), so
+/// a wrapped description reads as Electron's.
+pub(crate) fn field_description(description: impl Into<SharedString>, t: &Theme) -> gpui::Div {
+    let description: SharedString = description.into();
+    div()
+        .text_size(px(12.))
+        .line_height(px(18.))
+        .text_color(hsla(t.muted_foreground))
+        .child(description)
+}
+
+/// A Field's words beside its control: `FieldLabel` over a
+/// `FieldDescription`, `gap-0.5`.
 pub(crate) fn field_text(
     label: impl Into<SharedString>,
     description: Option<SharedString>,
     t: &Theme,
 ) -> gpui::Div {
-    let label: SharedString = label.into();
     div()
         .flex()
         .flex_col()
         .min_w_0()
         .gap(px(2.))
+        .child(field_label(label.into(), t))
+        .children(description.map(|description| field_description(description, t)))
+}
+
+/// The same words with a plain `text-xs` line under the label (16 px line
+/// height), as the listening and wake-word fields write theirs.
+pub(crate) fn field_text_xs(
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    t: &Theme,
+) -> gpui::Div {
+    let description: SharedString = description.into();
+    div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .gap(px(2.))
+        .child(field_label(label.into(), t))
         .child(
-            div()
-                .text_size(px(14.))
-                .line_height(px(20.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(hsla(t.foreground))
-                .child(label),
-        )
-        .children(description.map(|description| {
             div()
                 .type_scale(text::META)
                 .text_color(hsla(t.muted_foreground))
-                .child(description)
-        }))
+                .child(description),
+        )
+}
+
+/// A vertical `Field` (`flex-col gap-3`): the label, its description, then
+/// `rest` (the control and anything after it). The description pulls up
+/// 4 px when it is the second-to-last child (`nth-last-2:-mt-1`), so the
+/// words sit 8 px apart over a lone control and 12 px over more.
+pub(crate) fn field_stack(
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    rest: Vec<AnyElement>,
+    t: &Theme,
+) -> gpui::Div {
+    let description_gap = if rest.len() == 1 { 8. } else { 12. };
+    div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .child(field_label(label.into(), t))
+        .child(field_description(description, t).mt(px(description_gap)))
+        .children(rest.into_iter().map(|child| div().mt(px(12.)).child(child)))
 }
 
 /// `FieldError`: a failed save under its card, monochrome text after the
@@ -1368,7 +1418,6 @@ impl Render for SidekickScreen {
             Tab::Community => {
                 let preview = self.render_community_preview(window, cx);
                 render_community(
-                    &view,
                     self.entitled,
                     self.community.as_ref().expect("community state"),
                     &community_settings,

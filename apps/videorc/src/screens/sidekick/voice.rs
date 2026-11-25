@@ -22,7 +22,8 @@ use videorc_kit::tokens::text;
 
 use super::live::LiveView;
 use super::{
-    SaveSection, SidekickScreen, config_grid_pair, field_beside, field_text, tab_lead, unlock_alert,
+    SaveSection, SidekickScreen, config_grid_pair, field_beside, field_stack, field_text_xs,
+    tab_lead, unlock_alert,
 };
 
 const COMMANDS: &str = "Commands";
@@ -320,7 +321,7 @@ pub fn render_voice(
             FieldGroup::new()
                 .grouped()
                 .child(field_beside(
-                    field_text(WAKE_WORD_LABEL, Some(WAKE_WORD_DESCRIPTION.into()), theme),
+                    field_text_xs(WAKE_WORD_LABEL, WAKE_WORD_DESCRIPTION, theme),
                     Switch::new("wake-word")
                         .accessibility_label(WAKE_WORD_LABEL)
                         .checked(wake)
@@ -338,35 +339,34 @@ pub fn render_voice(
                             }
                         }),
                 ))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(12.))
-                        .child(field_text(BEFORE_REMOVE, Some(remove_desc.into()), theme))
-                        .child(
-                            SegmentedControl::new("remove-confirm")
-                                .small(true)
-                                .accessibility_label(BEFORE_REMOVE)
-                                .value(Some(remove_confirm))
-                                .disabled(locked)
-                                .option(Segment::new("confirm", CONFIRM_FIRST))
-                                .option(Segment::new("countdown", COUNTDOWN))
-                                .on_change({
-                                    let entity = entity.clone();
-                                    move |value, _, cx| {
-                                        let mode = value.to_string();
-                                        entity.update(cx, |screen, cx| {
-                                            screen.patch_section(
-                                                serde_json::json!({ "removeConfirm": mode }),
-                                                SaveSection::Voice,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                }),
-                        ),
-                ),
+                .child(field_stack(
+                    BEFORE_REMOVE,
+                    remove_desc,
+                    vec![
+                        SegmentedControl::new("remove-confirm")
+                            .small(true)
+                            .accessibility_label(BEFORE_REMOVE)
+                            .value(Some(remove_confirm))
+                            .disabled(locked)
+                            .option(Segment::new("confirm", CONFIRM_FIRST))
+                            .option(Segment::new("countdown", COUNTDOWN))
+                            .on_change({
+                                let entity = entity.clone();
+                                move |value, _, cx| {
+                                    let mode = value.to_string();
+                                    entity.update(cx, |screen, cx| {
+                                        screen.patch_section(
+                                            serde_json::json!({ "removeConfirm": mode }),
+                                            SaveSection::Voice,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            })
+                            .into_any_element(),
+                    ],
+                    theme,
+                )),
         );
 
     // Remove messages: each connected platform, ready or with its one fix.

@@ -71,14 +71,21 @@ pub fn render_status(
         show_in_recording: true,
     });
 
-    let picture: Option<ImageSource> = match screen.persona_picture() {
-        Some(path) => Some(path.into()),
-        None => super::pictures::default_idle().map(Into::into),
+    // `BuddyEmblem size="lg"`: 56 px tall. The default golem is the emblem
+    // at its own width (`w-auto`); a picture of the avatar's own fits a
+    // 56 px square (`aspect-square object-contain`).
+    let (picture, width): (ImageSource, f32) = match screen.persona_picture() {
+        Some(path) => (path.into(), EMBLEM),
+        None => {
+            let (w, h) = super::pictures::EMBLEM_LARGE_SIZE;
+            (super::pictures::emblem_large().into(), EMBLEM * w / h)
+        }
     };
     let emblem = div()
-        .size(px(EMBLEM))
+        .w(px(width))
+        .h(px(EMBLEM))
         .flex_none()
-        .children(picture.map(|picture| img(picture).size_full().object_fit(ObjectFit::Contain)));
+        .child(img(picture).size_full().object_fit(ObjectFit::Contain));
 
     let shortcut = PageId::Layouts
         .key()

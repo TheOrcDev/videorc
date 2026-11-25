@@ -52,7 +52,7 @@ use videorc_kit::tokens::{radius, size, text};
 use videorc_kit::tooltip::tooltip;
 use videorc_protocol::community::{CommunitySettings, REGULAR_STREAMS_MAX, REGULAR_STREAMS_MIN};
 
-use super::live::{LiveView, Unlock, UnlockAction};
+use super::live::{Unlock, UnlockAction};
 use super::voice::chat_platform;
 use super::{SidekickScreen, config_grid_pair, unlock_alert};
 
@@ -739,9 +739,7 @@ impl SidekickScreen {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render_community(
-    view: &LiveView,
     entitled: bool,
     state: &CommunityState,
     settings: &CommunitySettings,
@@ -905,9 +903,10 @@ pub fn render_community(
     let people_body = if state.people.is_empty() {
         let query = state.search.read(cx).value().to_string();
         let (title, description) = people_empty_copy(&query, state.filter);
-        div()
-            .py(px(24.))
-            .child(Empty::new().title(title).description(description))
+        // `Empty className="py-6"`: Empty's own 24 px padding, no more.
+        Empty::new()
+            .title(title)
+            .description(description)
             .into_any_element()
     } else {
         let count = state.people.len();
@@ -1034,24 +1033,23 @@ pub fn render_community(
                         )
                         .child(sort),
                 )
-                .child(show)
+                // A plain `SegmentedControl` (not in a Field): it hugs its
+                // options at the left (`w-fit`).
+                .child(div().flex().child(show))
                 .child(people_body),
         );
 
     let community_settings = render_settings_section(settings, entity.clone());
 
-    // Premium: the lock leads, and both rows stay on screen behind it.
+    // Premium: the lock leads, and both rows stay on screen behind it. Its
+    // action is the gate's upgrade (`unlockActionForGate`): View Premium,
+    // signed in or not.
     let lock = (!entitled).then(|| {
-        let action = view
-            .unlock
-            .as_ref()
-            .and_then(|unlock| unlock.action)
-            .unwrap_or(UnlockAction::ViewPremium);
         unlock_alert(
             "sidekick-community-premium-lock",
             "community-unlock-action",
             &Unlock {
-                action: Some(action),
+                action: Some(UnlockAction::ViewPremium),
                 reason: BUDDY_REMEMBERS_LOCK_REASON.to_string(),
             },
             BUDDY_REMEMBERS_LOCK_REASON,
@@ -1147,9 +1145,8 @@ pub fn render_community(
                                 Button::new("copy-disclosure")
                                     .variant(ButtonVariant::Secondary)
                                     .size(ButtonSize::Xs)
-                                    .accessibility_label(if state.copied { COPIED } else { COPY })
-                                    .child(icon(IconName::Copy, 14., foreground))
-                                    .child(if state.copied { COPIED } else { COPY })
+                                    .icon(IconName::Copy)
+                                    .label(if state.copied { COPIED } else { COPY })
                                     .on_click({
                                         let entity = entity.clone();
                                         move |_, _, cx| {

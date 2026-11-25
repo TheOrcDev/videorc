@@ -17,14 +17,14 @@ use videorc_app_core::buddy::chat::{
 };
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
-use videorc_kit::field::Field;
+use videorc_kit::field::{Field, FieldGroup};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::popover::Popover;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
-use videorc_kit::select::Select;
-use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
+use videorc_kit::select::{Select, SelectSize};
+use videorc_kit::settings_row::SettingsRow;
 use videorc_kit::shortcut_keys::ShortcutKeys;
 use videorc_kit::switch::Switch;
 use videorc_kit::textarea::{Textarea, TextareaState};
@@ -425,9 +425,33 @@ pub(super) fn render_greetings(
 
     let enabled = entity.clone();
     // A settings row sits in a grouped card like every Settings row (plan
-    // 168 S-02), so its label and switch line up with the lines'.
-    let switch_row = SettingsRow::new("avatar-greetings-enabled-row", "Greetings")
-        .description("New chatters, follows, subs, raids and the rest, each with its own line.")
+    // 168 S-02). Electron's Greetings row is its own `items-center` line
+    // (label over description at `gap-0.5`), so the switch centres on both.
+    let switch_row = div()
+        .id("avatar-greetings-enabled-row")
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w(px(0.))
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .line_height(px(20.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(hsla(t.foreground))
+                        .child("Greetings"),
+                )
+                .child(meta(
+                    "New chatters, follows, subs, raids and the rest, each with its own line.",
+                    t,
+                )),
+        )
         .child(
             Switch::new("avatar-greetings-enabled")
                 .accessibility_label("Greetings")
@@ -446,7 +470,9 @@ pub(super) fn render_greetings(
     let open_chat = entity.clone();
     // Plan 239: writing them with AI is Sidekick's (Premium and cloud AI),
     // so its switch lives with Answers and Banter.
+    // A horizontal Field: the pointer sits on the label's line.
     let ai_row = SettingsRow::new("avatar-greetings-ai-row", "Write greetings with AI")
+        .flush(true)
         .description(ai_line)
         .child(
             Button::new("avatar-greetings-ai-pointer")
@@ -479,6 +505,7 @@ pub(super) fn render_greetings(
     let full = greetings.templates.len() >= TEMPLATES_MAX;
     let add = entity.clone();
     let mut picker = Select::new("avatar-greeting-add")
+        .size(SelectSize::Xs)
         .width(176.)
         .accessibility_label("Add a greeting")
         .placeholder(if full {
@@ -518,7 +545,7 @@ pub(super) fn render_greetings(
             "What {name} says when someone chats for the first time, follows, subs or raids. Free: every kind has a line until you write your own. In Bubble, {name} says it on stream; in Suggest, you post it."
         ))
         .last(true)
-        .child(SettingsGroup::new().row(switch_row).row(ai_row))
+        .child(FieldGroup::new().grouped().child(switch_row).child(ai_row))
         .child(welcomes_list)
         .child(activity_list)
         .child(footer);
@@ -668,6 +695,7 @@ fn line_editor(
     if !matches!(target, Target::Welcome(_)) {
         let pick = entity.clone();
         let mut platforms = Select::new("avatar-greeting-platform")
+            .size(SelectSize::Xs)
             .width(112.)
             .accessibility_label("Platform")
             .value(Some(SharedString::from(
@@ -753,7 +781,7 @@ fn line_editor(
                     .size(ButtonSize::IconXs)
                     .accessibility_label("Remove greeting")
                     .tooltip("Remove greeting")
-                    .child(icon(IconName::X, 14., hsla(t.muted_foreground)))
+                    .child(icon(IconName::X, 12., hsla(t.muted_foreground)))
                     .on_click(move |_, _, cx| {
                         let id = id.clone();
                         remove.update(cx, |screen, cx| screen.remove_template(&id, cx))
