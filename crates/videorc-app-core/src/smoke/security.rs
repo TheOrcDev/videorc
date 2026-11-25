@@ -227,6 +227,9 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     // L1's Retry preview (`Preview::retry`, P117/P146): answered with the
     // preview's state and whether it ran.
     "preview-retry",
+    // Window → Preview / ⌘P (`TogglePreview`, `Preview::toggle_open`),
+    // dispatched as the menu does: no accessibility tree needed.
+    "preview-toggle-open",
     // S3.3b: the Scene page's canvas editor, what Electron's smokes read and
     // drive in the DOM (`data-videorc-stage-*`, trusted pointer input over
     // CDP): the stage's state, a chip, a drag with real pointer events

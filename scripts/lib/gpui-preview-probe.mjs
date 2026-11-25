@@ -1,7 +1,7 @@
 // Plan 260 Phase 3 (L6): what the GPUI app's native preview probes share.
-// They drive the app the way a person does (⌘P through the UI driver, the
-// Preview window's close button) and read the preview through the GPUI smoke
-// server: `preview-window-state` (L1's `Preview::phase()`, `closed`,
+// They drive the app the way a person does (⌘P as the `TogglePreview` action
+// the menu dispatches, the Preview window's close button) and read the preview
+// through the GPUI smoke server: `preview-window-state` (L1's `Preview::phase()`, `closed`,
 // `floatingOpen`), `native-preview-surface-status` (the element's live
 // `presentedFrameId`) and `preview-retry` (`Preview::retry`).
 //

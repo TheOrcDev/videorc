@@ -94,6 +94,8 @@ pub const PREVIEW_COMMANDS: &[&str] = &[
     // GPUI only: Retry preview (`Preview::retry`), answered with the state
     // and whether it ran; the phase goes back to starting.
     "preview-retry",
+    // GPUI only: Window → Preview / ⌘P, the `TogglePreview` action itself.
+    "preview-toggle-open",
     "preview-window-close",
     "preview-window-open",
     // The Preview window closed as its close button closes it (the app's
