@@ -17,6 +17,7 @@ pub mod quick_settings;
 pub mod scenes;
 pub mod session;
 pub mod show_stage;
+pub mod soundboard;
 pub mod space;
 pub mod takeover;
 pub mod talk_show_host;
@@ -25,7 +26,7 @@ pub mod vertical_stream;
 
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding,
-    KeyDownEvent, Window, canvas, div, prelude::*, px,
+    KeyDownEvent, KeyUpEvent, Window, canvas, div, prelude::*, px,
 };
 use videorc_app_core::StopOrigin;
 use videorc_app_core::studio::screen_views::SHOW_HERE_LABEL;
@@ -47,6 +48,7 @@ use quick_settings::QuickSettingsSection;
 use scenes::ScenesSection;
 use session::SessionSection;
 use show_stage::ShowStage;
+use soundboard::SoundboardSection;
 use space::{KEY_CONTEXT, SPACE, SpaceAction, SpacePress, ToggleRecord, space_action};
 use takeover::TakeoverSection;
 use talk_show_host::TalkShowRoomHost;
@@ -76,6 +78,8 @@ pub struct StudioPage {
     /// The Scenes section under the preview (P273: Scenes first in the
     /// bottom row; Soundboard and the vertical leg fill in after it).
     scenes: Entity<ScenesSection>,
+    /// Soundboard under Scenes (P273 / P340–P350).
+    soundboard: Entity<SoundboardSection>,
     /// Vertical stream panel (P273 / P334–P339); draws nothing until armed.
     vertical_stream: Entity<VerticalStreamSection>,
     /// Show stage (P357–P394): replaces the Preview while the room is open.
@@ -110,6 +114,7 @@ impl StudioPage {
         quick_settings: Entity<QuickSettingsSection>,
         takeover: Entity<TakeoverSection>,
         scenes: Entity<ScenesSection>,
+        soundboard: Entity<SoundboardSection>,
         vertical_stream: Entity<VerticalStreamSection>,
         show_stage: Entity<ShowStage>,
         talk_show_host: Entity<TalkShowRoomHost>,
@@ -144,6 +149,8 @@ impl StudioPage {
             .detach();
         cx.subscribe(&scenes, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
+        cx.subscribe(&soundboard, |_, _, open: &OpenPage, cx| cx.emit(*open))
+            .detach();
         cx.subscribe(&show_stage, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
         // The preview notifies only when its slot's words or its window
@@ -155,6 +162,13 @@ impl StudioPage {
             .detach();
         cx.observe(&show_stage, |_, _, cx| cx.notify()).detach();
         cx.observe(&talk_show_host, |_, _, cx| cx.notify()).detach();
+        // Release While held pads when the window blurs (P343).
+        cx.observe_window_activation(window, |page, window, cx| {
+            if !window.is_window_active() {
+                soundboard::release_held(&page.soundboard, cx);
+            }
+        })
+        .detach();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         Self {
@@ -168,6 +182,7 @@ impl StudioPage {
             quick_settings,
             takeover,
             scenes,
+            soundboard,
             vertical_stream,
             show_stage,
             talk_show_host,
@@ -404,13 +419,14 @@ impl Render for StudioPage {
             StudioLayout::Wide => preview_column.flex_1(),
             StudioLayout::Narrow => preview_column,
         };
+        // P273 order: Scenes, Soundboard, Vertical stream.
         let bottom_row = div()
             .id("studio-dashboard-bottom-row")
             .flex()
             .flex_col()
             .flex_none()
             .child(self.scenes.clone())
-            // Soundboard slot: C3.
+            .child(self.soundboard.clone())
             .child(self.vertical_stream.clone());
         let preview_column = div()
             .id("studio-preview-and-scenes")
@@ -451,10 +467,14 @@ impl Render for StudioPage {
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::toggle_record))
-            .capture_key_down(cx.listener(|page, event: &KeyDownEvent, _, _| {
+            .capture_key_down(cx.listener(|page, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == SPACE {
                     page.space_held = event.is_held;
                 }
+                let _ = soundboard::handle_key_down(&page.soundboard, event, cx);
+            }))
+            .capture_key_up(cx.listener(|page, event: &KeyUpEvent, _, cx| {
+                let _ = soundboard::handle_key_up(&page.soundboard, event, cx);
             }))
             .relative()
             .size_full()

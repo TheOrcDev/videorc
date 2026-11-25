@@ -225,6 +225,7 @@ fn main() -> Result<()> {
                     .chain(screens::avatar::EVENTS)
                     .chain(screens::sidekick::EVENTS)
                     .chain(screens::studio::chat::EVENTS)
+                    .chain(screens::studio::soundboard::EVENTS)
                     .chain(videorc_app_core::library::LIBRARY_EVENTS)
                     .chain(["session.log"])
                     // The hide state: Follow the app in front, and Studio's
@@ -596,6 +597,15 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let soundboard = cx.new(|cx| {
+                    screens::studio::soundboard::SoundboardSection::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        studio_state.clone(),
+                        talk_show.clone(),
+                        cx,
+                    )
+                });
                 let cloud_resume = cx.new(|cx| {
                     screens::studio::alerts::CloudResumeSlot::new(
                         studio.clone(),
@@ -637,6 +647,7 @@ fn main() -> Result<()> {
                         quick_settings,
                         takeover,
                         scenes,
+                        soundboard,
                         vertical_stream,
                         show_stage,
                         talk_show_host,
