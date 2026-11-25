@@ -1,6 +1,7 @@
 //! Destinations ⌘6 (plan 260 Phase 3, Sweep A): Setup trail (destinations,
-//! stream details, chat commands, output quality, Videorc Cloud, ready),
-//! Upcoming, and Discord. Words from `livestream::copy` and section modules.
+//! stream details, chat commands, output quality, Videorc Cloud, Watchdog,
+//! After the stream, ready), Upcoming, and Discord. Words from
+//! `livestream::copy` and section modules.
 
 mod chat_commands;
 mod cloud;
@@ -8,7 +9,9 @@ mod details;
 mod discord;
 mod quality;
 mod ready;
+mod stream_report;
 mod upcoming;
+mod watchdog;
 
 use std::sync::Arc;
 
@@ -25,6 +28,8 @@ use videorc_app_core::livestream::setup::{
 use videorc_app_core::livestream::targets::TargetPatch;
 use videorc_app_core::studio::chat_commands_store::ChatCommandsStore;
 use videorc_app_core::studio::scheduled::ScheduledState;
+use videorc_app_core::studio::stream_report_store::StreamReportStore;
+use videorc_app_core::studio::watchdog_settings::WatchdogSettingsStore;
 use videorc_app_core::{BackendClient, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
@@ -90,6 +95,8 @@ pub struct DestinationsPanel {
     details_dirty: bool,
     chat_commands: ChatCommandsStore,
     command_editor: Option<chat_commands::CommandEditor>,
+    watchdog: WatchdogSettingsStore,
+    stream_report: StreamReportStore,
     ready: ReadyView,
     scheduled: ScheduledState,
     discord_memory: DiscordMemory,
@@ -118,6 +125,8 @@ impl DestinationsPanel {
             let mut details_rx = studio_watch.details();
             let mut chat_rx = studio_watch.chat_commands();
             let mut scheduled_rx = studio_watch.scheduled();
+            let mut watchdog_rx = studio_watch.watchdog_settings();
+            let mut stream_report_rx = studio_watch.stream_report();
             loop {
                 tokio::select! {
                     changed = studio_rx.changed() => if changed.is_err() { break },
@@ -128,6 +137,8 @@ impl DestinationsPanel {
                     changed = details_rx.changed() => if changed.is_err() { break },
                     changed = chat_rx.changed() => if changed.is_err() { break },
                     changed = scheduled_rx.changed() => if changed.is_err() { break },
+                    changed = watchdog_rx.changed() => if changed.is_err() { break },
+                    changed = stream_report_rx.changed() => if changed.is_err() { break },
                 }
                 let _ = this.update(cx, |panel, cx| {
                     panel.rebuild(cx);
@@ -183,6 +194,8 @@ impl DestinationsPanel {
             details_dirty: false,
             chat_commands: ChatCommandsStore::default(),
             command_editor: None,
+            watchdog: WatchdogSettingsStore::default(),
+            stream_report: StreamReportStore::default(),
             ready: ReadyView {
                 rows: Vec::new(),
                 not_ready: Vec::new(),
@@ -230,8 +243,12 @@ impl DestinationsPanel {
         );
         self.details = self.studio.details_now();
         self.chat_commands = self.studio.chat_commands_now();
+        self.watchdog = self.studio.watchdog_settings_now();
+        self.stream_report = self.studio.stream_report_now();
         self.scheduled = self.studio.scheduled_now();
         self.ready = self.build_ready();
+        let premium = Self::watchdog_premium(&self.studio);
+        self.refresh_watchdog_phone_if_needed(premium);
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
@@ -239,6 +256,8 @@ impl DestinationsPanel {
         let before_cloud = self.cloud.clone();
         let before_details = self.details.clone();
         let before_chat = self.chat_commands.clone();
+        let before_watchdog = self.watchdog.clone();
+        let before_stream_report = self.stream_report.clone();
         let before_scheduled = self.scheduled.clone();
         let before_ready = self.ready.clone();
         self.rebuild_from_studio();
@@ -246,6 +265,8 @@ impl DestinationsPanel {
             || self.cloud != before_cloud
             || self.details != before_details
             || self.chat_commands != before_chat
+            || self.watchdog != before_watchdog
+            || self.stream_report != before_stream_report
             || self.scheduled != before_scheduled
             || self.ready != before_ready
         {
@@ -906,7 +927,13 @@ impl Render for DestinationsPanel {
                 if let Some(cloud) = self.cloud.clone() {
                     column = column.child(self.cloud_section(&cloud, window, cx));
                 }
+                let premium = Self::watchdog_premium(&self.studio);
+                if let Some(watchdog) = Self::watchdog_view(&self.watchdog, premium) {
+                    column = column.child(self.watchdog_section(&watchdog, window, cx));
+                }
+                let report = Self::stream_report_view(&self.stream_report);
                 column
+                    .child(self.stream_report_section(&report, window, cx))
                     .child(self.ready_section(&self.ready.clone(), window, cx))
                     .into_any_element()
             }
