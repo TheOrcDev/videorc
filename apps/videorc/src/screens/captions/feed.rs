@@ -5,10 +5,8 @@
 //! off (`decideCaptionsRuntimeIntent`). The caption service's status is the
 //! Studio's (`captions.status`).
 //!
-//! Not here yet: the burn-in driver that sends each line to the compositor
-//! (`captions.overlay.set` per output leg, the dwell clear). Until it lands
-//! the GPUI app transcribes and shows captions here and in the reader, but
-//! the stream and the recording carry no caption bar.
+//! The bar on the stream and the recording is [`super::burn`]'s, driven
+//! from here on every change.
 
 use std::sync::Arc;
 
@@ -19,6 +17,8 @@ use videorc_app_core::captions::{self as c, Lines, RuntimeIntent, Status, method
 use videorc_app_core::livestream::captions_preflight;
 use videorc_app_core::protocol::{EntitlementsSnapshot, RecordingState};
 use videorc_app_core::{BackendClient, BackendEvent, Studio, StudioSnapshot};
+
+use super::burn::Burn;
 
 pub type AppStudio = Studio<BackendClient>;
 
@@ -67,6 +67,7 @@ pub struct CaptionsFeed {
     was_capturing: bool,
     style_sent: Option<Value>,
     shown: Option<Value>,
+    burn: Burn,
     /// The last start's failure, shown on the page until the next attempt.
     pub start_error: Option<String>,
 }
@@ -124,6 +125,7 @@ impl CaptionsFeed {
             was_capturing: false,
             style_sent: None,
             shown: None,
+            burn: Burn::default(),
             start_error: None,
         }
     }
@@ -184,6 +186,10 @@ impl CaptionsFeed {
         let changed = match event.as_str() {
             methods::UPDATE_EVENT => self.lines.apply_update(&payload),
             methods::CLEARED_EVENT => self.lines.clear(),
+            methods::OVERLAY_LAYOUT_EVENT => {
+                self.burn.set_layout(payload);
+                false
+            }
             methods::ENTITLEMENTS_EVENT => {
                 self.entitlements = read_entitlements(&payload).or(self.entitlements.take());
                 true
@@ -234,6 +240,20 @@ impl CaptionsFeed {
             cx.notify();
         }
         self.was_capturing = capturing;
+        // The caption bar on the outputs.
+        let status = Status::of(snapshot.captions_status.as_ref());
+        let client = self.studio.backend().clone();
+        self.burn.drive(
+            &snapshot,
+            self.lines.latest(),
+            &status,
+            room_open,
+            capturing,
+            connected,
+            &client,
+            &self.runtime,
+            cx,
+        );
         let scope = Scope {
             enabled,
             suppressed,
@@ -263,7 +283,6 @@ impl CaptionsFeed {
         if !connected || self.pending() {
             return;
         }
-        let status = Status::of(snapshot.captions_status.as_ref());
         match c::runtime_intent(
             enabled,
             suppressed,
@@ -299,6 +318,28 @@ impl CaptionsFeed {
         } else {
             self.style_sent = None;
         }
+    }
+
+    pub(super) fn burn_mut(&mut self) -> &mut Burn {
+        &mut self.burn
+    }
+
+    /// Runs the rules again (a read landed).
+    pub(super) fn redrive(&mut self, cx: &mut Context<Self>) {
+        self.drive(cx);
+    }
+
+    /// The latest line's dwell ran out.
+    pub(super) fn dwell_ran_out(&mut self, ticket: u64, _cx: &mut Context<Self>) {
+        let snapshot = self.studio.snapshot();
+        let client = self.studio.backend().clone();
+        self.burn.dwell_ran_out(
+            ticket,
+            self.lines.latest(),
+            &snapshot.settings.capture_doc["captions"],
+            &client,
+            &self.runtime,
+        );
     }
 
     /// `startCaptions(language)`: Retry, or the session's start.
@@ -366,7 +407,10 @@ impl CaptionsFeed {
 fn wakes(event: &str) -> bool {
     matches!(
         event,
-        methods::UPDATE_EVENT | methods::CLEARED_EVENT | methods::ENTITLEMENTS_EVENT
+        methods::UPDATE_EVENT
+            | methods::CLEARED_EVENT
+            | methods::ENTITLEMENTS_EVENT
+            | methods::OVERLAY_LAYOUT_EVENT
     ) || event.starts_with("cloud.")
 }
 
