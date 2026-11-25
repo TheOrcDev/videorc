@@ -1681,7 +1681,7 @@ fn settings_row(
 ) -> gpui::Stateful<gpui::Div> {
     let label: SharedString = label.into();
     div()
-        .id(id.into())
+        .id(id)
         .role(gpui::Role::Group)
         .aria_label(label.clone())
         .flex()
