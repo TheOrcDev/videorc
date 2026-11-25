@@ -108,6 +108,7 @@ pub mod recordings_folder;
 mod recordings_folder_actions;
 pub mod room_frames;
 pub mod room_media;
+pub mod room_scene;
 pub mod scene_editor;
 pub mod scene_on_stream;
 pub mod scene_switch;
