@@ -2,13 +2,17 @@
 //! stream details, chat commands, output quality, Videorc Cloud, ready),
 //! Upcoming, and Discord. Words from `livestream::copy` and section modules.
 
+mod category;
 mod chat_commands;
 mod cloud;
 mod details;
 mod discord;
 mod quality;
 mod ready;
+mod schedule;
+mod thumbnail;
 mod upcoming;
+mod youtube_consent;
 
 use std::sync::Arc;
 
@@ -29,6 +33,7 @@ use videorc_app_core::{BackendClient, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::dialog::DialogHandle;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::list_row::{GroupedList, ListRow};
@@ -99,6 +104,11 @@ pub struct DestinationsPanel {
     manual_url_drafts: std::collections::BTreeMap<String, Entity<InputState>>,
     /// P1493: keyring LinuxSetupAlert before sign-in (Linux only).
     keyring_issue: Option<videorc_app_core::studio::linux_desktop::LinuxSetupIssue>,
+    youtube_consent: DialogHandle,
+    youtube_consent_accepted: bool,
+    category_picker: Option<category::CategoryPicker>,
+    thumbnail_field: thumbnail::Field,
+    schedule: Option<schedule::ScheduleEditor>,
 }
 
 impl DestinationsPanel {
@@ -195,6 +205,11 @@ impl DestinationsPanel {
             manual_key_drafts: std::collections::BTreeMap::new(),
             manual_url_drafts: std::collections::BTreeMap::new(),
             keyring_issue: None,
+            youtube_consent: DialogHandle::new(false),
+            youtube_consent_accepted: false,
+            category_picker: None,
+            thumbnail_field: thumbnail::Field::default(),
+            schedule: None,
         };
         panel.rebuild_from_studio();
         panel
@@ -627,11 +642,20 @@ impl DestinationsPanel {
                                     }),
                             );
                         } else {
+                            let platform = dest.platform.clone();
                             detail = detail.child(
                                 Button::new(format!("dest-connect-{}", dest.id))
                                     .label(connect_label.clone())
                                     .variant(ButtonVariant::Outline)
-                                    .disabled(!*connect_enabled || dest.disabled),
+                                    .disabled(!*connect_enabled || dest.disabled)
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_, window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.begin_connect(platform.clone(), window, cx);
+                                            });
+                                        }
+                                    }),
                             );
                         }
                     }
@@ -926,6 +950,8 @@ impl Render for DestinationsPanel {
         };
 
         let command_dialog = self.command_dialog_element(window, cx);
+        let youtube_consent = self.youtube_consent_dialog(window, cx);
+        let schedule = self.schedule_dialog(window, cx);
 
         div()
             .id("destinations-page")
@@ -962,5 +988,7 @@ impl Render for DestinationsPanel {
                 ),
             )
             .child(command_dialog)
+            .child(youtube_consent)
+            .child(schedule)
     }
 }

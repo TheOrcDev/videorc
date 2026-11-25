@@ -222,6 +222,28 @@ impl<B: StudioBackend> Studio<B> {
         }
     }
 
+    /// `scheduledThumbnail.import`: pick a file path into the managed
+    /// thumbnail root. Answers the asset id, or `None` when refused.
+    pub async fn import_scheduled_thumbnail(&self, path: &str) -> Option<String> {
+        match self
+            .backend
+            .livestream_request("scheduledThumbnail.import", json!({ "path": path }))
+            .await
+        {
+            Ok(value) => value
+                .get("id")
+                .or_else(|| value.get("assetId"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            Err(error) => {
+                self.config.logger.warn(format!(
+                    "Studio: scheduledThumbnail.import did not import ({error})."
+                ));
+                None
+            }
+        }
+    }
+
     /// `searchTwitchCategories` / `searchKickCategories`.
     pub async fn search_categories(&self, platform: &str, query: &str) {
         let trimmed = query.trim().to_string();
