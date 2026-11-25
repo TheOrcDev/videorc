@@ -579,7 +579,7 @@ impl QuickSettingsSection {
                     div()
                         .flex_none()
                         .text_color(lcd::dim(t))
-                        .child(lcd::caps(section_copy::CAMERA)),
+                        .child(lcd::tracked(section_copy::CAMERA)),
                 )
                 .child(
                     div()
@@ -643,7 +643,7 @@ impl QuickSettingsSection {
                     div()
                         .min_w_0()
                         .truncate()
-                        .child(lcd::caps(section_copy::STREAM_MANAGER)),
+                        .child(lcd::tracked(section_copy::STREAM_MANAGER)),
                 )
                 .child(div().child("·"))
                 .child(

@@ -45,6 +45,7 @@ use videorc_app_core::{BackendClient, Studio, StudioSnapshot};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::channel_toggle::{ChannelToggle, ChannelToggleSize, mute_toggle};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
@@ -351,29 +352,23 @@ fn control_row(
         )
 }
 
-/// The Microphone header's Mute (`MuteToggle size="icon"`): a 28 px square
-/// with the speaker, the mute tone while muted.
+/// The Microphone header's Mute (`MuteToggle size="icon"`): the kit's
+/// 28 px toggle with the speaker, the mute tone's wash and ink while muted.
 fn mute_button(
     muted: bool,
-    t: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> Button {
-    let (speaker, ink) = if muted {
-        (IconName::SpeakerSlashDuotone, t.channel_mute_foreground)
-    } else {
-        (IconName::SpeakerHighDuotone, t.muted_foreground)
-    };
-    Button::new("mute-mic")
-        .size(ButtonSize::Icon)
-        .variant(ButtonVariant::Secondary)
+) -> ChannelToggle {
+    mute_toggle("mute-mic")
+        .size(ChannelToggleSize::Icon)
+        .icons(IconName::SpeakerHighDuotone, IconName::SpeakerSlashDuotone)
+        .pressed(muted)
         .accessibility_label(if muted {
             audio_mixer::copy::UNMUTE_MICROPHONE
         } else {
             audio_mixer::copy::MUTE_MICROPHONE
         })
         .tooltip(audio_mixer::copy::MUTE_MICROPHONE)
-        .child(icon(speaker, 16.0, hsla(ink)))
-        .on_click(on_click)
+        .on_change(move |_, event, window, cx| on_click(event, window, cx))
 }
 
 fn more_button(
@@ -1338,7 +1333,7 @@ impl SourcesPanel {
             row = row.child(status_chip("mic-chip", chip.label.clone(), chip.tone));
         }
         let entity = cx.entity();
-        row = row.child(mute_button(muted, t, move |_, _, cx| {
+        row = row.child(mute_button(muted, move |_, _, cx| {
             entity.update(cx, |panel, _| panel.mute_toggle());
         }));
         let entity = cx.entity();

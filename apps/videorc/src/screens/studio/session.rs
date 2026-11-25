@@ -544,7 +544,7 @@ impl SessionSection {
                     div()
                         .flex_shrink_0()
                         .text_color(lcd::dim(theme))
-                        .child(lcd::caps(fact.label.clone())),
+                        .child(lcd::tracked(fact.label.clone())),
                 )
                 .child(div().min_w_0().text_color(lcd::lit(theme)).child(value))
                 .into_any_element()
