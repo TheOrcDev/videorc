@@ -649,7 +649,7 @@ impl Render for ImagesPanel {
         let bg_importing = self.background_importing;
         let bg_import_btn = |id: &'static str| {
             let entity = entity.clone();
-            Button::new(id.into())
+            Button::new(id)
                 .label(assets::background_import_label(bg_importing))
                 .variant(ButtonVariant::Outline)
                 .disabled(offline || bg_importing)
