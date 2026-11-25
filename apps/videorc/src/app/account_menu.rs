@@ -9,7 +9,7 @@
 //! picture loads through an
 //! avatar cache in Electron, never hot-linked, and the app has none yet.
 
-use gpui::{App, WeakEntity, Window, div, prelude::*, px};
+use gpui::{App, FontWeight, WeakEntity, Window, div, prelude::*, px};
 use videorc_app_core::accounts::{Account, AccountsState, MenuItem as Row, copy, menu_items};
 use videorc_app_core::nav::PageId;
 use videorc_app_core::studio::scenes_section::session_active;
@@ -19,8 +19,8 @@ use videorc_kit::{
     dropdown_menu::{DropdownMenu, Menu, MenuItem, MenuItemTone},
     icon::{IconName, icon},
     status_dot::{StatusDot, StatusTone},
-    theme::hsla,
-    tokens::Theme,
+    theme::{TypeScale, hsla},
+    tokens::{Theme, text},
 };
 
 use super::accounts::{self, Shared};
@@ -155,10 +155,18 @@ pub fn row(
             div()
                 .flex()
                 .items_center()
-                .gap(px(8.))
+                .gap(px(6.))
                 .min_w(px(0.))
                 .child(picture)
-                .child(div().truncate().child(name))
+                // Electron's trigger (`account-menu-trigger.tsx`): a 28 px
+                // row with the name at `text-xs font-medium`, 12/16 px.
+                .child(
+                    div()
+                        .truncate()
+                        .type_scale(text::META)
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(name),
+                )
                 // P025: bare, so the trigger's name stays the words it shows;
                 // the Go Live check, the toast and the chat row say why.
                 .when(needs_sign_in, |row| {
