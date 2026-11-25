@@ -117,6 +117,11 @@ pub struct Preview {
     closed: bool,
     /// Where a closed Preview opens again: where it was when it closed.
     closed_from: WindowMode,
+    /// Linux: the docked slot isn't fully inside its scroll view, so the
+    /// child (above the window's drawing, never clipped) hides and the slot
+    /// says why (`scrolled-away`). macOS's docked view is clipped by GPUI.
+    #[cfg(target_os = "linux")]
+    scrolled_away: bool,
     /// The Studio, for the grants the preview's sources wait for (P141).
     studio: Option<std::sync::Arc<videorc_app_core::Studio<videorc_app_core::BackendClient>>>,
 }
@@ -413,6 +418,14 @@ impl Preview {
         }
         if self.is_closed() {
             return Some(words::LIVES_IN_ITS_OWN_WINDOW);
+        }
+        #[cfg(target_os = "linux")]
+        if self.mode == WindowMode::Docked
+            && self.scrolled_away
+            && let Some(hidden) =
+                words::dock_hidden(videorc_preview::lifecycle::DockHiddenReason::ScrolledAway)
+        {
+            return Some(hidden);
         }
         if let Some(waiting) = self.permission_words() {
             return Some(waiting);
@@ -738,7 +751,11 @@ impl Preview {
                 canvas(
                     move |bounds, window, cx| {
                         let geometry = linux::geometry_of(window, bounds, cx);
-                        let _ = weak.update(cx, |preview, _| {
+                        // A scroll view clips the slot: the child hides
+                        // until the slot is fully in view.
+                        let away = !linux::fully_inside(window.content_mask().bounds, bounds);
+                        let _ = weak.update(cx, |preview, cx| {
+                            preview.set_scrolled_away(away, cx);
                             preview.place_linux(linux::Host::Docked, window, bounds, geometry)
                         });
                     },
