@@ -21,8 +21,13 @@ pub struct ShortcutRecorder {
     id: ElementId,
     /// Accelerator label chips (already built by the screen / ShortcutKeys).
     keys: Option<AnyElement>,
-    /// Shown while unarmed and unbound ("Set shortcut").
+    /// Shown while unarmed and unbound ("Unassigned").
     placeholder: SharedString,
+    /// The setting's name ("Start or stop recording"), for the spoken name.
+    label: Option<SharedString>,
+    /// The binding in words ("⇧⌘R"), for the spoken name.
+    value_label: Option<SharedString>,
+    tooltip: Option<SharedString>,
     armed: bool,
     invalid: bool,
     disabled: bool,
@@ -36,7 +41,10 @@ impl ShortcutRecorder {
         ShortcutRecorder {
             id: id.into(),
             keys: None,
-            placeholder: SharedString::from("Set shortcut"),
+            placeholder: SharedString::from("Unassigned"),
+            label: None,
+            value_label: None,
+            tooltip: None,
             armed: false,
             invalid: false,
             disabled: false,
@@ -54,6 +62,28 @@ impl ShortcutRecorder {
 
     pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
+        self
+    }
+
+    /// The setting's name. The field is spoken as Electron's
+    /// `shortcutRecorderName`: "<label>: <binding>", "<label>: Unassigned",
+    /// or "<label>: press the new shortcut" while armed; Clear is "Clear the
+    /// <label> shortcut".
+    pub fn label(mut self, label: impl Into<SharedString>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// The binding as inline words (`acceleratorInlineLabel`: "⇧⌘R"), for
+    /// the spoken name; the chips themselves come from [`Self::keys`].
+    pub fn value_label(mut self, words: impl Into<SharedString>) -> Self {
+        self.value_label = Some(words.into());
+        self
+    }
+
+    /// A tooltip on the field (what the shortcut does, or why it is off).
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
         self
     }
 
@@ -113,16 +143,38 @@ impl RenderOnce for ShortcutRecorder {
                 .text_size(px(12.0))
                 .line_height(px(16.0))
                 .text_color(hsla(t.muted_foreground))
+                .truncate()
                 .child(if self.armed {
-                    SharedString::from("Press keys…")
+                    SharedString::from("Press shortcut…")
                 } else {
-                    self.placeholder
+                    self.placeholder.clone()
                 })
                 .into_any_element()
         };
 
+        let name = self.label.as_ref().map(|label| {
+            let state = if self.armed {
+                SharedString::from("press the new shortcut")
+            } else {
+                self.value_label
+                    .clone()
+                    .unwrap_or_else(|| self.placeholder.clone())
+            };
+            SharedString::from(format!("{label}: {state}"))
+        });
+        let clear_name = self
+            .label
+            .as_ref()
+            .map(|label| SharedString::from(format!("Clear the {label} shortcut")))
+            .unwrap_or_else(|| SharedString::from("Clear the shortcut"));
+        let clear_id = SharedString::from(format!("{}/clear", self.id));
         let mut field = gpui_base::Button::new(self.id)
             .disabled(self.disabled)
+            .when_some(name, |field, name| field.accessibility_label(name))
+            .when_some(self.tooltip, |field, text| {
+                field.tooltip(crate::tooltip::tooltip(text))
+            })
+            .justify_start()
             .relative()
             .flex()
             .flex_1()
@@ -137,9 +189,11 @@ impl RenderOnce for ShortcutRecorder {
             field = field.on_click(move |e, w, cx| on_click(e, w, cx));
         }
 
-        let clear = self.on_clear.map(|on_clear| {
-            gpui_base::Button::new("shortcut-recorder-clear")
+        // Clear shows only while a binding is set and the field is not armed.
+        let clear = self.on_clear.filter(|_| !self.armed).map(|on_clear| {
+            gpui_base::Button::new(clear_id)
                 .disabled(self.disabled)
+                .accessibility_label(clear_name)
                 .flex_none()
                 .size(px(size::CONTROL))
                 .items_center()

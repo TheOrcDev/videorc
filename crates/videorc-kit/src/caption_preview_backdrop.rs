@@ -26,6 +26,8 @@ pub enum CaptionPreviewBackdrop {
 #[derive(IntoElement)]
 pub struct CaptionPreviewBackdropEl {
     kind: CaptionPreviewBackdrop,
+    /// The frame's corner radius: the backdrop is clipped to it.
+    radius: f32,
     appearance: Option<Appearance>,
 }
 
@@ -33,8 +35,16 @@ impl CaptionPreviewBackdropEl {
     pub fn new(kind: CaptionPreviewBackdrop) -> Self {
         CaptionPreviewBackdropEl {
             kind,
+            radius: 0.0,
             appearance: None,
         }
+    }
+
+    /// Clips the backdrop to the preview frame's corner radius (the raster
+    /// too, which an ancestor's `overflow_hidden` does not round).
+    pub fn rounded(mut self, radius: f32) -> Self {
+        self.radius = radius.max(0.0);
+        self
     }
 
     pub fn appearance(mut self, appearance: Appearance) -> Self {
@@ -43,8 +53,9 @@ impl CaptionPreviewBackdropEl {
     }
 }
 
-fn paint(window: &mut Window, bounds: Bounds<gpui::Pixels>, image: Arc<RenderImage>) {
-    let _ = window.paint_image(bounds, bounds, gpui::Corners::default(), image, 0, false);
+fn paint(window: &mut Window, bounds: Bounds<gpui::Pixels>, radius: f32, image: Arc<RenderImage>) {
+    let corners = gpui::Corners::all(px(radius));
+    let _ = window.paint_image(bounds, bounds, corners, image, 0, false);
 }
 
 fn dark_svg() -> &'static str {
@@ -87,32 +98,43 @@ fn mixed_svg() -> &'static str {
 impl RenderOnce for CaptionPreviewBackdropEl {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
+        let radius = self.radius;
         match self.kind {
-            CaptionPreviewBackdrop::Light => div().size_full().bg(linear_gradient(
-                135.0,
-                linear_color_stop(hsla(t.video_ground_foreground), 0.0),
-                linear_color_stop(hsla(t.video_ground_muted), 1.0),
-            )
-            .color_space(ColorSpace::Oklab)),
+            CaptionPreviewBackdrop::Light => {
+                div().size_full().rounded(px(radius)).bg(linear_gradient(
+                    135.0,
+                    linear_color_stop(hsla(t.video_ground_foreground), 0.0),
+                    linear_color_stop(hsla(t.video_ground_muted), 1.0),
+                )
+                .color_space(ColorSpace::Oklab))
+            }
             CaptionPreviewBackdrop::Dark | CaptionPreviewBackdrop::Mixed => {
                 let svg = match self.kind {
                     CaptionPreviewBackdrop::Dark => dark_svg(),
                     _ => mixed_svg(),
                 };
                 let raster = chrome::rasterise_for_kit(svg, 512, 288);
-                div().size_full().overflow_hidden().child(match raster {
-                    Some(image) => canvas(
-                        move |_, _, _| (),
-                        move |bounds, _, window, _| {
-                            paint(window, bounds, image.clone());
-                        },
-                    )
-                    .into_any_element(),
-                    None => div()
+                div()
+                    .size_full()
+                    .rounded(px(radius))
+                    .overflow_hidden()
+                    .child(match raster {
+                        // A canvas has no size of its own: without `size_full`
+                        // it lays out at 0×0 and the raster never paints.
+                        Some(image) => canvas(
+                            move |_, _, _| (),
+                            move |bounds, _, window, _| {
+                                paint(window, bounds, radius, image.clone());
+                            },
+                        )
                         .size_full()
-                        .bg(hsla(t.video_ground))
                         .into_any_element(),
-                })
+                        None => div()
+                            .size_full()
+                            .rounded(px(radius))
+                            .bg(hsla(t.video_ground))
+                            .into_any_element(),
+                    })
             }
         }
     }

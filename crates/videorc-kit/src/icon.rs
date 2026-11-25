@@ -253,6 +253,14 @@ pub enum IconName {
     SpeakerHighDuotone,
     /// `SpeakerOffIcon` at duotone weight.
     SpeakerSlashDuotone,
+    /// `PauseIcon` (Phosphor's Pause): the avatar preview's pause.
+    Pause,
+    /// `PauseIcon` at fill weight: the Library player.
+    PauseFill,
+    /// `ZoomInIcon` (Phosphor's MagnifyingGlassPlus): the Bubble zoom.
+    MagnifyingGlassPlus,
+    /// `LinkIcon` (Phosphor's LinkSimple): Guests' invite link.
+    LinkSimple,
 }
 
 impl IconName {
@@ -279,6 +287,7 @@ impl IconName {
             IconName::UploadSimple => IconName::UploadSimpleFill,
             IconName::ArrowsClockwise => IconName::ArrowsClockwiseFill,
             IconName::Play => IconName::PlayFill,
+            IconName::Pause => IconName::PauseFill,
             IconName::Info => IconName::InfoFill,
             IconName::XCircle => IconName::XCircleFill,
             IconName::CheckCircle => IconName::CheckCircleFill,
@@ -419,6 +428,10 @@ impl IconName {
             IconName::DesktopDuotone => include_bytes!("../icons/desktop-duotone.svg"),
             IconName::SpeakerHighDuotone => include_bytes!("../icons/speaker-high-duotone.svg"),
             IconName::SpeakerSlashDuotone => include_bytes!("../icons/speaker-slash-duotone.svg"),
+            IconName::Pause => include_bytes!("../icons/pause.svg"),
+            IconName::PauseFill => include_bytes!("../icons/pause-fill.svg"),
+            IconName::MagnifyingGlassPlus => include_bytes!("../icons/magnifying-glass-plus.svg"),
+            IconName::LinkSimple => include_bytes!("../icons/link-simple.svg"),
         }
     }
 }

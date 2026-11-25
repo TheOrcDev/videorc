@@ -37,7 +37,11 @@ pub struct Field {
     label: Option<SharedString>,
     /// Trailing chip on the label row (title "0/100" counter).
     label_end: Option<AnyElement>,
+    /// An element right after the label (`FieldLabel` is `w-fit gap-2`).
+    label_after: Option<AnyElement>,
     description: Option<SharedString>,
+    /// Description between the label and the control (`FieldContent`).
+    description_above: bool,
     error: Option<SharedString>,
     invalid: bool,
     children: SmallVec<[AnyElement; 2]>,
@@ -51,7 +55,9 @@ impl Field {
             orientation: FieldOrientation::Vertical,
             label: None,
             label_end: None,
+            label_after: None,
             description: None,
+            description_above: false,
             error: None,
             invalid: false,
             children: SmallVec::new(),
@@ -77,6 +83,21 @@ impl Field {
     /// Trailing element on the label row (character count, etc.).
     pub fn label_end(mut self, end: impl IntoElement) -> Self {
         self.label_end = Some(end.into_any_element());
+        self
+    }
+
+    /// An element right after the label, 8 px on (a badge, a status dot):
+    /// Electron's `FieldLabel` is `w-fit gap-2`, so its children follow the
+    /// words. [`Self::label_end`] sits at the row's far end instead.
+    pub fn label_after(mut self, after: impl IntoElement) -> Self {
+        self.label_after = Some(after.into_any_element());
+        self
+    }
+
+    /// The description under the label and above the control, as
+    /// `FieldContent` (label + description, `gap-1`) before the control.
+    pub fn description_above(mut self, above: bool) -> Self {
+        self.description_above = above;
         self
     }
 
@@ -116,18 +137,32 @@ impl RenderOnce for Field {
         let t = resolve(self.appearance, window, cx);
         let _invalid = self.invalid;
         let label_row = self.label.map(|label| {
-            let mut row = div().flex().w_full().items_center().gap(px(8.0)).child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .text_size(px(14.0))
-                    .line_height(px(20.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    // Electron keeps the label in the foreground; the error
-                    // line below carries the refusal.
-                    .text_color(hsla(t.foreground))
-                    .child(label),
-            );
+            let words = div()
+                .min_w(px(0.0))
+                .text_size(px(14.0))
+                .line_height(px(20.0))
+                .font_weight(FontWeight::MEDIUM)
+                // Electron keeps the label in the foreground; the error
+                // line below carries the refusal.
+                .text_color(hsla(t.foreground))
+                .child(label);
+            let name = div()
+                .flex()
+                .flex_1()
+                .min_w(px(0.0))
+                .items_center()
+                .gap(px(8.0))
+                .child(words)
+                .children(
+                    self.label_after
+                        .map(|after| div().flex_none().flex().items_center().child(after)),
+                );
+            let mut row = div()
+                .flex()
+                .w_full()
+                .items_center()
+                .gap(px(8.0))
+                .child(name);
             if let Some(end) = self.label_end {
                 row = row.child(
                     div()
@@ -148,18 +183,34 @@ impl RenderOnce for Field {
                 .child(description)
         });
         let error = self.error.map(|error| {
-            div()
-                .flex()
-                .items_start()
-                .gap(px(6.0))
-                .text_size(px(12.0))
-                .line_height(px(16.0))
-                .text_color(hsla(t.foreground))
-                .child(icon(IconName::XCircleFill, 14.0, hsla(t.destructive)))
-                .child(div().min_w(px(0.0)).child(error))
+            let error = FieldError::new(error);
+            match self.appearance {
+                Some(appearance) => error.appearance(appearance),
+                None => error,
+            }
         });
 
         match self.orientation {
+            // FieldContent first: label and description, 4 px apart, then
+            // the control and the error.
+            FieldOrientation::Vertical if self.description_above => div()
+                .id(self.id)
+                .role(gpui::Role::Group)
+                .flex()
+                .w_full()
+                .flex_col()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .w_full()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .children(label_row)
+                        .children(description),
+                )
+                .children(self.children)
+                .children(error),
             // shadcn: label → control → description → error
             FieldOrientation::Vertical => div()
                 .id(self.id)
@@ -194,6 +245,53 @@ impl RenderOnce for Field {
                     .children(self.children)
             }
         }
+    }
+}
+
+/// `FieldError` on its own (a refusal under a row or a group): 12 px words in
+/// the foreground with the destructive XCircle (fill, 14 px) before them,
+/// spoken as an alert. The colour marks it; the words stay readable.
+#[derive(IntoElement)]
+pub struct FieldError {
+    message: SharedString,
+    appearance: Option<Appearance>,
+}
+
+impl FieldError {
+    pub fn new(message: impl Into<SharedString>) -> Self {
+        FieldError {
+            message: message.into(),
+            appearance: None,
+        }
+    }
+
+    /// Draws in this appearance instead of the window's (the gallery).
+    pub fn appearance(mut self, appearance: Appearance) -> Self {
+        self.appearance = Some(appearance);
+        self
+    }
+}
+
+impl RenderOnce for FieldError {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let t = resolve(self.appearance, window, cx);
+        let name = self.message.clone();
+        div()
+            .id(SharedString::from(format!("field-error/{}", self.message)))
+            .role(gpui::Role::Alert)
+            .aria_label(name)
+            .flex()
+            .items_start()
+            .gap(px(6.0))
+            .text_size(px(12.0))
+            .line_height(px(16.0))
+            .text_color(hsla(t.foreground))
+            .child(div().flex_none().mt(px(1.0)).child(icon(
+                IconName::XCircleFill,
+                14.0,
+                hsla(t.destructive),
+            )))
+            .child(div().min_w(px(0.0)).child(self.message))
     }
 }
 

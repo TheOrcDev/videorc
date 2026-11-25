@@ -37,6 +37,9 @@ pub struct Input {
     revert_on_escape: bool,
     /// Show Electron-style number steppers; `None` hides them.
     step: Option<f64>,
+    /// A call site's `text-base font-medium` (Avatar's name: 16 / 500).
+    text_size: Option<f32>,
+    font_weight: Option<gpui::FontWeight>,
     ground: Option<Color>,
     accessibility_label: Option<SharedString>,
     appearance: Option<Appearance>,
@@ -53,6 +56,8 @@ impl Input {
             plain: false,
             revert_on_escape: false,
             step: None,
+            text_size: None,
+            font_weight: None,
             ground: None,
             accessibility_label: None,
             appearance: None,
@@ -78,6 +83,18 @@ impl Input {
     }
 
     /// `aria-invalid`: the destructive rim and ring.
+    /// The value's size instead of 14 px (`text-base`: 16, with a 24 px line).
+    pub fn text_size(mut self, size: f32) -> Self {
+        self.text_size = Some(size);
+        self
+    }
+
+    /// The value's weight (`font-medium`).
+    pub fn font_weight(mut self, weight: gpui::FontWeight) -> Self {
+        self.font_weight = Some(weight);
+        self
+    }
+
     /// `readOnly`: the value can be selected and copied but not edited. The
     /// field keeps its full colours and focus ring, as Electron's does.
     pub fn readonly(mut self, readonly: bool) -> Self {
@@ -201,8 +218,13 @@ impl RenderOnce for Input {
             .py(px(4.0))
             .rounded(px(radius::CHIP))
             .font_family(FONT)
-            .text_size(px(14.0))
-            .line_height(px(20.0))
+            .text_size(px(self.text_size.unwrap_or(14.0)))
+            .line_height(px(if self.text_size.is_some_and(|size| size >= 16.0) {
+                24.0
+            } else {
+                20.0
+            }))
+            .when_some(self.font_weight, |frame, weight| frame.font_weight(weight))
             .text_color(hsla(fade(t.foreground)));
         if self.plain {
             frame = frame
