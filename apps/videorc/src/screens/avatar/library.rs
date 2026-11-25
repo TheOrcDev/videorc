@@ -118,7 +118,7 @@ pub fn render_library(
                                 .size(ButtonSize::IconXs)
                                 .accessibility_label(words::LIBRARY_DISMISS)
                                 .tooltip(words::LIBRARY_DISMISS)
-                                .child(icon(IconName::X, 14., hsla(t.muted_foreground)))
+                                .child(icon(IconName::X, 12., hsla(t.muted_foreground)))
                                 .on_click(move |_, _, cx| {
                                     dismiss.update(cx, |screen, cx| screen.dismiss_invitation(cx))
                                 }),
@@ -346,11 +346,13 @@ fn card_element(
         .rounded(px(radius::CHIP))
         .bg(hsla(with_alpha(t.foreground, 0.04)))
         .map(|frame| match picture {
+            // `object-contain p-1.5`: GPUI's img ignores its own padding,
+            // so a padded box holds it.
             Some(picture) => frame.child(
-                img(picture)
+                div()
                     .size_full()
                     .p(px(6.))
-                    .object_fit(ObjectFit::Contain),
+                    .child(img(picture).size_full().object_fit(ObjectFit::Contain)),
             ),
             None => frame.child(
                 Skeleton::new(SharedString::from(format!("avatar-card-picture-{key}"))).size_full(),
