@@ -5,24 +5,30 @@
 //! replaces these plain elements when it lands.
 
 use crate::screens::avatar::{AvatarScreen, OpenPage as AvatarOpenPage, OpenSidekickTab};
-use crate::screens::command_palette::{Command, CommandPalette};
+use crate::screens::command_palette::{Command, CommandPalette, OpenWindows};
 use crate::screens::dialogs::{DialogsHost, OpenPage as DialogOpenPage};
 use crate::screens::error_panels::ErrorPanels;
 use crate::screens::notifications::{Centre, Hub, Navigate as NoticeNavigate, ToggleNotifications};
 use crate::screens::settings::{Navigate, SettingsScreen};
-use gpui::{Context, Entity, Focusable, ModifiersChangedEvent, Window, div, prelude::*, px};
-use videorc_app_core::nav::{self, PageId, ZONES};
+use gpui::{
+    ColorSpace, Context, Entity, Focusable, FontWeight, ModifiersChangedEvent, SharedString,
+    Window, div, linear_color_stop, linear_gradient, prelude::*, px,
+};
+use videorc_app_core::nav::{self, PageGroup, PageId, ZONES};
 use videorc_app_core::notices::NoticeAction;
+use videorc_app_core::studio::transport::{self, StatusTone as SessionTone};
+use videorc_app_core::studio::{Connection, StudioSnapshot};
 use videorc_app_core::{BackendState, ConnectionState, Tone};
 use videorc_kit::{
     button::{Button, ButtonSize, ButtonVariant},
+    chrome::{self, Direction, box_shadow},
     icon::{IconName, icon},
     shortcut_keys::ShortcutKeys,
     status_bar::{StatusBar, StatusBarHint},
-    status_bar_action::StatusBarAction,
     status_dot::{StatusDot, StatusTone},
-    theme::{self, FONT, TypeScale, hsla},
-    tokens::{Theme, radius, text},
+    theme::{self, FONT, TypeScale, hsla, with_alpha},
+    tokens::{Shadow, Theme, radius, size, text},
+    tooltip::tooltip,
 };
 
 use super::bridge::Mirror;
@@ -78,16 +84,6 @@ fn status_tone(tone: Tone) -> StatusTone {
     }
 }
 
-/// Top inset under the window chrome: traffic lights on macOS (P020/P044),
-/// a slim pad when Windows/Linux draw the native title bar (P046).
-fn chrome_top() -> gpui::Pixels {
-    if cfg!(target_os = "macos") {
-        px(40.)
-    } else {
-        px(8.)
-    }
-}
-
 /// Electron's sidebar / ⌘K page glyphs (`workspace-nav.tsx`,
 /// `page-row-icons.tsx`): each `PageId` wears the same Phosphor mark the
 /// React twin draws, including `UserSound` for Sidekick.
@@ -108,6 +104,102 @@ pub(crate) fn page_icon(page: PageId) -> IconName {
         PageId::Settings => IconName::GearSix,
         PageId::Diagnostics => IconName::Pulse,
     }
+}
+
+/// The status bar's state (`status-bar-session.tsx`): the session's own
+/// words ("Ready", "Recording", "On air", "Videorc is reconnecting…"),
+/// never the backend's line, and "· Rec" on air while the file is written.
+#[derive(Debug, Clone, PartialEq)]
+struct SessionWords {
+    label: &'static str,
+    tone: SessionTone,
+    pulse: bool,
+    also_records: bool,
+}
+
+impl SessionWords {
+    fn of(snapshot: &StudioSnapshot) -> Self {
+        let (label, tone) = transport::session_status(&snapshot.session, &snapshot.connection);
+        let connected = matches!(snapshot.connection, Connection::Connected { .. });
+        Self {
+            label,
+            tone,
+            pulse: transport::session_status_pulses(&snapshot.session, &snapshot.connection),
+            also_records: connected && transport::session_also_records(&snapshot.session),
+        }
+    }
+}
+
+fn session_tone(tone: SessionTone) -> StatusTone {
+    match tone {
+        SessionTone::Neutral => StatusTone::Neutral,
+        SessionTone::Good => StatusTone::Good,
+        SessionTone::Live => StatusTone::Live,
+        SessionTone::Warn => StatusTone::Warn,
+        SessionTone::Error => StatusTone::Error,
+    }
+}
+
+/// `NavRow` and the Studio slab set their words at `text-sm`: 14/20.
+const ROW_TEXT: f32 = 14.;
+const ROW_LINE: f32 = 20.;
+
+/// The Studio slab's hover group (the chrome's lift shows over the metal).
+const SLAB_GROUP: &str = "sidebar-studio-slab";
+
+/// `chrome-plate` (`styles.css`): the page you're on in the sidebar, a
+/// faint top-to-bottom plate with a 1 px highlight and a rim.
+fn chrome_plate<E: Styled>(element: E, t: &Theme) -> E {
+    element
+        .bg(linear_gradient(
+            180.,
+            linear_color_stop(hsla(t.chrome_plate_top), 0.),
+            linear_color_stop(hsla(t.chrome_plate_bottom), 1.),
+        )
+        .color_space(ColorSpace::Oklab))
+        .shadow(vec![
+            box_shadow(&Shadow {
+                inset: true,
+                x: 0.,
+                y: 1.,
+                blur: 0.,
+                spread: 0.,
+                color: t.chrome_plate_hi,
+            }),
+            box_shadow(&Shadow {
+                inset: true,
+                x: 0.,
+                y: 0.,
+                blur: 0.,
+                spread: 1.,
+                color: t.chrome_plate_rim,
+            }),
+        ])
+}
+
+/// The pane toolbar (`pane.tsx` `Toolbar`): the page title at 14 px / 600
+/// on the window's 40 px header band, a hairline under it. On macOS it
+/// shares the band with the traffic lights, which sit over the sidebar.
+fn toolbar(title: &'static str, t: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .h(px(size::TOOLBAR))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .px(px(size::GUTTER))
+        .border_b_1()
+        .border_color(hsla(t.border))
+        .child(
+            div()
+                .min_w(px(0.))
+                .truncate()
+                .text_size(px(ROW_TEXT))
+                .line_height(px(ROW_LINE))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(hsla(t.foreground))
+                .child(title),
+        )
 }
 
 pub struct Shell {
@@ -160,6 +252,8 @@ pub struct Shell {
     chat_waits: Option<Entity<Mirror<bool>>>,
     /// P017: sidebar shortcut chips while ⌘ / Ctrl is held.
     command_held: bool,
+    /// The status bar's state: the session's own words.
+    session: Option<Entity<Mirror<SessionWords>>>,
 }
 
 impl Shell {
@@ -214,6 +308,13 @@ impl Shell {
         });
         if let Some(chat_waits) = &chat_waits {
             cx.observe(chat_waits, |_, _, cx| cx.notify()).detach();
+        }
+        let session_store = cx
+            .try_global::<super::accounts::Shared>()
+            .map(|shared| shared.studio.watch());
+        let session = session_store.map(|store| super::bridge::mirror(cx, store, SessionWords::of));
+        if let Some(session) = &session {
+            cx.observe(session, |_, _, cx| cx.notify()).detach();
         }
         palette.update(cx, |palette, _| palette.set_notifications_available());
         let command_held = false;
@@ -390,6 +491,19 @@ impl Shell {
                         .update(cx, |studio, cx| studio.open_add_scene(window, cx));
                 }
                 Command::SceneBackground => this.open_scene_background(window, cx),
+                // ⌘K's Avatar and Sidekick tabs: the page, on that tab.
+                Command::AvatarTab(index) => {
+                    let index = *index;
+                    this.open_page(PageId::Avatar, window, cx);
+                    this.avatar
+                        .update(cx, |avatar, cx| avatar.select_tab(index, cx));
+                }
+                Command::SidekickTab(index) => {
+                    let index = *index;
+                    this.open_page(PageId::Ai, window, cx);
+                    this.sidekick
+                        .update(cx, |sidekick, cx| sidekick.select_tab(index, cx));
+                }
                 _ => {}
             },
         )
@@ -423,6 +537,7 @@ impl Shell {
             account,
             chat_waits,
             command_held,
+            session,
         }
     }
 
@@ -453,6 +568,14 @@ impl Shell {
     pub fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings
             .update(cx, |settings, cx| settings.disarm_shortcut(cx));
+        // The Windows rows say Open or Close by what is open now.
+        let windows = OpenWindows {
+            preview: !self.preview.read(cx).is_closed(),
+            notes: crate::screens::notes::window::handle(cx).is_some(),
+            stream_manager: crate::screens::stream_manager::window::handle(cx).is_some(),
+        };
+        self.palette
+            .update(cx, |palette, _| palette.set_open_windows(windows));
         self.palette
             .update(cx, |palette, cx| palette.toggle(window, cx));
         window.activate_window();
@@ -632,87 +755,191 @@ impl Shell {
         }
     }
 
+    /// One page row (`sidebar.tsx` `NavRow`): 28 px, 14 px words in the
+    /// secondary tier; the page you're on wears the chrome plate at 500 with
+    /// its icon in the primary ink, and hover is the flat sidebar block.
+    fn nav_row(&self, page: PageId, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = page == self.page;
+        let ink = if selected {
+            t.sidebar_accent_foreground
+        } else {
+            t.muted_foreground
+        };
+        let icon_ink = if selected { t.primary } else { ink };
+        let hover_bg = hsla(with_alpha(t.sidebar_accent, 0.6));
+        let hover_ink = hsla(t.sidebar_foreground);
+        // P017: chips stay mounted (width reserved) and fade in while
+        // ⌘/Ctrl is held; aria-hidden — the row's click is enough.
+        let shortcut = page
+            .key()
+            .and_then(super::menus::page_action)
+            .map(|action| {
+                div()
+                    .flex_none()
+                    .opacity(if self.command_held { 1. } else { 0. })
+                    .child(ShortcutKeys::for_action(action.as_ref()))
+            });
+        let row = div()
+            .id(page.id())
+            .flex_none()
+            .h(px(size::ROW_COMPACT))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(10.))
+            .rounded(px(radius::ROW))
+            .text_size(px(ROW_TEXT))
+            .line_height(px(ROW_LINE))
+            .font_weight(if selected {
+                FontWeight::MEDIUM
+            } else {
+                FontWeight::NORMAL
+            })
+            .text_color(hsla(ink))
+            .cursor_pointer();
+        let row = if selected {
+            chrome_plate(row, t)
+        } else {
+            row.hover(move |style| style.bg(hover_bg).text_color(hover_ink))
+        };
+        row.child(icon(page_icon(page), 16., hsla(icon_ink)))
+            .child(div().flex_1().min_w(px(0.)).truncate().child(page.label()))
+            .children(shortcut)
+            .on_click(cx.listener(move |this, _, window, cx| this.open_page(page, window, cx)))
+    }
+
+    /// The Studio row (`sidebar.tsx` `StudioNavButton`, plan 235 D5): the
+    /// way home, a 40 px slab of the chrome primary's metal (`chrome-fill`:
+    /// polished silver in dark, black chrome in light) on every page. Its
+    /// shortcut chip takes the slab's ink.
+    fn studio_slab(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let ink = hsla(t.chrome_fill_ink);
+        let shortcut = PageId::Studio
+            .key()
+            .and_then(super::menus::page_action)
+            .map(|action| {
+                div()
+                    .flex_none()
+                    .opacity(if self.command_held { 1. } else { 0. })
+                    .child(ShortcutKeys::for_action(action.as_ref()).on_filled(t.chrome_fill_ink))
+            });
+        div()
+            .id("sidebar-studio-slab")
+            .group(SLAB_GROUP)
+            .relative()
+            .flex_none()
+            .h(px(40.))
+            .rounded(px(radius::ROW))
+            .bg(hsla(t.chrome_fill_flat))
+            .shadow(chrome::shadows(t.chrome_fill_shadow))
+            .text_color(ink)
+            .cursor_pointer()
+            .child(chrome::metal(
+                t.chrome_fill_stops,
+                [radius::ROW; 4],
+                Direction::Down,
+            ))
+            .child(
+                chrome::layer(t.chrome_fill_lift, radius::ROW)
+                    .invisible()
+                    .group_hover(SLAB_GROUP, |style| style.visible()),
+            )
+            .child(
+                div()
+                    .relative()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(10.))
+                    .text_size(px(ROW_TEXT))
+                    .line_height(px(ROW_LINE))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(icon(page_icon(PageId::Studio), 20., ink))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .child(PageId::Studio.label()),
+                    )
+                    .children(shortcut),
+            )
+            .on_click(cx.listener(|this, _, window, cx| this.open_page(PageId::Studio, window, cx)))
+    }
+
     fn sidebar(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The pages sit in a padded column; the footer below it runs the
-        // sidebar's full width, so its rule meets both edges (`sidebar.tsx`:
-        // the nav is `px-3`, the footer `border-t px-3` under it).
-        let mut column = div()
+        // The top row shares the window's 40 px header band with the
+        // traffic lights: Search sits at its end (`sidebar.tsx`).
+        let top = div()
+            .flex_none()
+            .h(px(size::TOOLBAR))
+            .flex()
+            .items_center()
+            .justify_end()
+            .pr(px(8.))
+            .child(
+                Button::new("sidebar-search")
+                    .size(ButtonSize::Icon)
+                    .variant(ButtonVariant::Ghost)
+                    .accessibility_label("Search")
+                    .tooltip("Search")
+                    .child(icon(
+                        IconName::MagnifyingGlass,
+                        16.,
+                        hsla(t.muted_foreground),
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_search(window, cx))),
+            );
+        // The zones (plan 174 D8, plan 235): the Studio slab leads, then the
+        // labelled groups 16 px apart; Library and Settings sit in a bottom
+        // block above the footer (owner 2026-11-20). The footer below runs
+        // the sidebar's full width, so its rule meets both edges.
+        let mut nav = div()
+            .id("sidebar-nav")
             .flex_1()
             .min_h(px(0.))
+            .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(px(2.))
-            .px(px(8.))
-            .pt(chrome_top());
+            .gap(px(16.))
+            .px(px(12.))
+            .pt(px(4.))
+            .pb(px(8.));
         for (group, pages) in ZONES {
+            if group == PageGroup::Stage {
+                nav = nav.child(self.studio_slab(t, cx));
+                continue;
+            }
+            let mut zone = div().flex().flex_col().gap(px(2.));
+            if group == PageGroup::System {
+                zone = zone.mt_auto();
+            }
             if let Some(label) = group.label() {
-                column = column.child(
+                // `SectionLabel` at `leading-none`, 10 px in from the rows.
+                zone = zone.child(
                     div()
-                        .pt(px(10.))
+                        .px(px(10.))
                         .pb(px(4.))
-                        .px(px(8.))
-                        .type_scale(text::LABEL)
-                        .text_color(hsla(t.muted_foreground))
+                        .text_size(px(text::LABEL.size))
+                        .line_height(px(text::LABEL.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(hsla(t.subtle))
                         .child(label),
                 );
             }
             for &page in pages {
-                let selected = page == self.page;
-                let ink = if selected {
-                    hsla(t.foreground)
-                } else {
-                    hsla(t.muted_foreground)
-                };
-                // P017: chips stay mounted (width reserved) and fade in while
-                // ⌘/Ctrl is held; aria-hidden — the row's click is enough.
-                let shortcut = page
-                    .key()
-                    .and_then(super::menus::page_action)
-                    .map(|action| {
-                        div()
-                            .opacity(if self.command_held { 1. } else { 0. })
-                            .child(ShortcutKeys::for_action(action.as_ref()))
-                    });
-                column =
-                    column.child(
-                        div()
-                            .id(page.id())
-                            .flex()
-                            .justify_between()
-                            .items_center()
-                            .gap(px(10.))
-                            .px(px(8.))
-                            .py(px(5.))
-                            .rounded(px(radius::ROW))
-                            .type_scale(text::SECTION)
-                            .text_color(ink)
-                            .when(selected, |row| row.bg(hsla(t.accent)))
-                            .cursor_pointer()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .min_w(px(0.))
-                                    .child(icon(page_icon(page), 16., ink))
-                                    .child(page.label()),
-                            )
-                            .children(shortcut)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_page(page, window, cx)
-                            })),
-                    );
+                zone = zone.child(self.nav_row(page, t, cx));
             }
+            nav = nav.child(zone);
         }
-        // Bottom: the update chip (P021), the account row (P024) and the theme
-        // toggle (P022).
+        // The theme toggle (P022) and the account row (P024), under the
+        // update chip (P021).
         let dark = matches!(
             window.appearance(),
             gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
         );
-        // P021: the update chip, above the account row.
         let update_chip = super::update_chip::chip(cx.entity().downgrade(), t, cx);
-        let column = column.child(div().flex_1()).children(update_chip);
         let footer = div()
             .flex()
             .items_center()
@@ -767,16 +994,132 @@ impl Shell {
                     .label(if dark { "Light" } else { "Dark" })
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))),
             );
+        // `w-52`: 208 px.
         div()
-            .w(px(220.))
+            .w(px(208.))
+            .flex_none()
             .h_full()
             .flex()
             .flex_col()
             .bg(hsla(t.glass_solid))
             .border_r_1()
             .border_color(hsla(t.border))
-            .child(column)
+            .child(top)
+            .child(nav)
+            .children(update_chip)
             .child(footer)
+    }
+
+    /// The page in its pane (`app-shell.tsx`: `<Pane>`, the `Toolbar` with
+    /// `workspaceTabLabel`, then `PaneBody`). The band is 40 px on every
+    /// platform (on macOS it shares the traffic lights' row, which sit over
+    /// the sidebar); the body runs flush under it and each page owns its
+    /// own gutter. A page crash stays inside the page, under its band.
+    fn page_body(&self, page_error: bool, t: &Theme) -> gpui::Div {
+        let page = self.page;
+        let pane = div().flex_1().min_w(px(0.)).min_h(px(0.)).flex().flex_col();
+        if page == PageId::Studio && !page_error {
+            // The Studio rises into the title strip: no band, the stage and
+            // Record / Go Live line up with the traffic lights' row, and the
+            // column divider runs to the window's top edge (owner by-eye,
+            // 11-25). The page keeps its own gutter.
+            return pane.child(self.studio.clone());
+        }
+        // `PaneBody`: `relative min-h-0 flex-1`, the page's own column.
+        let body = div()
+            .relative()
+            .flex_1()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .flex()
+            .flex_col();
+        let body = if page_error {
+            body.child(self.errors.clone())
+        } else {
+            match page {
+                PageId::Studio => body.child(self.studio.clone()),
+                PageId::Sources => body.child(self.sources.clone()),
+                PageId::Layouts => body.child(self.scene.clone()),
+                PageId::Captions => match &self.captions {
+                    Some(captions) => body.child(captions.clone()),
+                    None => body.child(
+                        div()
+                            .p(px(size::GUTTER))
+                            .type_scale(text::META)
+                            .text_color(hsla(t.muted_foreground))
+                            .child("This page comes in plan 260's Phase 3."),
+                    ),
+                },
+                PageId::Recording => body.child(self.output.clone()),
+                PageId::Live => body.child(self.destinations.clone()),
+                PageId::Guests => body.child(self.guests.clone()),
+                PageId::Avatar => body.child(self.avatar.clone()),
+                PageId::Ai => body.child(self.sidekick.clone()),
+                PageId::Assets => body.child(self.images.clone()),
+                PageId::Sounds => body.child(self.sounds.clone()),
+                PageId::Library => body.child(self.library.clone()),
+                PageId::Settings => body.child(self.settings.clone()),
+                PageId::Diagnostics => body.child(self.health.clone()),
+            }
+        };
+        pane.child(toolbar(page.label(), t)).child(body)
+    }
+
+    /// The status bar's state (`status-bar-session.tsx`): the session's dot
+    /// and words, "· Rec" on air while it records too, and the door to
+    /// Health. Without the core's Studio it reads the connection.
+    fn session_state(
+        &self,
+        status: &StatusLine,
+        connection: String,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let words = self
+            .session
+            .as_ref()
+            .map(|session| session.read(cx).value().clone());
+        let (label, tone, pulse, also_records): (SharedString, StatusTone, bool, bool) = match words
+        {
+            Some(words) => (
+                words.label.into(),
+                session_tone(words.tone),
+                words.pulse,
+                words.also_records,
+            ),
+            None => (connection.into(), status_tone(status.tone), false, false),
+        };
+        let (accent, foreground) = (hsla(t.accent), hsla(t.foreground));
+        gpui_base::Button::new("open-health")
+            .accessibility_label(label.clone())
+            .tooltip(tooltip("Open Health"))
+            .min_w(px(0.))
+            .h(px(20.))
+            .ml(px(-6.))
+            .px(px(6.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .rounded(px(radius::CHIP))
+            .hover(move |style| style.bg(accent).text_color(foreground))
+            .child(
+                StatusDot::new("engine-status")
+                    .tone(tone)
+                    .label(label)
+                    .pulse(pulse),
+            )
+            .when(also_records, |button| {
+                button.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .child(transport::ALSO_RECORDS_LABEL),
+                )
+            })
+            .on_click(
+                cx.listener(|this, _, window, cx| this.open_page(PageId::Diagnostics, window, cx)),
+            )
     }
 
     fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -793,7 +1136,6 @@ impl Render for Shell {
         let root_error = self.errors.read(cx).is_root();
         let status = self.backend.read(cx).value().clone();
         let connection = self.connection.read(cx).value().clone();
-        let page = self.page;
         let page_error = self.errors.read(cx).is_page();
         if root_error {
             return div()
@@ -803,15 +1145,6 @@ impl Render for Shell {
                 .text_color(hsla(t.foreground))
                 .child(self.errors.clone());
         }
-        let sources = self.sources.clone();
-        let output = self.output.clone();
-        let captions = self.captions.clone();
-        let destinations = self.destinations.clone();
-        let guests = self.guests.clone();
-        let avatar = self.avatar.clone();
-        let sidekick = self.sidekick.clone();
-        let images = self.images.clone();
-        let sounds = self.sounds.clone();
         div()
             .size_full()
             .on_mouse_down(
@@ -869,241 +1202,88 @@ impl Render for Shell {
                     .flex()
                     .flex_row()
                     .child(self.sidebar(t, window, cx))
-                    .child(if page_error {
+                    .child(
                         div()
                             .flex_1()
                             .min_w(px(0.))
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
-                            .pt(chrome_top())
-                            .child(self.errors.clone())
-                    } else if page == PageId::Studio {
-                        // The Studio rises into the title strip: the stage and
-                        // Record / Go Live line up with the traffic lights'
-                        // row (they sit over the sidebar), and the column
-                        // divider runs to the window's top edge (owner by-eye,
-                        // 11-25). The page keeps its own gutter.
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(0.))
-                            .flex()
-                            .flex_col()
-                            .child(self.studio.clone())
-                    } else if page == PageId::Layouts {
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(0.))
-                            .flex()
-                            .flex_col()
-                            .pt(chrome_top())
-                            .gap(px(8.))
+                            .child(self.page_body(page_error, t))
+                            // State on the left, the shell's shortcuts on the right.
                             .child(
-                                div()
-                                    .px(px(24.))
-                                    .type_scale(text::SECTION)
-                                    .child(page.label()),
-                            )
-                            .child(self.scene.clone())
-                    } else if page == PageId::Library {
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(0.))
-                            .pt(chrome_top())
-                            .child(self.library.clone())
-                    } else if page == PageId::Sources {
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .pt(chrome_top())
-                            .px(px(24.))
-                            .gap(px(8.))
-                            .child(div().type_scale(text::SECTION).child(page.label()))
-                            .child(sources)
-                    } else if page == PageId::Recording {
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(0.))
-                            .flex()
-                            .flex_col()
-                            .pt(chrome_top())
-                            .px(px(24.))
-                            .gap(px(8.))
-                            .child(div().type_scale(text::SECTION).child(page.label()))
-                            .child(output)
-                    } else if let (PageId::Captions, Some(captions)) = (page, captions) {
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(0.))
-                            .flex()
-                            .flex_col()
-                            .pt(chrome_top())
-                            .px(px(24.))
-                            .gap(px(8.))
-                            .child(div().type_scale(text::SECTION).child(page.label()))
-                            .child(captions)
-                    } else if page == PageId::Live {
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(0.))
-                            .flex()
-                            .flex_col()
-                            .pt(chrome_top())
-                            .px(px(24.))
-                            .gap(px(8.))
-                            .child(div().type_scale(text::SECTION).child(page.label()))
-                            .child(destinations)
-                    } else if page == PageId::Guests {
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(0.))
-                            .flex()
-                            .flex_col()
-                            .pt(chrome_top())
-                            .px(px(24.))
-                            .gap(px(8.))
-                            .child(div().type_scale(text::SECTION).child(page.label()))
-                            .child(guests)
-                    } else if page == PageId::Avatar {
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(0.))
-                            .flex()
-                            .flex_col()
-                            .pt(chrome_top())
-                            .child(avatar)
-                    } else if page == PageId::Ai {
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(0.))
-                            .flex()
-                            .flex_col()
-                            .pt(chrome_top())
-                            .child(sidekick)
-                    } else if page == PageId::Assets {
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(0.))
-                            .flex()
-                            .flex_col()
-                            .pt(chrome_top())
-                            .child(images)
-                    } else if page == PageId::Sounds {
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(0.))
-                            .flex()
-                            .flex_col()
-                            .pt(chrome_top())
-                            .child(sounds)
-                    } else {
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(0.))
-                            .flex()
-                            .flex_col()
-                            .pt(chrome_top())
-                            .px(px(24.))
-                            .gap(px(8.))
-                            .child(div().type_scale(text::SECTION).child(page.label()))
-                            .map(|body| {
-                                if page == PageId::Library {
-                                    self.library.update(cx, |library, cx| {
-                                        library.focus_session(None, window, cx)
-                                    });
-                                }
-                                if page == PageId::Settings {
-                                    body.child(self.settings.clone())
-                                } else if page == PageId::Diagnostics {
-                                    body.child(self.health.clone())
-                                } else {
-                                    body.child(
-                                        div()
-                                            .type_scale(text::META)
-                                            .text_color(hsla(t.muted_foreground))
-                                            .child("This page comes in plan 260's Phase 3."),
+                                StatusBar::new()
+                                    .leading(self.session_state(&status, connection, t, cx))
+                                    .child(
+                                        StatusBarHint::new(
+                                            "search",
+                                            "Search",
+                                            ShortcutKeys::for_action(&super::menus::ToggleSearch),
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.toggle_search(window, cx)
+                                            }),
+                                        ),
                                     )
-                                }
-                            })
-                    }),
-            )
-            .child(
-                StatusBar::new()
-                    .leading(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(StatusDot::new("engine-status").tone(status_tone(status.tone)))
-                            .child(
-                                StatusBarAction::new("open-health", "Open Health")
-                                    .text(status.text)
-                                    .tooltip("Open Health", None)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_page(PageId::Diagnostics, window, cx)
-                                    })),
+                                    .child({
+                                        let preview_open = !self.preview.read(cx).is_closed();
+                                        StatusBarHint::new(
+                                            "preview",
+                                            "Preview",
+                                            ShortcutKeys::for_action(&super::menus::TogglePreview),
+                                        )
+                                        .pressed(preview_open)
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.preview.update(cx, |preview, cx| {
+                                                    preview.toggle_open(cx)
+                                                });
+                                            }),
+                                        )
+                                    })
+                                    .child(
+                                        StatusBarHint::new(
+                                            "notes",
+                                            "Notes",
+                                            ShortcutKeys::for_action(&super::menus::ToggleNotes),
+                                        )
+                                        .pressed(
+                                            crate::screens::notes::window::handle(cx).is_some(),
+                                        )
+                                        .on_click(
+                                            cx.listener(|_, _, window, cx| {
+                                                window.dispatch_action(
+                                                    Box::new(super::menus::ToggleNotes),
+                                                    cx,
+                                                )
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        StatusBarHint::new(
+                                            "stream-manager",
+                                            "Stream Manager",
+                                            ShortcutKeys::for_action(
+                                                &super::menus::ToggleStreamManager,
+                                            ),
+                                        )
+                                        .pressed(
+                                            crate::screens::stream_manager::window::handle(cx)
+                                                .is_some(),
+                                        )
+                                        .on_click(
+                                            cx.listener(|_, _, window, cx| {
+                                                window.dispatch_action(
+                                                    Box::new(super::menus::ToggleStreamManager),
+                                                    cx,
+                                                )
+                                            }),
+                                        ),
+                                    )
+                                    .child(self.notices.clone()),
                             ),
-                    )
-                    .child(div().text_color(hsla(t.muted_foreground)).child(connection))
-                    .child(
-                        StatusBarHint::new(
-                            "search",
-                            "Search",
-                            ShortcutKeys::for_action(&super::menus::ToggleSearch),
-                        )
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.toggle_search(window, cx)),
-                        ),
-                    )
-                    .child({
-                        let preview_open = !self.preview.read(cx).is_closed();
-                        StatusBarHint::new(
-                            "preview",
-                            "Preview",
-                            ShortcutKeys::for_action(&super::menus::TogglePreview),
-                        )
-                        .pressed(preview_open)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.preview
-                                .update(cx, |preview, cx| preview.toggle_open(cx));
-                        }))
-                    })
-                    .child(
-                        StatusBarHint::new(
-                            "notes",
-                            "Notes",
-                            ShortcutKeys::for_action(&super::menus::ToggleNotes),
-                        )
-                        .pressed(crate::screens::notes::window::handle(cx).is_some())
-                        .on_click(cx.listener(|_, _, window, cx| {
-                            window.dispatch_action(Box::new(super::menus::ToggleNotes), cx)
-                        })),
-                    )
-                    .child(
-                        StatusBarHint::new(
-                            "stream-manager",
-                            "Stream Manager",
-                            ShortcutKeys::for_action(&super::menus::ToggleStreamManager),
-                        )
-                        .pressed(crate::screens::stream_manager::window::handle(cx).is_some())
-                        .on_click(cx.listener(|_, _, window, cx| {
-                            window.dispatch_action(Box::new(super::menus::ToggleStreamManager), cx)
-                        })),
-                    )
-                    .child(self.notices.clone()),
+                    ),
             )
             .child(self.palette.clone())
             .child(self.go_live.clone())
