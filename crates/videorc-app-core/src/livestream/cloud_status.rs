@@ -43,6 +43,9 @@ pub struct CloudStatus {
     pub live_interval: Option<CloudLiveInterval>,
     /// The runner's platform legs, keyed by target id.
     pub legs: Vec<CloudLeg>,
+    /// Plan 249 S24: who controls the show (`ControllerFacts`): a takeover
+    /// from another device holds this computer's devices.
+    pub controller: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
