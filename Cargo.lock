@@ -7952,6 +7952,7 @@ dependencies = [
  "objc2-system-extensions",
  "raw-window-handle",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
  "videorc-app-core",

@@ -476,11 +476,7 @@ fn render_person_card(
         person.in_a_row,
         person.messages,
     );
-    let support = person
-        .support
-        .as_ref()
-        .and_then(support_line)
-        .unwrap_or_default();
+    let support = support_line(person.support.as_ref()).unwrap_or_default();
     let platforms: Vec<String> = if person.platforms.is_empty() {
         person
             .accounts
