@@ -6,10 +6,13 @@
 //! search chat, ⌘L write in chat, in the `StreamManager` key context). The
 //! header, stats bar, panes and status bar are the kit's (`videorc-kit`).
 
+use std::time::Duration;
+
 use gpui::{
     App, AppContext, Bounds, Context, FocusHandle, Global, KeyBinding, Subscription, Window,
     WindowHandle, actions, div, prelude::*, px, size,
 };
+use tokio::sync::watch;
 
 use super::activity::activity_pane;
 use super::chat::ChatPane;
@@ -17,7 +20,7 @@ use super::frame::{DEFAULT_HEIGHT, DEFAULT_WIDTH, StreamManagerFrame};
 use super::layout::{MIN_HEIGHT, MIN_WIDTH, Pane, Slot, Tier, right_pane_width, slot};
 use super::panes::{PaneKey, Panes, composer_available, key_runs};
 use super::sidekick::sidekick_pane;
-use super::stats::{SessionChip, stats_bar};
+use super::stats::{StatsView, stats_bar};
 use super::status::status_bar;
 use crate::app::hide::HideFromStream;
 use crate::app::menus::ToggleStreamManager;
@@ -27,6 +30,7 @@ use videorc_app_core::desktop::capture_protection::{
 };
 use videorc_app_core::desktop::permissions::PermissionPlatform;
 use videorc_app_core::stream_manager::copy::WINDOW_NAME;
+use videorc_app_core::stream_manager::dashboard::{LiveDashboard, SessionState};
 use videorc_kit::{
     theme::{self, hsla},
     window,
@@ -39,10 +43,12 @@ pub const KEY_CONTEXT: &str = "StreamManager";
 /// `WINDOW_NAMES.streamManager`.
 pub const TITLE: &str = WINDOW_NAME;
 
-/// The one window, its frame file, and whether the quit is closing it.
+/// The one window, its frame file, dashboard store, and whether the quit
+/// is closing it.
 struct Open {
     frame: StreamManagerFrame,
     app_id: &'static str,
+    dashboard: watch::Receiver<LiveDashboard>,
     window: Option<WindowHandle<StreamManager>>,
     quitting: bool,
 }
@@ -51,7 +57,12 @@ impl Global for Open {}
 
 /// The window's keys and menu command, and the window itself when it was
 /// open at the last quit. Call once the main window is up.
-pub fn install(cx: &mut App, frame: StreamManagerFrame, app_id: &'static str) {
+pub fn install(
+    cx: &mut App,
+    frame: StreamManagerFrame,
+    app_id: &'static str,
+    dashboard: watch::Receiver<LiveDashboard>,
+) {
     cx.bind_keys([
         KeyBinding::new("secondary-j", ShowSidekick, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-f", SearchChat, Some(KEY_CONTEXT)),
@@ -61,6 +72,7 @@ pub fn install(cx: &mut App, frame: StreamManagerFrame, app_id: &'static str) {
     cx.set_global(Open {
         frame,
         app_id,
+        dashboard,
         window: None,
         quitting: false,
     });
@@ -106,9 +118,9 @@ pub fn show(cx: &mut App) {
         let _ = window.update(cx, |_, window, _| window.activate_window());
         return;
     }
-    let (frame, app_id) = {
+    let (frame, app_id, dashboard) = {
         let open = cx.global::<Open>();
-        (open.frame.clone(), open.app_id)
+        (open.frame.clone(), open.app_id, open.dashboard.clone())
     };
     let bounds = frame.opening(cx).unwrap_or_else(|| {
         Bounds::centered(
@@ -121,7 +133,7 @@ pub fn show(cx: &mut App) {
     options.window_min_size = Some(size(px(MIN_WIDTH), px(MIN_HEIGHT)));
     options.app_id = Some(app_id.into());
     let opened = cx.open_window(options, move |window, cx| {
-        cx.new(|cx| StreamManager::new(frame, window, cx))
+        cx.new(|cx| StreamManager::new(frame, dashboard, window, cx))
     });
     match opened {
         Ok(window) => cx.global_mut::<Open>().window = Some(window),
@@ -152,7 +164,7 @@ pub struct StreamManager {
     chat: gpui::Entity<ChatPane>,
     panes: Panes,
     facts: Facts,
-    chip: SessionChip,
+    stats: StatsView,
     pinned: bool,
     hidden: bool,
     hide_method: HideMethod,
@@ -161,7 +173,12 @@ pub struct StreamManager {
 }
 
 impl StreamManager {
-    fn new(frame: StreamManagerFrame, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        frame: StreamManagerFrame,
+        mut dashboard: watch::Receiver<LiveDashboard>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let hub = cx
             .global::<crate::screens::notifications::Shared>()
             .0
@@ -184,6 +201,37 @@ impl StreamManager {
         if hide_method != HideMethod::Unsupported {
             let _ = HideFromStream::apply(window, WindowRole::Comments, hidden, cx);
         }
+        let now = chrono::Utc::now().timestamp_millis();
+        let stats = StatsView::from_dashboard(&dashboard.borrow(), now);
+        let live = matches!(dashboard.borrow().session, SessionState::Live);
+        cx.spawn(async move |this, cx| {
+            loop {
+                tokio::select! {
+                    changed = dashboard.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                    }
+                    _ = cx.background_executor().timer(Duration::from_secs(1)) => {}
+                }
+                let board = dashboard.borrow().clone();
+                let now = chrono::Utc::now().timestamp_millis();
+                let next = StatsView::from_dashboard(&board, now);
+                let live = matches!(board.session, SessionState::Live);
+                let alive = this.update(cx, |sm, cx| {
+                    let changed = sm.stats != next || sm.facts.live != live;
+                    sm.stats = next;
+                    sm.facts.live = live;
+                    if changed {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         Self {
             frame,
             notices,
@@ -193,9 +241,10 @@ impl StreamManager {
             facts: Facts {
                 can_send: true,
                 marker: true,
+                live,
                 ..Facts::default()
             },
-            chip: SessionChip::OffAir,
+            stats,
             pinned,
             hidden,
             hide_method,
@@ -309,7 +358,7 @@ impl Render for StreamManager {
                     this.run(PaneKey::WriteInChat, window, cx)
                 }))
                 .child(WindowHeader::new(TITLE).mac(mac))
-                .child(stats_bar(t, self.chip, width))
+                .child(stats_bar(t, &self.stats, width))
                 .child(
                     div()
                         .flex_1()

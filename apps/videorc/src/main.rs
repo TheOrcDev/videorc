@@ -578,7 +578,12 @@ fn main() -> Result<()> {
         cx.activate(true);
         // The Stream Manager's menu command and keys, and the window when it
         // was open at the last quit.
-        screens::stream_manager::window::install(cx, stream_manager_frame, APP_ID);
+        screens::stream_manager::window::install(
+            cx,
+            stream_manager_frame,
+            APP_ID,
+            studio.dashboard(),
+        );
         screens::notes::window::install(cx, notes_frame, APP_ID);
         cx.on_action(move |_: &menus::ShowSettings, cx| {
             let _ = main_window.update(cx, |shell, window, cx| {
