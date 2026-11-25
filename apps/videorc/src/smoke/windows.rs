@@ -136,7 +136,7 @@ fn run(command: &str, params: &Map<String, Value>, cx: &mut App) -> Result<Value
             let Some(view) = stream_manager::window::view(cx) else {
                 return Ok(chat_state(Some(CHAT_CLOSED), cx));
             };
-            let (color, words) = marker_color(params.get("color"));
+            let (color, words) = marker_color(params.get("color"))?;
             view.update(cx, |sm, _, cx| sm.smoke_set_marker(color, cx))
                 .map_err(|_| CHAT_CLOSED.to_string())?;
             let mut state = chat_state(None, cx);
@@ -149,8 +149,10 @@ fn run(command: &str, params: &Map<String, Value>, cx: &mut App) -> Result<Value
     }
 }
 
-/// `#rrggbb`, or the Notes smoke's red.
-fn marker_color(value: Option<&Value>) -> (Hsla, String) {
+/// The marker's `color`, `#rrggbb`. The smoke names it: the colour is the
+/// one its recording gate looks for, never a theme colour, so the app keeps
+/// no default (Electron's was red, which the one caller sends).
+fn marker_color(value: Option<&Value>) -> Result<(Hsla, String), String> {
     let words = value
         .and_then(Value::as_str)
         .filter(|words| {
@@ -158,10 +160,10 @@ fn marker_color(value: Option<&Value>) -> (Hsla, String) {
                 && words.starts_with('#')
                 && words[1..].chars().all(|c| c.is_ascii_hexdigit())
         })
-        .unwrap_or("#ff0000")
+        .ok_or("comments-window-set-smoke-marker's color is a #rrggbb colour.")?
         .to_ascii_lowercase();
-    let hex = u32::from_str_radix(&words[1..], 16).unwrap_or(0xff0000);
-    (rgb(hex).into(), words)
+    let value = u32::from_str_radix(&words[1..], 16).map_err(|error| error.to_string())?;
+    Ok((rgb(value).into(), words))
 }
 
 /// The frame a set-bounds asks for, each side missing kept from `current`.
@@ -306,10 +308,13 @@ mod tests {
     }
 
     #[test]
-    fn a_marker_is_a_hex_colour_or_red() {
-        assert_eq!(marker_color(Some(&json!("#00FF00"))).1, "#00ff00");
-        assert_eq!(marker_color(Some(&json!("green"))).1, "#ff0000");
-        assert_eq!(marker_color(None).1, "#ff0000");
+    fn a_marker_is_a_hex_colour_the_smoke_names() {
+        assert_eq!(
+            marker_color(Some(&json!("#00FF00"))).map(|(_, words)| words),
+            Ok("#00ff00".to_string())
+        );
+        assert!(marker_color(Some(&json!("green"))).is_err());
+        assert!(marker_color(None).is_err());
     }
 
     #[test]
