@@ -130,8 +130,8 @@ impl DestinationsPanel {
             } else {
                 "upcoming-list"
             })
-            .title(title)
-            .description(description)
+            .title(title.to_string())
+            .description(description.to_string())
             .last(past),
         );
         for section in sections {

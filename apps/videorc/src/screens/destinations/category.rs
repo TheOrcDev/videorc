@@ -91,9 +91,11 @@ impl DestinationsPanel {
         let platform_owned = platform.to_string();
         let results = state.category_results.clone();
         let search = picker.search.clone();
-        let t = theme::current(window, cx).theme();
+        let t = *theme::current(window, cx).theme();
+        let has_selected = selected_id.is_some();
+        let id = format!("category-{platform}");
 
-        let popover = Popover::new(format!("category-{platform}"))
+        let popover = Popover::new(id)
             .open(open)
             .width(288.)
             .on_open_change({
@@ -153,7 +155,7 @@ impl DestinationsPanel {
                                 }),
                         );
                     }
-                    if selected_id.is_some() {
+                    if has_selected {
                         let entity = entity.clone();
                         let platform = platform.clone();
                         body = body.child(
