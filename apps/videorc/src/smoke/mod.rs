@@ -79,6 +79,8 @@ pub trait ShellSmoke: 'static {
     /// The preview's commands ([`PREVIEW_COMMANDS`]): its state, its own
     /// window opened, closed or toggled, and Retry preview.
     fn preview(&self, command: &str, cx: &mut App) -> Result<Value, String>;
+    /// The preview, once the main window started it (`preview-surface-sample`).
+    fn preview_entity(&self) -> Option<gpui::Entity<crate::preview::Preview>>;
 }
 
 /// The preview's commands on the GPUI app. The preview draws in the main
@@ -87,6 +89,8 @@ pub trait ShellSmoke: 'static {
 pub const PREVIEW_COMMANDS: &[&str] = &[
     "inspect-native-preview-live-background",
     "inspect-native-preview-runtime",
+    // What the element presents (`presentedFrameId`), live.
+    "native-preview-surface-status",
     // GPUI only: Retry preview (`Preview::retry`), answered with the state
     // and whether it ran; the phase goes back to starting.
     "preview-retry",

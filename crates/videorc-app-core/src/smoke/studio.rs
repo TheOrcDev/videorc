@@ -60,6 +60,7 @@ pub const STUDIO_SMOKE_COMMANDS: &[&str] = &[
     "select-screen-device",
     "preview-surface-scene-state",
     "studio-capture-configure",
+    "studio-performance-check",
     "studio-record",
     "studio-replay-buffer",
     "studio-privacy-add-app",
@@ -388,6 +389,39 @@ impl StudioSmoke {
             .await
             .map_err(|error| format!("The capture config was not saved: {error}"))?;
         Ok(json!({ "configured": true, "state": state_json(&self.studio.snapshot()) }))
+    }
+
+    /// `studio-performance-check {displayWidth?, displayHeight?}`: "Check
+    /// this computer" as the Output page starts it (`requestPerformanceCheck`
+    /// through `Studio::run_performance_check`, the Clips ring stepping
+    /// aside). It answers once the run is asked for; the smoke follows
+    /// `performance.check.progress` / `.completed` from the backend.
+    fn performance_check(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let side = |key: &str| params.get(key).and_then(Value::as_u64).map(|v| v as u32);
+        let display = side("displayWidth").zip(side("displayHeight"));
+        let snapshot = self.studio.snapshot();
+        let separate = snapshot.settings.capture_doc["separateSourceRecordings"]["enabled"]
+            .as_bool()
+            .unwrap_or(false);
+        let run = crate::studio::performance_check::ceiling(
+            &snapshot.settings.capture.video,
+            display,
+            separate,
+        );
+        let answer = json!({
+            "started": true,
+            "ceilingWidth": run.ceiling_width,
+            "ceilingHeight": run.ceiling_height,
+            "ceilingFps": run.ceiling_fps,
+        });
+        let studio = self.studio.clone();
+        tokio::spawn(async move {
+            if let Err(error) = studio.run_performance_check(run).await {
+                // The smoke's own output: it names a check that never completes.
+                eprintln!("[smoke] studio-performance-check: {error}");
+            }
+        });
+        Ok(answer)
     }
 
     fn replay_buffer(&self, params: Map<String, Value>) -> Result<Value, String> {
@@ -784,6 +818,7 @@ impl SmokeCommandHandler for StudioSmoke {
                 "studio-stop" => self.stop(params).await,
                 "studio-capture-configure" => self.capture_configure(params).await,
                 "studio-replay-buffer" => self.replay_buffer(params),
+                "studio-performance-check" => self.performance_check(params),
                 "select-screen-device" => self.select_screen(params).await,
                 "select-camera-device" => self.select_camera(params).await,
                 "select-layout-preset" => self.select_layout_preset(params).await,

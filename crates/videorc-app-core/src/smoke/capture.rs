@@ -198,6 +198,117 @@ pub fn stage_capture_rect(
     })
 }
 
+/// A decoded capture: top-down BGRA rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bitmap {
+    pub width: usize,
+    pub height: usize,
+    pub bgra: Vec<u8>,
+}
+
+impl Bitmap {
+    /// The pixels inside `rect`, clipped to the bitmap; `None` when nothing
+    /// of it is inside.
+    pub fn crop(&self, rect: PixelRect) -> Option<Bitmap> {
+        let x0 = (rect.x as usize).min(self.width);
+        let y0 = (rect.y as usize).min(self.height);
+        let x1 = (rect.x as usize + rect.width as usize).min(self.width);
+        let y1 = (rect.y as usize + rect.height as usize).min(self.height);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let width = x1 - x0;
+        let mut bgra = Vec::with_capacity(width * (y1 - y0) * 4);
+        for y in y0..y1 {
+            let start = (y * self.width + x0) * 4;
+            bgra.extend_from_slice(&self.bgra[start..start + width * 4]);
+        }
+        Some(Bitmap {
+            width,
+            height: y1 - y0,
+            bgra,
+        })
+    }
+}
+
+/// An uncompressed Windows bitmap (what `screencapture -t bmp` writes):
+/// 24- or 32-bit, bottom-up or top-down, as top-down BGRA.
+pub fn decode_bmp(bytes: &[u8]) -> Result<Bitmap, String> {
+    let u16_at = |at: usize| -> Result<u16, String> {
+        bytes
+            .get(at..at + 2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .ok_or_else(|| "The bitmap is cut short.".to_string())
+    };
+    let u32_at = |at: usize| -> Result<u32, String> {
+        bytes
+            .get(at..at + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .ok_or_else(|| "The bitmap is cut short.".to_string())
+    };
+    if bytes.get(0..2) != Some(b"BM") {
+        return Err("Not a BMP file.".into());
+    }
+    let offset = u32_at(10)? as usize;
+    let width = u32_at(18)? as i32;
+    let height = u32_at(22)? as i32;
+    let bits = u16_at(28)?;
+    let compression = u32_at(30)?;
+    if width <= 0 || height == 0 {
+        return Err(format!("Not a bitmap size: {width}x{height}"));
+    }
+    // BI_RGB, or BI_BITFIELDS with the usual BGRA masks.
+    if compression != 0 && compression != 3 {
+        return Err(format!(
+            "A compressed bitmap ({compression}) is not read here."
+        ));
+    }
+    let bytes_per_pixel = match bits {
+        24 => 3,
+        32 => 4,
+        other => return Err(format!("A {other}-bit bitmap is not read here.")),
+    };
+    let width = width as usize;
+    let rows = height.unsigned_abs() as usize;
+    let stride = (width * bytes_per_pixel).div_ceil(4) * 4;
+    if bytes.len() < offset + stride * rows {
+        return Err("The bitmap is cut short.".into());
+    }
+    let mut bgra = Vec::with_capacity(width * rows * 4);
+    for y in 0..rows {
+        // Positive height: the last row comes first in the file.
+        let row = if height > 0 { rows - 1 - y } else { y };
+        let start = offset + row * stride;
+        for x in 0..width {
+            let pixel = &bytes[start + x * bytes_per_pixel..];
+            let alpha = if bytes_per_pixel == 4 { pixel[3] } else { 255 };
+            bgra.extend_from_slice(&[pixel[0], pixel[1], pixel[2], alpha]);
+        }
+    }
+    Ok(Bitmap {
+        width,
+        height: rows,
+        bgra,
+    })
+}
+
+/// The canvas contain-fit into the slot, centred (the layer's
+/// `contain_dest_rect`): the stage the frames are drawn in, as
+/// `(left, top, width, height)` in the slot's units.
+pub fn contain(slot: (f64, f64, f64, f64), canvas: (u32, u32)) -> (f64, f64, f64, f64) {
+    let (x, y, w, h) = slot;
+    if canvas.0 == 0 || canvas.1 == 0 || w <= 0.0 || h <= 0.0 {
+        return slot;
+    }
+    let aspect = f64::from(canvas.0) / f64::from(canvas.1);
+    let (fw, fh) = if w / h > aspect {
+        (h * aspect, h)
+    } else {
+        (w, w / aspect)
+    };
+    (x + (w - fw) / 2.0, y + (h - fh) / 2.0, fw, fh)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +410,61 @@ mod tests {
             }
         );
         assert!(mean_rects(&bitmap[..10], 10, 10, PixelOrder::Bgra, &[left]).is_err());
+    }
+
+    /// A 2 × 2 bottom-up 24-bit bitmap: bottom row red, blue; top row
+    /// green, white.
+    fn tiny_bmp() -> Vec<u8> {
+        let mut bytes = vec![0u8; 54];
+        bytes[0..2].copy_from_slice(b"BM");
+        bytes[10..14].copy_from_slice(&54u32.to_le_bytes());
+        bytes[14..18].copy_from_slice(&40u32.to_le_bytes());
+        bytes[18..22].copy_from_slice(&2i32.to_le_bytes());
+        bytes[22..26].copy_from_slice(&2i32.to_le_bytes());
+        bytes[26..28].copy_from_slice(&1u16.to_le_bytes());
+        bytes[28..30].copy_from_slice(&24u16.to_le_bytes());
+        // Rows pad to 4 bytes: 6 bytes of pixels, 2 of padding.
+        bytes.extend_from_slice(&[0, 0, 255, 255, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&[0, 255, 0, 255, 255, 255, 0, 0]);
+        bytes
+    }
+
+    #[test]
+    fn a_bottom_up_bitmap_reads_top_down() {
+        let bitmap = decode_bmp(&tiny_bmp()).unwrap();
+        assert_eq!((bitmap.width, bitmap.height), (2, 2));
+        assert_eq!(
+            bitmap.bgra,
+            vec![
+                0, 255, 0, 255, 255, 255, 255, 255, // top: green, white
+                0, 0, 255, 255, 255, 0, 0, 255, // bottom: red, blue
+            ]
+        );
+        let corner = bitmap
+            .crop(PixelRect {
+                x: 1,
+                y: 1,
+                width: 5,
+                height: 5,
+            })
+            .unwrap();
+        assert_eq!(corner.bgra, vec![255, 0, 0, 255]);
+        assert!(decode_bmp(b"PNG").is_err());
+        assert!(decode_bmp(&tiny_bmp()[..60]).is_err());
+    }
+
+    #[test]
+    fn the_canvas_is_contain_fit_in_the_slot() {
+        // Wider slot: pillarboxed.
+        assert_eq!(
+            contain((0.0, 0.0, 300.0, 100.0), (200, 100)),
+            (50.0, 0.0, 200.0, 100.0)
+        );
+        // Taller slot: letterboxed.
+        assert_eq!(
+            contain((10.0, 0.0, 160.0, 180.0), (200, 100)),
+            (10.0, 50.0, 160.0, 80.0)
+        );
     }
 
     #[test]

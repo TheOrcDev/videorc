@@ -125,6 +125,9 @@ pub struct Preview {
     scrolled_away: bool,
     /// The Studio, for the grants the preview's sources wait for (P141).
     studio: Option<std::sync::Arc<videorc_app_core::Studio<videorc_app_core::BackendClient>>>,
+    /// The slot each host last laid the video out in, in that window's
+    /// points (docked, floating): where `preview-surface-sample` reads.
+    smoke_slots: [Option<gpui::Bounds<gpui::Pixels>>; 2],
 }
 
 impl Preview {
@@ -155,6 +158,7 @@ impl Preview {
                 logger: setup.logger,
                 closed: false,
                 closed_from: WindowMode::Docked,
+                smoke_slots: [None, None],
                 studio: Some(setup.studio),
             })
         }
@@ -270,6 +274,7 @@ impl Preview {
                 frame: None,
                 closed: false,
                 closed_from: WindowMode::Docked,
+                smoke_slots: [None, None],
                 studio: Some(words_studio),
             }
         })
@@ -288,6 +293,7 @@ impl Preview {
             frame: None,
             closed: false,
             closed_from: WindowMode::Docked,
+            smoke_slots: [None, None],
             studio: None,
         }
     }
@@ -530,6 +536,64 @@ impl Preview {
                 "title": words.title,
                 "detail": words.detail,
             })),
+        })
+    }
+
+    /// The slot the video is laid out in where the preview shows now (the
+    /// main window's while docked, its own window's while floating), in that
+    /// window's points; `None` before it was laid out.
+    pub fn smoke_slot(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        match self.mode {
+            WindowMode::Docked => self.smoke_slots[0],
+            WindowMode::Floating => self.smoke_slots[1],
+        }
+    }
+
+    /// The program canvas the frames are drawn at (the recording video's
+    /// size): the layer contain-fits it into the slot.
+    pub fn smoke_canvas(&self) -> Option<(u32, u32)> {
+        // The frames' own size when one has drawn; the Studio's video
+        // settings before that.
+        #[cfg(target_os = "macos")]
+        if let Some(native) = self.native.as_ref() {
+            let telemetry = native.element.telemetry();
+            if telemetry.frame_width > 0 && telemetry.frame_height > 0 {
+                return Some((telemetry.frame_width, telemetry.frame_height));
+            }
+        }
+        let studio = self.studio.as_ref()?;
+        let video = videorc_app_core::livestream::plan::recording_video(
+            &studio.snapshot().settings.capture_doc,
+        );
+        (video.width > 0 && video.height > 0).then_some((video.width, video.height))
+    }
+
+    /// `native-preview-surface-status` (Electron's `nativePreviewSurfaceStatus`):
+    /// what the element presents, read live from its feed (the status the
+    /// log reads refreshes only every 750 ms). `presentedFrameId` advances
+    /// with every frame the layer shows.
+    pub fn smoke_surface_status(&self) -> serde_json::Value {
+        #[cfg(target_os = "macos")]
+        if let Some(native) = self.native.as_ref() {
+            let telemetry = native.element.telemetry();
+            let status = native.element.status();
+            return serde_json::json!({
+                "transport": "native-surface",
+                "state": status.phase.as_str(),
+                "presentedFrameId": telemetry.presented_frame_id,
+                "presented": telemetry.presented,
+                "framesRendered": telemetry.frames_rendered,
+                "frameWidth": telemetry.frame_width,
+                "frameHeight": telemetry.frame_height,
+                "presentedSceneRevision": telemetry.presented_scene_revision,
+                "message": status.reason.or(telemetry.surface_message),
+            });
+        }
+        serde_json::json!({
+            "transport": null,
+            "state": self.phase.as_str(),
+            "presentedFrameId": null,
+            "message": "This platform's GPUI preview has no native surface to report yet.",
         })
     }
 
@@ -877,6 +941,10 @@ impl Preview {
     /// place on the screen.
     #[cfg(target_os = "macos")]
     pub(crate) fn place(&mut self, host: Host, slot: Bounds<Pixels>, geometry: WindowGeometry) {
+        self.smoke_slots[match host {
+            Host::Docked => 0,
+            Host::Floating => 1,
+        }] = Some(slot);
         let Some(native) = self.native.as_mut() else {
             return;
         };

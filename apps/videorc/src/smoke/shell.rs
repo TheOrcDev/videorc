@@ -138,6 +138,10 @@ impl ShellSmoke for ShellWindows {
             .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())?
     }
 
+    fn preview_entity(&self) -> Option<Entity<Preview>> {
+        self.preview.borrow().clone()
+    }
+
     fn preview(&self, command: &str, cx: &mut App) -> Result<Value, String> {
         let preview = self
             .preview
@@ -146,6 +150,9 @@ impl ShellSmoke for ShellWindows {
             .ok_or_else(|| super::MAIN_WINDOW_NOT_READY.to_string())?;
         let mode = preview.read(cx).mode();
         let can_float = preview.read(cx).can_float();
+        if command == "native-preview-surface-status" {
+            return Ok(preview.read(cx).smoke_surface_status());
+        }
         if command == "inspect-native-preview-live-background" {
             // Electron's proof surface drew the idle live background on
             // Linux; the GPUI preview draws the backend compositor's frames

@@ -73,6 +73,7 @@ pub const STUDIO_COMMANDS: &[&str] = &[
     "select-screen-device",
     "studio-capture-configure",
     "studio-live-audio-hold",
+    "studio-performance-check",
     "studio-privacy-add-app",
     "studio-privacy-state",
     "studio-put-setting",

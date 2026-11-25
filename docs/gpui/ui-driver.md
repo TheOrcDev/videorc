@@ -59,11 +59,16 @@ Each gap is answered by name in the driver and listed here until it closes.
    wait for it. `ui-set-value` types the value instead.
    **Fix:** make it public, or add `Window::perform_a11y_action(ActionRequest)`,
    upstream.
-3. **No window capture outside tests.** `Window::render_to_image` is
-   `test-support` only, so `capture-page` refuses by name.
-   **Fix:** the feature in smoke builds only, or an OS capture of the window
-   (macOS `CGWindowListCreateImage` needs Screen Recording). This is a
-   decision for S2.5's follow-up.
+3. **No window capture outside tests (closed on macOS by an OS capture).**
+   `Window::render_to_image` is `test-support` only, so `capture-page-alpha`
+   (a page render's alpha) still refuses by name. `capture-page`,
+   `comments-window-capture-page` and `preview-surface-sample`
+   (`apps/videorc/src/smoke/capture.rs`, shapes in
+   `videorc_app_core::smoke::capture`) capture the composited window with
+   `screencapture -x -o -l <windowNumber>`: what is on screen, glass and the
+   native preview layer included. It needs Screen Recording for the process
+   that runs the app (a terminal's grant carries over). Windows and Linux
+   answer by name that they have no capture yet.
 4. **No disabled flag or clipping in the dump.** Every node reads as enabled
    and visible. The driver honours `disabled: true` should it appear.
 5. **No author ids in the dump.** `accessibility_id` is not printed. A
@@ -132,17 +137,23 @@ Should run with `VIDEORC_APP=gpui` (nothing app-specific beyond supported comman
 bubble case skips on GPUI), `smoke:dev` (its asset background goes through `import-smoke-background`, now in the
 core), `smoke:preview-real-launch` (on GPUI the main side of the chain is `inspect-native-preview-runtime`).
 
+`smoke:preview-overlay-presentation` and `smoke:preview-check-invisible` run with `VIDEORC_APP=gpui` on macOS:
+`native-preview-surface-status` reads the element's live feed (`presentedFrameId`, transport `native-surface`), and
+`preview-surface-sample` captures the window showing the Preview and reads the rects in the canvas the layer contain-fits
+(the frame's own size, else the Studio's video). The renderer hooks are the Studio handler's: `studio-capture-configure`,
+`studio-replay-buffer`, `studio-scenes-state`, `studio-record` / `studio-stop`, and `studio-performance-check` (Check
+this computer as the Output page starts it). The GPUI watchdog's `[preview] healing` / `stalled` lines count as
+Electron's `[preview-watch]` ones.
+
 Wait for a GPUI product path or new commands first:
 
 | Smoke                                                                                                                                            | Missing on GPUI                                                                                                                                                 |
 | ------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `smoke:captions-live`                                                                                                                            | the renderer's caption frame submissions (live PNG and cue frames)                                                                                              |
-| `smoke:preview-overlay-presentation`                                                                                                             | `native-preview-surface-status`, `preview-surface-sample`                                                                                                       |
-| `smoke:html-overlay`                                                                                                                             | the Chromium page host (`videorc-page-host` / P5-D10); `html-overlay-stats` answers `{ stats: null }` until then (named SKIP on GPUI)                            |
-| `smoke:screens` theme screenshots                                                                                                                | `capture-page` (gap 3); takeover import and `main-window-id` land with banners                                                                                  |
+| `smoke:html-overlay`                                                                                                                             | the Chromium page host (`videorc-page-host` / P5-D10); `html-overlay-stats` answers `{ stats: null }` until then (named SKIP on GPUI)                           |
+| `smoke:screens` theme screenshots                                                                                                                | the port itself (C1): `capture-page` captures the composited window on macOS now (gap 3)                                                                        |
 | `smoke:preview-pump-diagnostics`, `smoke:preview-click-focus`                                                                                    | Electron's present-pump and click-focus probes                                                                                                                  |
-| `smoke:preview-scene-commit`, `smoke:freeform-editor`                                                                                            | `select-camera-shape`; freeform-editor clicks unblocked once gap 1's bounds patch is in the smoke binary                                                                                          |
-| `smoke:preview-check-invisible`                                                                                                                  | `preview-surface-sample`, the Check computer command                                                                                                            |
+| `smoke:preview-scene-commit`, `smoke:freeform-editor`                                                                                            | `select-camera-shape`; freeform-editor clicks unblocked once gap 1's bounds patch is in the smoke binary                                                        |
 | `smoke:recording-native-preview`, `smoke:preview-surface`, `probe:preview-lifecycle`, `probe:preview-window`, `smoke:preview-interaction-stress` | Electron's native-surface and window commands; they need GPUI-specific probes, not a port                                                                       |
 | `probe:comments-window`                                                                                                                          | the chat fixtures (`comments-window-push-*`, `-seed-*`), `capture-page` (gap 3), the person card and layout metrics; it needs a GPUI-specific probe, not a port |
 
@@ -177,7 +188,6 @@ writes the highlight's rects into the overlay layout, as Electron's `snapHighlig
 `videorc-asset://` renderer fetch (no Chromium scheme; recording samples still prove the draw).
 `smoke:html-overlay` is a named SKIP until `videorc-page-host` (P5-D10) paints frames. Screens skips
 the live Assets theme screenshots (`capture-page`) and the renderer mic `eval-js` check.
-
 
 ### Sources, layouts and saved scenes
 
