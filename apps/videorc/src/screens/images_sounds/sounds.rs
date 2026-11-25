@@ -29,7 +29,7 @@ use videorc_kit::select::Select;
 use videorc_kit::slider::{Slider, SliderEvent, SliderState};
 use videorc_kit::spinner::Spinner;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
-use videorc_kit::tokens::{font, size, text};
+use videorc_kit::tokens::{size, text};
 
 pub type AppStudio = Studio<BackendClient>;
 
@@ -551,7 +551,7 @@ impl Render for SoundsPanel {
                         .w(px(52.))
                         .flex()
                         .justify_end()
-                        .font_family(font::MONO[0])
+                        .font_family(crate::lcd::SCREEN_FONT)
                         .text_size(px(12.))
                         .line_height(px(16.))
                         .font_weight(gpui::FontWeight::NORMAL)

@@ -198,7 +198,13 @@ async function launch({ bins, stateDir }) {
       VIDEORC_APP: 'gpui',
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_SMOKE_STATE_DIR: stateDir,
-      VIDEORC_USER_DATA_DIR: join(stateDir, 'profile')
+      VIDEORC_USER_DATA_DIR: join(stateDir, 'profile'),
+      // The Electron baselines are signed out on Basic, so Premium gates are
+      // locked. The sentinel's backend is a debug build, which resolves no
+      // account to the Developer tier and opens every gate; this downgrade-
+      // only override (`entitlements.rs` `basic_override_enabled`) keeps the
+      // GPUI shots on Basic so locked states compare.
+      VIDEORC_PREMIUM_FEATURES: 'basic'
     },
     spawnSpec: {
       command: bins.app,

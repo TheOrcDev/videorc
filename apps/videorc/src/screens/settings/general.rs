@@ -314,7 +314,7 @@ impl SettingsScreen {
         for row in model.elsewhere {
             let page = PageId::parse(row.id);
             let account = row.id == "account";
-            let can_open_account = account && self.account_name().is_some();
+            let signed_in = account && self.account_name().is_some();
             let mark = match page {
                 Some(page) => crate::app::shell::page_icon(page),
                 None => IconName::UserCircle,
@@ -324,10 +324,14 @@ impl SettingsScreen {
                 16.,
                 hsla(t.muted_foreground),
             ));
-            if (page.is_some() || can_open_account) && row.enabled {
+            // `onNavigate={signedIn ? openAccount : signIn}`: signed out, the
+            // account row signs in, like the account menu's Sign in.
+            if (page.is_some() || account) && row.enabled {
                 line = line.on_navigate(cx.listener(move |_, _, _, cx| {
-                    if can_open_account {
-                        cx.open_url("https://videorc.com/account");
+                    if signed_in {
+                        crate::app::accounts::open_web(cx, |web| web.account());
+                    } else if account {
+                        crate::app::accounts::sign_in(cx);
                     }
                     if let Some(page) = page {
                         cx.emit(Navigate(page));

@@ -253,11 +253,21 @@ fn columns(actions_width: f32, cells: [gpui::AnyElement; 7]) -> gpui::Div {
                 .w(px(COLUMN_SCENE))
                 .min_w(px(0.))
                 .overflow_hidden()
+                // A flex cell, so a badge keeps its own width (`w-fit`).
+                .flex()
+                .items_center()
                 .child(scene),
         )
         .child(div().flex_none().w(px(COLUMN_DURATION)).child(duration))
         .child(div().flex_none().w(px(COLUMN_SIZE)).child(bytes))
-        .child(div().flex_none().w(px(COLUMN_FILE)).child(file))
+        .child(
+            div()
+                .flex_none()
+                .w(px(COLUMN_FILE))
+                .flex()
+                .items_center()
+                .child(file),
+        )
         .child(
             div()
                 .flex_none()
@@ -869,7 +879,7 @@ impl LibraryScreen {
                             .child(row.meta.clone()),
                     ),
             );
-        let scene = div().children(
+        let scene = div().flex().children(
             row.scene
                 .as_ref()
                 .map(|scene| Badge::new(scene.text.clone()).variant(BadgeVariant::Outline)),
