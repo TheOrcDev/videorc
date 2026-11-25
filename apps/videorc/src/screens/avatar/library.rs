@@ -41,7 +41,7 @@ pub fn render_library(
     let persona = screen.persona.as_ref();
     let view = library_view(library, persona);
     let busy = busy_line(library, persona.map(|persona| persona.name.as_str()));
-    let offer = save_offer(library, persona, screen.library_alive);
+    let offer = save_offer(library, persona, screen.library_alive());
     let invitation = invitation_visible(library, persona, screen.invitation_dismissed);
     let working = screen.working();
     let entity = cx.entity();

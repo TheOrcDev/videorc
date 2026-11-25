@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 use videorc_app_core::buddy::copy as words;
 use videorc_app_core::buddy::library::{CONTEXT_MAX_CHARS, text_length};
 use videorc_app_core::buddy::persona::{
-    PERSONALITY_MAX_CHARS, about_to_save, bubble_index, bubble_style, chip_fills_at_once,
-    fresh_persona, name_to_save,
+    PERSONALITY_MAX_CHARS, about_to_save, bubble_style, chip_fills_at_once, fresh_persona,
+    name_to_save,
 };
 use videorc_app_core::stream_manager::buddy::CohostSettingsView;
 use videorc_app_core::user_error::{
@@ -22,12 +22,12 @@ use videorc_app_core::user_error::{
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::panel_section::PanelSection;
-use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::textarea::{Textarea, TextareaState};
 use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::{Theme, text};
+use videorc_kit::tokens::{Theme, radius, text};
 use videorc_protocol::cohost::CohostPersona;
 
 use super::reactions::SaveSection;
@@ -246,7 +246,7 @@ impl AvatarScreen {
         self.patch_settings(json!({ "notes": notes }), SaveSection::Persona, cx);
     }
 
-    fn set_bubble(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(super) fn set_bubble(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(persona) = self.persona.as_ref() else {
             return;
         };
@@ -553,27 +553,45 @@ pub(super) fn render_persona(
         t,
     );
 
-    let bubble_entity = entity.clone();
-    let mut picker = SegmentedControl::new("avatar-bubble-style")
-        .small(true)
-        .accessibility_label(words::BUBBLE_STYLE_LABEL)
-        .value(Some(
-            words::BUBBLE_STYLES[bubble_index(persona.bubble_style)].0,
-        ))
-        .on_change(move |value: SharedString, _, cx| {
-            let index = words::BUBBLE_STYLES
-                .iter()
-                .position(|(id, _)| *id == value.as_ref())
-                .unwrap_or(0);
-            bubble_entity.update(cx, |screen, cx| screen.set_bubble(index, cx));
-        });
-    for (id, label) in words::BUBBLE_STYLES {
-        picker = picker.option(Segment::new(id, label));
-    }
+    let picker =
+        super::bubble::style_picker("avatar-bubble-style", persona.bubble_style, entity.clone())
+            .accessibility_label(words::BUBBLE_STYLE_LABEL);
+    // The sample itself opens the zoom too (owner, 2026-10-09); the
+    // magnifier stays the keyboard path.
+    let (zoom_sample, zoom_button) = (entity.clone(), entity.clone());
+    let sample = div()
+        .id("avatar-bubble-sample-zoom")
+        .cursor_pointer()
+        .rounded(px(radius::ROW))
+        .child(super::bubble::inline_sample(screen))
+        .on_click(move |_, _, cx| zoom_sample.update(cx, |screen, cx| screen.open_bubble_zoom(cx)));
+    let controls = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(16.))
+        .child(picker)
+        .child(
+            div().flex().items_end().gap(px(4.)).child(sample).child(
+                Button::new("avatar-bubble-zoom")
+                    .variant(ButtonVariant::Ghost)
+                    .size(ButtonSize::Icon)
+                    .accessibility_label(words::BUBBLE_ZOOM)
+                    .tooltip(words::BUBBLE_ZOOM_HINT)
+                    .child(icon(
+                        IconName::MagnifyingGlass,
+                        16.,
+                        hsla(t.muted_foreground),
+                    ))
+                    .on_click(move |_, _, cx| {
+                        zoom_button.update(cx, |screen, cx| screen.open_bubble_zoom(cx))
+                    }),
+            ),
+        );
     let bubble = field(
         words::BUBBLE_LABEL,
         Some(words::bubble_description(&persona.name)),
-        picker.into_any_element(),
+        controls.into_any_element(),
         div().into_any_element(),
         t,
     );
