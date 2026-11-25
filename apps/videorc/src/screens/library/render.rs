@@ -21,7 +21,7 @@ use videorc_kit::{
     spinner::Spinner,
     status_dot::{StatusDot, StatusTone},
     theme::{self, TypeScale, hsla, with_alpha},
-    tokens::{Theme, radius, size, text},
+    tokens::{Theme, size, text},
     tooltip::tooltip,
 };
 impl LibraryScreen {
@@ -157,59 +157,19 @@ impl LibraryScreen {
             .collect()
     }
     fn posters(&mut self, rows: &[p::RowView], cx: &mut Context<Self>) {
-        // A bounded set, keyed by both id and backend duration/version. Never
+        // The first 150 rows' posters, keyed by both id and backend
+        // duration/version, from the app-wide cache (`app::posters`). Never
         // put the authenticated poster URL in the scene or diagnostics.
-        let needed = rows
+        let keys = rows
             .iter()
             .take(150)
             .filter_map(|row| match row.poster {
                 p::PosterView::Picture { version } => Some((row.id.clone(), version)),
                 _ => None,
             })
-            .filter(|key| !self.posters.contains_key(key))
             .collect::<Vec<_>>();
-        if needed.is_empty() {
-            return;
-        }
-        if self.posters.len() > 200 {
-            self.posters.clear();
-        }
-        for key in &needed {
-            self.posters.insert(key.clone(), None);
-        }
-        let core = self.core.clone();
-        self.task(
-            async move {
-                let mut images = Vec::new();
-                for (id, version) in needed {
-                    let bytes = match core.poster(&id, version).await {
-                        Some(bytes) => Some(bytes),
-                        None => {
-                            if core.ensure_poster(&id).await {
-                                core.poster(&id, version).await
-                            } else {
-                                None
-                            }
-                        }
-                    };
-                    images.push(((id, version), bytes));
-                }
-                Ok(images)
-            },
-            |this, result, _| {
-                if let Ok(images) = result {
-                    for (key, bytes) in images {
-                        this.posters.insert(
-                            key,
-                            bytes.map(|bytes| {
-                                Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Jpeg, bytes))
-                            }),
-                        );
-                    }
-                }
-            },
-            cx,
-        );
+        self.posters
+            .update(cx, |posters, cx| posters.want(POSTER_USER, keys, cx));
     }
 }
 
@@ -345,36 +305,18 @@ impl LibraryScreen {
 
     /// `SessionPoster`: the live dot, the poster, or the video file glyph in
     /// the 72 × 40 frame (`rounded-row border bg-muted/30`).
-    fn poster_cell(&self, row: &p::RowView, t: &Theme) -> gpui::Div {
-        let frame = div()
-            .flex_none()
-            .w(px(POSTER_WIDTH))
-            .h(px(POSTER_HEIGHT))
-            .flex()
-            .items_center()
-            .justify_center()
-            .overflow_hidden()
-            .rounded(px(radius::ROW))
-            .border_1()
-            .border_color(hsla(t.border))
-            .bg(hsla(with_alpha(t.muted, 0.3)));
+    fn poster_cell(&self, row: &p::RowView, t: &Theme, cx: &gpui::App) -> gpui::Div {
+        let frame = crate::app::posters::frame(POSTER_WIDTH, POSTER_HEIGHT, t);
         match row.poster {
             p::PosterView::Live { tone, pulse } => frame.child(
                 StatusDot::new(SharedString::from(format!("poster-dot-{}", row.id)))
                     .tone(status_tone(tone))
                     .pulse(pulse),
             ),
-            p::PosterView::Picture { version } => {
-                match self.posters.get(&(row.id.clone(), version)) {
-                    Some(Some(image)) => frame.child(
-                        gpui::img(image.clone())
-                            .size_full()
-                            .rounded(px(radius::ROW))
-                            .object_fit(gpui::ObjectFit::Cover),
-                    ),
-                    _ => frame.child(icon(IconName::FileVideo, 16., hsla(t.muted_foreground))),
-                }
-            }
+            p::PosterView::Picture { version } => frame.child(crate::app::posters::picture(
+                self.posters.read(cx).get(&row.id, version),
+                t,
+            )),
             p::PosterView::Glyph => {
                 frame.child(icon(IconName::FileVideo, 16., hsla(t.muted_foreground)))
             }
@@ -863,7 +805,7 @@ impl LibraryScreen {
             .flex()
             .items_center()
             .gap(px(12.))
-            .child(self.poster_cell(row, t))
+            .child(self.poster_cell(row, t, cx))
             .child(
                 div()
                     .min_w(px(0.))

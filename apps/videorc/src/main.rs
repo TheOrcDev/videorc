@@ -576,6 +576,9 @@ fn main() -> Result<()> {
         let destinations =
             cx.new(|cx| DestinationsPanel::new(studio.clone(), core_handle.clone(), cx));
         let guests = cx.new(|cx| GuestsPanel::new(studio.clone(), core_handle.clone(), cx));
+        // One poster cache for the Library and Clean cut (plan 260 L3),
+        // before Sidekick, which observes it.
+        app::posters::install(library.clone(), core_handle.clone(), cx);
         let sidekick = cx.new(|cx| {
             screens::sidekick::SidekickScreen::new(
                 studio.clone(),

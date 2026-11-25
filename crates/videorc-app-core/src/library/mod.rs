@@ -22,7 +22,8 @@
 //!   desktop layer implements, S2.6a), and it completes.
 //! - **Posters** come from the backend's loopback server
 //!   (`/sessions/{id}/poster?token=`), with one `sessions.poster` backfill
-//!   for an older recording that has none yet.
+//!   for an older recording that has none yet, in one app-wide cache the
+//!   Library and Clean cut share ([`posters`]).
 //!
 //! Its words are [`copy`], its pure logic [`view`], the page as one value
 //! [`page`] and the Markers dialog [`markers`]. The Cloud tab (Local |
@@ -40,6 +41,7 @@ pub mod markers;
 pub mod noise;
 pub mod page;
 pub mod player;
+pub mod posters;
 pub mod view;
 
 #[cfg(test)]
