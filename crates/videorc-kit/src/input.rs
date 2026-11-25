@@ -6,10 +6,13 @@
 //! The text lives in an `InputState` entity the screen owns
 //! (`cx.new(|cx| InputState::new(window, cx).placeholder("Name"))`), which
 //! emits `InputEvent::Change`, `PressEnter`, `Focus` and `Blur`.
+//!
+//! [`Input::revert_on_escape`] snapshots the value on focus and restores it
+//! (then blurs) when Escape is pressed — Scene transform fields (P549).
 
 use gpui::{App, ElementId, Entity, Focusable, IntoElement, SharedString, Window, prelude::*, px};
-use gpui_base::input::InputEditorStyle;
 pub use gpui_base::input::InputState;
+use gpui_base::input::{Escape, InputEditorStyle};
 
 use crate::{
     chrome::box_shadow,
@@ -25,6 +28,8 @@ pub struct Input {
     invalid: bool,
     /// No own rim, fill or focus ring: an [`crate::input_group::InputGroup`] owns them.
     plain: bool,
+    /// Escape restores the value from when the field gained focus (P549).
+    revert_on_escape: bool,
     ground: Option<Color>,
     accessibility_label: Option<SharedString>,
     appearance: Option<Appearance>,
@@ -38,10 +43,18 @@ impl Input {
             disabled: false,
             invalid: false,
             plain: false,
+            revert_on_escape: false,
             ground: None,
             accessibility_label: None,
             appearance: None,
         }
+    }
+
+    /// Escape restores the text from when the field gained focus, then blurs
+    /// (Electron transform fields: Enter commits, Escape reverts).
+    pub fn revert_on_escape(mut self, enabled: bool) -> Self {
+        self.revert_on_escape = enabled;
+        self
     }
 
     pub fn disabled(mut self, disabled: bool) -> Self {
@@ -108,6 +121,20 @@ impl RenderOnce for Input {
             let state = self.state.read(cx);
             state.focus_handle(cx).is_focused(window) || state.has_selection_focus(window, cx)
         };
+        // Escape-revert: snapshot on focus edge; restore when Escape propagates.
+        let revert = self.revert_on_escape;
+        let snap_key = SharedString::from(format!("{}/escape-snap", self.id));
+        let focus_key = SharedString::from(format!("{}/escape-focus", self.id));
+        let snap = window.use_keyed_state(snap_key, cx, |_, _| SharedString::default());
+        let had_focus = window.use_keyed_state(focus_key, cx, |_, _| false);
+        if revert {
+            let was = *had_focus.read(cx);
+            if focused && !was {
+                let value = self.state.read(cx).value();
+                snap.update(cx, |s, _| *s = value);
+            }
+            had_focus.update(cx, |s, _| *s = focused);
+        }
         // The text paints in what it inherits; the editor's own colours
         // (placeholder, caret, selection) come from the tokens, never from
         // gpui-base's fallback theme.
@@ -168,6 +195,18 @@ impl RenderOnce for Input {
         }
         if let Some(label) = self.accessibility_label {
             frame = frame.accessibility_label(label);
+        }
+        if revert {
+            let state = self.state.clone();
+            let snap = snap.clone();
+            frame = frame.on_action(move |_: &Escape, window, cx| {
+                let restore = snap.read(cx).clone();
+                state.update(cx, |state, cx| {
+                    state.set_value(restore, window, cx);
+                });
+                window.blur();
+                cx.stop_propagation();
+            });
         }
         frame.child(self.state.clone())
     }
