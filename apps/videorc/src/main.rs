@@ -243,7 +243,25 @@ fn main() -> Result<()> {
     launch
         .extra_env
         .extend(bundled.backend_env(&paths.user_data_dir));
-    launch.path_prepend = vec![videorc_app_core::paths::cargo_bin_dir()];
+    // A package's own FFmpeg (S5.1a), as Electron's main hands it over: the
+    // binary named, and its folder first on PATH. A dev build keeps the one
+    // on PATH.
+    let bundled_ffmpeg = resources
+        .as_deref()
+        .and_then(videorc_app_core::bundled::bundled_ffmpeg);
+    if let Some(ffmpeg) = &bundled_ffmpeg {
+        launch.extra_env.push((
+            videorc_app_core::bundled::BUNDLED_FFMPEG_PATH_ENV.to_string(),
+            ffmpeg.to_string_lossy().into_owned(),
+        ));
+    }
+    launch.path_prepend = bundled_ffmpeg
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf)
+        .into_iter()
+        .chain([videorc_app_core::paths::cargo_bin_dir()])
+        .collect();
     let stderr_logger = logger.clone();
     launch.stderr_sink = Some(std::sync::Arc::new(move |line: &str| {
         stderr_logger.log(Level::infer(line), line);

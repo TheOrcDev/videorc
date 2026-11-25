@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <!-- Hardened-runtime AV device access. Without these, camera/microphone are
+       denied in packaged builds NO MATTER what the user grants in System
+       Settings (TCC cannot override a missing entitlement) — the exact
+       works-in-dev/dead-in-release split shipped in 0.9.1. This one plist signs
+       the app AND the bundled capture binaries (videorc-backend, preview
+       helper, ffmpeg/ffprobe), so it must carry the device entitlements for
+       all of them. Screen recording needs no entitlement (TCC-only). -->
+  <key>com.apple.security.device.camera</key>
+  <true/>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+</dict>
+</plist>

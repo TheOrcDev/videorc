@@ -31,6 +31,15 @@ pub const RESOURCES_DIR_ENV: &str = "VIDEORC_RESOURCES_DIR";
 pub const BACKGROUNDS_IN_RESOURCES: &str = "background-assets/bundled";
 pub const BUDDY_IN_RESOURCES: &str = "buddy-assets/bundled";
 pub const STARTER_SOUNDS_IN_RESOURCES: &str = "sounds/starter";
+/// The bundled FFmpeg (macOS `mac.extraResources`: `vendor/ffmpeg/current`
+/// to `ffmpeg`, `bin/ffmpeg` and `bin/ffprobe` in it).
+#[cfg(not(windows))]
+pub const FFMPEG_IN_RESOURCES: &str = "ffmpeg/bin/ffmpeg";
+#[cfg(windows)]
+pub const FFMPEG_IN_RESOURCES: &str = "ffmpeg/bin/ffmpeg.exe";
+/// Where the backend takes FFmpeg from (Electron's main sets it to the
+/// bundled one); FFprobe is found beside it.
+pub const BUNDLED_FFMPEG_PATH_ENV: &str = "VIDEORC_BUNDLED_FFMPEG_PATH";
 
 /// The same folders in the checkout (electron-builder's `from:`).
 pub const BACKGROUNDS_IN_WORKSPACE: &str = "apps/desktop/src/renderer/src/assets/backgrounds";
@@ -165,6 +174,14 @@ pub fn run_root(
     discovered()
 }
 
+/// The package's FFmpeg, for [`BUNDLED_FFMPEG_PATH_ENV`]: `None` outside a
+/// package, or when the package has none (the backend then runs the
+/// `ffmpeg` on `PATH`, as a dev build does).
+pub fn bundled_ffmpeg(resources: &Path) -> Option<PathBuf> {
+    let ffmpeg = resources.join(FFMPEG_IN_RESOURCES);
+    ffmpeg.is_file().then_some(ffmpeg)
+}
+
 static BUNDLED: OnceLock<BundledAssets> = OnceLock::new();
 
 /// Sets this run's folders, once, at startup; later calls get the first.
@@ -270,6 +287,17 @@ mod tests {
             packaged_resources_dir(Path::new("/repo/target/release/videorc"), set),
             Some(PathBuf::from("/opt/videorc"))
         );
+    }
+
+    #[test]
+    fn a_package_hands_the_backend_its_own_ffmpeg() {
+        let root = std::env::temp_dir().join(format!("videorc-ffmpeg-{}", std::process::id()));
+        assert_eq!(bundled_ffmpeg(&root), None);
+        let ffmpeg = root.join(FFMPEG_IN_RESOURCES);
+        std::fs::create_dir_all(ffmpeg.parent().unwrap()).unwrap();
+        std::fs::write(&ffmpeg, b"").unwrap();
+        assert_eq!(bundled_ffmpeg(&root), Some(ffmpeg));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
