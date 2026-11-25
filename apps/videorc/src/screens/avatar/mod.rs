@@ -7,6 +7,7 @@
 //! (Still/Alive, Test, the living preview), Reactions and Motion, Greetings,
 //! the onboarding dialog and the Alive creator.
 
+mod greetings;
 mod library;
 mod persona;
 mod pictures;
@@ -31,8 +32,8 @@ use videorc_kit::dialog::DialogHandle;
 use videorc_kit::input::InputState;
 use videorc_kit::page_tabs::PageTabs;
 use videorc_kit::textarea::TextareaState;
-use videorc_kit::theme::{self, FONT, TypeScale, hsla};
-use videorc_kit::tokens::{size, text};
+use videorc_kit::theme::FONT;
+use videorc_kit::tokens::size;
 use videorc_protocol::cohost::CohostPersona;
 
 use status::Placement;
@@ -61,6 +62,12 @@ const UPDATE_THE_LIBRARY: UserErrorContext = UserErrorContext {
 pub struct OpenPage(pub PageId);
 
 impl EventEmitter<OpenPage> for AvatarScreen {}
+
+/// Opens a Sidekick tab (Greetings' "Sidekick → Chat").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenSidekickTab(pub usize);
+
+impl EventEmitter<OpenSidekickTab> for AvatarScreen {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -156,6 +163,9 @@ pub struct AvatarScreen {
     /// "About you": the avatar's notes (`cohost.settings` `notes`).
     notes: Option<String>,
     persona_fields: Option<persona::PersonaFields>,
+    /// `autoChat`: the greetings live in it.
+    auto_chat: Option<videorc_protocol::cohost::CohostAutoChat>,
+    greeting_editor: Option<greetings::GreetingEditor>,
     /// The last failed persona save, and the section that shows it.
     save_error: Option<(reactions::SaveSection, String)>,
     /// `cohost.pet.list`: the worn pack's reactions.
@@ -204,6 +214,8 @@ impl AvatarScreen {
             persona: None,
             notes: None,
             persona_fields: None,
+            auto_chat: None,
+            greeting_editor: None,
             save_error: None,
             packs: Vec::new(),
             motion: None,
@@ -298,6 +310,9 @@ impl AvatarScreen {
                 .ok()
                 .and_then(|value| CohostSettingsView::from_json(&value));
             let notes = settings.as_ref().map(|settings| settings.notes.clone());
+            let auto_chat = settings
+                .as_ref()
+                .and_then(|settings| settings.auto_chat.clone());
             let persona = settings.and_then(|settings| settings.persona);
             let library = backend
                 .request("cohost.library.get", json!({}))
@@ -319,10 +334,11 @@ impl AvatarScreen {
                         .and_then(Value::as_bool)
                 })
                 .unwrap_or(false);
-            (persona, notes, library, placement, library_alive)
+            (persona, notes, auto_chat, library, placement, library_alive)
         });
         cx.spawn(async move |this, cx| {
-            let Ok((persona, notes, library, placement, library_alive)) = read.await else {
+            let Ok((persona, notes, auto_chat, library, placement, library_alive)) = read.await
+            else {
                 return;
             };
             let _ = this.update(cx, |screen, cx| {
@@ -331,6 +347,9 @@ impl AvatarScreen {
                 }
                 if notes.is_some() {
                     screen.notes = notes;
+                }
+                if auto_chat.is_some() {
+                    screen.auto_chat = auto_chat;
                 }
                 if let Some(library) = library {
                     screen.library_changed(library, cx);
@@ -720,15 +739,12 @@ impl Render for AvatarScreen {
                             ),
                     )
                     .into_any_element(),
-                Tab::Greetings => {
-                    let t = theme::resolve(None, window, cx);
-                    div()
-                        .p(px(size::GUTTER))
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child("Greetings come in their own Phase 3 PR.")
-                        .into_any_element()
-                }
+                Tab::Greetings => div()
+                    .flex()
+                    .flex_col()
+                    .p(px(size::GUTTER))
+                    .children(greetings::render_greetings(self, window, cx))
+                    .into_any_element(),
             };
 
         let entity = cx.entity();

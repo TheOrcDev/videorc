@@ -381,7 +381,12 @@ impl AvatarScreen {
     }
 
     /// `patchCohostSettings`: the answer is the new settings.
-    fn patch_settings(&mut self, patch: Value, section: SaveSection, cx: &mut Context<Self>) {
+    pub(super) fn patch_settings(
+        &mut self,
+        patch: Value,
+        section: SaveSection,
+        cx: &mut Context<Self>,
+    ) {
         self.save_error = None;
         let backend = self.studio.backend().clone();
         let job = self
@@ -415,6 +420,9 @@ impl AvatarScreen {
                 self.persona = settings.persona;
             }
             self.notes = Some(settings.notes);
+            if settings.auto_chat.is_some() {
+                self.auto_chat = settings.auto_chat;
+            }
         }
         cx.notify();
     }

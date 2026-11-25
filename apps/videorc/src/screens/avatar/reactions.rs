@@ -363,6 +363,7 @@ pub(super) enum SaveSection {
     Persona,
     Reactions,
     Motion,
+    Greetings,
 }
 
 impl SaveSection {
@@ -372,6 +373,7 @@ impl SaveSection {
             Self::Persona => "the changes",
             Self::Reactions => "the reactions",
             Self::Motion => "the motion",
+            Self::Greetings => "the greetings",
         }
     }
 }
