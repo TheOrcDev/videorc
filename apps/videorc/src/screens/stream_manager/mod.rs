@@ -12,6 +12,10 @@
 //! The core's views (`videorc_app_core::stream_manager`) hold the rows, the
 //! filters and the copy; the kit draws them.
 
+use std::sync::Arc;
+
+use videorc_app_core::{BackendClient, Studio};
+
 pub mod activity;
 pub mod chat;
 pub mod frame;
@@ -22,3 +26,7 @@ pub mod sidekick;
 pub mod stats;
 pub mod status;
 pub mod window;
+
+pub type AppStudio = Studio<BackendClient>;
+
+pub type SharedStudio = Arc<AppStudio>;

@@ -91,6 +91,7 @@ pub mod js_value;
 pub mod latency;
 pub mod linux_desktop;
 pub mod live_audio;
+pub mod live_chat;
 pub mod live_sources;
 mod platform_lifecycle;
 mod platforms;
@@ -213,7 +214,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 35] = [
+pub const STUDIO_EVENTS: [&str; 39] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -262,6 +263,11 @@ pub const STUDIO_EVENTS: [&str; 35] = [
     dashboard::AUDIENCE_EVENT,
     dashboard::CHAT_TOTALS_EVENT,
     crate::client::names::EVENTS_LAGGED,
+    // Live chat for the Stream Manager.
+    live_chat::MESSAGE_EVENT,
+    live_chat::SNAPSHOT_EVENT,
+    live_chat::CLEARED_EVENT,
+    live_chat::PROVIDER_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -910,6 +916,8 @@ pub struct Studio<B: StudioBackend> {
     /// The Stream Manager's live dashboard, coalesced at most once a second.
     dashboard_tx: watch::Sender<crate::stream_manager::dashboard::LiveDashboard>,
     dashboard: Arc<Mutex<dashboard::DashboardInner>>,
+    /// Live chat for the Stream Manager (and Studio's Chat section later).
+    live_chat_tx: watch::Sender<crate::chat::LiveChat>,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -976,6 +984,7 @@ impl<B: StudioBackend> Studio<B> {
         let (dashboard_tx, _) =
             watch::channel(crate::stream_manager::dashboard::LiveDashboard::default());
         let dashboard = Arc::new(Mutex::new(dashboard::DashboardInner::new(&now_iso())));
+        let (live_chat_tx, _) = watch::channel(crate::chat::LiveChat::default());
         Self {
             backend,
             config,
@@ -1007,6 +1016,7 @@ impl<B: StudioBackend> Studio<B> {
             watchdog_tx,
             dashboard_tx,
             dashboard,
+            live_chat_tx,
         }
     }
 
@@ -1307,7 +1317,8 @@ impl<B: StudioBackend> Studio<B> {
                 // stores do (`stream.targets`, `stream.health`); it never
                 // owns the early return.
                 let _ = self.handle_dashboard_event(&event, &payload);
-                if self.handle_chat_commands_event(&event, &payload)
+                if self.handle_live_chat_event(&event, &payload)
+                    || self.handle_chat_commands_event(&event, &payload)
                     || self.handle_watchdog_event(&event, &payload)
                     || self.handle_cloud_event(&event, &payload).await
                     || self.handle_platforms_event(&event, &payload).await
@@ -1611,8 +1622,10 @@ impl<B: StudioBackend> Studio<B> {
         self.read_watchdog().await;
         // The Stream Manager's live dashboard: seed a mid-show cloud room.
         self.read_dashboard().await;
+        // Live chat for the Stream Manager.
+        self.read_live_chat().await;
         // The other areas' first reads (the agents line, takeovers and the
-        // soundboard, chat, Sidekick, destinations, chat commands, scheduled
+        // soundboard, Sidekick, destinations, chat commands, scheduled
         // streams, the performance check, Hide screen, captions, the working
         // sources) land with them (S1.6b to S1.6e).
         // The writes made while the engine was away (or journaled by a
