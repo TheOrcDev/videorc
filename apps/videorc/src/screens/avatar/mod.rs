@@ -19,7 +19,7 @@ mod look;
 mod onboarding;
 mod onboarding_view;
 mod persona;
-mod pictures;
+pub(crate) mod pictures;
 mod preview;
 mod reactions;
 mod status;

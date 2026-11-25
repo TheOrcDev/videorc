@@ -19,6 +19,7 @@ mod draw;
 
 use std::cell::Cell;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -36,8 +37,8 @@ use videorc_app_core::editor::stage::{
     Ghost, HandleId, HitTarget, KeyChord, Modifiers as StageModifiers, OVERLAY_ITEMS, PictureInput,
     PixelSize, PresetCameraLayout, SelectionHit, Settled, StageCrop, StageEdits, StageGesture,
     StageHit, StageItemBadge, StageMapping, StageRect, background_stage_margin,
-    banner_fills_canvas, banner_fit_rect, banner_stage_id, clamp_overlay_rect, draft_params,
-    effective_camera_mask_shape, layer_fit, output_badge, overlay_item_label,
+    banner_fills_canvas, banner_fit_rect, banner_stage_id, buddy_pet_box, clamp_overlay_rect,
+    draft_params, effective_camera_mask_shape, layer_fit, output_badge, overlay_item_label,
     overlay_orientation_key, overlay_stage_id, preset_camera_corner_rect, round_crop_for_commit,
     round_rect_for_commit, same_stage_rect, scene_camera_on_stage, scene_frame_rect,
     scene_picture_rect, screen_box_is_picture, snap_corner_of, stage_crop_of, stage_handle_offset,
@@ -109,6 +110,50 @@ struct Entry {
     aspect_locked: bool,
     /// Unselected, its whole rect takes the pointer (not only its chip).
     grabs_body: bool,
+    /// The item itself on the schematic (`StageItemPicture`): a banner's
+    /// image, the avatar's still in its pet's square.
+    picture: Option<ItemPicture>,
+}
+
+/// An item's picture file.
+#[derive(Debug, Clone, PartialEq)]
+enum PictureFile {
+    File(PathBuf),
+    /// The stone golem, the avatar with no picture of its own.
+    Golem,
+}
+
+/// `StageItemPicture`: what is drawn, how it fits, and at what opacity.
+#[derive(Debug, Clone, PartialEq)]
+struct ItemPicture {
+    file: PictureFile,
+    /// The avatar: drawn in the square its pet fills (`buddyPetBox`), else
+    /// the item's own rect (a banner's rect is its image).
+    buddy: bool,
+    /// 0 to 1: a banner's own opacity.
+    opacity: f32,
+}
+
+impl Entry {
+    /// Where the picture sits for the rect the stage shows now
+    /// (`stageItemPictureRect`).
+    fn picture_rect(&self, canvas_aspect: f64) -> Option<StageRect> {
+        let picture = self.picture.as_ref()?;
+        Some(if picture.buddy {
+            buddy_pet_box(self.rect, canvas_aspect)
+        } else {
+            self.rect
+        })
+    }
+}
+
+/// `isBannerFileName`: a bare basename, never a path.
+fn banner_file_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && !value.starts_with('.')
+        && !value.contains(['/', '\\', '\0'])
+        && !value.contains("..")
 }
 
 impl Entry {
@@ -282,6 +327,8 @@ pub(super) struct Stage {
     channel: DraftChannel,
     _draft_timer: Option<Task<()>>,
     freeform_hint: bool,
+    /// The docked preview's picture is under the stage (drawn last).
+    live: bool,
     snap: bool,
     facts: StageFacts,
     /// A precise edit lands (`externalPending`).
@@ -306,6 +353,7 @@ impl Stage {
             channel: DraftChannel::default(),
             _draft_timer: None,
             freeform_hint: false,
+            live: false,
             snap: false,
             facts: StageFacts::default(),
             external_pending: false,
@@ -518,6 +566,7 @@ impl ScenePage {
                 editable: editable(source),
                 aspect_locked: false,
                 grabs_body: true,
+                picture: None,
             });
         }
         let item_rect = |id: &str, place: StageRect| {
@@ -566,6 +615,15 @@ impl ScenePage {
                 editable: overlays_editable,
                 aspect_locked: true,
                 grabs_body: !banner_fills_canvas(fit),
+                // The full image, not the thumbnail: a strip may span the
+                // canvas (`<userData>/Banners/<imageFile>`).
+                picture: banner_file_name(&banner.image_file).then(|| ItemPicture {
+                    file: PictureFile::File(
+                        self.user_data_dir.join("Banners").join(&banner.image_file),
+                    ),
+                    buddy: false,
+                    opacity: banner.opacity.clamp(0.0, 1.0) as f32,
+                }),
             });
         }
         if let Some(saved) = &self.editor_state.overlay_layout {
@@ -585,6 +643,17 @@ impl ScenePage {
                     editable: overlays_editable,
                     aspect_locked: false,
                     grabs_body: false,
+                    // The highlight card and the caption bar have no picture
+                    // until a comment or a caption exists: their zone is the
+                    // truth.
+                    picture: (item == "buddy").then(|| ItemPicture {
+                        file: self
+                            .avatar_picture
+                            .clone()
+                            .map_or(PictureFile::Golem, PictureFile::File),
+                        buddy: true,
+                        opacity: 1.0,
+                    }),
                 });
             }
         }
@@ -736,7 +805,13 @@ impl ScenePage {
                 rect: entry.rect,
                 item: entry.item(),
                 body: entry.grabs_body,
-                picture: None,
+                // The avatar's picture takes the pointer where it is drawn
+                // (on the schematic, while an output shows it).
+                picture: (matches!(entry.target, Target::Overlay(_))
+                    && !entry.off
+                    && !self.stage.live)
+                    .then(|| entry.picture_rect(self.editor.canvas_aspect))
+                    .flatten(),
             })
             .collect();
         let hit = stage_hit(

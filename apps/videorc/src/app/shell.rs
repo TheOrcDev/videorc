@@ -494,6 +494,7 @@ impl Shell {
             if page == PageId::Layouts {
                 let focus = self.scene.read(cx).focus_handle();
                 window.focus(&focus, cx);
+                self.scene.update(cx, |scene, cx| scene.entered(cx));
             }
             cx.notify();
         }

@@ -693,6 +693,7 @@ fn main() -> Result<()> {
                         core_handle.clone(),
                         global_keys.clone(),
                         preview.clone(),
+                        paths.user_data_dir.clone(),
                         window,
                         cx,
                     )

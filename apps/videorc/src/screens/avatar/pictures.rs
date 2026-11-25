@@ -122,6 +122,18 @@ pub fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
+const EMBLEM: &[u8] =
+    include_bytes!("../../../../desktop/src/renderer/src/assets/buddy/buddy-emblem-64.webp");
+
+/// `BuddyIcon` with no picture: the avatar's mark at icon size (the
+/// Scene toolbar's Avatar chip).
+pub fn emblem() -> Arc<Image> {
+    static IMAGE: OnceLock<Arc<Image>> = OnceLock::new();
+    IMAGE
+        .get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Webp, EMBLEM.to_vec())))
+        .clone()
+}
+
 /// The stone golem: the default avatar's picture (`BuddyEmblem` with no
 /// picture of its own).
 pub fn default_idle() -> Option<Arc<Image>> {

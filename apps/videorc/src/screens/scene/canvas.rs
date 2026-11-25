@@ -8,7 +8,10 @@
 //! stage layer paints its chrome over the video. Also here: Freeform entry
 //! (X3), Edit scene (X2) and ⌘Z (P536).
 
-use gpui::{AnyElement, Context, Modifiers, SharedString, Window, div, prelude::*, px, relative};
+use gpui::{
+    AnyElement, Context, Modifiers, ObjectFit, SharedString, Window, div, img, prelude::*, px,
+    relative,
+};
 use serde_json::{Map, Value, json};
 use videorc_app_core::StudioSnapshot;
 use videorc_app_core::editor::inspector::{InspectorSelection, scene_position_lock_reason};
@@ -37,6 +40,7 @@ use super::editor::{ChipKind, copy};
 use super::model::copy as list_copy;
 use super::stage::StagePhase;
 use super::{SceneNavigate, ScenePage, UndoLayout};
+use crate::screens::avatar::pictures;
 
 /// The stage's own words (`scene-stage.tsx`).
 mod words {
@@ -134,21 +138,28 @@ impl ScenePage {
         }
 
         // P514, P515: the sources, the overlay items and the banners on
-        // the stage; a chip's badge in secondary text after its name.
-        // TODO(kit): the Avatar's own mark (`BuddyIcon`); its chip carries
-        // no icon until then.
+        // the stage; a chip's badge in secondary text after its name. The
+        // Avatar's mark is its emblem (`BuddyIcon`).
         let mut toolbar = ToggleGroup::new("scene-sources")
             .accessibility_label(copy::SCENE_SOURCES)
             .disabled(!editor.chips_enabled || self.stage.phase() != StagePhase::Idle)
             .value(editor.selected_stage_id.clone());
         for chip in &editor.chips {
+            let glyph = |name| Some(icon(name, 14., muted).into_any_element());
             let mark = match chip.kind {
-                ChipKind::Camera => Some(IconName::VideoCamera),
-                ChipKind::Source => Some(IconName::Monitor),
-                ChipKind::Banner => Some(IconName::ImageSquare),
+                ChipKind::Camera => glyph(IconName::VideoCamera),
+                ChipKind::Source => glyph(IconName::Monitor),
+                ChipKind::Banner => glyph(IconName::ImageSquare),
                 ChipKind::Overlay => match overlay_item_from_stage_id(&chip.stage_id) {
-                    Some("highlight" | "chat") => Some(IconName::ChatCircle),
-                    Some("captions") => Some(IconName::ClosedCaptioning),
+                    Some("highlight" | "chat") => glyph(IconName::ChatCircle),
+                    Some("captions") => glyph(IconName::ClosedCaptioning),
+                    Some("buddy") => Some(
+                        img(pictures::emblem())
+                            .size(px(14.))
+                            .flex_none()
+                            .object_fit(ObjectFit::Contain)
+                            .into_any_element(),
+                    ),
                     _ => None,
                 },
             };
@@ -157,7 +168,7 @@ impl ScenePage {
                 .items_center()
                 .gap(px(4.))
                 .max_w(px(176.))
-                .children(mark.map(|mark| icon(mark, 14., muted)))
+                .children(mark)
                 .child(div().truncate().child(chip.label.clone()))
                 .children(chip.badge.map(|badge| {
                     div()
