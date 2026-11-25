@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
@@ -37,6 +37,12 @@ const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 /** Each phase stays on the picture this long: several 0.25 s samples. */
 const PHASE_MS = 1500
+
+// Plan 260 Phase 3: VIDEORC_APP=gpui drives the GPUI app. Its core smoke
+// commands cover import-takeover-image; the videorc-asset:// banner fetch is
+// Electron's renderer check and is skipped on GPUI (managed-asset-read lands
+// with S3.8b). See docs/gpui/ui-driver.md.
+const gpuiApp = smokeAppIsGpui()
 
 // Fixture colours (RGB). The strip is opaque magenta; the logo is cyan at
 // 50 % alpha; the takeover is solid red. Cyan at half alpha over red reads
@@ -130,19 +136,22 @@ try {
     // Release test 146, plan 0005: main serves videorc-asset://banner from the
     // backend's own Banners folder. This smoke's profile keeps the backend's
     // data and Electron's userData apart (as Linux always does), so a resolver
-    // that assumes userData answers 404 here.
-    for (const banner of [strip, logo]) {
-      const url = `videorc-asset://banner/${banner.imageFile}`
-      const loaded = await requestSmokeCommand(
-        smoke,
-        'eval-js',
-        {
-          code: `const response = await fetch(${JSON.stringify(url)}); return { status: response.status, bytes: (await response.arrayBuffer()).byteLength }`
-        },
-        { timeoutMs }
-      )
-      assert.equal(loaded.result?.status, 200, `${url} must load in the renderer`)
-      assert(loaded.result?.bytes > 0, `${url} must not be empty`)
+    // that assumes userData answers 404 here. The GPUI app has no Chromium
+    // renderer to fetch the custom scheme; skip until managed-asset-read.
+    if (!gpuiApp) {
+      for (const banner of [strip, logo]) {
+        const url = `videorc-asset://banner/${banner.imageFile}`
+        const loaded = await requestSmokeCommand(
+          smoke,
+          'eval-js',
+          {
+            code: `const response = await fetch(${JSON.stringify(url)}); return { status: response.status, bytes: (await response.arrayBuffer()).byteLength }`
+          },
+          { timeoutMs }
+        )
+        assert.equal(loaded.result?.status, 200, `${url} must load in the renderer`)
+        assert(loaded.result?.bytes > 0, `${url} must not be empty`)
+      }
     }
     const stripHome = strip.horizontal
     const stripMoved = { ...stripHome, x: 0.0225, y: 0.04 }

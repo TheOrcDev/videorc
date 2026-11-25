@@ -163,7 +163,7 @@ pub struct ShellCommands {
 
 impl SmokeCommandHandler for ShellCommands {
     fn handles(&self, command: &str) -> bool {
-        command == "open-tab" || PREVIEW_COMMANDS.contains(&command)
+        command == "open-tab" || command == "main-window-id" || PREVIEW_COMMANDS.contains(&command)
     }
 
     fn run<'a>(
@@ -178,6 +178,9 @@ impl SmokeCommandHandler for ShellCommands {
                     .ui
                     .run(move |cx| shell(cx)?.preview(&command, cx))
                     .await?;
+            }
+            if command == "main-window-id" {
+                return self.ui.run(main_window_id).await?;
             }
             let tab = params
                 .get("tab")
@@ -194,6 +197,36 @@ impl SmokeCommandHandler for ShellCommands {
             Ok(serde_json::json!({ "activeTab": tab, "subTab": sub_tab }))
         })
     }
+}
+
+/// `main-window-id`: the OS capture id and bounds, as Electron's
+/// `getMediaSourceId` / `getBounds` answer them. Bounds are top-left screen
+/// points. `capture-page` stays refused (gap 3).
+fn main_window_id(cx: &mut App) -> Result<Value, String> {
+    use crate::platform::{self, ScreenFrame};
+    let handle = shell(cx)?
+        .window(videorc_app_core::smoke::security::UiWindow::Main, cx)
+        .ok_or_else(|| MAIN_WINDOW_NOT_READY.to_string())?;
+    handle
+        .update(cx, |_, window, _| {
+            let bounds = window.bounds();
+            let frame = ScreenFrame {
+                x: f64::from(f32::from(bounds.origin.x)),
+                y: f64::from(f32::from(bounds.origin.y)),
+                width: f64::from(f32::from(bounds.size.width)),
+                height: f64::from(f32::from(bounds.size.height)),
+            };
+            Ok(serde_json::json!({
+                "windowId": platform::current().capture_window_id(window),
+                "bounds": {
+                    "x": frame.x,
+                    "y": frame.y,
+                    "width": frame.width,
+                    "height": frame.height,
+                },
+            }))
+        })
+        .map_err(|_| MAIN_WINDOW_NOT_READY.to_string())?
 }
 
 /// The shell's answers, where the driver's foreground jobs find them.

@@ -138,8 +138,8 @@ Wait for a GPUI product path or new commands first:
 | ------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `smoke:captions-live`                                                                                                                            | the renderer's caption frame submissions (live PNG and cue frames)                                                                                              |
 | `smoke:preview-overlay-presentation`                                                                                                             | `native-preview-surface-status`, `preview-surface-sample`                                                                                                       |
-| `smoke:banners`, `smoke:html-overlay`                                                                                                            | `import-takeover-image` (the Images takeover import), `html-overlay-stats` (an HTML overlay host)                                                               |
-| `smoke:screens`                                                                                                                                  | `import-takeover-image`, `main-window-id`, `capture-page` (gap 3)                                                                                               |
+| `smoke:html-overlay`                                                                                                                             | the Chromium page host (`videorc-page-host` / P5-D10); `html-overlay-stats` answers `{ stats: null }` until then (named SKIP on GPUI)                            |
+| `smoke:screens` theme screenshots                                                                                                                | `capture-page` (gap 3); takeover import and `main-window-id` land with banners                                                                                  |
 | `smoke:preview-pump-diagnostics`, `smoke:preview-click-focus`                                                                                    | Electron's present-pump and click-focus probes                                                                                                                  |
 | `smoke:preview-scene-commit`, `smoke:freeform-editor`                                                                                            | `select-camera-shape`; freeform-editor clicks unblocked once gap 1's bounds patch is in the smoke binary                                                                                          |
 | `smoke:preview-check-invisible`                                                                                                                  | `preview-surface-sample`, the Check computer command                                                                                                            |
@@ -165,6 +165,19 @@ writes the highlight's rects into the overlay layout, as Electron's `snapHighlig
 `highlightPhases` and `highlightReasons`, and `comments-window-command-trace` the clicks in flight (`pendingCount`).
 `smoke:comment-highlight-stream` runs with `VIDEORC_APP=gpui` on its default Stream Manager surface;
 `VIDEORC_COMMENT_HIGHLIGHT_SURFACE=studio` is still Electron-only (it reads the renderer through `eval-js`).
+
+### Banners, HTML overlays and Screens on GPUI (2026-11-25)
+
+`videorc_app_core::smoke::commands` runs `import-takeover-image` (the Images takeover import through
+`screens.importImage`, answered with Electron's `{ ids, readyIds }` from `screens.list`) and
+`html-overlay-stats` (`{ stats: null }` until the page host reports). `apps/videorc/src/smoke` runs
+`main-window-id` (OS capture id + top-left bounds); `capture-page` stays refused by name (gap 3).
+
+`smoke:banners` and `smoke:screens` run with `VIDEORC_APP=gpui`. The banners smoke skips the
+`videorc-asset://` renderer fetch (no Chromium scheme; recording samples still prove the draw).
+`smoke:html-overlay` is a named SKIP until `videorc-page-host` (P5-D10) paints frames. Screens skips
+the live Assets theme screenshots (`capture-page`) and the renderer mic `eval-js` check.
+
 
 ### Sources, layouts and saved scenes
 
