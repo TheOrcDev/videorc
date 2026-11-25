@@ -16,10 +16,10 @@ use serde_json::{Value, json};
 use videorc_app_core::buddy::community::{
     self, BUDDY_REMEMBERS_LOCK_REASON, COMMUNITY_DISCLOSURE_LINE, CommunitySummary,
     REMEMBER_OFFER_DESCRIPTION, REMEMBER_OFFER_TITLE, X_SELF_LINK_REASON, YOUTUBE_RETENTION_LINE,
-    account_label, avatar_url, avatar_urls_to_load, forget_copy, forget_memory_label, has_x,
-    linked_line, memory_forget_copy, note_to_save, nothing_remembered_line, people_empty_copy,
-    person_load_failed_line, person_row_context, person_stats_line, regular_after_label,
-    remember_offer_shows, retention_line, support_line,
+    account_label, avatar_retry_delay, avatar_url, avatar_urls_to_load, forget_copy,
+    forget_memory_label, has_x, linked_line, memory_forget_copy, note_to_save,
+    nothing_remembered_line, people_empty_copy, person_load_failed_line, person_row_context,
+    person_stats_line, regular_after_label, remember_offer_shows, retention_line, support_line,
 };
 use videorc_app_core::chat::highlight_driver as driver;
 use videorc_app_core::chat::images;
@@ -287,6 +287,8 @@ pub struct CommunityState {
     /// `useCachedAvatar`: the People rows' and the card's pictures by
     /// `avatarUrl`, through the backend's chat image cache.
     pub(super) avatars: HashMap<String, Picture>,
+    /// How many times each picture has failed, for its next wait.
+    pub(super) avatar_failures: HashMap<String, usize>,
 }
 
 /// Export… and Import… (D12): a picked folder or file goes to the backend
@@ -359,6 +361,7 @@ impl CommunityState {
             file_busy: None,
             preview: None,
             avatars: HashMap::new(),
+            avatar_failures: HashMap::new(),
         }
     }
 }
@@ -471,8 +474,6 @@ impl SidekickScreen {
     /// caches the picture, its route serves the bytes, and the monogram
     /// stays while it loads or when either refuses.
     pub(super) fn load_community_avatars(&mut self, cx: &mut Context<Self>) {
-        let backend = self.studio.backend().clone();
-        let runtime = self.runtime.clone();
         let Some(community) = self.community.as_mut() else {
             return;
         };
@@ -497,28 +498,70 @@ impl SidekickScreen {
             community
                 .avatars
                 .retain(|url, _| keep.contains(url.as_str()));
+            community
+                .avatar_failures
+                .retain(|url, _| keep.contains(url.as_str()));
         }
         for url in wanted {
-            community.avatars.insert(url.clone(), Picture::Loading);
-            let backend = backend.clone();
-            let remote = url.clone();
-            let job = runtime.spawn(async move {
-                let kind = chat_media::cache_kind_for_url(&remote, false);
-                let local = driver::cache_image_as(&*backend, &remote, kind).await?;
-                let bytes = images::read_route(&local).await.ok()?;
-                Some(chat_media::picture_from_bytes(bytes))
-            });
-            cx.spawn(async move |this, cx| {
-                let picture = job.await.ok().flatten().unwrap_or(Picture::Failed);
-                let _ = this.update(cx, |screen, cx| {
-                    if let Some(community) = screen.community.as_mut() {
-                        community.avatars.insert(url, picture);
-                    }
-                    cx.notify();
-                });
-            })
-            .detach();
+            self.fetch_community_avatar(url, cx);
         }
+    }
+
+    /// One picture through the backend's cache. One the cache could not
+    /// fetch is asked for again after 5, 20 and 60 s, then left as the
+    /// monogram (`useCachedAvatar`'s `CHAT_IMAGE_NULL_RETRY_DELAYS_MS`).
+    fn fetch_community_avatar(&mut self, url: String, cx: &mut Context<Self>) {
+        let backend = self.studio.backend().clone();
+        let Some(community) = self.community.as_mut() else {
+            return;
+        };
+        community.avatars.insert(url.clone(), Picture::Loading);
+        let remote = url.clone();
+        let job = self.runtime.spawn(async move {
+            let kind = chat_media::cache_kind_for_url(&remote, false);
+            let local = driver::cache_image_as(&*backend, &remote, kind).await?;
+            let bytes = images::read_route(&local).await.ok()?;
+            Some(chat_media::picture_from_bytes(bytes))
+        });
+        cx.spawn(async move |this, cx| {
+            let picture = job.await.ok().flatten();
+            let retry = this
+                .update(cx, |screen, cx| {
+                    let community = screen.community.as_mut()?;
+                    let retry = match picture {
+                        Some(picture) => {
+                            community.avatar_failures.remove(&url);
+                            community.avatars.insert(url.clone(), picture);
+                            None
+                        }
+                        None => {
+                            let failed = community.avatar_failures.entry(url.clone()).or_insert(0);
+                            let delay = avatar_retry_delay(*failed);
+                            *failed += 1;
+                            community.avatars.insert(url.clone(), Picture::Failed);
+                            delay
+                        }
+                    };
+                    cx.notify();
+                    retry
+                })
+                .ok()
+                .flatten();
+            let Some(delay) = retry else {
+                return;
+            };
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |screen, cx| {
+                // Still on the page and still failed: ask again.
+                let again = screen.community.as_ref().is_some_and(|community| {
+                    matches!(community.avatars.get(&url), Some(Picture::Failed))
+                });
+                if again {
+                    screen.fetch_community_avatar(url, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// One card action (Wave, a note, Not the same, a memory, a bot flag, a

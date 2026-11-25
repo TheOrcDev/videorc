@@ -350,6 +350,18 @@ pub fn account_label(platform: &str, handle: Option<&str>, name: &str) -> String
     format!("{} · {shown}", crate::chat::view::platform_label(platform))
 }
 
+/// `CHAT_IMAGE_NULL_RETRY_DELAYS_MS`: a picture the cache could not fetch
+/// is asked for again after each of these, then left as the monogram.
+pub const AVATAR_RETRY_DELAYS_MS: [u64; 3] = [5_000, 20_000, 60_000];
+
+/// How long to wait before asking again for a picture that has failed
+/// `failed` times; none once the retries are spent.
+pub fn avatar_retry_delay(failed: usize) -> Option<std::time::Duration> {
+    AVATAR_RETRY_DELAYS_MS
+        .get(failed)
+        .map(|ms| std::time::Duration::from_millis(*ms))
+}
+
 /// A person's `avatarUrl` worth asking the picture cache for
 /// (`useCachedAvatar` skips an empty one): none when blank.
 pub fn avatar_url(url: Option<&str>) -> Option<&str> {
@@ -452,6 +464,15 @@ mod tests {
             ]
         );
         assert!(avatar_urls_to_load([None, Some(" ")], |_| false).is_empty());
+    }
+
+    #[test]
+    fn a_failed_avatar_is_asked_for_again_with_growing_waits_then_left() {
+        use std::time::Duration;
+        assert_eq!(avatar_retry_delay(0), Some(Duration::from_secs(5)));
+        assert_eq!(avatar_retry_delay(1), Some(Duration::from_secs(20)));
+        assert_eq!(avatar_retry_delay(2), Some(Duration::from_secs(60)));
+        assert_eq!(avatar_retry_delay(3), None);
     }
 
     /// Electron's "writes the card lines and the forget question".
