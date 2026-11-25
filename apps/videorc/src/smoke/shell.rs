@@ -6,10 +6,10 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{AnyWindowHandle, App, Entity, WindowHandle};
-use serde_json::{Value, json};
+use gpui::{AnyWindowHandle, App, Entity, WindowAppearance, WindowHandle};
+use serde_json::{json, Value};
 use videorc_app_core::smoke::security::{UiAppearanceRequest, UiToastRequest, UiWindow};
-use videorc_kit::theme::{ForcedDark, IncreaseContrast, ReduceMotion};
+use videorc_kit::theme::{IncreaseContrast, ReduceMotion};
 use videorc_kit::{ToastData, ToastKind};
 
 use super::ShellSmoke;
@@ -97,9 +97,15 @@ impl ShellSmoke for ShellWindows {
             reduce_motion: apply(before.reduce_motion, request.reduce_motion),
         };
         self.forced.set(forced);
+        // Dark/light goes through the same window appearance the Settings
+        // theme picker uses; theme::current then follows window.appearance().
         // The app does not read Increase Contrast or Reduce Motion from the
         // system yet (S2.6), so giving one back means off.
-        cx.set_global(ForcedDark(forced.dark));
+        cx.set_window_appearance(match forced.dark {
+            Some(true) => Some(WindowAppearance::Dark),
+            Some(false) => Some(WindowAppearance::Light),
+            None => None,
+        });
         cx.set_global(IncreaseContrast(forced.increase_contrast.unwrap_or(false)));
         cx.set_global(ReduceMotion(forced.reduce_motion.unwrap_or(false)));
         cx.refresh_windows();
