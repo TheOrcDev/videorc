@@ -57,8 +57,11 @@ raw-window-handle = "0.6"
 # Linux (plan 260 S2.6c, lane L5): the GlobalShortcuts portal through ashpd,
 # and the session bus (Inhibit, ScreenSaver, Secret Service) through ashpd's
 # zbus. Both are in the tree already through the backend's portal capture.
+# `async-io`, not `tokio`: gpui-pre-linux asks for ashpd with `async-io`, and
+# ashpd refuses both at once (a compile_error). zbus then runs its own
+# executor thread, so awaiting it on the app's tokio runtime still works.
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.13", default-features = false, features = ["tokio", "global_shortcuts"] }
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts"] }
 futures-util = "0.3"
 # Follow the app in front on X11 (`_NET_ACTIVE_WINDOW`); same crate the
 # preview's X11 child already uses.
