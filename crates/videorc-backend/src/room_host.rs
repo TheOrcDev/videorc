@@ -35,6 +35,13 @@ use crate::state::AppState;
 
 /// The dev switch.
 pub(crate) const SWITCH_ENV: &str = "VIDEORC_BACKEND_ROOM";
+/// Plan 260 (L1): who hosts the room, as the client that launched this
+/// backend says. The GPUI app has no renderer room, so it launches the
+/// backend with `backend` and the backend holds the seat in any build.
+/// Electron never sets it: its renderer keeps the room until S1.8e.
+pub(crate) const CLIENT_ROOM_ENV: &str = "VIDEORC_ROOM_HOST";
+/// [`CLIENT_ROOM_ENV`]'s value for a client with no room of its own.
+pub(crate) const CLIENT_ROOM_BACKEND: &str = "backend";
 
 /// The data topic the guest page listens on for the stage (`guest-wire.ts`,
 /// the renderer's `STAGE_TOPIC`).
@@ -60,9 +67,20 @@ const TAKE_OVER_WAIT: Duration = Duration::from_secs(3);
 /// Whether the backend holds (or is getting) the host seat.
 static HOLDS_SEAT: AtomicBool = AtomicBool::new(false);
 
-/// The switch: debug builds with `VIDEORC_BACKEND_ROOM=1`.
+/// The switch: debug builds with `VIDEORC_BACKEND_ROOM=1`, or a client
+/// that holds no room itself (`VIDEORC_ROOM_HOST=backend`, the GPUI app), in
+/// any build.
 pub(crate) fn enabled() -> bool {
-    cfg!(debug_assertions) && std::env::var(SWITCH_ENV).as_deref() == Ok("1")
+    switched_on(
+        cfg!(debug_assertions),
+        std::env::var(SWITCH_ENV).ok().as_deref(),
+        std::env::var(CLIENT_ROOM_ENV).ok().as_deref(),
+    )
+}
+
+/// [`enabled`]'s rule, from its inputs.
+fn switched_on(debug: bool, dev_switch: Option<&str>, client_room: Option<&str>) -> bool {
+    (debug && dev_switch == Some("1")) || client_room == Some(CLIENT_ROOM_BACKEND)
 }
 
 /// Whether the backend holds the host seat, so the renderer must stay out.
@@ -75,7 +93,10 @@ pub(crate) fn start(state: AppState) {
     if !enabled() {
         return;
     }
-    tracing::info!("{SWITCH_ENV}=1: the backend holds the talk show's host seat (no media yet)");
+    tracing::info!(
+        "the backend holds the talk show's host seat ({SWITCH_ENV}=1 in a debug build, or \
+         {CLIENT_ROOM_ENV}={CLIENT_ROOM_BACKEND} from a client with no room of its own)"
+    );
     // Plan 260 S1.8 (L1): the avatar content a client asks the backend to
     // build (`cloud.room.avatar.set { build: true }`).
     tokio::spawn(crate::room_avatar_build::run(state.clone()));
@@ -687,6 +708,21 @@ async fn leave(state: &AppState, room: Option<Arc<Room>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_room_is_the_backends_in_a_dev_build_or_for_a_client_without_one() {
+        // Electron's release: neither set, the renderer hosts.
+        assert!(!switched_on(false, None, None));
+        // The dev switch counts in debug builds only.
+        assert!(switched_on(true, Some("1"), None));
+        assert!(!switched_on(false, Some("1"), None));
+        assert!(!switched_on(true, Some("0"), None));
+        // The GPUI app: any build.
+        assert!(switched_on(false, None, Some("backend")));
+        assert!(switched_on(true, None, Some("backend")));
+        assert!(!switched_on(false, None, Some("renderer")));
+        assert!(!switched_on(false, None, Some("")));
+    }
 
     #[test]
     fn overlays_queue_by_slot_and_orientation() {
