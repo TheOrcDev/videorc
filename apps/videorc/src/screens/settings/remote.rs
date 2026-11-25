@@ -6,6 +6,7 @@ use videorc_kit::{
     button::{Button, ButtonVariant},
     dialog::Dialog,
     list_row::{GroupedList, ListRow},
+    page::ConfigGrid,
     panel_section::PanelSection,
     section_label::SectionLabel,
     settings_row::SettingsRow,
@@ -478,21 +479,10 @@ impl SettingsScreen {
                     .child(activity_rows),
             )
         });
-        div()
-            .flex()
-            .flex_wrap()
-            .flex_1()
-            .content_stretch()
-            .items_stretch()
-            .child(div().flex_1().min_w(px(360.)).child(remote).child(phone))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(360.))
-                    .border_l_1()
-                    .border_color(hsla(t.border))
-                    .child(agents),
-            )
+        ConfigGrid::new("settings-remote-grid")
+            .pair(true)
+            .child(div().child(remote).child(phone))
+            .child(div().child(agents))
             .into_any_element()
     }
 }

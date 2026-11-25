@@ -9,6 +9,7 @@ use videorc_kit::{
     button::{Button, ButtonSize, ButtonVariant},
     icon::{IconName, icon},
     list_row::{GroupedList, ListRow},
+    page::ConfigGrid,
     panel_section::PanelSection,
     progress::Progress,
     settings_row::SettingsRow,
@@ -159,21 +160,10 @@ impl SettingsScreen {
                 ),
             )
             .child(links);
-        div()
-            .flex()
-            .flex_wrap()
-            .flex_1()
-            .content_stretch()
-            .items_stretch()
-            .child(div().flex_1().min_w(px(360.)).child(about))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(360.))
-                    .border_l_1()
-                    .border_color(hsla(t.border))
-                    .child(support),
-            )
+        ConfigGrid::new("settings-about-grid")
+            .pair(true)
+            .child(div().child(about))
+            .child(div().child(support))
             .into_any_element()
     }
 }

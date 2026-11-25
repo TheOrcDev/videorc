@@ -10,6 +10,7 @@ use videorc_kit::{
     icon::{IconName, icon},
     list_row::GroupedList,
     navigable_row::NavigableRow,
+    page::ConfigGrid,
     panel_section::PanelSection,
     select::Select,
     settings_row::SettingsRow,
@@ -342,35 +343,17 @@ impl SettingsScreen {
         }
         // `CONFIG_GRID_PAIR`: two columns with a rule between them, wrapping
         // at the same breakpoint so rows stay usable on a narrow window.
-        div()
-            .flex()
-            .flex_wrap()
-            .flex_1()
-            .content_stretch()
-            .items_stretch()
+        ConfigGrid::new("settings-general-grid")
+            .pair(true)
+            .child(div().child(appearance).child(chat).child(setup))
             .child(
-                div()
-                    .flex_1()
-                    .min_w(px(360.))
-                    .child(appearance)
-                    .child(chat)
-                    .child(setup),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(360.))
-                    .border_l_1()
-                    .border_color(hsla(t.border))
-                    .child(import)
-                    .child(privacy)
-                    .child(
-                        PanelSection::new(c::ELSEWHERE)
-                            .title(c::ELSEWHERE)
-                            .description(c::ELSEWHERE_DESCRIPTION)
-                            .last(true)
-                            .child(elsewhere),
-                    ),
+                div().child(import).child(privacy).child(
+                    PanelSection::new(c::ELSEWHERE)
+                        .title(c::ELSEWHERE)
+                        .description(c::ELSEWHERE_DESCRIPTION)
+                        .last(true)
+                        .child(elsewhere),
+                ),
             )
             .into_any_element()
     }
