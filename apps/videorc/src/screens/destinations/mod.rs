@@ -1005,6 +1005,10 @@ impl DestinationsPanel {
 
 impl Render for DestinationsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Escape can close the kit handle before Cancel's owner cleanup runs.
+        if self.schedule.as_ref().is_some_and(|e| !e.dialog.is_open()) {
+            self.schedule = None;
+        }
         self.ensure_details_inputs(window, cx);
         self.ensure_command_editor(window, cx);
         self.ensure_discord_paste(window, cx);

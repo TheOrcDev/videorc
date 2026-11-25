@@ -26,8 +26,10 @@ impl DestinationsPanel {
     }
 
     pub(super) fn close_youtube_consent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.youtube_consent.close(window, cx);
         self.youtube_consent_accepted = false;
+        if self.youtube_consent.is_open() {
+            self.youtube_consent.close(window, cx);
+        }
         cx.notify();
     }
 
@@ -56,6 +58,15 @@ impl DestinationsPanel {
         )
         .description(page_copy::YOUTUBE_CONSENT_DESCRIPTION)
         .close_button(false)
+        .on_open_change({
+            let entity = entity.clone();
+            move |open, _, window, cx| {
+                if !open {
+                    // Escape / backdrop — same as Cancel.
+                    entity.update(cx, |this, cx| this.close_youtube_consent(window, cx));
+                }
+            }
+        })
         .child(
             div()
                 .flex()
@@ -215,8 +226,10 @@ impl DestinationsPanel {
     }
 
     pub(super) fn close_disconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.disconnect_confirm.close(window, cx);
         self.disconnect_platform = None;
+        if self.disconnect_confirm.is_open() {
+            self.disconnect_confirm.close(window, cx);
+        }
         cx.notify();
     }
 
@@ -225,7 +238,9 @@ impl DestinationsPanel {
             self.memory.sign_in.remove(&platform);
             app_accounts::disconnect_provider(cx, &platform);
         }
-        self.disconnect_confirm.close(window, cx);
+        if self.disconnect_confirm.is_open() {
+            self.disconnect_confirm.close(window, cx);
+        }
         self.rebuild(cx);
     }
 
@@ -253,6 +268,15 @@ impl DestinationsPanel {
         Dialog::new("dest-disconnect", &self.disconnect_confirm, words.title)
             .description(words.description)
             .close_button(false)
+            .on_open_change({
+                let entity = entity.clone();
+                move |open, _, window, cx| {
+                    if !open {
+                        // Escape / backdrop — same as Cancel.
+                        entity.update(cx, |this, cx| this.close_disconnect(window, cx));
+                    }
+                }
+            })
             .footer(
                 Button::new("dest-disconnect-cancel")
                     .label(page_copy::CANCEL)
