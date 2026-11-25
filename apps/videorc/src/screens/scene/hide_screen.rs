@@ -8,14 +8,17 @@ use videorc_app_core::desktop::accelerator::accelerator_display_keys;
 use videorc_app_core::editor::inspector::{
     copy as inspector_copy, remove_password_manager, restore_built_in_password_managers,
 };
+use videorc_app_core::scenes::picker::app_choices_from_devices;
 use videorc_app_core::settings_page::SettingsTab;
-use videorc_app_core::studio::families::PrivacySettings;
+use videorc_app_core::studio::families::{PrivacySettings, add_password_manager};
 use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::kbd::{Kbd, kbd_group};
 use videorc_kit::kebab_menu::{KEBAB_HOST, KebabMenu, KebabMenuItem, KebabReveal};
 use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::navigable_row::NavigableRow;
 use videorc_kit::panel_section::PanelSection;
+use videorc_kit::popover::Popover;
 use videorc_kit::settings_row::SettingsRow;
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, hsla};
@@ -109,6 +112,7 @@ impl ScenePage {
                                 entry.name.clone(),
                             )
                             .grouped()
+                            .icon(icon(IconName::LockKey, 14., muted))
                             .child(
                                 KebabMenu::new(
                                     SharedString::from(format!(
@@ -125,24 +129,98 @@ impl ScenePage {
             }
             section = section.child(list);
 
-            // P621: Restore built-in apps, once one was removed.
+            // P620: Add app… (the open apps from the device list; the app
+            // pictures' request is not in the protocol yet). P621: Restore
+            // built-in apps, once one was removed.
+            let open_page = page.clone();
+            let content_page = page.clone();
+            let add = Popover::new("password-manager-add")
+                .open(self.add_app_open)
+                .trigger(
+                    Button::new("password-manager-add-trigger")
+                        .label(copy::ADD_APP)
+                        .variant(ButtonVariant::Outline),
+                )
+                .on_open_change(move |open, _, cx| {
+                    let _ = open_page.update(cx, |page, cx| {
+                        page.add_app_open = open;
+                        cx.notify();
+                    });
+                })
+                .content(move |window, cx| {
+                    content_page
+                        .update(cx, |page, cx| page.add_app_content(window, cx))
+                        .unwrap_or_else(|_| div().into_any_element())
+                });
+            let mut actions = div().flex().flex_wrap().gap(px(8.)).child(add);
             if view.restore_shown {
                 let restore_page = page;
-                section = section.child(
-                    div().flex().flex_wrap().gap(px(8.)).child(
-                        Button::new("restore-built-in-password-managers")
-                            .label(copy::RESTORE_BUILT_IN)
-                            .variant(ButtonVariant::Ghost)
-                            .on_click(move |_, _, cx| {
-                                let _ = restore_page.update(cx, |page, _| {
-                                    page.update_privacy(restore_built_in_password_managers)
-                                });
-                            }),
-                    ),
+                actions = actions.child(
+                    Button::new("restore-built-in-password-managers")
+                        .label(copy::RESTORE_BUILT_IN)
+                        .variant(ButtonVariant::Ghost)
+                        .on_click(move |_, _, cx| {
+                            let _ = restore_page.update(cx, |page, _| {
+                                page.update_privacy(restore_built_in_password_managers)
+                            });
+                        }),
                 );
             }
+            section = section.child(actions);
         }
         section.into_any_element()
+    }
+
+    /// Add app…'s list: open apps not on the list yet.
+    fn add_app_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme::resolve(None, window, cx);
+        let muted = hsla(t.muted_foreground);
+        let snapshot = self.studio.watch().borrow().clone();
+        let listed: Vec<String> = self
+            .model
+            .hide
+            .entries
+            .iter()
+            .flat_map(|entry| entry.bundle_ids.iter().map(|id| id.to_lowercase()))
+            .collect();
+        let own = vec!["dev.theorcdev.videorc".to_string()];
+        let offered: Vec<_> = app_choices_from_devices(&snapshot.sources.devices.devices, &own)
+            .into_iter()
+            .filter(|app| !listed.contains(&app.bundle_id.to_lowercase()))
+            .collect();
+        let status = if !snapshot.sources.devices_known {
+            Some(inspector_copy::FINDING_APPS)
+        } else if offered.is_empty() {
+            Some(inspector_copy::EVERY_APP_LISTED)
+        } else {
+            None
+        };
+        let mut list = GroupedList::new().label(copy::OPEN_APPS);
+        for app in offered {
+            let (bundle_id, name) = (app.bundle_id.clone(), app.name.clone());
+            list = list.row(
+                ListRow::new(
+                    SharedString::from(format!("add-app-{bundle_id}")),
+                    app.name.clone(),
+                )
+                .grouped()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let (bundle_id, name) = (bundle_id.clone(), name.clone());
+                    this.update_privacy(|settings| {
+                        add_password_manager(settings, &bundle_id, &name)
+                    });
+                    this.add_app_open = false;
+                    cx.notify();
+                })),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .children(status.map(|line| div().text_color(muted).child(line)))
+            .child(list)
+            .into_any_element()
     }
 
     /// `updatePrivacySettings`: the next settings from the stored ones.

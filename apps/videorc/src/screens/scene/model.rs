@@ -39,7 +39,9 @@ pub mod copy {
     pub const FOLLOWS: &str = "Follows";
     pub const ON_STREAM: &str = "On stream";
     pub const OPEN_SOURCES: &str = "Open Sources";
+    pub const ADD_SCENE: &str = "Add scene…";
     pub const RENAME: &str = "Rename…";
+    pub const CHANGE_SCREEN: &str = "Change screen…";
     pub const FOLLOW_THE_APP: &str = "Follow the app";
     pub const STOP_FOLLOWING: &str = "Stop following";
     pub const SAVE_AUDIO: &str = "Save audio to scene";
@@ -66,6 +68,8 @@ pub mod copy {
     pub const PASSWORD_MANAGERS: &str = "Password managers";
     pub const REMOVE: &str = "Remove";
     pub const RESTORE_BUILT_IN: &str = "Restore built-in apps";
+    pub const ADD_APP: &str = "Add app…";
+    pub const OPEN_APPS: &str = "Open apps";
     // Layout.
     pub const LAYOUT_TITLE: &str = "Layout";
     pub const ORIENTATION: &str = "Orientation";
@@ -121,6 +125,9 @@ pub struct SceneRow {
     pub follows: Option<bool>,
     /// The position key, then the custom key (Electron accelerators).
     pub keys: Vec<String>,
+    /// Why Change screen… waits (other than read-only): the scene on
+    /// stream's live screen switch (`sourceSwitchReason('capture')`).
+    pub change_screen_reason: Option<String>,
     /// Why Save audio to scene is off (other than read-only).
     pub save_audio_reason: Option<&'static str>,
     pub delete: DeleteRule,
@@ -246,11 +253,17 @@ impl SceneModel {
                         .map(|other| other.name.clone()),
                     _ => None,
                 };
+                let on_stream = view.on_stream_id.as_deref() == Some(scene.id.as_str());
                 SceneRow {
+                    change_screen_reason: if on_stream {
+                        snapshot.source_reasons[0].clone()
+                    } else {
+                        None
+                    },
                     id: scene.id.clone(),
                     name: scene.name.clone(),
                     index,
-                    on_stream: view.on_stream_id.as_deref() == Some(scene.id.as_str()),
+                    on_stream,
                     disabled: blocked.is_some() || camera_blocked || pending,
                     disabled_reason,
                     meta,

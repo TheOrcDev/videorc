@@ -77,9 +77,19 @@ impl ScenePage {
             None => div().child(copy::SCENES_LINE_CUSTOM).into_any_element(),
         };
 
+        // P453/P454: Add scene…, off with Electron's reason when read-only.
+        let mut add = Button::new("scene-new")
+            .label(copy::ADD_SCENE)
+            .variant(ButtonVariant::Outline)
+            .disabled(list.read_only)
+            .on_click(cx.listener(|this, _, window, cx| this.open_add(window, cx)));
+        if list.read_only {
+            add = add.tooltip(copy::READ_ONLY_REASON);
+        }
         let mut section = PanelSection::new("scenes")
             .title(copy::SCENES_TITLE)
-            .description(description);
+            .description(description)
+            .action(add);
 
         if let Some(error) = list.error {
             section = section.child(
@@ -189,7 +199,10 @@ impl ScenePage {
         }
         if !row.disabled {
             let apply = id.clone();
-            line = line.on_click(cx.listener(move |this, _, _, _| this.apply_scene(&apply)));
+            let needs_sources = row.meta == RowMeta::Text(copy::RESOLVE_SOURCES.to_string());
+            line = line.on_click(cx.listener(move |this, _, window, cx| {
+                this.select_scene(&apply, needs_sources, window, cx)
+            }));
         }
 
         let index = row.index;
@@ -244,6 +257,39 @@ impl ScenePage {
         }
         items.push(rename);
 
+        let change_id = row.id.clone();
+        let change_page = page.clone();
+        let mut change =
+            KebabMenuItem::new("change-screen", copy::CHANGE_SCREEN, move |window, cx| {
+                let _ = change_page.update(cx, |page, cx| {
+                    page.open_change_screen(&change_id, None, window, cx)
+                });
+            })
+            .group("edit");
+        if let Some(reason) = read_only_reason
+            .map(str::to_string)
+            .or_else(|| row.change_screen_reason.clone())
+        {
+            change = change.disabled(true).disabled_reason(reason);
+        }
+        items.push(change);
+
+        // Set key… is never off, even read-only.
+        let (key_id, key_name) = (row.id.clone(), row.name.clone());
+        let key_page = page.clone();
+        items.push(
+            KebabMenuItem::new(
+                "set-key",
+                super::dialogs::SET_KEY_LABEL,
+                move |window, cx| {
+                    let _ = key_page.update(cx, |page, cx| {
+                        page.open_set_key(&key_id, &key_name, window, cx)
+                    });
+                },
+            )
+            .group("edit"),
+        );
+
         if let Some(follows) = row.follows {
             let follow_id = row.id.clone();
             let follow_page = page.clone();
@@ -276,6 +322,18 @@ impl ScenePage {
             save_audio = save_audio.disabled(true).disabled_reason(reason);
         }
         items.push(save_audio);
+
+        let guests_id = row.id.clone();
+        let guests_page = page.clone();
+        let mut guests =
+            KebabMenuItem::new("guests", super::dialogs::GUESTS_LABEL, move |window, cx| {
+                let _ = guests_page.update(cx, |page, cx| page.open_guests(&guests_id, window, cx));
+            })
+            .group("keeps");
+        if let Some(reason) = read_only_reason {
+            guests = guests.disabled(true).disabled_reason(reason);
+        }
+        items.push(guests);
 
         let duplicate_id = row.id.clone();
         let duplicate_page = page.clone();
@@ -314,14 +372,51 @@ impl ScenePage {
         items
     }
 
-    /// A row click (`dialogs.select`): the scene goes on stream.
-    fn apply_scene(&self, id: &str) {
+    /// A row click (`dialogs.select`): a scene that needs sources opens
+    /// Resolve scene sources; any other goes on stream, and a failure with
+    /// no words of its own opens Resolve with its line (never for an app
+    /// scene, whose window is found when it goes on).
+    fn select_scene(
+        &mut self,
+        id: &str,
+        needs_sources: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(scene) = self
+            .studio
+            .watch()
+            .borrow()
+            .scenes
+            .scenes
+            .iter()
+            .find(|scene| scene.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        if needs_sources {
+            self.open_resolve_for(&scene.id, false, window, cx);
+            return;
+        }
         let studio = self.studio.clone();
-        let id = id.to_string();
+        let applied = scene.id.clone();
+        let (done, answer) = tokio::sync::oneshot::channel();
         self.run(async move {
-            let result = studio.apply_saved_scene_by_id(&id).await;
-            eprintln!("[videorc-app] Scene apply: {result}");
+            let result = studio
+                .apply_saved_scene(&applied, None, Default::default())
+                .await;
+            let _ = done.send(!result.ok && result.message.is_none() && !result.superseded);
         });
+        cx.spawn_in(window, async move |this, cx| {
+            let failed = answer.await.unwrap_or(false);
+            if failed && scene.app().is_none() {
+                let _ = this.update_in(cx, |page, window, cx| {
+                    page.open_resolve_for(&scene.id, true, window, cx)
+                });
+            }
+        })
+        .detach();
     }
 
     fn move_scene(&self, id: &str, to_index: usize) {
