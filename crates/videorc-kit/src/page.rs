@@ -40,7 +40,10 @@ fn record_width(state: &Entity<f32>, bounds: Bounds<Pixels>, window: &mut Window
     let width = f32::from(bounds.size.width);
     if (state.read(cx) - width).abs() > 0.5 {
         state.update(cx, |w, _| *w = width);
-        window.refresh();
+        // `refresh` is a no-op while the window draws, and prepaint
+        // is drawing: ask for it from the next frame, where it
+        // re-renders every view with the new width.
+        window.on_next_frame(|window, _| window.refresh());
     }
 }
 
