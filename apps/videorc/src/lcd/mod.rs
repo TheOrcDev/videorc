@@ -18,21 +18,14 @@ use gpui::{
 };
 use videorc_kit::chrome::box_shadow;
 use videorc_kit::icon::{IconName, icon};
+use videorc_kit::slider::Slider;
 use videorc_kit::theme::{hsla, is_dark, with_alpha};
 use videorc_kit::tokens::{Shadow, Theme, radius};
 use videorc_kit::tooltip::tooltip;
 
-/// The screen's face: `--font-mono` (`ui-monospace`, SF Mono) in Electron.
-/// GPUI loads families by name and finds neither the CSS keyword nor SF Mono
-/// (hidden as ".SF NS Mono" on macOS), so it takes each platform's own
-/// mono, as gpui-base's theme does.
-pub const SCREEN_FONT: &str = if cfg!(target_os = "macos") {
-    "Menlo"
-} else if cfg!(target_os = "windows") {
-    "Consolas"
-} else {
-    "DejaVu Sans Mono"
-};
+/// The screen's face: `--font-mono` in Electron, the kit's loadable mono
+/// (Menlo / Consolas / DejaVu Sans Mono).
+pub const SCREEN_FONT: &str = videorc_kit::FONT_MONO;
 
 /// The screen's text: `text-sm` with `leading-none`.
 const SCREEN_TEXT_PX: f32 = 14.;
@@ -57,6 +50,17 @@ pub fn dim(theme: &Theme) -> Hsla {
 /// Unlit hover wash behind a row.
 pub fn unlit(theme: &Theme) -> Hsla {
     hsla(with_alpha(theme.primary, 0.07))
+}
+
+/// `LCD_FADER` (`lcd-panel.tsx:249-252`): the track in the dim ink, the
+/// range and the knob lit, the knob's ring the screen's glow (lit at 60% in
+/// dark, 22% in light, `lcd-display.tsx:29,33`).
+pub fn fader(slider: Slider, theme: &Theme) -> Slider {
+    let glow = with_alpha(theme.primary, if is_dark(theme) { 0.6 } else { 0.22 });
+    slider
+        .track_color(with_alpha(theme.primary, 0.4))
+        .range_color(theme.primary)
+        .thumb_color(theme.primary, glow)
 }
 
 /// The opaque solid for inverted key fills.
