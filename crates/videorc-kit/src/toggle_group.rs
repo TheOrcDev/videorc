@@ -25,6 +25,7 @@ use crate::{
     badge::plate_shadows,
     theme::{Appearance, faded_over, hsla, resolve},
     tokens::{Color, radius, size},
+    tooltip::tooltip,
 };
 
 type ChangeHandler = Rc<dyn Fn(Vec<SharedString>, &mut Window, &mut App)>;
@@ -35,6 +36,8 @@ pub struct ToggleItem {
     label: SharedString,
     /// React `ToggleGroupItem` children: preview content instead of the label.
     child: Option<AnyElement>,
+    /// Hover words (L3 Kinds of cuts chips).
+    tooltip: Option<SharedString>,
     disabled: bool,
 }
 
@@ -44,6 +47,7 @@ impl ToggleItem {
             value: value.into(),
             label: label.into(),
             child: None,
+            tooltip: None,
             disabled: false,
         }
     }
@@ -52,6 +56,12 @@ impl ToggleItem {
     /// label remains the accessible name.
     pub fn child(mut self, child: impl IntoElement) -> Self {
         self.child = Some(child.into_any_element());
+        self
+    }
+
+    /// A tooltip in the float glass's tooltip tier.
+    pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(tooltip.into());
         self
     }
 
@@ -228,6 +238,7 @@ impl RenderOnce for ToggleGroup {
                 let value = item.value.clone();
                 let chip_id = SharedString::from(format!("{group_id}/{}", item.value));
                 let custom = item.child.is_some();
+                let tip = item.tooltip.clone();
                 let body = item
                     .child
                     .unwrap_or_else(|| item.label.clone().into_any_element());
@@ -298,6 +309,10 @@ impl RenderOnce for ToggleGroup {
                     if self.outline {
                         chip = chip.border_color(hsla(t.input)).bg(hsla(t.glass_solid));
                     }
+                }
+
+                if let Some(words) = tip {
+                    chip = chip.tooltip(tooltip(words));
                 }
 
                 chip.into_any_element()
