@@ -19,6 +19,7 @@ use videorc_app_core::livestream::targets::{self, Target};
 use videorc_app_core::studio::captions_readiness::captions_platform_unavailable_reason;
 use videorc_app_core::studio::go_live::GoLiveState;
 use videorc_app_core::{BackendClient, Studio};
+use videorc_kit::StatusBadge;
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonVariant};
@@ -27,6 +28,7 @@ use videorc_kit::icon::IconName;
 use videorc_kit::input::InputState;
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::section_label::SectionLabel;
+use videorc_kit::status_dot::StatusTone;
 use videorc_kit::textarea::TextareaState;
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
@@ -436,9 +438,9 @@ impl GoLiveDialog {
                 dest_copy::ROW_STREAM_KEY.to_string()
             };
             let badge = if ready {
-                Badge::new(READY).variant(BadgeVariant::Success)
+                StatusBadge::new(READY).tone(StatusTone::Good)
             } else {
-                Badge::new(copy::NEEDS_ATTENTION_BADGE).variant(BadgeVariant::Warning)
+                StatusBadge::new(copy::NEEDS_ATTENTION_BADGE).tone(StatusTone::Warn)
             };
             let mut block = div().child(
                 ListRow::new(
@@ -494,9 +496,17 @@ impl GoLiveDialog {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(Badge::new(format!("Read · {read_label}")).variant(chat_tone(read_tone)))
+                    // `StatusBadge label="Read"`: the tone's dot, the muted
+                    // label, the value.
                     .child(
-                        Badge::new(format!("Send · {write_label}")).variant(chat_tone(write_tone)),
+                        StatusBadge::new(read_label)
+                            .label("Read")
+                            .tone(chat_tone(read_tone)),
+                    )
+                    .child(
+                        StatusBadge::new(write_label)
+                            .label("Send")
+                            .tone(chat_tone(write_tone)),
                     ),
             );
             if !dest.chat_message.is_empty() {
@@ -584,7 +594,7 @@ impl GoLiveDialog {
                         )
                         .icon(crate::screens::platform_glyph(&target.platform))
                         .context(context)
-                        .child(Badge::new(copy::LEFT_OUT).variant(BadgeVariant::Outline)),
+                        .child(StatusBadge::new(copy::LEFT_OUT).tone(StatusTone::Neutral)),
                     )
                     .child(
                         div()
@@ -619,12 +629,12 @@ impl GoLiveDialog {
     }
 }
 
-fn chat_tone(tone: &str) -> BadgeVariant {
+fn chat_tone(tone: &str) -> StatusTone {
     match tone {
-        "good" => BadgeVariant::Success,
-        "warn" => BadgeVariant::Warning,
-        "error" => BadgeVariant::Destructive,
-        _ => BadgeVariant::Outline,
+        "good" => StatusTone::Good,
+        "warn" => StatusTone::Warn,
+        "error" => StatusTone::Error,
+        _ => StatusTone::Neutral,
     }
 }
 
@@ -789,10 +799,10 @@ impl Render for GoLiveDialog {
                 .gap(px(8.))
                 .child(SectionLabel::new(dest_copy::DESTINATIONS))
                 .children(self.view.summary.as_ref().map(|summary| {
-                    Badge::new(summary.clone()).variant(if self.view.destinations_ready {
-                        BadgeVariant::Success
+                    StatusBadge::new(summary.clone()).tone(if self.view.destinations_ready {
+                        StatusTone::Good
                     } else {
-                        BadgeVariant::Warning
+                        StatusTone::Warn
                     })
                 })),
         );
