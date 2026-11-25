@@ -124,18 +124,17 @@ core), `smoke:preview-real-launch` (on GPUI the main side of the chain is `inspe
 
 Wait for a GPUI product path or new commands first:
 
-| Smoke                                                                                                                                            | Missing on GPUI                                                                                                                                                                                                                                                                    |
-| ------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `smoke:captions-live`                                                                                                                            | the renderer's caption frame submissions (live PNG and cue frames)                                                                                                                                                                                                                 |
-| `smoke:preview-overlay-presentation`                                                                                                             | `native-preview-surface-status`, `preview-surface-sample`                                                                                                                                                                                                                          |
-| `smoke:banners`, `smoke:html-overlay`                                                                                                            | `import-takeover-image` (the Images takeover import), `html-overlay-stats` (an HTML overlay host)                                                                                                                                                                                  |
-| `smoke:screens`                                                                                                                                  | `import-takeover-image`, `main-window-id`, `capture-page` (gap 3)                                                                                                                                                                                                                  |
-| `smoke:preview-pump-diagnostics`, `smoke:preview-click-focus`                                                                                    | Electron's present-pump and click-focus probes                                                                                                                                                                                                                                     |
-| `smoke:preview-scene-commit`, `smoke:freeform-editor`                                                                                            | `select-camera-shape`; the editor needs clicks (gap 1)                                                                                                                                                                                                                             |
-| `smoke:preview-check-invisible`                                                                                                                  | `preview-surface-sample`, the Check computer command                                                                                                                                                                                                                               |
-| `smoke:smart-scenes`                                                                                                                             | Follow the app in front and the password-manager hide are not wired in the GPUI app (`scenes::follow` has no caller); then scene insert, edit, move and shortcut commands, the full v2 library with each scene's keys, privacy settings commands, and `screen.hide` from the smoke |
-| `smoke:recording-native-preview`, `smoke:preview-surface`, `probe:preview-lifecycle`, `probe:preview-window`, `smoke:preview-interaction-stress` | Electron's native-surface and window commands; they need GPUI-specific probes, not a port                                                                                                                                                                                          |
-| `smoke:screen-recording-real`, `smoke:notes-window-invisible`, `smoke:comment-highlight-stream`, `probe:comments-window`                         | the Notes and Comments window commands                                                                                                                                                                                                                                             |
+| Smoke                                                                                                                                            | Missing on GPUI                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `smoke:captions-live`                                                                                                                            | the renderer's caption frame submissions (live PNG and cue frames)                                |
+| `smoke:preview-overlay-presentation`                                                                                                             | `native-preview-surface-status`, `preview-surface-sample`                                         |
+| `smoke:banners`, `smoke:html-overlay`                                                                                                            | `import-takeover-image` (the Images takeover import), `html-overlay-stats` (an HTML overlay host) |
+| `smoke:screens`                                                                                                                                  | `import-takeover-image`, `main-window-id`, `capture-page` (gap 3)                                 |
+| `smoke:preview-pump-diagnostics`, `smoke:preview-click-focus`                                                                                    | Electron's present-pump and click-focus probes                                                    |
+| `smoke:preview-scene-commit`, `smoke:freeform-editor`                                                                                            | `select-camera-shape`; the editor needs clicks (gap 1)                                            |
+| `smoke:preview-check-invisible`                                                                                                                  | `preview-surface-sample`, the Check computer command                                              |
+| `smoke:recording-native-preview`, `smoke:preview-surface`, `probe:preview-lifecycle`, `probe:preview-window`, `smoke:preview-interaction-stress` | Electron's native-surface and window commands; they need GPUI-specific probes, not a port         |
+| `smoke:screen-recording-real`, `smoke:notes-window-invisible`, `smoke:comment-highlight-stream`, `probe:comments-window`                         | the Notes and Comments window commands                                                            |
 
 ### Sources, layouts and saved scenes
 
@@ -167,3 +166,21 @@ Wait for a GPUI product path or new commands first:
 - `smoke:system-audio`: the seed and the clips-idle gain through `studio-capture-configure`; the tones come from the
   Node player (`lib/tone-player.mjs`). The `self` case is a named SKIP on GPUI: the app has no monitor-only sound of its
   own to play during a take.
+
+### smart-scenes on GPUI
+
+`smoke:smart-scenes` runs with `VIDEORC_APP=gpui` on the Studio smoke handler (`studio-scenes-state`,
+`studio-scene-insert`, `-edit`, `-move`, `-apply`, `-delete`, `-layout`, `studio-shortcut`, `studio-privacy-*`,
+`studio-screen-privacy`) and #2056's Follow and password-manager hide. What differs from Electron:
+
+- The plan-210 migration step is a SKIP: it seeds the renderer's v1 settings and reloads; core unit tests cover
+  `scenes::migration`.
+- New scenes: the GPUI Scene page has no Add scene… dialog yet, so the smoke builds the app scenes (Follow on, the app's
+  name, "<name> 2" for a second) and inserts them with `studio-scene-insert`.
+- Reorder: `studio-scene-move` instead of a row's Alt+ArrowUp (no clicks or row focus yet, driver gap 1); position keys
+  come from `studio-scenes-state`'s `keys`.
+- Rapid keys: the trace is polled from `studio-scenes-state`; the renderer-only diagnostics (layout intent, queued key,
+  resolve generation) are `null`. The gate reads only the frames and the final state.
+- A refused scene apply reads as `false` (the command's error); refusal reasons come from `studio-state`.
+- Add app… for the password-manager list goes through `studio-privacy-add-app` (no picker yet).
+- Follow's "Videorc in front" row is Electron's and is left out on GPUI.
