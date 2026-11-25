@@ -357,6 +357,7 @@ impl ScenePage {
         meta: Option<String>,
         selected: bool,
         pick: ScreenPick,
+        well: Option<IconName>,
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -375,8 +376,12 @@ impl ScenePage {
                 div()
                     .w_full()
                     .h(px(74.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .rounded(px(radius::ROW))
-                    .bg(hsla(t.inset)),
+                    .bg(hsla(t.inset))
+                    .children(well.map(|name| icon(name, 32., hsla(t.muted_foreground)))),
             )
             .child(
                 div()
@@ -540,6 +545,7 @@ impl ScenePage {
                         meta,
                         selected,
                         pick,
+                        None,
                         t,
                         cx,
                     ));
@@ -639,6 +645,7 @@ impl ScenePage {
                         meta,
                         selected,
                         pick,
+                        Some(IconName::Monitor),
                         t,
                         cx,
                     ));
@@ -697,6 +704,7 @@ impl ScenePage {
                         Some(meta),
                         selected,
                         pick,
+                        None,
                         t,
                         cx,
                     )),

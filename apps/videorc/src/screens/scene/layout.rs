@@ -8,6 +8,7 @@ use serde_json::{Map, json};
 use videorc_app_core::editor::inspector::copy as inspector_copy;
 use videorc_app_core::nav::PageId;
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::settings_row::SettingsRow;
@@ -17,6 +18,7 @@ use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 
 use super::model::copy;
+use super::picker::PickerMode;
 use super::{SceneNavigate, ScenePage, epoch_ms};
 
 const HORIZONTAL: &str = "horizontal";
@@ -52,7 +54,8 @@ impl ScenePage {
         }
 
         // P501–P504: the layouts. A layout that asks for a screen (D19)
-        // opens Change screen… once the picker lands; until then it waits.
+        // opens Change screen… for the scene on stream, and goes on once
+        // the screen does.
         let presets_page = page.clone();
         let mut presets = SegmentedControl::new("scene-layout-presets")
             .accessibility_label(copy::LAYOUT_TITLE)
@@ -63,19 +66,19 @@ impl ScenePage {
                     .and_then(|index| view.presets.get(index))
                     .map(|option| SharedString::from(option.id)),
             )
-            .on_change(move |value, _, cx| {
+            .on_change(move |value, window, cx| {
                 let preset = value.to_string();
-                let _ = presets_page.update(cx, |page, _| page.apply_layout(&preset));
+                let _ = presets_page.update(cx, |page, cx| page.choose_layout(&preset, window, cx));
             });
         for option in &view.presets {
             presets = presets.option(
-                Segment::new(option.id, option.label.clone())
-                    .disabled(option.disabled || option.asks_for_screen),
+                Segment::new(option.id, option.label.clone()).disabled(option.disabled),
             );
         }
 
         let mut section = PanelSection::new("scene-layout")
             .title(copy::LAYOUT_TITLE)
+            .icon(icon(IconName::Layout, 16., muted))
             .description(inspector_copy::LAYOUT_DESCRIPTION)
             .action(orientation)
             .child(presets);
@@ -190,6 +193,45 @@ impl ScenePage {
             let ok = studio.switch_orientation(vertical).await;
             eprintln!("[videorc-app] Scene orientation: {ok}");
         });
+    }
+
+    /// `chooseLayout`: D19 first, else the layout goes on.
+    fn choose_layout(&mut self, preset: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let asks = self
+            .model
+            .layout
+            .presets
+            .iter()
+            .any(|option| option.id == preset && option.asks_for_screen);
+        if asks {
+            let on_stream = {
+                let watch = self.studio.watch();
+                let snapshot = watch.borrow();
+                snapshot
+                    .scenes
+                    .on_stream_id
+                    .clone()
+                    .and_then(|id| {
+                        snapshot
+                            .scenes
+                            .scenes
+                            .iter()
+                            .find(|scene| scene.id == id)
+                            .map(|scene| (id, scene.name.clone()))
+                    })
+            };
+            if let Some((scene_id, name)) = on_stream {
+                let mode = PickerMode::Change {
+                    scene_id,
+                    name,
+                    on_stream: true,
+                    for_layout: Some(preset.to_string()),
+                };
+                self.open_picker(mode, window, cx);
+            }
+            return;
+        }
+        self.apply_layout(preset);
     }
 
     fn apply_layout(&self, preset: &str) {

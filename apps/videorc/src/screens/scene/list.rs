@@ -27,6 +27,7 @@ use videorc_kit::tokens::text;
 use videorc_kit::tooltip::tooltip;
 
 use super::model::{RowMeta, SceneRow, copy};
+use super::picker::PickerMode;
 use super::{SceneNavigate, ScenePage, now_iso};
 
 /// `sceneMoveKeyStep`: ⌥↑ is -1 and ⌥↓ is +1; any other modifier is not a
@@ -77,9 +78,21 @@ impl ScenePage {
             None => div().child(copy::SCENES_LINE_CUSTOM).into_any_element(),
         };
 
+        // P453/P454: Add scene…, off with Electron's reason when read-only.
+        let mut add = Button::new("scene-new")
+            .label(copy::ADD_SCENE)
+            .variant(ButtonVariant::Outline)
+            .disabled(list.read_only)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_picker(PickerMode::Add, window, cx)
+            }));
+        if list.read_only {
+            add = add.tooltip(copy::READ_ONLY_REASON);
+        }
         let mut section = PanelSection::new("scenes")
             .title(copy::SCENES_TITLE)
-            .description(description);
+            .description(description)
+            .action(add);
 
         if let Some(error) = list.error {
             section = section.child(
@@ -243,6 +256,27 @@ impl ScenePage {
             rename = rename.disabled(true).disabled_reason(reason);
         }
         items.push(rename);
+
+        let (change_id, change_name, change_on_stream) =
+            (row.id.clone(), row.name.clone(), row.on_stream);
+        let change_page = page.clone();
+        let mut change = KebabMenuItem::new("change-screen", copy::CHANGE_SCREEN, move |window, cx| {
+            let mode = PickerMode::Change {
+                scene_id: change_id.clone(),
+                name: change_name.clone(),
+                on_stream: change_on_stream,
+                for_layout: None,
+            };
+            let _ = change_page.update(cx, |page, cx| page.open_picker(mode, window, cx));
+        })
+        .group("edit");
+        if let Some(reason) = read_only_reason
+            .map(str::to_string)
+            .or_else(|| row.change_screen_reason.clone())
+        {
+            change = change.disabled(true).disabled_reason(reason);
+        }
+        items.push(change);
 
         if let Some(follows) = row.follows {
             let follow_id = row.id.clone();

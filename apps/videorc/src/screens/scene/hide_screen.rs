@@ -11,6 +11,7 @@ use videorc_app_core::editor::inspector::{
 use videorc_app_core::settings_page::SettingsTab;
 use videorc_app_core::studio::families::PrivacySettings;
 use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::kbd::{Kbd, kbd_group};
 use videorc_kit::kebab_menu::{KEBAB_HOST, KebabMenu, KebabMenuItem, KebabReveal};
 use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
@@ -109,6 +110,7 @@ impl ScenePage {
                                 entry.name.clone(),
                             )
                             .grouped()
+                            .icon(icon(IconName::LockKey, 14., muted))
                             .child(
                                 KebabMenu::new(
                                     SharedString::from(format!(
