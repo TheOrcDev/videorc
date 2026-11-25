@@ -604,7 +604,13 @@ fn main() -> Result<()> {
                     cx.new(|cx| SoundsPanel::new(studio.clone(), core_handle.clone(), window, cx));
                 // Plan 260 Phase 3 (L1): the Scene page ⌘3.
                 let scene = cx.new(|cx| {
-                    screens::scene::ScenePage::new(studio.clone(), core_handle.clone(), window, cx)
+                    screens::scene::ScenePage::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        global_keys.clone(),
+                        window,
+                        cx,
+                    )
                 });
                 cx.new(|cx| {
                     Shell::new(

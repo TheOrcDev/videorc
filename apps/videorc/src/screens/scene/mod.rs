@@ -18,6 +18,7 @@ mod list;
 pub mod model;
 mod picker;
 mod resolve;
+mod setkey;
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -76,6 +77,11 @@ pub struct ScenePage {
     /// Resolve scene sources.
     resolve: DialogHandle,
     resolving: Option<resolve::Resolving>,
+    /// Set key….
+    set_key: DialogHandle,
+    setting_key: Option<setkey::SettingKey>,
+    /// The global keys, kept quiet while Set key… records.
+    hotkeys: crate::app::hotkeys::Hotkeys,
     /// Draws again when the switch status line is due (no timer lives in
     /// the Studio).
     status_timer: Option<Task<()>>,
@@ -109,6 +115,7 @@ impl ScenePage {
     pub fn new(
         studio: Arc<AppStudio>,
         runtime: tokio::runtime::Handle,
+        hotkeys: crate::app::hotkeys::Hotkeys,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -167,6 +174,9 @@ impl ScenePage {
             guesting: None,
             resolve: DialogHandle::new(false),
             resolving: None,
+            set_key: DialogHandle::new(false),
+            setting_key: None,
+            hotkeys,
             status_timer: None,
         };
         let snapshot = page.studio.watch().borrow().clone();
@@ -245,5 +255,6 @@ impl Render for ScenePage {
             .child(self.picker_dialog(window, cx))
             .child(self.guests_dialog(window, cx))
             .child(self.resolve_dialog(window, cx))
+            .child(self.set_key_dialog(window, cx))
     }
 }

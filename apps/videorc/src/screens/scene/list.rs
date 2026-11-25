@@ -282,6 +282,22 @@ impl ScenePage {
         }
         items.push(change);
 
+        // Set key… is never off, even read-only.
+        let (key_id, key_name) = (row.id.clone(), row.name.clone());
+        let key_page = page.clone();
+        items.push(
+            KebabMenuItem::new(
+                "set-key",
+                super::setkey::copy::MENU_ITEM,
+                move |window, cx| {
+                    let _ = key_page.update(cx, |page, cx| {
+                        page.open_set_key(&key_id, &key_name, window, cx)
+                    });
+                },
+            )
+            .group("edit"),
+        );
+
         if let Some(follows) = row.follows {
             let follow_id = row.id.clone();
             let follow_page = page.clone();
