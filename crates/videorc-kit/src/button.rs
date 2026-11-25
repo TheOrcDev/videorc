@@ -78,6 +78,9 @@ pub struct Button {
     label: Option<SharedString>,
     variant: ButtonVariant,
     size: ButtonSize,
+    /// Horizontal padding of 6 px at the control height (Electron account
+    /// trigger `px-1.5`). Not a size: the twin Size enum stays the React cva.
+    dense: bool,
     disabled: bool,
     lit: bool,
     selected: bool,
@@ -96,6 +99,7 @@ impl Button {
             label: None,
             variant: ButtonVariant::Default,
             size: ButtonSize::Default,
+            dense: false,
             disabled: false,
             lit: false,
             selected: false,
@@ -120,6 +124,13 @@ impl Button {
 
     pub fn size(mut self, size: ButtonSize) -> Self {
         self.size = size;
+        self
+    }
+
+    /// Pad 6 px horizontally while keeping the size's height (Electron's
+    /// account-menu trigger: `h-7` + `px-1.5`). Default pad is 12 px.
+    pub fn dense(mut self, dense: bool) -> Self {
+        self.dense = dense;
         self
     }
 
@@ -257,13 +268,17 @@ impl RenderOnce for Button {
                 color
             }
         };
-        let (height, pad, gap, text_size, line_height) = match self.size {
+        let (height, mut pad, gap, text_size, line_height) = match self.size {
             ButtonSize::Default => (size::CONTROL, 12.0, 6.0, 14.0, 20.0),
             ButtonSize::Xs => (24.0, 10.0, 4.0, 12.0, 16.0),
             ButtonSize::Lg => (32.0, 16.0, 6.0, 14.0, 20.0),
             ButtonSize::Icon => (size::CONTROL, 0.0, 0.0, 14.0, 20.0),
             ButtonSize::IconXs => (24.0, 0.0, 0.0, 12.0, 16.0),
         };
+        // Dense keeps height; only the horizontal pad shrinks (not icon squares).
+        if self.dense && !matches!(self.size, ButtonSize::Icon | ButtonSize::IconXs) {
+            pad = 6.0;
+        }
         let square = matches!(self.size, ButtonSize::Icon | ButtonSize::IconXs);
         let r = radius::CHIP;
 
