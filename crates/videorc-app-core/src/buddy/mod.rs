@@ -14,6 +14,7 @@
 pub mod chat;
 pub mod clean_cut_drafts;
 pub mod clean_cut_review;
+pub mod clean_cut_view;
 pub mod community;
 pub mod copy;
 pub mod library;

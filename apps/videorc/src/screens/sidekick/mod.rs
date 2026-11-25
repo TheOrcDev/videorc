@@ -38,7 +38,8 @@ use videorc_protocol::cohost::CohostAutoChat;
 use videorc_protocol::{CleanCutGetResult, CleanCutJob, CleanCutJobDetail, CleanCutMode};
 
 use chat::{ChatWidgets, render_chat};
-use clean_cut::{CleanCutState, RecordingRow, render_clean_cut};
+use clean_cut::CleanCutState;
+pub use clean_cut::OpenLibrarySession;
 use community::{CommunityState, LinkSuggestion, PersonDetail, PersonRow, render_community};
 use live::{LiveInput, LiveView, live_view};
 use overview::{OverviewState, render_overview};
@@ -218,12 +219,11 @@ impl SidekickScreen {
         if self.clean_cut.is_none() {
             self.clean_cut = Some(CleanCutState::new(&self.local_dir, window, cx));
         }
-        if self.tab == Tab::CleanCut {
-            if let Some(clean) = self.clean_cut.as_ref() {
-                if !clean.loaded {
-                    self.refresh_clean_cut(cx);
-                }
-            }
+        if self.tab == Tab::CleanCut
+            && let Some(clean) = self.clean_cut.as_ref()
+            && !clean.loaded
+        {
+            self.refresh_clean_cut(cx);
         }
     }
 
@@ -283,10 +283,12 @@ impl SidekickScreen {
                                     let job = serde_json::from_value::<CleanCutJob>(payload.clone()).ok();
                                     let _ = this.update(cx, |screen, cx| {
                                         if let (Some(job), Some(clean)) = (job, screen.clean_cut.as_mut()) {
-                                            if let Some(slot) = clean.jobs.iter_mut().find(|j| j.id == job.id) {
-                                                *slot = job;
-                                            } else {
-                                                clean.jobs.insert(0, job);
+                                            // A finished cut adds its copy to the Library and
+                                            // spends minutes: read both again.
+                                            let finished = job.state == videorc_protocol::CleanCutJobState::Completed;
+                                            clean.jobs = videorc_app_core::buddy::clean_cut_view::upsert_job(&clean.jobs, job);
+                                            if finished {
+                                                screen.refresh_clean_cut(cx);
                                             }
                                         }
                                         cx.notify();
@@ -403,39 +405,53 @@ impl SidekickScreen {
         let backend = self.studio.backend().clone();
         let job = self.runtime.spawn(async move {
             let jobs = backend
-                .request("cleanCut.list", serde_json::json!({}))
+                .request("cleanCut.list", json!({}))
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<Vec<CleanCutJob>>(value).ok());
+            let sessions = backend
+                .request("sessions.list", json!({ "limit": 200 }))
                 .await
                 .ok()
                 .and_then(|value| {
-                    value
-                        .get("jobs")
-                        .cloned()
-                        .or_else(|| value.as_array().cloned().map(serde_json::Value::Array))
+                    serde_json::from_value::<videorc_protocol::SessionListPage>(value).ok()
                 })
-                .and_then(|value| serde_json::from_value::<Vec<CleanCutJob>>(value).ok())
-                .unwrap_or_default();
-            let recordings = backend
-                .request("sessions.list", serde_json::json!({ "limit": 50 }))
+                .map(|page| page.items);
+            let capabilities = backend.request("ai.capabilities.get", json!({})).await.ok();
+            let entitlements = backend
+                .request("entitlements.get", serde_json::Value::Null)
                 .await
                 .ok()
                 .and_then(|value| {
-                    value
-                        .get("sessions")
-                        .cloned()
-                        .or_else(|| value.get("items").cloned())
-                })
-                .and_then(|value| serde_json::from_value::<Vec<RecordingRow>>(value).ok())
-                .unwrap_or_default();
-            (jobs, recordings)
+                    type Snapshot = videorc_protocol::EntitlementsSnapshot;
+                    serde_json::from_value::<Snapshot>(value.clone())
+                        .ok()
+                        .or_else(|| {
+                            serde_json::from_value::<Snapshot>(value["snapshot"].clone()).ok()
+                        })
+                });
+            (jobs, sessions, capabilities, entitlements)
         });
         cx.spawn(async move |this, cx| {
-            let Ok((jobs, recordings)) = job.await else {
+            let Ok((jobs, sessions, capabilities, entitlements)) = job.await else {
                 return;
             };
             let _ = this.update(cx, |screen, cx| {
                 if let Some(clean) = screen.clean_cut.as_mut() {
-                    clean.jobs = jobs;
-                    clean.recordings = recordings;
+                    if let Some(jobs) = jobs {
+                        clean.jobs = jobs;
+                        clean.jobs_loaded = true;
+                    }
+                    if let Some(sessions) = sessions {
+                        clean.sessions = sessions;
+                    }
+                    clean.capabilities =
+                        videorc_app_core::buddy::clean_cut_view::clean_cut_capabilities(
+                            capabilities.as_ref(),
+                        );
+                    if entitlements.is_some() {
+                        clean.entitlements = entitlements;
+                    }
                     clean.loaded = true;
                 }
                 cx.notify();
@@ -456,37 +472,55 @@ impl SidekickScreen {
         .detach();
     }
 
-    pub(crate) fn start_clean_cut(&mut self, cx: &mut Context<Self>) {
-        let Some(clean) = self.clean_cut.as_ref() else {
+    /// `cleanCut.start` with the consent the card holds and, for Condensed,
+    /// the target length in seconds.
+    pub(crate) fn start_clean_cut(
+        &mut self,
+        session_id: String,
+        mode: CleanCutMode,
+        target_minutes: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(clean) = self.clean_cut.as_mut() else {
             return;
         };
-        let Some(session_id) = clean.selected_session.clone() else {
-            return;
-        };
-        let mode = clean.mode;
-        let consented = self.consented;
-        let backend = self.studio.backend().clone();
-        let job = self.runtime.spawn(async move {
-            backend
-                .request(
-                    "cleanCut.start",
-                    serde_json::json!({
-                        "sessionId": session_id,
-                        "mode": mode,
-                        "consentToUploadAudio": consented
-                    }),
-                )
-                .await
-                .ok()
-                .and_then(|value| serde_json::from_value::<CleanCutJob>(value).ok())
+        clean.pending = true;
+        let mut params = json!({
+            "sessionId": session_id,
+            "mode": mode,
+            "consentToUploadAudio": true
         });
+        if mode == CleanCutMode::Condensed {
+            params["targetDurationSeconds"] = json!(
+                videorc_app_core::buddy::clean_cut_view::condensed_target_seconds(target_minutes)
+            );
+        }
+        let backend = self.studio.backend().clone();
+        let job = self
+            .runtime
+            .spawn(async move { backend.request("cleanCut.start", params).await });
         cx.spawn(async move |this, cx| {
-            let Ok(started) = job.await else {
+            let Ok(result) = job.await else {
                 return;
             };
             let _ = this.update(cx, |screen, cx| {
-                if let (Some(started), Some(clean)) = (started, screen.clean_cut.as_mut()) {
-                    clean.jobs.insert(0, started);
+                if let Some(clean) = screen.clean_cut.as_mut() {
+                    clean.pending = false;
+                    if let Ok(value) = &result
+                        && let Ok(started) = serde_json::from_value::<CleanCutJob>(value.clone())
+                    {
+                        clean.jobs = videorc_app_core::buddy::clean_cut_view::upsert_job(
+                            &clean.jobs,
+                            started,
+                        );
+                    }
+                }
+                if let Err(error) = &result {
+                    screen.clean_cut_failed(
+                        "clean-cut-start",
+                        videorc_app_core::buddy::clean_cut_view::start_failed_title(mode),
+                        error,
+                    );
                 }
                 cx.notify();
             });
@@ -498,12 +532,21 @@ impl SidekickScreen {
         let backend = self.studio.backend().clone();
         let job = self.runtime.spawn(async move {
             backend
-                .request("cleanCut.cancel", serde_json::json!({ "jobId": job_id }))
+                .request("cleanCut.cancel", json!({ "jobId": job_id }))
                 .await
         });
         cx.spawn(async move |this, cx| {
-            let _ = job.await;
-            let _ = this.update(cx, |screen, cx| screen.refresh_clean_cut(cx));
+            let result = job.await;
+            let _ = this.update(cx, |screen, cx| {
+                if let Ok(Err(error)) = &result {
+                    screen.clean_cut_failed(
+                        "clean-cut-cancel",
+                        videorc_app_core::buddy::clean_cut_view::CANCEL_FAILED_TITLE,
+                        error,
+                    );
+                }
+                screen.refresh_clean_cut(cx);
+            });
         })
         .detach();
     }
@@ -1284,9 +1327,7 @@ impl Render for SidekickScreen {
                 render_reports(&view, reports, buddy_on, name, window, cx)
             }
             Tab::CleanCut => {
-                let clean = self.clean_cut.as_ref().expect("clean cut state");
-                let auto = self.studio.read_ui_settings(clean_cut_auto);
-                render_clean_cut(&view, self.consented, auto, clean, window, cx)
+                self.render_clean_cut(self.studio.read_ui_settings(clean_cut_auto), window, cx)
             }
         };
 
