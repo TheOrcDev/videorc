@@ -174,6 +174,14 @@ impl Platform for MacOs {
         Ok(())
     }
 
+    /// `performClose:`: what the close button does, `windowShouldClose:`
+    /// (GPUI's `on_window_should_close`) first.
+    fn perform_close(&self, window: &Window) -> OsResult<()> {
+        let ns = ns_window(window)?;
+        ns.performClose(None);
+        Ok(())
+    }
+
     fn raise_window(&self, window: &Window, level: SmokeWindowLevel) -> OsResult<()> {
         let ns = ns_window(window)?;
         ns.setLevel(match level {

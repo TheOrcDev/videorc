@@ -163,6 +163,19 @@ impl ShellSmoke for ShellWindows {
                 "detail": "The GPUI preview draws the compositor's frames; compositor.status reports the live background.",
             }));
         }
+        if command == "preview-window-os-close" {
+            let handle = preview.read(cx).floating_window().ok_or_else(|| {
+                "preview-window-os-close: the Preview window is not open.".to_string()
+            })?;
+            handle
+                .update(cx, |_, window, _| {
+                    crate::platform::current().perform_close(window)
+                })
+                .map_err(|_| "preview-window-os-close: the Preview window closed.".to_string())??;
+            // The close lands a moment later; the smoke polls
+            // `preview-window-state` for `closed`.
+            return Ok(preview.read(cx).smoke_state());
+        }
         if command == "preview-retry" {
             let retried = preview.update(cx, |preview, cx| preview.retry(cx));
             let mut state = preview.read(cx).smoke_state();
