@@ -15,7 +15,8 @@ use videorc_kit::select::Select;
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 
-use super::{ScenePage, now_iso};
+use super::super::now_iso;
+use super::SceneDialogs;
 
 pub(super) mod copy {
     pub const TITLE: &str = "Resolve scene sources";
@@ -48,8 +49,8 @@ pub(super) struct Resolving {
     busy: bool,
 }
 
-impl ScenePage {
-    pub(super) fn open_resolve(
+impl SceneDialogs {
+    pub(super) fn show_resolve(
         &mut self,
         scene: SavedScene,
         error: Option<&'static str>,
@@ -184,6 +185,7 @@ impl ScenePage {
             let (ok, failed) = answer.await.unwrap_or((false, true));
             let _ = this.update_in(cx, |page, window, cx| {
                 if ok {
+                    page.succeeded = true;
                     page.resolving = None;
                     page.resolve.close(window, cx);
                 } else if let Some(resolving) = &mut page.resolving {

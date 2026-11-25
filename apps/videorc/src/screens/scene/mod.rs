@@ -16,17 +16,13 @@ mod banners;
 mod camera;
 mod canvas;
 mod controls;
-mod dialogs;
+pub mod dialogs;
 pub mod editor;
-mod guests;
 mod hide_screen;
 mod inspector;
 mod layout;
 mod list;
 pub mod model;
-mod picker;
-mod resolve;
-mod setkey;
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -37,13 +33,11 @@ use videorc_app_core::settings_page::SettingsTab;
 use videorc_app_core::studio::Connection;
 use videorc_app_core::studio::screen_views::talk_show_room;
 use videorc_app_core::{BackendClient, Studio, StudioSnapshot};
-use videorc_kit::command::InputEvent;
-use videorc_kit::dialog::DialogHandle;
-use videorc_kit::input::InputState;
 use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::theme::{self, hsla};
 
 use controls::Controls;
+use dialogs::SceneDialogs;
 use editor::{EditorModel, EditorState, parse_banners};
 use model::SceneModel;
 
@@ -59,47 +53,14 @@ pub enum SceneNavigate {
     Settings(SettingsTab),
 }
 
-/// The Rename dialog while it is open.
-struct Renaming {
-    id: String,
-    error: Option<String>,
-    busy: bool,
-}
-
-/// The Delete confirmation while it is open.
-struct Deleting {
-    id: String,
-    name: String,
-    next: Option<String>,
-    busy: bool,
-}
-
 pub struct ScenePage {
     studio: Arc<AppStudio>,
     runtime: tokio::runtime::Handle,
     model: SceneModel,
-    rename: DialogHandle,
-    rename_input: Entity<InputState>,
-    renaming: Option<Renaming>,
-    delete: DialogHandle,
-    deleting: Option<Deleting>,
-    /// Add scene… and Change screen….
-    picker: DialogHandle,
-    picker_search: Entity<InputState>,
-    picking: Option<picker::Picking>,
-    /// Guests in the room….
-    guests: DialogHandle,
-    guesting: Option<guests::Guesting>,
-    /// Resolve scene sources.
-    resolve: DialogHandle,
-    resolving: Option<resolve::Resolving>,
-    /// Set key….
-    set_key: DialogHandle,
-    setting_key: Option<setkey::SettingKey>,
+    /// The scene dialogs, shared with the Studio's Scenes section.
+    dialogs: Entity<SceneDialogs>,
     /// Hide screen's Add app… popover.
     add_app_open: bool,
-    /// The global keys, kept quiet while Set key… records.
-    hotkeys: crate::app::hotkeys::Hotkeys,
     /// Draws again when the switch status line is due (no timer lives in
     /// the Studio).
     status_timer: Option<Task<()>>,
@@ -144,29 +105,8 @@ impl ScenePage {
         cx: &mut Context<Self>,
     ) -> Self {
         let model = SceneModel::of(&studio.watch().borrow(), platform(), wayland());
-        let rename_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .validate(|value, _| value.chars().count() <= dialogs::NAME_MAX_CHARS)
-        });
-        cx.subscribe_in(
-            &rename_input,
-            window,
-            |this, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::Change) {
-                    // Typing clears the error (`sceneNameError` waits for Enter).
-                    if let Some(renaming) = &mut this.renaming {
-                        renaming.error = None;
-                    }
-                    cx.notify();
-                }
-                if matches!(event, InputEvent::PressEnter { .. }) && this.rename.is_open() {
-                    this.submit_rename(window, cx);
-                }
-            },
-        )
-        .detach();
-
-        let picker_search = cx.new(|cx| InputState::new(window, cx));
+        let dialogs =
+            cx.new(|cx| SceneDialogs::new(studio.clone(), runtime.clone(), hotkeys, window, cx));
         let controls = Controls::new(window, cx);
         let editor_state = EditorState::default();
         let editor = EditorModel::of(
@@ -205,22 +145,8 @@ impl ScenePage {
             studio,
             runtime,
             model,
-            rename: DialogHandle::new(false),
-            rename_input,
-            renaming: None,
-            delete: DialogHandle::new(false),
-            deleting: None,
-            picker: DialogHandle::new(false),
-            picker_search,
-            picking: None,
-            guests: DialogHandle::new(false),
-            guesting: None,
-            resolve: DialogHandle::new(false),
-            resolving: None,
+            dialogs,
             add_app_open: false,
-            set_key: DialogHandle::new(false),
-            setting_key: None,
-            hotkeys,
             status_timer: None,
             editor_state,
             editor,
@@ -398,11 +324,65 @@ impl Render for ScenePage {
                     .child(div().flex().flex_col().w_full().child(list).child(grid)),
             )
             .child(self.camera_reset_dialog(cx))
-            .child(self.rename_dialog(window, cx))
-            .child(self.delete_dialog(cx))
-            .child(self.picker_dialog(window, cx))
-            .child(self.guests_dialog(window, cx))
-            .child(self.resolve_dialog(window, cx))
-            .child(self.set_key_dialog(window, cx))
+            .child(self.dialogs.clone())
+    }
+}
+
+/// The page's doors into the shared dialogs.
+impl ScenePage {
+    fn open_rename(&mut self, id: &str, _name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.dialogs
+            .update(cx, |dialogs, cx| dialogs.open_rename(id, None, window, cx));
+    }
+
+    fn open_delete(
+        &mut self,
+        id: &str,
+        _name: &str,
+        _next: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dialogs
+            .update(cx, |dialogs, cx| dialogs.open_delete(id, None, window, cx));
+    }
+
+    fn open_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dialogs
+            .update(cx, |dialogs, cx| dialogs.open_add(None, window, cx));
+    }
+
+    fn open_change_screen(
+        &mut self,
+        id: &str,
+        for_layout: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dialogs.update(cx, |dialogs, cx| {
+            dialogs.open_change_screen(id, for_layout, None, window, cx)
+        });
+    }
+
+    fn open_set_key(&mut self, id: &str, _name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.dialogs
+            .update(cx, |dialogs, cx| dialogs.open_set_key(id, None, window, cx));
+    }
+
+    fn open_guests(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.dialogs
+            .update(cx, |dialogs, cx| dialogs.open_guests(id, None, window, cx));
+    }
+
+    fn open_resolve_for(
+        &mut self,
+        id: &str,
+        apply_failed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dialogs.update(cx, |dialogs, cx| {
+            dialogs.open_resolve(id, apply_failed, None, window, cx)
+        });
     }
 }

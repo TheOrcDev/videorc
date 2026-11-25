@@ -12,14 +12,14 @@ use videorc_kit::input::Input;
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 
-use super::model::copy;
-use super::{Deleting, Renaming, ScenePage};
+use super::super::model::copy;
+use super::{Deleting, Renaming, SceneDialogs};
 
 /// `maxLength={80}` on the name field.
 pub(super) const NAME_MAX_CHARS: usize = 80;
 
-impl ScenePage {
-    pub(super) fn open_rename(
+impl SceneDialogs {
+    pub(super) fn show_rename(
         &mut self,
         id: &str,
         name: &str,
@@ -68,6 +68,7 @@ impl ScenePage {
             let renamed = answer.await.unwrap_or(false);
             let _ = this.update_in(cx, |page, window, cx| {
                 if renamed {
+                    page.succeeded = true;
                     page.renaming = None;
                     page.rename.close(window, cx);
                 } else if let Some(renaming) = &mut page.renaming {
@@ -146,7 +147,7 @@ impl ScenePage {
             .into_any_element()
     }
 
-    pub(super) fn open_delete(
+    pub(super) fn show_delete(
         &mut self,
         id: &str,
         name: &str,
@@ -182,6 +183,7 @@ impl ScenePage {
             let deleted = answer.await.unwrap_or(false);
             let _ = this.update_in(cx, |page, window, cx| {
                 if deleted {
+                    page.succeeded = true;
                     page.deleting = None;
                     page.delete.close(window, cx);
                 } else if let Some(deleting) = &mut page.deleting {

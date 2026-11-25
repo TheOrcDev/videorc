@@ -18,7 +18,6 @@ use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 
 use super::model::copy;
-use super::picker::PickerMode;
 use super::{SceneNavigate, ScenePage, epoch_ms};
 
 const HORIZONTAL: &str = "horizontal";
@@ -215,14 +214,8 @@ impl ScenePage {
                         .map(|scene| (id, scene.name.clone()))
                 })
             };
-            if let Some((scene_id, name)) = on_stream {
-                let mode = PickerMode::Change {
-                    scene_id,
-                    name,
-                    on_stream: true,
-                    for_layout: Some(preset.to_string()),
-                };
-                self.open_picker(mode, window, cx);
+            if let Some((scene_id, _)) = on_stream {
+                self.open_change_screen(&scene_id, Some(preset.to_string()), window, cx);
             }
             return;
         }

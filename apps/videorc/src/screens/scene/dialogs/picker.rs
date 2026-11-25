@@ -26,7 +26,8 @@ use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{Theme, radius, text};
 
-use super::{ScenePage, now_iso, platform};
+use super::super::{now_iso, platform};
+use super::SceneDialogs;
 
 /// Electron's app id: Videorc's own windows are never offered.
 const OWN_BUNDLE_IDS: [&str; 1] = ["dev.theorcdev.videorc"];
@@ -128,7 +129,7 @@ fn layout_draws_no_screen(layout: &Value) -> bool {
     )
 }
 
-impl ScenePage {
+impl SceneDialogs {
     /// The stored scene with this id.
     fn stored_scene(&self, id: &str) -> Option<Scene> {
         self.studio
@@ -140,7 +141,7 @@ impl ScenePage {
             .and_then(|library| library.scenes.iter().find(|scene| scene.id == id).cloned())
     }
 
-    pub(super) fn open_picker(
+    pub(super) fn show_picker(
         &mut self,
         mode: PickerMode,
         window: &mut Window,
@@ -369,6 +370,7 @@ impl ScenePage {
             let taken = answer.await.unwrap_or(false);
             let _ = this.update_in(cx, |page, window, cx| {
                 if taken {
+                    page.succeeded = true;
                     page.picking = None;
                     page.picker.close(window, cx);
                 } else if let Some(picking) = &mut page.picking {

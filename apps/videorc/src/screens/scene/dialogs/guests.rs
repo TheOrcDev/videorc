@@ -14,7 +14,8 @@ use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 
-use super::{ScenePage, now_iso};
+use super::super::now_iso;
+use super::SceneDialogs;
 
 /// `SCENE_EXTENSION_VERSION`.
 const SCENE_EXTENSION_VERSION: u64 = 1;
@@ -166,8 +167,8 @@ pub(super) struct Guesting {
     busy: bool,
 }
 
-impl ScenePage {
-    pub(super) fn open_guests(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+impl SceneDialogs {
+    pub(super) fn show_guests(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(scene) = self
             .studio
             .watch()
@@ -208,6 +209,7 @@ impl ScenePage {
             let saved = answer.await.unwrap_or(false);
             let _ = this.update_in(cx, |page, window, cx| {
                 if saved {
+                    page.succeeded = true;
                     page.guesting = None;
                     page.guests.close(window, cx);
                 } else if let Some(guesting) = &mut page.guesting {

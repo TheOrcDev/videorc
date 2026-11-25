@@ -27,7 +27,6 @@ use videorc_kit::tokens::text;
 use videorc_kit::tooltip::tooltip;
 
 use super::model::{RowMeta, SceneRow, copy};
-use super::picker::PickerMode;
 use super::{SceneNavigate, ScenePage, now_iso};
 
 /// `sceneMoveKeyStep`: ⌥↑ is -1 and ⌥↓ is +1; any other modifier is not a
@@ -83,9 +82,7 @@ impl ScenePage {
             .label(copy::ADD_SCENE)
             .variant(ButtonVariant::Outline)
             .disabled(list.read_only)
-            .on_click(
-                cx.listener(|this, _, window, cx| this.open_picker(PickerMode::Add, window, cx)),
-            );
+            .on_click(cx.listener(|this, _, window, cx| this.open_add(window, cx)));
         if list.read_only {
             add = add.tooltip(copy::READ_ONLY_REASON);
         }
@@ -260,18 +257,13 @@ impl ScenePage {
         }
         items.push(rename);
 
-        let (change_id, change_name, change_on_stream) =
-            (row.id.clone(), row.name.clone(), row.on_stream);
+        let change_id = row.id.clone();
         let change_page = page.clone();
         let mut change =
             KebabMenuItem::new("change-screen", copy::CHANGE_SCREEN, move |window, cx| {
-                let mode = PickerMode::Change {
-                    scene_id: change_id.clone(),
-                    name: change_name.clone(),
-                    on_stream: change_on_stream,
-                    for_layout: None,
-                };
-                let _ = change_page.update(cx, |page, cx| page.open_picker(mode, window, cx));
+                let _ = change_page.update(cx, |page, cx| {
+                    page.open_change_screen(&change_id, None, window, cx)
+                });
             })
             .group("edit");
         if let Some(reason) = read_only_reason
@@ -288,7 +280,7 @@ impl ScenePage {
         items.push(
             KebabMenuItem::new(
                 "set-key",
-                super::setkey::copy::MENU_ITEM,
+                super::dialogs::SET_KEY_LABEL,
                 move |window, cx| {
                     let _ = key_page.update(cx, |page, cx| {
                         page.open_set_key(&key_id, &key_name, window, cx)
@@ -333,14 +325,11 @@ impl ScenePage {
 
         let guests_id = row.id.clone();
         let guests_page = page.clone();
-        let mut guests = KebabMenuItem::new(
-            "guests",
-            super::guests::copy::MENU_ITEM,
-            move |window, cx| {
+        let mut guests =
+            KebabMenuItem::new("guests", super::dialogs::GUESTS_LABEL, move |window, cx| {
                 let _ = guests_page.update(cx, |page, cx| page.open_guests(&guests_id, window, cx));
-            },
-        )
-        .group("keeps");
+            })
+            .group("keeps");
         if let Some(reason) = read_only_reason {
             guests = guests.disabled(true).disabled_reason(reason);
         }
@@ -407,7 +396,7 @@ impl ScenePage {
             return;
         };
         if needs_sources {
-            self.open_resolve(scene, None, window, cx);
+            self.open_resolve_for(&scene.id, false, window, cx);
             return;
         }
         let studio = self.studio.clone();
@@ -423,7 +412,7 @@ impl ScenePage {
             let failed = answer.await.unwrap_or(false);
             if failed && scene.app().is_none() {
                 let _ = this.update_in(cx, |page, window, cx| {
-                    page.open_resolve(scene, Some(super::resolve::copy::FAILED), window, cx)
+                    page.open_resolve_for(&scene.id, true, window, cx)
                 });
             }
         })

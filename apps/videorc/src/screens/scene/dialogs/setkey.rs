@@ -16,7 +16,8 @@ use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 
-use super::{ScenePage, platform, wayland};
+use super::super::{platform, wayland};
+use super::SceneDialogs;
 
 pub(super) mod copy {
     pub const MENU_ITEM: &str = "Set key…";
@@ -49,7 +50,7 @@ pub(super) struct SettingKey {
     interceptor: Option<gpui::Subscription>,
 }
 
-impl ScenePage {
+impl SceneDialogs {
     fn scene_action(id: &str) -> String {
         format!("scene:{id}")
     }
@@ -66,7 +67,7 @@ impl ScenePage {
         .unwrap_or_default()
     }
 
-    pub(super) fn open_set_key(
+    pub(super) fn show_set_key(
         &mut self,
         id: &str,
         name: &str,
@@ -292,6 +293,7 @@ impl ScenePage {
                     .label(copy::DONE)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.disarm_key(cx);
+                        this.succeeded = true;
                         this.setting_key = None;
                         this.set_key.close(window, cx);
                     })),
