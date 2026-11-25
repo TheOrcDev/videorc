@@ -32,6 +32,17 @@ const COMMANDS_HINT: &str = "Add or change the !commands viewers type";
 const CLEAR_HINT: &str = "Clear view (keeps Library history)";
 const BANNERS_HINT: &str = "Show or hide your banners (or type /banner)";
 const SOUNDS_HINT: &str = "Play a sound (or type /sound)";
+const HIDE_ALL_BANNERS: &str = "Hide all banners";
+const LOADING_BANNERS: &str = "Loading banners…";
+const IMPORT_BANNERS: &str = "Import banners in Images";
+
+/// One banner row for the Banners menu (id, name, shown).
+#[derive(Clone, Debug)]
+pub struct BannerRow {
+    pub id: String,
+    pub name: String,
+    pub shown: bool,
+}
 const HIDE_SCREEN_HINT: &str =
     "Cover your screen with a frosted picture on the recording and every stream";
 const SHOW_SCREEN_HINT: &str = "Show your screen to viewers again";
@@ -50,6 +61,9 @@ pub fn status_bar(
     on_clear: impl Fn(&mut Window, &mut App) + 'static,
     on_clip: impl Fn(u32, &mut Window, &mut App) + 'static,
     on_screen: impl Fn(bool, &mut Window, &mut App) + 'static,
+    banners: Option<Vec<BannerRow>>,
+    on_banner: impl Fn(String, bool, &mut Window, &mut App) + 'static,
+    on_banner_hide_all: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let tier = Tier::of(width);
     let labels = full_labels(width);
@@ -76,6 +90,8 @@ pub fn status_bar(
     let on_clear = Rc::new(on_clear);
     let on_clip = Rc::new(on_clip);
     let on_screen = Rc::new(on_screen);
+    let on_banner = Rc::new(on_banner);
+    let on_banner_hide_all = Rc::new(on_banner_hide_all);
     let screen_label = if screen_hidden {
         SHOW_SCREEN
     } else {
@@ -164,10 +180,20 @@ pub fn status_bar(
                     }),
             )
             .child(
-                StatusBarAction::new("banners", BANNERS)
-                    .text(BANNERS)
-                    .hint(BANNERS_HINT)
-                    .on_click(|_, _, _| {}),
+                DropdownMenu::new("banners")
+                    .trigger(
+                        StatusBarAction::new("banners", BANNERS)
+                            .text(BANNERS)
+                            .hint(BANNERS_HINT),
+                    )
+                    .menu({
+                        let banners = banners.clone();
+                        let on_banner = on_banner.clone();
+                        let hide_all = on_banner_hide_all.clone();
+                        move |_, _| {
+                            banners_menu(banners.as_ref(), on_banner.clone(), hide_all.clone())
+                        }
+                    }),
             )
             .child(
                 StatusBarAction::new("sounds", SOUNDS)
@@ -229,6 +255,9 @@ pub fn status_bar(
                         let clear = on_clear.clone();
                         let clip = on_clip.clone();
                         let screen = on_screen.clone();
+                        let banners = banners.clone();
+                        let on_banner = on_banner.clone();
+                        let hide_all = on_banner_hide_all.clone();
                         let screen_item = screen_label.to_string();
                         let screen_off = screen_disabled;
                         move |_, _| {
@@ -253,7 +282,14 @@ pub fn status_bar(
                                     MenuItem::new(clip_long_menu.clone())
                                         .on_select(move |window, app| clip60(60, window, app)),
                                 )
-                                .item(MenuItem::new(BANNERS).on_select(|_, _| {}))
+                                .submenu(
+                                    BANNERS,
+                                    banners_menu(
+                                        banners.as_ref(),
+                                        on_banner.clone(),
+                                        hide_all.clone(),
+                                    ),
+                                )
                                 .item(MenuItem::new(format!("{SOUNDS}…")).on_select(|_, _| {}))
                                 .item(MenuItem::new("Chat commands…").on_select(|_, _| {}))
                                 .item(MenuItem::new(preview_menu.clone()).on_select(|_, _| {}))
@@ -268,4 +304,37 @@ pub fn status_bar(
     }
 
     bar.child(notices).into_any_element()
+}
+
+fn banners_menu(
+    banners: Option<&Vec<BannerRow>>,
+    on_banner: Rc<dyn Fn(String, bool, &mut Window, &mut App)>,
+    hide_all: Rc<dyn Fn(&mut Window, &mut App)>,
+) -> Menu {
+    let mut menu = Menu::new();
+    match banners {
+        None => {
+            menu = menu.item(MenuItem::new(LOADING_BANNERS).disabled(true));
+        }
+        Some(list) if list.is_empty() => {
+            menu = menu.item(MenuItem::new(IMPORT_BANNERS).disabled(true));
+        }
+        Some(list) => {
+            let any_shown = list.iter().any(|b| b.shown);
+            for banner in list {
+                let id = banner.id.clone();
+                let shown = banner.shown;
+                let toggle = on_banner.clone();
+                menu = menu.checkbox(banner.name.clone(), shown, move |next, window, app| {
+                    toggle(id.clone(), next, window, app)
+                });
+            }
+            menu = menu.separator().item(
+                MenuItem::new(HIDE_ALL_BANNERS)
+                    .disabled(!any_shown)
+                    .on_select(move |window, app| hide_all(window, app)),
+            );
+        }
+    }
+    menu
 }
