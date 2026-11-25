@@ -10,18 +10,22 @@
 use gpui::{AnyElement, Context, Entity, KeyDownEvent, SharedString, Window, div, prelude::*, px};
 use gpui_base::input::InputEvent;
 use videorc_app_core::buddy::chat::{
-    ACTIVITY_KINDS, ANY_PLATFORM, GreetingKind, GreetingRow, TEMPLATES_MAX, activity_rows,
-    add_option_label, auto_chat_patch, builtin, display_name, field_entry, fields_for,
-    kind_platforms, new_template, platform_id, platform_label, preview, templates_full_line,
-    warnings, welcome_rows, welcomes, with_welcome_text,
+    ACTIVITY_KINDS, ANY_PLATFORM, GreetingKind, GreetingRow, TEMPLATE_TEXT_MAX_CHARS,
+    TEMPLATES_MAX, activity_rows, add_option_label, auto_chat_patch, builtin, display_name,
+    field_entry, fields_for, kind_platforms, new_template, platform_id, platform_label, preview,
+    templates_full_line, warnings, welcome_rows, welcomes, with_welcome_text,
 };
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::field::Field;
 use videorc_kit::icon::{IconName, icon};
-use videorc_kit::list_row::{GroupedList, ListRow};
+use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::panel_section::PanelSection;
+use videorc_kit::popover::Popover;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::select::Select;
+use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
+use videorc_kit::shortcut_keys::ShortcutKeys;
 use videorc_kit::switch::Switch;
 use videorc_kit::textarea::{Textarea, TextareaState};
 use videorc_kit::theme::{self, TypeScale, hsla};
@@ -48,6 +52,9 @@ const PLATFORMS: [CohostGreetingPlatform; 4] = [
 ];
 /// Sidekick → Chat, where "Write greetings with AI" lives.
 pub const SIDEKICK_CHAT_TAB: usize = 1;
+/// An open line's editor adds a variant from the keyboard too (G-23,
+/// `ADD_VARIANT_ACCELERATOR`).
+const ADD_VARIANT_ACCELERATOR: &str = "CmdOrCtrl+N";
 
 /// The open row's editor: its text box and what it opened with.
 pub(super) struct GreetingEditor {
@@ -59,7 +66,6 @@ pub(super) struct GreetingEditor {
     saved: String,
     /// A welcome's built-in line: the placeholder, and what empty posts.
     fallback: Option<String>,
-    fields_open: bool,
 }
 
 /// What an editor's row is.
@@ -70,7 +76,7 @@ enum Target {
 }
 
 fn target_of(key: &str, kind: GreetingKind) -> Target {
-    if key.starts_with("welcome:") {
+    if key.starts_with("welcome:") && kind.is_welcome() {
         Target::Welcome(kind)
     } else if let (Some(_), GreetingKind::Activity(kind)) = (key.strip_prefix("default:"), kind) {
         Target::Default(kind)
@@ -126,15 +132,17 @@ impl AvatarScreen {
         let Some((_, mut greetings)) = self.greetings_now() else {
             return;
         };
-        match kind {
-            GreetingKind::FirstTime => {
-                greetings.welcomes.first_time = change(greetings.welcomes.first_time.clone())
-            }
-            GreetingKind::Returning => {
-                greetings.welcomes.returning = change(greetings.welcomes.returning.clone())
-            }
+        let welcomes = &mut greetings.welcomes;
+        let slot = match kind {
+            GreetingKind::FirstTime => &mut welcomes.first_time,
+            GreetingKind::Returning => &mut welcomes.returning,
+            GreetingKind::Regular => &mut welcomes.regular,
+            GreetingKind::Comeback => &mut welcomes.comeback,
+            GreetingKind::Milestone => &mut welcomes.milestone,
             GreetingKind::Activity(_) => return,
-        }
+        };
+        let next = change(slot.clone());
+        *slot = next;
         self.save_greetings(greetings, cx);
     }
 
@@ -231,7 +239,6 @@ impl AvatarScreen {
             text,
             saved,
             fallback,
-            fields_open: false,
         });
         cx.notify();
     }
@@ -387,14 +394,6 @@ impl AvatarScreen {
         editor
             .text
             .update(cx, |state, cx| state.set_value(next, window, cx));
-        editor.fields_open = false;
-        cx.notify();
-    }
-
-    fn toggle_fields(&mut self, cx: &mut Context<Self>) {
-        if let Some(editor) = self.greeting_editor.as_mut() {
-            editor.fields_open = !editor.fields_open;
-        }
         cx.notify();
     }
 
@@ -425,18 +424,18 @@ pub(super) fn render_greetings(
     let chat_caps = auto_chat.talk.unwrap_or_default() != CohostTalkMode::Bubble;
 
     let enabled = entity.clone();
-    let switch_row = row_with(
-        "Greetings",
-        "New chatters, follows, subs, raids and the rest, each with its own line.",
-        Switch::new("avatar-greetings-enabled")
-            .accessibility_label("Greetings")
-            .checked(greetings.enabled)
-            .on_change(move |on, _, cx| {
-                enabled.update(cx, |screen, cx| screen.set_greetings_enabled(on, cx))
-            })
-            .into_any_element(),
-        t,
-    );
+    // A settings row sits in a grouped card like every Settings row (plan
+    // 168 S-02), so its label and switch line up with the lines'.
+    let switch_row = SettingsRow::new("avatar-greetings-enabled-row", "Greetings")
+        .description("New chatters, follows, subs, raids and the rest, each with its own line.")
+        .child(
+            Switch::new("avatar-greetings-enabled")
+                .accessibility_label("Greetings")
+                .checked(greetings.enabled)
+                .on_change(move |on, _, cx| {
+                    enabled.update(cx, |screen, cx| screen.set_greetings_enabled(on, cx))
+                }),
+        );
     let ai_line = if greetings.ai {
         format!(
             "On: Sidekick writes each greeting in {name}'s voice, with your line as the example."
@@ -445,22 +444,22 @@ pub(super) fn render_greetings(
         format!("Off: {name} says your lines as they are.")
     };
     let open_chat = entity.clone();
-    let ai_row = row_with(
-        "Write greetings with AI",
-        ai_line,
-        Button::new("avatar-greetings-ai-pointer")
-            .variant(ButtonVariant::Ghost)
-            .size(ButtonSize::Xs)
-            .label("Sidekick → Chat")
-            .child(icon(IconName::CaretRight, 14., hsla(t.muted_foreground)))
-            .on_click(move |_, _, cx| {
-                open_chat.update(cx, |_, cx| {
-                    cx.emit(super::OpenSidekickTab(SIDEKICK_CHAT_TAB))
-                })
-            })
-            .into_any_element(),
-        t,
-    );
+    // Plan 239: writing them with AI is Sidekick's (Premium and cloud AI),
+    // so its switch lives with Answers and Banter.
+    let ai_row = SettingsRow::new("avatar-greetings-ai-row", "Write greetings with AI")
+        .description(ai_line)
+        .child(
+            Button::new("avatar-greetings-ai-pointer")
+                .variant(ButtonVariant::Ghost)
+                .size(ButtonSize::Xs)
+                .label("Sidekick → Chat")
+                .child(icon(IconName::CaretRight, 12., hsla(t.foreground)))
+                .on_click(move |_, _, cx| {
+                    open_chat.update(cx, |_, cx| {
+                        cx.emit(super::OpenSidekickTab(SIDEKICK_CHAT_TAB))
+                    })
+                }),
+        );
 
     let mut welcomes_list = GroupedList::new().label("Welcomes");
     let welcome_lines = welcomes(greetings);
@@ -518,24 +517,13 @@ pub(super) fn render_greetings(
         .description(format!(
             "What {name} says when someone chats for the first time, follows, subs or raids. Free: every kind has a line until you write your own. In Bubble, {name} says it on stream; in Suggest, you post it."
         ))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(16.))
-                .child(switch_row)
-                .child(ai_row),
-        )
+        .last(true)
+        .child(SettingsGroup::new().row(switch_row).row(ai_row))
         .child(welcomes_list)
         .child(activity_list)
         .child(footer);
     if let Some(error) = screen.save_error(SaveSection::Greetings) {
-        section = section.child(
-            div()
-                .type_scale(text::META)
-                .text_color(hsla(t.destructive))
-                .child(error),
-        );
+        section = section.child(Field::new("avatar-greetings-error").error(error));
     }
     Some(section.into_any_element())
 }
@@ -605,14 +593,16 @@ fn greeting_row(
     .on_click(move |_, window, cx| {
         let row = open_row.clone();
         open.update(cx, |screen, cx| screen.toggle_editor(&row, window, cx))
-    })
-    .child(switch);
+    });
     if row.default {
         line = line.alias(Badge::new("Default").variant(BadgeVariant::Outline));
     }
+    // Electron's order: the warning mark, then the switch last.
     if !row.warnings.is_empty() {
-        line = line.status_icon(icon(IconName::WarningFill, 14., hsla(t.warning)));
+        line = line.child(icon(IconName::WarningFill, 14., hsla(t.warning)));
     }
+    // Flush in its grouped list: no rounding of its own.
+    let line = line.child(switch).grouped();
     let editing = screen
         .greeting_editor
         .as_ref()
@@ -670,6 +660,10 @@ fn line_editor(
         .flex_wrap()
         .items_center()
         .gap(px(8.))
+        .child(meta(
+            format!("{}/{TEMPLATE_TEXT_MAX_CHARS}", draft.chars().count()),
+            t,
+        ))
         .child(state_picker);
     if !matches!(target, Target::Welcome(_)) {
         let pick = entity.clone();
@@ -691,13 +685,51 @@ fn line_editor(
         }
         controls = controls.child(platforms);
     }
-    let fields = entity.clone();
+    // The braces this line may use, in a popover (`w-64 p-1`).
+    let field_list = fields_for(editor.kind);
+    let insert = entity.clone();
     controls = controls.child(
-        Button::new("avatar-greeting-fields")
-            .variant(ButtonVariant::Ghost)
-            .size(ButtonSize::Xs)
-            .label("Fields")
-            .on_click(move |_, _, cx| fields.update(cx, |screen, cx| screen.toggle_fields(cx))),
+        Popover::new("avatar-greeting-fields")
+            .width(256.)
+            .flush()
+            .trigger(
+                Button::new("avatar-greeting-fields-trigger")
+                    .variant(ButtonVariant::Ghost)
+                    .size(ButtonSize::Xs)
+                    .label("Fields"),
+            )
+            .content(move |window, cx| {
+                let t = theme::resolve(None, window, cx);
+                let mut list = div().flex().flex_col().items_start().p(px(4.));
+                for (field, hint) in field_list.iter().copied() {
+                    let insert = insert.clone();
+                    list = list.child(
+                        Button::new(SharedString::from(format!("avatar-greeting-field-{field}")))
+                            .variant(ButtonVariant::Ghost)
+                            .accessibility_label(field_entry(field, hint))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .child(format!("{{{field}}}")),
+                            )
+                            .child(
+                                div()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .text_color(hsla(t.muted_foreground))
+                                    .child(hint),
+                            )
+                            .on_click(move |_, window, cx| {
+                                insert
+                                    .update(cx, |screen, cx| screen.insert_field(field, window, cx))
+                            }),
+                    );
+                }
+                list
+            }),
     );
     if let Target::Template(id) = &target {
         let variant = entity.clone();
@@ -710,6 +742,7 @@ fn line_editor(
                     .variant(ButtonVariant::Ghost)
                     .size(ButtonSize::Xs)
                     .label("Add variant")
+                    .child(ShortcutKeys::accelerator(ADD_VARIANT_ACCELERATOR))
                     .on_click(move |_, window, cx| {
                         variant.update(cx, |screen, cx| screen.add_variant(window, cx))
                     }),
@@ -744,69 +777,40 @@ fn line_editor(
             screen.editor_key(event, window, cx)
         }))
         .child(
-            Textarea::new("avatar-greeting-text", &editor.text)
-                .accessibility_label(format!("{} greeting text", row.title)),
+            Textarea::new("avatar-greeting-text", &editor.text).accessibility_label(
+                if editor.kind.is_welcome() {
+                    format!("{} welcome text", row.title)
+                } else {
+                    format!("{} greeting text", row.title)
+                },
+            ),
         )
-        .child(controls);
-    if editor.fields_open {
-        let mut list = div().flex().flex_wrap().gap(px(4.));
-        for (field, hint) in fields_for(editor.kind) {
-            let insert = entity.clone();
-            list = list.child(
-                Button::new(SharedString::from(format!("avatar-greeting-field-{field}")))
-                    .variant(ButtonVariant::Outline)
-                    .size(ButtonSize::Xs)
-                    .label(field_entry(field, hint))
-                    .on_click(move |_, window, cx| {
-                        insert.update(cx, |screen, cx| screen.insert_field(field, window, cx))
-                    }),
-            );
-        }
-        column = column.child(list);
-    }
-    column = column.child(meta(sample, t));
-    for note in notes {
-        column = column.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(icon(IconName::WarningFill, 14., hsla(t.warning)))
-                .child(meta(note, t)),
-        );
-    }
-    column.into_any_element()
-}
-
-/// A label and its description on the left, the control on the right.
-fn row_with(
-    label: &'static str,
-    description: impl Into<SharedString>,
-    control: AnyElement,
-    t: &Theme,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(12.))
+        .child(controls)
+        // "Preview:" in the faintest tier, then the line with the sample.
         .child(
             div()
                 .flex()
-                .flex_col()
-                .min_w(px(0.))
-                .gap(px(2.))
+                .items_start()
+                .gap(px(4.))
+                .type_scale(text::META)
+                .text_color(hsla(t.muted_foreground))
                 .child(
                     div()
-                        .text_size(px(14.))
-                        .line_height(px(20.))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(hsla(t.foreground))
-                        .child(label),
+                        .flex_none()
+                        .text_color(hsla(t.subtle))
+                        .child("Preview:"),
                 )
-                .child(meta(description, t)),
-        )
-        .child(control)
+                .child(div().min_w(px(0.)).child(if sample.is_empty() {
+                    "…".to_string()
+                } else {
+                    sample
+                })),
+        );
+    // Each warning is a plain note under the preview.
+    for note in notes {
+        column = column.child(meta(note, t));
+    }
+    column.into_any_element()
 }
 
 fn meta(line: impl Into<SharedString>, t: &Theme) -> gpui::Div {

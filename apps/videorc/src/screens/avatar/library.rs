@@ -5,7 +5,8 @@
 //! Nothing toasts: the card and the look are the confirmation.
 
 use gpui::{
-    AnyElement, Context, ImageSource, ObjectFit, SharedString, Window, div, img, prelude::*, px,
+    AnyElement, ColorSpace, Context, ImageSource, ObjectFit, SharedString, Window, div, img,
+    linear_color_stop, linear_gradient, prelude::*, px,
 };
 use videorc_app_core::buddy::copy as words;
 use videorc_app_core::buddy::library::{
@@ -15,6 +16,7 @@ use videorc_app_core::buddy::library::{
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::chrome::box_shadow;
 use videorc_kit::dialog::{Dialog, DialogSize};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::Input;
@@ -23,13 +25,32 @@ use videorc_kit::panel_section::PanelSection;
 use videorc_kit::skeleton::Skeleton;
 use videorc_kit::spinner::Spinner;
 use videorc_kit::textarea::Textarea;
-use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::{Theme, radius, text};
+use videorc_kit::theme::{self, TypeScale, hsla, with_alpha};
+use videorc_kit::tokens::{Shadow, Theme, radius, size, text};
 
 use super::{AvatarScreen, pictures};
 
-/// A gallery card's width: Electron's grid fits about four in the column.
-const CARD_WIDTH: f32 = 144.;
+/// `Gallery`'s tracks (`components/page.tsx`): `repeat(auto-fill,
+/// minmax(180px, 1fr))` with `gap-3`, so five official cards fill the
+/// default window's row.
+const CARD_MIN: f32 = 180.;
+const GALLERY_GAP: f32 = 12.;
+/// `MediaCard`'s `p-1.5` and its hairline, around the square picture.
+const CARD_PADDING: f32 = 6.;
+
+/// Each card's width across `width` (the section's content box): the row
+/// shared out (`1fr`) among the tracks that fit, never under the minimum.
+fn card_width(width: f32) -> f32 {
+    if width <= CARD_MIN {
+        return CARD_MIN;
+    }
+    let columns = ((width + GALLERY_GAP) / (CARD_MIN + GALLERY_GAP))
+        .floor()
+        .max(1.);
+    ((width - GALLERY_GAP * (columns - 1.)) / columns)
+        .floor()
+        .max(CARD_MIN)
+}
 
 pub fn render_library(
     screen: &AvatarScreen,
@@ -45,6 +66,8 @@ pub fn render_library(
     let invitation = invitation_visible(library, persona, screen.invitation_dismissed);
     let working = screen.working();
     let entity = cx.entity();
+    // The section's content box: the page less its gutters.
+    let card_w = card_width(screen.page_width - 2. * size::GUTTER);
 
     let mut actions = div().flex().items_center().gap(px(6.));
     if view.syncing {
@@ -58,7 +81,9 @@ pub fn render_library(
         Button::new("avatar-library-new")
             .variant(ButtonVariant::Outline)
             .size(ButtonSize::Xs)
-            .label(words::LIBRARY_NEW_BUDDY)
+            .accessibility_label(words::LIBRARY_NEW_BUDDY)
+            .child(icon(IconName::Sparkle, 12., hsla(t.foreground)))
+            .child(words::LIBRARY_NEW_BUDDY)
             .on_click({
                 let entity = entity.clone();
                 move |_, _, cx| entity.update(cx, |screen, cx| screen.open_onboarding(cx))
@@ -72,6 +97,7 @@ pub fn render_library(
         let dismiss = entity.clone();
         column = column.child(
             Alert::new("avatar-library-invitation")
+                .icon(icon(IconName::Sparkle, 16., hsla(t.muted_foreground)))
                 .title(words::LIBRARY_INVITATION)
                 .action(
                     div()
@@ -106,6 +132,7 @@ pub fn render_library(
         let save = entity.clone();
         column = column.child(
             Alert::new("avatar-library-local-only")
+                .icon(icon(IconName::UploadSimple, 16., hsla(t.muted_foreground)))
                 .title(words::library_local_only(&name))
                 .action(
                     Button::new("avatar-library-save-to-library")
@@ -137,6 +164,11 @@ pub fn render_library(
         let use_it = entity.clone();
         column = column.child(
             Alert::new("avatar-library-picked-elsewhere")
+                .icon(icon(
+                    IconName::ArrowsClockwise,
+                    16.,
+                    hsla(t.muted_foreground),
+                ))
                 .title(words::library_picked_elsewhere(&name))
                 .action(
                     Button::new("avatar-library-picked-elsewhere-use")
@@ -155,7 +187,15 @@ pub fn render_library(
     let official_tag = alive_tag_distinguishes(&view.official);
     let mut official = gallery();
     for card in &view.official {
-        official = official.child(card_element(screen, card, official_tag, working, t, cx));
+        official = official.child(card_element(
+            screen,
+            card,
+            official_tag,
+            working,
+            card_w,
+            t,
+            cx,
+        ));
     }
     column = column.child(group(
         words::LIBRARY_OFFICIAL,
@@ -183,7 +223,9 @@ pub fn render_library(
                     Button::new("avatar-library-sign-in")
                         .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
-                        .label(words::SIGN_IN)
+                        .accessibility_label(words::SIGN_IN)
+                        .child(icon(IconName::SignIn, 12., hsla(t.foreground)))
+                        .child(words::SIGN_IN)
                         .on_click(move |_, _, cx| {
                             sign_in.update(cx, |screen, cx| screen.sign_in(cx))
                         }),
@@ -194,8 +236,8 @@ pub fn render_library(
         match view.mine.as_ref() {
             None if view.syncing => Some(
                 gallery()
-                    .child(placeholder("avatar-library-loading-1"))
-                    .child(placeholder("avatar-library-loading-2"))
+                    .child(placeholder("avatar-library-loading-1", card_w))
+                    .child(placeholder("avatar-library-loading-2", card_w))
                     .into_any_element(),
             ),
             // Listing failed: the error below says why, never "empty".
@@ -218,7 +260,7 @@ pub fn render_library(
                 let tag = alive_tag_distinguishes(cards);
                 let mut mine = gallery();
                 for card in cards {
-                    mine = mine.child(card_element(screen, card, tag, working, t, cx));
+                    mine = mine.child(card_element(screen, card, tag, working, card_w, t, cx));
                 }
                 Some(mine.into_any_element())
             }
@@ -248,13 +290,14 @@ pub fn render_library(
 }
 
 fn gallery() -> gpui::Div {
-    div().flex().flex_wrap().gap(px(8.))
+    div().flex().flex_wrap().gap(px(GALLERY_GAP))
 }
 
-fn placeholder(id: &'static str) -> impl IntoElement {
+/// A card still loading (`aspect-[3/4] rounded-row`).
+fn placeholder(id: &'static str, width: f32) -> impl IntoElement {
     Skeleton::new(id)
-        .w(px(CARD_WIDTH))
-        .h(px(CARD_WIDTH * 4. / 3.))
+        .w(px(width))
+        .h(px(width * 4. / 3.))
         .rounded(px(radius::ROW))
 }
 
@@ -283,6 +326,7 @@ fn card_element(
     card: &Card,
     alive_tag: bool,
     working: bool,
+    width: f32,
     t: &Theme,
     cx: &mut Context<AvatarScreen>,
 ) -> AnyElement {
@@ -294,13 +338,15 @@ fn card_element(
     };
     let key = card.id.replace([':', '/'], "-");
 
+    // `aspect-square` inside the card's padding and hairline, on
+    // `bg-foreground/[0.04]`.
     let frame = div()
         .relative()
         .w_full()
-        .h(px(CARD_WIDTH - 12.))
+        .h(px(width - 2. * (CARD_PADDING + 1.)))
         .overflow_hidden()
         .rounded(px(radius::CHIP))
-        .bg(hsla(t.inset))
+        .bg(hsla(with_alpha(t.foreground, 0.04)))
         .map(|frame| match picture {
             Some(picture) => frame.child(
                 img(picture)
@@ -344,9 +390,13 @@ fn card_element(
         .px(px(2.))
         .child(title);
     if !card.subtitle.is_empty() {
+        // `line-clamp-2 min-h-8`: a one-line tagline keeps two lines' room,
+        // so the cards' words start level.
         words_block = words_block.child(
             div()
                 .line_clamp(2)
+                .text_ellipsis()
+                .min_h(px(32.))
                 .type_scale(text::META)
                 .text_color(hsla(t.muted_foreground))
                 .child(card.subtitle.clone()),
@@ -356,6 +406,7 @@ fn card_element(
         words_block = words_block.child(
             div()
                 .line_clamp(3)
+                .text_ellipsis()
                 .type_scale(text::META)
                 .text_color(hsla(t.muted_foreground))
                 .child(detail.to_string()),
@@ -395,21 +446,64 @@ fn card_element(
         );
     }
 
+    // `MediaCard`: the row radius, a 4% fill and a hairline; the one in use
+    // is `selected`, the chrome plate with a brighter rim, never a colour.
     div()
         .id(SharedString::from(format!("avatar-card-{key}")))
-        .w(px(CARD_WIDTH))
+        .w(px(width))
+        .flex_none()
         .flex()
         .flex_col()
         .gap(px(6.))
-        .p(px(6.))
+        .p(px(CARD_PADDING))
         .rounded(px(radius::ROW))
         .border_1()
-        .border_color(hsla(if card.active { t.ring } else { t.border }))
-        .when(card.active, |element| element.bg(hsla(t.accent)))
+        .map(|element| {
+            if card.active {
+                element
+                    .border_color(hsla(with_alpha(t.foreground, 0.25)))
+                    .bg(linear_gradient(
+                        180.,
+                        linear_color_stop(hsla(t.chrome_plate_top), 0.),
+                        linear_color_stop(hsla(t.chrome_plate_bottom), 1.),
+                    )
+                    .color_space(ColorSpace::Oklab))
+                    .shadow(plate_shadows(t))
+            } else {
+                element
+                    .border_color(hsla(t.border))
+                    .bg(hsla(with_alpha(t.foreground, 0.04)))
+            }
+        })
         .child(frame)
         .child(words_block)
         .when(!card.active || menu, |element| element.child(footer))
         .into_any_element()
+}
+
+/// `chrome-plate`'s light and shade: a 1 px top line and its rim, inset.
+fn plate_shadows(t: &Theme) -> Vec<gpui::BoxShadow> {
+    [
+        Shadow {
+            inset: true,
+            x: 0.,
+            y: 1.,
+            blur: 0.,
+            spread: 0.,
+            color: t.chrome_plate_hi,
+        },
+        Shadow {
+            inset: true,
+            x: 0.,
+            y: 0.,
+            blur: 0.,
+            spread: 1.,
+            color: t.chrome_plate_rim,
+        },
+    ]
+    .iter()
+    .map(box_shadow)
+    .collect()
 }
 
 /// Rename and Edit personality for your own; Make it Alive where it does
