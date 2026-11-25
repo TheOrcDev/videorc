@@ -34,7 +34,7 @@ use tokio::sync::watch;
 use videorc_app_core::{BackendState, Level, Logger};
 use videorc_kit::tokens::DARK as VIDEO;
 use videorc_preview::element::Phase;
-use videorc_preview::lifecycle::WindowMode;
+use videorc_preview::lifecycle::{PermissionStatus, WindowMode};
 use videorc_preview::words::{self, PreviewWords};
 
 #[cfg(target_os = "linux")]
@@ -434,6 +434,13 @@ impl Preview {
     /// device list says so; Electron's supervisor hears it from the
     /// surface).
     fn permission_words(&self) -> Option<PreviewWords> {
+        self.permission_wait().map(words::needs_permission)
+    }
+
+    /// The grant the preview's sources wait for while no frame presents,
+    /// or none: the status behind "Preview needs permission" (P141), for
+    /// the Studio's fix button (P133, `previewPermissionPane`).
+    pub fn permission_wait(&self) -> Option<PermissionStatus> {
         if self.phase == Phase::Presenting {
             return None;
         }
@@ -451,7 +458,7 @@ impl Preview {
         };
         let screen = waits(&sources.screen_id) || waits(&sources.window_id);
         let camera = waits(&sources.camera_id);
-        words::permission_wait(screen, camera).map(words::needs_permission)
+        words::permission_wait(screen, camera)
     }
 
     /// What the Studio slot says, or nothing while a frame shows there.
@@ -701,7 +708,7 @@ impl Preview {
 
     /// The mode a closed Preview opens in again (`previewWindow.mode` while
     /// closed): the Preview shortcut's keys ride on that button (P125/P126).
-    #[cfg(target_os = "macos")]
+    /// Every platform: [`Self::toggle_open`] reads the same field.
     pub fn reopens_floating(&self) -> bool {
         self.closed_from == WindowMode::Floating
     }
