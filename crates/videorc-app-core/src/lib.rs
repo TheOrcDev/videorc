@@ -8,6 +8,7 @@
 //! `videorc-preview`) compile unchanged.
 
 pub mod account;
+pub mod accounts;
 pub mod assets;
 pub mod buddy;
 pub mod captions;

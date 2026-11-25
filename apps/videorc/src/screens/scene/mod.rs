@@ -26,21 +26,28 @@ mod list;
 pub mod model;
 mod stage;
 
+use std::cell::Cell;
+use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    Context, Entity, EventEmitter, FocusHandle, KeyBinding, Task, Window, actions, div, prelude::*,
+    Context, Entity, EventEmitter, FocusHandle, KeyBinding, ScrollHandle, Task, Window, actions,
+    div, prelude::*,
 };
 use videorc_app_core::nav::PageId;
 use videorc_app_core::settings_page::SettingsTab;
 use videorc_app_core::studio::Connection;
 use videorc_app_core::studio::screen_views::talk_show_room;
 use videorc_app_core::{BackendClient, Studio, StudioSnapshot};
+use videorc_kit::input::InputState;
 use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::theme::{self, hsla};
 
 use crate::preview::Preview;
+use crate::screens::avatar::pictures;
+use videorc_app_core::stream_manager::buddy::CohostSettingsView;
 
 use controls::Controls;
 use dialogs::SceneDialogs;
@@ -86,11 +93,25 @@ pub struct ScenePage {
     stage: stage::Stage,
     /// The layout undo slot holds an entry (Undo shows, ⌘Z works).
     undo_available: bool,
+    /// Where the banner images and the avatar's pictures are (the stage
+    /// draws them on the schematic).
+    user_data_dir: PathBuf,
+    /// The avatar's own idle picture, as Settings last said; None draws the
+    /// golem (`buddyStateImageUrl`).
+    avatar_picture: Option<PathBuf>,
+    /// The page's scroll, so Background settings can bring the camera's
+    /// Background into view (P575).
+    scroll: ScrollHandle,
+    /// The Background tile that takes focus (the chosen one, else the
+    /// first), and a reveal waiting for the section's next paint.
+    background_focus: FocusHandle,
+    background_reveal: Rc<Cell<bool>>,
     model: SceneModel,
     /// The scene dialogs, shared with the Studio's Scenes section.
     dialogs: Entity<SceneDialogs>,
-    /// Hide screen's Add app… popover.
+    /// Hide screen's Add app… popover, and its search.
     add_app_open: bool,
+    add_app_search: Entity<InputState>,
     /// Draws again when the switch status line is due (no timer lives in
     /// the Studio).
     status_timer: Option<Task<()>>,
@@ -132,6 +153,7 @@ impl ScenePage {
         runtime: tokio::runtime::Handle,
         hotkeys: crate::app::hotkeys::Hotkeys,
         preview: Entity<Preview>,
+        user_data_dir: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -141,6 +163,9 @@ impl ScenePage {
         let dialogs =
             cx.new(|cx| SceneDialogs::new(studio.clone(), runtime.clone(), hotkeys, window, cx));
         let controls = Controls::new(window, cx);
+        let add_app_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(model::copy::SEARCH_OPEN_APPS));
+        cx.observe(&add_app_search, |_, _, cx| cx.notify()).detach();
         let editor_state = EditorState::default();
         let editor = EditorModel::of(
             &studio.watch().borrow(),
@@ -181,9 +206,15 @@ impl ScenePage {
             preview,
             stage: stage::Stage::new(),
             undo_available: false,
+            user_data_dir,
+            avatar_picture: None,
+            scroll: ScrollHandle::new(),
+            background_focus: cx.focus_handle(),
+            background_reveal: Rc::new(Cell::new(false)),
             model,
             dialogs,
             add_app_open: false,
+            add_app_search,
             status_timer: None,
             editor_state,
             editor,
@@ -245,13 +276,26 @@ impl ScenePage {
         let read = self.runtime.spawn(async move {
             let banners = studio.banners().await.ok().and_then(parse_banners);
             let overlay = studio.overlay_layout().await.ok();
-            (banners, overlay)
+            // The avatar's idle picture, for its square on the schematic.
+            let persona = studio
+                .backend()
+                .request("cohost.settings.get", serde_json::json!({}))
+                .await
+                .ok()
+                .and_then(|value| CohostSettingsView::from_json(&value))
+                .map(|settings| settings.persona);
+            (banners, overlay, persona)
         });
         cx.spawn(async move |this, cx| {
-            let Ok((banners, overlay)) = read.await else {
+            let Ok((banners, overlay, persona)) = read.await else {
                 return;
             };
             let _ = this.update(cx, |page, cx| {
+                if let Some(persona) = persona {
+                    page.avatar_picture = persona
+                        .and_then(|persona| persona.images.idle)
+                        .and_then(|idle| pictures::managed_path(&page.user_data_dir, &idle));
+                }
                 if let Some(banners) = banners {
                     page.editor_state.banners = banners;
                     page.editor_state.banners_loaded = true;
@@ -305,6 +349,15 @@ impl ScenePage {
     /// The page's focus, for the shell to focus on entry.
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus.clone()
+    }
+
+    /// The page opens: the banners, the overlay layout and the avatar's
+    /// picture are read again (another page may have changed them).
+    pub fn entered(&mut self, cx: &mut Context<Self>) {
+        let snapshot = self.studio.snapshot();
+        if matches!(snapshot.connection, Connection::Connected { .. }) {
+            self.load_lists(cx);
+        }
     }
 }
 
@@ -377,6 +430,7 @@ impl Render for ScenePage {
             .child(measure)
             .child(
                 ScrollArea::new("scene-scroll")
+                    .handle(self.scroll.clone())
                     .child(div().flex().flex_col().w_full().child(list).child(grid)),
             )
             .child(self.camera_reset_dialog(cx))

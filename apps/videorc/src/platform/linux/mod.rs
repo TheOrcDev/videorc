@@ -23,6 +23,7 @@
 
 mod bus;
 pub mod desktop;
+pub mod front_app;
 mod inhibit;
 pub mod secrets;
 pub mod shortcuts;

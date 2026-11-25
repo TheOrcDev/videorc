@@ -96,6 +96,8 @@ pub mod linux_desktop;
 pub mod live_audio;
 pub mod live_chat;
 pub mod live_sources;
+pub mod output_quality;
+pub mod performance_check;
 mod platform_lifecycle;
 mod platforms;
 pub mod preview_scene;
@@ -219,7 +221,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 39] = [
+pub const STUDIO_EVENTS: [&str; 41] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -273,6 +275,9 @@ pub const STUDIO_EVENTS: [&str; 39] = [
     live_chat::SNAPSHOT_EVENT,
     live_chat::CLEARED_EVENT,
     live_chat::PROVIDER_EVENT,
+    // The Output page's performance check (it holds the Clips ring).
+    performance_check::PROGRESS_EVENT,
+    performance_check::COMPLETED_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -503,6 +508,9 @@ pub struct StudioSnapshot {
     /// (`shouldReloadSceneFromCaptureConfig`), so an idle screen or camera
     /// pick made while it is open loads the scene itself.
     pub scene_edit_mode: bool,
+    /// The Output page's performance check: its state, the rung it is on,
+    /// and the hold a check this app started puts on the ring and preview.
+    pub performance: performance_check::PerformanceView,
 }
 
 /// What a start did.
@@ -705,6 +713,8 @@ struct Inner {
     /// S1.6b part 5e: the Scene page's canvas editor is open
     /// (`sceneEditMode`).
     scene_edit_mode: bool,
+    /// The Output page's performance check.
+    performance: performance_check::PerformanceView,
     /// S1.6b part 4c-2: the vertical stream's live sends.
     vertical_leg: vertical_leg::VerticalLeg,
 }
@@ -996,6 +1006,7 @@ impl<B: StudioBackend> Studio<B> {
             recordings_folder_facts: None,
             clips: clips_actions::ClipsCore::default(),
             scene_edit_mode: false,
+            performance: Default::default(),
             vertical_leg: vertical_leg::VerticalLeg::default(),
         };
         // Writes a previous run journaled wait in the cache until the
@@ -1379,7 +1390,8 @@ impl<B: StudioBackend> Studio<B> {
                 // stores do (`stream.targets`, `stream.health`); it never
                 // owns the early return.
                 let _ = self.handle_dashboard_event(&event, &payload);
-                if self.handle_live_chat_event(&event, &payload)
+                if self.handle_performance_event(&event, &payload)
+                    || self.handle_live_chat_event(&event, &payload)
                     || self.handle_chat_commands_event(&event, &payload)
                     || self.handle_watchdog_event(&event, &payload)
                     || self.handle_cloud_event(&event, &payload).await
@@ -1670,6 +1682,8 @@ impl<B: StudioBackend> Studio<B> {
         self.read_telemetry(generation).await;
         // S1.6b part 5b: the caption service's status, for the Captions row.
         self.read_captions_status(generation).await;
+        // The Output page's performance check line.
+        self.read_performance_check(generation).await;
         // S1.6a part 6c: the Clips ring's state, and the launch's arming.
         self.read_replay_status(generation).await;
         // S1.6c: the platform accounts, Stream details and Discord, the chat
@@ -3007,6 +3021,7 @@ impl<B: StudioBackend> Studio<B> {
             recordings_folder,
             clips,
             scene_edit_mode: inner.scene_edit_mode,
+            performance: inner.performance.clone(),
         }
     }
 }

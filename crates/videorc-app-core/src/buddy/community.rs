@@ -293,6 +293,104 @@ pub fn about_item(name: &str) -> String {
     format!("About {name}")
 }
 
+/// D10: the one-time offer, after the first stream regulars came to
+/// (`community-copy.ts`).
+pub const REMEMBER_OFFER_TITLE: &str = "Let Sidekick remember what your regulars tell it?";
+pub const REMEMBER_OFFER_DESCRIPTION: &str = "After a stream, Sidekick reads what your regulars said about themselves and keeps a few short memories, so next time it can ask how the borrow checker is treating them. You see and delete every memory. YouTube chat is never read for this.";
+
+/// `RememberOffer`'s conditions (remember-offer.tsx): regulars came, the
+/// streamer has Premium, Remember my community is on, Sidekick remembers is
+/// off and the offer was never answered.
+pub fn remember_offer_shows(
+    regulars_came: bool,
+    entitled: bool,
+    enabled: bool,
+    remember: bool,
+    remember_offered: bool,
+) -> bool {
+    regulars_came && entitled && enabled && !remember && !remember_offered
+}
+
+/// The retention note under the Community settings (D3).
+pub fn retention_line() -> String {
+    format!(
+        "Twitch, Kick and X viewers are forgotten 12 months after their last chat. {YOUTUBE_RETENTION_LINE}"
+    )
+}
+
+/// The People list's empty state: its title and its sentence, by the search
+/// and the "Show" filter (community-tab.tsx).
+pub fn people_empty_copy(query: &str, filter: &str) -> (&'static str, &'static str) {
+    if !query.trim().is_empty() {
+        ("No one by that name", "Try another name, or show Everyone.")
+    } else if filter == "regulars" {
+        (
+            "No regulars yet",
+            "Someone becomes a regular after chatting in a few of your streams.",
+        )
+    } else {
+        (
+            "No one here yet",
+            "People show up here after they chat in one of your streams.",
+        )
+    }
+}
+
+/// "Regular after": one choice of the threshold select ("3 streams").
+pub fn regular_after_label(streams: u32) -> String {
+    format!("{streams} streams")
+}
+
+/// The card's account line: "Twitch · ada_l", the handle or else the name.
+pub fn account_label(platform: &str, handle: Option<&str>, name: &str) -> String {
+    let shown = handle
+        .map(str::trim)
+        .filter(|handle| !handle.is_empty())
+        .unwrap_or(name);
+    format!("{} · {shown}", crate::chat::view::platform_label(platform))
+}
+
+/// The card header's line for a linked person.
+pub fn linked_line(accounts: usize) -> String {
+    format!("One person on {accounts} platforms")
+}
+
+/// The card's "Sidekick remembers" with no memories yet.
+pub fn nothing_remembered_line(name: &str) -> String {
+    format!("Nothing yet. Sidekick learns from what {name} says about themselves in chat.")
+}
+
+/// The card when `cohost.community.person` failed.
+pub fn person_load_failed_line(name: &str) -> String {
+    format!("Couldn't read what Videorc remembers about {name}.")
+}
+
+/// A memory's forget button, for a screen reader: "Forget “likes Rust”".
+pub fn forget_memory_label(text: &str) -> String {
+    format!("Forget “{text}”")
+}
+
+/// `memoryForgetCopy`: the one-memory confirm's title, sentence and button.
+pub fn memory_forget_copy(name: &str, text: &str) -> ForgetCopy {
+    ForgetCopy {
+        title: "Forget this memory?".to_owned(),
+        description: format!(
+            "Sidekick stops remembering “{text}” about {name}. It can learn it again from a later stream."
+        ),
+        confirm: "Forget memory".to_owned(),
+    }
+}
+
+/// `NOTE_MAX_CHARS`: the private note's length.
+pub const NOTE_MAX_CHARS: usize = 300;
+
+/// `NoteField`'s save: the draft trimmed and cut to the note's length, or
+/// nothing when it is what was saved.
+pub fn note_to_save(draft: &str, saved: &str) -> Option<String> {
+    let next: String = draft.trim().chars().take(NOTE_MAX_CHARS).collect();
+    (next != saved.trim()).then_some(next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +567,108 @@ mod tests {
             assert!(
                 VIEW.contains(words),
                 "community-view.ts no longer says {words:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_offer_shows_once_to_a_premium_streamer_whose_regulars_came() {
+        assert!(remember_offer_shows(true, true, true, false, false));
+        assert!(!remember_offer_shows(false, true, true, false, false));
+        assert!(!remember_offer_shows(true, false, true, false, false));
+        assert!(!remember_offer_shows(true, true, false, false, false));
+        assert!(!remember_offer_shows(true, true, true, true, false));
+        assert!(!remember_offer_shows(true, true, true, false, true));
+    }
+
+    #[test]
+    fn the_card_and_tab_lines() {
+        assert_eq!(
+            people_empty_copy(" ada ", "regulars").0,
+            "No one by that name"
+        );
+        assert_eq!(people_empty_copy("", "regulars").0, "No regulars yet");
+        assert_eq!(people_empty_copy("", "bots").0, "No one here yet");
+        assert_eq!(regular_after_label(3), "3 streams");
+        assert_eq!(
+            account_label("twitch", Some(" ada_l "), "Ada"),
+            "Twitch · ada_l"
+        );
+        assert_eq!(account_label("youtube", Some(" "), "Ada"), "YouTube · Ada");
+        assert_eq!(linked_line(2), "One person on 2 platforms");
+        assert_eq!(forget_memory_label("likes Rust"), "Forget “likes Rust”");
+        let copy = memory_forget_copy("Ada", "likes Rust");
+        assert_eq!(copy.title, "Forget this memory?");
+        assert_eq!(
+            copy.description,
+            "Sidekick stops remembering “likes Rust” about Ada. It can learn it again from a later stream."
+        );
+        assert_eq!(copy.confirm, "Forget memory");
+        assert!(retention_line().ends_with(YOUTUBE_RETENTION_LINE));
+    }
+
+    #[test]
+    fn a_note_saves_trimmed_and_cut_and_never_twice() {
+        assert_eq!(note_to_save(" hi ", ""), Some("hi".to_owned()));
+        assert_eq!(note_to_save(" hi ", "hi"), None);
+        assert_eq!(note_to_save("", " "), None);
+        assert_eq!(note_to_save("", "old"), Some(String::new()));
+        let long = "é".repeat(NOTE_MAX_CHARS + 5);
+        assert_eq!(
+            note_to_save(&long, "").map(|note| note.chars().count()),
+            Some(NOTE_MAX_CHARS)
+        );
+    }
+
+    /// The tab's, the card's and the offer's words are Electron's.
+    #[test]
+    fn the_tab_and_card_words_are_electrons() {
+        const COPY: &str = include_str!(
+            "../../../../apps/desktop/src/renderer/src/components/community/community-copy.ts"
+        );
+        const TAB: &str = include_str!(
+            "../../../../apps/desktop/src/renderer/src/components/community/community-tab.tsx"
+        );
+        const CARD: &str = include_str!(
+            "../../../../apps/desktop/src/renderer/src/components/community/person-card-body.tsx"
+        );
+        for words in [
+            REMEMBER_OFFER_TITLE,
+            REMEMBER_OFFER_DESCRIPTION,
+            "Forget this memory?",
+            "Sidekick stops remembering “",
+            ". It can learn it again from a later stream.",
+            "Forget memory",
+        ] {
+            assert!(
+                COPY.contains(words),
+                "community-copy.ts no longer says {words:?}"
+            );
+        }
+        for words in [
+            "Twitch, Kick and X viewers are forgotten 12 months after their last chat.",
+            "No one by that name",
+            "Try another name, or show Everyone.",
+            "No regulars yet",
+            "Someone becomes a regular after chatting in a few of your streams.",
+            "No one here yet",
+            "People show up here after they chat in one of your streams.",
+        ] {
+            assert!(
+                TAB.contains(words),
+                "community-tab.tsx no longer says {words:?}"
+            );
+        }
+        for words in [
+            "One person on ",
+            "Nothing yet. Sidekick learns from what ",
+            " says about themselves in chat.",
+            "Couldn't read what Videorc remembers about ",
+            "Forget “",
+        ] {
+            assert!(
+                CARD.contains(words),
+                "person-card-body.tsx no longer says {words:?}"
             );
         }
     }

@@ -4,8 +4,12 @@ use gpui::{
     Context, Entity, EntityInputHandler, EventEmitter, Focusable, ScrollHandle, SharedString,
     Window, div, prelude::*, px,
 };
+use serde_json::json;
 use std::sync::Arc;
-use videorc_app_core::studio::{families, inspector::StartGates, transport::TransportView};
+use videorc_app_core::protocol::SoundboardState;
+use videorc_app_core::studio::{
+    camera_background_view, families, inspector::StartGates, transport::TransportView,
+};
 use videorc_app_core::{BackendClient, StopOrigin, Studio};
 use videorc_app_core::{
     nav::{self, PageId, ThemeChoice},
@@ -35,8 +39,14 @@ pub enum Command {
     Scene(String),
     /// Studio's Add scene… (plan 231 D14): the Studio page opens its picker.
     AddScene,
+    /// Background settings (P575): Scene opens on the camera's Background.
+    SceneBackground,
     Theme(ThemeChoice),
     Chat,
+    /// Play one soundboard pad (P103).
+    PlaySound(String),
+    /// Stop every playing sound (P103).
+    StopAllSounds,
     Unavailable,
 }
 #[derive(Clone)]
@@ -81,6 +91,8 @@ pub struct CommandPalette {
     scroll: ScrollHandle,
     notifications_available: bool,
     dialogs: Option<Entity<crate::screens::dialogs::DialogsHost>>,
+    /// Soundboard pads for ⌘K Sounds (P103); refreshed when Search opens.
+    board: Option<SoundboardState>,
 }
 impl CommandPalette {
     pub fn new(
@@ -134,7 +146,27 @@ impl CommandPalette {
             scroll: ScrollHandle::new(),
             notifications_available: false,
             dialogs: None,
+            board: None,
         }
+    }
+
+    fn load_board(&mut self, cx: &mut Context<Self>) {
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move { studio.backend().sounds_list().await })
+                .await;
+            let _ = this.update(cx, |palette, cx| {
+                if let Ok(Ok(board)) = result {
+                    palette.board = Some(board);
+                    if palette.handle.is_open() {
+                        palette.refresh(cx);
+                    }
+                }
+            });
+        })
+        .detach();
     }
     pub fn set_notifications_available(&mut self) {
         self.notifications_available = true;
@@ -149,6 +181,7 @@ impl CommandPalette {
             self.input
                 .update(cx, |input, cx| input.set_value("", window, cx));
             self.selected = 0;
+            self.load_board(cx);
             self.refresh(cx);
             self.handle.open(window, cx);
             cx.on_next_frame(window, |this, window, cx| {
@@ -236,6 +269,22 @@ impl CommandPalette {
                 )
                 .keywords(page_keywords(page)),
             );
+            // `command-palette.tsx:471-487`: Background settings under Scene.
+            if page == PageId::Layouts {
+                let mut words: Vec<&str> = camera_background_view::KEYWORDS.to_vec();
+                words.extend(camera_background_view::GREEN_SCREEN_KEYWORDS);
+                words.extend(["blur strength", "similarity", "spill", "smoothness"]);
+                rows.push(
+                    Row::new(
+                        "scene-background",
+                        "Pages",
+                        camera_background_view::SETTINGS_LABEL,
+                        Command::SceneBackground,
+                        page.ported(),
+                    )
+                    .keywords(&words),
+                );
+            }
         }
         rows.push(Row::new(
             "notifications",
@@ -346,6 +395,39 @@ impl CommandPalette {
             Command::Chat,
             s.settings.hydrated,
         ));
+        // Sounds (P103): each pad, then Stop all while the board is loaded.
+        if let Some(board) = &self.board {
+            for sound in &board.sounds {
+                rows.push(
+                    Row::new(
+                        format!("sound-{}", sound.id),
+                        "Sounds",
+                        format!("Play sound: {}", sound.name),
+                        Command::PlaySound(sound.id.clone()),
+                        connected,
+                    )
+                    .keywords(&[
+                        "sound",
+                        "soundboard",
+                        "sfx",
+                        "effect",
+                        "play",
+                    ]),
+                );
+            }
+            if !board.sounds.is_empty() {
+                rows.push(
+                    Row::new(
+                        "stop-sounds",
+                        "Sounds",
+                        "Stop all sounds",
+                        Command::StopAllSounds,
+                        connected,
+                    )
+                    .keywords(&["sounds", "soundboard", "stop", "silence"]),
+                );
+            }
+        }
         rows
     }
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -391,6 +473,7 @@ impl CommandPalette {
             | Command::Notes
             | Command::CaptionsReader
             | Command::AddScene
+            | Command::SceneBackground
             | Command::Notifications => cx.emit(command),
             _ => {
                 if command == Command::Stop {
@@ -447,6 +530,18 @@ impl CommandPalette {
                                 .update_studio_settings(|settings| {
                                     settings.set("studioChat", serde_json::json!(!value))
                                 })
+                                .await;
+                        }
+                        Command::PlaySound(id) => {
+                            let _ = studio
+                                .backend()
+                                .sounds_request("sounds.play", json!({ "id": id }))
+                                .await;
+                        }
+                        Command::StopAllSounds => {
+                            let _ = studio
+                                .backend()
+                                .sounds_request("sounds.stop", json!({}))
                                 .await;
                         }
                         _ => {}

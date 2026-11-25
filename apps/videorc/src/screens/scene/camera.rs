@@ -4,10 +4,15 @@
 //! settings, Background, Placement, Lens and Camera look. The view is the
 //! core's (`inspector_view`'s camera rows, `background_section_view`).
 
-use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px, relative};
+use std::rc::Rc;
+
+use gpui::{
+    AnyElement, Context, KeyDownEvent, SharedString, Window, div, point, prelude::*, px, relative,
+};
 use serde_json::json;
 use videorc_app_core::editor::inspector::{
-    InspectorView, camera_settings_defaults, camera_shape_patch, copy as inspector_copy,
+    InspectorSelection, InspectorView, camera_settings_defaults, camera_shape_patch,
+    copy as inspector_copy,
 };
 use videorc_app_core::nav::PageId;
 use videorc_app_core::studio::camera_background_view::{
@@ -16,6 +21,7 @@ use videorc_app_core::studio::camera_background_view::{
     key_edges_set,
 };
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::chrome::focus_ring;
 use videorc_kit::dialog::{Dialog, DialogSize};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::panel_section::PanelSection;
@@ -25,6 +31,7 @@ use videorc_kit::settings_row::SettingsRow;
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, TypeScale, faded_over, hsla};
 use videorc_kit::tokens::{Theme, radius, text};
+use videorc_protocol::SceneSourceKind;
 
 use super::controls::{Field, Knob};
 use super::editor::copy;
@@ -52,6 +59,9 @@ struct Tile {
     selected: bool,
     disabled: bool,
     mark: Option<IconName>,
+    /// The tile Background settings focuses (the chosen one, else the
+    /// first that can be chosen).
+    focus: bool,
 }
 
 fn pick_split(page: &ScenePage, value: &str) {
@@ -370,6 +380,7 @@ impl ScenePage {
             selected,
             disabled,
             mark,
+            focus,
         } = tile;
         let ground = t.glass_solid;
         let fade = |color| {
@@ -385,6 +396,15 @@ impl ScenePage {
         } else {
             t.muted_foreground
         };
+        let ring = focus_ring(t);
+        let mut picture = div()
+            .id(SharedString::from(format!("{id}-picture")))
+            .w_full();
+        if focus {
+            picture = picture
+                .track_focus(&self.background_focus)
+                .focus(move |style| style.shadow(vec![ring]));
+        }
         let mut tile = div()
             .id(id)
             .flex()
@@ -392,8 +412,7 @@ impl ScenePage {
             .gap(px(4.))
             .min_w_0()
             .child(
-                div()
-                    .w_full()
+                picture
                     .aspect_ratio(16. / 10.)
                     .rounded(px(radius::ROW))
                     .border_1()
@@ -411,7 +430,21 @@ impl ScenePage {
                     .child(label),
             );
         if !disabled {
-            tile = tile.on_click(cx.listener(move |this, _, _, cx| on_pick(this, cx)));
+            let on_pick = Rc::new(on_pick);
+            let on_key = on_pick.clone();
+            tile = tile
+                .on_click(cx.listener(move |this, _, _, cx| on_pick(this, cx)))
+                // The focused tile picks with Return or Space, as a radio.
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    let key = event.keystroke.key.as_str();
+                    if focus
+                        && event.keystroke.modifiers.number_of_modifiers() == 0
+                        && (key == "enter" || key == "space")
+                    {
+                        cx.stop_propagation();
+                        on_key(this, cx);
+                    }
+                }));
         }
         tile.into_any_element()
     }
@@ -429,6 +462,24 @@ impl ScenePage {
             .iter()
             .partition(|choice| matches!(choice.id, ChoiceId::Green | ChoiceId::Blue));
         let mut grid = div().grid().grid_cols(4).gap(px(6.));
+        // The pick that takes focus: the chosen tile, else the first one
+        // that can be chosen (`[role="radio"][tabindex="0"]`).
+        let focus_id = view
+            .selected
+            .clone()
+            .filter(|id| {
+                others
+                    .iter()
+                    .chain(&screens)
+                    .any(|choice| &choice.id == id && choice.disabled_reason.is_none())
+            })
+            .or_else(|| {
+                others
+                    .iter()
+                    .chain(&screens)
+                    .find(|choice| choice.disabled_reason.is_none())
+                    .map(|choice| choice.id.clone())
+            });
         let tile = |page: &ScenePage, choice: &Choice, cx: &mut Context<ScenePage>| {
             let id = choice.id.clone();
             page.background_tile(
@@ -438,6 +489,7 @@ impl ScenePage {
                     selected: view.selected.as_ref() == Some(&choice.id),
                     disabled: choice.disabled_reason.is_some(),
                     mark: None,
+                    focus: focus_id.as_ref() == Some(&choice.id),
                 },
                 t,
                 move |page, cx| page.choose_background(&id, cx),
@@ -458,6 +510,7 @@ impl ScenePage {
                     selected: false,
                     disabled: false,
                     mark: Some(IconName::ImageSquare),
+                    focus: false,
                 },
                 t,
                 |page, cx| page.navigate(SceneNavigate::Page(PageId::Assets), cx),
@@ -545,9 +598,69 @@ impl ScenePage {
         }
 
         // P585: the hint.
-        section
-            .children(view.hint.clone().map(|hint| meta_line(hint, t)))
+        let section = section.children(view.hint.clone().map(|hint| meta_line(hint, t)));
+        div()
+            .relative()
+            .child(section)
+            .child(self.background_reveal_probe())
             .into_any_element()
+    }
+
+    /// P575: Background settings (⌘K, the Studio popover's Settings). The
+    /// camera takes the stage's one selection and its Background comes into
+    /// view with the pick focused (`layout-tab.tsx` 548-572). A scene with
+    /// no camera hears nothing.
+    pub fn reveal_background(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let snapshot = self.studio.snapshot();
+        let camera = snapshot.sources.scene.as_ref().and_then(|scene| {
+            scene
+                .sources
+                .iter()
+                .find(|source| source.kind == SceneSourceKind::Camera)
+                .map(|source| source.id.clone())
+        });
+        let Some(camera) = camera else {
+            return;
+        };
+        self.editor_state.selection = Some(InspectorSelection::Source(camera));
+        self.update_editor(&snapshot, cx);
+        self.background_reveal.set(true);
+        window.focus(&self.background_focus, cx);
+        cx.notify();
+    }
+
+    /// Scrolls the least that brings the painted section into view, once
+    /// per request (`scrollIntoView({ block: 'nearest' })`).
+    fn background_reveal_probe(&self) -> impl IntoElement {
+        let reveal = self.background_reveal.clone();
+        let scroll = self.scroll.clone();
+        gpui::canvas(
+            move |bounds, window, _| {
+                if !reveal.replace(false) {
+                    return;
+                }
+                let view = scroll.bounds();
+                let offset = scroll.offset();
+                let (top, bottom) = (f32::from(bounds.top()), f32::from(bounds.bottom()));
+                let (view_top, view_bottom) = (f32::from(view.top()), f32::from(view.bottom()));
+                let shift = if top < view_top || bottom - top > view_bottom - view_top {
+                    view_top - top
+                } else if bottom > view_bottom {
+                    view_bottom - bottom
+                } else {
+                    return;
+                };
+                let max = f32::from(scroll.max_offset().y);
+                let y = (f32::from(offset.y) + shift).clamp(-max, 0.);
+                scroll.set_offset(point(offset.x, px(y)));
+                window.refresh();
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
     }
 
     /// `choose(id)`: the pick's background, applied at once.

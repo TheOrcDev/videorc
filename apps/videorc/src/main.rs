@@ -222,6 +222,7 @@ fn main() -> Result<()> {
                     .into_iter()
                     .chain([camera::VIRTUAL_CAMERA_CHANGED, app::exit::CLOUD_STATE])
                     .chain(screens::settings::EVENTS)
+                    .chain(screens::captions::EVENTS)
                     .chain(screens::avatar::EVENTS)
                     .chain(screens::sidekick::EVENTS)
                     .chain(screens::studio::chat::EVENTS)
@@ -230,7 +231,9 @@ fn main() -> Result<()> {
                     .chain(["session.log"])
                     // The hide state: Follow the app in front, and Studio's
                     // Scenes section (Hide screen).
-                    .chain(["screen.privacy.changed"]),
+                    .chain(["screen.privacy.changed"])
+                    // The Videorc account and its plan (S1.6f).
+                    .chain(videorc_app_core::accounts::EVENTS),
             ),
             logger: logger.clone(),
             ..ClientConfig::default()
@@ -323,6 +326,15 @@ fn main() -> Result<()> {
         logger.clone(),
     );
     let deep_links: links::Links = Arc::new(DeepLinks::new(client.clone(), logger.clone()));
+    // S1.6f (L4): the Videorc account. `videorc://account/callback` goes to
+    // the sign-in this app started; any other is refused by name.
+    let accounts = app::accounts::start(
+        runtime.handle(),
+        client.clone(),
+        supervisor.state(),
+        studio.clone(),
+    );
+    deep_links.set_account_sink(accounts.clone());
     links::receive(&deep_links, &args.links, LinkSource::CommandLine);
 
     let backend_state = supervisor.state();
@@ -398,6 +410,16 @@ fn main() -> Result<()> {
             cx,
         );
         menus::install(cx);
+        app::accounts::install(
+            cx,
+            app::accounts::Shared {
+                accounts: accounts.clone(),
+                studio: studio.clone(),
+                runtime: core_handle.clone(),
+                web: app::accounts::web_links(cfg!(debug_assertions)),
+                development: cfg!(debug_assertions),
+            },
+        );
         studio_screen::bind_keys(cx);
         screens::sources::bind_keys(cx);
         screens::scene::bind_keys(cx);
@@ -479,6 +501,9 @@ fn main() -> Result<()> {
         let sources = cx.new(|cx| {
             SourcesPanel::new(studio.clone(), permissions.clone(), core_handle.clone(), cx)
         });
+        // Captions ⌘4 and the reader share one caption feed (plan 260, L2);
+        // Output's quality lock reads its entitlements, so it comes first.
+        screens::captions::install(studio.clone(), core_handle.clone(), cx);
         let output = cx.new(|cx| {
             OutputPanel::new(
                 studio.clone(),
@@ -487,8 +512,6 @@ fn main() -> Result<()> {
                 cx,
             )
         });
-        // Captions ⌘4 and the reader share one caption feed (plan 260, L2).
-        screens::captions::install(studio.clone(), core_handle.clone(), cx);
         let destinations =
             cx.new(|cx| DestinationsPanel::new(studio.clone(), core_handle.clone(), cx));
         let guests = cx.new(|cx| GuestsPanel::new(studio.clone(), core_handle.clone(), cx));
@@ -497,6 +520,7 @@ fn main() -> Result<()> {
                 studio.clone(),
                 core_handle.clone(),
                 paths.user_data_dir.clone(),
+                library_files.backend.clone(),
                 cx,
             )
         });
@@ -714,6 +738,7 @@ fn main() -> Result<()> {
                         core_handle.clone(),
                         global_keys.clone(),
                         preview.clone(),
+                        paths.user_data_dir.clone(),
                         window,
                         cx,
                     )
@@ -770,42 +795,90 @@ fn main() -> Result<()> {
 
         // Follow the app in front and the password-manager hide (plan 210
         // D10/D11): the core's follower, fed by the platform's front-app
-        // watcher. Only macOS has one so far.
+        // watcher (NSWorkspace on macOS; WinEvent / GetForegroundWindow on
+        // Windows; _NET_ACTIVE_WINDOW on Linux X11; Wayland named no-op).
         {
-            #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
             let mut self_ids = vec![APP_ID.to_string()];
             #[cfg(target_os = "macos")]
             self_ids.extend(platform::macos::front_app::self_bundle_id());
+            #[cfg(target_os = "windows")]
+            self_ids.extend(platform::windows::front_app::self_bundle_id());
+            #[cfg(target_os = "linux")]
+            self_ids.extend(platform::linux::front_app::self_bundle_id());
             let feed = videorc_app_core::studio::follow_runner::start(
                 &core_handle,
                 studio.clone(),
                 self_ids,
                 follow_logger.clone(),
             );
-            #[cfg(target_os = "macos")]
-            if platform::macos::front_app::start(feed.sender.clone()) {
+            let started = {
+                #[cfg(target_os = "macos")]
+                {
+                    platform::macos::front_app::start(feed.sender.clone())
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    platform::windows::front_app::start(feed.sender.clone())
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    platform::linux::front_app::start(feed.sender.clone())
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+                {
+                    let _ = &feed;
+                    false
+                }
+            };
+            if started {
                 let watch = feed.watch_windows.clone();
                 cx.spawn(async move |cx| {
                     loop {
                         cx.background_executor()
                             .timer(Duration::from_millis(500))
                             .await;
-                        if watch.load(std::sync::atomic::Ordering::Relaxed) {
-                            cx.update(|_| platform::macos::front_app::poll());
+                        // Always poll on Windows/Linux (event hooks miss
+                        // same-app window swaps); on macOS only while Follow
+                        // asks for the front-window watch.
+                        let want = {
+                            #[cfg(target_os = "macos")]
+                            {
+                                watch.load(std::sync::atomic::Ordering::Relaxed)
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                let _ = &watch;
+                                true
+                            }
+                        };
+                        if want {
+                            cx.update(|_| {
+                                #[cfg(target_os = "macos")]
+                                platform::macos::front_app::poll();
+                                #[cfg(target_os = "windows")]
+                                platform::windows::front_app::poll();
+                                #[cfg(target_os = "linux")]
+                                platform::linux::front_app::poll();
+                            });
                         }
                     }
                 })
                 .detach();
             } else {
+                drop(feed);
+                #[cfg(target_os = "linux")]
+                {
+                    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                        follow_logger.info(platform::linux::front_app::WAYLAND_NO_WATCHER);
+                    } else {
+                        follow_logger.warn(
+                            "Follow the app in front: the X11 front-app watcher did not start; Follow and the password-manager hide stay off.",
+                        );
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
                 follow_logger.warn(
                     "Follow the app in front: the front-app watcher did not start; Follow and the password-manager hide stay off.",
-                );
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                drop(feed);
-                follow_logger.info(
-                    "Follow the app in front: this platform has no front-app watcher yet; Follow and the password-manager hide stay off.",
                 );
             }
         }

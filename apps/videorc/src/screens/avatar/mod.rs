@@ -19,7 +19,7 @@ mod look;
 mod onboarding;
 mod onboarding_view;
 mod persona;
-mod pictures;
+pub(crate) mod pictures;
 mod preview;
 mod reactions;
 mod status;
@@ -53,7 +53,7 @@ pub type AppStudio = Studio<BackendClient>;
 
 /// The events the page follows; `main.rs` adds them to the client's filter.
 /// `account.changed` is already there (Settings').
-pub const EVENTS: [&str; 8] = [
+pub const EVENTS: [&str; 9] = [
     videorc_app_core::buddy::look::PROGRESS_EVENT,
     videorc_app_core::buddy::look::DRAFT_EVENT,
     creator_view::IDENTITY_READ_EVENT,
@@ -62,8 +62,11 @@ pub const EVENTS: [&str; 8] = [
     LIBRARY_CHANGED_EVENT,
     SETTINGS_CHANGED_EVENT,
     videorc_app_core::chat::overlay::LAYOUT_EVENT,
+    ENTITLEMENTS_UPDATED,
 ];
 const LIBRARY_CHANGED_EVENT: &str = "cohost.library.changed";
+/// Premium changed: the create gates read again.
+const ENTITLEMENTS_UPDATED: &str = "entitlements.updated";
 const SETTINGS_CHANGED_EVENT: &str = "cohost.settings.changed";
 
 /// A refused library call, as one sentence (`problemOf`,
@@ -334,6 +337,11 @@ impl AvatarScreen {
                                 }
                             });
                         }
+                        // P1064: a sign-in or sign-out reads the page again
+                        // (the signed-out empty state, the gates).
+                        videorc_app_core::accounts::methods::CHANGED_EVENT => {
+                            let _ = this.update(cx, |screen, cx| screen.refresh(cx));
+                        }
                         videorc_app_core::chat::overlay::LAYOUT_EVENT => {
                             let placement = Placement::from_layout(&payload);
                             let _ = this.update(cx, |screen, cx| {
@@ -349,7 +357,7 @@ impl AvatarScreen {
                             let _ =
                                 this.update(cx, |screen, cx| screen.look_event(&name, payload, cx));
                         }
-                        SETTINGS_CHANGED_EVENT | "account.changed" => {
+                        SETTINGS_CHANGED_EVENT | "account.changed" | ENTITLEMENTS_UPDATED => {
                             let _ = this.update(cx, |screen, cx| screen.refresh(cx));
                         }
                         other => {
@@ -401,6 +409,7 @@ impl AvatarScreen {
                 .and_then(|layout| Placement::from_layout(&layout));
             let capabilities = backend.request("ai.capabilities.get", json!({})).await.ok();
             let account = backend.request("account.get", json!({})).await.ok();
+            let entitlements = backend.request("entitlements.get", Value::Null).await.ok();
             (
                 persona,
                 notes,
@@ -409,11 +418,20 @@ impl AvatarScreen {
                 placement,
                 capabilities,
                 account,
+                entitlements,
             )
         });
         cx.spawn(async move |this, cx| {
-            let Ok((persona, notes, auto_chat, library, placement, capabilities, account)) =
-                read.await
+            let Ok((
+                persona,
+                notes,
+                auto_chat,
+                library,
+                placement,
+                capabilities,
+                account,
+                entitlements,
+            )) = read.await
             else {
                 return;
             };
@@ -435,6 +453,9 @@ impl AvatarScreen {
                 }
                 if let Some(account) = account {
                     screen.account_answered(&account);
+                }
+                if let Some(entitlements) = entitlements {
+                    screen.entitlements_answered(&entitlements);
                 }
                 screen.consented = screen.studio.read_ui_settings(families::ai_consent);
                 screen.loading = false;
@@ -579,8 +600,9 @@ impl AvatarScreen {
         self.show_onboarding(1, cx);
     }
 
-    pub(crate) fn sign_in(&mut self, _cx: &mut Context<Self>) {
-        eprintln!("[videorc-app] Avatar: Sign in (account UI next)");
+    /// P1064 and the gates' Sign in: the Videorc sign-in in the browser.
+    pub(crate) fn sign_in(&mut self, cx: &mut Context<Self>) {
+        crate::app::accounts::sign_in(cx);
     }
 
     pub(crate) fn open_page(&mut self, page: PageId, _window: &mut Window, cx: &mut Context<Self>) {

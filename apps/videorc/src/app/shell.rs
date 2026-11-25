@@ -15,8 +15,9 @@ use videorc_app_core::nav::{self, PageId, ZONES};
 use videorc_app_core::notices::NoticeAction;
 use videorc_app_core::{BackendState, ConnectionState, Tone};
 use videorc_kit::{
+    button::{Button, ButtonSize, ButtonVariant},
     shortcut_keys::ShortcutKeys,
-    status_bar::StatusBar,
+    status_bar::{StatusBar, StatusBarHint},
     status_bar_action::StatusBarAction,
     status_dot::{StatusDot, StatusTone},
     theme::{self, FONT, TypeScale, hsla},
@@ -34,7 +35,7 @@ use crate::screens::images_sounds::{ImagesPanel, SoundsPanel};
 use crate::screens::output::OutputPanel;
 use crate::screens::scene::{SceneNavigate, ScenePage};
 use crate::screens::settings::OpenSetup;
-use crate::screens::sidekick::SidekickScreen;
+use crate::screens::sidekick::{OpenLibrarySession, SidekickScreen};
 use crate::screens::sources::SourcesPanel;
 use crate::screens::studio::{StudioPage, transport::OpenPage};
 
@@ -120,6 +121,8 @@ pub struct Shell {
     notice_hub: Entity<Hub>,
     /// Phase 3 (L1): Scene ⌘3.
     scene: Entity<ScenePage>,
+    /// S1.6f (L4): the Videorc account, for the sidebar's account row.
+    account: Option<Entity<Mirror<videorc_app_core::accounts::AccountsState>>>,
 }
 
 impl Shell {
@@ -151,6 +154,19 @@ impl Shell {
         let notices = cx.new(|cx| Centre::new(notice_hub.clone(), "main", window, cx));
         let errors = cx.new(ErrorPanels::new);
         cx.observe(&errors, |_, _, cx| cx.notify()).detach();
+        let account_store = cx
+            .try_global::<super::accounts::Shared>()
+            .map(|shared| shared.accounts.watch());
+        let account = account_store.map(|store| {
+            super::bridge::mirror(
+                cx,
+                store,
+                |state: &videorc_app_core::accounts::AccountsState| state.clone(),
+            )
+        });
+        if let Some(account) = &account {
+            cx.observe(account, |_, _, cx| cx.notify()).detach();
+        }
         palette.update(cx, |palette, _| palette.set_notifications_available());
         let captions = crate::screens::captions::page(cx);
         if let Some(captions) = &captions {
@@ -195,6 +211,7 @@ impl Shell {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()))
                 }
                 NoticeNavigate::Action(NoticeAction::OpenUrl { url }) => cx.open_url(url),
+                NoticeNavigate::Action(NoticeAction::SignIn) => super::accounts::sign_in(cx),
                 _ => {}
             },
         )
@@ -235,6 +252,17 @@ impl Shell {
         )
         .detach();
         cx.observe(&sidekick, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &sidekick,
+            window,
+            |this, _, open: &OpenLibrarySession, window, cx| {
+                this.open_page(PageId::Library, window, cx);
+                this.library.update(cx, |library, cx| {
+                    library.focus_session(Some(open.0.as_str()), window, cx)
+                });
+            },
+        )
+        .detach();
         cx.observe(&images, |_, _, cx| cx.notify()).detach();
         cx.observe(&sounds, |_, _, cx| cx.notify()).detach();
         cx.observe(&go_live, |_, _, cx| cx.notify()).detach();
@@ -252,6 +280,8 @@ impl Shell {
         cx.subscribe_in(&studio, window, |this, _, open: &OpenPage, window, cx| {
             if let Some(tab) = open.settings_tab {
                 this.open_settings(Some(tab), window, cx);
+            } else if open.scene_background {
+                this.open_scene_background(window, cx);
             } else {
                 this.open_page(open.page, window, cx);
             }
@@ -310,6 +340,7 @@ impl Shell {
                     this.studio
                         .update(cx, |studio, cx| studio.open_add_scene(window, cx));
                 }
+                Command::SceneBackground => this.open_scene_background(window, cx),
                 _ => {}
             },
         )
@@ -340,6 +371,7 @@ impl Shell {
             notices,
             notice_hub,
             scene,
+            account,
         }
     }
 
@@ -439,6 +471,14 @@ impl Shell {
         Ok(())
     }
 
+    /// P575: Scene opens on the camera, its Background in view and the pick
+    /// focused (⌘K's Background settings, the Studio popover's Settings).
+    fn open_scene_background(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_page(PageId::Layouts, window, cx);
+        self.scene
+            .update(cx, |scene, cx| scene.reveal_background(window, cx));
+    }
+
     pub fn open_page(&mut self, page: PageId, window: &mut Window, cx: &mut Context<Self>) {
         if self.page != page {
             self.settings
@@ -493,12 +533,13 @@ impl Shell {
             if page == PageId::Layouts {
                 let focus = self.scene.read(cx).focus_handle();
                 window.focus(&focus, cx);
+                self.scene.update(cx, |scene, cx| scene.entered(cx));
             }
             cx.notify();
         }
     }
 
-    fn sidebar(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sidebar(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut column = div()
             .w(px(220.))
             .h_full()
@@ -550,7 +591,53 @@ impl Shell {
                     );
             }
         }
-        column
+        // Bottom: the account row (P024) and the theme toggle (P022).
+        let dark = matches!(
+            window.appearance(),
+            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+        );
+        column.child(div().flex_1()).child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(4.))
+                .border_t_1()
+                .border_color(hsla(t.border))
+                .px(px(4.))
+                .py(px(6.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .children(self.account.as_ref().map(|account| {
+                            super::account_menu::row(
+                                account.read(cx).value(),
+                                cx.entity().downgrade(),
+                                t,
+                            )
+                        })),
+                )
+                .child(
+                    Button::new("sidebar-theme-toggle")
+                        .size(ButtonSize::Xs)
+                        .variant(ButtonVariant::Ghost)
+                        .accessibility_label("Toggle color theme")
+                        .tooltip(if dark {
+                            "Switch to light theme"
+                        } else {
+                            "Switch to dark theme"
+                        })
+                        .label(if dark { "Light" } else { "Dark" })
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))),
+                ),
+        )
+    }
+
+    fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings
+            .update(cx, |settings, cx| settings.toggle_theme(window, cx));
+        cx.notify();
     }
 }
 
@@ -597,6 +684,11 @@ impl Render for Shell {
                     this.toggle_search(window, cx)
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &super::menus::ToggleTheme, window, cx| {
+                    this.toggle_theme(window, cx)
+                }),
+            )
             .font_family(FONT)
             .flex()
             .flex_col()
@@ -608,7 +700,7 @@ impl Render for Shell {
                     .min_h(px(0.))
                     .flex()
                     .flex_row()
-                    .child(self.sidebar(t, cx))
+                    .child(self.sidebar(t, window, cx))
                     .child(if page_error {
                         div()
                             .flex_1()
@@ -795,7 +887,7 @@ impl Render for Shell {
                     )
                     .child(div().text_color(hsla(t.muted_foreground)).child(connection))
                     .child(
-                        videorc_kit::status_bar::StatusBarHint::new(
+                        StatusBarHint::new(
                             "search",
                             "Search",
                             ShortcutKeys::for_action(&super::menus::ToggleSearch),
@@ -803,6 +895,55 @@ impl Render for Shell {
                         .on_click(
                             cx.listener(|this, _, window, cx| this.toggle_search(window, cx)),
                         ),
+                    )
+                    .child({
+                        let preview_open = {
+                            #[cfg(target_os = "macos")]
+                            {
+                                !self.preview.read(cx).is_closed()
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                self.preview.read(cx).mode()
+                                    == videorc_preview::lifecycle::WindowMode::Floating
+                            }
+                        };
+                        StatusBarHint::new(
+                            "preview",
+                            "Preview",
+                            ShortcutKeys::for_action(&super::menus::TogglePreview),
+                        )
+                        .pressed(preview_open)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            #[cfg(target_os = "macos")]
+                            this.preview
+                                .update(cx, |preview, cx| preview.toggle_open(cx));
+                            #[cfg(not(target_os = "macos"))]
+                            this.preview
+                                .update(cx, |preview, cx| preview.toggle_floating(cx));
+                        }))
+                    })
+                    .child(
+                        StatusBarHint::new(
+                            "notes",
+                            "Notes",
+                            ShortcutKeys::for_action(&super::menus::ToggleNotes),
+                        )
+                        .pressed(crate::screens::notes::window::handle(cx).is_some())
+                        .on_click(cx.listener(|_, _, window, cx| {
+                            window.dispatch_action(Box::new(super::menus::ToggleNotes), cx)
+                        })),
+                    )
+                    .child(
+                        StatusBarHint::new(
+                            "stream-manager",
+                            "Stream Manager",
+                            ShortcutKeys::for_action(&super::menus::ToggleStreamManager),
+                        )
+                        .pressed(crate::screens::stream_manager::window::handle(cx).is_some())
+                        .on_click(cx.listener(|_, _, window, cx| {
+                            window.dispatch_action(Box::new(super::menus::ToggleStreamManager), cx)
+                        })),
                     )
                     .child(self.notices.clone()),
             )

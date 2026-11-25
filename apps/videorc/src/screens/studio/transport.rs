@@ -171,11 +171,13 @@ impl GoLiveFace {
 }
 
 /// A row of the transport asks the shell to open a page (the blocked line's
-/// jump). `settings_tab` opens Settings on that tab (Permissions, …).
+/// jump). `settings_tab` opens Settings on that tab (Permissions, …);
+/// `scene_background` opens Scene on the camera's Background (P575).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenPage {
     pub page: PageId,
     pub settings_tab: Option<SettingsTab>,
+    pub scene_background: bool,
 }
 
 impl OpenPage {
@@ -183,6 +185,17 @@ impl OpenPage {
         Self {
             page,
             settings_tab: None,
+            scene_background: false,
+        }
+    }
+
+    /// Background settings (Electron `openSceneBackground`): Scene, the
+    /// camera selected and its Background in view.
+    pub const fn scene_background() -> Self {
+        Self {
+            page: PageId::Layouts,
+            settings_tab: None,
+            scene_background: true,
         }
     }
 
@@ -190,6 +203,7 @@ impl OpenPage {
         Self {
             page: PageId::Settings,
             settings_tab: Some(tab),
+            scene_background: false,
         }
     }
 }

@@ -8,8 +8,9 @@
 
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Div, Hitbox, HitboxBehavior,
-    Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Window,
-    canvas, div, point, prelude::*, px, relative, size,
+    Hsla, ImageSource, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, PathBuilder, Pixels, Window, canvas, div, img, point, prelude::*, px, relative,
+    size,
 };
 use videorc_app_core::editor::stage::{
     Axis, GestureKind, HandleId, ITEM_CHIP_HIT_WIDTH, PixelSize, SourceShape, StageItemBadge,
@@ -20,7 +21,8 @@ use videorc_kit::tokens::{Theme, radius, text};
 use videorc_protocol::{SceneSource, SceneSourceKind};
 
 use super::super::ScenePage;
-use super::{Entry, GUTTER, StageView, Target};
+use super::{Entry, GUTTER, PictureFile, StageView, Target};
+use crate::screens::avatar::pictures;
 
 /// The handle's drawn square and its hit square (points).
 const HANDLE_SIZE: f32 = 6.0;
@@ -106,6 +108,7 @@ impl ScenePage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.stage.live = live;
         let focus = self.ensure_stage_focus(window, cx);
         let view = self.stage_view(cx);
         self.stage.facts = view.facts(self.stage.snap);
@@ -151,6 +154,12 @@ impl ScenePage {
                     }
                 }
                 _ => {
+                    // Under the live canvas the compositor draws the real
+                    // thing.
+                    if !live {
+                        canvas_box =
+                            canvas_box.children(item_picture(entry, self.editor.canvas_aspect));
+                    }
                     canvas_box = canvas_box.child(item_paint(entry, selected, t));
                     if let Some(pixels) = pixels
                         && entry.editable
@@ -222,9 +231,31 @@ impl ScenePage {
                 entry.rect.width * pixels.width,
                 entry.rect.height * pixels.height,
             ) as f32;
+            let line = faded(hsla(t.foreground), 0.7);
             for (handle, ax, ay) in stage_handle_points(entry.rect) {
                 if !handles.contains(&handle) {
                     continue;
+                }
+                // A box too small for its handles has them pushed out: a
+                // line ties each to its corner (`offset > 0`).
+                if offset > 0.0 {
+                    chrome = chrome.child(
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, _| {
+                                let mut path = PathBuilder::stroke(px(1.));
+                                path.move_to(bounds.origin);
+                                path.line_to(bounds.bottom_right());
+                                if let Ok(path) = path.build() {
+                                    window.paint_path(path, line);
+                                }
+                            },
+                        )
+                        .absolute()
+                        .left(relative(ax as f32))
+                        .top(relative(ay as f32))
+                        .size(px(offset)),
+                    );
                 }
                 chrome = chrome.child(
                     div()
@@ -421,6 +452,28 @@ fn source_paint(
 /// An overlay item or a banner: a dashed hairline (stronger when
 /// selected) and its label chip with the badge's raw word; dimmed when no
 /// output shows it.
+/// The item itself on the schematic: a banner's image, the avatar's still
+/// in its pet's square; dimmed when no output shows it.
+fn item_picture(entry: &Entry, canvas_aspect: f64) -> Option<AnyElement> {
+    let picture = entry.picture.as_ref()?;
+    let rect = entry.picture_rect(canvas_aspect)?;
+    let source: ImageSource = match &picture.file {
+        PictureFile::File(path) => path.clone().into(),
+        PictureFile::Golem => pictures::default_idle()?.into(),
+    };
+    let share = if entry.off { OFF_SHARE } else { 1.0 };
+    Some(
+        placed(rect)
+            .child(
+                img(source)
+                    .size_full()
+                    .object_fit(ObjectFit::Contain)
+                    .opacity(picture.opacity * share),
+            )
+            .into_any_element(),
+    )
+}
+
 fn item_paint(entry: &Entry, selected: bool, t: &Theme) -> Div {
     let share = if entry.off { OFF_SHARE } else { 1.0 };
     let stroke = faded(

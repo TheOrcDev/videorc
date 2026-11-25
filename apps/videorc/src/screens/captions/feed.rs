@@ -148,6 +148,12 @@ impl CaptionsFeed {
     }
 
     /// `cloudAiUploadGate`.
+    /// The plan as last read (`entitlements.get`, then
+    /// `entitlements.updated`); Output's quality lock reads it too.
+    pub fn entitlements(&self) -> Option<&EntitlementsSnapshot> {
+        self.entitlements.as_ref()
+    }
+
     pub fn gate(&self) -> EntitlementGate {
         cloud_ai_upload_gate(self.entitlements.as_ref())
     }

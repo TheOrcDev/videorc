@@ -7,9 +7,11 @@
 //!
 //! The answers keep Electron's shapes (`notesWindowState`,
 //! `commentsWindowState`). `visible` is `open`: GPUI does not say whether a
-//! window is minimized. The chat fixture commands (`comments-window-push-*`,
-//! `-seed-*`, `-reader-state`, `-click-message`, …) wait for the chat
-//! pane's smoke seam and stay "not supported" until it lands.
+//! window is minimized. The chat's are the pane's own paths too:
+//! `-click-message` is a row's click, `-set-highlight-anchor` the status
+//! bar's corner pick, `-reader-state` the rows' words and highlight phases,
+//! `-command-trace` the clicks in flight. The fixture commands
+//! (`comments-window-push-*`, `-seed-*`) stay "not supported".
 
 use gpui::{AnyWindowHandle, App, Hsla, Window, rgb};
 use serde_json::{Map, Value, json};
@@ -22,10 +24,14 @@ use crate::screens::{notes, stream_manager};
 
 /// The commands this handler takes, sorted.
 pub const WINDOW_COMMANDS: &[&str] = &[
+    "comments-window-click-message",
     "comments-window-close",
+    "comments-window-command-trace",
     "comments-window-open",
+    "comments-window-reader-state",
     "comments-window-set-bounds",
     "comments-window-set-hidden-from-stream",
+    "comments-window-set-highlight-anchor",
     "comments-window-set-smoke-marker",
     "comments-window-state",
     "comments-window-toggle",
@@ -136,7 +142,7 @@ fn run(command: &str, params: &Map<String, Value>, cx: &mut App) -> Result<Value
             let Some(view) = stream_manager::window::view(cx) else {
                 return Ok(chat_state(Some(CHAT_CLOSED), cx));
             };
-            let (color, words) = marker_color(params.get("color"));
+            let (color, words) = marker_color(params.get("color"))?;
             view.update(cx, |sm, _, cx| sm.smoke_set_marker(color, cx))
                 .map_err(|_| CHAT_CLOSED.to_string())?;
             let mut state = chat_state(None, cx);
@@ -144,13 +150,48 @@ fn run(command: &str, params: &Map<String, Value>, cx: &mut App) -> Result<Value
             state["markerColor"] = json!(words);
             Ok(state)
         }
+        "comments-window-set-highlight-anchor" => {
+            let anchor = params
+                .get("anchor")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let view = stream_manager::window::view(cx).ok_or(CHAT_CLOSED)?;
+            view.update(cx, |sm, _, cx| sm.smoke_set_anchor(&anchor, cx))
+                .map_err(|_| CHAT_CLOSED.to_string())?;
+            Ok(chat_state(None, cx))
+        }
+        "comments-window-click-message" => {
+            let id = params
+                .get("messageId")
+                .and_then(Value::as_str)
+                .ok_or("comments-window-click-message takes a messageId.")?
+                .to_string();
+            let view = stream_manager::window::view(cx).ok_or(CHAT_CLOSED)?;
+            let clicked = view
+                .update(cx, |sm, _, cx| sm.smoke_click_message(&id, cx))
+                .map_err(|_| CHAT_CLOSED.to_string())?;
+            Ok(json!({ "clicked": clicked, "messageId": id }))
+        }
+        "comments-window-reader-state" => {
+            let view = stream_manager::window::view(cx).ok_or(CHAT_CLOSED)?;
+            view.update(cx, |sm, _, cx| sm.smoke_reader_state(cx))
+                .map_err(|_| CHAT_CLOSED.to_string())
+        }
+        "comments-window-command-trace" => {
+            let view = stream_manager::window::view(cx).ok_or(CHAT_CLOSED)?;
+            view.update(cx, |sm, _, cx| sm.smoke_command_trace(cx))
+                .map_err(|_| CHAT_CLOSED.to_string())
+        }
         "raise-window" => raise(params, cx),
         other => Err(format!("{other} is not a Notes or Stream Manager command.")),
     }
 }
 
-/// `#rrggbb`, or the Notes smoke's red.
-fn marker_color(value: Option<&Value>) -> (Hsla, String) {
+/// The marker's `color`, `#rrggbb`. The smoke names it: the colour is the
+/// one its recording gate looks for, never a theme colour, so the app keeps
+/// no default (Electron's was red, which the one caller sends).
+fn marker_color(value: Option<&Value>) -> Result<(Hsla, String), String> {
     let words = value
         .and_then(Value::as_str)
         .filter(|words| {
@@ -158,10 +199,10 @@ fn marker_color(value: Option<&Value>) -> (Hsla, String) {
                 && words.starts_with('#')
                 && words[1..].chars().all(|c| c.is_ascii_hexdigit())
         })
-        .unwrap_or("#ff0000")
+        .ok_or("comments-window-set-smoke-marker's color is a #rrggbb colour.")?
         .to_ascii_lowercase();
-    let hex = u32::from_str_radix(&words[1..], 16).unwrap_or(0xff0000);
-    (rgb(hex).into(), words)
+    let value = u32::from_str_radix(&words[1..], 16).map_err(|error| error.to_string())?;
+    Ok((rgb(value).into(), words))
 }
 
 /// The frame a set-bounds asks for, each side missing kept from `current`.
@@ -249,8 +290,10 @@ fn notes_state(message: Option<&str>, cx: &mut App) -> Value {
 
 fn chat_state(message: Option<&str>, cx: &mut App) -> Value {
     let mut state = window_state(stream_manager::window::handle(cx), message, cx);
-    let view = stream_manager::window::view(cx)
-        .and_then(|view| view.update(cx, |sm, window, _| sm.smoke_state(window)).ok());
+    let view = stream_manager::window::view(cx).and_then(|view| {
+        view.update(cx, |sm, window, cx| sm.smoke_state(window, cx))
+            .ok()
+    });
     merge(
         &mut state,
         view.unwrap_or_else(|| json!({ "protected": false, "windowId": null })),
@@ -306,10 +349,13 @@ mod tests {
     }
 
     #[test]
-    fn a_marker_is_a_hex_colour_or_red() {
-        assert_eq!(marker_color(Some(&json!("#00FF00"))).1, "#00ff00");
-        assert_eq!(marker_color(Some(&json!("green"))).1, "#ff0000");
-        assert_eq!(marker_color(None).1, "#ff0000");
+    fn a_marker_is_a_hex_colour_the_smoke_names() {
+        assert_eq!(
+            marker_color(Some(&json!("#00FF00"))).map(|(_, words)| words),
+            Ok("#00ff00".to_string())
+        );
+        assert!(marker_color(Some(&json!("green"))).is_err());
+        assert!(marker_color(None).is_err());
     }
 
     #[test]

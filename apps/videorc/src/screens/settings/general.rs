@@ -1,5 +1,5 @@
 use super::*;
-use gpui::{AnyElement, WindowAppearance};
+use gpui::{AnyElement, Window, WindowAppearance};
 use videorc_app_core::{
     nav::{PageId, ThemeChoice},
     studio::families,
@@ -43,6 +43,22 @@ impl SettingsScreen {
                 .is_ok()
         });
         self.finish_save(job, cx);
+    }
+
+    /// Sidebar / D: flip light ↔ dark; landing on the system look returns
+    /// control to System (`next_toggled_theme`, P022 / P060).
+    pub fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let system_dark = matches!(
+            window.appearance(),
+            WindowAppearance::Dark | WindowAppearance::VibrantDark
+        );
+        let stored = ThemeChoice::parse(self.studio.snapshot().settings.theme.as_deref());
+        let next = videorc_app_core::nav::next_toggled_theme(
+            stored.resolved_dark(system_dark),
+            system_dark,
+        );
+        self.save_theme(next, cx);
+        self.apply_theme(cx);
     }
 
     pub(super) fn general(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

@@ -62,6 +62,8 @@ actions!(
         ToggleCaptions,
         OpenReleaseNotes,
         ToggleSearch,
+        /// D: flip light/dark (P022 / P060); outside editable fields and modals.
+        ToggleTheme,
     ]
 );
 
@@ -333,6 +335,13 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("secondary-k", ToggleSearch, Some("CommandPalette")),
         KeyBinding::new("secondary-,", ShowSettings, None),
         KeyBinding::new("secondary-/", ShowShortcuts, None),
+        // Plain D (no modifiers): Electron's theme toggle. Skip while a
+        // dialog, menu, select or text field holds the key context.
+        KeyBinding::new(
+            "d",
+            ToggleTheme,
+            Some("!Dialog && !Popover && !Select && !Menu && !Input"),
+        ),
     ]);
     if let Some(bar) = menu_bar(cx, &windows()) {
         cx.bind_keys(bar.bindings);

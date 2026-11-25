@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnyElement, Context, Entity, Image, ImageFormat, ImageSource, KeyDownEvent, ObjectFit,
-    SharedString, Window, div, img, prelude::*, px,
+    AnyElement, Context, Entity, Image, ImageSource, KeyDownEvent, ObjectFit, SharedString, Window,
+    div, img, prelude::*, px,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -49,7 +49,7 @@ use super::gate::{
 };
 use super::preview::{PetPreview, STILL_PACK_ID};
 use super::reactions::SaveSection;
-use super::{AvatarScreen, pictures, sync_handle};
+use super::{AvatarScreen, files, pictures, sync_handle};
 
 /// The preview's size on the page and the draft's (`BUDDY_TAB_PREVIEW_PX`,
 /// `DRAFT_PREVIEW_PX`).
@@ -442,15 +442,7 @@ impl AvatarScreen {
         let read = cx.background_spawn(async move {
             paths
                 .into_iter()
-                .filter_map(|(state, path)| {
-                    let bytes = std::fs::read(&path).ok()?;
-                    let format = if path.extension().is_some_and(|ext| ext == "webp") {
-                        ImageFormat::Webp
-                    } else {
-                        ImageFormat::Png
-                    };
-                    Some((state, Arc::new(Image::from_bytes(format, bytes))))
-                })
+                .filter_map(|(state, path)| files::load_image(&path).map(|image| (state, image)))
                 .collect::<BTreeMap<_, _>>()
         });
         cx.spawn(async move |this, cx| {
@@ -721,17 +713,33 @@ impl AvatarScreen {
         });
     }
 
-    fn sync_draft_preview(&mut self, cx: &mut Context<Self>) {
-        let pictures: Vec<(String, ImageSource)> = self
+    /// One of the draft's pictures, as the look section read it (`state`
+    /// is a pose: idle, talk, …). The onboarding shows these too.
+    pub(super) fn draft_picture(&self, state: &str) -> Option<Arc<Image>> {
+        self.look_ui.draft_pictures.get(state).cloned()
+    }
+
+    pub(super) fn has_draft_pictures(&self) -> bool {
+        !self.look_ui.draft_pictures.is_empty()
+    }
+
+    /// The draft's pictures for a living preview, and the key they were
+    /// read under (a redone pose keeps its path, so the key moves).
+    pub(super) fn draft_stills(&self) -> (String, Vec<(String, ImageSource)>) {
+        let stills = self
             .look_ui
             .draft_pictures
             .iter()
             .map(|(state, image)| (state.clone(), image.clone().into()))
             .collect();
+        (self.look_ui.draft_key.clone().unwrap_or_default(), stills)
+    }
+
+    fn sync_draft_preview(&mut self, cx: &mut Context<Self>) {
+        let (key, pictures) = self.draft_stills();
         if pictures.is_empty() {
             return;
         }
-        let key = self.look_ui.draft_key.clone().unwrap_or_default();
         self.draft_preview
             .update(cx, |preview, cx| preview.show_still(key, pictures, cx));
     }

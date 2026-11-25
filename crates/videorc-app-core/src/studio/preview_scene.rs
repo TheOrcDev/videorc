@@ -187,7 +187,7 @@ pub fn preview_scene_request(
             recording_state: &snapshot.session.status.state,
             start_pending: snapshot.session.start_pending,
             stop_pending: snapshot.session.stop_pending,
-            performance_check_running: false,
+            performance_check_running: snapshot.performance.hold,
         });
     allowed.then(|| {
         studio_scene_params(
