@@ -32,7 +32,6 @@ chrono = "0.4"
 uuid = { version = "1.19", features = ["v4"] }
 # The core's own runtime (two workers), beside GPUI's executor.
 tokio = { version = "1.48", features = ["rt-multi-thread", "sync", "time", "macros"] }
-uuid = { version = "1.19", features = ["v4"] }
 # The preview element (plan 260 S2.3a, L1): the presenter, the lease feed,
 # the contracts and the slots' words; and the wire types its scene speaks.
 videorc-preview = { workspace = true }
