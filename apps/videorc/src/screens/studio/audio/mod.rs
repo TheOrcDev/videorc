@@ -35,6 +35,7 @@ use videorc_app_core::{Studio, StudioSnapshot};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::channel_toggle::{ChannelToggleSize, mute_toggle};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::panel_section::PanelSection;
@@ -599,23 +600,19 @@ impl AudioSection {
         } else {
             words::MUTE_MICROPHONE
         };
-        let (speaker, speaker_ink) = if muted {
-            (IconName::SpeakerSlashDuotone, theme.chrome_fill_ink)
-        } else {
-            (IconName::SpeakerHighDuotone, theme.muted_foreground)
-        };
+        // `MuteToggle size="icon"` (`audio-section.tsx:346-359`): the mute
+        // tone's wash and ink while muted.
         header = header.child(
-            Button::new("studio-mic-mute")
-                .variant(if muted {
-                    ButtonVariant::Default
-                } else {
-                    ButtonVariant::Secondary
-                })
-                .size(ButtonSize::Icon)
+            mute_toggle("studio-mic-mute")
+                .size(ChannelToggleSize::Icon)
+                .icons(IconName::SpeakerHighDuotone, IconName::SpeakerSlashDuotone)
+                .pressed(muted)
                 .accessibility_label(words::MUTE_MICROPHONE)
                 .tooltip(mute_label)
-                .child(icon(speaker, 16., hsla(speaker_ink)))
-                .on_click(cx.listener(|this, _, _, _| this.mute_toggle())),
+                .on_change({
+                    let entity = cx.entity();
+                    move |_, _, _, cx| entity.update(cx, |this, _| this.mute_toggle())
+                }),
         );
 
         let disabled = mic.disabled_reason.is_some();
@@ -786,7 +783,7 @@ impl AudioSection {
                     .min_w_0()
                     .truncate()
                     .text_color(lcd::lit(theme))
-                    .child(lcd::caps(words::MICROPHONE)),
+                    .child(lcd::tracked(words::MICROPHONE)),
             );
         let mut controls = div().flex().items_center().gap(px(12.));
         if let Some(accel) = mic.mute_accelerator.as_ref() {
@@ -838,7 +835,7 @@ impl AudioSection {
                     div()
                         .flex_none()
                         .text_color(lcd::dim(theme))
-                        .child(lcd::caps("Device")),
+                        .child(lcd::tracked("Device")),
                 )
                 .child({
                     let entity = cx.entity();
@@ -907,7 +904,7 @@ impl AudioSection {
                     .min_w_0()
                     .truncate()
                     .text_color(lcd::lit(theme))
-                    .child(lcd::caps(words::SYSTEM_AUDIO)),
+                    .child(lcd::tracked(words::SYSTEM_AUDIO)),
             );
         // P229–P231: Needs permission / Resume / issue word beside the
         // On/Off switch, as Electron's RetroSystemAudioValue — not an alert.

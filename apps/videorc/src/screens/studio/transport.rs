@@ -516,7 +516,7 @@ impl Transport {
                 div()
                     .opacity(0.7)
                     .font_weight(FontWeight::MEDIUM)
-                    .child(retro_space_label())
+                    .child(lcd::key_tracked(retro_space_label()))
                     .into_any_element()
             });
             let record_icon = record_glyph(&record);

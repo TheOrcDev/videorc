@@ -23,6 +23,7 @@ use videorc_kit::slider::Slider;
 use videorc_kit::theme::{hsla, is_dark, with_alpha};
 use videorc_kit::tokens::{Shadow, Theme, radius};
 use videorc_kit::tooltip::tooltip;
+use videorc_kit::tracking::TrackedText;
 
 /// The screen's face: `--font-mono` in Electron, the kit's loadable mono
 /// (Menlo / Consolas / DejaVu Sans Mono).
@@ -36,6 +37,26 @@ const MESSAGE_LINE_PX: f32 = 19.;
 /// The words as the screen prints them (`uppercase`).
 pub fn caps(words: impl Into<SharedString>) -> SharedString {
     SharedString::from(words.into().to_uppercase())
+}
+
+/// The inspector screen's letter spacing (`LCD_PANEL`'s `tracking-[0.08em]`,
+/// `lcd-panel.tsx:57`).
+const SCREEN_TRACKING_EM: f32 = 0.08;
+/// A key's words: `text-[0.85em]` (12 px) at `tracking-[0.04em]`
+/// (`lcd-panel.tsx:193`).
+const KEY_TEXT_PX: f32 = 12.;
+const KEY_TRACKING_EM: f32 = 0.04;
+
+/// A fixed label on the screen, in capitals with the screen's tracking.
+/// For the short words only (titles, row labels, On/Off): tracked text
+/// never truncates, so a value that may be cut ("…") stays [`caps`].
+pub fn tracked(words: impl Into<SharedString>) -> TrackedText {
+    TrackedText::new(caps(words), SCREEN_TEXT_PX, SCREEN_TRACKING_EM)
+}
+
+/// A key's words, in capitals with the keys' tracking.
+pub fn key_tracked(words: impl Into<SharedString>) -> TrackedText {
+    TrackedText::new(caps(words), KEY_TEXT_PX, KEY_TRACKING_EM)
 }
 
 /// Lit pixel ink on the screen.
@@ -381,8 +402,8 @@ pub fn key(
         .px(px(8.))
         .text_color(if disabled { muted } else { border })
         // `text-[0.85em]` of the screen's 14 px.
-        .text_size(px(12.))
-        .line_height(px(12.));
+        .text_size(px(KEY_TEXT_PX))
+        .line_height(px(KEY_TEXT_PX));
     if !disabled {
         button = button
             .cursor_pointer()
@@ -393,7 +414,12 @@ pub fn key(
     // label runs into the key's padding, as Electron's does, never "RECO…".
     button
         .children(leading)
-        .child(div().flex_none().whitespace_nowrap().child(caps(label)))
+        .child(
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .child(key_tracked(label)),
+        )
         .children(trailing)
 }
 
@@ -430,7 +456,7 @@ pub fn nav_row(
             div()
                 .flex_shrink_0()
                 .text_color(dim(theme))
-                .child(caps(label)),
+                .child(tracked(label)),
         )
         .child(
             div()
@@ -477,7 +503,7 @@ pub fn press_row(
         .child(
             div()
                 .flex_shrink_0()
-                .child(caps(if pressed { "On" } else { "Off" })),
+                .child(tracked(if pressed { "On" } else { "Off" })),
         )
 }
 
