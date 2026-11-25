@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, ObjectFit, SharedString, Window, div,
-    prelude::*, px,
+    AnyElement, App, Background, Context, Entity, EventEmitter, FontWeight, ObjectFit, Role,
+    SharedString, Window, div, linear_color_stop, linear_gradient, prelude::*, px,
 };
 use serde_json::{Value, json};
 use videorc_app_core::account::entitlements::EntitlementGate;
@@ -19,6 +19,8 @@ use videorc_kit::{
     alert::{Alert, AlertVariant},
     badge::{Badge, BadgeVariant},
     button::{Button, ButtonSize, ButtonVariant},
+    field::FieldGroup,
+    icon::{IconName, icon},
     list_row::GroupedList,
     navigable_row::NavigableRow,
     panel_section::PanelSection,
@@ -29,10 +31,18 @@ use videorc_kit::{
     shortcut_keys::ShortcutKeys,
     status_dot::{StatusDot, StatusTone},
     switch::Switch,
-    theme::{self, FONT, TypeScale, hsla},
+    theme::{self, FONT, TypeScale, faded_over, hsla, with_alpha},
     toggle_group::{ToggleGroup, ToggleItem},
-    tokens::{Theme, radius, size, text},
+    tokens::{Color, Theme, radius, size, text},
 };
+
+/// `CAPTIONS_GRID` (`lib/page-layout.ts`): the preview beside the controls
+/// from 940 px of page width (`@min-[940px]/page`), stacked below it.
+const CAPTIONS_GRID_MIN_WIDTH: f32 = 940.;
+/// `minmax(380px,0.8fr)`: the controls column's floor.
+const CONTROLS_MIN_WIDTH: f32 = 380.;
+/// `grid-cols-2 gap-2`: the Style chips' gap.
+const STYLE_GAP: f32 = 8.;
 
 use super::feed::{self, AppStudio, CaptionsFeed};
 use crate::app::menus::ToggleCaptions;
@@ -57,6 +67,9 @@ pub struct CaptionsPanel {
     transcript: Vec<(String, String)>,
     transcript_failed: bool,
     transcript_show: Option<String>,
+    /// The page's measured width (`@container/page`): one column or two,
+    /// and the Style chips' width.
+    width: f32,
 }
 
 impl CaptionsPanel {
@@ -86,7 +99,31 @@ impl CaptionsPanel {
             transcript: Vec::new(),
             transcript_failed: false,
             transcript_show: None,
+            width: 0.,
         }
+    }
+
+    fn measured(&mut self, width: f32, cx: &mut Context<Self>) {
+        if (width - self.width).abs() >= 0.5 {
+            self.width = width;
+            cx.notify();
+        }
+    }
+
+    fn wide(&self) -> bool {
+        self.width >= CAPTIONS_GRID_MIN_WIDTH
+    }
+
+    /// One Style chip's body width: two chips to a row of the controls
+    /// column (`grid-cols-2 gap-2`), less the chip's own padding and rim.
+    fn style_chip_width(&self) -> f32 {
+        let column = if self.wide() {
+            (self.width * 0.4).max(CONTROLS_MIN_WIDTH)
+        } else {
+            self.width
+        };
+        let item = (column - 2. * size::GUTTER - STYLE_GAP) / 2.;
+        (item - 2. * 8. - 2.).floor().max(120.)
     }
 
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
@@ -281,25 +318,44 @@ impl CaptionsPanel {
         let video_h = capture["video"]["height"].as_u64().unwrap_or(1080);
         let (canvas_w, canvas_h) = c::preview_canvas(video_w as u32, video_h as u32);
         let top = capture["captions"]["position"].as_str() == Some("top");
-        let ground = match self.backdrop {
-            PreviewBackdrop::Dark => t.video_ground,
-            PreviewBackdrop::Light => t.video_ground_foreground,
-            PreviewBackdrop::Mixed => t.video_ground_muted,
+        // Stand-in video, so the video tokens in both themes. Light is
+        // Electron's 135° light-to-grey ramp; Dark and Mixed stay flat
+        // until the kit carries their gradient stops.
+        let ground: Background = match self.backdrop {
+            PreviewBackdrop::Dark => hsla(t.video_ground).into(),
+            PreviewBackdrop::Light => linear_gradient(
+                135.,
+                linear_color_stop(hsla(t.video_ground_foreground), 0.),
+                linear_color_stop(hsla(t.video_ground_muted), 1.),
+            ),
+            PreviewBackdrop::Mixed => hsla(t.video_ground_muted).into(),
         };
-        // The stand-in video at the canvas aspect, the backend's bar on it.
-        let frame_width = 480.0_f32;
-        let frame_height = frame_width * canvas_h as f32 / canvas_w.max(1) as f32;
+        // The stand-in video fills the column at the canvas aspect
+        // (`aspect-video w-full`), the backend's bar on it.
         let mut frame = div()
             .id("caption-preview-frame")
             .relative()
-            .w(px(frame_width))
-            .h(px(frame_height))
-            .max_w_full()
+            .w_full()
+            .aspect_ratio(canvas_w.max(1) as f32 / canvas_h.max(1) as f32)
             .overflow_hidden()
             .rounded(px(radius::ROW))
             .border_1()
             .border_color(hsla(t.border))
-            .bg(hsla(ground));
+            .bg(ground);
+        // Faint safe-area columns: a hairline at the middle of every 8rem
+        // tile, white 8% at 35%.
+        let column = hsla(with_alpha(t.video_ground_foreground, 0.08 * 0.35));
+        for index in 0..16 {
+            frame = frame.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .h_full()
+                    .left(px(63. + 128. * index as f32))
+                    .w(px(2.))
+                    .bg(column),
+            );
+        }
         if let Some(image) = self.preview.clone() {
             frame = frame.child(
                 gpui::img(image)
@@ -318,16 +374,19 @@ impl CaptionsPanel {
             |control, backdrop| control.option(Segment::new(backdrop.id(), backdrop.label())),
         );
         let this = cx.entity().downgrade();
+        // The column's only section: no hairline under it.
         PanelSection::new("caption-preview")
+            .icon(icon(IconName::Eye, 16., hsla(t.muted_foreground)))
             .title(c::PREVIEW_TITLE)
             .description(c::PREVIEW_DESCRIPTION)
+            .last(true)
             .action(
                 Badge::new(if sample {
                     c::PREVIEW_SAMPLE_BADGE
                 } else {
                     c::PREVIEW_LATEST_BADGE
                 })
-                .variant(BadgeVariant::Outline),
+                .variant(BadgeVariant::Default),
             )
             .child(frame)
             .child(
@@ -342,7 +401,15 @@ impl CaptionsPanel {
                             .min_w(px(0.))
                             .flex()
                             .flex_col()
-                            .child(div().type_scale(text::LABEL).truncate().child(text.clone()))
+                            // `text-sm font-medium`.
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .line_height(px(20.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .truncate()
+                                    .child(text.clone()),
+                            )
                             .child(
                                 div()
                                     .type_scale(text::META)
@@ -365,7 +432,7 @@ impl CaptionsPanel {
             .into_any_element()
     }
 
-    fn controls_section(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn controls_section(&self, t: &Theme, last: bool, cx: &mut Context<Self>) -> AnyElement {
         let (view, upgrade) = self.page_view(cx);
         let feed = self.feed.read(cx);
         let pending = feed.pending();
@@ -375,15 +442,20 @@ impl CaptionsPanel {
         let locked = view.locked.is_some();
         let this = cx.entity().downgrade();
         let reader_open = super::reader::is_open(cx);
+        let muted = hsla(t.muted_foreground);
 
-        let mut section = PanelSection::new("captions-controls")
+        let section = PanelSection::new("captions-controls")
+            .icon(icon(IconName::ClosedCaptioning, 16., muted))
             .title(c::LIVE_CAPTIONS)
-            .description(c::PANEL_DESCRIPTION);
+            .description(c::PANEL_DESCRIPTION)
+            .last(last);
+        // One `FieldGroup` holds the section's fields, 24 px apart.
+        let mut fields: Vec<AnyElement> = Vec::new();
 
         // Locked means disabled with one reason, and the lock leads.
         if let Some(reason) = view.locked.clone() {
             let mut alert = Alert::new("captions-lock")
-                .variant(AlertVariant::Warning)
+                .variant(AlertVariant::Locked)
                 .title(reason);
             if let Some(url) = upgrade {
                 alert = alert.action(
@@ -394,7 +466,7 @@ impl CaptionsPanel {
                         .on_click(move |_, _, cx| cx.open_url(&url)),
                 );
             }
-            section = section.child(alert);
+            fields.push(alert.into_any_element());
         }
 
         // One state signal: the switch says on or off; while on, one dot
@@ -434,36 +506,40 @@ impl CaptionsPanel {
                 }),
         );
         switch_row = switch_row.child(trailing);
-        section = section.child(SettingsGroup::new().row(switch_row));
+        fields.push(SettingsGroup::new().row(switch_row).into_any_element());
 
         if let Some(error) = start_error {
-            section = section.child(
+            fields.push(
                 Alert::new("captions-start-error")
                     .variant(AlertVariant::Destructive)
-                    .title(error),
+                    .title(error)
+                    .into_any_element(),
             );
         }
         if view.room_open {
-            section = section.child(
+            fields.push(
                 Alert::new("captions-room")
                     .title(c::ROOM_TITLE)
-                    .description(c::ROOM_DESCRIPTION),
+                    .description(c::ROOM_DESCRIPTION)
+                    .into_any_element(),
             );
         }
         if view.platform_unavailable {
-            section = section.child(
+            fields.push(
                 Alert::new("captions-platform-unavailable")
                     .variant(AlertVariant::Warning)
                     .title(captions_preflight::LINUX_TITLE)
-                    .description(captions_preflight::LINUX_DETAIL),
+                    .description(captions_preflight::LINUX_DETAIL)
+                    .into_any_element(),
             );
         }
         if let Some(blocker) = view.livestream_blocker {
-            section = section.child(
+            fields.push(
                 Alert::new("captions-livestream-blocker")
                     .variant(AlertVariant::Warning)
                     .title(c::BLOCKER_TITLE)
-                    .description(blocker),
+                    .description(blocker)
+                    .into_any_element(),
             );
         }
 
@@ -479,19 +555,25 @@ impl CaptionsPanel {
         for (value, label) in c::OUTPUT_OPTIONS {
             outputs = outputs.option(Segment::new(*value, *label));
         }
-        section = section.child(field(
-            t,
-            c::OUTPUTS_LABEL,
-            view.outputs_description,
-            outputs.on_change({
-                let this = this.clone();
-                move |value, _, app| {
-                    let _ = this.update(app, |this, cx| {
-                        this.patch("burnTarget", json!(value.as_ref()), false, cx)
-                    });
-                }
-            }),
-        ));
+        // Its line sits under the control (`FieldLabel`, the control, then
+        // `FieldDescription`).
+        fields.push(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .child(field_label(c::OUTPUTS_LABEL))
+                .child(outputs.on_change({
+                    let this = this.clone();
+                    move |value, _, app| {
+                        let _ = this.update(app, |this, cx| {
+                            this.patch("burnTarget", json!(value.as_ref()), false, cx)
+                        });
+                    }
+                }))
+                .child(field_description(t, view.outputs_description))
+                .into_any_element(),
+        );
 
         // What captions hear and where the bar sits belong to Sources and
         // Scene: these rows say it and open the page.
@@ -501,14 +583,15 @@ impl CaptionsPanel {
                 let _ = this.update(app, |_, cx| cx.emit(OpenPage(page)));
             }
         };
+        // The group's name is for screen readers only (`aria-label`).
         let mut elsewhere = GroupedList::new()
-            .label(c::ELSEWHERE_LABEL)
             .row(
                 NavigableRow::new(
                     "captions-microphone",
                     c::MICROPHONE,
                     view.microphone.clone(),
                 )
+                .icon(icon(IconName::Microphone, 16., muted))
                 .on_navigate(open(PageId::Sources)),
             )
             .row(
@@ -517,47 +600,66 @@ impl CaptionsPanel {
                     c::PLACEMENT,
                     view.placement.unwrap_or("Bottom"),
                 )
+                .icon(icon(IconName::SquaresFour, 16., muted))
                 .on_navigate(open(PageId::Layouts)),
             );
         if let Some(allowance) = view.allowance.clone() {
-            elsewhere = elsewhere.row(NavigableRow::new(
-                "captions-allowance",
-                c::ALLOWANCE,
-                allowance,
-            ));
+            elsewhere = elsewhere.row(
+                NavigableRow::new("captions-allowance", c::ALLOWANCE, allowance).icon(icon(
+                    IconName::ClosedCaptioning,
+                    16.,
+                    muted,
+                )),
+            );
         }
-        section = section.child(elsewhere);
+        fields.push(
+            div()
+                .id("captions-elsewhere")
+                .role(Role::Group)
+                .aria_label(c::ELSEWHERE_LABEL)
+                .child(elsewhere)
+                .into_any_element(),
+        );
 
         // The look: applied live. Each chip shows a swatch, the name and
         // its line (`StyleSwatch`).
+        // Two chips to a row, 8 px apart (`grid w-full grid-cols-2 gap-2`).
+        let chip_width = self.style_chip_width();
         let styles = c::STYLES.iter().fold(
             ToggleGroup::new("caption-style")
                 .outline(true)
+                .spacing(STYLE_GAP)
                 .accessibility_label(c::STYLE_LABEL)
                 .disabled(locked)
                 .value([view.style_id.clone()]),
             |group, style| {
-                group.item(ToggleItem::new(style.id, style.label).child(style_chip(t, style)))
+                group.item(
+                    ToggleItem::new(style.id, style.label)
+                        .child(style_chip(t, style, chip_width, locked)),
+                )
             },
         );
-        section = section.child(field(
-            t,
-            c::STYLE,
-            c::STYLE_DESCRIPTION,
-            div().flex().flex_col().gap(px(6.)).child(styles.on_change({
-                let this = this.clone();
-                move |values, _, app| {
-                    let Some(value) = values.into_iter().next() else {
-                        return;
-                    };
-                    if c::STYLES.iter().any(|style| style.id == value.as_ref()) {
-                        let _ = this.update(app, |this, cx| {
-                            this.patch("styleId", json!(value.as_ref()), true, cx)
-                        });
+        fields.push(
+            field(
+                t,
+                c::STYLE,
+                c::STYLE_DESCRIPTION,
+                styles.on_change({
+                    let this = this.clone();
+                    move |values, _, app| {
+                        let Some(value) = values.into_iter().next() else {
+                            return;
+                        };
+                        if c::STYLES.iter().any(|style| style.id == value.as_ref()) {
+                            let _ = this.update(app, |this, cx| {
+                                this.patch("styleId", json!(value.as_ref()), true, cx)
+                            });
+                        }
                     }
-                }
-            })),
-        ));
+                }),
+            )
+            .into_any_element(),
+        );
 
         let sizes = c::TEXT_SIZES.iter().fold(
             SegmentedControl::new("caption-text-size")
@@ -566,19 +668,22 @@ impl CaptionsPanel {
                 .value(Some(view.text_size.clone())),
             |control, (value, label)| control.option(Segment::new(*value, *label)),
         );
-        section = section.child(field(
-            t,
-            c::TEXT_SIZE,
-            "",
-            sizes.on_change({
-                let this = this.clone();
-                move |value, _, app| {
-                    let _ = this.update(app, |this, cx| {
-                        this.patch("textSize", json!(value.as_ref()), true, cx)
-                    });
-                }
-            }),
-        ));
+        fields.push(
+            field(
+                t,
+                c::TEXT_SIZE,
+                "",
+                sizes.on_change({
+                    let this = this.clone();
+                    move |value, _, app| {
+                        let _ = this.update(app, |this, cx| {
+                            this.patch("textSize", json!(value.as_ref()), true, cx)
+                        });
+                    }
+                }),
+            )
+            .into_any_element(),
+        );
 
         let languages = c::LANGUAGES.iter().fold(
             Select::new("caption-language")
@@ -587,19 +692,22 @@ impl CaptionsPanel {
                 .value(Some(SharedString::from(view.language.clone()))),
             |select, (id, label)| select.option(*id, *label),
         );
-        section = section.child(field(
-            t,
-            c::LANGUAGE,
-            view.language_description,
-            languages.on_change({
-                let this = this.clone();
-                move |value, _, app| {
-                    let _ = this.update(app, |this, cx| {
-                        this.patch("language", json!(value.as_ref()), false, cx)
-                    });
-                }
-            }),
-        ));
+        fields.push(
+            field(
+                t,
+                c::LANGUAGE,
+                view.language_description,
+                languages.on_change({
+                    let this = this.clone();
+                    move |value, _, app| {
+                        let _ = this.update(app, |this, cx| {
+                            this.patch("language", json!(value.as_ref()), false, cx)
+                        });
+                    }
+                }),
+            )
+            .into_any_element(),
+        );
 
         // The live strip: the last three lines, partials in the secondary
         // tone; screen readers hear settled lines only.
@@ -616,11 +724,13 @@ impl CaptionsPanel {
                 .border_1()
                 .border_color(hsla(t.border))
                 .bg(hsla(t.inset));
+            // `text-sm leading-6`.
             if strip.is_empty() {
                 lines = lines.child(
                     div()
-                        .type_scale(text::LABEL)
-                        .text_color(hsla(t.muted_foreground))
+                        .text_size(px(14.))
+                        .line_height(px(24.))
+                        .text_color(muted)
                         .child(c::LISTENING),
                 );
             }
@@ -628,7 +738,8 @@ impl CaptionsPanel {
                 lines = lines.child(
                     div()
                         .id(SharedString::from(format!("strip-{}", line.identity())))
-                        .type_scale(text::LABEL)
+                        .text_size(px(14.))
+                        .line_height(px(24.))
                         .text_color(hsla(if line.is_partial() {
                             t.muted_foreground
                         } else {
@@ -637,10 +748,10 @@ impl CaptionsPanel {
                         .child(line.text.clone()),
                 );
             }
-            section = section.child(lines);
+            fields.push(lines.into_any_element());
         }
         if let Some(final_text) = announcement {
-            section = section.child(live_region(final_text));
+            fields.push(live_region(final_text).into_any_element());
         }
 
         let reader_label = if reader_open {
@@ -648,35 +759,55 @@ impl CaptionsPanel {
         } else {
             format!("Open {}", c::READER_NAME)
         };
+        let reader_disabled = !reader_open && locked;
+        // The icon carries its own colour: pre-blend it as the button
+        // fades its words.
+        let reader_ink = if reader_disabled {
+            faded_over(t.foreground, t.glass_solid, 0.5)
+        } else {
+            t.foreground
+        };
+        fields.push(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap(px(12.))
+                .pt(px(16.))
+                .border_t_1()
+                .border_color(hsla(t.border))
+                .child(
+                    // `max-w-md`.
+                    div()
+                        .max_w(px(448.))
+                        .type_scale(text::META)
+                        .text_color(muted)
+                        .child(c::PRIVACY_NOTE),
+                )
+                .child(
+                    // Leading ExternalLinkIcon, the words, then the keys
+                    // (`ml-1`); label would draw first, so all are children.
+                    Button::new("captions-reader-toggle")
+                        .accessibility_label(reader_label.clone())
+                        .variant(ButtonVariant::Outline)
+                        .disabled(reader_disabled)
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ToggleCaptions), cx)
+                        })
+                        .child(icon(IconName::ArrowSquareOut, 16., hsla(reader_ink)))
+                        .child(reader_label)
+                        .child(
+                            div()
+                                .ml(px(4.))
+                                .child(ShortcutKeys::for_action(&ToggleCaptions)),
+                        ),
+                )
+                .into_any_element(),
+        );
+
         section
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.))
-                    .pt(px(16.))
-                    .border_t_1()
-                    .border_color(hsla(t.border))
-                    .child(
-                        div()
-                            .max_w(px(420.))
-                            .type_scale(text::META)
-                            .text_color(hsla(t.muted_foreground))
-                            .child(c::PRIVACY_NOTE),
-                    )
-                    .child(
-                        Button::new("captions-reader-toggle")
-                            .label(reader_label)
-                            .variant(ButtonVariant::Outline)
-                            .disabled(!reader_open && locked)
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ToggleCaptions), cx)
-                            })
-                            .child(ShortcutKeys::for_action(&ToggleCaptions)),
-                    ),
-            )
+            .child(FieldGroup::new().children(fields))
             .into_any_element()
     }
 
@@ -696,9 +827,17 @@ impl CaptionsPanel {
             self.transcript_failed = false;
         }
         let show_id = show_id.filter(|_| room_open)?;
+        // The page's last section; the note is its first line of content,
+        // not a header description.
         let mut section = PanelSection::new("host-transcript")
             .title(c::TRANSCRIPT_TITLE)
-            .description(c::TRANSCRIPT_NOTE)
+            .last(true)
+            .child(
+                div()
+                    .type_scale(text::META)
+                    .text_color(hsla(t.muted_foreground))
+                    .child(c::TRANSCRIPT_NOTE),
+            )
             .child(
                 Button::new("host-transcript-refresh")
                     .label(c::TRANSCRIPT_REFRESH)
@@ -709,61 +848,93 @@ impl CaptionsPanel {
                     })),
             );
         if self.transcript_failed {
-            section =
-                section.child(Alert::new("host-transcript-failed").title(c::TRANSCRIPT_FAILED));
+            section = section
+                .child(Alert::new("host-transcript-failed").description(c::TRANSCRIPT_FAILED));
         }
-        let mut list = GroupedList::new().label(c::TRANSCRIPT_LABEL);
+        // A plain list, newest first, at most 256 px tall
+        // (`max-h-64 overflow-auto text-sm`).
+        let mut list = div()
+            .id("host-transcript-list")
+            .role(Role::List)
+            .aria_label(c::TRANSCRIPT_LABEL)
+            .flex()
+            .flex_col()
+            .max_h(px(256.))
+            .overflow_y_scroll()
+            .text_size(px(14.))
+            .line_height(px(20.));
         for (index, (offset, words)) in self.transcript.iter().enumerate() {
-            list = list.item(
+            list = list.child(
                 div()
                     .id(SharedString::from(format!("transcript-{index}")))
                     .flex()
-                    .gap(px(6.))
-                    .px(px(12.))
-                    .py(px(4.))
-                    .type_scale(text::LABEL)
+                    .gap(px(4.))
                     .child(
                         div()
+                            .flex_none()
                             .text_color(hsla(t.muted_foreground))
                             .child(offset.clone()),
                     )
-                    .child(words.clone()),
+                    .child(div().min_w(px(0.)).child(words.clone())),
             );
         }
-        if !self.transcript.is_empty() {
-            section = section.child(list);
-        }
-        Some(section.into_any_element())
+        Some(section.child(list).into_any_element())
     }
 }
 
 /// One Style chip's body (`StyleSwatch` and its words): the bar's shape on
 /// a stand-in frame, then the name and its line. The frame is video, so it
-/// is the video ground in both themes.
-fn style_chip(t: &Theme, style: &c::CaptionStyle) -> AnyElement {
+/// is the video ground in both themes, with white words and black plates
+/// (`text-white`, `bg-black/70`, `bg-black/85`, `bg-black`). `width` is the
+/// body's share of a two-column row; `disabled` pre-blends the picture over
+/// the window's solid at half strength, as Chromium fades the locked chip.
+fn style_chip(t: &Theme, style: &c::CaptionStyle, width: f32, disabled: bool) -> AnyElement {
+    let fade = |color: Color| {
+        if disabled {
+            faded_over(color, t.glass_solid, 0.5)
+        } else {
+            color
+        }
+    };
+    // A black plate at `alpha` composited over the swatch's ground.
+    let plate_over = |alpha: f32| faded_over(with_alpha(t.video_ground, alpha), t.video_ground, 1.);
+    let plate_fill = |alpha: f32| fade(plate_over(alpha));
+    // 11 px is the floor (Electron draws the sample at 8 px).
     let words = div()
         .max_w_full()
         .px(px(8.))
         .py(px(4.))
         .text_size(px(11.))
+        .line_height(px(11.))
         .truncate()
-        .text_color(hsla(t.video_ground_foreground))
-        .child(c::STYLE_SAMPLE);
+        .text_color(hsla(fade(t.video_ground_foreground)));
     let plate = match style.id {
-        "glass" => words
-            .rounded(px(radius::CHIP))
-            .border_1()
-            .border_color(hsla(t.border))
-            .bg(hsla(t.glass_float)),
+        "glass" => {
+            let fill = plate_fill(0.7);
+            // `rounded-md`, 8 px; the band and the solid plate are
+            // `rounded-sm`, 6 px.
+            words
+                .rounded(px(radius::ROW))
+                .border_1()
+                // `border-white/10` over the plate.
+                .border_color(hsla(fade(faded_over(
+                    with_alpha(t.video_ground_foreground, 0.1),
+                    plate_over(0.7),
+                    1.,
+                ))))
+                .bg(hsla(fill))
+                .font_weight(FontWeight::SEMIBOLD)
+        }
         "lower-third" => words
             .w_full()
-            .rounded(px(radius::TAG))
-            .bg(hsla(t.glass_float)),
+            .rounded(px(radius::CHIP))
+            .bg(hsla(plate_fill(0.85)))
+            .font_weight(FontWeight::SEMIBOLD),
         "high-contrast" => words
-            .rounded(px(radius::TAG))
-            .font_weight(gpui::FontWeight::BOLD)
-            .bg(hsla(t.video_ground)),
-        _ => words.font_weight(gpui::FontWeight::SEMIBOLD),
+            .rounded(px(radius::CHIP))
+            .bg(hsla(plate_fill(1.)))
+            .font_weight(FontWeight::BOLD),
+        _ => words.font_weight(FontWeight::SEMIBOLD),
     };
     let mut swatch = div()
         .flex()
@@ -773,29 +944,36 @@ fn style_chip(t: &Theme, style: &c::CaptionStyle) -> AnyElement {
         .p(px(8.))
         .overflow_hidden()
         .rounded(px(radius::CHIP))
-        .bg(hsla(t.video_ground));
+        .bg(hsla(fade(t.video_ground)));
     swatch = if style.id == "lower-third" {
         swatch.justify_start()
     } else {
         swatch.justify_center()
     };
+    // The chip pads itself (8 px); the body is the swatch, then the name
+    // (`text-xs font-medium`) and its line (`text-[11px] leading-snug`).
     div()
         .flex()
         .flex_col()
         .gap(px(8.))
-        .w(px(180.))
-        .p(px(8.))
-        .child(swatch.child(plate))
+        .w(px(width))
+        .child(swatch.child(plate.child(c::STYLE_SAMPLE)))
         .child(
             div()
                 .flex()
                 .flex_col()
                 .gap(px(2.))
-                .child(div().type_scale(text::META).child(style.label))
+                .child(
+                    div()
+                        .type_scale(text::META)
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(style.label),
+                )
                 .child(
                     div()
                         .text_size(px(11.))
-                        .text_color(hsla(t.muted_foreground))
+                        .line_height(px(15.))
+                        .text_color(hsla(fade(t.muted_foreground)))
                         .child(style.description),
                 ),
         )
@@ -820,27 +998,45 @@ fn status_tone(tone: Tone) -> StatusTone {
     }
 }
 
-/// A labelled field: the title, its line, then the control.
+/// A labelled field (`Field`): the name and its line 4 px apart
+/// (`FieldContent`), then the control 12 px under them.
 fn field(
     t: &Theme,
     label: &'static str,
     description: &'static str,
     control: impl IntoElement,
 ) -> impl IntoElement {
-    let mut field = div()
+    let mut content = div()
         .flex()
         .flex_col()
-        .gap(px(6.))
-        .child(div().type_scale(text::LABEL).child(label));
+        .gap(px(4.))
+        .child(field_label(label));
     if !description.is_empty() {
-        field = field.child(
-            div()
-                .type_scale(text::META)
-                .text_color(hsla(t.muted_foreground))
-                .child(description),
-        );
+        content = content.child(field_description(t, description));
     }
-    field.child(control)
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .child(content)
+        .child(control)
+}
+
+/// `FieldLabel` / `FieldTitle`: `text-sm font-medium`.
+fn field_label(label: &'static str) -> impl IntoElement {
+    div()
+        .text_size(px(14.))
+        .line_height(px(20.))
+        .font_weight(FontWeight::MEDIUM)
+        .child(label)
+}
+
+/// `FieldDescription`: 12 px secondary text.
+fn field_description(t: &Theme, description: &'static str) -> impl IntoElement {
+    div()
+        .type_scale(text::META)
+        .text_color(hsla(t.muted_foreground))
+        .child(description)
 }
 
 /// The settled line for screen readers (`aria-live="polite"`), drawn
@@ -859,10 +1055,68 @@ impl Render for CaptionsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme::current(window, cx).theme();
         let preview = self.preview_section(t, cx);
-        let controls = self.controls_section(t, cx);
         let transcript = self.transcript_section(t, cx);
+        let controls = self.controls_section(t, transcript.is_none(), cx);
+        let page = cx.entity().downgrade();
+        let measure = gpui::canvas(
+            move |bounds, _, cx| {
+                let width = f32::from(bounds.size.width);
+                page.update(cx, |page, cx| page.measured(width, cx)).ok();
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+
+        // `CAPTIONS_GRID`: flush columns split by a hairline, never a gap.
+        let trail = div()
+            .flex()
+            .flex_col()
+            .min_w(px(0.))
+            .child(controls)
+            .children(transcript);
+        let body = if self.wide() {
+            // The preview stays in view (`CAPTIONS_PREVIEW_PIN`) while the
+            // controls beside it scroll: `minmax(0,1.2fr)` |
+            // `minmax(380px,0.8fr)`.
+            div()
+                .flex()
+                .size_full()
+                .child(
+                    div()
+                        .flex_1()
+                        .flex_grow(1.2)
+                        .min_w(px(0.))
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .border_r_1()
+                        .border_color(hsla(t.border))
+                        .child(preview),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .flex_grow(0.8)
+                        .min_w(px(CONTROLS_MIN_WIDTH))
+                        .h_full()
+                        .child(ScrollArea::new("captions-scroll").child(trail)),
+                )
+        } else {
+            // Stacked in one column, a hairline above the controls.
+            div().size_full().child(
+                ScrollArea::new("captions-scroll").child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(preview)
+                        .child(trail.border_t_1().border_color(hsla(t.border))),
+                ),
+            )
+        };
         div()
             .id("captions-page")
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -871,16 +1125,7 @@ impl Render for CaptionsPanel {
             .type_scale(text::META)
             .bg(hsla(t.glass_solid))
             .text_color(hsla(t.foreground))
-            .child(
-                ScrollArea::new("captions-scroll").child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(size::GUTTER))
-                        .child(preview)
-                        .child(controls)
-                        .children(transcript),
-                ),
-            )
+            .child(measure)
+            .child(body)
     }
 }

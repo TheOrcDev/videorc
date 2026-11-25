@@ -4,12 +4,13 @@
 //! (P505). The view is the core's `layout_section_view`; the stage's phase
 //! gates the layouts and Freeform as it draws.
 
-use gpui::{AnyElement, Context, FontWeight, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px};
 use serde_json::{Map, json};
 use videorc_app_core::editor::inspector::copy as inspector_copy;
 use videorc_app_core::nav::PageId;
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::icon::{IconName, icon};
+use videorc_kit::label::Label;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::settings_row::SettingsRow;
@@ -210,17 +211,15 @@ impl ScenePage {
                     .items_center()
                     .justify_between()
                     .gap(px(12.))
+                    // `ScreenFramingControl`: the name in 14 px / 500, its
+                    // line 2 px under it.
                     .child(
                         div()
                             .flex()
                             .flex_col()
+                            .gap(px(2.))
                             .min_w_0()
-                            .child(
-                                div()
-                                    .type_scale(text::LABEL)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(copy::SCREEN),
-                            )
+                            .child(Label::new(copy::SCREEN))
                             .child(div().type_scale(text::META).text_color(muted).child(line)),
                     )
                     .child(
