@@ -375,15 +375,7 @@ impl LibraryScreen {
 impl Render for LibraryScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme::current(window, cx).theme();
-        // The toolbar's title (`WINDOW_TITLE_CLASS`); the shell gives this
-        // page no toolbar of its own yet.
-        let title = div()
-            .flex_none()
-            .px(px(size::GUTTER))
-            .pb(px(8.))
-            .type_scale(text::SECTION)
-            .text_color(hsla(t.foreground))
-            .child(copy::TITLE);
+        // The title is the shell's toolbar band (#2206), not the page's.
         if self.cloud_shown {
             let cloud = self.cloud_body(cx);
             let tabs = self.tabs(cx).child(
@@ -401,7 +393,6 @@ impl Render for LibraryScreen {
                 .flex_col()
                 .type_scale(text::LABEL)
                 .text_color(hsla(t.foreground))
-                .child(title)
                 .child(tabs)
                 .child(self.markers_dialog_view(cx));
         }
@@ -736,7 +727,6 @@ impl Render for LibraryScreen {
             .on_key_down(cx.listener(Self::keys))
             .type_scale(text::LABEL)
             .text_color(ink)
-            .child(title)
             .child(self.tabs(cx).child(panel));
         if let Some(rename) = view.rename {
             root = root.child(

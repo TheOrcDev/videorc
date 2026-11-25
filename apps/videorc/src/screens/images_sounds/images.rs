@@ -1220,15 +1220,7 @@ impl Render for ImagesPanel {
             .bg(hsla(t.glass_solid))
             .text_color(hsla(t.foreground))
             .type_scale(text::META)
-            // The toolbar's title; the shell gives this page no toolbar yet.
-            .child(
-                div()
-                    .flex_none()
-                    .px(px(size::GUTTER))
-                    .pb(px(8.))
-                    .type_scale(text::SECTION)
-                    .child(assets::TITLE),
-            )
+            // The title is the shell's toolbar band (#2206), not the page's.
             .child(
                 div().flex_1().min_h(px(0.)).child(
                     ScrollArea::new("images-scroll").child(
