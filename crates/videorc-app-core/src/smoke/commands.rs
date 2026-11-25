@@ -52,7 +52,9 @@ pub const IMPLEMENTED_COMMANDS: &[&str] = &[
     "app-quit",
     "authorize-smoke-resource",
     "backend-debug-rpc",
+    "html-overlay-stats",
     "import-smoke-background",
+    "import-takeover-image",
     "inspect-backend-state-isolation",
     "preview-lifecycle-allow-app-quit",
     "preview-lifecycle-attempt-app-quit",
@@ -148,7 +150,6 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "global-shortcuts-recorder",
     "global-shortcuts-state",
     "import-smoke-scheduled-thumbnail",
-    "import-takeover-image",
     "inspect-native-preview-bootstrap",
     "inspect-native-preview-live-background",
     "inspect-native-preview-runtime",
@@ -361,7 +362,18 @@ impl AppSmokeCommands {
             }
             "authorize-smoke-resource" => self.authorize_resource(&params).await,
             "backend-debug-rpc" => self.backend_debug_rpc(&params).await,
+            "html-overlay-stats" => {
+                no_params(command, &params)?;
+                if self.config.packaged {
+                    return Err("HTML overlay stats are unavailable in this app mode.".into());
+                }
+                // Plan 260 P5-D10: the Chromium page host reports here when
+                // it lands. Until then the GPUI app has no host, so stats
+                // are null (Electron answers the same before the first target).
+                Ok(json!({ "stats": null }))
+            }
             "import-smoke-background" => self.import_background(&params).await,
+            "import-takeover-image" => self.import_takeover(&params).await,
             "inspect-backend-state-isolation" => self.inspect_isolation(&params).await,
             other => Err(not_supported_message(other)),
         }
@@ -432,6 +444,65 @@ impl AppSmokeCommands {
             )
             .await?;
         background_import_answer(&grant.path, &imported)
+    }
+
+    /// `import-takeover-image {path}`: a takeover image inside the smoke's
+    /// state directory, imported as the Images page imports one (the
+    /// backend's `screens.importImage` copies it into Screens storage).
+    /// Answered as Electron's Assets UI does after the picker finishes:
+    /// every listed takeover id, and the ones whose thumbnail is ready.
+    async fn import_takeover(&self, params: &Map<String, Value>) -> Result<Value, String> {
+        const UNAVAILABLE: &str = "Takeover smoke import unavailable.";
+        if self.config.packaged || params.len() != 1 {
+            return Err(UNAVAILABLE.into());
+        }
+        let path = params.get("path").cloned().ok_or(UNAVAILABLE)?;
+        let mut check = Map::new();
+        check.insert("path".into(), path);
+        check.insert("kind".into(), json!("input-file"));
+        let grant =
+            validate_smoke_resource_authorization(&check, self.config.state_directory.as_deref())?;
+        let imported = self
+            .admin
+            .request(
+                "screens.importImage",
+                json!({ "path": grant.path.to_string_lossy() }),
+                IMAGE_IMPORT_TIMEOUT,
+            )
+            .await?;
+        let imported_id = imported
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("The backend's takeover import gave no id.")?
+            .to_string();
+        let list = self
+            .admin
+            .request("screens.list", json!({}), ADMIN_TIMEOUT)
+            .await?;
+        let screens = list
+            .as_array()
+            .ok_or("screens.list did not return an array.")?;
+        let mut ids = Vec::with_capacity(screens.len());
+        let mut ready_ids = Vec::with_capacity(screens.len());
+        for screen in screens {
+            let Some(id) = screen.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            ids.push(id.to_string());
+            // Electron's readyIds are tiles whose <img> decoded. On GPUI the
+            // Images page has no thumbnail decode gate yet; a listed screen
+            // after a successful import is ready for the smoke.
+            let status = screen.get("status").and_then(Value::as_str);
+            if status != Some("missing") {
+                ready_ids.push(id.to_string());
+            }
+        }
+        if !ids.iter().any(|id| id == &imported_id) {
+            return Err(format!(
+                "Takeover import published {imported_id} but screens.list does not include it."
+            ));
+        }
+        Ok(json!({ "ids": ids, "readyIds": ready_ids }))
     }
 
     async fn backend_debug_rpc(&self, params: &Map<String, Value>) -> Result<Value, String> {
