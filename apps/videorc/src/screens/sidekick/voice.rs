@@ -2,19 +2,27 @@
 
 use gpui::{AnyElement, Context, Window, div, prelude::*, px};
 use videorc_app_core::buddy::copy as words;
+use videorc_app_core::livestream::PlatformsState;
+use videorc_app_core::livestream::accounts::{
+    AccountStatus, KICK_MODERATION_SCOPE, PlatformAccount, TWITCH_MODERATION_SCOPE,
+    YOUTUBE_FORCE_SSL_SCOPE, permission_reconnect_scopes, platform_label,
+};
 use videorc_app_core::stream_manager::buddy::{self as sm_buddy, CohostSettingsView};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::chat_platform::ChatPlatform;
+use videorc_kit::icon::icon;
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
+use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
 
-use super::SidekickScreen;
 use super::live::{LiveView, UnlockAction};
+use super::{SaveSection, SidekickScreen};
 
 const COMMANDS: &str = "Commands";
 const WHAT_YOU_CAN_SAY: &str = "What you can say";
@@ -102,6 +110,87 @@ const VOICE_COMMANDS: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
+const REMOVE_MESSAGES_READY: &str = "Ready";
+const REMOVE_MESSAGES_NEEDS_ACCESS: &str = "Needs access";
+
+/// One "Remove messages" row (`RemoveMessagesRow`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveMessagesRow {
+    pub platform: &'static str,
+    pub label: &'static str,
+    pub account_label: Option<String>,
+    pub ready: bool,
+    /// The fix as a sentence: the button's name and tooltip.
+    pub message: String,
+    /// "Reconnect" or "Authorize X Live"; None when ready.
+    pub action: Option<&'static str>,
+}
+
+/// `removeMessagesReadiness(platform, account) === 'ready'`.
+fn removes_messages(platform: &str, account: &PlatformAccount, x_live_authorized: bool) -> bool {
+    let connected = account.status == AccountStatus::Connected;
+    let holds = |scope: &str| connected && account.scopes.iter().any(|held| held == scope);
+    match platform {
+        "youtube" => holds(YOUTUBE_FORCE_SSL_SCOPE),
+        "twitch" => holds(TWITCH_MODERATION_SCOPE),
+        "kick" => holds(KICK_MODERATION_SCOPE),
+        "x" => connected && x_live_authorized,
+        _ => false,
+    }
+}
+
+/// `removeMessagesRows`: each connected platform that can remove a chat
+/// message, in the Destinations order, ready or with its one fix.
+pub fn remove_messages_rows(platforms: &PlatformsState) -> Vec<RemoveMessagesRow> {
+    let x_live_authorized = platforms
+        .x_capability
+        .as_ref()
+        .is_some_and(|capability| capability.native_available);
+    ["youtube", "twitch", "kick", "x"]
+        .into_iter()
+        .filter_map(|platform| {
+            let account = platforms
+                .accounts
+                .iter()
+                .find(|account| account.platform == platform)?;
+            let label = platform_label(platform);
+            let ready = removes_messages(platform, account, x_live_authorized);
+            let account_label = Some(account.account_label.trim().to_string())
+                .filter(|account_label| !account_label.is_empty());
+            let (message, action) = if ready {
+                (REMOVE_MESSAGES_READY.to_string(), None)
+            } else if platform == "x" {
+                (
+                    "Authorize X Live to let Sidekick remove messages.".to_string(),
+                    Some("Authorize X Live"),
+                )
+            } else {
+                (
+                    format!("Reconnect {label} to let Sidekick remove messages."),
+                    Some("Reconnect"),
+                )
+            };
+            Some(RemoveMessagesRow {
+                platform,
+                label,
+                account_label,
+                ready,
+                message,
+                action,
+            })
+        })
+        .collect()
+}
+
+fn chat_platform(platform: &str) -> ChatPlatform {
+    match platform {
+        "youtube" => ChatPlatform::Youtube,
+        "twitch" => ChatPlatform::Twitch,
+        "kick" => ChatPlatform::Kick,
+        _ => ChatPlatform::X,
+    }
+}
+
 fn phrases_label(phrases: &[&str]) -> String {
     phrases
         .iter()
@@ -120,6 +209,8 @@ fn commands_description() -> String {
 pub fn render_voice(
     view: &LiveView,
     settings: Option<&CohostSettingsView>,
+    paused: &[&'static str],
+    rows: &[RemoveMessagesRow],
     window: &mut Window,
     cx: &mut Context<SidekickScreen>,
 ) -> AnyElement {
@@ -165,9 +256,7 @@ pub fn render_voice(
                     .size(ButtonSize::Xs)
                     .label(label)
                     .on_click(move |_, _, cx| match action {
-                        UnlockAction::SignIn => {
-                            eprintln!("[videorc-app] Sidekick Voice: Sign in (account UI next)")
-                        }
+                        UnlockAction::SignIn => crate::app::accounts::sign_in(cx),
                         UnlockAction::ViewPremium => cx.open_url("https://videorc.com/premium"),
                     }),
             );
@@ -189,6 +278,18 @@ pub fn render_voice(
                             entity.update(cx, |screen, cx| screen.select_tab(0, cx));
                         }),
                 ),
+        );
+    }
+    for (index, line) in paused.iter().enumerate() {
+        lead = lead.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .type_scale(text::META)
+                .text_color(muted)
+                .child(StatusDot::new(("voice-paused", index)).tone(StatusTone::Warn))
+                .child(*line),
         );
     }
 
@@ -241,8 +342,9 @@ pub fn render_voice(
                                     let entity = entity.clone();
                                     move |value, _, cx| {
                                         entity.update(cx, |screen, cx| {
-                                            screen.patch_settings(
+                                            screen.patch_section(
                                                 serde_json::json!({ "wakeWordRequired": value }),
+                                                SaveSection::Voice,
                                                 cx,
                                             );
                                         });
@@ -266,8 +368,9 @@ pub fn render_voice(
                                     move |value, _, cx| {
                                         let mode = value.to_string();
                                         entity.update(cx, |screen, cx| {
-                                            screen.patch_settings(
+                                            screen.patch_section(
                                                 serde_json::json!({ "removeConfirm": mode }),
+                                                SaveSection::Voice,
                                                 cx,
                                             );
                                         });
@@ -277,30 +380,73 @@ pub fn render_voice(
                 ),
         );
 
+    let mut platform_rows = GroupedList::new().label(REMOVE_MESSAGES);
+    if rows.is_empty() {
+        platform_rows = platform_rows.row(
+            ListRow::new("remove-messages-empty", BUDDY_REMOVE_MESSAGES_NO_ACCOUNT).compact(true),
+        );
+    }
+    for row in rows {
+        let mark = chat_platform(row.platform);
+        let status = if row.ready {
+            REMOVE_MESSAGES_READY
+        } else {
+            REMOVE_MESSAGES_NEEDS_ACCESS
+        };
+        let mut list_row = ListRow::new(format!("remove-messages-{}", row.platform), row.label)
+            .compact(true)
+            .icon(icon(mark.icon(), 14., mark.tint_hsla(theme)))
+            .status_icon(
+                StatusDot::new(format!("remove-messages-status-{}", row.platform))
+                    .tone(if row.ready {
+                        StatusTone::Good
+                    } else {
+                        StatusTone::Warn
+                    })
+                    .label(status),
+            );
+        if let Some(account) = row.account_label.as_ref() {
+            list_row = list_row.context(account.clone());
+        }
+        if let Some(action) = row.action {
+            let platform = row.platform;
+            list_row = list_row.child(
+                Button::new(format!("remove-messages-fix-{platform}"))
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::Xs)
+                    .label(action)
+                    .accessibility_label(row.message.clone())
+                    .tooltip(row.message.clone())
+                    .on_click(move |_, _, cx| {
+                        if matches!(platform, "x" | "youtube") {
+                            // Authorize X Live, and YouTube's consent before
+                            // its sign-in, have no GPUI home yet (Sweep A).
+                            eprintln!("[videorc-app] Sidekick Voice: {platform} fix (next)");
+                            return;
+                        }
+                        // The reconnect grants the moderation scope
+                        // (`permissionReconnectOptions`).
+                        crate::app::accounts::connect_provider(
+                            cx,
+                            platform,
+                            permission_reconnect_scopes(platform),
+                            false,
+                            |_, _| {},
+                        );
+                    }),
+            );
+        }
+        platform_rows = platform_rows.row(list_row);
+    }
+
     let remove = PanelSection::new("sidekick-remove-messages")
         .title(REMOVE_MESSAGES)
-        .description(format!("{limits} {BUDDY_REMOVAL_FALLBACK}"))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .type_scale(text::META)
-                        .text_color(muted)
-                        .child(BUDDY_VOICE_PREMIUM),
-                )
-                .child(
-                    div()
-                        .type_scale(text::META)
-                        .text_color(muted)
-                        .p(px(12.))
-                        .child(BUDDY_REMOVE_MESSAGES_NO_ACCOUNT),
-                ),
-        );
+        .description(format!(
+            "{limits} {BUDDY_REMOVAL_FALLBACK} {BUDDY_VOICE_PREMIUM}"
+        ))
+        .child(platform_rows);
 
-    let show_lead = view.unlock.is_some() || off;
+    let show_lead = view.unlock.is_some() || off || !paused.is_empty();
 
     div()
         .flex()

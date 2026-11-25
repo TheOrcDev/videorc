@@ -35,7 +35,7 @@ use crate::screens::images_sounds::{ImagesPanel, SoundsPanel};
 use crate::screens::output::OutputPanel;
 use crate::screens::scene::{SceneNavigate, ScenePage};
 use crate::screens::settings::OpenSetup;
-use crate::screens::sidekick::SidekickScreen;
+use crate::screens::sidekick::{OpenLibrarySession, SidekickScreen};
 use crate::screens::sources::SourcesPanel;
 use crate::screens::studio::{StudioPage, transport::OpenPage};
 
@@ -252,6 +252,17 @@ impl Shell {
         )
         .detach();
         cx.observe(&sidekick, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &sidekick,
+            window,
+            |this, _, open: &OpenLibrarySession, window, cx| {
+                this.open_page(PageId::Library, window, cx);
+                this.library.update(cx, |library, cx| {
+                    library.focus_session(Some(open.0.as_str()), window, cx)
+                });
+            },
+        )
+        .detach();
         cx.observe(&images, |_, _, cx| cx.notify()).detach();
         cx.observe(&sounds, |_, _, cx| cx.notify()).detach();
         cx.observe(&go_live, |_, _, cx| cx.notify()).detach();

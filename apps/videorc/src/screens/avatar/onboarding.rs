@@ -16,13 +16,10 @@
 //! Not yet in this flavour: the animated stream demo (a still one) and
 //! shrinking a picture over 3 MB before it is sent.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Image, ImageSource, KeyDownEvent, ObjectFit,
+    AnyElement, App, Context, Entity, FocusHandle, ImageSource, KeyDownEvent, ObjectFit,
     PathPromptOptions, Role, SharedString, Window, div, img, prelude::*, px,
 };
 use gpui_base::actions::Confirm;
@@ -134,10 +131,8 @@ pub struct Onboarding {
     /// Kept or begun again: the fields empty on the next frame (they need a
     /// window).
     clear_fields: bool,
-    /// The draft's pictures, read fresh per redo (a redone pose keeps its
-    /// path), for the tiles and the living preview.
-    pictures_key: String,
-    pictures: BTreeMap<String, Arc<Image>>,
+    /// The draft pictures' key the living preview last played.
+    stills_key: String,
     /// The draft's living preview, this dialog's own.
     preview: Option<Entity<PetPreview>>,
     preview_active: bool,
@@ -164,8 +159,7 @@ impl Onboarding {
             focus: None,
             focus_body: false,
             clear_fields: false,
-            pictures_key: String::new(),
-            pictures: BTreeMap::new(),
+            stills_key: String::new(),
             preview: None,
             preview_active: false,
             delete: Confirmation::new(),
@@ -700,60 +694,25 @@ impl AvatarScreen {
         }
     }
 
-    /// The draft's pictures, read again whenever the draft or a redo
-    /// changes them; the living preview plays them.
-    fn load_onboarding_pictures(&mut self, cx: &mut Context<Self>) {
-        let Some(draft) = self.onboarding_draft().cloned() else {
+    /// The wizard's living preview plays the draft's pictures, as the look
+    /// section read them (one read for both); pushed again when a new draft
+    /// or a redone pose moves their key.
+    fn sync_onboarding_stills(&mut self, cx: &mut Context<Self>) {
+        if self.onboarding_draft().is_none() {
             return;
-        };
-        let key = format!(
-            "{}:{}:{:?}",
-            draft.request_id, self.look_ui.look.revision, draft.images
-        );
-        let user_data_dir = self.user_data_dir.clone();
+        }
+        let (key, stills) = self.draft_stills();
         let Some(onboarding) = self.onboarding.as_mut() else {
             return;
         };
-        if onboarding.pictures_key == key {
+        if stills.is_empty() || onboarding.stills_key == key {
             return;
         }
-        onboarding.pictures_key = key.clone();
-        let paths: Vec<(String, PathBuf)> = draft
-            .images
-            .iter()
-            .filter_map(|(state, path)| {
-                pictures::managed_path(&user_data_dir, path).map(|path| (state.clone(), path))
-            })
-            .collect();
-        let read = cx.background_spawn(async move {
-            paths
-                .into_iter()
-                .filter_map(|(state, path)| files::load_image(&path).map(|image| (state, image)))
-                .collect::<BTreeMap<_, _>>()
-        });
-        cx.spawn(async move |this, cx| {
-            let images = read.await;
-            let _ = this.update(cx, |screen, cx| {
-                let Some(onboarding) = screen.onboarding.as_mut() else {
-                    return;
-                };
-                if onboarding.pictures_key != key {
-                    return;
-                }
-                let stills: Vec<(String, ImageSource)> = images
-                    .iter()
-                    .map(|(state, image)| (state.clone(), image.clone().into()))
-                    .collect();
-                onboarding.pictures = images;
-                if let Some(preview) = onboarding.preview.as_ref()
-                    && !stills.is_empty()
-                {
-                    preview.update(cx, |preview, cx| preview.show_still(key, stills, cx));
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        let Some(preview) = onboarding.preview.clone() else {
+            return;
+        };
+        onboarding.stills_key = key.clone();
+        preview.update(cx, |preview, cx| preview.show_still(key, stills, cx));
     }
 
     /// The preview ticks only while the wizard shows step 4 on the page.
@@ -785,7 +744,7 @@ pub(super) fn render_onboarding(
         return div().into_any_element();
     }
     screen.ensure_onboarding_fields(window, cx);
-    screen.load_onboarding_pictures(cx);
+    screen.sync_onboarding_stills(cx);
     let in_progress = screen.onboarding_in_progress();
     if let Some(onboarding) = screen.onboarding.as_mut() {
         sync_handle(
@@ -1563,7 +1522,7 @@ fn create_step(
             // draw keeps the tiles and the line, without an empty box.
             let preview = match onboarding.preview.clone() {
                 Some(preview)
-                    if !onboarding.pictures.is_empty() && preview.read(cx).error().is_none() =>
+                    if screen.has_draft_pictures() && preview.read(cx).error().is_none() =>
                 {
                     Some(preview)
                 }
@@ -1645,7 +1604,7 @@ fn pose_tiles(
         let done = view_kind == View::Working
             && look.phases.get(state).map(String::as_str) == Some("done");
         let picture = (view_kind == View::Draft)
-            .then(|| onboarding.pictures.get(state).cloned())
+            .then(|| screen.draft_picture(state))
             .flatten();
         let failed = view_kind == View::Draft
             && !redoing

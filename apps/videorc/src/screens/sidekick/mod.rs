@@ -16,44 +16,52 @@ use std::sync::Arc;
 
 use gpui::{Context, Window, div, prelude::*};
 use serde_json::json;
+use videorc_app_core::account::entitlements::{live_cohost_gate, read_snapshot};
 use videorc_app_core::buddy::chat::{self as buddy_chat, RULES_MAX};
 use videorc_app_core::buddy::copy as words;
 use videorc_app_core::stream_manager::buddy::{
-    CLOUD_AI_KEEPS, CohostSettingsView, CohostState, cloud_ai_uses,
+    CLOUD_AI_KEEPS, CohostSettingsView, CohostState, cloud_ai_uses, command_availability_lines,
+    listen_allowance_label,
 };
 use videorc_app_core::studio::families::{
     self, clean_cut_auto, write_ai_consent, write_clean_cut_auto,
 };
 use videorc_app_core::studio::ui_local::UiLocal;
-use videorc_app_core::{BackendClient, BackendEvent, Studio};
+use videorc_app_core::user_error::{
+    Failure, UserErrorContext, UserErrorKind, toast_user_error, user_error_message,
+};
+use videorc_app_core::{BackendClient, BackendEvent, BackendState, Studio};
 use videorc_kit::dialog::DialogHandle;
 use videorc_kit::page_tabs::PageTabs;
 use videorc_kit::theme::FONT;
+use videorc_kit::toast::{ToastData, ToastKind};
 use videorc_protocol::cohost::CohostAutoChat;
-use videorc_protocol::{
-    CleanCutGetResult, CleanCutJob, CleanCutJobDetail, CleanCutMode, CohostReportPayload,
-};
+use videorc_protocol::{CleanCutGetResult, CleanCutJob, CleanCutJobDetail, CleanCutMode};
 
 use chat::{ChatWidgets, render_chat};
-use clean_cut::{CleanCutState, RecordingRow, render_clean_cut};
+use clean_cut::CleanCutState;
+pub use clean_cut::OpenLibrarySession;
 use community::{CommunityState, LinkSuggestion, PersonDetail, PersonRow, render_community};
 use live::{LiveInput, LiveView, live_view};
 use overview::{OverviewState, render_overview};
 use reports::{ReportsState, render_reports};
 use videorc_app_core::buddy::community::CommunitySummary;
-use voice::render_voice;
+use voice::{remove_messages_rows, render_voice};
 
 pub type AppStudio = Studio<BackendClient>;
 
 /// The events the page follows; `main.rs` adds them to the client's filter
 /// (the backend drops the rest). `cohost.settings.changed` and
 /// `account.changed` come with Avatar's and Settings' lists.
-pub const EVENTS: [&str; 4] = [
+pub const EVENTS: [&str; 5] = [
     "cohost.state",
     "cleanCut.status",
     "cohost.report.saved",
     "cohost.community.changed",
+    ENTITLEMENTS_UPDATED,
 ];
+/// Premium changed (a purchase, a refresh): the locks read again.
+const ENTITLEMENTS_UPDATED: &str = "entitlements.updated";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -115,10 +123,40 @@ impl Tab {
     }
 }
 
+/// Where a failed settings save shows: under its section's card (Overview's
+/// listening, Replies, Moderation), or as a toast (Voice).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SaveSection {
+    Listen,
+    Replies,
+    Moderation,
+    Voice,
+}
+
+const SAVE_SETTINGS: UserErrorContext = UserErrorContext {
+    action: "save",
+    object: "Sidekick settings",
+};
+const SAVE_VOICE_SETTING: UserErrorContext = UserErrorContext {
+    action: "save",
+    object: "the voice command setting",
+};
+const TURN_ON_LIVE: UserErrorContext = UserErrorContext {
+    action: "turn on",
+    object: "Sidekick Live",
+};
+const TURN_OFF_LIVE: UserErrorContext = UserErrorContext {
+    action: "turn off",
+    object: "Sidekick Live",
+};
+
 pub struct SidekickScreen {
     studio: Arc<AppStudio>,
     runtime: tokio::runtime::Handle,
     local_dir: PathBuf,
+    /// The backend's bootstrap, for the single-use file capabilities
+    /// Community's Export… and Import… hand the backend.
+    backend_state: tokio::sync::watch::Receiver<BackendState>,
     tab: Tab,
     settings: Option<CohostSettingsView>,
     state: CohostState,
@@ -128,6 +166,8 @@ pub struct SidekickScreen {
     live: bool,
     consent: DialogHandle,
     pending_on: bool,
+    /// A failed save, under the section it belongs to (`SaveError`).
+    save_error: Option<(SaveSection, String)>,
     chat: Option<ChatWidgets>,
     community: Option<CommunityState>,
     reports: Option<ReportsState>,
@@ -139,6 +179,7 @@ impl SidekickScreen {
         studio: Arc<AppStudio>,
         runtime: tokio::runtime::Handle,
         local_dir: PathBuf,
+        backend_state: tokio::sync::watch::Receiver<BackendState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let tab = Tab::from_id(UiLocal::in_dir(&local_dir).buddy_tab());
@@ -147,6 +188,7 @@ impl SidekickScreen {
             studio: studio.clone(),
             runtime: runtime.clone(),
             local_dir,
+            backend_state,
             tab,
             settings: None,
             state: CohostState::default(),
@@ -156,6 +198,7 @@ impl SidekickScreen {
             live: false,
             consent: DialogHandle::new(false),
             pending_on: false,
+            save_error: None,
             chat: None,
             community: None,
             reports: None,
@@ -173,31 +216,25 @@ impl SidekickScreen {
         if let Some(widgets) = self.chat.as_ref() {
             widgets.sync_cooldowns(self.settings.as_ref(), window, cx);
         }
+        self.sync_rule_inputs(window, cx);
     }
 
     fn ensure_clean_cut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.clean_cut.is_none() {
             self.clean_cut = Some(CleanCutState::new(&self.local_dir, window, cx));
         }
-        if self.tab == Tab::CleanCut {
-            if let Some(clean) = self.clean_cut.as_ref() {
-                if !clean.loaded {
-                    self.refresh_clean_cut(cx);
-                }
-            }
+        if self.tab == Tab::CleanCut
+            && let Some(clean) = self.clean_cut.as_ref()
+            && !clean.loaded
+        {
+            self.refresh_clean_cut(cx);
         }
     }
 
     fn ensure_reports(&mut self, cx: &mut Context<Self>) {
-        if self.reports.is_none() {
-            self.reports = Some(ReportsState::default());
-        }
-        if self.tab == Tab::Reports {
-            if let Some(reports) = self.reports.as_ref() {
-                if !reports.loaded && !reports.loading {
-                    self.refresh_reports(cx);
-                }
-            }
+        let reports = self.reports.get_or_insert_with(ReportsState::default);
+        if self.tab == Tab::Reports && !reports.loaded && !reports.loading {
+            self.refresh_reports(cx);
         }
     }
 
@@ -234,7 +271,10 @@ impl SidekickScreen {
                             Ok(BackendEvent::Untyped { event, payload }) => {
                                 let refresh = matches!(
                                     event.as_str(),
-                                    "cohost.state" | "cohost.settings.changed" | "account.changed"
+                                    "cohost.state"
+                                        | "cohost.settings.changed"
+                                        | "account.changed"
+                                        | ENTITLEMENTS_UPDATED
                                 );
                                 if event == "cohost.state" {
                                     if let Ok(state) =
@@ -250,10 +290,12 @@ impl SidekickScreen {
                                     let job = serde_json::from_value::<CleanCutJob>(payload.clone()).ok();
                                     let _ = this.update(cx, |screen, cx| {
                                         if let (Some(job), Some(clean)) = (job, screen.clean_cut.as_mut()) {
-                                            if let Some(slot) = clean.jobs.iter_mut().find(|j| j.id == job.id) {
-                                                *slot = job;
-                                            } else {
-                                                clean.jobs.insert(0, job);
+                                            // A finished cut adds its copy to the Library and
+                                            // spends minutes: read both again.
+                                            let finished = job.state == videorc_protocol::CleanCutJobState::Completed;
+                                            clean.jobs = videorc_app_core::buddy::clean_cut_view::upsert_job(&clean.jobs, job);
+                                            if finished {
+                                                screen.refresh_clean_cut(cx);
                                             }
                                         }
                                         cx.notify();
@@ -312,11 +354,14 @@ impl SidekickScreen {
                 .and_then(|value| value.get("status"))
                 .and_then(|status| status.as_str())
                 == Some("signed-in");
-            let entitled = account
-                .as_ref()
-                .and_then(|value| value.pointer("/entitlements/liveCohost/allowed"))
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
+            // Premium comes from `entitlements.get` (`liveCohostGate`):
+            // `account.get` carries no entitlements.
+            let entitlements = backend
+                .request("entitlements.get", serde_json::Value::Null)
+                .await
+                .ok()
+                .and_then(|value| read_snapshot(&value));
+            let entitled = live_cohost_gate(entitlements.as_ref()).allowed();
             (settings, signed_in, entitled)
         });
         cx.spawn(async move |this, cx| {
@@ -370,39 +415,53 @@ impl SidekickScreen {
         let backend = self.studio.backend().clone();
         let job = self.runtime.spawn(async move {
             let jobs = backend
-                .request("cleanCut.list", serde_json::json!({}))
+                .request("cleanCut.list", json!({}))
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<Vec<CleanCutJob>>(value).ok());
+            let sessions = backend
+                .request("sessions.list", json!({ "limit": 200 }))
                 .await
                 .ok()
                 .and_then(|value| {
-                    value
-                        .get("jobs")
-                        .cloned()
-                        .or_else(|| value.as_array().cloned().map(serde_json::Value::Array))
+                    serde_json::from_value::<videorc_protocol::SessionListPage>(value).ok()
                 })
-                .and_then(|value| serde_json::from_value::<Vec<CleanCutJob>>(value).ok())
-                .unwrap_or_default();
-            let recordings = backend
-                .request("sessions.list", serde_json::json!({ "limit": 50 }))
+                .map(|page| page.items);
+            let capabilities = backend.request("ai.capabilities.get", json!({})).await.ok();
+            let entitlements = backend
+                .request("entitlements.get", serde_json::Value::Null)
                 .await
                 .ok()
                 .and_then(|value| {
-                    value
-                        .get("sessions")
-                        .cloned()
-                        .or_else(|| value.get("items").cloned())
-                })
-                .and_then(|value| serde_json::from_value::<Vec<RecordingRow>>(value).ok())
-                .unwrap_or_default();
-            (jobs, recordings)
+                    type Snapshot = videorc_protocol::EntitlementsSnapshot;
+                    serde_json::from_value::<Snapshot>(value.clone())
+                        .ok()
+                        .or_else(|| {
+                            serde_json::from_value::<Snapshot>(value["snapshot"].clone()).ok()
+                        })
+                });
+            (jobs, sessions, capabilities, entitlements)
         });
         cx.spawn(async move |this, cx| {
-            let Ok((jobs, recordings)) = job.await else {
+            let Ok((jobs, sessions, capabilities, entitlements)) = job.await else {
                 return;
             };
             let _ = this.update(cx, |screen, cx| {
                 if let Some(clean) = screen.clean_cut.as_mut() {
-                    clean.jobs = jobs;
-                    clean.recordings = recordings;
+                    if let Some(jobs) = jobs {
+                        clean.jobs = jobs;
+                        clean.jobs_loaded = true;
+                    }
+                    if let Some(sessions) = sessions {
+                        clean.sessions = sessions;
+                    }
+                    clean.capabilities =
+                        videorc_app_core::buddy::clean_cut_view::clean_cut_capabilities(
+                            capabilities.as_ref(),
+                        );
+                    if entitlements.is_some() {
+                        clean.entitlements = entitlements;
+                    }
                     clean.loaded = true;
                 }
                 cx.notify();
@@ -423,37 +482,55 @@ impl SidekickScreen {
         .detach();
     }
 
-    pub(crate) fn start_clean_cut(&mut self, cx: &mut Context<Self>) {
-        let Some(clean) = self.clean_cut.as_ref() else {
+    /// `cleanCut.start` with the consent the card holds and, for Condensed,
+    /// the target length in seconds.
+    pub(crate) fn start_clean_cut(
+        &mut self,
+        session_id: String,
+        mode: CleanCutMode,
+        target_minutes: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(clean) = self.clean_cut.as_mut() else {
             return;
         };
-        let Some(session_id) = clean.selected_session.clone() else {
-            return;
-        };
-        let mode = clean.mode;
-        let consented = self.consented;
-        let backend = self.studio.backend().clone();
-        let job = self.runtime.spawn(async move {
-            backend
-                .request(
-                    "cleanCut.start",
-                    serde_json::json!({
-                        "sessionId": session_id,
-                        "mode": mode,
-                        "consentToUploadAudio": consented
-                    }),
-                )
-                .await
-                .ok()
-                .and_then(|value| serde_json::from_value::<CleanCutJob>(value).ok())
+        clean.pending = true;
+        let mut params = json!({
+            "sessionId": session_id,
+            "mode": mode,
+            "consentToUploadAudio": true
         });
+        if mode == CleanCutMode::Condensed {
+            params["targetDurationSeconds"] = json!(
+                videorc_app_core::buddy::clean_cut_view::condensed_target_seconds(target_minutes)
+            );
+        }
+        let backend = self.studio.backend().clone();
+        let job = self
+            .runtime
+            .spawn(async move { backend.request("cleanCut.start", params).await });
         cx.spawn(async move |this, cx| {
-            let Ok(started) = job.await else {
+            let Ok(result) = job.await else {
                 return;
             };
             let _ = this.update(cx, |screen, cx| {
-                if let (Some(started), Some(clean)) = (started, screen.clean_cut.as_mut()) {
-                    clean.jobs.insert(0, started);
+                if let Some(clean) = screen.clean_cut.as_mut() {
+                    clean.pending = false;
+                    if let Ok(value) = &result
+                        && let Ok(started) = serde_json::from_value::<CleanCutJob>(value.clone())
+                    {
+                        clean.jobs = videorc_app_core::buddy::clean_cut_view::upsert_job(
+                            &clean.jobs,
+                            started,
+                        );
+                    }
+                }
+                if let Err(error) = &result {
+                    screen.clean_cut_failed(
+                        "clean-cut-start",
+                        videorc_app_core::buddy::clean_cut_view::start_failed_title(mode),
+                        error,
+                    );
                 }
                 cx.notify();
             });
@@ -465,12 +542,21 @@ impl SidekickScreen {
         let backend = self.studio.backend().clone();
         let job = self.runtime.spawn(async move {
             backend
-                .request("cleanCut.cancel", serde_json::json!({ "jobId": job_id }))
+                .request("cleanCut.cancel", json!({ "jobId": job_id }))
                 .await
         });
         cx.spawn(async move |this, cx| {
-            let _ = job.await;
-            let _ = this.update(cx, |screen, cx| screen.refresh_clean_cut(cx));
+            let result = job.await;
+            let _ = this.update(cx, |screen, cx| {
+                if let Ok(Err(error)) = &result {
+                    screen.clean_cut_failed(
+                        "clean-cut-cancel",
+                        videorc_app_core::buddy::clean_cut_view::CANCEL_FAILED_TITLE,
+                        error,
+                    );
+                }
+                screen.refresh_clean_cut(cx);
+            });
         })
         .detach();
     }
@@ -603,62 +689,13 @@ impl SidekickScreen {
         .detach();
     }
 
-    pub(crate) fn refresh_reports(&mut self, cx: &mut Context<Self>) {
-        if let Some(reports) = self.reports.as_mut() {
-            reports.loading = true;
-            reports.error = None;
-        }
-        cx.notify();
-        let backend = self.studio.backend().clone();
-        let job = self.runtime.spawn(async move {
-            match backend
-                .request("cohost.report.latest", serde_json::json!({}))
-                .await
-            {
-                Ok(value) => {
-                    if value.is_null() {
-                        Ok(None)
-                    } else {
-                        serde_json::from_value::<CohostReportPayload>(value)
-                            .map(Some)
-                            .map_err(|e| e.to_string())
-                    }
-                }
-                Err(error) => Err(error.to_string()),
-            }
-        });
-        cx.spawn(async move |this, cx| {
-            let result = job.await;
-            let _ = this.update(cx, |screen, cx| {
-                if let Some(reports) = screen.reports.as_mut() {
-                    reports.loading = false;
-                    reports.loaded = true;
-                    match result {
-                        Ok(Ok(payload)) => {
-                            reports.payload = payload;
-                            reports.error = None;
-                        }
-                        Ok(Err(error)) => {
-                            reports.error = Some(error);
-                        }
-                        Err(error) => {
-                            reports.error = Some(error.to_string());
-                        }
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     pub(crate) fn refresh_community(&mut self, cx: &mut Context<Self>) {
         let backend = self.studio.backend().clone();
-        let query = self
+        let (query, filter, sort) = self
             .community
             .as_ref()
-            .map(|c| c.search.read(cx).value().to_string())
-            .unwrap_or_default();
+            .map(|c| (c.search.read(cx).value().to_string(), c.filter, c.sort))
+            .unwrap_or((String::new(), "regulars", "streams"));
         let query = query.trim().to_string();
         let job = self.runtime.spawn(async move {
             let summary = backend
@@ -666,7 +703,7 @@ impl SidekickScreen {
                 .await
                 .ok()
                 .and_then(|value| serde_json::from_value::<CommunitySummary>(value).ok());
-            let mut list_params = json!({ "filter": "everyone", "sort": "streams", "limit": 100 });
+            let mut list_params = json!({ "filter": filter, "sort": sort, "limit": 100 });
             if !query.is_empty() {
                 list_params["query"] = json!(query);
             }
@@ -750,8 +787,14 @@ impl SidekickScreen {
         .detach();
     }
 
-    pub(crate) fn select_community_person(&mut self, person_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn select_community_person(
+        &mut self,
+        person_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let backend = self.studio.backend().clone();
+        let asked = person_id.clone();
         let job = self.runtime.spawn(async move {
             backend
                 .request("cohost.community.person", json!({ "personId": person_id }))
@@ -759,17 +802,20 @@ impl SidekickScreen {
                 .ok()
                 .and_then(|value| serde_json::from_value::<PersonDetail>(value).ok())
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(person) = job.await else {
                 return;
             };
-            let _ = this.update(cx, |screen, cx| {
-                if let Some(community) = screen.community.as_mut() {
-                    community.selected = person;
-                    community.linking = false;
-                    community.link_hits.clear();
+            let _ = this.update_in(cx, |screen, window, cx| {
+                // A card opened on someone else since: this answer is stale.
+                let current = screen
+                    .community
+                    .as_ref()
+                    .and_then(|community| community.opening.as_ref())
+                    .is_some_and(|(id, _)| *id == asked);
+                if current {
+                    screen.show_community_person(person, window, cx);
                 }
-                cx.notify();
             });
         })
         .detach();
@@ -779,34 +825,21 @@ impl SidekickScreen {
         &mut self,
         person_id: String,
         is_bot: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let status = if is_bot { "normal" } else { "bot" };
-        let backend = self.studio.backend().clone();
-        let job = self.runtime.spawn(async move {
-            backend
-                .request(
-                    "cohost.community.update",
-                    json!({ "personId": person_id, "status": status }),
-                )
-                .await
-                .ok()
-                .and_then(|value| serde_json::from_value::<PersonDetail>(value).ok())
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(person) = job.await else {
-                return;
-            };
-            let _ = this.update(cx, |screen, cx| {
-                if let Some(community) = screen.community.as_mut() {
-                    if let Some(person) = person {
-                        community.selected = Some(person);
-                    }
-                }
-                screen.refresh_community(cx);
-            });
-        })
-        .detach();
+        self.community_card_request(
+            community::CardCall {
+                method: "cohost.community.update",
+                params: json!({ "personId": person_id, "status": status }),
+                action: "update",
+                object: None,
+                then: community::CardThen::Person,
+            },
+            window,
+            cx,
+        );
     }
 
     pub(crate) fn ask_forget_person(
@@ -819,6 +852,8 @@ impl SidekickScreen {
         if let Some(community) = self.community.as_mut() {
             community.forget_id = Some(person_id);
             community.forget_name = name;
+            // The question takes the card's place (kit dialogs don't stack).
+            community.person.close(window, cx);
             community.forget.open(window, cx);
         }
         cx.notify();
@@ -877,35 +912,20 @@ impl SidekickScreen {
         &mut self,
         person_id: String,
         other_person_id: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let backend = self.studio.backend().clone();
-        let job = self.runtime.spawn(async move {
-            backend
-                .request(
-                    "cohost.community.link",
-                    json!({ "personId": person_id, "otherPersonId": other_person_id }),
-                )
-                .await
-                .ok()
-                .and_then(|value| serde_json::from_value::<PersonDetail>(value).ok())
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(person) = job.await else {
-                return;
-            };
-            let _ = this.update(cx, |screen, cx| {
-                if let Some(community) = screen.community.as_mut() {
-                    community.linking = false;
-                    community.link_hits.clear();
-                    if let Some(person) = person {
-                        community.selected = Some(person);
-                    }
-                }
-                screen.refresh_community(cx);
-            });
-        })
-        .detach();
+        self.community_card_request(
+            community::CardCall {
+                method: "cohost.community.link",
+                params: json!({ "personId": person_id, "otherPersonId": other_person_id }),
+                action: "link",
+                object: None,
+                then: community::CardThen::Person,
+            },
+            window,
+            cx,
+        );
     }
 
     pub(crate) fn community_accept_suggestion(
@@ -959,7 +979,7 @@ impl SidekickScreen {
             cx.notify();
             return;
         }
-        self.apply_live(on, cx);
+        self.apply_live(on, false, cx);
     }
 
     pub(crate) fn answer_consent(
@@ -969,23 +989,33 @@ impl SidekickScreen {
         cx: &mut Context<Self>,
     ) {
         self.consent.close(window, cx);
-        if !accept {
-            self.pending_on = false;
-            cx.notify();
-            return;
-        }
-        let studio = self.studio.clone();
         let turn_on = self.pending_on;
         self.pending_on = false;
+        if accept {
+            self.consent_and_turn_on(turn_on, cx);
+        }
+        cx.notify();
+    }
+
+    /// `answerBuddyConsent(true)`: grants cloud AI, then turns Sidekick Live
+    /// on when the switch asked. A failure is one toast with Retry.
+    fn consent_and_turn_on(&mut self, turn_on: bool, cx: &mut Context<Self>) {
+        let studio = self.studio.clone();
         let write = self
             .runtime
             .spawn(async move { studio.write_settings(vec![write_ai_consent(true)]).await });
         cx.spawn(async move |this, cx| {
-            let _ = write.await;
+            let answer = write.await;
             let _ = this.update(cx, |screen, cx| {
-                screen.consented = true;
-                if turn_on {
-                    screen.apply_live(true, cx);
+                match answer {
+                    Ok(Ok(())) => {
+                        screen.consented = true;
+                        if turn_on {
+                            screen.apply_live(true, true, cx);
+                        }
+                    }
+                    Ok(Err(error)) => screen.consent_failed(&error, turn_on, cx),
+                    Err(_) => {}
                 }
                 cx.notify();
             });
@@ -993,20 +1023,66 @@ impl SidekickScreen {
         .detach();
     }
 
-    fn apply_live(&mut self, on: bool, cx: &mut Context<Self>) {
+    /// The consent dialog's failure: "Couldn't turn on Sidekick Live" with
+    /// Retry (`BuddyTabConsentDialog`, id `buddy-live-consent`).
+    fn consent_failed(
+        &mut self,
+        error: &videorc_app_core::client::RpcError,
+        turn_on: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let copy = user_error_message(Failure::Rpc(error), Some(TURN_ON_LIVE));
+        if copy.kind == UserErrorKind::Canceled {
+            return;
+        }
+        let kind = if copy.warning {
+            ToastKind::Warning
+        } else {
+            ToastKind::Error
+        };
+        let entity = cx.entity();
+        let toast = ToastData::new(kind, copy.title)
+            .description(copy.description)
+            .action(words::RETRY, move |_, cx| {
+                entity.update(cx, |screen, cx| screen.consent_and_turn_on(turn_on, cx));
+            });
+        let hub = cx
+            .global::<crate::screens::notifications::Shared>()
+            .0
+            .clone();
+        hub.update(cx, |hub, cx| {
+            hub.press_toast("buddy-live-consent".to_string(), toast, cx)
+        });
+    }
+
+    /// `setBuddyLive(on)`. A failed switch is a toast; one that came from
+    /// the consent dialog offers Retry.
+    fn apply_live(&mut self, on: bool, from_consent: bool, cx: &mut Context<Self>) {
         let backend = self.studio.backend().clone();
         let job = self.runtime.spawn(async move {
             backend
                 .request("cohost.settings.set", json!({ "enabled": on }))
                 .await
         });
+        let studio = self.studio.clone();
         cx.spawn(async move |this, cx| {
             let result = job.await;
             let _ = this.update(cx, |screen, cx| {
-                if let Ok(Ok(value)) = result {
-                    screen.settings = CohostSettingsView::from_json(&value);
-                } else if let Ok(Err(error)) = result {
-                    eprintln!("[videorc-app] Sidekick Live: {error}");
+                match result {
+                    Ok(Ok(value)) => screen.settings = CohostSettingsView::from_json(&value),
+                    Ok(Err(error)) if from_consent => screen.consent_failed(&error, true, cx),
+                    Ok(Err(error)) => {
+                        let context = if on { TURN_ON_LIVE } else { TURN_OFF_LIVE };
+                        let id = if on {
+                            "buddy-live-on"
+                        } else {
+                            "buddy-live-off"
+                        };
+                        if let Some(command) = toast_user_error(Failure::Rpc(&error), context, id) {
+                            studio.post_notices(vec![command]);
+                        }
+                    }
+                    Err(_) => {}
                 }
                 cx.notify();
             });
@@ -1015,22 +1091,7 @@ impl SidekickScreen {
     }
 
     pub(crate) fn set_listen(&mut self, on: bool, cx: &mut Context<Self>) {
-        let backend = self.studio.backend().clone();
-        let job = self.runtime.spawn(async move {
-            backend
-                .request("cohost.settings.set", json!({ "listen": on }))
-                .await
-        });
-        cx.spawn(async move |this, cx| {
-            let result = job.await;
-            let _ = this.update(cx, |screen, cx| {
-                if let Ok(Ok(value)) = result {
-                    screen.settings = CohostSettingsView::from_json(&value);
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        self.patch_section(json!({ "listen": on }), SaveSection::Listen, cx);
     }
 
     pub(crate) fn set_consent(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -1053,21 +1114,60 @@ impl SidekickScreen {
     }
 
     pub(crate) fn patch_settings(&mut self, patch: serde_json::Value, cx: &mut Context<Self>) {
+        self.patch_settings_in(patch, None, cx);
+    }
+
+    /// `patchCohostSettings` for one section: its failure shows there.
+    pub(crate) fn patch_section(
+        &mut self,
+        patch: serde_json::Value,
+        section: SaveSection,
+        cx: &mut Context<Self>,
+    ) {
+        self.patch_settings_in(patch, Some(section), cx);
+    }
+
+    fn patch_settings_in(
+        &mut self,
+        patch: serde_json::Value,
+        section: Option<SaveSection>,
+        cx: &mut Context<Self>,
+    ) {
+        if section.is_some() {
+            self.save_error = None;
+        }
         let backend = self.studio.backend().clone();
         let job = self
             .runtime
             .spawn(async move { backend.request("cohost.settings.set", patch).await });
+        let studio = self.studio.clone();
         cx.spawn(async move |this, cx| {
             let result = job.await;
             let _ = this.update(cx, |screen, cx| {
-                match result {
-                    Ok(Ok(value)) => {
+                match (result, section) {
+                    (Ok(Ok(value)), _) => {
                         screen.settings = CohostSettingsView::from_json(&value);
                     }
-                    Ok(Err(error)) => {
+                    (Ok(Err(error)), Some(SaveSection::Voice)) => {
+                        if let Some(command) = toast_user_error(
+                            Failure::Rpc(&error),
+                            SAVE_VOICE_SETTING,
+                            "buddy-voice-setting",
+                        ) {
+                            studio.post_notices(vec![command]);
+                        }
+                    }
+                    (Ok(Err(error)), Some(section)) => {
+                        let copy = user_error_message(Failure::Rpc(&error), Some(SAVE_SETTINGS));
+                        if copy.kind != UserErrorKind::Canceled {
+                            screen.save_error =
+                                Some((section, format!("{}. {}", copy.title, copy.description)));
+                        }
+                    }
+                    (Ok(Err(error)), None) => {
                         eprintln!("[videorc-app] Sidekick settings: {error}");
                     }
-                    Err(error) => {
+                    (Err(error), _) => {
                         eprintln!("[videorc-app] Sidekick settings: {error}");
                     }
                 }
@@ -1075,6 +1175,14 @@ impl SidekickScreen {
             });
         })
         .detach();
+    }
+
+    /// The failed save under `section`, if that is where it belongs.
+    pub(crate) fn save_error(&self, section: SaveSection) -> Option<&str> {
+        self.save_error
+            .as_ref()
+            .filter(|(failed, _)| *failed == section)
+            .map(|(_, message)| message.as_str())
     }
 
     pub(crate) fn patch_auto_behaviour(
@@ -1108,7 +1216,22 @@ impl SidekickScreen {
             }
             _ => return,
         }
-        self.patch_settings(json!({ "autoChat": next }), cx);
+        self.patch_section(json!({ "autoChat": next }), SaveSection::Replies, cx);
+    }
+
+    /// The saved chat rules.
+    pub(crate) fn saved_rules(&self) -> Vec<String> {
+        self.settings
+            .as_ref()
+            .and_then(|settings| settings.raw.get("rules"))
+            .and_then(serde_json::Value::as_array)
+            .map(|rules| {
+                rules
+                    .iter()
+                    .filter_map(|rule| rule.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn add_chat_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1119,46 +1242,40 @@ impl SidekickScreen {
         let Some(rule) = buddy_chat::rule_to_save(&draft) else {
             return;
         };
-        let mut rules: Vec<String> = self
-            .settings
-            .as_ref()
-            .and_then(|s| s.raw.get("rules"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut rules = self.saved_rules();
         if rules.len() >= RULES_MAX {
             return;
         }
         rules.push(rule);
-        if let Some(widgets) = self.chat.as_ref() {
-            widgets
-                .rule_draft
-                .update(cx, |input, cx| input.set_value("", window, cx));
+        widgets
+            .rule_draft
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.patch_section(json!({ "rules": rules }), SaveSection::Moderation, cx);
+    }
+
+    /// A rule edited in place: saved on blur or Enter; emptied, it goes.
+    pub(crate) fn edit_chat_rule(&mut self, index: usize, text: &str, cx: &mut Context<Self>) {
+        let mut rules = self.saved_rules();
+        let Some(current) = rules.get(index).cloned() else {
+            return;
+        };
+        match buddy_chat::rule_to_save(text) {
+            Some(next) if next == current => return,
+            Some(next) => rules[index] = next,
+            None => {
+                rules.remove(index);
+            }
         }
-        self.patch_settings(json!({ "rules": rules }), cx);
+        self.patch_section(json!({ "rules": rules }), SaveSection::Moderation, cx);
     }
 
     pub(crate) fn remove_chat_rule(&mut self, index: usize, cx: &mut Context<Self>) {
-        let mut rules: Vec<String> = self
-            .settings
-            .as_ref()
-            .and_then(|s| s.raw.get("rules"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut rules = self.saved_rules();
         if index >= rules.len() {
             return;
         }
         rules.remove(index);
-        self.patch_settings(json!({ "rules": rules }), cx);
+        self.patch_section(json!({ "rules": rules }), SaveSection::Moderation, cx);
     }
 }
 
@@ -1170,39 +1287,57 @@ impl Render for SidekickScreen {
         self.ensure_clean_cut(window, cx);
         let view = self.view();
         let listen = self.settings.as_ref().map(|s| s.listen).unwrap_or(false);
-        let remember = self
-            .settings
-            .as_ref()
-            .and_then(|s| s.raw.get("community"))
-            .and_then(|c| c.get("remember"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let community_settings = community::community_settings(self.settings.as_ref());
         let overview = OverviewState {
             view: &view,
             listen,
             consented: self.consented,
             cloud_uses: cloud_ai_uses(),
             cloud_keeps: CLOUD_AI_KEEPS,
+            allowance: self
+                .state
+                .listening
+                .as_ref()
+                .and_then(listen_allowance_label),
+            listen_error: self.save_error(SaveSection::Listen),
         };
         let settings = self.settings.as_ref();
         let widgets = self.chat.as_ref().expect("chat widgets");
         let community = self.community.as_ref().expect("community state");
         let body = match self.tab {
             Tab::Overview => render_overview(overview, window, cx),
-            Tab::Chat => render_chat(&view, settings, widgets, window, cx),
-            Tab::Community => {
-                render_community(&view, self.entitled, community, remember, window, cx)
+            Tab::Chat => {
+                let errors = (
+                    self.save_error(SaveSection::Replies),
+                    self.save_error(SaveSection::Moderation),
+                );
+                render_chat(&view, settings, widgets, errors, window, cx)
             }
-            Tab::Voice => render_voice(&view, settings, window, cx),
+            Tab::Community => render_community(
+                &view,
+                self.entitled,
+                community,
+                &community_settings,
+                window,
+                cx,
+            ),
+            Tab::Voice => {
+                let paused = command_availability_lines(self.state.command_availability.as_ref());
+                let rows = remove_messages_rows(&self.studio.platforms_now());
+                render_voice(&view, settings, &paused, &rows, window, cx)
+            }
             Tab::Reports => {
                 let reports = self.reports.as_ref().expect("reports state");
                 let buddy_on = self.settings.as_ref().map(|s| s.enabled).unwrap_or(false);
-                render_reports(&view, reports, buddy_on, window, cx)
+                let name = self
+                    .settings
+                    .as_ref()
+                    .and_then(|s| s.persona.as_ref())
+                    .map(|persona| persona.name.as_str());
+                render_reports(&view, reports, buddy_on, name, window, cx)
             }
             Tab::CleanCut => {
-                let clean = self.clean_cut.as_ref().expect("clean cut state");
-                let auto = self.studio.read_ui_settings(clean_cut_auto);
-                render_clean_cut(&view, self.consented, auto, clean, window, cx)
+                self.render_clean_cut(self.studio.read_ui_settings(clean_cut_auto), window, cx)
             }
         };
 

@@ -6,6 +6,7 @@ use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
@@ -13,7 +14,7 @@ use videorc_kit::shortcut_keys::ShortcutKeys;
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::{size, text};
+use videorc_kit::tokens::{radius, size, text};
 
 use super::SidekickScreen;
 use super::live::{LiveView, StatusKind, UnlockAction};
@@ -24,6 +25,10 @@ pub struct OverviewState<'a> {
     pub consented: bool,
     pub cloud_uses: [String; 6],
     pub cloud_keeps: &'static str,
+    /// "4 h 20 min of listening left this month" (`CohostListenAllowance`).
+    pub allowance: Option<String>,
+    /// A failed listening save, under its card.
+    pub listen_error: Option<&'a str>,
 }
 
 fn status_tone(kind: StatusKind) -> StatusTone {
@@ -59,21 +64,40 @@ pub fn render_overview(
         );
     }
 
-    let mut status_row = div().flex().flex_wrap().items_center().gap(px(12.)).child(
-        div()
-            .flex()
-            .min_w(px(0.))
-            .flex_1()
-            .flex_col()
-            .gap(px(2.))
-            .child(
-                div()
-                    .type_scale(text::LABEL)
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(words::PAGE_TITLE),
-            )
-            .child(status_words),
-    );
+    // `SidekickMark` (lg): the page glyph on a quiet tile, monochrome.
+    let mark = div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(56.))
+        .rounded(px(radius::PANEL))
+        .bg(hsla(theme.muted))
+        .border_1()
+        .border_color(border)
+        .child(icon(IconName::UserSound, 28., hsla(theme.foreground)));
+
+    let mut status_row = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(12.))
+        .child(mark)
+        .child(
+            div()
+                .flex()
+                .min_w(px(0.))
+                .flex_1()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .type_scale(text::LABEL)
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(words::PAGE_TITLE),
+                )
+                .child(status_words),
+        );
 
     let checked = view.checked;
     let disabled = view.switch_disabled;
@@ -137,9 +161,7 @@ pub fn render_overview(
                     .size(ButtonSize::Xs)
                     .label(label)
                     .on_click(move |_, _, cx| match action {
-                        UnlockAction::SignIn => {
-                            eprintln!("[videorc-app] Sidekick: Sign in (account UI next)")
-                        }
+                        UnlockAction::SignIn => crate::app::accounts::sign_in(cx),
                         UnlockAction::ViewPremium => cx.open_url("https://videorc.com/premium"),
                     }),
             );
@@ -169,7 +191,18 @@ pub fn render_overview(
                             }),
                     ),
             ),
-        );
+        )
+        .children(
+            state
+                .allowance
+                .map(|line| div().type_scale(text::META).text_color(muted).child(line)),
+        )
+        .children(state.listen_error.map(|line| {
+            div()
+                .type_scale(text::META)
+                .text_color(hsla(theme.destructive))
+                .child(line.to_string())
+        }));
 
     let mut powers = GroupedList::new();
     for (title, description, tab) in words::POWERS {
