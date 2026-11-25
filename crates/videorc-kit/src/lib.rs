@@ -69,7 +69,7 @@ pub mod window_frame;
 
 pub use alert::{Alert, AlertVariant};
 pub use avatar::Avatar;
-pub use badge::{Badge, BadgeVariant};
+pub use badge::{Badge, BadgeVariant, plate_shadows};
 pub use bar_visualizer::{BarVisualizer, BarVisualizerState};
 pub use button::{Button, ButtonSize, ButtonVariant};
 pub use caption_preview_backdrop::{CaptionPreviewBackdrop, CaptionPreviewBackdropEl};
@@ -121,7 +121,9 @@ pub use status_dot::{StatusDot, StatusTone};
 pub use switch::Switch;
 pub use tabs::{Tabs, TabsVariant};
 pub use textarea::{Textarea, TextareaState};
-pub use theme::{Appearance, FONT, IncreaseContrast, ReduceMotion, TypeScale, faded_over, hsla};
+pub use theme::{
+    Appearance, FONT, FONT_MONO, IncreaseContrast, ReduceMotion, TypeScale, faded_over, hsla,
+};
 pub use toast::{ToastData, ToastKind, Toaster, toast_card};
 pub use toggle_group::{ToggleGroup, ToggleItem};
 pub use tooltip::{tooltip, tooltip_with_accelerator, tooltip_with_action, tooltip_with_shortcut};

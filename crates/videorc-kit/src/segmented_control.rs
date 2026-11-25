@@ -342,18 +342,34 @@ impl RenderOnce for SegmentedControl {
                     });
                 }
 
-                if !on {
-                    radio = radio.text_color(hsla(faded_over(t.muted_foreground, ground, 0.5)));
-                } else if checked {
+                if checked {
+                    // A disabled control keeps its choice on show: the plate
+                    // and its words stay, faded (`disabled:opacity-50` over
+                    // `aria-checked:chrome-plate`), pre-blended per the kit.
+                    let fade = |color| {
+                        if on {
+                            color
+                        } else {
+                            faded_over(color, ground, 0.5)
+                        }
+                    };
+                    let mut plate = plate_shadows(t);
+                    if !on {
+                        for shadow in &mut plate {
+                            shadow.color.a *= 0.5;
+                        }
+                    }
                     radio = radio
-                        .text_color(hsla(t.foreground))
+                        .text_color(hsla(fade(t.foreground)))
                         .bg(linear_gradient(
                             180.0,
-                            linear_color_stop(hsla(t.chrome_plate_top), 0.0),
-                            linear_color_stop(hsla(t.chrome_plate_bottom), 1.0),
+                            linear_color_stop(hsla(fade(t.chrome_plate_top)), 0.0),
+                            linear_color_stop(hsla(fade(t.chrome_plate_bottom)), 1.0),
                         )
                         .color_space(ColorSpace::Oklab))
-                        .shadow(plate_shadows(t));
+                        .shadow(plate);
+                } else if !on {
+                    radio = radio.text_color(hsla(faded_over(t.muted_foreground, ground, 0.5)));
                 } else {
                     radio = radio
                         .text_color(hsla(t.muted_foreground))

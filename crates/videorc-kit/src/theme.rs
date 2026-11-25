@@ -54,6 +54,18 @@ pub fn with_alpha(color: Color, factor: f32) -> Color {
 /// (`-apple-system`, `Segoe UI`, `system-ui`) in GPUI's own words.
 pub const FONT: &str = ".SystemUIFont";
 
+/// The monospace face (`--font-mono`: `ui-monospace`, SF Mono, Menlo) in a
+/// family GPUI can load. GPUI loads families by name and finds neither the
+/// CSS keyword nor SF Mono (hidden on macOS), so `font::MONO[0]` draws the
+/// system sans; this takes each platform's own mono, as gpui-base does.
+pub const FONT_MONO: &str = if cfg!(target_os = "macos") {
+    "Menlo"
+} else if cfg!(target_os = "windows") {
+    "Consolas"
+} else {
+    "DejaVu Sans Mono"
+};
+
 /// One appearance: light or dark, with or without Increase Contrast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Appearance {

@@ -257,8 +257,10 @@ pub(crate) fn tinted(chip: gpui::Div, t: &Theme, tone: Color) -> gpui::Div {
         )))
 }
 
-/// `chrome-plate`: `inset 0 1px 0 hi, inset 0 0 0 1px rim`.
-pub(crate) fn plate_shadows(t: &Theme) -> Vec<gpui::BoxShadow> {
+/// `chrome-plate`: `inset 0 1px 0 hi, inset 0 0 0 1px rim`. Public so a
+/// screen that wears the plate (the shell's selected row) uses this recipe
+/// rather than a copy.
+pub fn plate_shadows(t: &Theme) -> Vec<gpui::BoxShadow> {
     vec![
         box_shadow(&Shadow {
             inset: true,
