@@ -4,6 +4,7 @@
 //! message on stream; Remove from chat runs the Studio's moderation request
 //! after the 3 s Undo toast.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -25,6 +26,8 @@ use videorc_kit::{
     tokens::radius,
 };
 
+use crate::screens::chat_media::{self, Picture};
+
 /// Person-menu words (Electron `ChatPersonMenu`).
 const SAME_PERSON: &str = "Same person as…";
 const MARK_AS_BOT: &str = "Mark as bot";
@@ -44,6 +47,7 @@ pub fn chat_row(
     providers: &[LiveChatProviderState],
     operation: Option<&ModerationOperation>,
     requesting: bool,
+    pictures: &HashMap<String, Picture>,
     on_highlight: OnHighlight,
     on_remove: OnRemove,
 ) -> AnyElement {
@@ -106,7 +110,7 @@ pub fn chat_row(
     let has_person =
         !author.is_empty() && message.event_type != "system" && message.event_type != "moderation";
 
-    let body = row_body(&view);
+    let body = row_body(&view, pictures);
     let chips = view.row.chips.iter().map(|(label, chip)| {
         Badge::new(*label).variant(match chip {
             StatusChip::Neutral => BadgeVariant::Default,
@@ -173,7 +177,7 @@ fn person_menu(name: &str, platform: &str) -> Menu {
         .item(MenuItem::new(MARK_AS_BOT).on_select(|_, _| {}))
 }
 
-fn row_body(view: &ManagerRow) -> AnyElement {
+fn row_body(view: &ManagerRow, pictures: &HashMap<String, Picture>) -> AnyElement {
     div()
         .flex()
         .flex_col()
@@ -232,7 +236,17 @@ fn row_body(view: &ManagerRow) -> AnyElement {
         .when_some(view.reply.clone(), |col, reply| {
             col.child(div().text_size(px(11.)).child(reply))
         })
-        .child(div().text_size(px(13.)).child(view.row.words.clone()))
+        .when_some(view.notice.clone(), |col, notice| {
+            col.child(div().text_size(px(12.)).italic().child(notice))
+        })
+        // P198: emotes and GIFs as pictures (Electron CommentMessageBody).
+        .child(chat_media::message_body(
+            &view.pieces,
+            &view.gifs,
+            pictures,
+            13.,
+            96.,
+        ))
         .into_any_element()
 }
 
