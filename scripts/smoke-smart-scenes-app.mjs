@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url'
 
 import { buildFixtureApps, FIXTURE_SOURCE_PATH } from './fixtures/build-fixture-apps.mjs'
 import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
+import { createUiDriver } from './lib/ui-driver.mjs'
 import { reloadKeepingSeedJs, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { decodeSceneFrames } from './lib/scene-artifact-frames.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
@@ -444,14 +445,14 @@ try {
   summary.steps.reorder = await step('reorder', async () => {
     const before = await renderer.state()
     const last = before.scenes.at(-1)
-    // GPUI: the row's Alt+Arrow needs a focused row (no clicks yet, driver
-    // gap 1), so the move goes through the Studio's own move.
-    if (gpuiApp)
-      await renderer.command('studio-scene-move', {
-        id: last.id,
-        toIndex: before.scenes.length - 2
-      })
-    else
+    // GPUI: focus the Scene list row, then Alt+↑ — same path as Electron's
+    // keyboard reorder (gap 1 closed; rows track_focus).
+    if (gpuiApp) {
+      const ui = createUiDriver(smoke)
+      await ui.openTab('layout', { waitFor: { id: `scene-row-${last.id}` } })
+      await ui.focus({ id: `scene-row-${last.id}` })
+      await ui.press('ArrowUp', { modifiers: ['alt'] })
+    } else
       await renderer.evaluate(`
       const button = await waitFor('[data-saved-scene="${last.id}"] [data-slot="list-row-button"]');
       button.focus(); button.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true }));
@@ -479,7 +480,7 @@ try {
       ok: true,
       failures: [],
       rows,
-      detail: `reorder kept program; position chips follow the new order${gpuiApp ? " (GPUI: studio-scene-move and the Studio's position keys)" : ''}`
+      detail: `reorder kept program; position chips follow the new order${gpuiApp ? ' (GPUI: ui-focus + Alt+ArrowUp on scene-row)' : ''}`
     }
   })
   if (!summary.steps.reorder.ok) fail('reorder acceptance failed')

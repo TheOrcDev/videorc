@@ -207,6 +207,7 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "suspend-native-preview-surface",
     "ui-appearance",
     "ui-click",
+    "ui-drag",
     "ui-find",
     "ui-focus",
     "ui-key",
