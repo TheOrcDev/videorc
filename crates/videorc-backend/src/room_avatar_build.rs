@@ -42,8 +42,12 @@ const PORTRAIT: (u32, u32) = (1080, 1920);
 const POLL: Duration = Duration::from_millis(250);
 /// The still's clock: a fixed instant, so an idle pet's still never changes.
 const STILL_CLOCK_SECONDS: f64 = 0.0;
-/// `AVATAR_MAX_BYTES` (`cloud-avatar.ts`): one layer's PNG at most.
-const AVATAR_MAX_BYTES: usize = 512 * 1024;
+/// `avatarPng` (`cloud-avatar.ts`): a page refuses a layer whose PNG is over
+/// 256 KiB of base64, or over 1024 px on a side, or over 1024² pixels (and
+/// with it the whole snapshot). `AVATAR_MAX_BYTES` (512 KiB) bounds the
+/// snapshot, not one PNG.
+const AVATAR_PNG_MAX_BASE64: usize = 256 * 1024;
+const AVATAR_PNG_MAX_SIDE: u32 = 1024;
 
 pub(crate) fn set_build(build: bool) {
     BUILD.store(build, Ordering::Release);
@@ -55,19 +59,20 @@ pub(crate) fn building() -> bool {
 
 /// One lane's static layer from a composed straight-alpha BGRA picture of
 /// `size`: a PNG named by its SHA-256 (`avatarHash`), placed at `place`
-/// (canvas pixels, `[x, y, w, h]`) in canvas fractions. `None` when it would
-/// not fit the avatar's budget.
+/// (canvas pixels, `[x, y, w, h]`) in canvas fractions. `None` when a page
+/// would refuse it (`avatarPng`'s limits).
 pub(crate) fn png_layer(
     canvas: (u32, u32),
     place: [f32; 4],
     size: (u32, u32),
     bgra: &[u8],
 ) -> Option<Value> {
-    use image::ImageEncoder as _;
     let (width, height) = size;
-    let [x, y, place_width, place_height] = place;
+    let [_, _, place_width, place_height] = place;
     if width == 0
         || height == 0
+        || width > AVATAR_PNG_MAX_SIDE
+        || height > AVATAR_PNG_MAX_SIDE
         || place_width <= 0.0
         || place_height <= 0.0
         || bgra.len() < width as usize * height as usize * 4
@@ -78,27 +83,40 @@ pub(crate) fn png_layer(
     for pixel in bgra.chunks_exact(4) {
         rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
     }
-    let mut bytes = Vec::new();
-    image::codecs::png::PngEncoder::new(&mut bytes)
-        .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
-        .ok()?;
-    if bytes.len() > AVATAR_MAX_BYTES {
-        return None;
-    }
-    let hash = format!("{:x}", Sha256::digest(&bytes));
-    let png = base64::engine::general_purpose::STANDARD.encode(bytes);
-    let (canvas_width, canvas_height) = (f64::from(canvas.0), f64::from(canvas.1));
+    let (hash, png) = encode_png(&rgba, width, height)?;
     Some(json!({
         "kind": "avatar",
-        "rect": {
-            "x": f64::from(x) / canvas_width,
-            "y": f64::from(y) / canvas_height,
-            "w": f64::from(place_width) / canvas_width,
-            "h": f64::from(place_height) / canvas_height,
-        },
+        "rect": canvas_fractions(canvas, place),
         "asset": { "hash": hash, "png": png, "width": width, "height": height },
         "expiresAt": null,
     }))
+}
+
+/// Straight-alpha RGBA as a PNG: its SHA-256 (lowercase hex, the asset's
+/// name) and its base64. `None` when encoding fails or the base64 is over
+/// what a page takes.
+fn encode_png(rgba: &[u8], width: u32, height: u32) -> Option<(String, String)> {
+    use image::ImageEncoder as _;
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
+        .ok()?;
+    let png = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    if png.len() > AVATAR_PNG_MAX_BASE64 {
+        return None;
+    }
+    Some((format!("{:x}", Sha256::digest(&bytes)), png))
+}
+
+/// A place on a canvas (pixels, `[x, y, w, h]`) in canvas fractions.
+fn canvas_fractions(canvas: (u32, u32), [x, y, width, height]: [f32; 4]) -> Value {
+    let (canvas_width, canvas_height) = (f64::from(canvas.0), f64::from(canvas.1));
+    json!({
+        "x": f64::from(x) / canvas_width,
+        "y": f64::from(y) / canvas_height,
+        "w": f64::from(width) / canvas_width,
+        "h": f64::from(height) / canvas_height,
+    })
 }
 
 /// The content as `cloud.room.avatar.set` carries it.
@@ -222,6 +240,24 @@ mod tests {
         // Short pixels or an empty size: none.
         assert!(png_layer((100, 50), [0.0, 0.0, 2.0, 2.0], (2, 2), &bgra).is_none());
         assert!(png_layer((100, 50), [0.0, 0.0, 0.0, 1.0], (2, 1), &bgra).is_none());
+    }
+
+    #[test]
+    fn a_layer_a_page_would_refuse_is_not_made() {
+        // Wider than 1024 px (`avatarPng`).
+        let wide = vec![255_u8; 1025 * 4];
+        assert!(png_layer((1920, 1080), [0.0, 0.0, 1025.0, 1.0], (1025, 1), &wide).is_none());
+        let edge = vec![255_u8; 1024 * 4];
+        assert!(png_layer((1920, 1080), [0.0, 0.0, 1024.0, 1.0], (1024, 1), &edge).is_some());
+        // Noise does not compress: 300² pixels are far over 256 KiB of base64.
+        let mut seed = 0x2545_F491_u32;
+        let noise = (0..300 * 300 * 4)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 24) as u8
+            })
+            .collect::<Vec<_>>();
+        assert!(png_layer((1920, 1080), [0.0, 0.0, 300.0, 300.0], (300, 300), &noise).is_none());
     }
 
     #[test]
