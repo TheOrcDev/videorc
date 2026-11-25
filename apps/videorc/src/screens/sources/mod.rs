@@ -861,6 +861,13 @@ impl SourcesPanel {
         }
     }
 
+    /// P283: Open Scenes brings the Studio's Scenes section into view.
+    fn open_studio_scenes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(shell) = self.shell.as_ref() {
+            let _ = shell.update(cx, |shell, cx| shell.open_studio_scenes(window, cx));
+        }
+    }
+
     fn toggle_more(&mut self, key: &'static str, cx: &mut Context<Self>) {
         if !self.ui.more.insert(key) {
             self.ui.more.remove(key);
@@ -1029,7 +1036,7 @@ impl SourcesPanel {
                 )
                 .on_navigate(move |_, window, cx| {
                     entity.update(cx, |panel, cx| {
-                        panel.open_page(PageId::Studio, window, cx);
+                        panel.open_studio_scenes(window, cx);
                     });
                 }),
             );

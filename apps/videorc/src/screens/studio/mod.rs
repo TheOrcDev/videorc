@@ -6,7 +6,10 @@
 //! The grid follows the page's own width (P113): from 720 px the preview
 //! column spans the left and the transport heads the inspector on the
 //! right; narrower, the transport leads, then the preview, then the
-//! inspector.
+//! inspector. The page scrolls as one (`PaneBody`, `pane.tsx:80`), and a
+//! narrow page keeps its transport pinned unless the preview is docked
+//! (`studioTransportRowClass`). Doors bring Scenes (P283) and Audio
+//! (P172 / P180) into view on that scroll.
 
 pub mod alerts;
 pub mod audio;
@@ -24,9 +27,12 @@ pub mod talk_show_host;
 pub mod transport;
 pub mod vertical_stream;
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding,
-    KeyDownEvent, KeyUpEvent, Role, Window, canvas, div, prelude::*, px,
+    KeyDownEvent, KeyUpEvent, Role, ScrollHandle, Window, canvas, div, point, prelude::*, px,
 };
 use videorc_app_core::StopOrigin;
 use videorc_app_core::desktop::permissions::{PermissionPlatform, SystemPermissionPane};
@@ -35,6 +41,7 @@ use videorc_app_core::desktop::system_access::{
     media_access_status_for_pane, system_access_action, system_access_action_label,
     system_access_rows,
 };
+use videorc_app_core::livestream::plan;
 #[cfg(target_os = "macos")]
 use videorc_app_core::studio::screen_views::KEEP_ON_TOP_LABEL;
 use videorc_app_core::studio::screen_views::{
@@ -43,6 +50,7 @@ use videorc_app_core::studio::screen_views::{
 };
 use videorc_kit::ShortcutKeys;
 use videorc_kit::icon::{IconName, icon};
+use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
 use videorc_kit::{Button, ButtonVariant, Spinner};
@@ -56,7 +64,7 @@ use crate::preview::Preview;
 use alerts::{CloudResumeSlot, PreviewNotes, StudioRequest};
 use audio::AudioSection;
 use chat::ChatSection;
-use layout::{INSPECTOR_MAX_PX, StudioLayout};
+use layout::{INSPECTOR_MAX_PX, StudioLayout, StudioSection, reveal_offset, stage_footprint};
 use quick_settings::QuickSettingsSection;
 use scenes::ScenesSection;
 use session::SessionSection;
@@ -108,6 +116,11 @@ pub struct StudioPage {
     space_held: bool,
     /// The preview's permission fix (P133) is asking the OS or reopening.
     permission_pending: bool,
+    /// The page's scroll, so a door can bring its section into view.
+    scroll: ScrollHandle,
+    /// The section a door asked for, brought into view at its next paint
+    /// (the page may open first).
+    reveal: Rc<Cell<Option<StudioSection>>>,
 }
 
 impl EventEmitter<OpenPage> for StudioPage {}
@@ -152,6 +165,8 @@ impl StudioPage {
                 StudioRequest::FocusAudio => {
                     let strip = page.audio.read(cx).focus_handle(cx);
                     strip.focus(window, cx);
+                    // P172 / P180: and the Microphone row in view.
+                    page.reveal_section(StudioSection::Audio, cx);
                 }
                 StudioRequest::TakeoverEnded => page
                     .takeover
@@ -216,6 +231,8 @@ impl StudioPage {
             width: 0.,
             space_held: false,
             permission_pending: false,
+            scroll: ScrollHandle::new(),
+            reveal: Rc::new(Cell::new(None)),
         }
     }
 
@@ -223,6 +240,60 @@ impl StudioPage {
     pub fn open_add_scene(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.scenes
             .update(cx, |scenes, cx| scenes.open_add(window, cx));
+    }
+
+    /// Sources' Open Scenes (P283): the Scenes section in view once the
+    /// page shows (`scene-presets.tsx:98-105`).
+    pub fn reveal_scenes(&mut self, cx: &mut Context<Self>) {
+        self.reveal_section(StudioSection::Scenes, cx);
+    }
+
+    fn reveal_section(&mut self, section: StudioSection, cx: &mut Context<Self>) {
+        self.reveal.set(Some(section));
+        cx.notify();
+    }
+
+    /// Scrolls the page so the painted section comes into view, once per
+    /// request; drawn over the section's wrapper (the Audio section is not
+    /// this file's, so its bounds are the wrapper's).
+    fn reveal_probe(&self, section: StudioSection) -> impl IntoElement {
+        let reveal = self.reveal.clone();
+        let scroll = self.scroll.clone();
+        canvas(
+            move |bounds, window, _| {
+                if reveal.get() != Some(section) {
+                    return;
+                }
+                reveal.set(None);
+                let view = scroll.bounds();
+                let offset = scroll.offset();
+                let Some(y) = reveal_offset(
+                    section,
+                    (f32::from(view.top()), f32::from(view.bottom())),
+                    (f32::from(bounds.top()), f32::from(bounds.bottom())),
+                    f32::from(offset.y),
+                    f32::from(scroll.max_offset().y),
+                ) else {
+                    return;
+                };
+                scroll.set_offset(point(offset.x, px(y)));
+                window.refresh();
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    }
+
+    /// The stage's footprint (`previewFootprintRatio`) for the recording
+    /// profile (`captureConfig.video`).
+    fn stage_aspect(&self, cx: &App) -> f32 {
+        let watch = self.transport.read(cx).studio().watch();
+        let snapshot = watch.borrow();
+        let video = plan::recording_video(&snapshot.settings.capture_doc);
+        stage_footprint(video.width, video.height)
     }
 
     fn measured(&mut self, width: f32, cx: &mut Context<Self>) {
@@ -659,25 +730,42 @@ impl Render for StudioPage {
         let preview_replaced = self.transport.read(cx).talk_show(cx).preview_replaced;
         let stage = if preview_replaced {
             // P122 / P357: the Show stage replaces the Preview while the room
-            // is open.
+            // is open; its well keeps its own aspect.
             div()
-                .flex_1()
-                .min_h_0()
+                .w_full()
                 .child(self.show_stage.clone())
                 .into_any_element()
         } else {
+            // The stage keeps the canvas's footprint at the column's width
+            // (`previewFootprintRatio`, `preview-stage.tsx:360`), so the page
+            // scrolls under a stage of a known height. It is never taller
+            // than the scroll view leaves under the column's gutters, so the
+            // docked slot fits whole at the top (Linux hides its child while
+            // the slot is not wholly in view).
+            let aspect = self.stage_aspect(cx);
+            let view_height = f32::from(self.scroll.bounds().size.height);
+            let widest =
+                (view_height > 0.).then(|| (view_height - 2. * size::GUTTER).max(120.) * aspect);
             div()
-                .flex_1()
-                .min_h_0()
-                .child(Preview::docked_slot(&self.preview, cx))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .relative()
+                        .w_full()
+                        .when_some(widest, |stage, widest| stage.max_w(px(widest)))
+                        .aspect_ratio(aspect)
+                        .child(Preview::docked_slot(&self.preview, cx)),
+                )
                 .into_any_element()
         };
         // P116: "Preview" heads the stage while it isn't docked (in its own
         // window, closed, or without the native surface); docked, the video
         // is the pane, with no title (`studio-tab.tsx:466-485`).
-        let title = (!preview_replaced)
-            .then(|| stage_view(self.preview.read(cx)).section_title)
-            .flatten()
+        let stage_shape = (!preview_replaced).then(|| stage_view(self.preview.read(cx)));
+        let preview_docked = stage_shape.as_ref().is_some_and(|view| view.docked);
+        let title = stage_shape
+            .and_then(|view| view.section_title)
             .map(|title| {
                 div()
                     .id("studio-preview-title")
@@ -692,14 +780,13 @@ impl Render for StudioPage {
         // shapes; the Show stage has none.
         let health = (!preview_replaced && self.preview_notes.read(cx).has_alert())
             .then(|| self.preview_notes.clone());
-        let preview_column = div()
+        let stage_column = div()
             .id("studio-preview-column")
             .flex()
             .flex_col()
             .gap(px(8.))
             .p(px(size::GUTTER))
             .min_w_0()
-            .min_h_0()
             .children(title)
             .child(stage)
             .children(
@@ -709,33 +796,42 @@ impl Render for StudioPage {
             )
             .children(health);
         // "Session inspector" (P114): cloud resume, the session section,
-        // chat, audio, quick settings and takeover, in that order.
+        // chat, audio, quick settings and takeover, in that order. Open Audio
+        // (P172 / P180) brings the Audio section into view: its wrapper
+        // carries the probe, the section being another lane's.
         let inspector = div()
             .id("studio-session-inspector")
             .flex()
             .flex_col()
             .min_w_0()
-            .min_h_0()
             .child(self.cloud_resume.clone())
             .child(self.session.clone())
             .child(self.chat.clone())
-            .child(self.audio.clone())
+            .child(
+                div()
+                    .id("studio-audio-reveal")
+                    .relative()
+                    .child(self.audio.clone())
+                    .child(self.reveal_probe(StudioSection::Audio)),
+            )
             .child(self.quick_settings.clone())
             .child(self.takeover.clone());
         let transport = self.transport.clone();
         // `StudioDashboardBottomRow` (P273): Scenes, then Soundboard (C3),
-        // then Vertical stream. Wide, the stage keeps the room the row leaves.
-        let stage_column = match layout {
-            StudioLayout::Wide => preview_column.flex_1(),
-            StudioLayout::Narrow => preview_column,
-        };
-        // P273 order: Scenes, Soundboard, Vertical stream.
+        // then Vertical stream, right under the stage. Open Scenes (P283)
+        // brings Scenes into view.
         let bottom_row = div()
             .id("studio-dashboard-bottom-row")
             .flex()
             .flex_col()
             .flex_none()
-            .child(self.scenes.clone())
+            .child(
+                div()
+                    .id("studio-scenes-reveal")
+                    .relative()
+                    .child(self.scenes.clone())
+                    .child(self.reveal_probe(StudioSection::Scenes)),
+            )
             .child(self.soundboard.clone())
             .child(self.vertical_stream.clone());
         let preview_column = div()
@@ -743,34 +839,58 @@ impl Render for StudioPage {
             .flex()
             .flex_col()
             .min_w_0()
-            .min_h_0()
             .child(stage_column)
             .child(bottom_row);
 
-        let grid = match layout {
-            StudioLayout::Wide => div()
-                .flex()
-                .flex_row()
-                .size_full()
-                .child(preview_column.flex_1().border_r_1().border_color(border))
-                .child(
+        // The grid is at least the page's height (`min-h-full`,
+        // `studio-layout.ts:22`) and grows with its sections; the page
+        // scrolls it. Narrow, the transport stays pinned above the scroll
+        // unless the preview is docked (`studioTransportRowClass`).
+        let pinned = layout.transport_sticky(preview_docked);
+        let (pinned_transport, grid) = match layout {
+            StudioLayout::Wide => (
+                None,
+                div()
+                    .flex()
+                    .flex_row()
+                    .w_full()
+                    .min_h_full()
+                    .child(preview_column.flex_1().border_r_1().border_color(border))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .w(px(INSPECTOR_MAX_PX))
+                            .flex_shrink(0.)
+                            .min_w_0()
+                            .child(transport)
+                            .child(inspector),
+                    ),
+            ),
+            StudioLayout::Narrow => {
+                let (pinned_transport, scrolled_transport) = if pinned {
+                    (Some(transport), None)
+                } else {
+                    (None, Some(transport))
+                };
+                (
+                    pinned_transport,
                     div()
                         .flex()
                         .flex_col()
-                        .w(px(INSPECTOR_MAX_PX))
-                        .flex_shrink(0.)
-                        .min_w_0()
-                        .child(transport)
-                        .child(inspector.flex_1()),
-                ),
-            StudioLayout::Narrow => div()
-                .flex()
-                .flex_col()
-                .size_full()
-                .child(transport)
-                .child(preview_column)
-                .child(inspector.border_t_1().border_color(border)),
+                        .w_full()
+                        .min_h_full()
+                        .children(scrolled_transport)
+                        .child(preview_column)
+                        .child(inspector.border_t_1().border_color(border)),
+                )
+            }
         };
+        let body = div().flex_1().min_h_0().child(
+            ScrollArea::new("studio-scroll")
+                .handle(self.scroll.clone())
+                .child(grid),
+        );
 
         div()
             .id("studio-page")
@@ -788,9 +908,12 @@ impl Render for StudioPage {
             }))
             .relative()
             .size_full()
+            .flex()
+            .flex_col()
             .child(measure)
             // P395: talk-show host draws nothing; keep it mounted for watches.
             .child(self.talk_show_host.clone())
-            .child(grid)
+            .children(pinned_transport)
+            .child(body)
     }
 }

@@ -542,6 +542,14 @@ impl Shell {
             .update(cx, |scene, cx| scene.reveal_background(window, cx));
     }
 
+    /// P283: Sources' Open Scenes, the Studio with its Scenes section in
+    /// view (`scene-presets.tsx:98-105`).
+    pub fn open_studio_scenes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_page(PageId::Studio, window, cx);
+        self.studio
+            .update(cx, |studio, cx| studio.reveal_scenes(cx));
+    }
+
     pub fn open_page(&mut self, page: PageId, window: &mut Window, cx: &mut Context<Self>) {
         // P017: a fired page shortcut closes the reminder layer.
         if self.command_held {
