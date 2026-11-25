@@ -156,6 +156,12 @@ impl ShellSmoke for ShellWindows {
                 "detail": "The GPUI preview draws the compositor's frames; compositor.status reports the live background.",
             }));
         }
+        if command == "preview-retry" {
+            let retried = preview.update(cx, |preview, cx| preview.retry(cx));
+            let mut state = preview.read(cx).smoke_state();
+            state["retried"] = json!(retried);
+            return Ok(state);
+        }
         let wanted = match command {
             "inspect-native-preview-runtime" | "preview-window-state" => None,
             "preview-window-open" => Some(WindowMode::Floating),
