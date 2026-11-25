@@ -4529,6 +4529,53 @@ async fn start_x_live_authorization(
         .await
 }
 
+/// Debug builds only: the scheduling smokes' X fixture account signs with the
+/// fixture's credentials against its loopback origin (as
+/// `scheduled_streams_service::x_api` does), so `smoke:x-live-mock` can take
+/// instant Go Live, the live categories and a live update through the real
+/// handlers without x.com. Every other account, and every release build,
+/// answers `None` and keeps the real path.
+#[cfg(debug_assertions)]
+fn x_smoke_fixture_api(
+    state: &AppState,
+    account: Option<&crate::streaming::PlatformAccount>,
+) -> anyhow::Result<Option<(x_live::XLivestreamCredentials, String)>> {
+    if !account
+        .is_some_and(|account| account.account_id == scheduled_streams_service::X_SMOKE_ACCOUNT_ID)
+        || scheduled_streams_service::smoke_api_base()?.is_none()
+    {
+        return Ok(None);
+    }
+    let api =
+        scheduled_streams_service::x_api(state, scheduled_streams_service::X_SMOKE_ACCOUNT_ID)?;
+    Ok(Some((api.credentials, api.base)))
+}
+
+#[cfg(not(debug_assertions))]
+fn x_smoke_fixture_api(
+    _state: &AppState,
+    _account: Option<&crate::streaming::PlatformAccount>,
+) -> anyhow::Result<Option<(x_live::XLivestreamCredentials, String)>> {
+    Ok(None)
+}
+
+/// The credentials and API base for an X Live call on `account`: the smoke
+/// fixture's in debug builds (see `x_smoke_fixture_api`), otherwise the
+/// authorized X Live token after the capability check, on the default base.
+fn x_live_api_for(
+    state: &AppState,
+    account: Option<&crate::streaming::PlatformAccount>,
+) -> anyhow::Result<(x_live::XLivestreamCredentials, Option<String>)> {
+    if let Some((credentials, base)) = x_smoke_fixture_api(state, account)? {
+        return Ok((credentials, Some(base)));
+    }
+    let capability = x_live::x_native_live_capability(account)?;
+    x_live::ensure_x_native_live_available(&capability)?;
+    let credentials = x_live::x_livestream_credentials()?
+        .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?;
+    Ok((credentials, None))
+}
+
 async fn prepare_x_native_live(
     state: &AppState,
     params: XPrepareParams,
@@ -4542,15 +4589,21 @@ async fn prepare_x_native_live(
         },
     )?;
     x_live::ensure_x_native_live_available(&capability)?;
-    let credentials = x_live::x_livestream_credentials()?
-        .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?;
+    let (credentials, api_base_url) = match x_smoke_fixture_api(state, account)? {
+        Some((credentials, base)) => (credentials, Some(base)),
+        None => (
+            x_live::x_livestream_credentials()?
+                .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?,
+            None,
+        ),
+    };
     clear_legacy_x_source_health(state);
     let prepared = match x_live::prepare_x_stream_source(
         XPrepareSourceRequest {
             credentials: credentials.clone(),
             account: account.cloned(),
             source_name: x_live::default_source_name(),
-            api_base_url: None,
+            api_base_url,
         },
         &reqwest::Client::new(),
         secrets::put_secret,
@@ -4641,11 +4694,8 @@ async fn publish_x_native_live(
     let session_id = params.session_id.clone();
     let accounts = state.database.list_platform_accounts()?;
     let account = x_live::select_x_account(&accounts, params.account_id.as_deref())?;
-    let capability = x_live::x_native_live_capability(account)?;
-    x_live::ensure_x_native_live_available(&capability)?;
+    let (credentials, api_base_url) = x_live_api_for(state, account)?;
     let metadata = state.database.stream_metadata_draft()?;
-    let credentials = x_live::x_livestream_credentials()?
-        .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?;
     let announce = !x_live::x_should_not_tweet(&metadata);
     let result = x_live::publish_x_broadcast(
         XPublishRequest {
@@ -4654,7 +4704,7 @@ async fn publish_x_native_live(
             metadata,
             locale: x_live::default_publish_locale(),
             chat_option: x_live::default_chat_option(),
-            api_base_url: None,
+            api_base_url,
             poll_attempts: 10,
             poll_interval_ms: 2_000,
             // A 409 means the source cannot take video yet (or another
@@ -4742,14 +4792,11 @@ async fn update_x_broadcast(
     let session_id = params.session_id.clone();
     let accounts = state.database.list_platform_accounts()?;
     let account = x_live::select_x_account(&accounts, params.account_id.as_deref())?;
-    let capability = x_live::x_native_live_capability(account)?;
-    x_live::ensure_x_native_live_available(&capability)?;
-    let credentials = x_live::x_livestream_credentials()?
-        .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?;
+    let (credentials, api_base_url) = x_live_api_for(state, account)?;
     let result = x_live::update_broadcast(
         &reqwest::Client::new(),
         &credentials,
-        &x_live::api_base_url(None),
+        &x_live::api_base_url(api_base_url.as_deref()),
         &params.broadcast_id,
         &x_live::XBroadcastChanges {
             title: params.title,
@@ -4792,14 +4839,11 @@ async fn x_live_categories(
 ) -> anyhow::Result<x_live::XLiveCategoriesResult> {
     let accounts = state.database.list_platform_accounts()?;
     let account = x_live::select_x_account(&accounts, params.account_id.as_deref())?;
-    let capability = x_live::x_native_live_capability(account)?;
-    x_live::ensure_x_native_live_available(&capability)?;
-    let credentials = x_live::x_livestream_credentials()?
-        .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?;
+    let (credentials, api_base_url) = x_live_api_for(state, account)?;
     let categories = x_live::live_categories(
         &reqwest::Client::new(),
         &credentials,
-        &x_live::api_base_url(None),
+        &x_live::api_base_url(api_base_url.as_deref()),
         params.refresh,
     )
     .await?;
@@ -4810,26 +4854,8 @@ async fn end_x_native_live(state: &AppState, params: XEndParams) -> anyhow::Resu
     let session_id = params.session_id.clone();
     let accounts = state.database.list_platform_accounts()?;
     let account = x_live::select_x_account(&accounts, params.account_id.as_deref())?;
-    #[cfg(debug_assertions)]
-    let smoke = account
-        .is_some_and(|account| account.account_id == scheduled_streams_service::X_SMOKE_ACCOUNT_ID)
-        && scheduled_streams_service::smoke_api_base()?.is_some();
-    #[cfg(not(debug_assertions))]
-    let smoke = false;
-    let (credentials, api_base_url) = if smoke {
-        // The scheduling smoke ENDs against its loopback fixture, never x.com.
-        let api =
-            scheduled_streams_service::x_api(state, scheduled_streams_service::X_SMOKE_ACCOUNT_ID)?;
-        (api.credentials, Some(api.base))
-    } else {
-        let capability = x_live::x_native_live_capability(account)?;
-        x_live::ensure_x_native_live_available(&capability)?;
-        (
-            x_live::x_livestream_credentials()?
-                .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?,
-            None,
-        )
-    };
+    // The smokes END against their loopback fixture, never x.com.
+    let (credentials, api_base_url) = x_live_api_for(state, account)?;
     // Stop the state watch BEFORE X sees the END, so the ENDED state Videorc
     // causes is never reported as "X ended your broadcast".
     x_watched_broadcasts().remove(&params.broadcast_id);
