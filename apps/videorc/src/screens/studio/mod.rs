@@ -174,6 +174,12 @@ impl StudioPage {
         }
     }
 
+    /// ⌘K's Add scene… (P283): the Scenes section's picker.
+    pub fn open_add_scene(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.scenes
+            .update(cx, |scenes, cx| scenes.open_add(window, cx));
+    }
+
     fn measured(&mut self, width: f32, cx: &mut Context<Self>) {
         let flips = StudioLayout::for_width(width) != StudioLayout::for_width(self.width);
         self.width = width;

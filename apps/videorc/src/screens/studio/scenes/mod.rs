@@ -14,8 +14,14 @@
 //! reorder (a drag, or ⌥← ⌥→ on a focused card), the whole name or meta on
 //! hover when a line cut it, and under the cards the scene on stream's own
 //! fields ([`on_stream`]): Screen with Hide screen, Layout, Framing and the
-//! Vertical stream. Add scene…, Change screen… and ⋯ wait for the picker
-//! and the dialogs.
+//! Vertical stream.
+//!
+//! Part 3 opens the Scene page's dialogs (`useSceneDialogs`, one
+//! [`SceneDialogs`] of the section's own): Add scene…, each card's ⋯ menu
+//! (Rename…, Change screen…, Set key…, Follow the app, Save audio to scene,
+//! Guests in the room…, Duplicate, Delete), the fields' Change screen…, a
+//! layout that asks for a screen first (D19), and Resolve scene sources for
+//! a card whose sources are gone.
 //!
 //! The status line shows a moment after a switch starts. The section asks
 //! the core when, and draws once more then: no frame loop.
@@ -35,7 +41,10 @@ use gpui::{
 use tokio::sync::watch;
 use videorc_app_core::StudioSnapshot;
 use videorc_app_core::nav::PageId;
-use videorc_app_core::scenes::list::{MoveKey, SceneGlyph};
+use videorc_app_core::scenes::list::{
+    MoveKey, SceneGlyph, duplicated_scene, scene_with_audio, scene_with_follow,
+};
+use videorc_app_core::scenes::model::scene_audio;
 use videorc_app_core::scenes::pictures::picture_key;
 use videorc_app_core::scenes::switch_progress::{
     SCENE_SWITCH_PENDING_LABEL, SceneSwitchStatusLine,
@@ -52,6 +61,7 @@ use videorc_app_core::studio::scenes_section::{
 use videorc_app_core::studio::screen_views::TalkShowRoomView;
 use videorc_kit::chrome::{box_shadow, focus_ring};
 use videorc_kit::icon::{IconName, icon};
+use videorc_kit::kebab_menu::{KEBAB_HOST, KebabMenu, KebabMenuItem, KebabReveal};
 use videorc_kit::theme::{self, FONT, TypeScale, faded_over, hsla, with_alpha};
 use videorc_kit::tokens::{Color, Shadow, Theme, radius, text};
 use videorc_kit::tooltip::tooltip;
@@ -65,6 +75,8 @@ use super::transport::{AppStudio, OpenPage};
 use crate::app::bridge::Mirror;
 use crate::app::hotkeys::{Hotkeys, node_platform};
 use crate::app::permissions::Permissions;
+use crate::screens::scene::dialogs::{GUESTS_LABEL, SET_KEY_LABEL, SceneDialogs};
+use crate::screens::scene::model::copy as menu_copy;
 use pictures::Stills;
 
 /// Cards are at least this wide: a picture big enough to read, and
@@ -99,6 +111,11 @@ fn corner_px(corner: ThumbCorner) -> f32 {
         ThumbCorner::Tight => radius::CHIP / 3.0,
         ThumbCorner::Hair => radius::CHIP / 6.0,
     }
+}
+
+/// `new Date().toISOString()`.
+fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 fn now_ms() -> u64 {
@@ -202,6 +219,9 @@ pub struct ScenesSection {
     wake: Option<u64>,
     /// The cards' row width at the last paint.
     width: f32,
+    /// The scene dialogs the section opens (Add scene…, the ⋯ menu's,
+    /// Change screen…, Resolve scene sources).
+    dialogs: Entity<SceneDialogs>,
 }
 
 impl EventEmitter<OpenPage> for ScenesSection {}
@@ -245,6 +265,9 @@ impl ScenesSection {
             }
         })
         .detach();
+        let dialogs = cx.new(|cx| {
+            SceneDialogs::new(studio.clone(), runtime.clone(), hotkeys.clone(), window, cx)
+        });
         let mut section = Self {
             studio,
             runtime,
@@ -263,6 +286,7 @@ impl ScenesSection {
             drag: None,
             wake: None,
             width: 0.,
+            dialogs,
         };
         section.watch_privacy(cx);
         section.refresh(cx);
@@ -388,17 +412,52 @@ impl ScenesSection {
         }
     }
 
-    /// A card's click (`dialogs.select`): the scene goes on stream. A scene
-    /// whose sources need choosing again would open the repair dialog in
-    /// Electron; until that dialog lands the core's apply answers it (a
-    /// refusal in words is the core's toast).
-    fn apply(&mut self, id: String) {
+    /// A card's click (`dialogs.select`, P280): a scene whose sources need
+    /// choosing again opens Resolve scene sources; any other goes on
+    /// stream, and a failure with no words of its own opens Resolve with its
+    /// line (never for an app scene, whose window is found when it goes on),
+    /// as the Scene page's rows do. A refusal in words is the core's toast.
+    fn select(
+        &mut self,
+        id: String,
+        needs_sources: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if needs_sources {
+            self.open_resolve(&id, false, window, cx);
+            return;
+        }
+        let app_scene = self
+            .studio
+            .watch()
+            .borrow()
+            .scenes
+            .scenes
+            .iter()
+            .find(|scene| scene.id == id)
+            .is_some_and(|scene| scene.app().is_some());
         let studio = self.studio.clone();
+        let applied = id.clone();
+        let (done, answer) = tokio::sync::oneshot::channel();
         self.runtime.spawn(async move {
-            if !studio.apply_saved_scene_by_id(&id).await {
+            let result = studio
+                .apply_saved_scene(&applied, None, Default::default())
+                .await;
+            if !result.ok {
                 eprintln!("[videorc-app] Scenes: the scene didn't go on stream");
             }
+            let _ = done.send(!result.ok && result.message.is_none() && !result.superseded);
         });
+        cx.spawn_in(window, async move |this, cx| {
+            let failed = answer.await.unwrap_or(false);
+            if failed && !app_scene {
+                let _ = this.update_in(cx, |section, window, cx| {
+                    section.open_resolve(&id, true, window, cx)
+                });
+            }
+        })
+        .detach();
     }
 
     /// The 16:9 / 9:16 toggle (`switchMode`).
@@ -422,6 +481,265 @@ impl ScenesSection {
                 eprintln!("[videorc-app] Scenes: Follow the app in front: {error}");
             }
         });
+    }
+}
+
+/// The section's doors into the shared scene dialogs, and the ⋯ menu's
+/// writes (`useSceneDialogs`).
+impl ScenesSection {
+    /// Add scene… (P276), also ⌘K's (P283): never in a library from a newer
+    /// Videorc, nor while the room holds the section.
+    pub fn open_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ScenesSectionView::Gallery(gallery) = &self.view else {
+            return;
+        };
+        if gallery.read_only {
+            return;
+        }
+        self.dialogs
+            .update(cx, |dialogs, cx| dialogs.open_add(None, window, cx));
+    }
+
+    fn open_rename(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.dialogs
+            .update(cx, |dialogs, cx| dialogs.open_rename(id, None, window, cx));
+    }
+
+    /// Change screen… for one scene; `for_layout` is D19's layout that asked
+    /// for a screen, put on once the screen lands.
+    fn open_change_screen(
+        &mut self,
+        id: &str,
+        for_layout: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dialogs.update(cx, |dialogs, cx| {
+            dialogs.open_change_screen(id, for_layout, None, window, cx)
+        });
+    }
+
+    fn open_set_key(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.dialogs
+            .update(cx, |dialogs, cx| dialogs.open_set_key(id, None, window, cx));
+    }
+
+    fn open_guests(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.dialogs
+            .update(cx, |dialogs, cx| dialogs.open_guests(id, None, window, cx));
+    }
+
+    fn open_delete(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.dialogs
+            .update(cx, |dialogs, cx| dialogs.open_delete(id, None, window, cx));
+    }
+
+    /// Resolve scene sources (P315, P316); `apply_failed` adds the failed
+    /// apply's line.
+    fn open_resolve(
+        &mut self,
+        id: &str,
+        apply_failed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dialogs.update(cx, |dialogs, cx| {
+            dialogs.open_resolve(id, apply_failed, None, window, cx)
+        });
+    }
+
+    /// Follow the app / Stop following (`sceneWithFollow`).
+    fn set_follows(&self, id: &str, follows: bool) {
+        let studio = self.studio.clone();
+        let Some(scene) = studio
+            .watch()
+            .borrow()
+            .scenes
+            .scenes
+            .iter()
+            .find(|scene| scene.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        self.runtime.spawn(async move {
+            let next = scene_with_follow(&scene, follows, &now_iso());
+            if !studio.replace_listed_scene(&next).await {
+                eprintln!("[videorc-app] Scenes: the scene's follow wasn't saved");
+            }
+        });
+    }
+
+    /// Save audio to scene (`sceneWithAudio` with the working audio).
+    fn save_audio(&self, id: &str) {
+        let studio = self.studio.clone();
+        let (scene, working) = {
+            let watch = studio.watch();
+            let snapshot = watch.borrow();
+            let capture = &snapshot.settings.capture_doc;
+            let working = scene_audio(
+                &capture["sources"],
+                capture["audio"]["systemAudioEnabled"] == serde_json::Value::Bool(true),
+            );
+            let scene = snapshot
+                .scenes
+                .scenes
+                .iter()
+                .find(|scene| scene.id == id)
+                .cloned();
+            (scene, working)
+        };
+        let Some(scene) = scene else {
+            return;
+        };
+        self.runtime.spawn(async move {
+            let next = scene_with_audio(&scene, working, &now_iso());
+            if !studio.replace_listed_scene(&next).await {
+                eprintln!("[videorc-app] Scenes: the scene's audio wasn't saved");
+            }
+        });
+    }
+
+    /// Duplicate (D5, D6): a deep copy named "{name} 2", at the end of the
+    /// list, without its custom key.
+    fn duplicate(&self, id: &str) {
+        let studio = self.studio.clone();
+        let copy = {
+            let watch = studio.watch();
+            let snapshot = watch.borrow();
+            snapshot.scenes.library.as_ref().and_then(|library| {
+                library
+                    .scenes
+                    .iter()
+                    .find(|scene| scene.id == id)
+                    .map(|stored| {
+                        duplicated_scene(
+                            stored,
+                            &library.scenes,
+                            &uuid::Uuid::new_v4().to_string(),
+                            &now_iso(),
+                        )
+                    })
+            })
+        };
+        let Some(copy) = copy else {
+            return;
+        };
+        self.runtime.spawn(async move {
+            if !studio.insert_scenes(&[copy], None, &HashMap::new()).await {
+                eprintln!("[videorc-app] Scenes: the scene wasn't duplicated");
+            }
+        });
+    }
+
+    /// A card's ⋯ menu (`dialogs.menuItems`, D11, P294–P301): edit, keeps,
+    /// copy, then Delete; the states and reasons are the core's.
+    fn menu_items(&self, card: &SceneCardView, cx: &mut Context<Self>) -> Vec<KebabMenuItem> {
+        let section = cx.entity().downgrade();
+        let menu = &card.menu;
+        let mut items = Vec::new();
+
+        let (id, weak) = (card.id.clone(), section.clone());
+        let mut rename = KebabMenuItem::new("rename", menu_copy::RENAME, move |window, cx| {
+            let _ = weak.update(cx, |section, cx| section.open_rename(&id, window, cx));
+        })
+        .group("edit");
+        if let Some(reason) = menu.read_only_reason {
+            rename = rename.disabled(true).disabled_reason(reason);
+        }
+        items.push(rename);
+
+        let (id, weak) = (card.id.clone(), section.clone());
+        let mut change = KebabMenuItem::new(
+            "change-screen",
+            menu_copy::CHANGE_SCREEN,
+            move |window, cx| {
+                let _ = weak.update(cx, |section, cx| {
+                    section.open_change_screen(&id, None, window, cx)
+                });
+            },
+        )
+        .group("edit");
+        if let Some(reason) = menu.change_screen_reason.clone() {
+            change = change.disabled(true).disabled_reason(reason);
+        }
+        items.push(change);
+
+        // Set key… is never off, even read-only.
+        let (id, weak) = (card.id.clone(), section.clone());
+        items.push(
+            KebabMenuItem::new("set-key", SET_KEY_LABEL, move |window, cx| {
+                let _ = weak.update(cx, |section, cx| section.open_set_key(&id, window, cx));
+            })
+            .group("edit"),
+        );
+
+        if let Some(follows) = menu.follows {
+            let (id, weak) = (card.id.clone(), section.clone());
+            let mut follow = KebabMenuItem::new(
+                "follow",
+                if follows {
+                    menu_copy::STOP_FOLLOWING
+                } else {
+                    menu_copy::FOLLOW_THE_APP
+                },
+                move |_, cx| {
+                    let _ = weak.update(cx, |section, _| section.set_follows(&id, !follows));
+                },
+            )
+            .group("keeps");
+            if let Some(reason) = menu.read_only_reason {
+                follow = follow.disabled(true).disabled_reason(reason);
+            }
+            items.push(follow);
+        }
+
+        let (id, weak) = (card.id.clone(), section.clone());
+        let mut save_audio =
+            KebabMenuItem::new("save-audio", menu_copy::SAVE_AUDIO, move |_, cx| {
+                let _ = weak.update(cx, |section, _| section.save_audio(&id));
+            })
+            .group("keeps");
+        if let Some(reason) = menu.save_audio_reason {
+            save_audio = save_audio.disabled(true).disabled_reason(reason);
+        }
+        items.push(save_audio);
+
+        let (id, weak) = (card.id.clone(), section.clone());
+        let mut guests = KebabMenuItem::new("guests", GUESTS_LABEL, move |window, cx| {
+            let _ = weak.update(cx, |section, cx| section.open_guests(&id, window, cx));
+        })
+        .group("keeps");
+        if let Some(reason) = menu.read_only_reason {
+            guests = guests.disabled(true).disabled_reason(reason);
+        }
+        items.push(guests);
+
+        let (id, weak) = (card.id.clone(), section.clone());
+        let mut duplicate = KebabMenuItem::new("duplicate", menu_copy::DUPLICATE, move |_, cx| {
+            let _ = weak.update(cx, |section, _| section.duplicate(&id));
+        })
+        .group("copy");
+        if let Some(reason) = menu.read_only_reason {
+            duplicate = duplicate.disabled(true).disabled_reason(reason);
+        }
+        items.push(duplicate);
+
+        // Plan 231 D16: the last scene stays, and so does the scene on
+        // stream while recording or live (P317's words are the dialog's).
+        let (id, weak) = (card.id.clone(), section);
+        let mut delete = KebabMenuItem::new("delete", menu_copy::DELETE, move |window, cx| {
+            let _ = weak.update(cx, |section, cx| section.open_delete(&id, window, cx));
+        })
+        .destructive(true);
+        if menu.delete_disabled {
+            delete = delete.disabled(true);
+            if let Some(reason) = menu.delete_reason {
+                delete = delete.disabled_reason(reason);
+            }
+        }
+        items.push(delete);
+        items
     }
 }
 
@@ -782,6 +1100,7 @@ impl ScenesSection {
                     .child(card.name.clone())
                     .child(self.text_measure(&card.id, true, cx)),
             )
+            // The check's place is the ⋯'s: on hover the menu takes it.
             .child(
                 div()
                     .flex_none()
@@ -790,7 +1109,9 @@ impl ScenesSection {
                     .items_center()
                     .justify_center()
                     .when(card.on_stream, |check| {
-                        check.child(icon(IconName::Check, 16., foreground))
+                        check
+                            .group_hover(KEBAB_HOST, |style| style.opacity(0.))
+                            .child(icon(IconName::Check, 16., foreground))
                     }),
             );
 
@@ -901,8 +1222,21 @@ impl ScenesSection {
         let key_id = card.id.clone();
         let drop_id = card.id.clone();
         let disabled = card.disabled;
+        let needs_sources = card.needs_sources;
+        let key_focus = focus.clone();
+        // P294–P301: over the name row's last place (`right-1 bottom-7.5`),
+        // centred on that row and the check's 16 px; shown on hover.
+        let menu = div().absolute().right(px(4.)).bottom(px(30.)).child(
+            KebabMenu::new(
+                SharedString::from(format!("scene-card-actions-{}", card.id)),
+                self.menu_items(card, cx),
+            )
+            .label(menu_copy::actions_for(&card.name))
+            .reveal(KebabReveal::Hover),
+        );
         div()
             .id(("scene-card", index))
+            .group(KEBAB_HOST)
             .role(Role::Button)
             .aria_label(card.name.clone())
             .track_focus(&focus)
@@ -940,41 +1274,50 @@ impl ScenesSection {
                     .hover(move |style| style.bg(accent))
             })
             .when(!disabled, |card_box| {
-                card_box.on_click(cx.listener(move |section, _, _, _| {
-                    section.apply(id.clone());
+                card_box.on_click(cx.listener(move |section, _, window, cx| {
+                    section.select(id.clone(), needs_sources, window, cx);
                 }))
             })
             // ⌥← ⌥→ move the card (P282), on the card itself, while it can't
-            // go on too; Enter and Space put it on stream, as its button.
-            .on_key_down(cx.listener(move |section, event: &KeyDownEvent, _, cx| {
-                let keystroke = &event.keystroke;
-                let modifiers = &keystroke.modifiers;
-                let dom_key = match keystroke.key.as_str() {
-                    "left" => "ArrowLeft",
-                    "right" => "ArrowRight",
-                    "up" => "ArrowUp",
-                    "down" => "ArrowDown",
-                    other => other,
-                };
-                let key = MoveKey {
-                    key: dom_key,
-                    alt: modifiers.alt,
-                    ctrl: modifiers.control,
-                    meta: modifiers.platform,
-                    shift: modifiers.shift,
-                };
-                if let Some(target) = card_move_target(key, index, count, read_only) {
-                    cx.stop_propagation();
-                    section.move_scene(key_id.clone(), target);
-                    return;
-                }
-                let plain =
-                    !modifiers.alt && !modifiers.control && !modifiers.platform && !modifiers.shift;
-                if plain && !disabled && matches!(keystroke.key.as_str(), "enter" | "space") {
-                    cx.stop_propagation();
-                    section.apply(key_id.clone());
-                }
-            }))
+            // go on too; Enter and Space put it on stream, as its button
+            // (only the card's own: the ⋯ inside it takes its own keys).
+            .on_key_down(
+                cx.listener(move |section, event: &KeyDownEvent, window, cx| {
+                    let keystroke = &event.keystroke;
+                    let modifiers = &keystroke.modifiers;
+                    let dom_key = match keystroke.key.as_str() {
+                        "left" => "ArrowLeft",
+                        "right" => "ArrowRight",
+                        "up" => "ArrowUp",
+                        "down" => "ArrowDown",
+                        other => other,
+                    };
+                    let key = MoveKey {
+                        key: dom_key,
+                        alt: modifiers.alt,
+                        ctrl: modifiers.control,
+                        meta: modifiers.platform,
+                        shift: modifiers.shift,
+                    };
+                    if let Some(target) = card_move_target(key, index, count, read_only) {
+                        cx.stop_propagation();
+                        section.move_scene(key_id.clone(), target);
+                        return;
+                    }
+                    let plain = !modifiers.alt
+                        && !modifiers.control
+                        && !modifiers.platform
+                        && !modifiers.shift;
+                    if plain
+                        && !disabled
+                        && key_focus.is_focused(window)
+                        && matches!(keystroke.key.as_str(), "enter" | "space")
+                    {
+                        cx.stop_propagation();
+                        section.select(key_id.clone(), needs_sources, window, cx);
+                    }
+                }),
+            )
             .when(!read_only, |card_box| {
                 card_box
                     .on_drag(
@@ -1014,6 +1357,7 @@ impl ScenesSection {
             .child(well)
             .child(name_row)
             .child(meta_row)
+            .child(menu)
             // The drop line, 2 px in the ring's tone, in the gap beside the
             // card (`before:w-0.5 before:bg-ring`, 5 px out).
             .children(edge.map(|edge| {
@@ -1051,6 +1395,24 @@ impl ScenesSection {
                     .variant(ButtonVariant::Ghost)
                     .label(copy::EDIT_SCENE)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Layouts)))),
+            )
+            .action(
+                // P276: the same Add scene… as the Scene page's, off with its
+                // reason in a library from a newer Videorc.
+                div()
+                    .id("scene-add-reason")
+                    .child(
+                        Button::new("scene-add")
+                            .variant(ButtonVariant::Outline)
+                            .label(menu_copy::ADD_SCENE)
+                            .disabled(gallery.read_only)
+                            .on_click(
+                                cx.listener(|section, _, window, cx| section.open_add(window, cx)),
+                            ),
+                    )
+                    .when(gallery.read_only, |wrap| {
+                        wrap.tooltip(tooltip(copy::READ_ONLY_REASON))
+                    }),
             );
 
         // P277: the canvas's orientation; the encoder canvas is fixed at
@@ -1181,6 +1543,13 @@ impl ScenesSection {
             .children(status)
             .children(reason)
             .children(fields)
+            .child(self.dialogs_host())
+    }
+
+    /// The dialogs draw over the window (gpui-base's deferred overlay);
+    /// their host takes no room and no gap in the section.
+    fn dialogs_host(&self) -> impl IntoElement {
+        div().absolute().size_0().child(self.dialogs.clone())
     }
 }
 
@@ -1201,7 +1570,8 @@ impl Render for ScenesSection {
             // P287: the section's room while the library is read.
             ScenesSectionView::Loading => PanelSection::new("studio-scenes")
                 .title(copy::TITLE)
-                .child(Skeleton::new("scenes-loading").w_full().h(px(320.))),
+                .child(Skeleton::new("scenes-loading").w_full().h(px(320.)))
+                .child(self.dialogs_host()),
             ScenesSectionView::Gallery(gallery) => self.gallery(&gallery, t, window, cx),
         }
     }

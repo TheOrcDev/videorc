@@ -292,6 +292,13 @@ impl Shell {
                 Command::CaptionsReader => {
                     window.dispatch_action(Box::new(super::menus::ToggleCaptions), cx)
                 }
+                // P283: Studio is the home of scenes; its Scenes section
+                // opens the picker.
+                Command::AddScene => {
+                    this.open_page(PageId::Studio, window, cx);
+                    this.studio
+                        .update(cx, |studio, cx| studio.open_add_scene(window, cx));
+                }
                 _ => {}
             },
         )

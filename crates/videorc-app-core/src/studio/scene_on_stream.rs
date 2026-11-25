@@ -85,6 +85,8 @@ pub mod copy {
     pub const SCREEN_PRIVACY_ID: &str = "screen-privacy";
     /// `toastUserError`'s object.
     pub const YOUR_SCREEN: &str = "your screen";
+    /// The Screen field's door to the picker (`scene-on-stream.tsx:141`).
+    pub const CHANGE_SCREEN: &str = "Change screen…";
 }
 
 /// `screen.privacy.changed`: the backend's Hide screen state, on every hide
@@ -380,6 +382,16 @@ impl LayoutFieldView {
         let changes = self.freeform || choice.value != self.preset;
         (changes && !choice.disabled && !choice.asks_for_screen).then_some(choice.value)
     }
+
+    /// D19 (`chooseLayout`): another layout that draws a screen, chosen on a
+    /// scene that shows none, opens Change screen… with it; it goes on once
+    /// the screen lands, and Cancel keeps the old one. None for any other
+    /// pick.
+    pub fn asks_for_screen(&self, preset: &str) -> Option<&'static str> {
+        let choice = self.choices.iter().find(|choice| choice.value == preset)?;
+        let changes = self.freeform || choice.value != self.preset;
+        (changes && !choice.disabled && choice.asks_for_screen).then_some(choice.value)
+    }
 }
 
 /// `ScreenFramingControl`: Fill or Fit and its line.
@@ -436,6 +448,9 @@ pub struct SceneOnStreamView {
     pub switch_status: Option<SwitchStatusLine>,
     /// A stand-in screen's line.
     pub stand_in: Option<String>,
+    /// Why Change screen… is off (`changeScreenBlockedReason`): a library
+    /// from a newer Videorc, or the screen's switch.
+    pub change_screen_reason: Option<String>,
     pub layout: LayoutFieldView,
     pub framing: Option<FramingView>,
     /// The scene's 9:16 layout, while a vertical stream is armed beside a
@@ -545,6 +560,11 @@ impl SceneOnStreamView {
             ),
             stand_in: source_stand_in(sources, SourceKind::Capture, input.devices)
                 .map(|stand_in| stand_in_line(&stand_in)),
+            change_screen_reason: if input.read_only {
+                Some(super::vertical_stream::READ_ONLY_REASON.to_string())
+            } else {
+                input.capture_reason.map(str::to_string)
+            },
             layout: LayoutFieldView {
                 description: layout_description(vertical),
                 freeform,
