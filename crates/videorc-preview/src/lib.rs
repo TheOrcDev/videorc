@@ -48,6 +48,7 @@
 //! S4.1c.
 
 pub mod bounds;
+pub mod chrome;
 pub mod first_frame;
 pub mod lifecycle;
 pub mod stats;

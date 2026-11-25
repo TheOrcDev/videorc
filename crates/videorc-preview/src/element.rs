@@ -827,6 +827,41 @@ impl PreviewElement {
         self.native.backing()
     }
 
+    /// The Scene editor's chrome over the video can show here: Linux's
+    /// Wayland subsurface (macOS draws it in GPUI over its view; X11's child
+    /// window has no transparent sibling, so the Scene canvas falls back to
+    /// the schematic there).
+    pub fn chrome_supported(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.native
+                .presenter
+                .as_ref()
+                .is_some_and(LinuxPresenter::chrome_supported)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    /// The Scene editor's chrome over the video ([`crate::chrome`]), or none.
+    /// True when it changed. Nothing off Linux (GPUI draws it itself).
+    pub fn set_chrome(&mut self, scene: Option<crate::chrome::ChromeScene>) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.native
+                .presenter
+                .as_mut()
+                .is_some_and(|presenter| presenter.set_chrome(scene))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = scene;
+            false
+        }
+    }
+
     /// Plan 220 S4.2c: the host's reason for drawing on the texture route
     /// (the window system took no child); `None` clears it. The surface's
     /// status carries it in its message.

@@ -134,6 +134,12 @@ pub(super) fn new(setup: PreviewSetup, window: &mut Window, cx: &mut App) -> Ent
             Level::Error,
             &format!("[preview] the Linux presenter could not join the window: {error}"),
         );
+    } else if !element.chrome_supported() {
+        // The named fallback: the Scene canvas is a schematic here.
+        logger.log(
+            Level::Info,
+            &format!("[preview] {}", super::X11_SCHEMATIC_REASON),
+        );
     }
     let mut status = element.status_watch();
     let phase = status.borrow().phase;

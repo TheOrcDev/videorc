@@ -216,13 +216,14 @@ impl ScenePage {
         let border = hsla(t.border);
         let snapshot = self.studio.snapshot();
         let vertical_view = self.editor.overlays_on == Some(true);
-        let (live_canvas, docked, can_float, preview_open) = {
+        let (live_canvas, docked, can_float, preview_open, scene_docked) = {
             let preview = self.preview.read(cx);
             (
                 preview.live_canvas(),
                 preview.mode() == WindowMode::Docked && !preview.is_closed(),
                 preview.can_float(),
                 !preview.is_closed(),
+                preview.scene_hosts_docked(),
             )
         };
         // X5: the live picture under the stage, not in the vertical view
@@ -292,12 +293,7 @@ impl ScenePage {
         }
         // P530: where the picture is when the canvas can't show it.
         if has_sources
-            && let Some(note) = layout_only_note(
-                crate::preview::SCENE_HOSTS_DOCKED,
-                vertical_view,
-                preview_open,
-                docked,
-            )
+            && let Some(note) = layout_only_note(scene_docked, vertical_view, preview_open, docked)
         {
             let pops = note.action == LayoutOnlyAction::PopOut;
             lines.push(
@@ -481,7 +477,8 @@ impl ScenePage {
             let preview = self.preview.read(cx);
             (preview.can_float(), !preview.is_closed())
         };
-        if !crate::preview::SCENE_HOSTS_DOCKED && can_float {
+        let scene_docked = self.preview.read(cx).scene_hosts_docked();
+        if !scene_docked && can_float {
             let label = if preview_open {
                 words::CLOSE_PREVIEW
             } else {
@@ -499,7 +496,7 @@ impl ScenePage {
                     })),
             );
         }
-        if crate::preview::SCENE_HOSTS_DOCKED && can_float {
+        if scene_docked && can_float {
             let button = if docked {
                 Button::new("scene-stage-pop-out")
                     .accessibility_label(words::POP_OUT)
