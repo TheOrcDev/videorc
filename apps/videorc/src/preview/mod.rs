@@ -57,6 +57,13 @@ use {
 /// rounded stage). The floating window is square.
 pub const SLOT_RADIUS: f64 = 12.0;
 
+/// The Scene page's canvas hosts the docked layer (X5, `liveCanvasSupported`)
+/// on macOS, where GPUI composites the native view beneath its own drawing
+/// and paints the stage's chrome over the video. Linux's presenter child
+/// sits above GPUI's drawing, so its Scene canvas stays a layout until it
+/// can take chrome; Windows has no element yet (S2.3b).
+pub const SCENE_HOSTS_DOCKED: bool = cfg!(target_os = "macos");
+
 /// What the preview needs from the app's core.
 pub struct PreviewSetup {
     pub runtime: tokio::runtime::Handle,
@@ -260,6 +267,12 @@ impl Preview {
     /// Docked in the Studio, or in its own window.
     pub fn mode(&self) -> WindowMode {
         self.mode
+    }
+
+    /// The Scene canvas shows the live picture (X5 `liveCanvasActive`):
+    /// the docked layer is here, not in its own window.
+    pub fn live_canvas(&self) -> bool {
+        SCENE_HOSTS_DOCKED && self.mode == WindowMode::Docked && self.native_ready()
     }
 
     /// What the Studio slot says, or nothing while a frame shows there.

@@ -218,6 +218,8 @@ pub struct EditorState {
     pub precise_pending: bool,
     /// A Background slider mid-drag, for the camera it was dragged on.
     pub background_draft: BackgroundDraft,
+    /// A stage gesture runs: the inspector waits (`inert={stageDragging}`).
+    pub stage_dragging: bool,
 }
 
 /// The canvas toolbar, the inspector and the Banners section.
@@ -458,8 +460,7 @@ impl EditorModel {
             scene_edit_mode: snapshot.scene_edit_mode,
             session_active,
             accepts_live_scene_edits: snapshot.session.status.accepts_live_scene_edits,
-            // The stage's gestures are batch B: nothing drags yet.
-            stage_dragging: false,
+            stage_dragging: state.stage_dragging,
             connected,
             visibility_percent: scene
                 .and_then(|scene| scene.background.as_ref())

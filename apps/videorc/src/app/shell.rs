@@ -454,13 +454,22 @@ impl Shell {
                     .update(cx, |settings, cx| settings.refresh(cx));
             }
             window.set_window_title(&nav::window_title(page));
-            // A docked slot that is not on screen presents nothing.
+            // A docked slot that is not on screen presents nothing. The
+            // Scene page's canvas is the other docked slot (X5).
             self.preview.update(cx, |preview, _| {
-                preview.set_docked_shown(page == PageId::Studio)
+                preview.set_docked_shown(
+                    page == PageId::Studio
+                        || (crate::preview::SCENE_HOSTS_DOCKED && page == PageId::Layouts),
+                )
             });
             // Space records only while the Studio page holds focus.
             if page == PageId::Studio {
                 let focus = self.studio.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+            // ⌘Z undoes a layout change while the Scene page holds focus.
+            if page == PageId::Layouts {
+                let focus = self.scene.read(cx).focus_handle();
                 window.focus(&focus, cx);
             }
             cx.notify();
