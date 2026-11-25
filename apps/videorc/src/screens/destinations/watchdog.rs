@@ -1,8 +1,8 @@
 //! Destinations → Watchdog settings (`WatchdogSection`, P783–P790).
 //!
-//! Words and view rules come from `livestream::watchdog_section`. Studio
-//! stores settings on `watchdog_settings`; L2 still owes the real RPC
-//! answers behind those stubs.
+//! Words and view rules come from `livestream::watchdog_section`. The
+//! Studio's `watchdog_settings` reads and saves them over
+//! `watchdog.settings.*` and reads the phones once per Premium account.
 
 use gpui::{AnyElement, ClipboardItem, Context, SharedString, Window, div, prelude::*, px};
 use videorc_app_core::livestream::copy as page_copy;
@@ -15,6 +15,7 @@ use videorc_app_core::studio::watchdog_settings::WatchdogSettingsStore;
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::panel_section::PanelSection;
+use videorc_kit::qr_code::QrCode;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
 use videorc_kit::switch::Switch;
@@ -164,39 +165,56 @@ impl DestinationsPanel {
                         "Show a link for videorc.com/live on your phone."
                     })
                     .child(
+                        // `PhoneCode` beside the buttons: dark on light in
+                        // both themes (the kit's QR), 112 px as `size-28`.
                         div()
                             .flex()
-                            .flex_col()
-                            .gap(px(4.))
+                            .items_center()
+                            .gap(px(12.))
+                            .when(view.show_code, |row| {
+                                row.child(
+                                    QrCode::new("watchdog-phone-qr", LIVE_URL)
+                                        .size(112.)
+                                        .accessibility_label(QR_CODE_LABEL),
+                                )
+                            })
                             .child(
-                                Button::new("watchdog-show-code")
-                                    .label(view.show_code_label)
-                                    .variant(ButtonVariant::Outline)
-                                    .on_click({
-                                        let entity = entity.clone();
-                                        let show = !view.show_code;
-                                        move |_, _, cx| {
-                                            entity.update(cx, |this, _| {
-                                                this.set_watchdog_show_code(show)
-                                            });
-                                        }
-                                    }),
-                            )
-                            .child(
-                                Button::new("watchdog-copy-link")
-                                    .label(view.copy_label)
-                                    .variant(ButtonVariant::Ghost)
-                                    .on_click({
-                                        let entity = entity.clone();
-                                        move |_, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                LIVE_URL.to_string(),
-                                            ));
-                                            entity.update(cx, |this, _| {
-                                                this.note_watchdog_link_copied()
-                                            });
-                                        }
-                                    }),
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.))
+                                    .child(
+                                        Button::new("watchdog-show-code")
+                                            .label(view.show_code_label)
+                                            .variant(ButtonVariant::Outline)
+                                            .on_click({
+                                                let entity = entity.clone();
+                                                let show = !view.show_code;
+                                                move |_, _, cx| {
+                                                    entity.update(cx, |this, _| {
+                                                        this.set_watchdog_show_code(show)
+                                                    });
+                                                }
+                                            }),
+                                    )
+                                    .child(
+                                        Button::new("watchdog-copy-link")
+                                            .label(view.copy_label)
+                                            .variant(ButtonVariant::Ghost)
+                                            .on_click({
+                                                let entity = entity.clone();
+                                                move |_, _, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(
+                                                            LIVE_URL.to_string(),
+                                                        ),
+                                                    );
+                                                    entity.update(cx, |this, _| {
+                                                        this.note_watchdog_link_copied()
+                                                    });
+                                                }
+                                            }),
+                                    ),
                             ),
                     ),
             );
@@ -265,12 +283,10 @@ impl DestinationsPanel {
         self.studio.note_watchdog_link_copied();
     }
 
+    /// Every rebuild asks; the Studio answers `true` once per Premium
+    /// account, so a failed or signed-out read is not sent again each tick.
     pub(super) fn refresh_watchdog_phone_if_needed(&self, premium: bool) {
-        if !premium {
-            return;
-        }
-        let store = self.studio.watchdog_settings_now();
-        if store.settings.is_none() || store.phone_devices.is_some() {
+        if !self.studio.claim_watchdog_phone_read(premium) {
             return;
         }
         let studio = self.studio.clone();

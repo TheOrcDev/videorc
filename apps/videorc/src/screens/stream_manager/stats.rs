@@ -1,5 +1,6 @@
 //! The stats bar (P945–P951): session chip, Clock / Viewers / Followers
-//! cells from [`LiveDashboard`], Wide-only sparklines, and drag-reorder.
+//! cells from [`LiveDashboard`], Wide-only sparklines, drag-reorder, and
+//! Hide screen's chip at the trailing edge (P950).
 
 use gpui::{
     AnyElement, App, Context, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px,
@@ -12,11 +13,13 @@ use videorc_app_core::stream_manager::format::{group_thousands, parse_time};
 use videorc_app_core::studio::families::{
     DEFAULT_STAT_ORDER, StatsLayout, arranged_stat_ids, move_stat,
 };
+use videorc_app_core::studio::scene_on_stream::copy::SCREEN_HIDDEN;
 use videorc_app_core::studio::timecode::format_timecode;
 use videorc_kit::{
     badge::{Badge, BadgeVariant},
     context_menu::ContextMenu,
     dropdown_menu::{Menu, MenuItem},
+    icon::{IconName, icon},
     theme::hsla,
     tokens::Theme,
 };
@@ -281,6 +284,7 @@ pub fn stats_bar(
     view: &StatsView,
     layout: &StatsLayout,
     width: f32,
+    screen_hidden: bool,
     on_layout: impl Fn(StatsLayout, &mut App) + Clone + 'static,
 ) -> AnyElement {
     let wide = width >= WIDE_MIN;
@@ -424,5 +428,22 @@ pub fn stats_bar(
                 })
                 .into_any_element()
         }))
+        // P950 (plan 210 D9): Hide screen's chip at the trailing edge. It is
+        // never clipped and no stat moves when it comes or goes; a warn
+        // badge whose EyeSlash takes the dot's place, as the Studio's.
+        .when(screen_hidden, |bar| {
+            bar.child(
+                div()
+                    .id("stats-screen-hidden")
+                    .ml_auto()
+                    .flex_none()
+                    .pl(px(12.))
+                    .child(
+                        Badge::new(SCREEN_HIDDEN)
+                            .variant(BadgeVariant::Warning)
+                            .icon(icon(IconName::EyeSlash, 14., hsla(t.warning))),
+                    ),
+            )
+        })
         .into_any_element()
 }

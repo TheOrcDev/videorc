@@ -89,7 +89,7 @@ impl Hub {
                 if let Incoming::Event(event) = &incoming {
                     let relevant = match event {
                         BackendEvent::HealthEvent(_) | BackendEvent::RecordingFinalization(_) | BackendEvent::EventsLagged(_) | BackendEvent::ClientLagged {..} => true,
-                        BackendEvent::Untyped {event, ..} => matches!(event.as_str(), "stream.targets" | "replay.saved" | "replay.saveFailed" | "replay.state"),
+                        BackendEvent::Untyped {event, ..} => matches!(event.as_str(), "stream.targets" | "replay.saved" | "replay.saveFailed" | "replay.state" | sources::app::AGENTS_ACTIVITY_EVENT),
                         _ => false,
                     };
                     if !relevant { continue; }
@@ -292,7 +292,7 @@ impl Hub {
         }
     }
     fn can_run(&self, key: &str, id: &str) -> bool {
-        matches!(id, "open-permissions" | "open-shortcuts")
+        matches!(id, "open-permissions" | "open-shortcuts" | "open-settings")
             || self.watchdog_job(key, id).is_some()
             || self.action(key, id).as_ref().is_some_and(Self::supported)
     }
@@ -330,6 +330,10 @@ impl Hub {
             )),
             "open-shortcuts" => cx.emit(Navigate::Settings(
                 videorc_app_core::settings_page::SettingsTab::Shortcuts,
+            )),
+            // An agent's notice: where agents are set up (`openSettingsTab('remote')`).
+            "open-settings" => cx.emit(Navigate::Settings(
+                videorc_app_core::settings_page::SettingsTab::Remote,
             )),
             _ if matches!(
                 videorc_app_core::notices::sources::cloud::cloud_press(key, id),
