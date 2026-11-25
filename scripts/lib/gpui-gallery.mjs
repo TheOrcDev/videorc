@@ -194,7 +194,10 @@ export const SCREENS = Object.freeze([
     title: 'Go Live dialog',
     deck: 'livestream',
     open: page('studio', { dialog: 'go-live' }),
-    close: 'Escape',
+    // GPUI's dialog doesn't take the key focus Escape needs, and the UI
+    // driver's tree doesn't reach real builds yet: Cancel, else a fresh app.
+    close: { click: { name: 'Cancel', role: 'button' } },
+    restart: true,
     baseline: { screen: 'go-live', state: 'dialog' },
     sections: ['Go Live dialog']
   },

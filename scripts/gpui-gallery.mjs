@@ -100,6 +100,11 @@ const log = (line) => console.log(`gallery: ${line}`)
 const ON_AIR = join(homedir(), 'Library', 'Application Support', 'Videorc', 'on-air.json')
 const RUN_LOCK = join(homedir(), 'videorc-app-run.lock')
 const SETTLE_MS = Number(process.env.VIDEORC_GALLERY_SETTLE_MS ?? 1500)
+// A second capture this long after the first, in case the window was still
+// drawing when the first was taken.
+const WAKE_MS = Number(process.env.VIDEORC_GALLERY_WAKE_MS ?? 700)
+// The test toast's life: gone before the next screen is shot.
+const TOAST_MS = 2_500
 
 function buildSha(buildDir) {
   if (values.sha) return values.sha
@@ -159,7 +164,9 @@ function run(argv) {
   for (let i = 0; i < list.count; i++) {
     const w = list.objectAtIndex(i);
     if (ObjC.unwrap(w.objectForKey('kCGWindowOwnerPID')) !== pid) continue;
-    if (ObjC.unwrap(w.objectForKey('kCGWindowLayer')) !== 0) continue;
+    // Normal (0) or floating (3, raise-window): not menus or shadows.
+    const layer = ObjC.unwrap(w.objectForKey('kCGWindowLayer'));
+    if (layer !== 0 && layer !== 3) continue;
     const b = w.objectForKey('kCGWindowBounds');
     out.push({ id: ObjC.unwrap(w.objectForKey('kCGWindowNumber')), width: ObjC.unwrap(b.objectForKey('Width')), height: ObjC.unwrap(b.objectForKey('Height')) });
   }
@@ -341,17 +348,37 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
   const imgDir = join(runDir, 'img')
   mkdirSync(gpuiDir, { recursive: true })
   mkdirSync(imgDir, { recursive: true })
-  const app = await launch({ bins, stateDir })
-  const smoke = app.connections['preview-motion-ready']
+  let app, smoke, ui, ws, raisedWindowId
   const command = (name, params = {}, timeoutMs = 20_000) =>
     requestSmokeCommand(smoke, name, params, { timeoutMs })
-  const ui = createUiDriver(smoke, { app: 'gpui' })
-  const ws = await connectBackend(app.connections['backend-ready'], 60_000)
   const rpc = (method, params = {}) => request(ws, 60_000, method, params)
+  // A fresh app on the same profile: the start, and after a screen that
+  // leaves something open the app can't close yet (`restart`).
+  const start = async () => {
+    app = await launch({ bins, stateDir })
+    smoke = app.connections['preview-motion-ready']
+    ui = createUiDriver(smoke, { app: 'gpui' })
+    ws = await connectBackend(app.connections['backend-ready'], 60_000)
+    await command('resize-window', WINDOW)
+    // GPUI stops drawing a window macOS reports as covered, so a shot behind
+    // other windows showed the screen before it (010616c0d's first runs).
+    // Floating, without taking focus: it stays drawn and the owner keeps
+    // typing where they were.
+    const raised = await command('raise-window', {
+      role: 'main',
+      level: 'floating',
+      focus: false
+    })
+    raisedWindowId = Number.isInteger(raised?.windowId) ? raised.windowId : null
+    await sleep(800)
+  }
+  const stop = async () => {
+    ws?.close()
+    await app?.stop()
+  }
   const entries = []
   try {
-    await command('resize-window', WINDOW)
-    await sleep(800)
+    await start()
     const library = await command('studio-scenes-state').catch((error) => ({
       error: error.message
     }))
@@ -388,7 +415,7 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
               title: `A ${screen.toast} toast`,
               description: 'What happened, in one sentence.',
               id: 'gallery-toast',
-              durationMs: 30_000
+              durationMs: TOAST_MS
             })
             await sleep(900)
           } else {
@@ -403,18 +430,15 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
             await sleep(screen.open.dialog ? SETTLE_MS + 800 : SETTLE_MS)
           }
           const png = join(gpuiDir, `${name}.png`)
-          execFileSync('screencapture', [
-            '-x',
-            '-o',
-            '-l',
-            String(mainWindowId(app.process.pid, jxa)),
-            png
-          ])
+          const windowId = String(raisedWindowId ?? mainWindowId(app.process.pid, jxa))
+          execFileSync('screencapture', ['-x', '-o', '-l', windowId, png])
+          await sleep(WAKE_MS)
+          execFileSync('screencapture', ['-x', '-o', '-l', windowId, png])
           const bytes = readFileSync(png)
           const jpg = join(imgDir, `${name}.jpg`)
           toJpeg(png, jpg)
           shot.gpui = { png: `gpui/${name}.png`, image: `img/${name}.jpg`, digest: digest(bytes) }
-          if (screen.close) await ui.press(screen.close).catch(() => {})
+          if (screen.close) await closeScreen(ui, screen.close)
         } catch (error) {
           shot.gpui = { error: String(error?.message ?? error).slice(0, 300) }
           log(`${name}: ${shot.gpui.error}`)
@@ -424,15 +448,29 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
         entry.shots.push(shot)
       }
       if (restore) await restore().catch((error) => log(`${screen.id}: ${error.message}`))
-      if (screen.toast) await sleep(200)
+      if (screen.toast) await sleep(TOAST_MS + 500)
+      if (screen.restart) {
+        await stop()
+        await start()
+      }
       entries.push(entry)
       log(`${screen.id}: ${entry.shots.filter((s) => s.gpui?.image).length}/${LOOKS.length} shot`)
     }
   } finally {
-    ws.close()
-    await app.stop()
+    await stop()
   }
   return { sha, date: new Date().toISOString().slice(0, 10), window: WINDOW, screens: entries }
+}
+
+/** Closes what a screen opened: a key, or a button to click (Escape if it
+ * can't be found). */
+async function closeScreen(ui, close) {
+  if (typeof close === 'string') {
+    await ui.press(close).catch(() => {})
+    return
+  }
+  await ui.click(close.click, { timeoutMs: 3_000 }).catch(() => ui.press('Escape').catch(() => {}))
+  await sleep(400)
 }
 
 /** How much of each GPUI shot moved since `previous` (a run folder). */
