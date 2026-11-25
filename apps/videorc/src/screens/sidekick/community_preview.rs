@@ -4,10 +4,10 @@
 use std::path::Path;
 
 use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, px};
-use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::panel_section::PanelSection;
-use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::{radius, text};
+use videorc_kit::theme::{self, hsla};
+use videorc_kit::tokens::radius;
 use videorc_protocol::buddy_pet::BuddyAvatar;
 use videorc_protocol::cohost::{CohostPersona, CohostWelcomes, WelcomeLine};
 
@@ -43,7 +43,13 @@ pub(super) struct CommunityPreview {
 impl CommunityPreview {
     pub(super) fn new(cx: &mut Context<SidekickScreen>) -> Self {
         Self {
-            preview: cx.new(|_| PetPreview::new(PREVIEW_PX, "Sidekick")),
+            preview: cx.new(|_| {
+                let mut preview = PetPreview::new(PREVIEW_PX, "Sidekick");
+                // Electron LazyBuddyPetPreview interactive={false}; idle until
+                // Sidekick is on Community.
+                preview.set_interactive(false);
+                preview
+            }),
             said: None,
             loaded: None,
         }
@@ -61,6 +67,7 @@ impl SidekickScreen {
             return;
         }
         let preview = CommunityPreview::new(cx);
+        preview.set_active(false, cx);
         if let Some(community) = self.community.as_mut() {
             community.preview = Some(preview);
         }
@@ -149,7 +156,8 @@ impl SidekickScreen {
                                     .bg(hsla(theme.inset))
                                     .px(px(12.))
                                     .py(px(8.))
-                                    .type_scale(text::META)
+                                    // Electron text-sm (14).
+                                    .text_size(px(14.))
                                     .text_color(if line_muted {
                                         muted
                                     } else {
@@ -166,7 +174,6 @@ impl SidekickScreen {
                                         Button::new("community-preview-regular")
                                             .label(PLAY_WELCOME)
                                             .variant(ButtonVariant::Secondary)
-                                            .size(ButtonSize::Xs)
                                             .on_click({
                                                 let entity = entity.clone();
                                                 move |_, _, cx| {
@@ -183,7 +190,6 @@ impl SidekickScreen {
                                         Button::new("community-preview-milestone")
                                             .label(PLAY_MILESTONE)
                                             .variant(ButtonVariant::Secondary)
-                                            .size(ButtonSize::Xs)
                                             .on_click({
                                                 let entity = entity.clone();
                                                 move |_, _, cx| {
@@ -382,4 +388,36 @@ fn regex_replace_fields(text: &str, mut fill: impl FnMut(&str) -> Option<String>
     }
     out.push_str(rest);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PreviewKind, fill_sample, preview_words};
+    use videorc_protocol::cohost::CohostWelcomes;
+
+    #[test]
+    fn fill_sample_matches_electron_resolve_greeting_preview() {
+        let ada = &[
+            ("name", "Ada"),
+            ("handle", "@ada"),
+            ("platform", "Twitch"),
+            ("nth", "14th"),
+            ("streams", "14"),
+            ("row", "5"),
+            ("since", "March 2026"),
+        ];
+        assert_eq!(
+            fill_sample(
+                "Welcome { name } · {streams}/{row} since {since}",
+                ada
+            ),
+            "Welcome Ada · 14/5 since March 2026"
+        );
+        assert_eq!(
+            fill_sample("{names} and {months} {streak} {nope}", ada),
+            "Ada and {nope}"
+        );
+        let (line, _) = preview_words(&CohostWelcomes::default(), PreviewKind::Milestone);
+        assert_eq!(line, "Kim's 10th stream with us! Thank you!");
+    }
 }
