@@ -8,6 +8,7 @@ use videorc_kit::{
     button::{Button, ButtonSize, ButtonVariant},
     icon::{IconName, icon},
     list_row::{GroupedList, ListRow},
+    page::ConfigGrid,
     panel_section::PanelSection,
     settings_row::SettingsRow,
     shortcut_keys::ShortcutKeys,
@@ -337,14 +338,10 @@ impl SettingsScreen {
             }
             app = app.child(list);
         }
-        div()
-            .flex()
-            .flex_wrap()
-            .flex_1()
-            .content_stretch()
-            .items_stretch()
+        ConfigGrid::new("settings-shortcuts-grid")
+            .pair(true)
             .child(
-                div().flex_1().min_w(px(360.)).child(
+                div().child(
                     PanelSection::new(s::GLOBAL_TITLE)
                         .title(s::GLOBAL_TITLE)
                         .description(model.global_description)
@@ -357,18 +354,13 @@ impl SettingsScreen {
                 ),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_w(px(360.))
-                    .border_l_1()
-                    .border_color(hsla(t.border))
-                    .child(
-                        PanelSection::new(s::APP_TITLE)
-                            .title(s::APP_TITLE)
-                            .description(s::APP_DESCRIPTION)
-                            .last(true)
-                            .child(app),
-                    ),
+                div().child(
+                    PanelSection::new(s::APP_TITLE)
+                        .title(s::APP_TITLE)
+                        .description(s::APP_DESCRIPTION)
+                        .last(true)
+                        .child(app),
+                ),
             )
             .into_any_element()
     }
