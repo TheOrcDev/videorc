@@ -769,8 +769,9 @@ impl ScenePage {
     }
 
     /// One typed percent: its label over the field and the `%` after it.
-    // TODO(kit): InputGroup with an inline-end addon, and Escape reverting
-    // the draft (the field keeps what was typed until Enter or blur).
+    // TODO(kit): InputGroup with an inline-end addon. P549: Escape reverts
+    // the draft to what the field held when it took focus (kit
+    // `Input::revert_on_escape`).
     pub(super) fn percent_field(
         &self,
         field: Field,
@@ -805,6 +806,7 @@ impl ScenePage {
                         div().flex_1().min_w_0().child(
                             Input::new(SharedString::from(id), self.controls.input(field))
                                 .disabled(!enabled)
+                                .revert_on_escape(true)
                                 .accessibility_label(name),
                         ),
                     )
