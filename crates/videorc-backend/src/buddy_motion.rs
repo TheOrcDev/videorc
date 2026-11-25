@@ -710,6 +710,174 @@ impl BuddyMotion {
             pivot,
         }
     }
+
+    /// Everything the model carries between calls, as the TS twin's
+    /// `BuddyMotionState` JSON (plan 249 S5 keyframes; plan 260 S1.8 R6b
+    /// sends them from the backend): `state` and `velocity` (five channels
+    /// each), `springRunning`, the reaction `envelope` (`start`, `total`,
+    /// its segments with their ease) or `null`, `idle`, `breathGain` and
+    /// `lastNow`. The configuration is not part of it: the animator sets it
+    /// every step.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // the room's motion stream
+    pub fn save_state(&self) -> serde_json::Value {
+        let envelope = self.envelope.map(|envelope| {
+            let segments = envelope.segments[..envelope.count]
+                .iter()
+                .map(|segment| {
+                    serde_json::json!({
+                        "duration": segment.duration,
+                        "ease": segment.ease.to_json(),
+                        "from": segment.from.to_vec(),
+                        "to": segment.to.to_vec(),
+                        "yoyo": segment.yoyo,
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "start": envelope.start,
+                "total": envelope.total,
+                "segments": segments,
+            })
+        });
+        serde_json::json!({
+            "state": self.state.to_vec(),
+            "velocity": self.velocity.to_vec(),
+            "springRunning": self.spring_running,
+            "envelope": envelope,
+            "idle": self.idle,
+            "breathGain": self.breath_gain,
+            "lastNow": self.last_now,
+        })
+    }
+
+    /// Continue from [`save_state`](Self::save_state)'s JSON (or the TS
+    /// twin's `saveState()`), keeping this model's configuration. The shape
+    /// is checked as `parseAnimatorState` checks it; an envelope of more
+    /// segments than a reaction builds is refused.
+    #[cfg_attr(not(test), allow(dead_code))] // a consumer's side; the tests replay keyframes
+    pub fn load_state(&mut self, saved: &serde_json::Value) -> Result<(), String> {
+        let saved = saved
+            .as_object()
+            .ok_or("The motion state is not an object.")?;
+        let field = |name: &str| {
+            saved
+                .get(name)
+                .ok_or_else(|| format!("The motion state has no {name}."))
+        };
+        let flag = |name: &str| {
+            field(name)?
+                .as_bool()
+                .ok_or_else(|| format!("The motion state's {name} is not a boolean."))
+        };
+        let state = state_channels(field("state")?).ok_or("The motion state's state is off.")?;
+        let velocity =
+            state_channels(field("velocity")?).ok_or("The motion state's velocity is off.")?;
+        let spring_running = flag("springRunning")?;
+        let idle = flag("idle")?;
+        let breath_gain = state_number(field("breathGain")?, 0.0, 1.0)
+            .ok_or("The motion state's breathGain is off.")?;
+        let last_now = match field("lastNow")? {
+            serde_json::Value::Null => None,
+            value => {
+                Some(state_number(value, -1e7, 1e7).ok_or("The motion state's lastNow is off.")?)
+            }
+        };
+        let envelope = match field("envelope")? {
+            serde_json::Value::Null => None,
+            value => Some(state_envelope(value).ok_or("The motion state's envelope is off.")?),
+        };
+        self.state = state;
+        self.velocity = velocity;
+        self.spring_running = spring_running;
+        self.envelope = envelope;
+        self.idle = idle;
+        self.breath_gain = breath_gain;
+        self.last_now = last_now;
+        Ok(())
+    }
+}
+
+impl Ease {
+    /// The TS twin's `Ease`: `{ kind: 'cubic' | 'quartic' | 'sine' }` or
+    /// `{ kind: 'elastic', period }`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn to_json(self) -> serde_json::Value {
+        match self {
+            Ease::Cubic => serde_json::json!({ "kind": "cubic" }),
+            Ease::Quartic => serde_json::json!({ "kind": "quartic" }),
+            Ease::Sine => serde_json::json!({ "kind": "sine" }),
+            Ease::Elastic { period } => serde_json::json!({ "kind": "elastic", "period": period }),
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let ease = match object.get("kind")?.as_str()? {
+            "cubic" => Ease::Cubic,
+            "quartic" => Ease::Quartic,
+            "sine" => Ease::Sine,
+            "elastic" => Ease::Elastic {
+                period: state_number(object.get("period")?, 0.0, 10.0)?,
+            },
+            _ => return None,
+        };
+        let keys = if matches!(ease, Ease::Elastic { .. }) {
+            2
+        } else {
+            1
+        };
+        (object.len() == keys).then_some(ease)
+    }
+}
+
+/// A finite number within `min..=max` (`parseAnimatorState`'s `finite`).
+#[cfg_attr(not(test), allow(dead_code))]
+fn state_number(value: &serde_json::Value, min: f64, max: f64) -> Option<f64> {
+    value
+        .as_f64()
+        .filter(|number| number.is_finite() && (min..=max).contains(number))
+}
+
+/// Five channels, each within ±1e4 (`parseAnimatorState`'s `channels`).
+#[cfg_attr(not(test), allow(dead_code))]
+fn state_channels(value: &serde_json::Value) -> Option<[f64; CHANNEL_COUNT]> {
+    let values = value
+        .as_array()
+        .filter(|values| values.len() == CHANNEL_COUNT)?;
+    let mut channels = ZERO;
+    for (slot, value) in channels.iter_mut().zip(values) {
+        *slot = state_number(value, -1e4, 1e4)?;
+    }
+    Some(channels)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn state_envelope(value: &serde_json::Value) -> Option<Envelope> {
+    let object = value.as_object()?;
+    let start = state_number(object.get("start")?, -1e7, 1e7)?;
+    let total = state_number(object.get("total")?, 0.0, 60.0)?;
+    let raw = object.get("segments")?.as_array()?;
+    if raw.len() > MAX_SEGMENTS {
+        return None;
+    }
+    let mut envelope = Envelope {
+        start,
+        segments: [Segment::REST; MAX_SEGMENTS],
+        count: raw.len(),
+        total,
+    };
+    for (slot, segment) in envelope.segments.iter_mut().zip(raw) {
+        let segment = segment.as_object()?;
+        *slot = Segment {
+            duration: state_number(segment.get("duration")?, 0.0, 60.0)?,
+            ease: Ease::from_json(segment.get("ease")?)?,
+            from: state_channels(segment.get("from")?)?,
+            to: state_channels(segment.get("to")?)?,
+            yoyo: segment.get("yoyo")?.as_bool()?,
+        };
+    }
+    Some(envelope)
 }
 
 #[cfg(test)]

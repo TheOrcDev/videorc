@@ -97,6 +97,9 @@ pub(crate) fn start(state: AppState) {
         "the backend holds the talk show's host seat ({SWITCH_ENV}=1 in a debug build, or \
          {CLIENT_ROOM_ENV}={CLIENT_ROOM_BACKEND} from a client with no room of its own)"
     );
+    // Plan 260 S1.8 (L1): the avatar content a client asks the backend to
+    // build (`cloud.room.avatar.set { build: true }`).
+    tokio::spawn(crate::room_avatar_build::run(state.clone()));
     tokio::spawn(follow(state));
 }
 

@@ -114,6 +114,8 @@ mod room_aux;
 #[cfg(target_os = "macos")]
 mod room_avatar;
 #[cfg(target_os = "macos")]
+mod room_avatar_build;
+#[cfg(target_os = "macos")]
 #[allow(
     dead_code,
     reason = "plan 260 S1.8b: the presentation publishers (graphics, avatar, scene, HTML layers) read the receipts in its next parts"
