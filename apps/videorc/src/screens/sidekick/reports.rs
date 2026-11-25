@@ -22,10 +22,10 @@ use videorc_kit::empty::Empty;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
-use videorc_kit::select::Select;
+use videorc_kit::select::{Select, SelectOption};
 use videorc_kit::spinner::Spinner;
 use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::{Theme, radius, size, text};
+use videorc_kit::tokens::{Theme, radius, text};
 use videorc_kit::tooltip::tooltip;
 use videorc_protocol::streaming::StreamPlatform;
 use videorc_protocol::{ClipMomentSource, CohostReportPayload};
@@ -34,10 +34,14 @@ use super::SidekickScreen;
 use super::live::{LiveView, UnlockAction};
 use crate::screens::session_player;
 
-/// A platform mark in a row or the stream line.
-const MARK_PX: f32 = 14.;
+/// A platform mark in a row or the stream line (`ChatPlatformIcon`'s
+/// `size-5`: YouTube's official icon may not go below 20 px, plan 165).
+const MARK_PX: f32 = 20.;
 /// A row's icon tile glyph.
 const ICON_PX: f32 = 16.;
+/// `lg:grid-cols-2`: the report's lists sit side by side from this window
+/// width (a viewport breakpoint, not the report's).
+const LISTS_SIDE_BY_SIDE_MIN_WIDTH: f32 = 1024.;
 
 /// The tab's state (`useBuddyReport` and the card's own).
 #[derive(Debug, Clone, Default)]
@@ -62,6 +66,23 @@ pub struct ReportsState {
     /// The Library's recording dialog with the session's markers
     /// (`SessionMarkersDialog`), made on the first Markers click.
     pub markers: Option<Entity<session_player::Player>>,
+    /// The report's own width (`@container/buddy-report`), measured each
+    /// frame: the stat tiles' columns follow it.
+    pub width: f32,
+}
+
+/// The stat tiles' columns at the report's width: 2, 3 from 30 rem, 5 from
+/// 52 rem, then all 9 in one row from 90 rem.
+fn stat_columns(width: f32) -> u16 {
+    if width >= 1440. {
+        9
+    } else if width >= 832. {
+        5
+    } else if width >= 480. {
+        3
+    } else {
+        2
+    }
 }
 
 impl SidekickScreen {
@@ -179,6 +200,19 @@ impl SidekickScreen {
         self.refresh_reports(cx);
     }
 
+    /// The report's measured width; draws again only when the tiles'
+    /// columns change.
+    fn measure_report(&mut self, width: f32, cx: &mut Context<Self>) {
+        let Some(reports) = self.reports.as_mut() else {
+            return;
+        };
+        let flips = stat_columns(reports.width) != stat_columns(width);
+        reports.width = width;
+        if flips {
+            cx.notify();
+        }
+    }
+
     /// "Show all {n}" / "Show fewer".
     pub(crate) fn toggle_report_list(&mut self, list: &'static str, cx: &mut Context<Self>) {
         if let Some(reports) = self.reports.as_mut()
@@ -228,9 +262,12 @@ pub fn render_reports(
     );
     let selected = ask.or_else(|| shown.map(|shown| shown.session_id.clone()));
 
+    // The tab's one section (`PageStack`): flush to the pane, and as its
+    // last section it has no hairline under it.
     let mut section = PanelSection::new("sidekick-stream-report")
         .title(rv::STREAM_REPORT)
-        .description(rv::DESCRIPTION);
+        .description(rv::DESCRIPTION)
+        .last(true);
     // P1219: the shown stream's markers, in the Library's own dialog.
     if let (Some(shown), Some(_)) = (shown, session) {
         let session_id = shown.session_id.clone();
@@ -249,10 +286,29 @@ pub fn render_reports(
     if let Some(selected) = selected
         && !options.is_empty()
     {
-        section = section.action(stream_picker(&options, selected, &entity));
+        section = section.action(stream_picker(&options, selected, &entity, t));
     }
 
-    let mut body = div().flex().flex_col().min_w(px(0.)).gap(px(16.));
+    // `@container/buddy-report`: the tiles' columns follow this block's width.
+    let measured = entity.downgrade();
+    let measure = gpui::canvas(
+        move |bounds, _, cx| {
+            let width = f32::from(bounds.size.width);
+            measured
+                .update(cx, |screen, cx| screen.measure_report(width, cx))
+                .ok();
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full();
+    let mut body = div()
+        .relative()
+        .flex()
+        .flex_col()
+        .min_w(px(0.))
+        .gap(px(16.))
+        .child(measure);
     if let Some(error) = state.error.as_ref() {
         body = body.child(
             Alert::new("sidekick-report-error")
@@ -274,7 +330,8 @@ pub fn render_reports(
     }
     match &report {
         ReportView::Shown(shown) => {
-            body = body.child(report_body(shown, view, state, t, &entity));
+            let wide = f32::from(window.viewport_size().width) >= LISTS_SIDE_BY_SIDE_MIN_WIDTH;
+            body = body.child(report_body(shown, view, state, wide, t, &entity));
         }
         ReportView::Empty { .. } if state.error.is_some() => {}
         ReportView::Empty { .. } if state.loading || !state.loaded => {
@@ -302,32 +359,49 @@ pub fn render_reports(
     div()
         .flex()
         .flex_col()
-        .p(px(size::GUTTER))
         .child(section.child(body))
         .into_any_element()
 }
 
 /// The stream picker: recent streams, newest first, named by when they ran.
-/// The kit's select has one label for its trigger and its row, so a row
-/// reads its date, then its title when it is a real one.
+/// The trigger reads the date (the title when there is none); a row reads
+/// the title, then the date in secondary text.
 fn stream_picker(
     options: &[SessionOption],
     selected: String,
     entity: &Entity<SidekickScreen>,
+    t: &'static Theme,
 ) -> Select {
     let mut select = Select::new("sidekick-report-stream")
         .accessibility_label(rv::STREAM)
         .placeholder(rv::STREAM)
         .value(Some(SharedString::from(selected)));
     for option in options {
-        let label = if option.date.is_empty() {
-            option.title.clone()
-        } else if is_auto_session_title(&option.title) {
-            option.date.clone()
-        } else {
-            format!("{} · {}", option.date, option.title)
+        let label = match (option.date.is_empty(), option.title.is_empty()) {
+            (false, _) => option.date.clone(),
+            (true, false) => option.title.clone(),
+            (true, true) => rv::STREAM.to_string(),
         };
-        select = select.option(option.id.clone(), label);
+        let row = div()
+            .flex()
+            .min_w(px(0.))
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .max_w(px(256.))
+                    .truncate()
+                    .child(option.title.clone()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .type_scale(text::META)
+                    .text_color(hsla(t.muted_foreground))
+                    .child(option.date.clone()),
+            );
+        select = select.option_item(SelectOption::new(option.id.clone(), label).child(row));
     }
     let entity = entity.clone();
     select.on_change(move |id, _, cx| {
@@ -339,10 +413,12 @@ fn report_body(
     view: &ShownReport,
     live: &LiveView,
     state: &ReportsState,
+    wide: bool,
     t: &'static Theme,
     entity: &Entity<SidekickScreen>,
 ) -> impl IntoElement {
     let muted = hsla(t.muted_foreground);
+    let columns = stat_columns(state.width);
     let mut body = div()
         .flex()
         .flex_col()
@@ -357,7 +433,7 @@ fn report_body(
                     .description(note.hint),
             );
         }
-        None => body = body.child(stat_tiles(&view.stats, t)),
+        None => body = body.child(stat_tiles(&view.stats, columns, t)),
     }
     if let Some(community) = view.community.as_ref() {
         let mut block = div()
@@ -371,7 +447,7 @@ fn report_body(
                     .text_color(hsla(t.foreground))
                     .child(rv::COMMUNITY),
             )
-            .child(stat_tiles(&community.stats, t));
+            .child(stat_tiles(&community.stats, columns, t));
         if let Some(line) = community.line.as_ref() {
             block = block.child(
                 div()
@@ -402,34 +478,39 @@ fn report_body(
             }
             (None, None) => {}
         }
-        block = block
-            .children(report_list(
-                "regulars",
-                rv::REGULARS_BACK,
-                &community.regulars,
-                state,
-                entity,
-                |index, person| {
-                    let mut row = ListRow::new(row_id("regulars", index), person.name.clone())
-                        .meta(person.streams.clone());
-                    for platform in &person.platforms {
-                        row = row.status_icon(platform_mark(*platform, t));
-                    }
-                    row
-                },
-            ))
-            .children(report_list(
-                "milestones",
-                rv::MILESTONES,
-                &community.milestones,
-                state,
-                entity,
-                |index, entry| {
-                    ListRow::new(row_id("milestones", index), entry.name.clone())
-                        .meta(entry.label.clone())
-                        .status_icon(platform_mark(entry.platform, t))
-                },
-            ));
+        let regulars = report_list(
+            "regulars",
+            rv::REGULARS_BACK,
+            &community.regulars,
+            state,
+            entity,
+            |index, person| {
+                let mut row = ListRow::new(row_id("regulars", index), person.name.clone())
+                    .meta(person.streams.clone());
+                for platform in &person.platforms {
+                    row = row.status_icon(platform_mark(*platform, t));
+                }
+                row
+            },
+        );
+        let milestones = report_list(
+            "milestones",
+            rv::MILESTONES,
+            &community.milestones,
+            state,
+            entity,
+            |index, entry| {
+                ListRow::new(row_id("milestones", index), entry.name.clone())
+                    .meta(entry.label.clone())
+                    .status_icon(platform_mark(entry.platform, t))
+            },
+        );
+        // Side by side at `lg` when both have rows.
+        block = block.children(list_columns(
+            regulars.map(|list| vec![list]).unwrap_or_default(),
+            milestones.map(|list| vec![list]).unwrap_or_default(),
+            wide,
+        ));
         body = body.child(block);
     }
     if let Some(commands) = view.commands.as_ref() {
@@ -497,92 +578,144 @@ fn report_body(
                 .child(skips.sentence.clone()),
         );
     }
-    body.children(report_list(
-        "missed",
-        rv::MISSED_QUESTIONS,
-        &view.missed,
-        state,
-        entity,
-        |index, question| {
-            let mut row = ListRow::new(row_id("missed", index), question.text.clone());
-            if !question.askers.is_empty() {
-                row = row.context(question.askers.clone());
-            }
-            if question.high {
-                row = row.alias(Badge::new(rv::HIGH).variant(BadgeVariant::Outline));
-            }
-            for platform in &question.platforms {
-                row = row.status_icon(platform_mark(*platform, t));
-            }
-            if let Some(at) = question.at.as_ref() {
-                row = row.meta(at.clone());
-            }
-            row
-        },
-    ))
-    .children(report_list(
-        "promises",
-        rv::OPEN_PROMISES,
-        &view.promises,
-        state,
-        entity,
-        |index, promise| {
-            let row = ListRow::new(row_id("promises", index), promise.text.clone());
-            match promise.at.as_ref() {
-                Some(at) => row.meta(at.clone()),
-                None => row,
-            }
-        },
-    ))
-    .children(report_list(
-        "moments",
-        rv::MOMENTS,
-        &view.moments,
-        state,
-        entity,
-        |index, moment| {
-            let glyph = match moment.kind {
-                ClipMomentSource::Voice => IconName::Microphone,
-                ClipMomentSource::Manual => IconName::Scissors,
-                ClipMomentSource::Chat => IconName::ChatCircle,
-            };
-            let row = ListRow::new(row_id("moments", index), moment.label.clone())
-                .icon(icon(glyph, ICON_PX, muted))
-                .meta(moment.range.clone());
-            if moment.excerpt.is_empty() {
+    // What needs you (questions, promises) beside what happened (moments,
+    // alerts), two columns at `lg` when both sides have rows.
+    let needs_you = [
+        report_list(
+            "missed",
+            rv::MISSED_QUESTIONS,
+            &view.missed,
+            state,
+            entity,
+            |index, question| {
+                let mut row = ListRow::new(row_id("missed", index), question.text.clone());
+                if !question.askers.is_empty() {
+                    row = row.context(question.askers.clone());
+                }
+                if question.high {
+                    row = row.alias(Badge::new(rv::HIGH).variant(BadgeVariant::Outline));
+                }
+                for platform in &question.platforms {
+                    row = row.status_icon(platform_mark(*platform, t));
+                }
+                if let Some(at) = question.at.as_ref() {
+                    row = row.meta(at.clone());
+                }
                 row
-            } else {
-                row.context(moment.excerpt.clone())
-            }
-        },
+            },
+        ),
+        report_list(
+            "promises",
+            rv::OPEN_PROMISES,
+            &view.promises,
+            state,
+            entity,
+            |index, promise| {
+                let row = ListRow::new(row_id("promises", index), promise.text.clone());
+                match promise.at.as_ref() {
+                    Some(at) => row.meta(at.clone()),
+                    None => row,
+                }
+            },
+        ),
+    ];
+    let happened = [
+        report_list(
+            "moments",
+            rv::MOMENTS,
+            &view.moments,
+            state,
+            entity,
+            |index, moment| {
+                let glyph = match moment.kind {
+                    ClipMomentSource::Voice => IconName::Microphone,
+                    ClipMomentSource::Manual => IconName::Scissors,
+                    ClipMomentSource::Chat => IconName::ChatCircle,
+                };
+                let row = ListRow::new(row_id("moments", index), moment.label.clone())
+                    .icon(icon(glyph, ICON_PX, muted))
+                    .meta(moment.range.clone());
+                if moment.excerpt.is_empty() {
+                    row
+                } else {
+                    row.context(moment.excerpt.clone())
+                }
+            },
+        ),
+        report_list(
+            "alerts",
+            rv::ALERTS,
+            &view.alerts,
+            state,
+            entity,
+            |index, alert| {
+                let row = ListRow::new(row_id("alerts", index), alert.label)
+                    .icon(icon(IconName::WarningCircle, ICON_PX, muted))
+                    .context(alert.viewers.clone());
+                match alert.at.as_ref() {
+                    Some(at) => row.meta(at.clone()),
+                    None => row,
+                }
+            },
+        ),
+    ];
+    body.children(list_columns(
+        needs_you.into_iter().flatten().collect(),
+        happened.into_iter().flatten().collect(),
+        wide,
     ))
-    .children(report_list(
-        "alerts",
-        rv::ALERTS,
-        &view.alerts,
-        state,
-        entity,
-        |index, alert| {
-            let row = ListRow::new(row_id("alerts", index), alert.label)
-                .icon(icon(IconName::WarningCircle, ICON_PX, muted))
-                .context(alert.viewers.clone());
-            match alert.at.as_ref() {
-                Some(at) => row.meta(at.clone()),
-                None => row,
-            }
-        },
-    ))
+}
+
+/// Two groups of report lists (`grid min-w-0 gap-4`): side by side, each a
+/// column of its lists, when `wide` and both have rows; else one under the
+/// other. None when neither has a row.
+fn list_columns(first: Vec<AnyElement>, second: Vec<AnyElement>, wide: bool) -> Option<AnyElement> {
+    if first.is_empty() && second.is_empty() {
+        return None;
+    }
+    let column = |lists: Vec<AnyElement>| {
+        div()
+            .flex()
+            .flex_col()
+            .min_w(px(0.))
+            .gap(px(16.))
+            .children(lists)
+    };
+    let side_by_side = wide && !first.is_empty() && !second.is_empty();
+    let grid = if side_by_side {
+        div()
+            .flex()
+            .items_start()
+            .min_w(px(0.))
+            .gap(px(16.))
+            .child(column(first).flex_1())
+            .child(column(second).flex_1())
+    } else {
+        div()
+            .flex()
+            .flex_col()
+            .min_w(px(0.))
+            .gap(px(16.))
+            .when(!first.is_empty(), |grid| grid.child(column(first)))
+            .when(!second.is_empty(), |grid| grid.child(column(second)))
+    };
+    Some(grid.into_any_element())
 }
 
 /// Title, then how long it ran and where the chat came from (P1224: one
 /// mark per platform, its count in the tooltip).
 fn stream_line(view: &ShownReport, t: &'static Theme) -> impl IntoElement {
     let muted = hsla(t.muted_foreground);
+    // Each fact its own span, a "·" between them, all 6 px apart.
     let facts = [view.duration.clone(), Some(view.chat.label.clone())]
         .into_iter()
         .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ");
+        .enumerate()
+        .flat_map(|(index, fact)| {
+            let dot = (index > 0).then(|| div().child("·"));
+            dot.into_iter().chain([div().child(fact)])
+        })
+        .collect::<Vec<_>>();
     let several = view.chat.platforms.len() > 1;
     let platforms = view
         .chat
@@ -623,10 +756,11 @@ fn stream_line(view: &ShownReport, t: &'static Theme) -> impl IntoElement {
                 .flex()
                 .flex_wrap()
                 .items_center()
-                .gap(px(6.))
+                .gap_x(px(6.))
+                .gap_y(px(2.))
                 .type_scale(text::META)
                 .text_color(muted)
-                .child(facts)
+                .children(facts)
                 .child(
                     div()
                         .flex()
@@ -639,12 +773,12 @@ fn stream_line(view: &ShownReport, t: &'static Theme) -> impl IntoElement {
 }
 
 /// The stats as a row of tiles: each the number over its label, a ratio's
-/// whole muted after a slash.
-fn stat_tiles(stats: &[Stat], t: &'static Theme) -> impl IntoElement {
+/// whole muted after a slash. `columns` follows the report's width.
+fn stat_tiles(stats: &[Stat], columns: u16, t: &'static Theme) -> impl IntoElement {
     let muted = hsla(t.muted_foreground);
     div()
         .grid()
-        .grid_cols(3)
+        .grid_cols(columns)
         .gap(px(8.))
         .children(stats.iter().map(|stat| {
             div()
@@ -766,5 +900,12 @@ fn platform_mark(platform: StreamPlatform, t: &Theme) -> Svg {
         StreamPlatform::Instagram => ChatPlatform::Instagram,
         StreamPlatform::Custom => ChatPlatform::Custom,
     };
-    icon(mark.icon(), MARK_PX, mark.tint_hsla(t))
+    let glyph = icon(mark.icon(), MARK_PX, mark.tint_hsla(t));
+    // YouTube keeps clear space of the triangle's width before what
+    // follows it (`mr-1`, brand.youtube).
+    if mark == ChatPlatform::Youtube {
+        glyph.mr(px(4.))
+    } else {
+        glyph
+    }
 }
