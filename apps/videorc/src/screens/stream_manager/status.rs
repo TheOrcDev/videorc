@@ -43,6 +43,7 @@ pub fn status_bar(
     on_pin: impl Fn(bool, &ClickEvent, &mut Window, &mut App) + 'static,
     on_hide: impl Fn(bool, &ClickEvent, &mut Window, &mut App) + 'static,
     on_clear: impl Fn(&mut Window, &mut App) + 'static,
+    on_clip: impl Fn(u32, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let tier = Tier::of(width);
     let labels = full_labels(width);
@@ -67,6 +68,7 @@ pub fn status_bar(
     let preview = open_preview();
     let actions_wide = tier != Tier::Narrow;
     let on_clear = Rc::new(on_clear);
+    let on_clip = Rc::new(on_clip);
 
     bar = bar
         .child(
@@ -125,13 +127,19 @@ pub fn status_bar(
                 StatusBarAction::new("clip-30", "Save a 30-second clip")
                     .text(clip_short)
                     .hint("Save the last 30 seconds as a clip")
-                    .on_click(|_, _, _| {}),
+                    .on_click({
+                        let clip = on_clip.clone();
+                        move |_, window, app| clip(30, window, app)
+                    }),
             )
             .child(
                 StatusBarAction::new("clip-60", "Save a 1-minute clip")
                     .text(clip_long.clone())
                     .hint("Save the last minute as a clip")
-                    .on_click(|_, _, _| {}),
+                    .on_click({
+                        let clip = on_clip.clone();
+                        move |_, window, app| clip(60, window, app)
+                    }),
             )
             .child(
                 StatusBarAction::new("banners", BANNERS)
@@ -197,13 +205,22 @@ pub fn status_bar(
                     )
                     .menu({
                         let clear = on_clear.clone();
+                        let clip = on_clip.clone();
                         move |_, _| {
                             let clear = clear.clone();
+                            let clip30 = clip.clone();
+                            let clip60 = clip.clone();
                             Menu::new()
                                 .item(MenuItem::new(HIDE_SCREEN).on_select(|_, _| {}))
                                 .item(MenuItem::new(HIGHLIGHT_POSITION).on_select(|_, _| {}))
-                                .item(MenuItem::new(clip_short_menu.clone()).on_select(|_, _| {}))
-                                .item(MenuItem::new(clip_long_menu.clone()).on_select(|_, _| {}))
+                                .item(
+                                    MenuItem::new(clip_short_menu.clone())
+                                        .on_select(move |window, app| clip30(30, window, app)),
+                                )
+                                .item(
+                                    MenuItem::new(clip_long_menu.clone())
+                                        .on_select(move |window, app| clip60(60, window, app)),
+                                )
                                 .item(MenuItem::new(BANNERS).on_select(|_, _| {}))
                                 .item(MenuItem::new(format!("{SOUNDS}…")).on_select(|_, _| {}))
                                 .item(MenuItem::new("Chat commands…").on_select(|_, _| {}))

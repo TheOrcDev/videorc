@@ -6,6 +6,7 @@
 //! search chat, ⌘L write in chat, in the `StreamManager` key context). The
 //! header, stats bar, panes and status bar are the kit's (`videorc-kit`).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
@@ -13,6 +14,20 @@ use gpui::{
     WindowHandle, actions, div, prelude::*, px, size,
 };
 use tokio::sync::watch;
+use videorc_app_core::desktop::capture_protection::{
+    HideMethod, WindowRole, stream_manager_hide_method,
+};
+use videorc_app_core::desktop::permissions::PermissionPlatform;
+use videorc_app_core::stream_manager::copy::WINDOW_NAME;
+use videorc_app_core::stream_manager::dashboard::{LiveDashboard, SessionState};
+use videorc_app_core::{BackendClient, Studio};
+use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::dialog::{Dialog, DialogHandle};
+use videorc_kit::{
+    theme::{self, hsla},
+    window,
+    window_frame::{WindowFrame, WindowHeader},
+};
 
 use super::activity::activity_pane;
 use super::chat::ChatPane;
@@ -25,19 +40,8 @@ use super::status::status_bar;
 use crate::app::hide::HideFromStream;
 use crate::app::menus::ToggleStreamManager;
 use crate::platform;
-use videorc_app_core::desktop::capture_protection::{
-    HideMethod, WindowRole, stream_manager_hide_method,
-};
-use videorc_app_core::desktop::permissions::PermissionPlatform;
-use videorc_app_core::stream_manager::copy::WINDOW_NAME;
-use videorc_app_core::stream_manager::dashboard::{LiveDashboard, SessionState};
-use videorc_kit::button::{Button, ButtonVariant};
-use videorc_kit::dialog::{Dialog, DialogHandle};
-use videorc_kit::{
-    theme::{self, hsla},
-    window,
-    window_frame::{WindowFrame, WindowHeader},
-};
+
+pub type AppStudio = Studio<BackendClient>;
 
 actions!(stream_manager, [ShowSidekick, SearchChat, WriteInChat]);
 
@@ -51,6 +55,8 @@ struct Open {
     frame: StreamManagerFrame,
     app_id: &'static str,
     dashboard: watch::Receiver<LiveDashboard>,
+    studio: Arc<AppStudio>,
+    runtime: tokio::runtime::Handle,
     window: Option<WindowHandle<StreamManager>>,
     quitting: bool,
 }
@@ -64,6 +70,8 @@ pub fn install(
     frame: StreamManagerFrame,
     app_id: &'static str,
     dashboard: watch::Receiver<LiveDashboard>,
+    studio: Arc<AppStudio>,
+    runtime: tokio::runtime::Handle,
 ) {
     cx.bind_keys([
         KeyBinding::new("secondary-j", ShowSidekick, Some(KEY_CONTEXT)),
@@ -75,6 +83,8 @@ pub fn install(
         frame,
         app_id,
         dashboard,
+        studio,
+        runtime,
         window: None,
         quitting: false,
     });
@@ -120,9 +130,15 @@ pub fn show(cx: &mut App) {
         let _ = window.update(cx, |_, window, _| window.activate_window());
         return;
     }
-    let (frame, app_id, dashboard) = {
+    let (frame, app_id, dashboard, studio, runtime) = {
         let open = cx.global::<Open>();
-        (open.frame.clone(), open.app_id, open.dashboard.clone())
+        (
+            open.frame.clone(),
+            open.app_id,
+            open.dashboard.clone(),
+            open.studio.clone(),
+            open.runtime.clone(),
+        )
     };
     let bounds = frame.opening(cx).unwrap_or_else(|| {
         Bounds::centered(
@@ -135,7 +151,7 @@ pub fn show(cx: &mut App) {
     options.window_min_size = Some(size(px(MIN_WIDTH), px(MIN_HEIGHT)));
     options.app_id = Some(app_id.into());
     let opened = cx.open_window(options, move |window, cx| {
-        cx.new(|cx| StreamManager::new(frame, dashboard, window, cx))
+        cx.new(|cx| StreamManager::new(frame, dashboard, studio, runtime, window, cx))
     });
     match opened {
         Ok(window) => cx.global_mut::<Open>().window = Some(window),
@@ -162,6 +178,8 @@ impl Facts {
 
 pub struct StreamManager {
     frame: StreamManagerFrame,
+    studio: Arc<AppStudio>,
+    runtime: tokio::runtime::Handle,
     notices: gpui::Entity<crate::screens::notifications::Centre>,
     chat: gpui::Entity<ChatPane>,
     panes: Panes,
@@ -179,6 +197,8 @@ impl StreamManager {
     fn new(
         frame: StreamManagerFrame,
         mut dashboard: watch::Receiver<LiveDashboard>,
+        studio: Arc<AppStudio>,
+        runtime: tokio::runtime::Handle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -237,6 +257,8 @@ impl StreamManager {
         .detach();
         Self {
             frame,
+            studio,
+            runtime,
             notices,
             chat,
             panes: Panes::default(),
@@ -266,6 +288,13 @@ impl StreamManager {
         self.clear.close(window, cx);
         self.chat.update(cx, |chat, cx| chat.clear_view(cx));
         cx.notify();
+    }
+
+    fn mark_clip(&self, seconds: u32) {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            let _ = studio.mark_clip(Some(seconds)).await;
+        });
     }
 
     fn set_pinned(&mut self, pinned: bool, window: &Window, cx: &mut Context<Self>) {
@@ -352,6 +381,7 @@ impl Render for StreamManager {
         let pin = this.clone();
         let hide = this.clone();
         let clear = this.clone();
+        let clip = this.clone();
         let clear_dialog = Dialog::new("stream-manager-clear", &self.clear, "Clear the view?")
             .description(
                 "Chat and Activity in this window are emptied and the messages per minute start over. The Library keeps the history.",
@@ -427,6 +457,9 @@ impl Render for StreamManager {
                     },
                     move |window, app| {
                         let _ = clear.update(app, |this, cx| this.request_clear(window, cx));
+                    },
+                    move |seconds, _window, app| {
+                        let _ = clip.update(app, |this, _| this.mark_clip(seconds));
                     },
                 ))
                 .child(clear_dialog)
