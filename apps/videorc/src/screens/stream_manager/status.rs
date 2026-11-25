@@ -71,6 +71,8 @@ pub fn status_bar(
     on_clear: impl Fn(&mut Window, &mut App) + 'static,
     on_clip: impl Fn(u32, &mut Window, &mut App) + 'static,
     on_screen: impl Fn(bool, &mut Window, &mut App) + 'static,
+    anchor: super::chat::HighlightAnchor,
+    on_anchor: impl Fn(super::chat::HighlightAnchor, &mut Window, &mut App) + 'static,
     banners: Option<Vec<BannerRow>>,
     on_banner: impl Fn(String, bool, &mut Window, &mut App) + 'static,
     on_banner_hide_all: impl Fn(&mut Window, &mut App) + 'static,
@@ -165,15 +167,22 @@ pub fn status_bar(
                 DropdownMenu::new("highlight-position")
                     .trigger(
                         StatusBarAction::new("highlight-position", HIGHLIGHT_POSITION)
-                            .hint(format!("{HIGHLIGHT_POSITION}: Top left")),
+                            .hint(format!("{HIGHLIGHT_POSITION}: {}", anchor.label())),
                     )
-                    .menu(|_, _| {
-                        Menu::new()
-                            .label(SHOW_HIGHLIGHTS_IN)
-                            .item(MenuItem::new("Top left").on_select(|_, _| {}))
-                            .item(MenuItem::new("Top right").on_select(|_, _| {}))
-                            .item(MenuItem::new("Bottom left").on_select(|_, _| {}))
-                            .item(MenuItem::new("Bottom right").on_select(|_, _| {}))
+                    .menu({
+                        let on_anchor = std::rc::Rc::new(on_anchor);
+                        move |_, _| {
+                            let mut menu = Menu::new().label(SHOW_HIGHLIGHTS_IN);
+                            for corner in super::chat::HighlightAnchor::ALL {
+                                let on_anchor = on_anchor.clone();
+                                menu = menu.radio(
+                                    corner.label(),
+                                    corner == anchor,
+                                    move |window, app| on_anchor(corner, window, app),
+                                );
+                            }
+                            menu
+                        }
                     }),
             )
             .child(

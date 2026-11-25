@@ -5,7 +5,7 @@ import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import {
   COMMENT_HIGHLIGHT_AVATAR_RGB,
   COMMENT_HIGHLIGHT_EMOTE_RGB,
@@ -46,6 +46,14 @@ let studioViewportBefore = null
 // glass) lands in the box's rect on every stream leg. The legacy FFmpeg graph
 // carries no chat box, as it carries no highlight card.
 const checkChatBox = surface === 'stream-manager'
+// Plan 260 Phase 3: VIDEORC_APP=gpui drives the GPUI app's Stream Manager
+// through the same window commands. The Studio surface still reads Electron's
+// renderer (eval-js), so it stays Electron-only.
+if (smokeAppIsGpui() && surface === 'studio') {
+  throw new Error(
+    'VIDEORC_COMMENT_HIGHLIGHT_SURFACE=studio is not ported to the GPUI app yet (it reads the renderer through eval-js).'
+  )
+}
 
 const PREVIEW_CARD_RECT = `(() => {
   const card = document.querySelector('[data-videorc-preview-card]')
