@@ -3,6 +3,7 @@ use gpui::{AnyElement, Hsla, Image, ImageFormat, ImageSource, img};
 use std::sync::{Arc, LazyLock};
 use videorc_app_core::updater::{self as u, UpdateRowControl, UpdateRowView};
 use videorc_app_core::{nav::PageId, settings_page::about as a};
+use videorc_kit::theme::TypeScale as _;
 use videorc_kit::{
     alert::{Alert, AlertVariant},
     badge::{Badge, BadgeVariant},
@@ -94,7 +95,7 @@ impl SettingsScreen {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .text_xs()
+                            .type_scale(videorc_kit::tokens::text::META)
                             .text_color(muted)
                             .child(
                                 div()

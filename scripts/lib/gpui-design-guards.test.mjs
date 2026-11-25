@@ -133,6 +133,17 @@ test('text: nothing below 11 px', () => {
     'let frame = Size { width: 4.0, height: 4.0 };'
   )
   assert.deepEqual(smallTextOffenders(screen, lexRust(allowed)), [])
+  // GPUI's Tailwind text helpers keep GPUI's line height: the scale, never them.
+  assert.deepEqual(
+    smallTextOffenders(screen, lexRust('div().text_xs().child("a")')).map((line) =>
+      line.slice(line.indexOf(': ') + 2)
+    ),
+    ['.text_xs() (not the type scale)']
+  )
+  assert.deepEqual(
+    smallTextOffenders(screen, lexRust('div().type_scale(text::META).text_xs_like()')),
+    []
+  )
   const tokens = (size) =>
     lines(
       'pub mod text {',

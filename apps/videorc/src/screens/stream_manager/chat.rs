@@ -42,6 +42,7 @@ use videorc_app_core::stream_manager::send::{
 };
 use videorc_app_core::studio::screen_views::talk_show_room_in;
 use videorc_app_core::user_error::{Failure, REMOVE_THE_MESSAGE, toast_user_error};
+use videorc_kit::theme::TypeScale as _;
 use videorc_kit::{
     badge::{Badge, BadgeVariant},
     button::{Button, ButtonSize, ButtonVariant},
@@ -1382,7 +1383,7 @@ fn sign_in_rows(
                 div()
                     .min_w(px(0.))
                     .flex_1()
-                    .text_xs()
+                    .type_scale(videorc_kit::tokens::text::META)
                     .text_color(muted)
                     .child(row.message.clone()),
             );

@@ -263,9 +263,19 @@ const TEXT_SIZES = [
   { pattern: /\bsize\s*:\s*([\d.]+)\s*,/, px: (value) => value, only: /TextStyle\s*\{/ }
 ]
 
-/** Text set below 11 px, in px or rems (16 px). */
+/** GPUI's Tailwind text helpers: a size with GPUI's own line height, not
+ * the type scale (`.type_scale(text::META)` is Electron's `text-xs`). */
+const OFF_SCALE_TEXT = /\.text_(?:xs|sm|base|lg|xl|2xl|3xl)\s*\(\s*\)/
+
+/** Text set below 11 px, in px or rems (16 px), or by a Tailwind helper
+ * instead of the type scale. */
 export function smallTextOffenders(path, { code }) {
-  const found = []
+  const found = codeOffenders(
+    path,
+    code,
+    OFF_SCALE_TEXT,
+    (match) => `${match[0].trim()} (not the type scale)`
+  )
   for (const { pattern, px, only } of TEXT_SIZES) {
     for (const match of code.matchAll(new RegExp(pattern.source, 'g'))) {
       if (only && !only.test(code.slice(Math.max(0, match.index - 80), match.index))) continue
