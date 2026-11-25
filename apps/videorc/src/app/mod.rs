@@ -6,6 +6,8 @@
 //! (`src/smoke/`, L6) join as their slices land. Phase 3 screens live
 //! under [`crate::screens`].
 
+pub mod account_menu;
+pub mod accounts;
 pub mod args;
 pub mod bridge;
 pub mod camera;

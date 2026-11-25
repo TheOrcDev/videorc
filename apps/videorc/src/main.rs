@@ -231,7 +231,9 @@ fn main() -> Result<()> {
                     .chain(["session.log"])
                     // The hide state: Follow the app in front, and Studio's
                     // Scenes section (Hide screen).
-                    .chain(["screen.privacy.changed"]),
+                    .chain(["screen.privacy.changed"])
+                    // The Videorc account and its plan (S1.6f).
+                    .chain(videorc_app_core::accounts::EVENTS),
             ),
             logger: logger.clone(),
             ..ClientConfig::default()
@@ -324,6 +326,15 @@ fn main() -> Result<()> {
         logger.clone(),
     );
     let deep_links: links::Links = Arc::new(DeepLinks::new(client.clone(), logger.clone()));
+    // S1.6f (L4): the Videorc account. `videorc://account/callback` goes to
+    // the sign-in this app started; any other is refused by name.
+    let accounts = app::accounts::start(
+        runtime.handle(),
+        client.clone(),
+        supervisor.state(),
+        studio.clone(),
+    );
+    deep_links.set_account_sink(accounts.clone());
     links::receive(&deep_links, &args.links, LinkSource::CommandLine);
 
     let backend_state = supervisor.state();
@@ -399,6 +410,16 @@ fn main() -> Result<()> {
             cx,
         );
         menus::install(cx);
+        app::accounts::install(
+            cx,
+            app::accounts::Shared {
+                accounts: accounts.clone(),
+                studio: studio.clone(),
+                runtime: core_handle.clone(),
+                web: app::accounts::web_links(cfg!(debug_assertions)),
+                development: cfg!(debug_assertions),
+            },
+        );
         studio_screen::bind_keys(cx);
         screens::sources::bind_keys(cx);
         screens::scene::bind_keys(cx);
