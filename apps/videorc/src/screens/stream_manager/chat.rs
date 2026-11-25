@@ -3,13 +3,14 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, Focusable, IntoElement, SharedString,
-    Subscription, Window, div, prelude::*, px,
+    AnyElement, App, AppContext, Context, Entity, Focusable, IntoElement, ScrollHandle,
+    SharedString, Subscription, Window, div, prelude::*, px,
 };
 use tokio::sync::watch;
 use videorc_app_core::chat::LiveChat;
 use videorc_app_core::chat::model::LiveChatMessage;
-use videorc_app_core::chat::view::platform_label;
+use videorc_app_core::chat::store::DeliveryCursor;
+use videorc_app_core::chat::view::{self, platform_label};
 use videorc_app_core::stream_manager::copy::{
     CHAT_MESSAGES, CHAT_ON_STREAM, CHAT_PANE, START_A_LIVESTREAM,
 };
@@ -56,6 +57,12 @@ pub struct ChatPane {
     sending: bool,
     /// Clear the draft on the next render (after a successful send).
     clear_draft: bool,
+    /// Follow the newest message (Electron's pinned follow).
+    following: bool,
+    unread: usize,
+    incomplete: bool,
+    delivery_cursor: DeliveryCursor,
+    scroll: ScrollHandle,
     _search: Subscription,
     _draft: Subscription,
 }
@@ -87,6 +94,7 @@ impl ChatPane {
         });
         let seed = live_chat.borrow().clone();
         let (messages, platforms, mention_names, can_send) = view_from_chat(&seed);
+        let delivery_cursor = seed.delivery.cursor();
         cx.spawn(async move |this, cx| {
             loop {
                 if live_chat.changed().await.is_err() {
@@ -117,6 +125,11 @@ impl ChatPane {
             composer: live,
             sending: false,
             clear_draft: false,
+            following: true,
+            unread: 0,
+            incomplete: false,
+            delivery_cursor,
+            scroll: ScrollHandle::new(),
             _search: search_sub,
             _draft: draft_sub,
         }
@@ -129,7 +142,47 @@ impl ChatPane {
         self.mention_names = mention_names;
         self.can_send = can_send;
         self.composer = self.live && can_send;
+        let progress = chat.delivery.progress(Some(self.delivery_cursor));
+        self.delivery_cursor = chat.delivery.cursor();
+        if progress.reset || self.following {
+            self.unread = 0;
+            self.incomplete = false;
+            if self.following {
+                self.scroll.scroll_to_bottom();
+            }
+        } else {
+            self.unread = self.unread.saturating_add(progress.count);
+            if progress.incomplete {
+                self.incomplete = true;
+            }
+        }
         cx.notify();
+    }
+
+    fn follow_newest(&mut self, cx: &mut Context<Self>) {
+        self.following = true;
+        self.unread = 0;
+        self.incomplete = false;
+        self.scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    fn note_scroll(&mut self, cx: &mut Context<Self>) {
+        let offset = self.scroll.offset();
+        let max = self.scroll.max_offset();
+        // GPUI scrolls with a negative Y; near the bottom means following.
+        let at_bottom = max.y <= px(1.) || (-offset.y) >= max.y - px(24.);
+        if at_bottom {
+            if !self.following || self.unread > 0 || self.incomplete {
+                self.following = true;
+                self.unread = 0;
+                self.incomplete = false;
+                cx.notify();
+            }
+        } else if self.following {
+            self.following = false;
+            cx.notify();
+        }
     }
 
     pub fn set_live(&mut self, live: bool, cx: &mut Context<Self>) {
@@ -444,6 +497,8 @@ impl Render for ChatPane {
         let filters = self.filters_bar(tier, labels, window, cx);
         let live = self.live;
         let this = cx.entity().downgrade();
+        let show_jump = !self.following && !shown.is_empty();
+        let (jump_label, jump_name) = view::jump_chip(self.unread, self.incomplete);
         let list: AnyElement = if shown.is_empty() {
             let empty = if filtering {
                 pane::copy::NO_MATCH
@@ -460,19 +515,54 @@ impl Render for ChatPane {
                 .child(Empty::new().description(empty))
                 .into_any_element()
         } else {
+            let scroll = self.scroll.clone();
+            let this_scroll = this.clone();
             div()
-                .id("chat-messages")
+                .id("chat-messages-host")
                 .flex_1()
                 .min_h(px(0.))
                 .w_full()
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .px(px(4.))
-                .py(px(4.))
-                .overflow_y_scroll()
-                .aria_label(CHAT_MESSAGES)
-                .children(shown.into_iter().map(|message| chat_row(message, live)))
+                .relative()
+                .child(
+                    div()
+                        .id("chat-messages")
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .px(px(4.))
+                        .py(px(4.))
+                        .overflow_y_scroll()
+                        .track_scroll(&scroll)
+                        .aria_label(CHAT_MESSAGES)
+                        .on_scroll(move |_, _, app| {
+                            let _ = this_scroll.update(app, |pane, cx| pane.note_scroll(cx));
+                        })
+                        .children(shown.into_iter().map(|message| chat_row(message, live))),
+                )
+                .when(show_jump, |host| {
+                    let this = this.clone();
+                    host.child(
+                        div()
+                            .id("chat-jump-chip")
+                            .absolute()
+                            .bottom(px(8.))
+                            .left_0()
+                            .right_0()
+                            .flex()
+                            .justify_center()
+                            .child(
+                                Button::new("chat-jump")
+                                    .label(jump_label)
+                                    .variant(ButtonVariant::Secondary)
+                                    .size(ButtonSize::Xs)
+                                    .accessibility_label(jump_name)
+                                    .on_click(move |_, _, app| {
+                                        let _ = this.update(app, |pane, cx| pane.follow_newest(cx));
+                                    }),
+                            ),
+                    )
+                })
                 .into_any_element()
         };
 
