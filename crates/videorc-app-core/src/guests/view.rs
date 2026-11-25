@@ -821,6 +821,61 @@ pub fn output_profile_chips(profile: Option<&ManagedOutputProfile>) -> Vec<Outpu
         .collect()
 }
 
+fn orientation_word(orientation: &str) -> &'static str {
+    match orientation {
+        "vertical" => "Vertical",
+        _ => "Horizontal",
+    }
+}
+
+/// The room's output profile as one sentence (hover / closed-room line).
+/// Port of `managedProfileDescription` in `shared/cloud-output-profile.ts`.
+pub fn managed_profile_description(profile: Option<&ManagedOutputProfile>) -> String {
+    let Some(profile) = profile.filter(|profile| profile.version == 1) else {
+        return "This room didn't report its output profile. Reopen the room to see it.".into();
+    };
+    let lines: Vec<String> = profile
+        .effective
+        .iter()
+        .map(|output| {
+            let mut notes = Vec::new();
+            if output.differences.iter().any(|d| d == "resolution") {
+                notes.push("scaled to 1080p".to_string());
+            }
+            if output.differences.iter().any(|d| d == "fps") {
+                notes.push(format!("{} fps picture", output.picture_fps));
+            }
+            if output.differences.iter().any(|d| d == "bitrate") {
+                notes.push(format!("{} Mbps", f64::from(output.video_kbps) / 1000.0));
+            }
+            let differs = if notes.is_empty() {
+                String::new()
+            } else {
+                format!(" (differs from your settings: {})", notes.join(", "))
+            };
+            format!(
+                "{} {}×{}, {} fps picture in a stream, {} Mbps H.264{}",
+                orientation_word(&output.orientation),
+                output.width,
+                output.height,
+                output.picture_fps,
+                f64::from(output.video_kbps) / 1000.0,
+                differs
+            )
+        })
+        .collect();
+    let egress = if profile.effective.len() == 2 {
+        "Each orientation is its own cloud output"
+    } else {
+        "One cloud output"
+    };
+    format!(
+        "{}. {}; recording adds one per orientation. 1440p and 4K aren't available yet.",
+        lines.join(". "),
+        egress
+    )
+}
+
 // --- Screens (plan 252) --------------------------------------------------------
 
 pub const NO_SCREENS_YET: &str = "Nobody is sharing a screen.";
