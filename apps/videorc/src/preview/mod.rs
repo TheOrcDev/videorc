@@ -12,7 +12,7 @@
 //! layer lives in the Preview window.
 //!
 //! Linux has its element since S2.3c (`linux.rs`, S0.3's route: the
-//! presenter's child above GPUI's drawing, docked only for now). Windows
+//! presenter's child above GPUI's drawing, docked or in its own window). Windows
 //! gets its own in S2.3b (D12's route); until then its slot says the preview
 //! failed to start, which is the truth.
 
@@ -264,7 +264,7 @@ impl Preview {
 
     /// What the Preview window says over its video while no frame shows
     /// there (opening, failed or stalled), or nothing.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub(crate) fn floating_words(&self) -> Option<PreviewWords> {
         words::phase(self.phase)
     }
@@ -284,10 +284,9 @@ impl Preview {
         false
     }
 
-    /// Whether the Preview can open in its own window here (macOS; Linux's
-    /// floating window is S2.3c's follow-up).
+    /// Whether the Preview can open in its own window here.
     pub fn can_float(&self) -> bool {
-        cfg!(target_os = "macos") && self.native_ready()
+        self.native_ready()
     }
 
     /// The shell says whether the Studio page shows: a slot that is not on
@@ -345,7 +344,7 @@ impl Preview {
                     move |bounds, window, cx| {
                         let geometry = linux::geometry_of(window, bounds, cx);
                         let _ = weak.update(cx, |preview, _| {
-                            preview.place_linux(window, bounds, geometry)
+                            preview.place_linux(linux::Host::Docked, window, bounds, geometry)
                         });
                     },
                     |_, _, _, _| {},
@@ -369,7 +368,12 @@ impl Preview {
             WindowMode::Docked => self.float(cx),
             WindowMode::Floating => self.dock(cx),
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        match self.mode {
+            WindowMode::Docked => self.float_linux(cx),
+            WindowMode::Floating => self.dock_linux(cx),
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let _ = cx;
     }
 
@@ -389,7 +393,7 @@ impl Preview {
         #[cfg(not(target_os = "macos"))]
         let _ = cx;
         #[cfg(target_os = "linux")]
-        self.stop_linux();
+        self.stop_linux(cx);
     }
 
     // --- macOS: placing, moving and healing the layer ---
