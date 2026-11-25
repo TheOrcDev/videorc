@@ -1,6 +1,7 @@
 use super::*;
 use gpui::{AnyElement, ClipboardItem};
 use videorc_app_core::settings_page::{agents, remote as r};
+use videorc_kit::theme::TypeScale as _;
 use videorc_kit::{
     alert::Alert,
     button::{Button, ButtonVariant},
@@ -128,7 +129,7 @@ impl SettingsScreen {
         // hint line (`text-xs text-muted-foreground`) stands for the rows.
         let hint = |words: String| {
             div()
-                .text_xs()
+                .type_scale(videorc_kit::tokens::text::META)
                 .text_color(hsla(t.muted_foreground))
                 .child(words)
         };

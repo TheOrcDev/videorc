@@ -4,6 +4,7 @@ use videorc_app_core::{
     desktop::{accelerator as a, global_shortcuts as g},
     shortcuts as s,
 };
+use videorc_kit::theme::TypeScale as _;
 use videorc_kit::{
     button::{Button, ButtonSize, ButtonVariant},
     icon::{IconName, icon},
@@ -228,7 +229,7 @@ impl SettingsScreen {
             .items_center()
             .gap(px(4.))
             .px(px(10.))
-            .text_xs()
+            .type_scale(videorc_kit::tokens::text::META)
             .child(content);
         if enabled {
             control = control.cursor_pointer().on_click(
@@ -311,7 +312,7 @@ impl SettingsScreen {
             .items_center()
             .gap(px(4.))
             .px(px(4.))
-            .text_xs()
+            .type_scale(videorc_kit::tokens::text::META)
             .text_color(ink.muted)
             .child(ShortcutKeys::accelerator("Escape"))
             .child("cancels,")
