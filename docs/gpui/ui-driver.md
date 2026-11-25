@@ -5,14 +5,14 @@ The smokes drive the GPUI app the way they drive Electron: `VIDEORC_APP=gpui`
 one JS driver (`scripts/lib/ui-driver.mjs`). Their `ui-*` commands work on
 each window's AccessKit tree, which is what VoiceOver, Narrator and Orca read.
 
-| Part | Where | Owner |
-| --- | --- | --- |
-| Server, policy, the core's commands (`app-quit`, `backend-debug-rpc`, `authorize-smoke-resource`, `inspect-backend-state-isolation`, the quit guard) | `crates/videorc-app-core/src/smoke/` | L6 |
-| The tree as data, selectors (`ui_tree`, `gpui_tree`) | `crates/videorc-app-core/src/smoke/` | L6 |
-| The driver on live windows, the foreground hop, turning accessibility on | `apps/videorc/src/smoke/` | L6 |
-| Starting the server, which window is which, the forced look, a toast | `smoke::start` in `main.rs`, `ShellSmoke` in `apps/videorc/src/smoke/shell.rs` | L6 (Phase 3) |
-| `studio-*` and the other Studio commands (`STUDIO_COMMANDS`) | a `SmokeCommandHandler` on S1.6a's Studio | L7 |
-| `open-tab`, `main-window-*`, the preview's and each window's commands | `SmokeCommandHandler`s from the slices that own them | their lanes |
+| Part                                                                                                                                                 | Where                                                                          | Owner        |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ------------ |
+| Server, policy, the core's commands (`app-quit`, `backend-debug-rpc`, `authorize-smoke-resource`, `inspect-backend-state-isolation`, the quit guard) | `crates/videorc-app-core/src/smoke/`                                           | L6           |
+| The tree as data, selectors (`ui_tree`, `gpui_tree`)                                                                                                 | `crates/videorc-app-core/src/smoke/`                                           | L6           |
+| The driver on live windows, the foreground hop, turning accessibility on                                                                             | `apps/videorc/src/smoke/`                                                      | L6           |
+| Starting the server, which window is which, the forced look, a toast                                                                                 | `smoke::start` in `main.rs`, `ShellSmoke` in `apps/videorc/src/smoke/shell.rs` | L6 (Phase 3) |
+| `studio-*` and the other Studio commands (`STUDIO_COMMANDS`)                                                                                         | a `SmokeCommandHandler` on S1.6a's Studio                                      | L7           |
+| `open-tab`, `main-window-*`, the preview's and each window's commands                                                                                | `SmokeCommandHandler`s from the slices that own them                           | their lanes  |
 
 A known command that nobody runs yet answers, by name, that it is not
 supported. None ever succeeds silently.
@@ -82,3 +82,13 @@ focus (`ui-key`), but it cannot click.
 fixtures send `eval-js` and `enable-synthetic-source` today. With
 `VIDEORC_APP=gpui` they need the Studio handler (L7) and their `eval-js`
 moved to UI driver or Studio commands. That happens as the screens land.
+
+## The first GPUI smoke: `pnpm smoke:gpui-studio`
+
+`scripts/smoke-gpui-studio.mjs` drives the Studio through the driver only. It checks the isolated profile, the
+preview converging (`compositor.status`: the committed scene drawn, frames advancing), the Record button
+(`session-record`) in the main window's tree, and a take started and stopped with Space.
+
+A smoke run picks no devices, and the GPUI app has no test-pattern source until the Studio handler serves
+`enable-synthetic-source`. Until then Record is blocked, and the smoke checks that it says why
+(`session-blocked-reason`) and skips the take. `VIDEORC_SMOKE_REQUIRE_TAKE=1` turns the skip into a failure.
