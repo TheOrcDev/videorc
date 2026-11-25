@@ -205,6 +205,7 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "ui-appearance",
     "ui-click",
     "ui-find",
+    "ui-focus",
     "ui-key",
     "ui-scroll",
     "ui-set-value",

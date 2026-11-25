@@ -291,6 +291,24 @@ export function createUiDriver(
     )
   }
 
+  /**
+   * Focuses a row or field (GPUI: pointer click through the window's dispatch;
+   * Electron: `el.focus()`). Then `press` without a selector sends keys to it.
+   */
+  async function focus(selector, options = {}) {
+    const ms = waitMs(options)
+    if (gpui) {
+      return send('ui-focus', { ...gpuiSelector(selector), timeoutMs: ms }, ms)
+    }
+    return page(
+      `const el = await __ui.wait(params.spec, params.ms);
+       el.focus();
+       return { focused: true, element: __ui.describe(el) }`,
+      { spec: electronSelector(selector), ms },
+      ms
+    )
+  }
+
   /** Types `text` into a text field (emptied first unless `clear: false`). */
   async function type(selector, text, options = {}) {
     const ms = waitMs(options)
@@ -479,6 +497,7 @@ export function createUiDriver(
     waitFor,
     waitForGone,
     click,
+    focus,
     type,
     readText,
     isChecked,

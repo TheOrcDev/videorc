@@ -56,8 +56,12 @@ qrcode = { version = "0.14", default-features = false }
 #    Apple's NSFontWeight scale, so weight 500 draws SF Medium instead of
 #    Regular (S0.4). The diff is `patches/gpui-pre-apple.patch`. Drop it when
 #    a gpui-pre release carries the fix upstream (zed-industries/zed#67416).
+# 2. gpui-pre 0.3.14: AccessKit node bounds in `debug_a11y_tree_json` so the
+#    UI driver can click and focus (plan 260 S2.5 gap 1). The diff is
+#    `patches/gpui-pre.patch`. Drop it when a gpui-pre release prints bounds.
 [patch.crates-io]
 gpui-pre-apple = { path = "patches/gpui-pre-apple" }
+gpui-pre = { path = "patches/gpui-pre" }
 
 # Disable incremental codegen for dev builds. On macOS arm64, stale incremental
 # serde codegen artifacts have produced invalid links for the backend binary.
