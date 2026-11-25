@@ -43,6 +43,7 @@ pub mod soundboard;
 pub mod stream_manager;
 pub mod studio;
 pub mod supervisor;
+pub mod updater;
 pub mod user_error;
 
 pub use client::{BackendClient, BackendEvent, ClientConfig, ConnectionState, EventFilter};

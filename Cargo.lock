@@ -7990,6 +7990,7 @@ dependencies = [
  "url",
  "uuid",
  "videorc-protocol",
+ "videorc-updater",
 ]
 
 [[package]]

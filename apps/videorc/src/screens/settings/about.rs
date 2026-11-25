@@ -1,8 +1,10 @@
 use super::*;
 use gpui::AnyElement;
+use videorc_app_core::updater::{self as u, UpdateRowControl, UpdateRowView};
 use videorc_app_core::{nav::PageId, settings_page::about as a};
 use videorc_kit::{
-    button::{Button, ButtonVariant},
+    alert::{Alert, AlertVariant},
+    button::{Button, ButtonSize, ButtonVariant},
     list_row::{GroupedList, ListRow},
     panel_section::PanelSection,
 };
@@ -11,8 +13,43 @@ impl SettingsScreen {
     pub(super) fn about_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme::current(window, cx).theme();
         let platform = crate::app::hotkeys::node_platform();
-        let (update_text, a::UpdateControl::Link { label, page }) = a::update_row(platform);
-        let update_url = a::web_link("https://videorc.com", page);
+        // P1430, P1431: the update row in the updater's state, or its calm
+        // alert with Try again (never the updater's own words).
+        let update_view = u::update_row_view(
+            &crate::app::updater::status(cx),
+            crate::app::updater::capture_active(cx),
+        );
+        let updates: AnyElement = match update_view {
+            UpdateRowView::Error { title, description } => Alert::new("update-error")
+                .variant(AlertVariant::Warning)
+                .title(title)
+                .description(description)
+                .action(
+                    Button::new("update-try-again")
+                        .label(u::copy::TRY_AGAIN)
+                        .size(ButtonSize::Xs)
+                        .variant(ButtonVariant::Outline)
+                        .on_click(|_, _, cx| crate::app::updater::check(cx)),
+                )
+                .into_any_element(),
+            UpdateRowView::Row {
+                description,
+                control,
+            } => div()
+                .child(
+                    ListRow::new("updates", u::copy::UPDATES)
+                        .children(control.map(|control| update_control(control, &t))),
+                )
+                .child(
+                    div()
+                        .px(px(12.))
+                        .pb(px(8.))
+                        .type_scale(text::META)
+                        .text_color(hsla(t.muted_foreground))
+                        .child(description),
+                )
+                .into_any_element(),
+        };
         let about = PanelSection::new(a::copy::ABOUT_AND_UPDATES)
             .title(a::copy::ABOUT_AND_UPDATES)
             .description(a::copy::ABOUT_DESCRIPTION)
@@ -44,25 +81,7 @@ impl SettingsScreen {
                                     )),
                             ),
                     )
-                    .item(
-                        div()
-                            .child(
-                                ListRow::new("updates", a::copy::UPDATES).child(
-                                    Button::new("open-downloads")
-                                        .label(label)
-                                        .variant(ButtonVariant::Outline)
-                                        .on_click(move |_, _, cx| cx.open_url(&update_url)),
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .px(px(12.))
-                                    .pb(px(8.))
-                                    .type_scale(text::META)
-                                    .text_color(hsla(t.muted_foreground))
-                                    .child(update_text),
-                            ),
-                    ),
+                    .item(updates),
             );
         let mut links = GroupedList::new();
         for (label, context, page) in a::ABOUT_LINKS {
@@ -127,5 +146,62 @@ impl SettingsScreen {
             .child(div().flex_1().min_w(px(360.)).child(about))
             .child(div().flex_1().min_w(px(360.)).child(support))
             .into_any_element()
+    }
+}
+
+/// The update row's one control (`UpdateControl` in `about-settings.tsx`).
+fn update_control(control: UpdateRowControl, t: &videorc_kit::tokens::Theme) -> AnyElement {
+    match control {
+        UpdateRowControl::Check { label } => Button::new("update-check")
+            .label(label)
+            .variant(ButtonVariant::Outline)
+            .on_click(|_, _, cx| crate::app::updater::check(cx))
+            .into_any_element(),
+        UpdateRowControl::Checking => Button::new("update-checking")
+            .label(u::copy::CHECKING)
+            .variant(ButtonVariant::Outline)
+            .disabled(true)
+            .into_any_element(),
+        // The kit has no Progress yet: a track and its fill, named as
+        // Electron's is.
+        UpdateRowControl::Progress { percent } => div()
+            .id("update-download")
+            .role(gpui::Role::ProgressIndicator)
+            .aria_label(u::copy::UPDATE_DOWNLOAD)
+            .flex_none()
+            .w(px(128.))
+            .h(px(6.))
+            .rounded_full()
+            .overflow_hidden()
+            .bg(hsla(t.muted))
+            .child(
+                div()
+                    .h_full()
+                    .w(gpui::relative(f32::from(percent) / 100.))
+                    .rounded_full()
+                    .bg(hsla(t.primary)),
+            )
+            .into_any_element(),
+        UpdateRowControl::Install {
+            label,
+            disabled_reason,
+        } => {
+            let mut button = Button::new("update-install")
+                .label(label)
+                .disabled(disabled_reason.is_some())
+                .on_click(|_, _, cx| crate::app::updater::install_update(cx));
+            if let Some(reason) = disabled_reason {
+                button = button.tooltip(reason);
+            }
+            button.into_any_element()
+        }
+        UpdateRowControl::Link { label, page } => {
+            let url = a::web_link("https://videorc.com", page);
+            Button::new("update-link")
+                .label(label)
+                .variant(ButtonVariant::Outline)
+                .on_click(move |_, _, cx| cx.open_url(&url))
+                .into_any_element()
+        }
     }
 }

@@ -692,12 +692,15 @@ impl Shell {
                     );
             }
         }
-        // Bottom: the account row (P024) and the theme toggle (P022).
+        // Bottom: the update chip (P021), the account row (P024) and the theme
+        // toggle (P022).
         let dark = matches!(
             window.appearance(),
             gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
         );
-        column.child(div().flex_1()).child(
+        // P021: the update chip, above the account row.
+        let update_chip = super::update_chip::chip(cx.entity().downgrade(), t, cx);
+        column.child(div().flex_1()).children(update_chip).child(
             div()
                 .flex()
                 .items_center()

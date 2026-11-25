@@ -335,6 +335,8 @@ fn main() -> Result<()> {
         studio.clone(),
     );
     deep_links.set_account_sink(accounts.clone());
+    // The updater (plan 260, L4): no feed until S5.2.
+    let updater = app::updater::start();
     links::receive(&deep_links, &args.links, LinkSource::CommandLine);
 
     let backend_state = supervisor.state();
@@ -412,6 +414,7 @@ fn main() -> Result<()> {
             cx,
         );
         menus::install(cx);
+        app::updater::install(cx, updater.clone(), studio.clone());
         app::accounts::install(
             cx,
             app::accounts::Shared {

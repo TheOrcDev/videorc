@@ -23,3 +23,5 @@ pub mod shell;
 pub mod sleep;
 #[cfg(target_os = "macos")]
 pub mod speech;
+pub mod update_chip;
+pub mod updater;
