@@ -8,6 +8,7 @@ mod chat_commands;
 mod cloud;
 mod details;
 mod discord;
+mod oauth_extras;
 mod quality;
 mod ready;
 mod schedule;
@@ -34,7 +35,7 @@ use videorc_app_core::studio::chat_commands_store::ChatCommandsStore;
 use videorc_app_core::studio::scheduled::ScheduledState;
 use videorc_app_core::studio::stream_report_store::StreamReportStore;
 use videorc_app_core::studio::watchdog_settings::WatchdogSettingsStore;
-use videorc_app_core::{BackendClient, Studio};
+use videorc_app_core::{BackendClient, StopOrigin, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonVariant};
@@ -332,6 +333,14 @@ impl DestinationsPanel {
     fn dismiss_failure(&mut self, key: String, cx: &mut Context<Self>) {
         self.memory.dismissed_problems = Some(key);
         self.rebuild(cx);
+    }
+
+    /// Failure banner "End livestream" (P686): same stop path as Studio.
+    fn end_livestream(&self) {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            studio.request_stop(StopOrigin::Button).await;
+        });
     }
 
     fn use_instant(&mut self, target_id: String, cx: &mut Context<Self>) {
@@ -795,6 +804,23 @@ impl DestinationsPanel {
                                 self.sign_in_pending(&dest.id, &platform, pending, t, &entity),
                             );
                         }
+                        if let Some(channel) = &account.channel {
+                            detail = detail.child(self.channel_row(
+                                &dest.id,
+                                channel,
+                                dest.disabled,
+                                cx,
+                            ));
+                        }
+                        if let Some(x_live) = &account.x_live {
+                            detail = detail.child(self.x_live_block(
+                                &dest.id,
+                                x_live,
+                                dest.disabled,
+                                t,
+                                cx,
+                            ));
+                        }
                     }
                     setup::OAuthView::SignIn {
                         connect_label,
@@ -1034,6 +1060,17 @@ impl Render for DestinationsPanel {
                             .variant(AlertVariant::Destructive)
                             .title(page_copy::FAILURE_TITLE)
                             .description(failure.lines.join("\n"))
+                            .action(
+                                Button::new("dest-end-live")
+                                    .label(page_copy::END_LIVESTREAM)
+                                    .variant(ButtonVariant::Destructive)
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_, _, cx| {
+                                            entity.update(cx, |this, _| this.end_livestream());
+                                        }
+                                    }),
+                            )
                             .action(
                                 Button::new("dest-continue")
                                     .label(page_copy::CONTINUE_STREAMING)

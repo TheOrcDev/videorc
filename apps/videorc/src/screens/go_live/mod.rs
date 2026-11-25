@@ -338,6 +338,15 @@ impl GoLiveDialog {
                         .child(dest.chat_message.clone()),
                 );
             }
+            if dest.chat_read == "needs-videorc-sign-in" {
+                body = body.child(
+                    Button::new(format!("go-live-sign-in-{id}"))
+                        .label("Sign in to Videorc")
+                        .variant(ButtonVariant::Outline)
+                        .disabled(pending)
+                        .on_click(|_, _, cx| crate::app::accounts::sign_in(cx)),
+                );
+            }
             if !ready {
                 let entity = cx.entity();
                 let mut actions = div().flex().flex_wrap().gap(px(8.));

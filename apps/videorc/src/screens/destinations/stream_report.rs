@@ -45,10 +45,8 @@ impl DestinationsPanel {
                         Button::new("stream-report-sign-in")
                             .label(page_copy::AUTH_SIGN_IN)
                             .variant(ButtonVariant::Outline)
-                            .on_click(|_, _, _| {
-                                eprintln!(
-                                    "[videorc-app] Destinations After the stream: Sign in (account UI next)"
-                                );
+                            .on_click(|_, _, cx| {
+                                crate::app::accounts::sign_in(cx);
                             }),
                     ),
             );
