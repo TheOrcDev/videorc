@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   BUNDLE_ID,
+  URL_SCHEME,
   USAGE_DESCRIPTIONS,
   bundleCopies,
   infoPlistValues,
@@ -40,6 +41,34 @@ test('the bundle keeps Electron bundle id and permission words', () => {
     assert.equal(key in values, false, key)
   }
   assert.equal(values.NSPrincipalClass, 'NSApplication')
+})
+
+test('the bundle declares the sign-in callback scheme Electron registers', () => {
+  const values = infoPlistValues({ version: '0.38.0' })
+  const main = fs.readFileSync(path.join(root, 'apps/desktop/src/main/index.ts'), 'utf8')
+  const electronScheme = main.match(/const OAUTH_CALLBACK_PROTOCOL = '([^']+)'/)?.[1]
+  assert.equal(electronScheme, URL_SCHEME)
+  assert.deepEqual(values.CFBundleURLTypes, [
+    { CFBundleURLName: 'dev.theorcdev.videorc', CFBundleURLSchemes: ['videorc'] }
+  ])
+  const xml = plistXml({ CFBundleURLTypes: values.CFBundleURLTypes })
+  assert.ok(
+    xml.includes(
+      [
+        '  <array>',
+        '    <dict>',
+        '      <key>CFBundleURLName</key>',
+        '      <string>dev.theorcdev.videorc</string>',
+        '      <key>CFBundleURLSchemes</key>',
+        '      <array>',
+        '        <string>videorc</string>',
+        '      </array>',
+        '    </dict>',
+        '  </array>'
+      ].join('\n')
+    ),
+    xml
+  )
 })
 
 test('only release versions go into the bundle', () => {

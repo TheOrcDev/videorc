@@ -25,3 +25,20 @@ Run it on an isolated profile:
 pnpm package:gpui:macos -- --binaries ~/cloud-test/gpui-builds/latest
 target/gpui-package/macos/Videorc.app/Contents/MacOS/Videorc --profile ~/videorc-profiles/package-check
 ```
+
+## Links (`videorc://`)
+
+The bundle declares `videorc` in `CFBundleURLTypes`. Electron registers it at
+run time instead (`setAsDefaultProtocolClient`). AppKit hands the URL to
+GPUI's `application:openURLs:`, and `main.rs` passes it to the core through
+`on_open_urls`, so the account sign-in callback (`videorc://account/callback`)
+reaches a running bundle.
+
+A local bundle shares Electron's bundle id. LaunchServices registers it when
+it runs, and on a Mac with the installed Electron app it may then get the
+links meant for that app. Build local bundles with a low `--version`, and
+unregister one once you're done with it:
+
+```sh
+/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -u target/gpui-package/macos/Videorc.app
+```

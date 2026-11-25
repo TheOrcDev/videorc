@@ -23,6 +23,14 @@ export const BUNDLE_ID = 'dev.theorcdev.videorc'
 export const EXECUTABLE = 'Videorc'
 export const BACKEND = 'videorc-backend'
 export const BRIDGE = 'videorc-mcp'
+/**
+ * The account sign-in callback's scheme (`videorc://account/callback`, L4's
+ * #2100). Electron registers it at run time (`setAsDefaultProtocolClient`,
+ * `OAUTH_CALLBACK_PROTOCOL`); a GPUI bundle declares it here, and AppKit
+ * hands the URL to GPUI's `application:openURLs:`, which `main.rs` passes on
+ * through `on_open_urls`.
+ */
+export const URL_SCHEME = 'videorc'
 /** Electron's `LSMinimumSystemVersion`. */
 export const MINIMUM_SYSTEM_VERSION = '12.0'
 
@@ -65,6 +73,7 @@ export function infoPlistValues({ version, year = new Date().getUTCFullYear() })
     CFBundleName: APP_NAME,
     CFBundlePackageType: 'APPL',
     CFBundleShortVersionString: version,
+    CFBundleURLTypes: [{ CFBundleURLName: BUNDLE_ID, CFBundleURLSchemes: [URL_SCHEME] }],
     CFBundleVersion: version,
     LSApplicationCategoryType: 'public.app-category.video',
     LSMinimumSystemVersion: MINIMUM_SYSTEM_VERSION,
@@ -88,27 +97,41 @@ function escapeXml(text) {
     .replaceAll('"', '&quot;')
 }
 
-function plistValue(value, indent) {
-  if (value === true) return `${indent}<true/>`
-  if (value === false) return `${indent}<false/>`
-  if (typeof value === 'string') return `${indent}<string>${escapeXml(value)}</string>`
+function plistLines(value, indent) {
+  if (value === true) return [`${indent}<true/>`]
+  if (value === false) return [`${indent}<false/>`]
+  if (typeof value === 'string') return [`${indent}<string>${escapeXml(value)}</string>`]
+  if (Array.isArray(value)) {
+    return [
+      `${indent}<array>`,
+      ...value.flatMap((item) => plistLines(item, `${indent}  `)),
+      `${indent}</array>`
+    ]
+  }
+  if (value !== null && typeof value === 'object') {
+    return [`${indent}<dict>`, ...dictLines(value, `${indent}  `), `${indent}</dict>`]
+  }
   throw new Error(`unsupported plist value: ${JSON.stringify(value)}`)
 }
 
-/** A flat property list, keys sorted, as XML. */
+function dictLines(values, indent) {
+  return Object.keys(values)
+    .sort()
+    .flatMap((key) => [`${indent}<key>${escapeXml(key)}</key>`, ...plistLines(values[key], indent)])
+}
+
+/** A property list (strings, booleans, arrays, dicts), keys sorted, as XML. */
 export function plistXml(values) {
-  const lines = [
+  return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
     '<plist version="1.0">',
-    '<dict>'
-  ]
-  for (const key of Object.keys(values).sort()) {
-    lines.push(`  <key>${escapeXml(key)}</key>`)
-    lines.push(plistValue(values[key], '  '))
-  }
-  lines.push('</dict>', '</plist>', '')
-  return lines.join('\n')
+    '<dict>',
+    ...dictLines(values, '  '),
+    '</dict>',
+    '</plist>',
+    ''
+  ].join('\n')
 }
 
 /**
