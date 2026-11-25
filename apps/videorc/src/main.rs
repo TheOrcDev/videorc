@@ -359,6 +359,9 @@ fn main() -> Result<()> {
         links::receive(&apple_links, &urls, LinkSource::AppleEvent);
     });
     let permissions_after_run = permissions.clone();
+    // The Dock's click with no window showing brings the main window back
+    // (macOS keeps the app running when it closes, `app::exit`).
+    application.on_reopen(ExitGuard::show_main_window);
     application.run(move |cx: &mut App| {
         videorc_kit::init(cx);
         // The menu bar from the core's template, and the keys it names.
@@ -757,8 +760,8 @@ fn main() -> Result<()> {
         .detach();
 
         // Closing the last window quits, as Electron does on Windows and
-        // Linux. (On macOS Electron keeps the app in the Dock; the menu bar
-        // and the Dock's reopen land with S2.6a.)
+        // Linux. On macOS the main window hides instead of closing, so the
+        // app stays in the Dock (`ExitGuard::close_main`).
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
