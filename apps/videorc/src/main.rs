@@ -224,7 +224,9 @@ fn main() -> Result<()> {
                     .chain(screens::avatar::EVENTS)
                     .chain(screens::sidekick::EVENTS)
                     .chain(videorc_app_core::library::LIBRARY_EVENTS)
-                    .chain(["session.log"]),
+                    .chain(["session.log"])
+                    // Follow the app in front hears the hide state.
+                    .chain(["screen.privacy.changed"]),
             ),
             logger: logger.clone(),
             ..ClientConfig::default()
@@ -351,6 +353,7 @@ fn main() -> Result<()> {
     let instance = Rc::new(RefCell::new(instance));
     let quit_instance = instance.clone();
     let hotkey_logger = logger.clone();
+    let follow_logger = logger.clone();
     let health_logger = logger.clone();
     let handoff_links = deep_links.clone();
     // The quit while on air: the guard follows the backend's events.
@@ -662,6 +665,48 @@ fn main() -> Result<()> {
             core_handle.clone(),
         );
         screens::notes::window::install(cx, notes_frame, APP_ID);
+
+        // Follow the app in front and the password-manager hide (plan 210
+        // D10/D11): the core's follower, fed by the platform's front-app
+        // watcher. Only macOS has one so far.
+        {
+            #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+            let mut self_ids = vec![APP_ID.to_string()];
+            #[cfg(target_os = "macos")]
+            self_ids.extend(platform::macos::front_app::self_bundle_id());
+            let feed = videorc_app_core::studio::follow_runner::start(
+                &core_handle,
+                studio.clone(),
+                self_ids,
+                follow_logger.clone(),
+            );
+            #[cfg(target_os = "macos")]
+            if platform::macos::front_app::start(feed.sender.clone()) {
+                let watch = feed.watch_windows.clone();
+                cx.spawn(async move |cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(500))
+                            .await;
+                        if watch.load(std::sync::atomic::Ordering::Relaxed) {
+                            cx.update(|_| platform::macos::front_app::poll());
+                        }
+                    }
+                })
+                .detach();
+            } else {
+                follow_logger.warn(
+                    "Follow the app in front: the front-app watcher did not start; Follow and the password-manager hide stay off.",
+                );
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                drop(feed);
+                follow_logger.info(
+                    "Follow the app in front: this platform has no front-app watcher yet; Follow and the password-manager hide stay off.",
+                );
+            }
+        }
         // P1549: a Preview left floating floats again once the workspace
         // shows (Electron's `restorePreviewWindowOnLaunch`, held while
         // first-run setup fills the window).

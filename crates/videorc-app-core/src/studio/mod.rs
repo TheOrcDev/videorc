@@ -83,6 +83,7 @@ pub mod clips_ring;
 pub mod cloud;
 pub mod dashboard;
 pub mod families;
+pub mod follow_runner;
 pub mod go_live;
 pub mod health;
 pub mod health_page;
