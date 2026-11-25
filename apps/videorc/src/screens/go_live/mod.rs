@@ -4,12 +4,15 @@
 
 use std::sync::Arc;
 
-use gpui::{Context, Window, div, prelude::*, px};
+use gpui::{Context, Entity, Window, div, prelude::*, px};
+use gpui_base::input::InputEvent;
 use videorc_app_core::desktop::permissions::PermissionPlatform;
 use videorc_app_core::livestream::accounts::{destination_label, platform_label};
 use videorc_app_core::livestream::captions_preflight::{self, go_live_readiness};
 use videorc_app_core::livestream::copy as dest_copy;
+use videorc_app_core::livestream::details::Privacy;
 use videorc_app_core::livestream::go_live_copy as copy;
+use videorc_app_core::livestream::go_live_privacy;
 use videorc_app_core::livestream::golive::{self, CaptionsStatus, DialogView};
 use videorc_app_core::livestream::plan;
 use videorc_app_core::livestream::targets::{self, Target};
@@ -20,7 +23,10 @@ use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle, DialogSize};
+use videorc_kit::input::InputState;
 use videorc_kit::list_row::{GroupedList, ListRow};
+use videorc_kit::section_label::SectionLabel;
+use videorc_kit::textarea::TextareaState;
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 
@@ -52,6 +58,15 @@ pub struct GoLiveDialog {
     captions: CaptionsStatus,
     /// "Go live without captions this time".
     suppress_captions: bool,
+    /// Stream details' title and description, editing the Studio's draft.
+    inputs: Option<(Entity<InputState>, Entity<TextareaState>)>,
+    /// The fields took the draft's words for this opening.
+    seeded: bool,
+    /// The instant YouTube destination's privacy, when one goes live.
+    instant_youtube: Option<Privacy>,
+    /// `nonPublicPrivacyLine` per destination row (instant YouTube only).
+    privacy_lines: Vec<(String, String)>,
+    title_counter: String,
 }
 
 impl GoLiveDialog {
@@ -96,6 +111,11 @@ impl GoLiveDialog {
             entitlement: None,
             captions: CaptionsStatus::Hidden,
             suppress_captions: false,
+            inputs: None,
+            seeded: false,
+            instant_youtube: None,
+            privacy_lines: Vec::new(),
+            title_counter: String::new(),
         };
         panel.rebuild(cx);
         panel
@@ -183,7 +203,45 @@ impl GoLiveDialog {
                     .unwrap_or(0),
             )
         };
+        // What YouTube gets: its customised override, else the draft's
+        // privacy (`effectiveInstantYouTubePrivacy`), while an instant
+        // YouTube destination goes live.
+        let instant_youtube = sent
+            .iter()
+            .any(|t| {
+                t.platform == "youtube" && t.scheduled_event_id.as_deref().is_none_or(str::is_empty)
+            })
+            .then(|| go_live_privacy::effective_instant_youtube_privacy(details.draft.as_ref()));
+        let sent_refs: Vec<&Target> = sent.iter().collect();
+        let privacy_lines: Vec<(String, String)> = go_live_privacy::non_public_youtube(
+            &sent_refs,
+            state
+                .preflight
+                .as_ref()
+                .map(|p| p.destinations.as_slice())
+                .unwrap_or_default(),
+            details.draft.as_ref(),
+        )
+        .into_iter()
+        .filter(|row| !row.scheduled)
+        .map(|row| {
+            (
+                row.target_id,
+                go_live_privacy::non_public_privacy_line(row.privacy),
+            )
+        })
+        .collect();
+        let title_counter = videorc_app_core::livestream::details::title_counter(
+            &details
+                .draft
+                .as_ref()
+                .map(|d| d.title.clone())
+                .unwrap_or_default(),
+        );
         let changed = self.state != state
+            || self.instant_youtube != instant_youtube
+            || self.privacy_lines != privacy_lines
+            || self.title_counter != title_counter
             || self.view != gate.view
             || self.gate_blocked != gate.blocked
             || self.confirm_label != confirm_label
@@ -207,12 +265,86 @@ impl GoLiveDialog {
         self.description_issue = gate.description_issue;
         self.entitlement = gate.entitlement;
         self.captions = captions;
+        self.instant_youtube = instant_youtube;
+        self.privacy_lines = privacy_lines;
+        self.title_counter = title_counter;
         if !self.state.open {
             self.suppress_captions = false;
+            self.seeded = false;
         }
         if changed {
             cx.notify();
         }
+    }
+
+    /// The title and description fields, editing the Studio's draft as
+    /// Destinations' Stream details does.
+    fn ensure_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.inputs.is_some() {
+            return;
+        }
+        let title = cx.new(|cx| InputState::new(window, cx).placeholder(dest_copy::UNTITLED));
+        let description =
+            cx.new(|cx| TextareaState::new(window, cx).placeholder(dest_copy::OPTIONAL));
+        cx.subscribe(&title, |this, state, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let value = state.read(cx).value().to_string();
+                this.studio
+                    .patch_metadata_draft(|draft| draft.title = value);
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.subscribe(&description, |this, state, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let value = state.read(cx).value().to_string();
+                this.studio
+                    .patch_metadata_draft(|draft| draft.description = value);
+                cx.notify();
+            }
+        })
+        .detach();
+        self.inputs = Some((title, description));
+    }
+
+    /// Each opening starts from the draft's words.
+    fn seed_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.seeded || !self.state.open {
+            return;
+        }
+        let Some((title, description)) = self.inputs.clone() else {
+            return;
+        };
+        let details = self.studio.details_now();
+        let Some(draft) = details.draft.as_ref() else {
+            return;
+        };
+        title.update(cx, |input, cx| {
+            input.set_value(draft.title.clone(), window, cx)
+        });
+        description.update(cx, |input, cx| {
+            input.set_value(draft.description.clone(), window, cx)
+        });
+        self.seeded = true;
+    }
+
+    /// `instantYouTubePrivacyPatch`: a customised YouTube override takes it,
+    /// else the draft's default.
+    fn set_instant_privacy(&self, privacy: Privacy) {
+        self.studio.patch_metadata_draft(|draft| {
+            let mut customised = false;
+            for target in draft
+                .target_overrides
+                .iter_mut()
+                .filter(|target| target.platform == "youtube" && target.customize)
+            {
+                target.privacy = privacy;
+                customised = true;
+            }
+            if !customised {
+                draft.default_privacy = privacy;
+            }
+        });
     }
 
     fn sync_handle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -315,7 +447,8 @@ impl GoLiveDialog {
                 .context(context)
                 .child(badge),
             );
-            let mut body = div().flex().flex_col().gap(px(4.)).px(px(12.)).pb(px(8.));
+            // `go-live-destination-body`: 8 px apart, 12 px below.
+            let mut body = div().flex().flex_col().gap(px(8.)).px(px(12.)).pb(px(12.));
             if let Some(scheduled) = &dest.scheduled {
                 let title = scheduled
                     .get("title")
@@ -333,7 +466,16 @@ impl GoLiveDialog {
                         .child(line),
                 );
             }
-            if let Some(problem) = &row.problem {
+            // A scheduled row already names its event's privacy above.
+            if let Some((_, line)) = self.privacy_lines.iter().find(|(target, _)| target == &id) {
+                body = body.child(
+                    div()
+                        .type_scale(text::META)
+                        .text_color(hsla(t.muted_foreground))
+                        .child(line.clone()),
+                );
+            }
+            if let Some(problem) = row.problem.as_ref().filter(|_| !ready) {
                 body = body.child(div().type_scale(text::META).child(problem.clone()));
             }
             let (read_label, read_tone) = golive::read_label(&dest.chat_read);
@@ -481,10 +623,13 @@ impl Render for GoLiveDialog {
         if !self.state.open && !self.dialog.is_open() {
             return div().into_any_element();
         }
+        self.ensure_inputs(window, cx);
+        self.seed_inputs(window, cx);
         let t = theme::current(window, cx).theme();
         let pending = self.state.pending;
         let entity = cx.entity();
-        let mut body = div().flex().flex_col().gap(px(12.));
+        // Sections 20 px apart (`gap-5`).
+        let mut body = div().flex().flex_col().gap(px(20.));
 
         if let Some(entitlement) = &self.entitlement {
             body = body.child(
@@ -513,19 +658,51 @@ impl Render for GoLiveDialog {
             );
         }
 
-        if let Some(issue) = &self.title_issue {
+        // Stream details while an instant destination goes live: the
+        // title's and description's errors sit under their fields.
+        if let (true, Some((title, description))) = (self.has_instant, self.inputs.as_ref()) {
+            let entity = cx.entity();
             body = body.child(
-                Alert::new("go-live-title")
-                    .variant(AlertVariant::Destructive)
-                    .title(issue.clone()),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(SectionLabel::new(dest_copy::STREAM_DETAILS))
+                    .child(crate::screens::broadcast_fields::broadcast_info_fields(
+                        t,
+                        crate::screens::broadcast_fields::Fields {
+                            id: "go-live",
+                            title,
+                            title_counter: self.title_counter.clone(),
+                            title_error: self.title_issue.clone(),
+                            description,
+                            description_error: self.description_issue.clone(),
+                            privacy: self.instant_youtube,
+                            disabled: pending || self.studio.details_now().draft.is_none(),
+                        },
+                        move |privacy, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.set_instant_privacy(privacy);
+                                cx.notify();
+                            })
+                        },
+                    )),
             );
-        }
-        if let Some(issue) = &self.description_issue {
-            body = body.child(
-                Alert::new("go-live-description")
-                    .variant(AlertVariant::Destructive)
-                    .title(issue.clone()),
-            );
+        } else {
+            if let Some(issue) = &self.title_issue {
+                body = body.child(
+                    Alert::new("go-live-title")
+                        .variant(AlertVariant::Destructive)
+                        .title(issue.clone()),
+                );
+            }
+            if let Some(issue) = &self.description_issue {
+                body = body.child(
+                    Alert::new("go-live-description")
+                        .variant(AlertVariant::Destructive)
+                        .title(issue.clone()),
+                );
+            }
         }
 
         match &self.captions {
@@ -599,12 +776,7 @@ impl Render for GoLiveDialog {
                 .items_center()
                 .justify_between()
                 .gap(px(8.))
-                .child(
-                    div()
-                        .type_scale(text::LABEL)
-                        .text_color(hsla(t.muted_foreground))
-                        .child(dest_copy::DESTINATIONS),
-                )
+                .child(SectionLabel::new(dest_copy::DESTINATIONS))
                 .children(self.view.summary.as_ref().map(|summary| {
                     Badge::new(summary.clone()).variant(if self.view.destinations_ready {
                         BadgeVariant::Success

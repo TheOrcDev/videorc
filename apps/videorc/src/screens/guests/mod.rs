@@ -37,7 +37,7 @@ use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
-use videorc_kit::tokens::{radius, size, text};
+use videorc_kit::tokens::{radius, text};
 use videorc_kit::tooltip::tooltip;
 
 pub type AppStudio = Studio<BackendClient>;
@@ -822,7 +822,16 @@ impl Render for GuestsPanel {
         }
         let guests_only: Vec<&RoomPerson> = people.iter().filter(|p| !p.host).collect();
         if requests.is_empty() && guests_only.is_empty() {
-            people_section = people_section.child(Empty::new().description(guests::NOBODY_YET));
+            // `Empty className="rounded-row border border-border bg-inset p-5"`.
+            people_section = people_section.child(
+                div()
+                    .rounded(px(radius::ROW))
+                    .border_1()
+                    .border_color(hsla(t.border))
+                    .bg(hsla(t.inset))
+                    .p(px(20.))
+                    .child(Empty::new().description(guests::NOBODY_YET)),
+            );
             if let Some(line) = declined {
                 people_section = people_section.child(
                     div()
@@ -940,13 +949,12 @@ impl Render for GuestsPanel {
             .text_color(hsla(t.foreground))
             .type_scale(text::META)
             .child(
+                // `PageStack`: flush sections under the toolbar, each with
+                // its own gutter and the hairline between them.
                 ScrollArea::new("guests-scroll").child(
                     div()
                         .flex()
                         .flex_col()
-                        .px(px(size::GUTTER))
-                        .py(px(8.))
-                        .gap(px(16.))
                         .child(room_section)
                         .child(invite)
                         .child(people_section)
