@@ -1830,11 +1830,11 @@ impl<B: StudioBackend> Studio<B> {
         self.publish();
         self.emit_all(effects);
         self.flush_scene_writes().await;
-        // S1.6b part 5a: the session's sources, and the working sources. The
-        // chat (`recoverLiveChatSnapshot`) is read again with its area
-        // (S1.6e).
+        // S1.6b part 5a: the session's sources, and the working sources.
         self.kick_live_sources_read().await;
         self.reconcile_working_sources().await;
+        // S1.6e: recover live chat after a lag (`recoverLiveChatSnapshot`).
+        self.read_live_chat().await;
     }
 
     /// `refreshDevices` and the scene: the Sources page's Refresh.
