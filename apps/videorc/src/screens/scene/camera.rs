@@ -17,12 +17,14 @@ use videorc_app_core::editor::inspector::{
 use videorc_app_core::nav::PageId;
 use videorc_app_core::studio::camera_background_view::{
     BLUR_MARKS, BLUR_MAX_PCT, BLUR_MIN_PCT, BLUR_STRENGTH_LABEL, BackgroundSectionView,
-    CHOOSE_IMAGE_LABEL, Choice, ChoiceId, KEY_EDGES, background_for_choice, key_edges_of,
+    CHOOSE_IMAGE_DESCRIPTION, CHOOSE_IMAGE_EMPTY, CHOOSE_IMAGE_LABEL, CHOOSE_IMAGE_TITLE, Choice,
+    ChoiceId, DONE_LABEL, KEY_EDGES, OPEN_IMAGES_LABEL, background_for_choice, key_edges_of,
     key_edges_set,
 };
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::chrome::focus_ring;
 use videorc_kit::dialog::{Dialog, DialogSize};
+use videorc_kit::empty::Empty;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::section_label::SectionLabel;
@@ -38,6 +40,7 @@ use super::editor::copy;
 use super::inspector::meta_line;
 use super::model::copy as list_copy;
 use super::{SceneNavigate, ScenePage};
+use crate::screens::studio::background::image_tiles;
 
 /// What a camera row's pick does.
 type Pick = fn(&ScenePage, &str);
@@ -371,7 +374,7 @@ impl ScenePage {
         &self,
         tile: Tile,
         t: &Theme,
-        on_pick: impl Fn(&mut ScenePage, &mut Context<ScenePage>) + 'static,
+        on_pick: impl Fn(&mut ScenePage, &mut Window, &mut Context<ScenePage>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Tile {
@@ -433,16 +436,16 @@ impl ScenePage {
             let on_pick = Rc::new(on_pick);
             let on_key = on_pick.clone();
             tile = tile
-                .on_click(cx.listener(move |this, _, _, cx| on_pick(this, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| on_pick(this, window, cx)))
                 // The focused tile picks with Return or Space, as a radio.
-                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                     let key = event.keystroke.key.as_str();
                     if focus
                         && event.keystroke.modifiers.number_of_modifiers() == 0
                         && (key == "enter" || key == "space")
                     {
                         cx.stop_propagation();
-                        on_key(this, cx);
+                        on_key(this, window, cx);
                     }
                 }));
         }
@@ -492,16 +495,14 @@ impl ScenePage {
                     focus: focus_id.as_ref() == Some(&choice.id),
                 },
                 t,
-                move |page, cx| page.choose_background(&id, cx),
+                move |page, _, cx| page.choose_background(&id, cx),
                 cx,
             )
         };
         for choice in others {
             grid = grid.child(tile(self, choice, cx));
         }
-        // P578 opens the image list; the app reads no background pictures
-        // yet (P586's dialog waits for them), so it is the dialog's own
-        // "Open Images" door for now.
+        // P578: Choose image… opens Choose an image (P586).
         if view.choose_image {
             grid = grid.child(self.background_tile(
                 Tile {
@@ -513,7 +514,10 @@ impl ScenePage {
                     focus: false,
                 },
                 t,
-                |page, cx| page.navigate(SceneNavigate::Page(PageId::Assets), cx),
+                |page, window, cx| {
+                    page.controls.choose_image.open(window, cx);
+                    cx.notify();
+                },
                 cx,
             ));
         }
@@ -678,6 +682,77 @@ impl ScenePage {
     }
 
     /// P556: Reset camera settings? (`CameraResetButton`'s ConfirmDialog).
+    /// P586: Choose an image: the camera's background pictures, Open Images
+    /// and Done (`camera-background-section.tsx`'s dialog). The app reads
+    /// no background library yet (P577), so it says how to add one.
+    pub(super) fn choose_image_dialog(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if !self.controls.choose_image.is_open() {
+            return div().into_any_element();
+        }
+        let t = theme::resolve(None, window, cx);
+        let (images, selected): (Vec<Choice>, Option<ChoiceId>) = self
+            .editor
+            .background
+            .as_ref()
+            .map(|view| {
+                (
+                    view.tiles
+                        .iter()
+                        .filter(|choice| matches!(choice.id, ChoiceId::Image(_)))
+                        .cloned()
+                        .collect(),
+                    view.selected.clone(),
+                )
+            })
+            .unwrap_or_default();
+        let body: AnyElement = if images.is_empty() {
+            Empty::new()
+                .description(CHOOSE_IMAGE_EMPTY)
+                .into_any_element()
+        } else {
+            let page = cx.entity().downgrade();
+            image_tiles(&images, selected.as_ref(), &t, move |choice, window, cx| {
+                let _ = page.update(cx, |page, cx| {
+                    page.choose_background(&choice, cx);
+                    page.controls.choose_image.close(window, cx);
+                    cx.notify();
+                });
+            })
+        };
+        Dialog::new(
+            "scene-choose-image",
+            &self.controls.choose_image,
+            CHOOSE_IMAGE_TITLE,
+        )
+        .size(DialogSize::Lg)
+        .description(CHOOSE_IMAGE_DESCRIPTION)
+        .child(body)
+        .footer(
+            Button::new("scene-choose-image-open-images")
+                .label(OPEN_IMAGES_LABEL)
+                .variant(ButtonVariant::Ghost)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.controls.choose_image.close(window, cx);
+                    this.navigate(SceneNavigate::Page(PageId::Assets), cx);
+                    cx.notify();
+                })),
+        )
+        .footer(
+            Button::new("scene-choose-image-done")
+                .label(DONE_LABEL)
+                .variant(ButtonVariant::Secondary)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.controls.choose_image.close(window, cx);
+                    cx.notify();
+                })),
+        )
+        .into_any_element()
+    }
+
     pub(super) fn camera_reset_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         if !self.controls.camera_reset.is_open() {
             return div().into_any_element();

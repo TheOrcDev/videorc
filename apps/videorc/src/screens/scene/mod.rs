@@ -434,6 +434,7 @@ impl Render for ScenePage {
                     .child(div().flex().flex_col().w_full().child(list).child(grid)),
             )
             .child(self.camera_reset_dialog(cx))
+            .child(self.choose_image_dialog(window, cx))
             .child(self.dialogs.clone())
     }
 }
