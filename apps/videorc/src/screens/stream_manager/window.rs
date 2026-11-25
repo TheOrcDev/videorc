@@ -10,20 +10,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext, Bounds, Context, FocusHandle, Global, KeyBinding, Subscription, Window,
-    WindowHandle, actions, div, prelude::*, px, size,
+    actions, div, prelude::*, px, size, App, AppContext, Bounds, Context, FocusHandle, Global,
+    KeyBinding, Subscription, Window, WindowHandle,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::watch;
 use videorc_app_core::desktop::capture_protection::{
-    HideMethod, WindowRole, stream_manager_hide_method,
+    stream_manager_hide_method, HideMethod, WindowRole,
 };
 use videorc_app_core::desktop::permissions::PermissionPlatform;
 use videorc_app_core::protocol::{Banner, ScreenPrivacy, ScreenPrivacyReason, SoundboardState};
 use videorc_app_core::stream_manager::copy::WINDOW_NAME;
 use videorc_app_core::stream_manager::dashboard::{LiveDashboard, SessionState};
-use videorc_app_core::studio::StudioBackend;
 use videorc_app_core::studio::families::{self, StatsLayout};
+use videorc_app_core::studio::StudioBackend;
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
 use videorc_kit::{
@@ -34,12 +34,12 @@ use videorc_kit::{
 
 use super::activity::ActivityPane;
 use super::chat::ChatPane;
-use super::frame::{DEFAULT_HEIGHT, DEFAULT_WIDTH, StreamManagerFrame};
-use super::layout::{MIN_HEIGHT, MIN_WIDTH, Pane, Slot, Tier, right_pane_width, slot};
-use super::panes::{PaneKey, Panes, composer_available, key_runs};
-use super::sidekick::sidekick_pane;
-use super::stats::{StatsView, stats_bar};
-use super::status::{BannerRow, SoundRow, status_bar};
+use super::frame::{StreamManagerFrame, DEFAULT_HEIGHT, DEFAULT_WIDTH};
+use super::layout::{right_pane_width, slot, Pane, Slot, Tier, MIN_HEIGHT, MIN_WIDTH};
+use super::panes::{composer_available, key_runs, PaneKey, Panes};
+use super::sidekick::SidekickPane;
+use super::stats::{stats_bar, StatsView};
+use super::status::{status_bar, BannerRow, SoundRow};
 use crate::app::hide::HideFromStream;
 use crate::app::menus::ToggleStreamManager;
 use crate::platform;
@@ -197,8 +197,11 @@ pub struct StreamManager {
     notices: gpui::Entity<crate::screens::notifications::Centre>,
     chat: gpui::Entity<ChatPane>,
     activity: gpui::Entity<ActivityPane>,
+    sidekick: gpui::Entity<SidekickPane>,
     panes: Panes,
     facts: Facts,
+    /// History session title + started-at line while viewing a past session (P943).
+    history: Option<(String, String)>,
     stats: StatsView,
     stats_layout: StatsLayout,
     pinned: bool,
@@ -247,6 +250,7 @@ impl StreamManager {
             )
         });
         let activity = cx.new(|cx| ActivityPane::new(studio.live_chat(), dashboard.clone(), cx));
+        let sidekick = cx.new(|cx| SidekickPane::new(studio.clone(), runtime.clone(), cx));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         frame.moved(window);
@@ -264,33 +268,31 @@ impl StreamManager {
         let now = chrono::Utc::now().timestamp_millis();
         let stats = StatsView::from_dashboard(&dashboard.borrow(), now);
         let stats_layout = studio.read_ui_settings(families::stats_layout);
-        cx.spawn(async move |this, cx| {
-            loop {
-                tokio::select! {
-                    changed = dashboard.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
+        cx.spawn(async move |this, cx| loop {
+            tokio::select! {
+                changed = dashboard.changed() => {
+                    if changed.is_err() {
+                        break;
                     }
-                    _ = cx.background_executor().timer(Duration::from_secs(1)) => {}
                 }
-                let board = dashboard.borrow().clone();
-                let now = chrono::Utc::now().timestamp_millis();
-                let next = StatsView::from_dashboard(&board, now);
-                let live = matches!(board.session, SessionState::Live);
-                let alive = this.update(cx, |sm, cx| {
-                    let changed = sm.stats != next || sm.facts.live != live;
-                    sm.stats = next;
-                    sm.facts.live = live;
-                    sm.chat.update(cx, |chat, cx| chat.set_live(live, cx));
-                    sm.facts.can_send = sm.chat.read(cx).can_send();
-                    if changed {
-                        cx.notify();
-                    }
-                });
-                if alive.is_err() {
-                    break;
+                _ = cx.background_executor().timer(Duration::from_secs(1)) => {}
+            }
+            let board = dashboard.borrow().clone();
+            let now = chrono::Utc::now().timestamp_millis();
+            let next = StatsView::from_dashboard(&board, now);
+            let live = matches!(board.session, SessionState::Live);
+            let alive = this.update(cx, |sm, cx| {
+                let changed = sm.stats != next || sm.facts.live != live;
+                sm.stats = next;
+                sm.facts.live = live;
+                sm.chat.update(cx, |chat, cx| chat.set_live(live, cx));
+                sm.facts.can_send = sm.chat.read(cx).can_send();
+                if changed {
+                    cx.notify();
                 }
+            });
+            if alive.is_err() {
+                break;
             }
         })
         .detach();
@@ -360,13 +362,16 @@ impl StreamManager {
             notices,
             chat,
             activity,
+            sidekick,
             panes: Panes::default(),
             facts: Facts {
                 can_send: true,
                 marker: false,
                 live,
+                sidekick_present: true,
                 ..Facts::default()
             },
+            history: None,
             stats,
             stats_layout,
             pinned,
@@ -381,6 +386,13 @@ impl StreamManager {
             focus,
             _bounds: bounds,
         }
+    }
+
+    /// Leave History and return to the live session (P943).
+    fn back_to_live(&mut self, cx: &mut Context<Self>) {
+        self.history = None;
+        self.facts.in_history = false;
+        cx.notify();
     }
 
     fn apply_stats_layout(&mut self, layout: StatsLayout, cx: &mut Context<Self>) {
@@ -612,7 +624,7 @@ impl StreamManager {
         let body = match pane {
             Pane::Chat => self.chat.clone().into_any_element(),
             Pane::Activity => self.activity.clone().into_any_element(),
-            Pane::Sidekick => sidekick_pane(),
+            Pane::Sidekick => self.sidekick.clone().into_any_element(),
         };
         let region = div().h_full().flex().flex_col().min_w(px(0.)).child(body);
         let region = match slot(pane, tier, self.panes.narrow(), self.panes.right()) {
@@ -709,6 +721,38 @@ impl Render for StreamManager {
                     this.run(PaneKey::WriteInChat, window, cx)
                 }))
                 .child(WindowHeader::new(TITLE).mac(mac))
+                .children(self.history.as_ref().map(|(title, started)| {
+                    let entity = cx.entity();
+                    div()
+                        .id("history-bar")
+                        .flex()
+                        .flex_none()
+                        .h(px(32.))
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(12.))
+                        .border_b_1()
+                        .border_color(hsla(t.border))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .text_size(px(12.))
+                                .text_color(hsla(t.muted_foreground))
+                                .child(format!("{title} · {started}")),
+                        )
+                        .child(
+                            Button::new("back-to-live")
+                                .label("Back to live")
+                                .variant(ButtonVariant::Ghost)
+                                .on_click(move |_, _, cx| {
+                                    entity.update(cx, |sm, cx| sm.back_to_live(cx));
+                                }),
+                        )
+                }))
                 .child({
                     let this = cx.entity().downgrade();
                     let layout = self.stats_layout.clone();
