@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FontWeight, SharedString, Window,
-    div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FontWeight, Window, div,
+    prelude::*, px,
 };
 use videorc_app_core::account::entitlements::cloud_ai_upload_gate;
 use videorc_app_core::buddy::clean_cut_drafts::{self, STORAGE_KEY};
@@ -27,20 +27,19 @@ use videorc_app_core::studio::session::session_is_live;
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
-use videorc_kit::chrome::focus_ring;
 use videorc_kit::dialog::{Dialog, DialogHandle};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::InputState;
 use videorc_kit::input_group::{InputGroup, InputGroupAddon};
 use videorc_kit::label::Label;
-use videorc_kit::list_row::{GroupedList, ListRow};
+use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::spinner::Spinner;
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::{Theme, radius, size, text};
+use videorc_kit::tokens::{Theme, size, text};
 use videorc_protocol::{CleanCutJob, CleanCutMode, EntitlementsSnapshot, SessionListItem};
 
 use super::SidekickScreen;
@@ -715,9 +714,10 @@ fn recording_list(
 
 /// A recording's row, drawn as the Library draws it (`RecordingList`'s
 /// `ListRow` with `className="h-auto gap-3 py-1.5"`): the poster in the icon
-/// tile, the title, its length and when it ran, and its newest cut's chip.
-/// The kit's `ListRow` is a fixed 32 px, so this is its anatomy at the
-/// poster's height; flush in the grouped list, the whole row one button.
+/// tile (`SessionPoster`, or the video file glyph while there is none), the
+/// title, its length and when it ran, and its newest cut's chip. The 64 × 36
+/// poster makes it 48 px; flush in the grouped list, the whole row one
+/// button.
 fn recording_row(
     session: &SessionListItem,
     title: String,
@@ -725,69 +725,18 @@ fn recording_row(
     chip: Option<Badge>,
     t: &Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    // The icon tile (`rounded-chip min-h-5 min-w-5 overflow-hidden`) around
-    // `SessionPoster`: the poster, or the video file glyph while there is
-    // none.
-    let tile = div()
-        .flex_none()
-        .min_w(px(20.))
-        .min_h(px(20.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(radius::CHIP))
-        .overflow_hidden()
-        .child(posters::frame(POSTER_WIDTH, POSTER_HEIGHT, t).child(posters::picture(poster, t)));
-    let words = div()
-        .min_w(px(0.))
-        .flex()
-        .items_baseline()
-        .gap(px(8.))
-        .child(
-            div()
-                .min_w(px(0.))
-                .truncate()
-                .text_color(hsla(t.foreground))
-                .font_weight(FontWeight::MEDIUM)
-                .child(title),
-        )
-        .child(
-            div()
-                .min_w(px(0.))
-                .truncate()
-                .text_color(hsla(t.muted_foreground))
-                .child(view::recording_facts(session)),
-        );
-    let content = div()
-        .w_full()
-        .flex()
-        .items_center()
-        .gap(px(RECORDING_ROW_GAP))
-        .px(px(12.))
-        .py(px(RECORDING_ROW_PADDING_Y))
-        .text_size(px(14.))
-        .line_height(px(20.))
-        .child(tile)
-        .child(words)
-        .child(div().flex_1())
-        .child(
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .children(chip),
-        );
-    let accent = hsla(t.accent);
-    let ring = focus_ring(t);
-    gpui_base::Button::new(SharedString::from(format!("clean-cut-rec-{}", session.id)))
-        .w_full()
-        .hover(move |style| style.bg(accent))
-        .focus_visible(move |style| style.shadow(vec![ring]))
-        .on_click(on_click)
-        .child(content)
-        .into_any_element()
+) -> ListRow {
+    let mut row = ListRow::new(format!("clean-cut-rec-{}", session.id), title)
+        .icon(posters::frame(POSTER_WIDTH, POSTER_HEIGHT, t).child(posters::picture(poster, t)))
+        .context(view::recording_facts(session))
+        .auto_height(true)
+        .py(RECORDING_ROW_PADDING_Y)
+        .gap(RECORDING_ROW_GAP)
+        .on_click(on_click);
+    if let Some(chip) = chip {
+        row = row.child(chip);
+    }
+    row.grouped()
 }
 
 /// The chip of a recording's newest cut; the tone lives in its icon.

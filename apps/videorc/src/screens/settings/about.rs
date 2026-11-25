@@ -103,7 +103,7 @@ impl SettingsScreen {
                                     .child("Version")
                                     .child(
                                         div()
-                                            .font_family(crate::lcd::SCREEN_FONT)
+                                            .font_family(videorc_kit::theme::FONT_MONO)
                                             .child(env!("CARGO_PKG_VERSION")),
                                     ),
                             )
@@ -162,7 +162,9 @@ impl SettingsScreen {
         div()
             .flex()
             .flex_wrap()
-            .items_start()
+            .flex_1()
+            .content_stretch()
+            .items_stretch()
             .child(div().flex_1().min_w(px(360.)).child(about))
             .child(
                 div()

@@ -204,7 +204,7 @@ impl RenderOnce for Input {
         } else {
             (with_alpha(t.border, 0.0), t.ring, with_alpha(t.ring, 0.3))
         };
-        let mut frame = gpui_base::InputBase::new(self.id)
+        let mut frame = gpui_base::InputBase::new(self.id.clone())
             .semantic_owner(self.state.entity_id())
             .focused(focused && !self.plain)
             .disabled(disabled)

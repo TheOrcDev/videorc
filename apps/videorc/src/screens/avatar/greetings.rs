@@ -624,12 +624,13 @@ fn greeting_row(
     if row.default {
         line = line.alias(Badge::new("Default").variant(BadgeVariant::Outline));
     }
-    // Electron's order: the warning mark, then the switch last.
+    // Electron's order: the warning mark (a status icon), then the switch
+    // in the meta slot, last.
     if !row.warnings.is_empty() {
-        line = line.child(icon(IconName::WarningFill, 14., hsla(t.warning)));
+        line = line.status_icon(icon(IconName::WarningFill, 14., hsla(t.warning)));
     }
     // Flush in its grouped list: no rounding of its own.
-    let line = line.child(switch).grouped();
+    let line = line.meta_element(switch).grouped();
     let editing = screen
         .greeting_editor
         .as_ref()

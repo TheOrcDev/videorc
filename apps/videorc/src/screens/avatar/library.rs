@@ -96,7 +96,7 @@ pub fn render_library(
         let dismiss = entity.clone();
         column = column.child(
             Alert::new("avatar-library-invitation")
-                .icon(icon(IconName::Sparkle, 16., hsla(t.muted_foreground)))
+                .glyph(IconName::Sparkle)
                 .title(words::LIBRARY_INVITATION)
                 .action(
                     div()
@@ -131,7 +131,7 @@ pub fn render_library(
         let save = entity.clone();
         column = column.child(
             Alert::new("avatar-library-local-only")
-                .icon(icon(IconName::UploadSimple, 16., hsla(t.muted_foreground)))
+                .glyph(IconName::UploadSimple)
                 .title(words::library_local_only(&name))
                 .action(
                     Button::new("avatar-library-save-to-library")
@@ -163,11 +163,7 @@ pub fn render_library(
         let use_it = entity.clone();
         column = column.child(
             Alert::new("avatar-library-picked-elsewhere")
-                .icon(icon(
-                    IconName::ArrowsClockwise,
-                    16.,
-                    hsla(t.muted_foreground),
-                ))
+                .glyph(IconName::ArrowsClockwise)
                 .title(words::library_picked_elsewhere(&name))
                 .action(
                     Button::new("avatar-library-picked-elsewhere-use")
@@ -512,38 +508,39 @@ fn card_menu(card: &Card, entity: gpui::Entity<AvatarScreen>) -> Vec<KebabMenuIt
     let mut items = Vec::new();
     if card.kind == CardKind::Mine {
         let (rename, id) = (entity.clone(), card.id.clone());
-        items.push(KebabMenuItem::new(
-            "rename",
-            words::LIBRARY_RENAME,
-            move |window, cx| {
+        items.push(
+            KebabMenuItem::new("rename", words::LIBRARY_RENAME, move |window, cx| {
                 let id = id.clone();
                 rename.update(cx, |screen, cx| {
                     screen.open_edit(EditKind::Rename, id, window, cx)
                 })
-            },
-        ));
+            })
+            .icon(|ink| icon(IconName::PencilSimple, 16., ink)),
+        );
         let (edit, id) = (entity.clone(), card.id.clone());
-        items.push(KebabMenuItem::new(
-            "edit-personality",
-            words::LIBRARY_EDIT_PERSONALITY,
-            move |window, cx| {
-                let id = id.clone();
-                edit.update(cx, |screen, cx| {
-                    screen.open_edit(EditKind::Personality, id, window, cx)
-                })
-            },
-        ));
+        items.push(
+            KebabMenuItem::new(
+                "edit-personality",
+                words::LIBRARY_EDIT_PERSONALITY,
+                move |window, cx| {
+                    let id = id.clone();
+                    edit.update(cx, |screen, cx| {
+                        screen.open_edit(EditKind::Personality, id, window, cx)
+                    })
+                },
+            )
+            .icon(|ink| icon(IconName::NotePencil, 16., ink)),
+        );
     }
     if card.can_make_alive {
         let (alive, id, active) = (entity.clone(), card.id.clone(), card.active);
-        items.push(KebabMenuItem::new(
-            "make-alive",
-            words::LIBRARY_MAKE_ALIVE,
-            move |_, cx| {
+        items.push(
+            KebabMenuItem::new("make-alive", words::LIBRARY_MAKE_ALIVE, move |_, cx| {
                 let id = id.clone();
                 alive.update(cx, |screen, cx| screen.make_alive(id, active, cx))
-            },
-        ));
+            })
+            .icon(|ink| icon(IconName::Sparkle, 16., ink)),
+        );
     }
     if card.kind == CardKind::Mine {
         let (delete, id, name) = (entity, card.id.clone(), card.name.clone());
@@ -552,6 +549,7 @@ fn card_menu(card: &Card, entity: gpui::Entity<AvatarScreen>) -> Vec<KebabMenuIt
                 let (id, name) = (id.clone(), name.clone());
                 delete.update(cx, |screen, cx| screen.ask_delete(id, name, cx))
             })
+            .icon(|ink| icon(IconName::Trash, 16., ink))
             .destructive(true),
         );
     }

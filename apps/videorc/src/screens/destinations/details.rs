@@ -5,11 +5,12 @@ use gpui_base::input::InputEvent;
 use videorc_app_core::livestream::copy as page_copy;
 use videorc_app_core::livestream::details;
 use videorc_app_core::livestream::{DetailsState, details as details_mod};
-use videorc_kit::badge::{Badge, BadgeVariant};
+use videorc_kit::StatusBadge;
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::InputState;
 use videorc_kit::panel_section::PanelSection;
+use videorc_kit::status_dot::StatusTone;
 use videorc_kit::textarea::TextareaState;
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
@@ -138,13 +139,14 @@ impl DestinationsPanel {
             .icon(icon(IconName::TextAa, 16., hsla(t.muted_foreground)));
         // The header's end: the status, then Save (`variant="secondary"`).
         let mut action = div().flex().items_center().gap(px(8.));
+        // `StatusBadge` (the tone's dot and the words).
         if let Some((tone, label)) = status {
-            let variant = match tone {
-                "good" => BadgeVariant::Success,
-                "warn" => BadgeVariant::Warning,
-                _ => BadgeVariant::Outline,
+            let tone = match tone {
+                "good" => StatusTone::Good,
+                "warn" => StatusTone::Warn,
+                _ => StatusTone::Neutral,
             };
-            action = action.child(Badge::new(label).variant(variant));
+            action = action.child(StatusBadge::new(label).tone(tone));
         }
         action = action.child(
             Button::new("stream-details-save")

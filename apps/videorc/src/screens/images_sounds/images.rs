@@ -831,8 +831,7 @@ impl Render for ImagesPanel {
             let entity = entity.clone();
             let reason = banner_reason;
             let running = self.banner_import != ImportPhase::Idle && self.banner_kind == kind;
-            // Electron's CodeIcon leads Import HTML…; the kit has no Code
-            // glyph yet, so that button goes without one.
+            // Electron's CodeIcon leads Import HTML…
             let glyph = if running {
                 Some(
                     Spinner::new(SharedString::from(format!("{id}-spinner")))
@@ -842,7 +841,7 @@ impl Render for ImagesPanel {
             } else if kind == BannerImportKind::Image {
                 Some(icon(IconName::ImageSquare, 16., hsla(t.foreground)).into_any_element())
             } else {
-                None
+                Some(icon(IconName::Code, 16., hsla(t.foreground)).into_any_element())
             };
             let mut button = Button::new(id)
                 .variant(ButtonVariant::Outline)

@@ -679,7 +679,13 @@ impl Render for SoundsPanel {
                 if let Some(slider) = self.volume.get(&sound.id) {
                     volume = volume.child(
                         div().flex_1().min_w(px(0.)).child(
+                            // A fader: the range runs from 0 dB to the thumb,
+                            // so nothing fills at unity (`FaderRange`).
                             Slider::new(slider)
+                                .origin(
+                                    (0 - SOUND_VOLUME_DB_MIN) as f32
+                                        / (SOUND_VOLUME_DB_MAX - SOUND_VOLUME_DB_MIN) as f32,
+                                )
                                 .accessibility_label(format!("{} volume", sound.name))
                                 .disabled(offline),
                         ),
@@ -692,7 +698,7 @@ impl Render for SoundsPanel {
                         .w(px(52.))
                         .flex()
                         .justify_end()
-                        .font_family(crate::lcd::SCREEN_FONT)
+                        .font_family(videorc_kit::theme::FONT_MONO)
                         .text_size(px(12.))
                         .line_height(px(16.))
                         .font_weight(gpui::FontWeight::NORMAL)
@@ -757,7 +763,7 @@ impl Render for SoundsPanel {
                                 if playing {
                                     IconName::StopFill
                                 } else {
-                                    IconName::Play
+                                    IconName::PlayFill
                                 },
                                 12.,
                                 hsla(t.foreground),

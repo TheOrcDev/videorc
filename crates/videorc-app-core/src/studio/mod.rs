@@ -2976,13 +2976,23 @@ impl<B: StudioBackend> Studio<B> {
         if effects.is_empty() {
             return;
         }
-        let commands: Vec<NoticeCommand> = {
+        let (commands, notice_moved) = {
             let mut inner = self.lock();
-            effects
+            let before = inner.notices.microphone_notice().cloned();
+            let commands: Vec<NoticeCommand> = effects
                 .iter()
                 .flat_map(|effect| inner.notices.on_effect(effect))
-                .collect()
+                .collect();
+            let moved = inner.notices.microphone_notice() != before.as_ref();
+            (commands, moved)
         };
+        // Every caller publishes before it emits, so a microphone notice an
+        // effect moved (past tense at the session's end, cleared by a new
+        // session or a failure) would wait for the next publish. Publish it
+        // now, before anyone hears the effect.
+        if notice_moved {
+            self.publish();
+        }
         for effect in effects {
             // No subscriber is not an error.
             let _ = self.effects.send(effect);

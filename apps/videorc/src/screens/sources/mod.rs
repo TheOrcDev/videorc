@@ -185,10 +185,10 @@ fn tag_badge(label: impl Into<SharedString>) -> Badge {
 /// 20 px icon tile and the 10 px gap, so the body starts under the title.
 const ITEM_INDENT: f32 = 42.0;
 
-/// `SourceItem`'s header: the ListRow at `h-auto min-h-10 py-1.5`, so a
-/// 32 px row with 4 px over and under it is the 40 px header.
+/// `SourceItem`'s header: the ListRow at `h-auto min-h-10 py-1.5`, so the
+/// row (and its hover) is the whole 40 px header.
 fn item_header(row: ListRow) -> gpui::Div {
-    div().py(px(4.)).child(row)
+    div().child(row.auto_height(true).min_height(40.))
 }
 
 /// The header's source icon: 16 px, muted, subtle while the source is off.
@@ -198,7 +198,12 @@ fn source_icon(name: IconName, disabled: bool, t: &Theme) -> impl IntoElement {
     } else {
         t.muted_foreground
     };
-    icon(name, 16.0, hsla(ink))
+    // Duotone, as `source-item.tsx:113-116` draws them.
+    icon(
+        crate::screens::studio::audio::duotone(name),
+        16.0,
+        hsla(ink),
+    )
 }
 
 /// `source-item-body`: `flex min-w-0 flex-col gap-2 pr-3 pb-3 pl-10.5`.
@@ -275,10 +280,8 @@ fn labelled_switch(
 
 /// A control row's readout: `font-mono text-xs text-muted-foreground`.
 fn value_text(t: &Theme, words: impl Into<SharedString>) -> gpui::Div {
-    // `font::MONO[0]` is the CSS `ui-monospace`, which GPUI can't load (kit
-    // request); the LCD's loadable mono face until the token carries one.
     div()
-        .font_family(crate::lcd::SCREEN_FONT)
+        .font_family(videorc_kit::FONT_MONO)
         .type_scale(text::META)
         .whitespace_nowrap()
         .text_color(hsla(t.muted_foreground))
@@ -356,9 +359,9 @@ fn mute_button(
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Button {
     let (speaker, ink) = if muted {
-        (IconName::SpeakerSlash, t.channel_mute_foreground)
+        (IconName::SpeakerSlashDuotone, t.channel_mute_foreground)
     } else {
-        (IconName::SpeakerHigh, t.muted_foreground)
+        (IconName::SpeakerHighDuotone, t.muted_foreground)
     };
     Button::new("mute-mic")
         .size(ButtonSize::Icon)
@@ -405,7 +408,8 @@ fn fill_select(id: impl Into<gpui::ElementId>, picker: &PickerView, disabled: bo
             "Choose…".to_string()
         })
         .disabled(disabled)
-        .width(280.0)
+        // The device picker's `w-full min-w-0`: it fills its column.
+        .full_width(true)
         .value(selected.map(SharedString::from));
     for item in &picker.items {
         if !item.heading.is_empty() {

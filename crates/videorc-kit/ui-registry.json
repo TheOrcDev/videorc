@@ -59,7 +59,10 @@
     "sound-pad",
     "qr-code",
     "progress",
-    "selectable-text"
+    "selectable-text",
+    "media-card",
+    "page",
+    "channel-toggle"
   ],
   "keepLocal": []
 }

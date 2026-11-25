@@ -43,9 +43,8 @@ use videorc_kit::shortcut_keys::{ShortcutKeys, ShortcutStyle};
 use videorc_kit::slider::{Slider, SliderEvent, SliderState};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::{Theme, size, text};
+use videorc_kit::tokens::{Theme, text};
 
-use super::layout::INSPECTOR_MAX_PX;
 use super::transport::{AppStudio, OpenPage};
 use crate::lcd;
 
@@ -449,11 +448,6 @@ fn chip_badge(label: &str, tone: &str) -> Badge {
     Badge::new(label.to_string()).variant(variant)
 }
 
-/// The Microphone picker spans the row's body (`DevicePicker`'s field
-/// trigger is `w-full`): the inspector less its gutters, the card's border
-/// and the body's `px-3`. The kit Select takes a fixed width only.
-const PICKER_WIDTH_PX: f32 = INSPECTOR_MAX_PX - 2. * size::GUTTER - 2. - 24.;
-
 /// `SourceControlRow`'s value column: `min-w-[8ch]` of the 12 px mono.
 const GAIN_VALUE_MIN_PX: f32 = 58.;
 
@@ -495,7 +489,7 @@ fn gain_row(
                     .tooltip(reset.to_string())
                     .child(
                         div()
-                            .font_family(lcd::SCREEN_FONT)
+                            .font_family(videorc_kit::FONT_MONO)
                             .text_color(value_ink)
                             .child(shown),
                     )
@@ -519,13 +513,16 @@ fn gain_row(
         .items_center()
         .gap(px(12.))
         .child(if retro { label } else { label.w(px(36.)) })
-        .child(
-            div().flex().flex_1().min_w_0().items_center().child(
-                Slider::new(slider)
-                    .accessibility_label(aria)
-                    .disabled(disabled),
-            ),
-        )
+        .child(div().flex().flex_1().min_w_0().items_center().child({
+            let fader = Slider::new(slider)
+                .accessibility_label(aria)
+                .disabled(disabled);
+            if retro {
+                lcd::fader(fader, theme)
+            } else {
+                fader
+            }
+        }))
         .child(
             div()
                 .flex()
@@ -533,7 +530,7 @@ fn gain_row(
                 .justify_end()
                 .min_w(px(GAIN_VALUE_MIN_PX))
                 .whitespace_nowrap()
-                .font_family(lcd::SCREEN_FONT)
+                .font_family(videorc_kit::FONT_MONO)
                 .type_scale(text::META)
                 .text_color(value_ink)
                 .child(value),
@@ -545,8 +542,25 @@ fn gain_row(
 /// muted ink, the title, then its chip and its one control.
 fn source_header(id: &'static str, glyph: IconName, title: &'static str, theme: &Theme) -> ListRow {
     ListRow::new(id, title)
-        .icon(icon(glyph, 16., hsla(theme.muted_foreground)))
+        .icon(icon(duotone(glyph), 16., hsla(theme.muted_foreground)))
+        // `h-auto min-h-10 py-1.5` (`source-item.tsx:110`).
+        .auto_height(true)
+        .min_height(40.)
         .grouped()
+}
+
+/// The source glyphs at Phosphor's duotone weight (`source-item.tsx:113-116`,
+/// the MuteToggle's speakers).
+pub(crate) fn duotone(glyph: IconName) -> IconName {
+    match glyph {
+        IconName::Monitor => IconName::MonitorDuotone,
+        IconName::VideoCamera => IconName::VideoCameraDuotone,
+        IconName::Microphone => IconName::MicrophoneDuotone,
+        IconName::Desktop => IconName::DesktopDuotone,
+        IconName::SpeakerHigh => IconName::SpeakerHighDuotone,
+        IconName::SpeakerSlash => IconName::SpeakerSlashDuotone,
+        other => other,
+    }
 }
 
 /// `SourceItem`'s body: `flex flex-col gap-2 pr-3 pb-3 pl-3` (the Studio's
@@ -586,9 +600,9 @@ impl AudioSection {
             words::MUTE_MICROPHONE
         };
         let (speaker, speaker_ink) = if muted {
-            (IconName::SpeakerSlash, theme.chrome_fill_ink)
+            (IconName::SpeakerSlashDuotone, theme.chrome_fill_ink)
         } else {
-            (IconName::SpeakerHigh, theme.muted_foreground)
+            (IconName::SpeakerHighDuotone, theme.muted_foreground)
         };
         header = header.child(
             Button::new("studio-mic-mute")
@@ -608,7 +622,8 @@ impl AudioSection {
         let entity = cx.entity();
         let mut body = source_body("studio-microphone").child(
             fill_select("studio-mic-picker", &mic.picker, disabled)
-                .width(PICKER_WIDTH_PX)
+                // `DevicePicker`'s field trigger is `w-full`.
+                .full_width(true)
                 .on_change(move |value, _, cx| {
                     entity.update(cx, |section, _| {
                         section.select_microphone(value.to_string());
@@ -678,21 +693,21 @@ impl AudioSection {
         if let Some(chip) = row.chip {
             header = header.child(chip_badge(chip.label, chip.tone));
         }
-        if let Some(accel) = row.toggle_accelerator.as_ref() {
-            header = header.child(ShortcutKeys::accelerator(accel.clone()));
-        }
         let checked = row.checked;
         let entity = cx.entity();
-        header = header.child(
-            Switch::new("studio-system-audio")
-                .accessibility_label(words::SYSTEM_AUDIO)
-                .checked(checked)
-                .disabled(row.disabled)
-                .small(true)
-                .on_change(move |value, _, cx| {
-                    entity.update(cx, |section, _| section.set_system_audio(value));
-                }),
-        );
+        let mut switch = Switch::new("studio-system-audio")
+            .accessibility_label(words::SYSTEM_AUDIO)
+            .checked(checked)
+            .disabled(row.disabled)
+            .small(true);
+        // Electron keeps System audio's key in the switch's tooltip
+        // (`ShortcutTooltip`, `audio-section.tsx:496`), not on the row.
+        if let Some(accel) = row.toggle_accelerator.as_ref() {
+            switch = switch.tooltip_with_accelerator(words::SYSTEM_AUDIO, accel.clone());
+        }
+        header = header.child(switch.on_change(move |value, _, cx| {
+            entity.update(cx, |section, _| section.set_system_audio(value));
+        }));
 
         // `SystemAudioRow`'s order: the level and D6's line while On, Gain,
         // then the issue with its one action.
@@ -827,13 +842,13 @@ impl AudioSection {
                 )
                 .child({
                     let entity = cx.entity();
-                    fill_select("studio-lcd-mic-picker", &mic.picker, disabled).on_change(
-                        move |value, _, cx| {
+                    fill_select("studio-lcd-mic-picker", &mic.picker, disabled)
+                        .trigger_with(lcd::picker_trigger(theme))
+                        .on_change(move |value, _, cx| {
                             entity.update(cx, |section, _| {
                                 section.select_microphone(value.to_string());
                             });
-                        },
-                    )
+                        })
                 }),
         );
         if let Some(status) = mic.status.as_ref() {
