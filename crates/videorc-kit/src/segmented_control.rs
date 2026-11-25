@@ -24,13 +24,14 @@ use gpui::{
     AnyElement, App, Axis, ColorSpace, ElementId, FocusHandle, FontWeight, IntoElement, KeyBinding,
     SharedString, Window, div, linear_color_stop, linear_gradient, prelude::*, px,
 };
+use gpui_base::ElementExt as _;
 use gpui_base::actions::{SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp};
 use smallvec::SmallVec;
 
 use crate::{
     badge::plate_shadows,
     chrome::box_shadow,
-    theme::{Appearance, TypeScale, faded_over, hsla, resolve, with_alpha},
+    theme::{Appearance, FONT, TypeScale, faded_over, hsla, resolve, with_alpha},
     tokens::{Color, Shadow, radius, size, text},
     tooltip::tooltip,
 };
@@ -103,6 +104,8 @@ pub struct SegmentedControl {
     manual: bool,
     /// 24 px segments; the default is the 28 px control height.
     small: bool,
+    /// `w-fit`: the track hugs its segments, each as wide as its words.
+    fit: bool,
     ground: Option<Color>,
     accessibility_label: Option<SharedString>,
     on_change: Option<ChangeHandler>,
@@ -119,6 +122,7 @@ impl SegmentedControl {
             disabled_reason: None,
             manual: false,
             small: false,
+            fit: false,
             ground: None,
             accessibility_label: None,
             on_change: None,
@@ -160,6 +164,16 @@ impl SegmentedControl {
         self
     }
 
+    /// Electron's default `w-fit`: the track hugs its segments and each is
+    /// as wide as its words (Community's Show). Without it the track fills
+    /// its column (`w-full`) and the segments share it as Chrome does: equal
+    /// shares, a segment never narrower than its words, and a line that
+    /// cannot hold them wraps (Stream quality).
+    pub fn fit(mut self, fit: bool) -> Self {
+        self.fit = fit;
+        self
+    }
+
     /// The colour the control sits on, for the disabled pre-blend.
     pub fn ground(mut self, ground: Color) -> Self {
         self.ground = Some(ground);
@@ -185,6 +199,61 @@ impl SegmentedControl {
         self.appearance = Some(appearance);
         self
     }
+}
+
+/// Chrome's widths for `flex: 1 1 0%` segments in a `w-full` track whose
+/// content box is `inner` wide, each never narrower than its `mins` (its
+/// words, `min-width: auto`): lines break where the minimums no longer fit,
+/// and on each line the segments share the width equally, except that one
+/// whose words need more keeps them and the rest share what is left.
+/// Returns (line, width) per segment. Measured against Chrome: see the kit
+/// owner's segment-measure notes (plan 260, batch 3).
+pub fn segment_widths(mins: &[f32], inner: f32) -> Vec<(usize, f32)> {
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0.0_f32;
+    for (index, min) in mins.iter().enumerate() {
+        match lines.last_mut() {
+            Some(line) if used + min <= inner + 0.01 => {
+                line.push(index);
+                used += min;
+            }
+            _ => {
+                lines.push(vec![index]);
+                used = *min;
+            }
+        }
+    }
+    let mut out = vec![(0, 0.0); mins.len()];
+    for (line_index, line) in lines.iter().enumerate() {
+        let mut frozen: Vec<usize> = Vec::new();
+        loop {
+            let left = inner - frozen.iter().map(|&i| mins[i]).sum::<f32>();
+            let open: Vec<usize> = line
+                .iter()
+                .copied()
+                .filter(|i| !frozen.contains(i))
+                .collect();
+            if open.is_empty() {
+                for &i in &frozen {
+                    out[i] = (line_index, mins[i]);
+                }
+                break;
+            }
+            let share = (left / open.len() as f32).max(0.0);
+            let short: Vec<usize> = open.iter().copied().filter(|&i| mins[i] > share).collect();
+            if short.is_empty() {
+                for &i in &open {
+                    out[i] = (line_index, share);
+                }
+                for &i in &frozen {
+                    out[i] = (line_index, mins[i]);
+                }
+                break;
+            }
+            frozen.extend(short);
+        }
+    }
+    out
 }
 
 /// The option a move lands on, skipping disabled ones. `delta` of −1 / +1
@@ -296,6 +365,55 @@ impl RenderOnce for SegmentedControl {
             )
         };
 
+        // Chrome's flex sizing for `flex-1` segments, from their words
+        // (`px-3` and a 1 px rim around 13 px medium text). A segment with a
+        // custom body can't be measured, so that track keeps plain `flex-1`.
+        let pad_x = if self.small { 8.0 } else { 12.0 };
+        let mins: Option<Vec<f32>> = self
+            .options
+            .iter()
+            .map(|option| {
+                option.child.is_none().then(|| {
+                    let mut font = gpui::font(FONT);
+                    font.weight = FontWeight::MEDIUM;
+                    let run = gpui::TextRun {
+                        len: option.label.len(),
+                        font,
+                        color: hsla(t.foreground),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let words = window
+                        .text_system()
+                        .shape_line(option.label.clone(), px(text_size), &[run], None)
+                        .width();
+                    f32::from(words) + pad_x * 2.0 + 2.0
+                })
+            })
+            .collect();
+        let width_state =
+            window.use_keyed_state(SharedString::from(format!("{key}/width")), cx, |_, _| {
+                0.0_f32
+            });
+        let track_inner = *width_state.read(cx) - 4.0;
+        let fit = self.fit;
+        let widths: Option<Vec<f32>> = match &mins {
+            Some(mins) if fit => Some(mins.clone()),
+            Some(mins) if track_inner > 0.0 => Some(
+                segment_widths(mins, track_inner)
+                    .into_iter()
+                    // A hair under, so float rounding never wraps a line early.
+                    .map(|(_, width)| (width - 0.01).max(0.0))
+                    .collect(),
+            ),
+            _ => None,
+        };
+        let track_width = match (&mins, fit) {
+            (Some(mins), true) => Some(mins.iter().sum::<f32>() + 4.0),
+            _ => None,
+        };
+
         let segments: SmallVec<[AnyElement; 4]> = self
             .options
             .into_iter()
@@ -321,7 +439,10 @@ impl RenderOnce for SegmentedControl {
                     .track_focus(&handles[index])
                     .relative()
                     .h(px(height - 4.0))
-                    .flex_1()
+                    .map(|radio| match widths.as_ref().and_then(|w| w.get(index)) {
+                        Some(width) => radio.flex_none().w(px(*width)),
+                        None => radio.flex_1(),
+                    })
                     .flex()
                     .items_center()
                     .justify_center()
@@ -398,8 +519,20 @@ impl RenderOnce for SegmentedControl {
             .flex_wrap()
             .items_center()
             .justify_center()
+            .gap_y(px(2.0))
             .min_h(px(height))
             .p(px(2.0))
+            .when_some(track_width, |track, width| track.flex_none().w(px(width)))
+            .on_prepaint({
+                let width_state = width_state.clone();
+                move |bounds, window, cx| {
+                    let width = f32::from(bounds.size.width);
+                    if (*width_state.read(cx) - width).abs() > 0.5 {
+                        width_state.update(cx, |w, _| *w = width);
+                        window.refresh();
+                    }
+                }
+            })
             .rounded(px(radius::ROW))
             .bg(hsla(with_alpha(
                 t.foreground,
@@ -445,5 +578,27 @@ impl RenderOnce for SegmentedControl {
                     .child(self.disabled_reason.unwrap_or_default()),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::segment_widths;
+
+    /// Chrome 2026-11 on `flex-1` segments, `px-3`, 13 px medium (the
+    /// kit owner's segment-measure page).
+    #[test]
+    fn segment_widths_follow_chrome() {
+        let near = |a: f32, b: f32| (a - b).abs() < 0.2;
+        let w = segment_widths(&[75.8, 83.1, 45.7], 396.0);
+        assert!(
+            w.iter()
+                .all(|&(line, width)| line == 0 && near(width, 132.0))
+        );
+        let w = segment_widths(&[116.1, 116.3, 157.7], 416.0);
+        assert!(near(w[0].1, 129.15) && near(w[1].1, 129.15) && near(w[2].1, 157.7));
+        let w = segment_widths(&[116.1, 116.3, 157.7], 326.0);
+        assert_eq!((w[0].0, w[1].0, w[2].0), (0, 0, 1));
+        assert!(near(w[0].1, 163.0) && near(w[1].1, 163.0) && near(w[2].1, 326.0));
     }
 }

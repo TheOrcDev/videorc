@@ -206,3 +206,92 @@ impl RenderOnce for PlatformGlyph {
         }
     }
 }
+
+/// A platform's bare mark at text size (`ChatPlatformIcon`: chat rows, the
+/// community list, Sidekick's sources): YouTube's official red mark, never a
+/// redrawn glyph, at least 20 px tall (YouTube's API terms, III.F.2a) with
+/// its width from the mark's aspect; every other platform its glyph in the
+/// brand tint. A surface without room for 20 px shows the word instead.
+#[derive(IntoElement)]
+pub struct PlatformMark {
+    id: ElementId,
+    platform: ChatPlatform,
+    size: f32,
+    appearance: Option<Appearance>,
+}
+
+impl PlatformMark {
+    pub fn new(platform: ChatPlatform) -> Self {
+        PlatformMark {
+            id: ("platform-mark", platform as usize).into(),
+            platform,
+            size: 16.0,
+            appearance: None,
+        }
+    }
+
+    /// The mark's height (16 by default); YouTube's never goes under 20.
+    pub fn size(mut self, size: f32) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// Override the stable element ID when repeating a platform under one parent.
+    pub fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = id.into();
+        self
+    }
+
+    /// Draws in this appearance instead of the window's (the gallery).
+    pub fn appearance(mut self, appearance: Appearance) -> Self {
+        self.appearance = Some(appearance);
+        self
+    }
+}
+
+impl RenderOnce for PlatformMark {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let t = resolve(self.appearance, window, cx);
+        let label: SharedString = self.platform.label().into();
+        let mark = div()
+            .id(self.id)
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .role(gpui::Role::Image)
+            .aria_label(label);
+        if self.platform != ChatPlatform::Youtube {
+            return mark.child(icon(
+                self.platform.icon(),
+                self.size,
+                self.platform.tint_hsla(t),
+            ));
+        }
+        let h = self.size.max(YT_H);
+        let w = (h * YT_W / YT_H * 100.0).round() / 100.0;
+        let scale = window.scale_factor().max(1.0);
+        let raster = brand_img(
+            &youtube_svg(),
+            (w * scale).ceil() as u32,
+            (h * scale).ceil() as u32,
+        );
+        let mark = mark.w(px(w)).h(px(h));
+        match raster {
+            // A canvas has no size of its own: without `size_full` it lays
+            // out at 0×0 and the mark paints nothing.
+            Some(image) => mark.child(
+                canvas(
+                    move |_, _, _| (),
+                    move |bounds, _, window, _| paint_mark(window, bounds, image.clone()),
+                )
+                .size_full(),
+            ),
+            None => mark.child(icon(
+                IconName::YoutubeLogo,
+                h,
+                hsla(fixed::PLATFORM_YOUTUBE),
+            )),
+        }
+    }
+}

@@ -96,6 +96,9 @@ pub struct Alert {
     title: Option<SharedString>,
     description: Option<AnyElement>,
     action: Option<AnyElement>,
+    /// Controls on the title's own line (`flex flex-wrap items-center
+    /// gap-x-3`), in flow: the row grows to them.
+    inline_action: Option<AnyElement>,
     appearance: Option<Appearance>,
 }
 
@@ -108,6 +111,7 @@ impl Alert {
             title: None,
             description: None,
             action: None,
+            inline_action: None,
             appearance: None,
         }
     }
@@ -134,6 +138,16 @@ impl Alert {
     /// out of flow as Electron's is.
     pub fn action(mut self, action: impl IntoElement) -> Self {
         self.action = Some(action.into_any_element());
+        self
+    }
+
+    /// Controls on the title's line, in flow, as Avatar's invitation draws
+    /// them (`col-start-2 flex flex-wrap items-center gap-x-3 gap-y-1.5`, the
+    /// alert `pr-3`): the title takes the rest of the line and the row grows
+    /// to the controls (Start and × at `xs` make it 46 px). Wraps under the
+    /// title when the line is too narrow.
+    pub fn inline_action(mut self, action: impl IntoElement) -> Self {
+        self.inline_action = Some(action.into_any_element());
         self
     }
 
@@ -196,6 +210,8 @@ impl RenderOnce for Alert {
                 .justify_center()
                 .child(mark)
         });
+        let inline_action = self.inline_action;
+        let has_inline = inline_action.is_some();
         let body = div()
             .flex_1()
             .min_w_0()
@@ -203,21 +219,32 @@ impl RenderOnce for Alert {
             .flex_col()
             .gap(px(2.0))
             .children(self.title.map(|title| {
-                div()
+                let title = div()
                     .text_color(hsla(variant.title_color(t)))
                     .font_weight(if has_description {
                         FontWeight::MEDIUM
                     } else {
                         FontWeight::NORMAL
                     })
-                    .child(title)
+                    .child(title);
+                match inline_action {
+                    Some(action) => div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_x(px(12.0))
+                        .gap_y(px(6.0))
+                        .child(title.flex_1().min_w_0())
+                        .child(div().flex().items_center().gap(px(4.0)).child(action)),
+                    None => title,
+                }
             }))
             .children(self.description.map(|description| {
                 div()
                     .text_color(hsla(t.muted_foreground))
                     .child(description)
             }));
-        let has_action = self.action.is_some();
+        let has_action = self.action.is_some() && !has_inline;
         div()
             .id(self.id)
             .role(variant.role())
