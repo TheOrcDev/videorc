@@ -590,6 +590,10 @@ fn main() -> Result<()> {
                 palette.update(cx, |palette, _| palette.bind_dialogs(dialogs.clone()));
                 let sounds =
                     cx.new(|cx| SoundsPanel::new(studio.clone(), core_handle.clone(), window, cx));
+                // Plan 260 Phase 3 (L1): the Scene page ⌘3.
+                let scene = cx.new(|cx| {
+                    screens::scene::ScenePage::new(studio.clone(), core_handle.clone(), window, cx)
+                });
                 cx.new(|cx| {
                     Shell::new(
                         status.clone(),
@@ -612,6 +616,7 @@ fn main() -> Result<()> {
                         palette,
                         dialogs,
                         notices.clone(),
+                        scene,
                         window,
                         cx,
                     )

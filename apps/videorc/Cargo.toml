@@ -28,6 +28,8 @@ videorc-kit = { workspace = true }
 videorc-app-core = { workspace = true }
 # The Session section's clock for the core's on-air facts.
 chrono = "0.4"
+# New scene ids (the Scene page's Duplicate, plan 260 Phase 3).
+uuid = { version = "1.19", features = ["v4"] }
 # The core's own runtime (two workers), beside GPUI's executor.
 tokio = { version = "1.48", features = ["rt-multi-thread", "sync", "time", "macros"] }
 # The preview element (plan 260 S2.3a, L1): the presenter, the lease feed,
