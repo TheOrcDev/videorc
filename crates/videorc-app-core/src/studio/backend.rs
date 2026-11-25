@@ -13,9 +13,6 @@ use videorc_protocol::{
     SessionStopParams, SoundboardState, StartSessionParams, StreamScreen,
 };
 
-use super::ui_settings_wire::{
-    UiSettingsChange, UiSettingsGetParams, UiSettingsSetParams, UiSettingsSnapshot,
-};
 use crate::client::methods::Method;
 use crate::client::methods::{
     AudioProcessingUpdate, DevicesList, HealthPing, PreviewScreenStart, RecordingStatusGet,
@@ -24,6 +21,9 @@ use crate::client::methods::{
     SupportBundleExport,
 };
 use crate::client::{BackendClient, RpcError};
+use videorc_protocol::ui_settings::{
+    UiSettingsChange, UiSettingsGetParams, UiSettingsSetParams, UiSettingsSnapshot,
+};
 
 /// The backend, as the Studio uses it. Every method is one request; the
 /// deadlines are the client's per-method ones.

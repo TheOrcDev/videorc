@@ -14,27 +14,13 @@
 //! - [`session_press`]: what each of these entries' buttons asks the app to
 //!   do (play or reveal a take, open it in the Library, open Sources).
 //!
-//! # The switch from S1.6a's toasts (binding on the wiring PR)
+//! # The switch from S1.6a's toasts
 //!
-//! `notices::toasts::SessionNotices` (S1.6a, L7) still raises, as toasts,
-//! what this module and `super::devices` turn into entries. When the Studio
-//! wires these sources in, each message must appear once, so that PR (L7's)
-//! drops these `NoticeCommand::Show` pushes and keeps the state behind them:
-//!
-//! - `session_finished`: the ended microphone toast (`microphone_toast`) and
-//!   "Recording saved" (`recording_saved`): [`session_finished`] here
-//!   publishes both.
-//! - `microphone_loss`: the lost microphone's toast: `devices::microphone_loss`
-//!   publishes the urgent entry, and the store pops it up in a session the
-//!   streamer started.
-//! - `session_health_event`: the separate-file warnings
-//!   (`separate-source-recordings-role-failed` and `-shed`): the health table
-//!   publishes them (`super::health`), behind the bell.
-//!
-//! What stays a toast there: the refused start (`start_failure`) and the
-//! error from `recording_startup_health_toast`, which
-//! [`route_session_health_event`] hands back as [`SessionHealthOutcome::Toast`].
-//! L7 drops the toast builders above once these PRs are on main.
+//! `SessionNotices` keeps microphone snapshot state and the refused-start /
+//! Error barrier-timeout toast. The ended mic entry, "Recording saved",
+//! separate-file warnings, destination transitions and the rest of the
+//! health table are store entries from this module, `super::devices`,
+//! `super::health` and `super::stream_targets` (#1859, #1865, #1869).
 
 use videorc_protocol::{HealthEvent, HealthLevel};
 

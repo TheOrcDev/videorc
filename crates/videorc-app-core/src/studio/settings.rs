@@ -21,10 +21,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::ui_settings_wire::{UiSettingsChange, UiSettingsSetParams, UiSettingsSnapshot};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use videorc_protocol::ui_settings::{UiSettingsChange, UiSettingsSetParams, UiSettingsSnapshot};
 
 use super::camera_background::normalize_camera_background;
 use super::capture_config::normalize_camera_look;

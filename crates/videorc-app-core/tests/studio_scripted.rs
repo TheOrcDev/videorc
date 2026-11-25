@@ -14,14 +14,14 @@ use videorc_app_core::client::{BackendEvent, RpcError};
 use videorc_app_core::studio::inspector::StartGates;
 use videorc_app_core::studio::session::READY_TO_START_MESSAGE;
 use videorc_app_core::studio::transport::{RecordButtonState, TransportView};
-use videorc_app_core::studio::ui_settings_wire::{
-    UI_SETTINGS_CHANGED_EVENT, UiSettingsChange, UiSettingsGetParams, UiSettingsSetParams,
-    UiSettingsSnapshot,
-};
 use videorc_app_core::studio::{
     Connection, HealthTone, SessionActivity, SessionEffect, SessionPhase, SessionStartFailureKind,
     SessionStartIntent, StartOutcome, StopExit, StopOrigin, StopOutcome, Studio, StudioBackend,
     StudioConfig, families, keys, settings_write_kept,
+};
+use videorc_protocol::ui_settings::{
+    UI_SETTINGS_CHANGED_EVENT, UiSettingsChange, UiSettingsGetParams, UiSettingsSetParams,
+    UiSettingsSnapshot,
 };
 use videorc_protocol::{
     AudioProcessingUpdateParams, AudioProcessingUpdateResult, BackendConnection, BackendHealth,

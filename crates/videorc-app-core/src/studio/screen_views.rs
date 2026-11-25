@@ -544,8 +544,6 @@ pub const PREVIEW_SECTION_TITLE: &str = "Preview";
 /// card while the talk-show room is open (P122 / P147).
 pub const PREVIEW_REPLACED_BY_SHOW_STAGE: &str =
     "The Show stage replaces the Preview while the room is open.";
-/// Closing the room from the Preview card waits for the Guests lane's close.
-pub const CLOSE_THE_ROOM_UNAVAILABLE: &str = "Closing the room isn't available yet.";
 
 /// The Studio's Preview stage.
 #[derive(Debug, Clone, PartialEq, Eq)]

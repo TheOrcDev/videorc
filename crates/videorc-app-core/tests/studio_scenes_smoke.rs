@@ -31,12 +31,12 @@ use videorc_app_core::client::methods::RemoteIntentAckParams;
 use videorc_app_core::client::{BackendClient, ClientConfig, EventFilter};
 use videorc_app_core::scenes::v2::SceneShows;
 use videorc_app_core::studio::scene_switch::ApplyOptions;
-use videorc_app_core::studio::ui_settings_wire::{
-    UiSettingsChange, UiSettingsGetParams, UiSettingsSetParams, UiSettingsSnapshot,
-};
 use videorc_app_core::studio::{STUDIO_EVENTS, SessionPhase, Studio, StudioConfig, keys};
 use videorc_app_core::supervisor::STOP_GRACE;
 use videorc_app_core::{AppPaths, BackendLaunch, Logger, Supervisor, SupervisorConfig};
+use videorc_protocol::ui_settings::{
+    UiSettingsChange, UiSettingsGetParams, UiSettingsSetParams, UiSettingsSnapshot,
+};
 use videorc_protocol::{
     AudioProcessingUpdateParams, AudioProcessingUpdateResult, BackendHealth, DeviceList,
     PreviewScreenStartParams, PreviewScreenStatus, RecordingStatus, Scene, SessionDetailListParams,
