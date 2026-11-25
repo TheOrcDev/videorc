@@ -6,6 +6,7 @@ use gpui::{Context, SharedString, Window, div, prelude::*, px};
 use serde_json::json;
 use videorc_app_core::protocol::{Sound, SoundMode, SoundboardState};
 use videorc_app_core::soundboard::{self, ImportPhase};
+use videorc_app_core::studio::StudioBackend;
 use videorc_app_core::{BackendClient, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
@@ -296,7 +297,7 @@ impl Render for SoundsPanel {
         let mut section = PanelSection::new("sounds-section")
             .title(soundboard::SECTION)
             .description(description)
-            .last()
+            .last(true)
             .action(import_button(
                 "sound-import",
                 import_reason,
