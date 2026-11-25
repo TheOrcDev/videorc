@@ -65,6 +65,10 @@ pub enum IconName {
     DeviceMobile,
     /// `LayoutIcon` (Phosphor's Layout).
     Layout,
+    /// `StudioIcon` / `CameraIcon` (Phosphor's VideoCamera).
+    VideoCamera,
+    /// `SceneIcon` (Phosphor's SquaresFour).
+    SquaresFour,
 }
 
 impl IconName {
@@ -99,6 +103,8 @@ impl IconName {
             IconName::Monitor => include_bytes!("../icons/monitor.svg"),
             IconName::DeviceMobile => include_bytes!("../icons/device-mobile.svg"),
             IconName::Layout => include_bytes!("../icons/layout.svg"),
+            IconName::VideoCamera => include_bytes!("../icons/video-camera.svg"),
+            IconName::SquaresFour => include_bytes!("../icons/squares-four.svg"),
         }
     }
 }
