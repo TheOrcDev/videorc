@@ -54,7 +54,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import {
   selectWindowsHideScreen,
@@ -78,6 +78,15 @@ assert(
   'The Preview check smoke requires the macOS or Windows dev app'
 )
 delete process.env.ELECTRON_RUN_AS_NODE
+// Plan 260 Phase 3: VIDEORC_APP=gpui drives the GPUI app (macOS). Its oracle
+// is the Preview on screen: `preview-surface-sample` captures the window that
+// shows it (`screencapture -l`) and reads the same rects in the canvas the
+// layer contain-fits, as the Windows proof-surface read does. The renderer's
+// hooks are the Studio smoke handler's: `studio-capture-configure`,
+// `studio-replay-buffer`, `studio-scenes-state`, `studio-performance-check`,
+// `studio-record` and `studio-stop`. Its watchdog logs `[preview] healing`.
+const gpuiApp = smokeAppIsGpui()
+assert(!(gpuiApp && isWindows), 'The GPUI app has no Windows preview yet (S2.3b)')
 const outputDirectory = mkdtempSync(join(tmpdir(), 'videorc-preview-check-invisible-'))
 const userDataDir = join(outputDirectory, 'profile')
 mkdirSync(userDataDir)
@@ -168,7 +177,8 @@ const evaluate = async (code, params = {}) => {
   const response = await command('eval-js', { ...params, code })
   return response?.result ?? response
 }
-const rendererState = () => evaluate(scenePresetStateReadCode)
+const rendererState = () =>
+  gpuiApp ? command('studio-scenes-state') : evaluate(scenePresetStateReadCode)
 const log = (line) => console.log(`[preview-check-invisible] ${line}`)
 function fail(pass, name, detail) {
   failures.push({ pass, name, detail })
@@ -202,10 +212,14 @@ function diffSummary(before, after) {
 }
 
 async function setReplay(armed) {
-  const switched = await evaluate(
-    `return window.__videorcSmokeSetReplayBuffer?.(${armed}, 30) ?? null`
-  )
-  assert.equal(switched, true, 'the maintained renderer Clips hook must be available')
+  if (gpuiApp) {
+    await command('studio-replay-buffer', { armed, seconds: 30 })
+  } else {
+    const switched = await evaluate(
+      `return window.__videorcSmokeSetReplayBuffer?.(${armed}, 30) ?? null`
+    )
+    assert.equal(switched, true, 'the maintained renderer Clips hook must be available')
+  }
   const until = Date.now() + 30_000
   let ring
   do {
@@ -257,7 +271,7 @@ function createPng(outputPath, source) {
  * user sees, with the surface's own scene kinds and presenter state.
  */
 async function readOracle(rects) {
-  if (!isWindows) {
+  if (!isWindows && !gpuiApp) {
     const frame = await rpc('preview.debug.sample', { rects })
     return { ...frame, surface: null }
   }
@@ -465,8 +479,12 @@ async function runPass({ name, clips, record = false }) {
           30_000
         )
         livePromise.catch(() => {})
-        const started = await evaluate(
-          'await window.__videorcSmokeScenePresets.start(); return window.__videorcSmokeScenePresets.state().recording'
+        const started = await (
+          gpuiApp
+            ? command('studio-record')
+            : evaluate(
+                'await window.__videorcSmokeScenePresets.start(); return window.__videorcSmokeScenePresets.state().recording'
+              )
         ).catch((error) => ({ error: error.message }))
         let live
         let stopRequestedAt
@@ -478,9 +496,11 @@ async function runPass({ name, clips, record = false }) {
         } finally {
           // Always let go of the session, or the next pass cannot switch Clips.
           stopRequestedAt = Date.now()
-          await evaluate('await window.__videorcSmokeScenePresets.stop(); return true').catch(
-            () => null
-          )
+          await (
+            gpuiApp
+              ? command('studio-stop')
+              : evaluate('await window.__videorcSmokeScenePresets.stop(); return true')
+          ).catch(() => null)
           await waitForEvent(
             'recording.status',
             (payload) => payload.state === 'idle',
@@ -498,7 +518,8 @@ async function runPass({ name, clips, record = false }) {
       })()
     : null
   try {
-    await evaluate('await window.__videorcSmokeScenePresets.checkComputer(); return true')
+    if (gpuiApp) await command('studio-performance-check')
+    else await evaluate('await window.__videorcSmokeScenePresets.checkComputer(); return true')
   } catch (error) {
     fail(name, 'setup', `requestPerformanceCheck failed: ${error.message}`)
   }
@@ -664,7 +685,9 @@ async function runPass({ name, clips, record = false }) {
       )
     fail(name, 'preview-not-back', detail.join('; '))
   }
-  const healed = checkLogs.filter((line) => /\[(first-frame|preview-watch)\] healing/.test(line))
+  const healed = checkLogs.filter((line) =>
+    /\[(first-frame|preview-watch)\] healing|\[preview\] healing/.test(line)
+  )
   if (healed.length) {
     fail(
       name,
@@ -869,8 +892,20 @@ try {
 
 async function runAll() {
   // A camera-free profile: the dev app has no camera grant.
-  await evaluate(
-    `
+  if (gpuiApp) {
+    await command('studio-capture-configure', {
+      config: {
+        video,
+        layout,
+        sources: { cameraOff: true, testPattern: false },
+        recordEnabled: true,
+        streamEnabled: false,
+        replayBuffer: { enabled: false, explicit: true }
+      }
+    })
+  } else
+    await evaluate(
+      `
       const settings = await ${UI_SETTINGS_READY_JS};
       const key = 'videorc.captureConfig';
       const current = JSON.parse(settings.getItem(key) ?? '{}');
@@ -884,10 +919,10 @@ async function runAll() {
       ${reloadKeepingSeedJs()}
       return true;
     `,
-    { video, layout }
-  )
+      { video, layout }
+    )
   const reloadDeadline = Date.now() + 30_000
-  while (true) {
+  while (!gpuiApp) {
     const ready = await evaluate(
       'return !window.__previewCheckBeforeReload && typeof window.__videorcSmokeSetReplayBuffer === "function" && typeof window.__videorcSmokeScenePresets?.checkComputer === "function"'
     ).catch(() => null)

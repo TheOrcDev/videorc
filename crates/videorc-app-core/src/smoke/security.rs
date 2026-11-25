@@ -238,6 +238,9 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     "studio-dock-slot",
     "studio-put-setting",
     "studio-record",
+    // L6: "Check this computer" as the Output page starts it
+    // (`__videorcSmokeScenePresets.checkComputer`).
+    "studio-performance-check",
     // S3.6a: the Clips ring armed for this run, with a smoke's length
     // (`__videorcSmokeSetReplayBuffer`).
     "studio-replay-buffer",
