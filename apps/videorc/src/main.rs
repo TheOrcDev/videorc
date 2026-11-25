@@ -107,6 +107,12 @@ use screens::studio::{
 const APP_ID: &str = "dev.theorcdev.videorc";
 
 fn main() -> Result<()> {
+    // A launch as the update helper (plan 260 S5.2) installs the update the
+    // app left ready once the app is gone, and does nothing else.
+    #[cfg(target_os = "macos")]
+    if let Some(code) = app::update_feed::run_helper_if_asked() {
+        std::process::exit(code);
+    }
     let args = args::parse()?;
     // A package's resources (Electron's `process.resourcesPath`), when the
     // app runs from one: the bundled pictures, pet packs and starter sounds
@@ -409,8 +415,15 @@ fn main() -> Result<()> {
         studio.clone(),
     );
     deep_links.set_account_sink(accounts.clone());
-    // The updater (plan 260, L4): no feed until S5.2.
-    let updater = app::updater::start();
+    // The updater (plan 260 S5.2): the GPUI app's own feed on macOS, the
+    // changelog notice on Linux; a dev run doesn't update itself.
+    let updater = app::updater::start(
+        runtime.handle(),
+        &paths.user_data_dir,
+        supervisor.restarter(),
+        smoke::shell::packaged(),
+        &logger,
+    );
     // Where Connect an agent's bridge lives; after an update a copy the
     // streamer already has is refreshed (`refreshAgentBridgeCopy`).
     let agent_bridge = videorc_app_core::desktop::agent_bridge::BridgeLocation {
@@ -575,6 +588,9 @@ fn main() -> Result<()> {
             stop_backend(&quit_supervisor, &runtime_handle);
             quit_instance.borrow_mut().take();
             quit_permissions.relaunch_if_requested();
+            // A ready update installs once the app is gone.
+            #[cfg(target_os = "macos")]
+            app::update_feed::apply_at_quit();
             async {}
         })
         .detach();
@@ -1204,6 +1220,8 @@ fn main() -> Result<()> {
     stop_backend(&supervisor, runtime.handle());
     instance.borrow_mut().take();
     permissions_after_run.relaunch_if_requested();
+    #[cfg(target_os = "macos")]
+    app::update_feed::apply_at_quit();
     Ok(())
 }
 

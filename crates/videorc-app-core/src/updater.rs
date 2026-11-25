@@ -12,11 +12,20 @@
 //!   nothing records or streams (`isUpdateInstallable`); the driver still
 //!   takes the backend's interruption lease before it quits
 //!   (`videorc_updater::install`).
-//! - Until the feed lands (plan 260 S5.2, L2), the app runs [`NoFeed`]: it
+//! - [`feed`] is the driver that reads the GPUI app's feed (plan 260 S5.2):
+//!   a check, the download it starts, and the platform's own check before
+//!   "ready"; and on Linux the changelog notice. A build that can't update
+//!   itself (a dev run, a Windows build until WC-4.3) runs [`NoFeed`]: it
 //!   reaches no server, downloads nothing, and every check answers that this
-//!   build doesn't update itself, which is what Settings → About said before.
+//!   build doesn't update itself.
 
 use std::sync::{Arc, Weak};
+
+pub mod feed;
+
+/// The update rules crate, for the app's platform halves (the transport,
+/// the macOS install and its helper).
+pub use videorc_updater as rules;
 
 use tokio::sync::watch;
 
@@ -55,6 +64,14 @@ impl Reporter {
         }
     }
 
+    /// The status as the update flow set it (the flow keeps its own copy
+    /// and says each one it sets).
+    pub fn status(&self, status: UpdateStatus) {
+        if let Some(updater) = self.0.upgrade() {
+            updater.set_status(status);
+        }
+    }
+
     /// The check is over; a status still on "checking" settles.
     pub fn check_ended(&self) {
         if let Some(updater) = self.0.upgrade() {
@@ -63,7 +80,8 @@ impl Reporter {
     }
 }
 
-/// What checks, downloads and installs. The feed's driver is S5.2's.
+/// What checks, downloads and installs: [`feed::FeedDriver`],
+/// [`feed::LinuxNotice`] or [`NoFeed`].
 pub trait UpdaterDriver: Send + Sync + 'static {
     /// One check (and, when one is available, its download), reported
     /// through `reporter`, ending with [`Reporter::check_ended`].
@@ -121,6 +139,14 @@ impl Updater {
     pub fn on_event(&self, event: UpdaterEvent) {
         self.status.send_if_modified(|status| {
             let next = update_status_from_event(event);
+            let changed = *status != next;
+            *status = next;
+            changed
+        });
+    }
+
+    fn set_status(&self, next: UpdateStatus) {
+        self.status.send_if_modified(|status| {
             let changed = *status != next;
             *status = next;
             changed

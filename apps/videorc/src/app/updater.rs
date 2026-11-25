@@ -6,14 +6,18 @@
 //! A downloaded update also says so once in a system notification (P1554,
 //! `updateReadyNotification`), never while Videorc records or is on air.
 //!
-//! The build runs [`NoFeed`] until the feed lands (plan 260 S5.2, L2): no
-//! request, no download, and the row says this build doesn't update itself.
+//! The driver is [`super::update_feed`]'s (plan 260 S5.2, L2): the GPUI
+//! app's own feed on macOS, the changelog notice on Linux, and on a build
+//! that can't update itself `NoFeed` (no request, no download, and the row
+//! says so).
 
 use std::sync::Arc;
 
 use gpui::{App, Global, SystemNotification};
+use videorc_app_core::log::Logger;
 use videorc_app_core::studio::scenes_section::session_active;
-use videorc_app_core::updater::{NoFeed, UpdateStatus, Updater, update_ready_notification};
+use videorc_app_core::supervisor::SupervisorRestart;
+use videorc_app_core::updater::{UpdateStatus, Updater, update_ready_notification};
 
 use videorc_app_core::{BackendClient, Studio};
 
@@ -29,11 +33,17 @@ pub struct Shared {
 
 impl Global for Shared {}
 
-/// The app's updater: this build's driver, and what it says before its
-/// first check (a build that can't update says so at once, as Electron's
-/// unpackaged builds do).
-pub fn start() -> Arc<Updater> {
-    Updater::new(NoFeed, UpdateStatus::Unsupported { reason: None })
+/// The app's updater: this build's driver and its silent checks
+/// ([`super::update_feed::start`]). A build that can't update says so at
+/// once, as Electron's unpackaged builds do.
+pub fn start(
+    runtime: &tokio::runtime::Handle,
+    user_data_dir: &std::path::Path,
+    restart: SupervisorRestart,
+    packaged: bool,
+    logger: &Logger,
+) -> Arc<Updater> {
+    super::update_feed::start(runtime, user_data_dir, restart, packaged, logger)
 }
 
 /// Makes the updater reachable from the chip and Settings, and redraws the
@@ -41,6 +51,20 @@ pub fn start() -> Arc<Updater> {
 pub fn install(cx: &mut App, updater: Arc<Updater>, studio: Arc<Studio<BackendClient>>) {
     let mut status = updater.watch();
     cx.set_global(Shared { updater, studio });
+    // Restart & install, once the backend admitted it: the app quits the
+    // normal way and the helper installs at the quit.
+    #[cfg(target_os = "macos")]
+    if let Some(mut quit) = super::update_feed::quit_requests() {
+        cx.spawn(async move |cx| {
+            while quit.changed().await.is_ok() {
+                if *quit.borrow_and_update() {
+                    cx.update(super::exit::ExitGuard::quit_unasked);
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
     cx.spawn(async move |cx| {
         let mut announced: Option<String> = None;
         while status.changed().await.is_ok() {

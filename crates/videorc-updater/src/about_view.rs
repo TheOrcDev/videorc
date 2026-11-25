@@ -6,12 +6,12 @@
 //!
 //! One rule matters beyond the words: a failed check or download never
 //! shows the updater's own message. It shows one calm line with Try again,
-//! and the message goes to the updater's log (`log.rs` in the plan 220
-//! port, S5.2). So the sentences of the flow's `failure_message` are for
-//! the support bundle, not for this row.
+//! and the message goes to the log ([`crate::log`]). So the sentences of
+//! [`crate::flow::failure_message`] are for the support bundle, not for
+//! this row.
 //!
 //! Not here yet: a row for a copy of the app that cannot be replaced where
-//! it is (`macos_install`'s refusals on macOS, S5.2). Electron has no
+//! it is ([`crate::macos_install`]'s refusals on macOS). Electron has no
 //! such state, since Squirrel.Mac fails late and the row then says the
 //! connection is at fault. Its row is S5.2c's, in front of the owner.
 
