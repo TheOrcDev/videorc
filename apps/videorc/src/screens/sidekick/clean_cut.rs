@@ -18,7 +18,7 @@ use videorc_kit::panel_section::PanelSection;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
 use videorc_kit::switch::Switch;
-use videorc_kit::theme::{self, hsla};
+use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
 use videorc_protocol::{
     CleanCutJob, CleanCutJobDetail, CleanCutJobState, CleanCutMode, CleanCutRemoval,
