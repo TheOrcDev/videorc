@@ -89,6 +89,12 @@ moved to UI driver or Studio commands. That happens as the screens land.
 preview converging (`compositor.status`: the committed scene drawn, frames advancing), the Record button
 (`session-record`) in the main window's tree, and a take started and stopped with Space.
 
-A smoke run picks no devices, and the GPUI app has no test-pattern source until the Studio handler serves
-`enable-synthetic-source`. Until then Record is blocked, and the smoke checks that it says why
-(`session-blocked-reason`) and skips the take. `VIDEORC_SMOKE_REQUIRE_TAKE=1` turns the skip into a failure.
+A smoke run picks no devices, so the smoke first logs why Record is blocked, then turns the test pattern on with
+`enable-synthetic-source` before the take.
+
+## The Studio's smoke commands
+
+`crates/videorc-app-core/src/smoke/studio.rs` (`StudioSmoke`, handed to `smoke::start` as `studio`) runs
+`enable-synthetic-source {settleMs?}`, `studio-state`, `studio-record {timeoutMs?}` and `studio-stop {timeoutMs?}` on
+the core's Studio. `open-tab {tab}` opens a page in the main window (`ShellCommands`, `PageId::from_tab_param`). The
+other `STUDIO_COMMANDS` still answer "not supported" by name.

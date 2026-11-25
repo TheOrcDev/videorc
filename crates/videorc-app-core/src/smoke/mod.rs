@@ -39,6 +39,7 @@ pub mod commands;
 pub mod gpui_tree;
 pub mod security;
 pub mod server;
+pub mod studio;
 pub mod ui_tree;
 
 use std::net::SocketAddr;
@@ -60,6 +61,7 @@ pub use security::{
     SMOKE_BACKEND_RPC_METHOD_NAMES,
 };
 pub use server::{CommandFuture, SmokeCommandRunner, SmokeServer, SmokeServerOptions};
+pub use studio::{STUDIO_SMOKE_COMMANDS, StudioSmoke};
 
 /// What every marker line starts with (`MARKER_PREFIX` in `app-launcher.mjs`).
 pub const MARKER_PREFIX: &str = "[smoke] ";

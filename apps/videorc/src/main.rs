@@ -638,11 +638,14 @@ fn main() -> Result<()> {
                 quit: Arc::new(move || {
                     let _ = smoke_quit_tx.send(());
                 }),
-                // The Studio's `studio-*` commands come with their handler.
-                studio: None,
+                // The Studio's commands: the test pattern, its state, Record
+                // and Stop (the rest answer "not supported" by name).
+                studio: Some(Arc::new(videorc_app_core::smoke::StudioSmoke::new(
+                    studio.clone(),
+                ))),
                 windows: Vec::new(),
                 shell: Rc::new(smoke::shell::ShellWindows::new(
-                    main_window.into(),
+                    main_window,
                     notices.clone(),
                 )),
             },
