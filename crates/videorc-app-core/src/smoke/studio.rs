@@ -7,6 +7,11 @@
 //! - `studio-state`: the session, the connection and the test pattern.
 //! - `studio-record {timeoutMs?}`: Record, answered once the take runs.
 //! - `studio-stop {timeoutMs?}`: Stop, answered once the session ended.
+//! - `studio-capture-configure {config}`: `config` merged over the capture
+//!   config (Electron's smokes seed `videorc.captureConfig` and reload).
+//! - `studio-replay-buffer {armed, seconds?}`: the clip buffer armed for
+//!   this run with a shorter ring, never saved
+//!   (`__videorcSmokeSetReplayBuffer`).
 //!
 //! The rest of [`STUDIO_COMMANDS`](super::STUDIO_COMMANDS) answer "not
 //! supported" by name until they land here.
@@ -24,7 +29,9 @@ use crate::{SessionPhase, StartOutcome, Studio};
 /// The commands this handler takes.
 pub const STUDIO_SMOKE_COMMANDS: &[&str] = &[
     "enable-synthetic-source",
+    "studio-capture-configure",
     "studio-record",
+    "studio-replay-buffer",
     "studio-state",
     "studio-stop",
 ];
@@ -84,6 +91,18 @@ pub fn state_json(snapshot: &StudioSnapshot) -> Value {
         "testPattern": test_pattern(snapshot),
         "lastError": snapshot.last_error,
     })
+}
+
+/// `patch` merged over `target`: objects key by key, anything else replaced.
+pub fn merge_json(target: &mut Value, patch: &Value) {
+    match (target, patch) {
+        (Value::Object(target), Value::Object(patch)) => {
+            for (key, value) in patch {
+                merge_json(target.entry(key.clone()).or_insert(Value::Null), value);
+            }
+        }
+        (target, patch) => *target = patch.clone(),
+    }
 }
 
 /// Waits until `done` holds for the Studio's snapshot, or says what it saw.
@@ -181,6 +200,35 @@ impl StudioSmoke {
     }
 }
 
+impl StudioSmoke {
+    async fn capture_configure(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let patch = params
+            .get("config")
+            .filter(|config| config.is_object())
+            .cloned()
+            .ok_or_else(|| "studio-capture-configure needs a config object.".to_string())?;
+        self.studio
+            .update_capture_config(|config| merge_json(config, &patch))
+            .await
+            .map_err(|error| format!("The capture config was not saved: {error}"))?;
+        Ok(json!({ "configured": true, "state": state_json(&self.studio.snapshot()) }))
+    }
+
+    fn replay_buffer(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let armed = params
+            .get("armed")
+            .or_else(|| params.get("enabled"))
+            .and_then(Value::as_bool)
+            .ok_or_else(|| "studio-replay-buffer needs armed: true or false.".to_string())?;
+        let seconds = params
+            .get("seconds")
+            .and_then(Value::as_u64)
+            .map(|seconds| seconds.clamp(1, 3600) as u32);
+        self.studio.set_clips_for_run(armed, seconds);
+        Ok(json!({ "armed": armed, "seconds": seconds }))
+    }
+}
+
 impl SmokeCommandHandler for StudioSmoke {
     fn handles(&self, command: &str) -> bool {
         STUDIO_SMOKE_COMMANDS.contains(&command)
@@ -193,6 +241,8 @@ impl SmokeCommandHandler for StudioSmoke {
                 "studio-state" => Ok(state_json(&self.studio.snapshot())),
                 "studio-record" => self.record(params).await,
                 "studio-stop" => self.stop(params).await,
+                "studio-capture-configure" => self.capture_configure(params).await,
+                "studio-replay-buffer" => self.replay_buffer(params),
                 other => Err(format!("The Studio smoke handler does not take {other}.")),
             }
         })
@@ -208,6 +258,23 @@ mod tests {
         for command in STUDIO_SMOKE_COMMANDS {
             assert!(super::super::STUDIO_COMMANDS.contains(command), "{command}");
         }
+    }
+
+    #[test]
+    fn a_patch_merges_objects_and_replaces_the_rest() {
+        let mut config = json!({"video": {"fps": 30, "width": 1920}, "recordEnabled": false});
+        merge_json(
+            &mut config,
+            &json!({"video": {"fps": 60}, "recordEnabled": true, "layout": {"layoutPreset": "screen-only"}}),
+        );
+        assert_eq!(
+            config,
+            json!({
+                "video": {"fps": 60, "width": 1920},
+                "recordEnabled": true,
+                "layout": {"layoutPreset": "screen-only"}
+            })
+        );
     }
 
     #[test]
