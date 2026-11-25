@@ -103,6 +103,7 @@ mod platforms;
 pub mod preview_scene;
 pub mod recordings_folder;
 mod recordings_folder_actions;
+pub mod room_frames;
 pub mod room_media;
 pub mod scene_editor;
 pub mod scene_on_stream;

@@ -56,6 +56,46 @@ pub(crate) async fn get_bytes(
     max_bytes: usize,
     deadline: std::time::Duration,
 ) -> Result<Vec<u8>> {
+    let response = get_raw(port, path, accept, max_bytes, deadline).await?;
+    let (status, body) = parse_response_bytes(&response)?;
+    if status != 200 {
+        return Err(anyhow!("HTTP {status}"));
+    }
+    Ok(body)
+}
+
+/// `GET {path}` with the answer's status and headers too (a frame route's
+/// cursor rides in its headers; a 204 is an answer, not an error). Header
+/// names are lowercase.
+pub(crate) async fn get_with_headers(
+    port: u16,
+    path: &str,
+    accept: &str,
+    max_bytes: usize,
+    deadline: std::time::Duration,
+) -> Result<(u16, Vec<(String, String)>, Vec<u8>)> {
+    let response = get_raw(port, path, accept, max_bytes, deadline).await?;
+    let (status, body) = parse_response_bytes(&response)?;
+    let split = find(&response, b"\r\n\r\n").unwrap_or(response.len());
+    let headers = String::from_utf8_lossy(&response[..split])
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect();
+    Ok((status, headers, body))
+}
+
+/// The whole raw answer of one `Connection: close` GET.
+async fn get_raw(
+    port: u16,
+    path: &str,
+    accept: &str,
+    max_bytes: usize,
+    deadline: std::time::Duration,
+) -> Result<Vec<u8>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let read = async {
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
@@ -75,11 +115,7 @@ pub(crate) async fn get_bytes(
                 return Err(anyhow!("the answer is over {max_bytes} bytes"));
             }
         }
-        let (status, body) = parse_response_bytes(&response)?;
-        if status != 200 {
-            return Err(anyhow!("HTTP {status}"));
-        }
-        Ok(body)
+        Ok(response)
     };
     tokio::time::timeout(deadline, read)
         .await
