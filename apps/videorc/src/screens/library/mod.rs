@@ -3,7 +3,6 @@
 mod actions;
 mod cloud;
 pub mod files;
-mod player;
 mod render;
 
 use gpui::{Context, Entity, FocusHandle, Focusable, Window, prelude::*};
@@ -33,7 +32,7 @@ pub struct LibraryScreen {
     studio: Arc<Studio<BackendClient>>,
     pub(crate) runtime: tokio::runtime::Handle,
     ui: LibraryUi,
-    player: Entity<player::Player>,
+    player: Entity<crate::screens::session_player::Player>,
     search: Entity<InputState>,
     rename_input: Entity<InputState>,
     rename_dialog: DialogHandle,
@@ -66,8 +65,17 @@ impl LibraryScreen {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // The player for every page (Sidekick's Reports, the Clean cut
+        // review): the same core, files and presenter rules as here.
+        cx.set_global(crate::screens::session_player::Services {
+            core: core.clone(),
+            files: files.clone(),
+            studio: studio.clone(),
+            runtime: runtime.clone(),
+            logger: logger.clone(),
+        });
         let player = cx.new(|cx| {
-            player::Player::new(
+            crate::screens::session_player::Player::new(
                 core.clone(),
                 files.clone(),
                 studio.clone(),

@@ -17,6 +17,7 @@ pub mod notes;
 pub mod notifications;
 pub mod output;
 pub mod scene;
+pub mod session_player;
 pub mod settings;
 pub mod sidekick;
 pub mod sources;
