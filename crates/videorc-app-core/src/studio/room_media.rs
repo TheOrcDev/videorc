@@ -30,6 +30,8 @@ pub const SCREEN_SET: &str = "cloud.room.screen.set";
 pub const MONITOR_SET: &str = "cloud.room.monitor.set";
 /// The runner's return: opened for the Program monitor (a node show's).
 pub const RETURN_SET: &str = "cloud.return.set";
+pub const AVATAR_SET: &str = "cloud.room.avatar.set";
+pub const PRESENTATION_SET: &str = "cloud.room.presentation.set";
 
 /// The room microphone's gain bounds (`room_microphone::Settings`).
 const GAIN_DB_MIN: f64 = -24.0;
@@ -199,6 +201,26 @@ pub fn return_params(open: bool) -> Value {
     json!({ "open": open })
 }
 
+/// `cloud.room.avatar.set`'s params for a client that builds no avatar
+/// content: the backend builds it from the stream's own pet and bubble
+/// (`build: true`); `guests` is the host's opt-in to show it to guest pages.
+pub fn avatar_build_params(guests: bool) -> Value {
+    json!({ "content": null, "build": true, "guests": guests })
+}
+
+/// `cloud.room.presentation.set`'s params: the room's graphics and avatar
+/// switches (the Guests page's), each only when set.
+pub fn presentation_params(graphics: Option<bool>, avatar: Option<bool>) -> Option<Value> {
+    let mut params = serde_json::Map::new();
+    if let Some(graphics) = graphics {
+        params.insert("graphics".into(), Value::Bool(graphics));
+    }
+    if let Some(avatar) = avatar {
+        params.insert("avatar".into(), Value::Bool(avatar));
+    }
+    (!params.is_empty()).then_some(Value::Object(params))
+}
+
 /// Whether a `cloud.room.*` answer says the backend holds the seat.
 pub fn held(answer: &Value) -> bool {
     answer.get("held").and_then(Value::as_bool) == Some(true)
@@ -338,6 +360,19 @@ mod tests {
             json!({ "enabled": true, "listen": true })
         );
         assert!(held(&json!({ "held": true })));
+        assert_eq!(
+            avatar_build_params(true),
+            json!({ "content": null, "build": true, "guests": true })
+        );
+        assert_eq!(presentation_params(None, None), None);
+        assert_eq!(
+            presentation_params(Some(true), None),
+            Some(json!({ "graphics": true }))
+        );
+        assert_eq!(
+            presentation_params(Some(false), Some(true)),
+            Some(json!({ "graphics": false, "avatar": true }))
+        );
         assert!(!held(&json!({ "held": false })));
     }
 

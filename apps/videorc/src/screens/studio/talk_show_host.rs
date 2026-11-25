@@ -24,8 +24,8 @@ use videorc_app_core::guests::session::ControllerFacts;
 use videorc_app_core::library::cloud::{CloudRecordingStop, CloudRecordingWatch};
 use videorc_app_core::studio::room_frames::{self, FrameCursor, FramePoll, RemoteSource};
 use videorc_app_core::studio::room_media::{
-    self, CAMERA_SET, HTML_SET, MICROPHONE_SET, MONITOR_SET, PRESENTATION_EVENT, RETURN_SET,
-    RoomMedia, SCREEN_SET,
+    self, AVATAR_SET, CAMERA_SET, HTML_SET, MICROPHONE_SET, MONITOR_SET, PRESENTATION_EVENT,
+    PRESENTATION_SET, RETURN_SET, RoomMedia, SCREEN_SET,
 };
 use videorc_app_core::studio::screen_views::TalkShowRoomView;
 use videorc_app_core::{BackendEvent, ConnectionState};
@@ -38,6 +38,10 @@ use crate::app::bridge::Mirror;
 const TILE_INTERVAL: Duration = Duration::from_millis(66);
 /// The monitor's key: the route ignores its identity.
 const MONITOR_KEY: &str = "monitor";
+
+/// The setters kept in step with the room: microphone, camera, sheet, the
+/// avatar's build, and the room's presentation switches.
+const SLOTS: usize = 5;
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -64,7 +68,16 @@ pub struct TalkShowRoomHost {
     controller_notice: Option<Vec<String>>,
     /// The params last sent (microphone, camera, sheet), so a repeat sends
     /// nothing; cleared when the room closes (the backend lets go).
-    sent: [Option<Value>; 3],
+    sent: [Option<Value>; SLOTS],
+    /// A slot the backend refused (it didn't hold the seat yet): sent again
+    /// once the room's presentation shows it holds it, never in a loop.
+    refused: [bool; SLOTS],
+    /// The Guests page's room switches (graphics, avatar) and its opt-in to
+    /// show the avatar to guests; `None` until set (the backend's own
+    /// default stands).
+    room_graphics: Option<bool>,
+    room_avatar: Option<bool>,
+    avatar_guests: bool,
     /// R3: each person's latest picture (camera or screen) and the Program
     /// monitor's, with its cursor, while the room publishes them.
     frames: HashMap<(String, RemoteSource), (FrameCursor, Arc<Image>)>,
@@ -131,6 +144,16 @@ impl TalkShowRoomHost {
                     if host.room_open() && host.room_media.as_ref() != Some(&media) {
                         host.room_media = Some(media);
                         cx.notify();
+                    }
+                    // The backend holds the room now: anything it refused
+                    // before its join goes again.
+                    if host.refused.iter().any(|refused| *refused) {
+                        for slot in 0..SLOTS {
+                            if std::mem::take(&mut host.refused[slot]) {
+                                host.sent[slot] = None;
+                            }
+                        }
+                        host.sync_room(cx);
                     }
                 });
                 if alive.is_err() {
@@ -206,7 +229,11 @@ impl TalkShowRoomHost {
             room_media: None,
             enabled_epoch: 0,
             controller_notice: None,
-            sent: [None, None, None],
+            sent: Default::default(),
+            refused: [false; SLOTS],
+            room_graphics: None,
+            room_avatar: None,
+            avatar_guests: false,
             frames: HashMap::new(),
             monitor: false,
             listening: false,
@@ -450,7 +477,8 @@ impl TalkShowRoomHost {
     fn sync_room(&mut self, cx: &mut Context<Self>) {
         self.sync_controller_notice(cx);
         if !self.room_open() {
-            self.sent = [None, None, None];
+            self.sent = Default::default();
+            self.refused = [false; SLOTS];
             if self.room_media.take().is_some() || !self.frames.is_empty() {
                 self.frames.clear();
                 cx.notify();
@@ -463,34 +491,80 @@ impl TalkShowRoomHost {
         let wanted = [
             (
                 MICROPHONE_SET,
-                room_media::microphone_params(
+                Some(room_media::microphone_params(
                     capture.sources.microphone_id.as_deref(),
                     &capture.audio,
                     held,
-                ),
+                )),
             ),
             (
                 CAMERA_SET,
-                room_media::camera_params(
+                Some(room_media::camera_params(
                     capture.sources.camera_id.as_deref(),
                     capture.layout.source_visibility.camera,
                     held,
-                ),
+                )),
             ),
-            (HTML_SET, room_media::html_params(held)),
+            (HTML_SET, Some(room_media::html_params(held))),
+            (
+                AVATAR_SET,
+                Some(room_media::avatar_build_params(self.avatar_guests)),
+            ),
+            (
+                PRESENTATION_SET,
+                room_media::presentation_params(self.room_graphics, self.room_avatar),
+            ),
         ];
         for (slot, (method, params)) in wanted.into_iter().enumerate() {
+            let Some(params) = params else {
+                continue;
+            };
             if self.sent[slot].as_ref() == Some(&params) {
                 continue;
             }
             self.sent[slot] = Some(params.clone());
-            let studio = self.studio.clone();
-            self.runtime.spawn(async move {
-                if let Err(error) = studio.backend().request(method, params).await {
-                    eprintln!("[videorc-app] Talk-show host: {method}: {error}");
+            self.refused[slot] = false;
+            // A refusal (the backend doesn't hold the seat yet) is kept, and
+            // the room's next presentation sends it again.
+            let request = self.request(method, params.clone());
+            cx.spawn(async move |this, cx| {
+                let held = matches!(request.await, Ok(Ok(ref answer)) if room_media::held(answer));
+                if !held {
+                    let _ = this.update(cx, |host, _| {
+                        if host.sent[slot].as_ref() == Some(&params) {
+                            host.refused[slot] = true;
+                        }
+                    });
                 }
-            });
+            })
+            .detach();
         }
+    }
+
+    /// The Guests page's room switches: the static graphics and the avatar
+    /// on the room's program (`cloud.room.presentation.set`), sent while the
+    /// room is open and again after a refusal.
+    pub fn set_room_presentation(
+        &mut self,
+        graphics: Option<bool>,
+        avatar: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        if graphics.is_some() {
+            self.room_graphics = graphics;
+        }
+        if avatar.is_some() {
+            self.room_avatar = avatar;
+        }
+        self.sync_room(cx);
+        cx.notify();
+    }
+
+    /// The host's opt-in to show the avatar to guest pages.
+    pub fn set_avatar_guests(&mut self, guests: bool, cx: &mut Context<Self>) {
+        self.avatar_guests = guests;
+        self.sync_room(cx);
+        cx.notify();
     }
 
     fn on_talk_show(&mut self, view: &TalkShowRoomView) {
