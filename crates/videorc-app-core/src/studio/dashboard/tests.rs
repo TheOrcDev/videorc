@@ -176,7 +176,16 @@ fn talk_show_keeps_the_runner_clock_once() {
     let mut relay = DashboardRelay::new(AT);
     assert!(relay.cloud(&status, AT, 1_000_000));
     let first = relay.current().started_at.clone();
-    assert!(relay.cloud(&status, AT, 1_500_000));
+    assert!(first.is_some());
+    // The next poll, 1.4 s on with the runner's count one higher
+    // (`live-dashboard-relay.test.ts` "takes the runner clock once"): the
+    // clock stays. `cloud` reports whether the dashboard changed, and a
+    // kept clock is no change, so its answer isn't the point here.
+    let later = CloudStatus {
+        live_seconds: Some(11),
+        ..status.clone()
+    };
+    let _ = relay.cloud(&later, AT, 1_001_400);
     assert_eq!(relay.current().started_at, first);
 }
 

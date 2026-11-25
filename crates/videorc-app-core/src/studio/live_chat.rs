@@ -39,7 +39,7 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     fn publish_live_chat(&self, chat: LiveChat) {
-        let _ = self.live_chat_tx.send(chat);
+        self.live_chat_tx.send_replace(chat);
     }
 
     pub(super) fn handle_live_chat_event(&self, event: &str, payload: &Value) -> bool {

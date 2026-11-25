@@ -558,7 +558,7 @@ impl<B: StudioBackend> Studio<B> {
 
     fn publish_dashboard(&self, state: Option<LiveDashboard>) {
         if let Some(state) = state {
-            let _ = self.dashboard_tx.send(state);
+            self.dashboard_tx.send_replace(state);
         }
     }
 
@@ -857,7 +857,7 @@ fn publish_if_changed(
         }
     };
     if let Some(state) = push {
-        let _ = dashboard_tx.send(state);
+        dashboard_tx.send_replace(state);
     }
 }
 
@@ -906,7 +906,7 @@ fn arm_push_timer(
             .coalescer
             .fire(timer, chrono::Utc::now().timestamp_millis());
         if let Some(state) = push {
-            let _ = dashboard_tx.send(state);
+            dashboard_tx.send_replace(state);
         }
     });
 }

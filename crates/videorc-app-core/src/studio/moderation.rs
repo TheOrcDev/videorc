@@ -32,7 +32,7 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     fn publish_moderation(&self, operations: Vec<ModerationOperation>) {
-        let _ = self.moderation_tx.send(operations);
+        self.moderation_tx.send_replace(operations);
     }
 
     /// Fold a backend event into the ledger.
