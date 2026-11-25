@@ -478,6 +478,8 @@ mod tests {
     fn the_track_waits_for_every_consumer_to_be_current() {
         let consumer = |identity: &str, current: bool| Consumer {
             identity: identity.to_string(),
+            visible: true,
+            denied: false,
             current,
             routing: true,
         };

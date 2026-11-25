@@ -16,15 +16,19 @@
 //! needs a receipt rests on an identity alone: the auxiliary track, an HTML
 //! sheet, and anything at all for a consumer nobody sees (a hidden egress
 //! page) wait until its capability receipt is current for the session it is
-//! in now. A visible participant (the runner, a guest) takes the host's
-//! media as the renderer room grants it, receipt or not (L1 11-25: the node
-//! runner and the guest page send no receipt, so a backend-hosted show never
-//! went live); a removed one takes nothing. Every participant
-//! connect (a first join or a replacement under the same identity)
-//! recomputes the plan, and the new session, with no receipt of its own yet,
-//! is revoked to nothing in that same permissions update; it earns its grant
-//! when a receipt from that session (matching its SID) has been validated,
-//! the same way a first join does.
+//! in now. A visible participant (one whose token is not `hidden`: the
+//! runner, a guest) takes the host's base media (camera, microphone,
+//! screen) as the renderer room grants every visible participant, receipt
+//! or not; a removed one takes nothing. The node runner can send no receipt
+//! (its token has no `canPublishData`), so without this a backend-hosted
+//! show never went live (L1 11-25). The guest page sends its receipt on
+//! connect, on reconnect and every 10 s, and earns the auxiliary track with
+//! it. Every participant connect (a first join or a replacement under the
+//! same identity) recomputes the plan: a new session with no receipt of its
+//! own yet is revoked to its base media if it is visible, to nothing if it
+//! is not, in that same permissions update; it earns the rest when a
+//! receipt from that session (matching its SID) has been validated, the
+//! same way a first join does.
 //!
 //! Routing: the Studio's program audio settings (speech and auxiliary gain
 //! and mute, `cloud.room.routing.set`) go to every routing-capable program
@@ -122,6 +126,15 @@ pub(crate) fn undeny(identity: &str) {
 
 /// The deny lifts once the guest was gone from the admitted guests and is
 /// back among them (the host let them in again).
+/// [`readmitted`] when the status names the room's guests; with no room in
+/// the status (between shows, or not loaded yet) nothing is lifted: an empty
+/// list there would read as every removed guest gone.
+pub(crate) fn readmitted_from(denied: &mut BTreeMap<String, bool>, admitted: Option<&[String]>) {
+    if let Some(admitted) = admitted {
+        readmitted(denied, admitted);
+    }
+}
+
 pub(crate) fn readmitted(denied: &mut BTreeMap<String, bool>, admitted: &[String]) {
     denied.retain(|identity, seen_gone| {
         let present = admitted.iter().any(|guest| guest == identity);
@@ -315,7 +328,7 @@ pub(crate) async fn run(
         let now = chrono::Utc::now().timestamp_millis();
         // The denies taken before this plan is made: confirmed once it is out.
         let waiting: Vec<oneshot::Sender<()>> = std::mem::take(&mut *deny_waiters());
-        let admitted: Vec<String> = crate::cloud_show::lock(&state.cloud_show)
+        let admitted: Option<Vec<String>> = crate::cloud_show::lock(&state.cloud_show)
             .status()
             .room
             .map(|room| {
@@ -323,14 +336,12 @@ pub(crate) async fn run(
                     .into_iter()
                     .map(|guest| guest.guest_id)
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         let mut consumers = consumers(&room, &receipts, now);
         {
             let mut denied = denied();
-            readmitted(&mut denied, &admitted);
-            // A denied identity is never current: it takes nothing (option D's
-            // empty grant), receipt or not.
+            readmitted_from(&mut denied, admitted.as_deref());
+            // A denied identity takes nothing, visible or not, receipt or not.
             for consumer in &mut consumers {
                 if denied.contains_key(&consumer.identity) {
                     consumer.current = false;
@@ -518,14 +529,85 @@ mod tests {
         assert!(!denied.contains_key("g_ada"));
     }
 
+    fn hidden(identity: &str, current: bool, routing: bool) -> Consumer {
+        Consumer {
+            visible: false,
+            ..consumer(identity, current, routing)
+        }
+    }
+
     #[test]
-    fn a_replaced_session_starts_with_nothing_and_earns_its_grant() {
-        // The same identity in a new session: its receipt was the old one's.
+    fn a_replaced_session_starts_with_its_base_media_and_earns_the_rest() {
+        // The same visible identity in a new session: its receipt was the
+        // old one's. The host's base media, never the aux track.
         let replaced = subscription_plan(&[consumer("g_a", false, false)], &tracks(), false);
-        assert!(allowed(&replaced, "g_a").is_empty());
+        assert_eq!(allowed(&replaced, "g_a"), vec!["TR_cam", "TR_mic"]);
         // A receipt from the new session, validated: the first join's grant.
         let earned = subscription_plan(&[consumer("g_a", true, false)], &tracks(), false);
         assert_eq!(allowed(&earned, "g_a"), vec!["TR_aux", "TR_cam", "TR_mic"]);
+        // A replaced hidden page: nothing until its own receipt.
+        let page = subscription_plan(&[hidden("EG_p", false, true)], &tracks(), false);
+        assert!(allowed(&page, "EG_p").is_empty());
+    }
+
+    #[test]
+    fn a_removed_participant_takes_nothing_even_with_a_current_receipt() {
+        let removed = Consumer {
+            denied: true,
+            ..consumer("g_bo", true, true)
+        };
+        let plan = subscription_plan(&[removed], &tracks(), false);
+        assert!(allowed(&plan, "g_bo").is_empty());
+        let plan = subscription_plan(
+            &[Consumer {
+                denied: true,
+                ..hidden("EG_p", true, true)
+            }],
+            &tracks(),
+            true,
+        );
+        assert!(allowed(&plan, "EG_p").is_empty());
+    }
+
+    #[test]
+    fn a_visible_guest_without_a_receipt_keeps_the_hosts_voice_in_a_takeover() {
+        let plan = subscription_plan(&[consumer("g_new", false, false)], &tracks(), true);
+        assert_eq!(allowed(&plan, "g_new"), vec!["TR_cam", "TR_mic"]);
+    }
+
+    #[test]
+    fn a_visible_page_without_a_receipt_never_takes_the_sheet_or_aux() {
+        let page = || consumer("EG_v", false, true);
+        let plan = subscription_plan(&[page()], &tracks(), false);
+        assert_eq!(allowed(&plan, "EG_v"), vec!["TR_cam", "TR_mic"]);
+        // In a takeover it cannot route, so the legacy silence applies too.
+        let plan = subscription_plan(&[page()], &tracks(), true);
+        assert_eq!(allowed(&plan, "EG_v"), vec!["TR_cam"]);
+    }
+
+    #[test]
+    fn a_consumer_without_a_current_receipt_never_takes_the_routing() {
+        let targets = routing_targets(&[
+            consumer("EG_visible", false, true),
+            hidden("EG_hidden", false, true),
+            consumer("g_a", false, true),
+        ]);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn a_status_without_a_room_lifts_no_removal() {
+        let mut denied = BTreeMap::from([("g_ada".to_string(), false)]);
+        // No room in the status: nothing is read as gone.
+        readmitted_from(&mut denied, None);
+        assert_eq!(denied.get("g_ada"), Some(&false));
+        // The room comes back still listing her: still denied.
+        readmitted_from(&mut denied, Some(&["g_ada".to_string()][..]));
+        assert!(denied.contains_key("g_ada"));
+        // Gone from the room, then let in again: lifted.
+        readmitted_from(&mut denied, Some(&[][..]));
+        readmitted_from(&mut denied, Some(&["g_ada".to_string()][..]));
+        assert!(!denied.contains_key("g_ada"));
     }
 
     #[test]
@@ -543,7 +625,7 @@ mod tests {
             &[
                 consumer("EG_new", true, true),
                 consumer("EG_legacy", true, false),
-                consumer("EG_stale", false, true),
+                hidden("EG_stale", false, true),
                 consumer("g_a", true, false),
             ],
             &tracks(),
