@@ -3,7 +3,7 @@
 // (`tune_video_layer`), so #2212's size bug could reach it; this checks it
 // the way `probe:preview-window` checks the preview.
 //
-//   VIDEORC_GPUI_APP_BINARY=… node scripts/gpui-library-player-probe.mjs
+//   pnpm probe:library-player   (VIDEORC_GPUI_APP_BINARY=… runs a prebuilt app)
 //
 // 1. Records a short take with the test pattern (`studio-record`,
 //    `studio-stop`) and waits for the session to end.

@@ -186,7 +186,7 @@ nothing; a layout the backend refuses without a real device makes the scene phas
 `session-player-geometry` reads every live session player (the Library's, and any a page hosts) the same way:
 `{ players: [{ mode, active, open, layerFrame, displayedFrame, slot }] }`. On macOS `displayedFrame` must equal
 `layerFrame` and fill `slot`, as the live preview's do; it uses the same `VideoLayer` (`tune_video_layer`).
-`node scripts/gpui-library-player-probe.mjs` (with `VIDEORC_GPUI_APP_BINARY`) records a short take, opens it in the Library
+`pnpm probe:library-player` (with `VIDEORC_GPUI_APP_BINARY` for a prebuilt app) records a short take, opens it in the Library
 player through the UI driver (the row's Session actions, then Markers), and holds the player's layer to its slot, then
 again after main-window resizes.
 
