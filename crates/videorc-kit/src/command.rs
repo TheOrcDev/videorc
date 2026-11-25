@@ -116,10 +116,18 @@ impl RenderOnce for CommandItem {
             .disabled(self.disabled)
             .accessibility_label(self.title.clone())
             .w_full()
+            // `CommandItem` is 40 px and never shrinks: `CommandList` is a
+            // capped scroll column, and a shrinkable row there was squeezed to
+            // its text height once the list ran past 384 px.
+            .flex_none()
             .h(px(40.))
             .px(px(10.))
             .flex()
             .items_center()
+            // Rows read from the leading edge, as cmdk's do; `Button`
+            // centres its content unless told otherwise, so a row with no
+            // shortcut or context drew its title in the middle.
+            .justify_start()
             .gap(px(8.))
             .rounded(px(radius::CHIP))
             .text_size(px(14.))
