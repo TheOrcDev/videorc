@@ -112,7 +112,9 @@ impl Shared {
 struct Output {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
-    _demand: PixelDemandGuard,
+    /// The compositor's pixel demand (the preview's ring); none for a ring
+    /// whose frames come from elsewhere (the playback's, `playback_cpu_ring`).
+    _demand: Option<PixelDemandGuard>,
 }
 
 impl Drop for Output {
@@ -172,6 +174,26 @@ impl PreviewCpuRingService {
         pixel_demand: PixelDemand,
         picker: StorePicker,
     ) -> Result<(PreviewCpuRingStatus, PreviewCpuRingOwner), String> {
+        self.open_with(owner, Some(pixel_demand), picker)
+    }
+
+    /// [`Self::open`] for a ring whose frames come from a store something
+    /// else fills (the playback's decoder): nothing is demanded of the
+    /// compositor.
+    pub fn open_without_demand(
+        self: &Arc<Self>,
+        owner: u64,
+        picker: StorePicker,
+    ) -> Result<(PreviewCpuRingStatus, PreviewCpuRingOwner), String> {
+        self.open_with(owner, None, picker)
+    }
+
+    fn open_with(
+        self: &Arc<Self>,
+        owner: u64,
+        pixel_demand: Option<PixelDemand>,
+        picker: StorePicker,
+    ) -> Result<(PreviewCpuRingStatus, PreviewCpuRingOwner), String> {
         {
             let mut current = self
                 .owner
@@ -196,7 +218,7 @@ impl PreviewCpuRingService {
             }
         }
         let shared = Arc::new(Shared::default());
-        let demand = pixel_demand.hold();
+        let demand = pixel_demand.map(|demand| demand.hold());
         let thread_shared = shared.clone();
         let thread = std::thread::Builder::new()
             .name("videorc-preview-ring".to_string())

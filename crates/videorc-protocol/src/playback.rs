@@ -17,11 +17,27 @@
 //! Events: `playback.status` on every change and four times a second while
 //! playing; `playback.frameReady` per published frame (coalesced, latest
 //! wins).
+//!
+//! Windows and Linux (plan 260, L5): no IOSurface, so the frames reach the
+//! app through a CPU ring, the live preview's route (d) (`preview.cpu.*`,
+//! #1930) for the playback. `playback.cpu.open` (admin, owned by the socket
+//! that opened it, like the preview's) answers a
+//! [`crate::PreviewCpuRingStatus`] whose `ring` the app maps with
+//! `videorc-preview-ring` and draws the newest frame of; `playback.cpu.close`
+//! answers whether this socket held it; `playback.cpu.status` observes it.
+//! The decoder publishes into the ring's store and the backend converts
+//! I420 to BGRA as for the preview; a new frame size is a new ring with the
+//! next generation.
 
 use serde::{Deserialize, Serialize};
 
 pub const PLAYBACK_STATUS_EVENT: &str = "playback.status";
 pub const PLAYBACK_FRAME_READY_EVENT: &str = "playback.frameReady";
+
+/// The CPU ring's methods (Windows and Linux): see the module's notes.
+pub const PLAYBACK_CPU_OPEN_METHOD: &str = "playback.cpu.open";
+pub const PLAYBACK_CPU_CLOSE_METHOD: &str = "playback.cpu.close";
+pub const PLAYBACK_CPU_STATUS_METHOD: &str = "playback.cpu.status";
 
 /// Why a recording cannot play here (Electron's `SessionMediaGrantRefusal`,
 /// `main/session-media.ts`): the player's copy keys on it.
@@ -61,8 +77,11 @@ pub enum PlaybackSurface {
     /// macOS: each frame is an IOSurface the app imports by id (zero copy
     /// into the presenter).
     Iosurface,
-    /// Windows and Linux until S4.1d's shared-memory ring carries them:
-    /// the frames are decoded and counted but no surface leaves the backend.
+    /// Windows and Linux: whole BGRA frames in a shared-memory ring the app
+    /// maps (`playback.cpu.open`), the live preview's route (d).
+    CpuRing,
+    /// No surface leaves the backend: the frames are decoded and counted
+    /// only (a platform with neither route, or before the decoder publishes).
     None,
 }
 
@@ -176,6 +195,19 @@ pub struct PlaybackFrameReleaseParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cpu_ring_surface_and_its_methods_have_their_wire_names() {
+        assert_eq!(
+            serde_json::to_value(PlaybackSurface::CpuRing).unwrap(),
+            "cpu-ring"
+        );
+        let back: PlaybackSurface = serde_json::from_value("cpu-ring".into()).unwrap();
+        assert_eq!(back, PlaybackSurface::CpuRing);
+        assert_eq!(PLAYBACK_CPU_OPEN_METHOD, "playback.cpu.open");
+        assert_eq!(PLAYBACK_CPU_CLOSE_METHOD, "playback.cpu.close");
+        assert_eq!(PLAYBACK_CPU_STATUS_METHOD, "playback.cpu.status");
+    }
 
     #[test]
     fn a_closed_status_omits_its_options_and_names_its_state() {

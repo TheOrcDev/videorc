@@ -199,6 +199,7 @@ mod panic_hook;
 mod performance_check;
 mod pipeline;
 mod platform_stream_watch;
+mod playback_cpu_ring;
 mod posters;
 mod preflight;
 mod preview_bmp;
@@ -6738,6 +6739,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "capture.recovery.status"
         | "preview.surface.status"
         | "preview.cpu.status"
+        | "playback.cpu.status"
         | "remote.control.status"
         | "remote.lan.status"
         | "remote.chat.snapshot"
@@ -10137,6 +10139,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     // (the socket closed) closes the ring.
     let preview_cpu_ring_tag = preview_cpu_ring::next_owner_tag();
     let mut preview_cpu_ring_owner: Option<preview_cpu_ring::PreviewCpuRingOwner> = None;
+    let mut playback_cpu_ring_owner: Option<preview_cpu_ring::PreviewCpuRingOwner> = None;
     let mut room_audio_bridge = room_audio_bridge::Bridge::default();
     let mut room_microphone = room_microphone::Bridge::default();
     let mut room_frame_bridge = room_frame_bridge::Bridge::default();
@@ -10436,6 +10439,26 @@ async fn websocket_session_with_handler_role_and_redaction(
                     continue;
                 }
 
+                if let Some(response) = playback_cpu_ring::handle_playback_cpu_ring_control(
+                    &state,
+                    role,
+                    preview_cpu_ring_tag,
+                    &mut playback_cpu_ring_owner,
+                    text.as_str(),
+                ) {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
                 let accepted = accept_websocket_command(&state, text.to_string());
                 if !send_tracked_websocket_item(&command_tx, &command_metrics, accepted).await {
                     break;
@@ -10469,6 +10492,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     drop(preview_frame_lease);
     drop(preview_handover);
     drop(preview_cpu_ring_owner);
+    drop(playback_cpu_ring_owner);
     drop(studio_socket_guard);
     drop(command_tx);
     drop(command_dispatcher_task);
@@ -13434,6 +13458,7 @@ async fn handle_text_message_with_role(
             ServerResponse::ok(command.id, status)
         }
         "preview.cpu.status" => ServerResponse::ok(command.id, state.preview_cpu_ring.status()),
+        "playback.cpu.status" => ServerResponse::ok(command.id, state.playback_cpu_ring.status()),
         "preview.surface.take_native_host_commands" => {
             let commands = take_native_preview_host_commands(state).await;
             ServerResponse::ok(command.id, commands)
