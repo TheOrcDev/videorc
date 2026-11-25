@@ -2,9 +2,9 @@
 //! backend decodes a finished recording with FFmpeg, publishes its frames
 //! into the playback's CPU ring (`playback_cpu_ring.rs`, #2031, on #1930's
 //! writer) and plays its sound on the platform output the soundboard monitor
-//! uses (WASAPI, PipeWire; `sound_monitor::DeviceOutput`). macOS plays a
-//! recording natively in the app, so there the frames are decoded and
-//! counted only (`surface: none`).
+//! uses (WASAPI, PipeWire; `sound_monitor::DeviceOutput`). macOS plays it
+//! with AVFoundation instead (`playback_avf.rs`): AVPlayer's sound and clock,
+//! and IOSurface frames the app leases (`playback.frame.acquire/release`).
 //!
 //! Methods (`videorc_protocol::playback`): `playback.open {sessionId,
 //! maxWidth?, maxHeight?}`, `playback.play`, `playback.pause`,
@@ -431,6 +431,9 @@ enum Control {
     Pause,
     Seek(u64),
     Close,
+    /// macOS only: the FFmpeg player's mute is its shared flag.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Mute(bool),
 }
 
 /// A control and, for a request, the signal that it ran.
@@ -698,7 +701,7 @@ impl Thread {
                         Control::Play => self.play(),
                         Control::Pause => self.pause(),
                         Control::Seek(position) => self.seek(position),
-                        Control::Close => {}
+                        Control::Close | Control::Mute(_) => {}
                     }
                     if let Some(ack) = ack {
                         let _ = ack.send(());
@@ -776,6 +779,9 @@ impl Drop for Player {
 #[derive(Default)]
 pub struct PlaybackService {
     player: StdMutex<Option<Player>>,
+    /// macOS: AVFoundation's player (`playback_avf.rs`).
+    #[cfg(target_os = "macos")]
+    mac: StdMutex<Option<crate::playback_avf::MacPlayer>>,
     next_id: AtomicU64,
     /// The last status after a close or a refusal, for `playback.status`.
     last: StdMutex<Option<PlaybackStatus>>,
@@ -791,7 +797,7 @@ impl std::fmt::Debug for PlaybackService {
 
 fn surface() -> PlaybackSurface {
     if cfg!(target_os = "macos") {
-        PlaybackSurface::None
+        PlaybackSurface::Iosurface
     } else {
         PlaybackSurface::CpuRing
     }
@@ -808,6 +814,10 @@ impl PlaybackService {
     }
 
     pub fn status(&self) -> PlaybackStatus {
+        #[cfg(target_os = "macos")]
+        if let Some(player) = self.mac.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+            return player.status();
+        }
         if let Some(player) = self
             .player
             .lock()
@@ -840,6 +850,19 @@ pub async fn close(state: &AppState) -> PlaybackStatus {
     if let Some(player) = player {
         // Joining waits for FFmpeg to be reaped: off the async runtime.
         let _ = tokio::task::spawn_blocking(move || drop(player)).await;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mac = state
+            .playback
+            .mac
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        if let Some(mut mac) = mac {
+            // AVFoundation's objects go on the main run loop.
+            let _ = tokio::task::spawn_blocking(move || mac.close()).await;
+        }
     }
     state.playback_frames.install(None);
     let status = state.playback.remember(PlaybackStatus::closed(now()));
@@ -915,6 +938,52 @@ pub async fn open(state: &AppState, params: PlaybackOpenParams) -> PlaybackStatu
     let size = fit_size(media.width, media.height, max);
     let id = state.playback.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let playback_id = format!("playback-{id}");
+    // macOS: AVFoundation plays it (sound, clock, IOSurface frames).
+    #[cfg(target_os = "macos")]
+    {
+        let base = PlaybackStatus {
+            state: PlaybackState::Opening,
+            playback_id: Some(playback_id.clone()),
+            session_id: Some(session_id.clone()),
+            duration_ms: media.duration_ms,
+            width: size.0,
+            height: size.1,
+            fps: media.fps,
+            has_audio: media.has_audio,
+            surface: surface(),
+            ..PlaybackStatus::closed(now())
+        };
+        let owned = state.clone();
+        let opened = tokio::task::spawn_blocking(move || {
+            crate::playback_avf::MacPlayer::open(owned, &file, base, size)
+        })
+        .await;
+        return match opened {
+            Ok(Ok(player)) => {
+                let status = player.status();
+                *state.playback.mac.lock().unwrap_or_else(|p| p.into_inner()) = Some(player);
+                state.emit_event(PLAYBACK_STATUS_EVENT, &status);
+                status
+            }
+            Ok(Err(message)) => refused(state, &session_id, None, message),
+            Err(error) => refused(state, &session_id, None, error.to_string()),
+        };
+    }
+    #[cfg(not(target_os = "macos"))]
+    open_ffmpeg(state, session_id, playback_id, file, media, size).await
+}
+
+/// Windows and Linux: FFmpeg decodes into the playback ring and the sound
+/// plays on the platform output.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+async fn open_ffmpeg(
+    state: &AppState,
+    session_id: String,
+    playback_id: String,
+    file: PathBuf,
+    media: Media,
+    size: (u32, u32),
+) -> PlaybackStatus {
     let shared = Arc::new(Shared {
         status: StdMutex::new(PlaybackStatus {
             state: PlaybackState::Opening,
@@ -1016,9 +1085,47 @@ pub async fn open(state: &AppState, params: PlaybackOpenParams) -> PlaybackStatu
     status
 }
 
+/// macOS: the control on AVFoundation's player, off the async runtime (it
+/// waits for the main run loop). `None` when no macOS playback is open.
+#[cfg(target_os = "macos")]
+async fn mac_control(state: &AppState, control: Control) -> Option<PlaybackStatus> {
+    let service = state.playback.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        let guard = service.mac.lock().unwrap_or_else(|p| p.into_inner());
+        let player = guard.as_ref()?;
+        Some(match control {
+            Control::Play => player.play(),
+            Control::Pause => player.pause(),
+            Control::Seek(position) => player.seek(position),
+            Control::Mute(muted) => player.mute(muted),
+            Control::Close => player.status(),
+        })
+    })
+    .await
+    .ok()
+    .flatten()?;
+    state.emit_event(PLAYBACK_STATUS_EVENT, &status);
+    Some(status)
+}
+
 /// A control, answered with the status once the player thread ran it (a
 /// seek's first frame is in the ring by then).
 async fn control(state: &AppState, control: Control) -> PlaybackStatus {
+    #[cfg(target_os = "macos")]
+    let control = {
+        let mac = match &control {
+            Control::Play => Some(Control::Play),
+            Control::Pause => Some(Control::Pause),
+            Control::Seek(position) => Some(Control::Seek(*position)),
+            _ => None,
+        };
+        if let Some(mac) = mac
+            && let Some(status) = mac_control(state, mac).await
+        {
+            return status;
+        }
+        control
+    };
     if let Some(ack) = state.playback.send(control) {
         let _ = tokio::task::spawn_blocking(move || ack.recv_timeout(CONTROL_WAIT)).await;
     }
@@ -1038,7 +1145,11 @@ pub async fn seek(state: &AppState, position_ms: u64) -> PlaybackStatus {
 }
 
 /// `playback.mute`: the sound goes silent and keeps its place.
-pub fn mute(state: &AppState, muted: bool) -> PlaybackStatus {
+pub async fn mute(state: &AppState, muted: bool) -> PlaybackStatus {
+    #[cfg(target_os = "macos")]
+    if let Some(status) = mac_control(state, Control::Mute(muted)).await {
+        return status;
+    }
     let guard = state
         .playback
         .player
@@ -1065,6 +1176,106 @@ pub fn playback_id(state: &AppState) -> Option<String> {
         .unwrap_or_else(|p| p.into_inner())
         .as_ref()
         .map(|player| player.playback_id.clone())
+}
+
+/// A leased frame on its socket: the lease id and the frame, whose
+/// IOSurface stays valid until the release or the socket's end.
+#[cfg(target_os = "macos")]
+pub(crate) type PlaybackFrameLease = Option<(String, Arc<crate::playback_avf::Frame>)>;
+#[cfg(not(target_os = "macos"))]
+pub(crate) type PlaybackFrameLease = Option<(String, ())>;
+
+/// `playback.frame.acquire` and `playback.frame.release` on the socket's
+/// own task (like the preview's frame leases): `None` for every other
+/// message. Main-process (admin) credential only; one lease at a time; the
+/// lease ends with the socket. macOS only: elsewhere the frames are in the
+/// playback ring (`playback.cpu.*`).
+pub(crate) fn handle_playback_frame_lease_control(
+    state: &AppState,
+    role: crate::backend_authority::BackendRole,
+    lease: &mut PlaybackFrameLease,
+    text: &str,
+) -> Option<crate::protocol::ServerResponse> {
+    use crate::protocol::{ClientCommand, ServerResponse};
+    use videorc_protocol::playback::{PlaybackFrameAcquireParams, PlaybackFrameReleaseParams};
+
+    if !text.contains("playback.frame.") {
+        return None;
+    }
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    let acquire = match command.method.as_str() {
+        "playback.frame.acquire" => true,
+        "playback.frame.release" => false,
+        _ => return None,
+    };
+    if role != crate::backend_authority::BackendRole::Admin {
+        return Some(ServerResponse::error(
+            command.id,
+            "forbidden",
+            "Playback frame leases require the main-process credential.",
+        ));
+    }
+    if !acquire {
+        return Some(
+            match serde_json::from_value::<PlaybackFrameReleaseParams>(command.params) {
+                Ok(params) => {
+                    let matches = lease.as_ref().is_some_and(|(id, _)| *id == params.lease_id);
+                    if matches {
+                        *lease = None;
+                    }
+                    ServerResponse::ok(command.id, matches)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            },
+        );
+    }
+    let params = match serde_json::from_value::<PlaybackFrameAcquireParams>(command.params) {
+        Ok(params) => params,
+        Err(error) => {
+            return Some(ServerResponse::error(
+                command.id,
+                "invalid-params",
+                error.to_string(),
+            ));
+        }
+    };
+    if lease.is_some() {
+        return Some(ServerResponse::error(
+            command.id,
+            "playback-frame-busy",
+            "Release the outstanding playback frame first.",
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let frame = state
+            .playback
+            .mac
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .filter(|player| player.playback_id == params.playback_id)
+            .and_then(|player| player.latest());
+        Some(match frame {
+            Some(frame) => {
+                let response = ServerResponse::ok(command.id, &frame.frame);
+                *lease = Some((params.lease_id, frame));
+                response
+            }
+            None => ServerResponse::ok(command.id, serde_json::Value::Null),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (state, params);
+        Some(ServerResponse::error(
+            command.id,
+            "playback-frame-unsupported",
+            "Playback frames come through the playback ring here (playback.cpu.open).",
+        ))
+    }
 }
 
 #[cfg(test)]
