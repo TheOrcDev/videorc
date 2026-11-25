@@ -861,7 +861,6 @@ pub fn render_community(
     state: &CommunityState,
     settings: &CommunitySettings,
     preview: AnyElement,
-    wide: bool,
     window: &mut Window,
     cx: &mut Context<SidekickScreen>,
 ) -> AnyElement {
@@ -1141,7 +1140,7 @@ pub fn render_community(
     let people = PanelSection::new("sidekick-people")
         .title(PEOPLE)
         .description(PEOPLE_DESCRIPTION)
-        .last(wide)
+        .last(true)
         .child(
             div()
                 .flex()
@@ -1341,7 +1340,7 @@ pub fn render_community(
             "sidekick-community-grid",
             lead,
             trail,
-            wide,
+            border,
         ))
         .child(person)
         .child(forget)

@@ -367,17 +367,16 @@ impl SidekickScreen {
             );
         }
         // `ConfigGrid` + `CONFIG_GRID_PAIR`: flush sections, side by side
-        // from 940 px of page (the screen's measurement), filling the height
+        // from 940 px of page (the grid measures it), filling the height
         // with the hairline between the columns and none under them;
         // stacked, a hairline between them.
-        let wide = self.wide();
-        let switch = auto_section(&card, auto, t, cx).last(wide);
+        let switch = auto_section(&card, auto, t, cx).last(true);
         let recordings = recordings_section(&card, t, cx).last(true);
         page.child(super::config_grid_pair(
             "clean-cut-grid",
             switch,
             recordings,
-            wide,
+            hsla(t.border),
         ))
         .child(consent_dialog(state, t, cx))
         .into_any_element()
