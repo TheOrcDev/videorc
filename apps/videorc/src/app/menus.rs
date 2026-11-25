@@ -8,11 +8,17 @@
 //! and the keys read), a window only once it exists. A disabled item stays
 //! listed, never hidden.
 //!
-//! GPUI's `OsAction` covers Undo, Redo, Cut, Copy, Paste and Select All; the
-//! template's other Edit roles (Paste and Match Style, Delete, Speech) wait
-//! for it and are left out of the menu meanwhile.
+//! The Edit roles are the text field's own actions (`gpui_base::input`,
+//! which the kit's Input and Textarea use), so an item is enabled while a
+//! field has focus and does what its key does there. Undo, Redo, Cut,
+//! Copy, Paste and Select All also carry GPUI's `OsAction` (AppKit's
+//! `cut:` and the rest, which save panels need). Paste and Match Style is
+//! Paste: a GPUI field only ever takes plain text. Edit → Speech (Start and
+//! Stop Speaking) has no GPUI form yet, so the empty submenu is left out
+//! (`docs/gpui/parity.md`, P1498).
 
 use gpui::{Action, App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, actions};
+use gpui_base::input as text;
 use videorc_app_core::desktop::menu::{
     MenuCommand, MenuEntry, MenuPlatform, MenuRole, PageKey, WindowId, app_menu_template,
     release_notes_url,
@@ -27,12 +33,6 @@ actions!(
         HideApp,
         HideOthers,
         ShowAll,
-        Undo,
-        Redo,
-        Cut,
-        Copy,
-        Paste,
-        SelectAll,
         ToggleFullScreen,
         Minimize,
         Zoom,
@@ -131,12 +131,14 @@ fn role_item(role: MenuRole) -> RoleItem {
         MenuRole::HideOthers => RoleItem::Action(Box::new(HideOthers)),
         MenuRole::Unhide => RoleItem::Action(Box::new(ShowAll)),
         MenuRole::Quit => RoleItem::Action(Box::new(Quit)),
-        MenuRole::Undo => RoleItem::Os(Box::new(Undo), OsAction::Undo),
-        MenuRole::Redo => RoleItem::Os(Box::new(Redo), OsAction::Redo),
-        MenuRole::Cut => RoleItem::Os(Box::new(Cut), OsAction::Cut),
-        MenuRole::Copy => RoleItem::Os(Box::new(Copy), OsAction::Copy),
-        MenuRole::Paste => RoleItem::Os(Box::new(Paste), OsAction::Paste),
-        MenuRole::SelectAll => RoleItem::Os(Box::new(SelectAll), OsAction::SelectAll),
+        MenuRole::Undo => RoleItem::Os(Box::new(text::Undo), OsAction::Undo),
+        MenuRole::Redo => RoleItem::Os(Box::new(text::Redo), OsAction::Redo),
+        MenuRole::Cut => RoleItem::Os(Box::new(text::Cut), OsAction::Cut),
+        MenuRole::Copy => RoleItem::Os(Box::new(text::Copy), OsAction::Copy),
+        MenuRole::Paste => RoleItem::Os(Box::new(text::Paste), OsAction::Paste),
+        MenuRole::PasteAndMatchStyle => RoleItem::Action(Box::new(text::Paste)),
+        MenuRole::Delete => RoleItem::Action(Box::new(text::Delete)),
+        MenuRole::SelectAll => RoleItem::Os(Box::new(text::SelectAll), OsAction::SelectAll),
         MenuRole::ToggleFullScreen => RoleItem::Action(Box::new(ToggleFullScreen)),
         MenuRole::Minimize => RoleItem::Action(Box::new(Minimize)),
         MenuRole::Zoom => RoleItem::Action(Box::new(Zoom)),
@@ -221,11 +223,15 @@ fn items(cx: &App, entries: &[MenuEntry], bindings: &mut Vec<KeyBinding>) -> Vec
             MenuEntry::Submenu {
                 items: children, ..
             } => {
-                out.push(MenuItem::submenu(Menu {
-                    name: title.into(),
-                    items: items(cx, children, bindings),
-                    disabled: false,
-                }));
+                // A submenu with nothing GPUI can show (Speech) stays out.
+                let children = items(cx, children, bindings);
+                if !children.is_empty() {
+                    out.push(MenuItem::submenu(Menu {
+                        name: title.into(),
+                        items: children,
+                        disabled: false,
+                    }));
+                }
             }
         }
     }
@@ -294,8 +300,17 @@ fn item_bindings(cx: &App, entries: &[MenuEntry], bindings: &mut Vec<KeyBinding>
 }
 
 /// The windows that exist; each handles its own command
-/// (`screens::stream_manager::window::install`).
-const WINDOWS: &[WindowId] = &[WindowId::StreamManager, WindowId::Notes];
+/// (`screens::stream_manager::window::install`, `screens::notes`, and the
+/// Preview's in `main.rs`). The Preview floats on macOS only; the Captions
+/// reader is not in this build yet.
+fn windows() -> Vec<WindowId> {
+    let mut windows = Vec::new();
+    if cfg!(target_os = "macos") {
+        windows.push(WindowId::Preview);
+    }
+    windows.extend([WindowId::StreamManager, WindowId::Notes]);
+    windows
+}
 
 /// The roles' handlers, and the commands that work now. Pages and windows
 /// get theirs as they are ported.
@@ -310,12 +325,12 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("secondary-,", ShowSettings, None),
         KeyBinding::new("secondary-/", ShowShortcuts, None),
     ]);
-    if let Some(bar) = menu_bar(cx, WINDOWS) {
+    if let Some(bar) = menu_bar(cx, &windows()) {
         cx.bind_keys(bar.bindings);
         cx.set_menus(bar.menus);
     } else {
         cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
-        cx.bind_keys(menu_less_bindings(cx, WINDOWS));
+        cx.bind_keys(menu_less_bindings(cx, &windows()));
     }
     // Quit and Close Window on the main window ask first while on air.
     cx.on_action(|_: &Quit, cx| super::exit::ExitGuard::request_quit(cx));
