@@ -248,6 +248,8 @@ try {
     ['Gaming', 'Just Chatting', 'Science & Technology'],
     "the picker lists X's categories in X's order"
   )
+  // Go Live refuses an untitled stream ("Add a title before you go live").
+  await setInput('#stream-title', 'X live mock show')
   await capture('x-live-mock-stream-details-category')
   assert.ok(
     await evaluate(
@@ -260,8 +262,8 @@ try {
     const x = (draft?.targetOverrides ?? draft?.draft?.targetOverrides ?? []).find(
       (override) => override.platform === 'x'
     )
-    return x?.xCategoryId === 'just-chatting'
-  }, 'Stream details saved the X category')
+    return draft?.title === 'X live mock show' && x?.xCategoryId === 'just-chatting'
+  }, 'Stream details saved the title and the X category')
   log('category saved: just-chatting')
 
   // 2. Instant Go Live carries the category.
@@ -279,6 +281,7 @@ try {
   await waitFor(async () => fixture.xBroadcasts.size === 1, 'instant X broadcast created')
   const [created] = xCalls('POST', /^\/2\/broadcasts$/)
   assert.equal(created.body.live_category_id, 'just-chatting', 'Go Live sent the category')
+  assert.equal(created.body.title, 'X live mock show', 'Go Live sent the saved title')
   assert.equal(
     xCalls('POST', /^\/2\/broadcasts\/scheduled$/).length,
     0,
