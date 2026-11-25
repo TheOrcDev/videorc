@@ -689,6 +689,15 @@ fn main() -> Result<()> {
                 preview.update(cx, |preview, _| {
                     preview.remember_window(preview_frame.clone())
                 });
+                // Linux: the docked child sits above the window's drawing,
+                // so it hides while first run's full-window overlay shows.
+                #[cfg(target_os = "linux")]
+                {
+                    let first_run = first_run.clone();
+                    preview.update(cx, |preview, _| {
+                        preview.set_cover_probe(move |cx| first_run.read(cx).is_open())
+                    });
+                }
                 *preview_slot.borrow_mut() = Some(preview.clone());
                 let session = cx.new(|cx| {
                     SessionSection::new(
