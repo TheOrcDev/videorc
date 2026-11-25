@@ -155,7 +155,7 @@ Wait for a GPUI product path or new commands first:
 | `smoke:preview-pump-diagnostics`, `smoke:preview-click-focus`                                                                                    | Electron's present-pump and click-focus probes                                                                                                                  |
 | `smoke:preview-scene-commit`, `smoke:freeform-editor`                                                                                            | `select-camera-shape`; freeform-editor clicks unblocked once gap 1's bounds patch is in the smoke binary                                                        |
 | `smoke:recording-native-preview`, `smoke:preview-surface`, `probe:preview-lifecycle`, `probe:preview-window`, `smoke:preview-interaction-stress` | Electron's native-surface and window commands; they need GPUI-specific probes, not a port                                                                       |
-| `probe:comments-window`                                                                                                                          | the chat fixtures (`comments-window-push-*`, `-seed-*`), `capture-page` (gap 3), the person card and layout metrics; it needs a GPUI-specific probe, not a port |
+| `probe:comments-window`                                                                                                                          | Electron fixtures (`push-*`/`seed-*`/person-card/layout-metrics) stay Electron-only. GPUI path: `comments-window-probe-gpui.mjs` (open/place/raise/hide + `#2142` composited capture on macOS; Win/Linux SKIP) |
 
 ### The Notes and Stream Manager windows on GPUI (2026-11-25)
 
@@ -182,12 +182,14 @@ writes the highlight's rects into the overlay layout, as Electron's `snapHighlig
 `videorc_app_core::smoke::commands` runs `import-takeover-image` (the Images takeover import through
 `screens.importImage`, answered with Electron's `{ ids, readyIds }` from `screens.list`) and
 `html-overlay-stats` (`{ stats: null }` until the page host reports). `apps/videorc/src/smoke` runs
-`main-window-id` (OS capture id + top-left bounds); `capture-page` stays refused by name (gap 3).
+`main-window-id` (OS capture id + top-left bounds). `capture-page` and `comments-window-capture-page`
+write a PNG of the composited window on macOS (#2142); Windows and Linux still answer by name that
+they have no capture.
 
 `smoke:banners` and `smoke:screens` run with `VIDEORC_APP=gpui`. The banners smoke skips the
 `videorc-asset://` renderer fetch (no Chromium scheme; recording samples still prove the draw).
-`smoke:html-overlay` is a named SKIP until `videorc-page-host` (P5-D10) paints frames. Screens skips
-the live Assets theme screenshots (`capture-page`) and the renderer mic `eval-js` check.
+`smoke:html-overlay` is a named SKIP until `videorc-page-host` (P5-D10) paints frames. Screens can
+use `capture-page` on macOS for theme screenshots; the renderer mic `eval-js` check stays Electron.
 
 ### Sources, layouts and saved scenes
 
