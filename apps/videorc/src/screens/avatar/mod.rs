@@ -9,10 +9,15 @@
 
 mod bubble;
 mod consent;
+mod creator;
+mod creator_view;
+mod files;
 mod gate;
 mod greetings;
 mod library;
 mod look;
+mod onboarding;
+mod onboarding_view;
 mod persona;
 mod pictures;
 mod preview;
@@ -48,9 +53,12 @@ pub type AppStudio = Studio<BackendClient>;
 
 /// The events the page follows; `main.rs` adds them to the client's filter.
 /// `account.changed` is already there (Settings').
-pub const EVENTS: [&str; 5] = [
+pub const EVENTS: [&str; 8] = [
     videorc_app_core::buddy::look::PROGRESS_EVENT,
     videorc_app_core::buddy::look::DRAFT_EVENT,
+    creator_view::IDENTITY_READ_EVENT,
+    creator_view::SHEET_GENERATED_EVENT,
+    creator_view::BUILD_PROGRESS_EVENT,
     LIBRARY_CHANGED_EVENT,
     SETTINGS_CHANGED_EVENT,
     videorc_app_core::chat::overlay::LAYOUT_EVENT,
@@ -212,6 +220,10 @@ pub struct AvatarScreen {
     /// A refused automatic sync stays quiet.
     quiet_problem: Option<String>,
     invitation_dismissed: bool,
+    /// The four-step onboarding: what was typed survives closing it.
+    onboarding: Option<onboarding::Onboarding>,
+    /// The Alive creator, over Profile while it is open.
+    creator: Option<creator::Creator>,
     /// Make it Alive on a card that is not the active one: used first, then
     /// the creator opens once the backend says it is the avatar.
     alive_for: Option<String>,
@@ -273,6 +285,8 @@ impl AvatarScreen {
             problem: None,
             quiet_problem: None,
             invitation_dismissed,
+            onboarding: None,
+            creator: None,
             alive_for: None,
             edit: None,
             edit_handle: DialogHandle::new(false),
@@ -338,7 +352,10 @@ impl AvatarScreen {
                         SETTINGS_CHANGED_EVENT | "account.changed" => {
                             let _ = this.update(cx, |screen, cx| screen.refresh(cx));
                         }
-                        _ => {}
+                        other => {
+                            let _ = this
+                                .update(cx, |screen, cx| screen.creator_event(other, payload, cx));
+                        }
                     },
                     Ok(BackendEvent::Ready(_)) | Ok(BackendEvent::EventsLagged(_)) => {
                         let _ = this.update(cx, |screen, cx| screen.refresh(cx));
@@ -552,14 +569,14 @@ impl AvatarScreen {
         );
     }
 
-    /// The Alive creator lands in its own PR (P1133 to P1149).
-    fn open_alive_creator(&mut self, _cx: &mut Context<Self>) {
-        eprintln!("[videorc-app] Avatar: Make it Alive (the Alive creator lands next)");
+    /// The Alive creator, over Profile (P1133 to P1149).
+    fn open_alive_creator(&mut self, cx: &mut Context<Self>) {
+        self.show_creator(None, cx);
     }
 
-    /// The four-step onboarding lands in its own PR (P1077 to P1093).
-    pub(crate) fn open_onboarding(&mut self, _cx: &mut Context<Self>) {
-        eprintln!("[videorc-app] Avatar: New avatar (the onboarding lands next)");
+    /// The four-step onboarding at step 1 (P1077 to P1093).
+    pub(crate) fn open_onboarding(&mut self, cx: &mut Context<Self>) {
+        self.show_onboarding(1, cx);
     }
 
     pub(crate) fn sign_in(&mut self, _cx: &mut Context<Self>) {
@@ -784,6 +801,7 @@ impl Render for AvatarScreen {
         self.sync_previews(cx);
         let body =
             match self.tab {
+                Tab::Profile if self.creator_open() => creator::render_creator(self, window, cx),
                 Tab::Profile => div()
                     .flex()
                     .flex_col()
@@ -844,5 +862,6 @@ impl Render for AvatarScreen {
             .child(bubble::zoom_dialog(self, window, cx))
             .child(look::look_dialogs(self, cx))
             .child(test_dialog::test_dialog(self, window, cx))
+            .child(onboarding::render_onboarding(self, window, cx))
     }
 }
