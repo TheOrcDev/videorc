@@ -1215,8 +1215,7 @@ impl OutputPanel {
 
     #[cfg(not(target_os = "linux"))]
     fn load_camera_module(&mut self, cx: &mut Context<Self>) {
-        use videorc_app_core::desktop::linux::v4l2loopback::LoadResult;
-        self.camera_error = LoadResult::not_linux().message;
+        self.camera_error = Some("Videorc Camera's module load runs on Linux only.".into());
         cx.notify();
     }
 

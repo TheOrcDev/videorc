@@ -313,7 +313,7 @@ impl SessionSection {
                     .child(
                         div()
                             .min_w_0()
-                            .flex_shrink()
+                            .flex_shrink(1.)
                             .truncate()
                             .text_color(lcd::dim(theme))
                             .child(line),

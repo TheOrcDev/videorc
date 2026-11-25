@@ -616,7 +616,7 @@ fn ghost_btn(
     disabled: bool,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> Button {
-    Button::new(id)
+    Button::new(id.into())
         .label(label)
         .size(ButtonSize::Xs)
         .variant(ButtonVariant::Ghost)
@@ -649,7 +649,7 @@ impl Render for ImagesPanel {
         let bg_importing = self.background_importing;
         let bg_import_btn = |id: &'static str| {
             let entity = entity.clone();
-            Button::new(id)
+            Button::new(id.into())
                 .label(assets::background_import_label(bg_importing))
                 .variant(ButtonVariant::Outline)
                 .disabled(offline || bg_importing)
