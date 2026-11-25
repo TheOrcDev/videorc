@@ -8,6 +8,7 @@
 //! the onboarding dialog and the Alive creator.
 
 mod library;
+mod persona;
 mod pictures;
 mod status;
 
@@ -151,6 +152,11 @@ pub struct AvatarScreen {
     tab: Tab,
     active: bool,
     persona: Option<CohostPersona>,
+    /// "About you": the avatar's notes (`cohost.settings` `notes`).
+    notes: Option<String>,
+    persona_fields: Option<persona::PersonaFields>,
+    /// A failed save in Name and personality.
+    persona_error: Option<String>,
     placement: Option<Placement>,
     library: Option<LibraryState>,
     /// `aiCapabilities.cohost.buddyLibrary.alive`: the web keeps imports.
@@ -192,6 +198,9 @@ impl AvatarScreen {
             tab,
             active: false,
             persona: None,
+            notes: None,
+            persona_fields: None,
+            persona_error: None,
             placement: None,
             library: None,
             library_alive: false,
@@ -276,12 +285,13 @@ impl AvatarScreen {
         let studio = self.studio.clone();
         let read = self.runtime.spawn(async move {
             let backend = studio.backend().clone();
-            let persona = backend
+            let settings = backend
                 .request("cohost.settings.get", json!({}))
                 .await
                 .ok()
-                .and_then(|value| CohostSettingsView::from_json(&value))
-                .and_then(|settings| settings.persona);
+                .and_then(|value| CohostSettingsView::from_json(&value));
+            let notes = settings.as_ref().map(|settings| settings.notes.clone());
+            let persona = settings.and_then(|settings| settings.persona);
             let library = backend
                 .request("cohost.library.get", json!({}))
                 .await
@@ -302,15 +312,18 @@ impl AvatarScreen {
                         .and_then(Value::as_bool)
                 })
                 .unwrap_or(false);
-            (persona, library, placement, library_alive)
+            (persona, notes, library, placement, library_alive)
         });
         cx.spawn(async move |this, cx| {
-            let Ok((persona, library, placement, library_alive)) = read.await else {
+            let Ok((persona, notes, library, placement, library_alive)) = read.await else {
                 return;
             };
             let _ = this.update(cx, |screen, cx| {
                 if persona.is_some() {
                     screen.persona = persona;
+                }
+                if notes.is_some() {
+                    screen.notes = notes;
                 }
                 if let Some(library) = library {
                     screen.library_changed(library, cx);
@@ -670,6 +683,7 @@ fn sync_handle(
 impl Render for AvatarScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_dialogs(window, cx);
+        self.ensure_persona_fields(window, cx);
         let body = match self.tab {
             Tab::Profile => div()
                 .flex()
@@ -681,7 +695,8 @@ impl Render for AvatarScreen {
                         .flex_col()
                         .gap(px(size::GUTTER))
                         .p(px(size::GUTTER))
-                        .child(library::render_library(self, window, cx)),
+                        .child(library::render_library(self, window, cx))
+                        .children(persona::render_persona(self, window, cx)),
                 )
                 .into_any_element(),
             Tab::Greetings => {
@@ -715,5 +730,6 @@ impl Render for AvatarScreen {
             .child(tabs.child(body))
             .child(library::edit_dialog(self, window, cx))
             .child(library::delete_dialog(self, window, cx))
+            .child(persona::persona_dialogs(self, cx))
     }
 }

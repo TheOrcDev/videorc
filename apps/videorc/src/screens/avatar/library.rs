@@ -232,14 +232,12 @@ pub fn render_library(
 
     // A failed sync or action is the section's (plan 174 G-7).
     let dialog_open = screen.edit_want_open || screen.delete_want_open;
-    if let Some(problem) = screen.shown_problem().or(view.error.clone()) {
-        if !dialog_open {
-            column = column.child(
-                Alert::new("avatar-library-error")
-                    .variant(AlertVariant::Destructive)
-                    .title(problem),
-            );
-        }
+    if !dialog_open && let Some(problem) = screen.shown_problem().or(view.error.clone()) {
+        column = column.child(
+            Alert::new("avatar-library-error")
+                .variant(AlertVariant::Destructive)
+                .title(problem),
+        );
     }
 
     PanelSection::new("avatar-library")
