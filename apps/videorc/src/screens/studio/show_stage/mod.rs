@@ -1265,7 +1265,9 @@ struct StageCardPaint {
 
 impl StageCardPaint {
     fn of(t: &Theme, selected: bool, disabled: bool) -> Self {
-        let ground = faded_over(t.foreground, t.glass_solid, 0.04);
+        // PanelSection paints no fill: these cards sit on plain glass_solid,
+        // not a 4% MediaCard panel. Unselected fill stays transparent.
+        let ground = t.glass_solid;
         let dim = |color: Color| {
             if disabled {
                 faded_over(color, ground, 0.5)
@@ -1275,17 +1277,18 @@ impl StageCardPaint {
         };
         let border = if selected { t.foreground } else { t.border };
         let fill = if selected {
-            with_alpha(t.foreground, 0.08)
+            let selected_fill = with_alpha(t.foreground, 0.08);
+            if disabled {
+                faded_over(selected_fill, ground, 0.5)
+            } else {
+                selected_fill
+            }
         } else {
             with_alpha(t.foreground, 0.)
         };
         Self {
             border: hsla(dim(border)),
-            fill: hsla(if disabled {
-                faded_over(fill, ground, 0.5)
-            } else {
-                fill
-            }),
+            fill: hsla(fill),
             thumb: hsla(dim(t.inset)),
             name: hsla(dim(t.foreground)),
             meta: hsla(dim(t.muted_foreground)),
@@ -1295,7 +1298,7 @@ impl StageCardPaint {
 
     /// Layout cards use a muted plate instead of the Screens inset well.
     fn layout_thumb(t: &Theme, disabled: bool) -> gpui::Hsla {
-        let ground = faded_over(t.foreground, t.glass_solid, 0.04);
+        let ground = t.glass_solid;
         let plate = with_alpha(t.muted, 0.5);
         hsla(if disabled {
             faded_over(plate, ground, 0.5)
