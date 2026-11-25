@@ -80,6 +80,7 @@ pub trait ShellSmoke: 'static {
 /// window (docked) or its own (floating, macOS); Electron's surface and
 /// host commands have no GPUI form and stay "not supported".
 pub const PREVIEW_COMMANDS: &[&str] = &[
+    "inspect-native-preview-live-background",
     "inspect-native-preview-runtime",
     "preview-window-close",
     "preview-window-open",

@@ -63,6 +63,7 @@ pub const IMPLEMENTED_COMMANDS: &[&str] = &[
 /// `window.__videorcSmoke*`). The app's Studio handler takes exactly these.
 pub const STUDIO_COMMANDS: &[&str] = &[
     "enable-synthetic-source",
+    "preview-surface-scene-state",
     "scheduled-mutate",
     "scheduled-state",
     "select-camera-device",
@@ -142,6 +143,7 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "import-smoke-scheduled-thumbnail",
     "import-takeover-image",
     "inspect-native-preview-bootstrap",
+    "inspect-native-preview-live-background",
     "inspect-native-preview-runtime",
     "inspect-preview-stage-badges",
     "main-window-focus",
@@ -169,7 +171,6 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "permissions-state",
     "preview-route-set",
     "preview-route-state",
-    "preview-surface-scene-state",
     "preview-window-close",
     "preview-window-open",
     "preview-window-os-close",
