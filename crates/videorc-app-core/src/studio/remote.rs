@@ -25,8 +25,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use serde::Serialize;
 use serde_json::Value;
 use videorc_protocol::{DeviceStatus, RecordingState};
