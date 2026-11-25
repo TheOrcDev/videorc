@@ -255,6 +255,44 @@ pub fn menu_bar(cx: &App, windows: &[WindowId]) -> Option<MenuBar> {
     Some(MenuBar { menus, bindings })
 }
 
+/// Windows and Linux: no menu bar, as Electron's, but the same keys. There
+/// Electron's main forwards ⌘1–⌘9, ⇧⌘L and ⌘, to the shell and its renderer
+/// runs the window chords (`shell-shortcuts.ts`); here the macOS template's
+/// page and window items are bound without a menu (Ctrl on these
+/// platforms). The app menu's roles (Hide, Minimize, Zoom…) stay macOS's.
+pub fn menu_less_bindings(cx: &App, windows: &[WindowId]) -> Vec<KeyBinding> {
+    let mut availability = nav::menu_availability(windows);
+    availability.pages.insert(PageKey::Settings);
+    let Some(template) = app_menu_template(MenuPlatform::Mac, APP_NAME, &availability) else {
+        return Vec::new();
+    };
+    let mut bindings = Vec::new();
+    item_bindings(cx, &template, &mut bindings);
+    bindings
+}
+
+/// The page and window items' keys, through every submenu.
+fn item_bindings(cx: &App, entries: &[MenuEntry], bindings: &mut Vec<KeyBinding>) {
+    for entry in entries {
+        match entry {
+            MenuEntry::Item { command, .. } => {
+                let action = match command {
+                    MenuCommand::ShowPage(key) => page_action(*key),
+                    MenuCommand::ToggleWindow(window) => Some(window_action(*window)),
+                    MenuCommand::OpenReleaseNotes => None,
+                };
+                if let Some(action) = action {
+                    bind(cx, bindings, entry.accelerator(), action.as_ref());
+                }
+            }
+            MenuEntry::Submenu {
+                items: children, ..
+            } => item_bindings(cx, children, bindings),
+            _ => {}
+        }
+    }
+}
+
 /// The windows that exist; each handles its own command
 /// (`screens::stream_manager::window::install`).
 const WINDOWS: &[WindowId] = &[WindowId::StreamManager, WindowId::Notes];
@@ -277,6 +315,7 @@ pub fn install(cx: &mut App) {
         cx.set_menus(bar.menus);
     } else {
         cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
+        cx.bind_keys(menu_less_bindings(cx, WINDOWS));
     }
     // Quit and Close Window on the main window ask first while on air.
     cx.on_action(|_: &Quit, cx| super::exit::ExitGuard::request_quit(cx));

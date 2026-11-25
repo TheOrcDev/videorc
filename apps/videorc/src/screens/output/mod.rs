@@ -53,7 +53,10 @@ const CAMERA_DESCRIPTION: &str = "Shows your program as a camera in Meet, Zoom, 
 const FOLDER_SECTION_DESCRIPTION: &str =
     "The folder each recording is saved to, and what Videorc keeps there.";
 const OFFLINE_LOCK: &str = "Videorc is reconnecting. These controls come back in a moment.";
-const DEVICE_NOUN: &str = "Mac";
+/// `platformCopy(platform).deviceNoun`: "Mac", "PC" or "computer".
+fn device_noun() -> &'static str {
+    videorc_app_core::format::device_noun(crate::app::hotkeys::node_platform())
+}
 
 const RECORDING_PRESETS: &[&str] = &[
     "tutorial-540p30",
@@ -197,7 +200,7 @@ impl CameraModel {
                     .message
                     .clone()
                     .filter(|_| status.platform_step == Some(VirtualCameraPlatformStep::Failed))
-                    .unwrap_or_else(|| camera_copy::cant_run(DEVICE_NOUN)),
+                    .unwrap_or_else(|| camera_copy::cant_run(device_noun())),
                 StatusTone::Warn,
                 false,
             ));
@@ -216,7 +219,7 @@ impl CameraModel {
                 VirtualCameraState::NeedsApproval => {
                     if status.platform_step == Some(VirtualCameraPlatformStep::NeedsReboot) {
                         model.line = Some(say(
-                            camera_copy::needs_restart(DEVICE_NOUN),
+                            camera_copy::needs_restart(device_noun()),
                             StatusTone::Warn,
                             false,
                         ));
