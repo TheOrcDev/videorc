@@ -585,6 +585,8 @@ fn main() -> Result<()> {
             stream_manager_frame,
             APP_ID,
             studio.dashboard(),
+            studio.clone(),
+            core_handle.clone(),
         );
         screens::notes::window::install(cx, notes_frame, APP_ID);
         cx.on_action(move |_: &menus::ShowSettings, cx| {
