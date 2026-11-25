@@ -15,6 +15,7 @@ mod hide_screen;
 mod layout;
 mod list;
 pub mod model;
+mod picker;
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -63,6 +64,10 @@ pub struct ScenePage {
     renaming: Option<Renaming>,
     delete: DialogHandle,
     deleting: Option<Deleting>,
+    /// Add scene… and Change screen….
+    picker: DialogHandle,
+    picker_search: Entity<InputState>,
+    picking: Option<picker::Picking>,
     /// Draws again when the switch status line is due (no timer lives in
     /// the Studio).
     status_timer: Option<Task<()>>,
@@ -122,6 +127,7 @@ impl ScenePage {
         )
         .detach();
 
+        let picker_search = cx.new(|cx| InputState::new(window, cx));
         let watch = studio.clone();
         cx.spawn(async move |this, cx| {
             let mut snapshots = watch.watch();
@@ -146,6 +152,9 @@ impl ScenePage {
             renaming: None,
             delete: DialogHandle::new(false),
             deleting: None,
+            picker: DialogHandle::new(false),
+            picker_search,
+            picking: None,
             status_timer: None,
         };
         let snapshot = page.studio.watch().borrow().clone();
@@ -221,5 +230,6 @@ impl Render for ScenePage {
             )
             .child(self.rename_dialog(window, cx))
             .child(self.delete_dialog(cx))
+            .child(self.picker_dialog(window, cx))
     }
 }
