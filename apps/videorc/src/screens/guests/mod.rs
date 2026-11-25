@@ -27,7 +27,7 @@ use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
-use videorc_kit::tokens::{size, text};
+use videorc_kit::tokens::{radius, size, text};
 
 pub type AppStudio = Studio<BackendClient>;
 
@@ -425,7 +425,7 @@ impl Render for GuestsPanel {
                             .min_w(px(0.))
                             .px(px(10.))
                             .py(px(6.))
-                            .rounded(px(6.))
+                            .rounded(px(radius::CHIP))
                             .bg(hsla(t.muted))
                             .type_scale(text::META)
                             .text_color(hsla(if no_link {

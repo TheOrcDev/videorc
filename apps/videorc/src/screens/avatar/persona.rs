@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 use videorc_app_core::buddy::copy as words;
 use videorc_app_core::buddy::library::{CONTEXT_MAX_CHARS, text_length};
 use videorc_app_core::buddy::persona::{
-    PERSONALITY_MAX_CHARS, about_to_save, bubble_index, bubble_style, chip_fills_at_once,
-    fresh_persona, name_to_save,
+    PERSONALITY_MAX_CHARS, about_to_save, bubble_style, chip_fills_at_once, fresh_persona,
+    name_to_save,
 };
 use videorc_app_core::stream_manager::buddy::CohostSettingsView;
 use videorc_app_core::user_error::{
@@ -22,20 +22,17 @@ use videorc_app_core::user_error::{
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::panel_section::PanelSection;
-use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::textarea::{Textarea, TextareaState};
 use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::{Theme, text};
+use videorc_kit::tokens::{Theme, radius, text};
 use videorc_protocol::cohost::CohostPersona;
 
+use super::reactions::SaveSection;
 use super::{AvatarScreen, pictures, sync_handle};
 
-const SAVE_THE_CHANGES: UserErrorContext = UserErrorContext {
-    action: "save",
-    object: "the changes",
-};
 const START_OVER: UserErrorContext = UserErrorContext {
     action: "start",
     object: "over",
@@ -246,10 +243,10 @@ impl AvatarScreen {
             return;
         };
         fields.saved_about = notes.clone();
-        self.patch_settings(json!({ "notes": notes }), cx);
+        self.patch_settings(json!({ "notes": notes }), SaveSection::Persona, cx);
     }
 
-    fn set_bubble(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(super) fn set_bubble(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(persona) = self.persona.as_ref() else {
             return;
         };
@@ -362,12 +359,35 @@ impl AvatarScreen {
     }
 
     fn save_persona(&mut self, persona: CohostPersona, cx: &mut Context<Self>) {
-        self.patch_settings(json!({ "persona": persona }), cx);
+        self.save_persona_with(persona, SaveSection::Persona, cx);
+    }
+
+    /// Saves the persona; a failure is the given section's.
+    pub(super) fn save_persona_with(
+        &mut self,
+        persona: CohostPersona,
+        section: SaveSection,
+        cx: &mut Context<Self>,
+    ) {
+        self.patch_settings(json!({ "persona": persona }), section, cx);
+    }
+
+    /// The failed save a section shows, in words.
+    pub(super) fn save_error(&self, section: SaveSection) -> Option<String> {
+        self.save_error
+            .as_ref()
+            .filter(|(failed, _)| *failed == section)
+            .map(|(_, message)| message.clone())
     }
 
     /// `patchCohostSettings`: the answer is the new settings.
-    fn patch_settings(&mut self, patch: Value, cx: &mut Context<Self>) {
-        self.persona_error = None;
+    pub(super) fn patch_settings(
+        &mut self,
+        patch: Value,
+        section: SaveSection,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_error = None;
         let backend = self.studio.backend().clone();
         let job = self
             .runtime
@@ -378,9 +398,13 @@ impl AvatarScreen {
                 match answer {
                     Ok(Ok(value)) => screen.settings_answered(&value, cx),
                     Ok(Err(error)) => {
-                        let copy = user_error_message(Failure::Rpc(&error), Some(SAVE_THE_CHANGES));
-                        screen.persona_error =
-                            Some(format!("{}. {}", copy.title, copy.description));
+                        let context = UserErrorContext {
+                            action: "save",
+                            object: section.object(),
+                        };
+                        let copy = user_error_message(Failure::Rpc(&error), Some(context));
+                        screen.save_error =
+                            Some((section, format!("{}. {}", copy.title, copy.description)));
                     }
                     Err(_) => {}
                 }
@@ -396,6 +420,9 @@ impl AvatarScreen {
                 self.persona = settings.persona;
             }
             self.notes = Some(settings.notes);
+            if settings.auto_chat.is_some() {
+                self.auto_chat = settings.auto_chat;
+            }
         }
         cx.notify();
     }
@@ -526,27 +553,45 @@ pub(super) fn render_persona(
         t,
     );
 
-    let bubble_entity = entity.clone();
-    let mut picker = SegmentedControl::new("avatar-bubble-style")
-        .small(true)
-        .accessibility_label(words::BUBBLE_STYLE_LABEL)
-        .value(Some(
-            words::BUBBLE_STYLES[bubble_index(persona.bubble_style)].0,
-        ))
-        .on_change(move |value: SharedString, _, cx| {
-            let index = words::BUBBLE_STYLES
-                .iter()
-                .position(|(id, _)| *id == value.as_ref())
-                .unwrap_or(0);
-            bubble_entity.update(cx, |screen, cx| screen.set_bubble(index, cx));
-        });
-    for (id, label) in words::BUBBLE_STYLES {
-        picker = picker.option(Segment::new(id, label));
-    }
+    let picker =
+        super::bubble::style_picker("avatar-bubble-style", persona.bubble_style, entity.clone())
+            .accessibility_label(words::BUBBLE_STYLE_LABEL);
+    // The sample itself opens the zoom too (owner, 2026-10-09); the
+    // magnifier stays the keyboard path.
+    let (zoom_sample, zoom_button) = (entity.clone(), entity.clone());
+    let sample = div()
+        .id("avatar-bubble-sample-zoom")
+        .cursor_pointer()
+        .rounded(px(radius::ROW))
+        .child(super::bubble::inline_sample(screen))
+        .on_click(move |_, _, cx| zoom_sample.update(cx, |screen, cx| screen.open_bubble_zoom(cx)));
+    let controls = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(16.))
+        .child(picker)
+        .child(
+            div().flex().items_end().gap(px(4.)).child(sample).child(
+                Button::new("avatar-bubble-zoom")
+                    .variant(ButtonVariant::Ghost)
+                    .size(ButtonSize::Icon)
+                    .accessibility_label(words::BUBBLE_ZOOM)
+                    .tooltip(words::BUBBLE_ZOOM_HINT)
+                    .child(icon(
+                        IconName::MagnifyingGlass,
+                        16.,
+                        hsla(t.muted_foreground),
+                    ))
+                    .on_click(move |_, _, cx| {
+                        zoom_button.update(cx, |screen, cx| screen.open_bubble_zoom(cx))
+                    }),
+            ),
+        );
     let bubble = field(
         words::BUBBLE_LABEL,
         Some(words::bubble_description(&persona.name)),
-        picker.into_any_element(),
+        controls.into_any_element(),
         div().into_any_element(),
         t,
     );
@@ -555,7 +600,7 @@ pub(super) fn render_persona(
         .title(words::PERSONA_TITLE)
         .description(words::PERSONA_DESCRIPTION)
         .child(header);
-    if let Some(error) = screen.persona_error.clone() {
+    if let Some(error) = screen.save_error(SaveSection::Persona) {
         section = section.child(
             Alert::new("avatar-persona-error")
                 .variant(AlertVariant::Destructive)

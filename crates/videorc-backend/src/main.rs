@@ -199,6 +199,9 @@ mod panic_hook;
 mod performance_check;
 mod pipeline;
 mod platform_stream_watch;
+mod playback;
+#[cfg(target_os = "macos")]
+mod playback_avf;
 mod playback_cpu_ring;
 mod posters;
 mod preflight;
@@ -6551,6 +6554,13 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
         }),
 
+        // Plan 260 (L2): an open probes the file and waits for its first
+        // frame (5 s at most); a seek waits for the frame at its position.
+        "playback.open" | "playback.seek" | "playback.close" => Some(Mutation {
+            max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
+        }),
+        "playback.play" | "playback.pause" | "playback.mute" => Some(DEFAULT_MUTATION_POLICY),
+
         // Plan 168 S-F4: a save decodes the built atlas once and moves the pack.
         "cohost.pet.save" => Some(Mutation {
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
@@ -6740,6 +6750,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "preview.surface.status"
         | "preview.cpu.status"
         | "playback.cpu.status"
+        | "playback.status"
         | "remote.control.status"
         | "remote.lan.status"
         | "remote.chat.snapshot"
@@ -10134,6 +10145,8 @@ async fn websocket_session_with_handler_role_and_redaction(
         None => (None, None),
     };
     let mut preview_frame_lease = None;
+    // Plan 260 (L2): the macOS Library player's frame lease, socket-owned.
+    let mut playback_frame_lease: playback::PlaybackFrameLease = None;
     let mut preview_handover = preview_handover::HeldPreviewHandover::default();
     // Plan 260 S1.7: the CPU preview ring this socket opened; dropping it
     // (the socket closed) closes the ring.
@@ -10375,6 +10388,25 @@ async fn websocket_session_with_handler_role_and_redaction(
                     continue;
                 }
 
+                if let Some(response) = playback::handle_playback_frame_lease_control(
+                    &state,
+                    role,
+                    &mut playback_frame_lease,
+                    text.as_str(),
+                ) {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
                 if let Some(response) = handle_preview_frame_lease_control(
                     &state,
                     role,
@@ -10490,6 +10522,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     // accepted queue so native/source mutations are never canceled halfway.
     // (Remote client count is decremented by RemoteClientCountGuard's Drop.)
     drop(preview_frame_lease);
+    drop(playback_frame_lease);
     drop(preview_handover);
     drop(preview_cpu_ring_owner);
     drop(playback_cpu_ring_owner);
@@ -13177,7 +13210,11 @@ async fn handle_text_message_with_role(
                     {
                         Ok(Ok(result)) => ServerResponse::ok(
                             command.id,
-                            result.guard_privacy(privacy_start, state.screen_privacy.view()),
+                            screen_capture::GuardScenePictures::guard_privacy(
+                                result,
+                                privacy_start,
+                                state.screen_privacy.view(),
+                            ),
                         ),
                         Ok(Err(error)) => {
                             ServerResponse::error(command.id, "scene-pictures-failed", error)
@@ -13459,6 +13496,45 @@ async fn handle_text_message_with_role(
         }
         "preview.cpu.status" => ServerResponse::ok(command.id, state.preview_cpu_ring.status()),
         "playback.cpu.status" => ServerResponse::ok(command.id, state.playback_cpu_ring.status()),
+        // Plan 260 (L2): the Library's playback on Windows and Linux.
+        "playback.open" => {
+            match serde_json::from_value::<crate::protocol::playback::PlaybackOpenParams>(
+                command.params,
+            ) {
+                Ok(params) => ServerResponse::ok(command.id, playback::open(state, params).await),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "playback.play" => ServerResponse::ok(command.id, playback::play(state).await),
+        "playback.pause" => ServerResponse::ok(command.id, playback::pause(state).await),
+        "playback.seek" => {
+            match serde_json::from_value::<crate::protocol::playback::PlaybackSeekParams>(
+                command.params,
+            ) {
+                Ok(params) => {
+                    ServerResponse::ok(command.id, playback::seek(state, params.position_ms).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "playback.mute" => {
+            match serde_json::from_value::<crate::protocol::playback::PlaybackMuteParams>(
+                command.params,
+            ) {
+                Ok(params) => {
+                    ServerResponse::ok(command.id, playback::mute(state, params.muted).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "playback.close" => ServerResponse::ok(command.id, playback::close(state).await),
+        "playback.status" => ServerResponse::ok(command.id, state.playback.status()),
         "preview.surface.take_native_host_commands" => {
             let commands = take_native_preview_host_commands(state).await;
             ServerResponse::ok(command.id, commands)

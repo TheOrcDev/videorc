@@ -9,6 +9,7 @@
 //! inspector.
 
 pub mod audio;
+pub mod chat;
 pub mod layout;
 pub mod scenes;
 pub mod session;
@@ -34,6 +35,7 @@ use videorc_preview::lifecycle::WindowMode;
 use crate::preview::Preview;
 
 use audio::AudioSection;
+use chat::ChatSection;
 use layout::{INSPECTOR_MAX_PX, StudioLayout};
 use scenes::ScenesSection;
 use session::SessionSection;
@@ -52,6 +54,8 @@ pub struct StudioPage {
     transport: Entity<Transport>,
     preview: Entity<Preview>,
     session: Entity<SessionSection>,
+    /// Chat in Studio (P188): draws nothing until it shows.
+    chat: Entity<ChatSection>,
     audio: Entity<AudioSection>,
     takeover: Entity<TakeoverSection>,
     /// The Scenes section under the preview (P273: Scenes first in the
@@ -78,6 +82,7 @@ impl StudioPage {
         transport: Entity<Transport>,
         preview: Entity<Preview>,
         session: Entity<SessionSection>,
+        chat: Entity<ChatSection>,
         audio: Entity<AudioSection>,
         takeover: Entity<TakeoverSection>,
         scenes: Entity<ScenesSection>,
@@ -106,6 +111,7 @@ impl StudioPage {
             transport,
             preview,
             session,
+            chat,
             audio,
             takeover,
             scenes,
@@ -139,6 +145,12 @@ impl StudioPage {
     }
 }
 
+/// `preview-stage.tsx`'s floating card.
+#[cfg(target_os = "macos")]
+const BRING_TO_FRONT_LABEL: &str = "Bring to front";
+#[cfg(target_os = "macos")]
+const KEEP_ON_TOP_LABEL: &str = "Keep on top of other apps";
+
 impl StudioPage {
     /// `preview-stage.tsx`'s dock control under the video: "Pop out" while
     /// docked, "Show here" while the Preview floats. Close, Bring to front
@@ -163,17 +175,61 @@ impl StudioPage {
                 .label(SHOW_HERE_LABEL)
                 .variant(ButtonVariant::Default),
         };
-        let preview = self.preview.clone();
-        Some(
-            div()
-                .flex()
-                .justify_end()
-                .items_center()
-                .child(button.on_click(move |_, _, cx| {
-                    preview.update(cx, |preview, cx| preview.toggle_floating(cx));
-                }))
-                .into_any_element(),
-        )
+        let floating = preview.mode() == WindowMode::Floating;
+        #[cfg(target_os = "macos")]
+        let keep_on_top = preview.keep_on_top();
+        let muted = hsla(theme.muted_foreground);
+        let entity = self.preview.clone();
+        let row = div()
+            .flex()
+            .flex_wrap()
+            .justify_end()
+            .items_center()
+            .gap(px(8.))
+            .child(button.on_click(move |_, _, cx| {
+                entity.update(cx, |preview, cx| preview.toggle_floating(cx));
+            }));
+        // `preview-stage.tsx`'s floating card: Bring to front (P130) and
+        // "Keep on top of other apps" (P132).
+        #[cfg(target_os = "macos")]
+        let row = if floating {
+            let front = self.preview.clone();
+            let pin = self.preview.clone();
+            row.child(
+                Button::new("preview-bring-to-front")
+                    .label(BRING_TO_FRONT_LABEL)
+                    .variant(ButtonVariant::Secondary)
+                    .on_click(move |_, _, cx| {
+                        front.update(cx, |preview, cx| preview.bring_to_front(cx))
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        videorc_kit::switch::Switch::new("preview-keep-on-top")
+                            .small(true)
+                            .accessibility_label(KEEP_ON_TOP_LABEL)
+                            .checked(keep_on_top)
+                            .on_change(move |on, _, cx| {
+                                pin.update(cx, |preview, cx| preview.set_keep_on_top(on, cx));
+                            }),
+                    )
+                    .child(
+                        div()
+                            .type_scale(text::META)
+                            .text_color(muted)
+                            .child(KEEP_ON_TOP_LABEL),
+                    ),
+            )
+        } else {
+            row
+        };
+        #[cfg(not(target_os = "macos"))]
+        let _ = (floating, muted);
+        Some(row.into_any_element())
     }
 
     /// `TalkShowPreviewCard`: the Preview's place while the room is open.
@@ -260,6 +316,7 @@ impl Render for StudioPage {
             .min_w_0()
             .min_h_0()
             .child(self.session.clone())
+            .child(self.chat.clone())
             .child(self.audio.clone())
             .child(self.takeover.clone());
         let transport = self.transport.clone();

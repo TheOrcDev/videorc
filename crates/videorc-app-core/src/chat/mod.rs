@@ -9,9 +9,11 @@
 //! - [`highlight`]: a message on stream as a row shows it, and the files the
 //!   backend draws its card from (the backend never fetches while drawing,
 //!   so the avatar and each emote are cached first).
+//! - [`highlight_driver`]: a click that puts a message on stream or takes it
+//!   off, and the backend's card as `comments.highlight.status` pushes it.
 //! - [`overlay`]: which messages the chat-on-stream box shows.
 //! - [`images`]: a chat image's bytes through the backend's loopback route,
-//!   for the rows' avatars.
+//!   for the rows' avatars, and what kind of picture they are.
 //!
 //! - [`view`]: the Studio's Chat section.
 //!
@@ -20,6 +22,7 @@
 
 pub mod arrival;
 pub mod highlight;
+pub mod highlight_driver;
 pub mod images;
 pub mod model;
 pub mod overlay;

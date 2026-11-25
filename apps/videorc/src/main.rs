@@ -222,8 +222,13 @@ fn main() -> Result<()> {
                     .chain([camera::VIRTUAL_CAMERA_CHANGED, app::exit::CLOUD_STATE])
                     .chain(screens::settings::EVENTS)
                     .chain(screens::avatar::EVENTS)
+                    .chain(screens::sidekick::EVENTS)
+                    .chain(screens::studio::chat::EVENTS)
                     .chain(videorc_app_core::library::LIBRARY_EVENTS)
-                    .chain(["session.log"]),
+                    .chain(["session.log"])
+                    // The hide state: Follow the app in front, and Studio's
+                    // Scenes section (Hide screen).
+                    .chain(["screen.privacy.changed"]),
             ),
             logger: logger.clone(),
             ..ClientConfig::default()
@@ -338,6 +343,8 @@ fn main() -> Result<()> {
     // The main window's frame, saved in the data directory.
     let stream_manager_frame = StreamManagerFrame::new(&paths.user_data_dir, logger.clone());
     let notes_frame = NotesFrame::new(&paths.user_data_dir, logger.clone());
+    #[cfg(target_os = "macos")]
+    let preview_frame = preview::frame::PreviewFrame::new(&paths.user_data_dir, logger.clone());
     let captions_frame =
         screens::captions::reader::CaptionsFrame::new(&paths.user_data_dir, logger.clone());
     let quit_guard = sleep_guard.clone();
@@ -348,6 +355,7 @@ fn main() -> Result<()> {
     let instance = Rc::new(RefCell::new(instance));
     let quit_instance = instance.clone();
     let hotkey_logger = logger.clone();
+    let follow_logger = logger.clone();
     let health_logger = logger.clone();
     let handoff_links = deep_links.clone();
     // The quit while on air: the guard follows the backend's events.
@@ -522,6 +530,10 @@ fn main() -> Result<()> {
                     window,
                     cx,
                 );
+                #[cfg(target_os = "macos")]
+                preview.update(cx, |preview, _| {
+                    preview.remember_window(preview_frame.clone())
+                });
                 *preview_slot.borrow_mut() = Some(preview.clone());
                 let session = cx.new(|cx| {
                     SessionSection::new(
@@ -542,6 +554,15 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let chat = cx.new(|cx| {
+                    screens::studio::chat::ChatSection::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        studio_state.clone(),
+                        studio.live_chat(),
+                        cx,
+                    )
+                });
                 let takeover = cx.new(|cx| {
                     TakeoverSection::new(
                         studio.backend().clone(),
@@ -557,6 +578,8 @@ fn main() -> Result<()> {
                         studio_state.clone(),
                         talk_show.clone(),
                         global_keys.clone(),
+                        permissions.clone(),
+                        window,
                         cx,
                     )
                 });
@@ -565,6 +588,7 @@ fn main() -> Result<()> {
                         transport.clone(),
                         preview.clone(),
                         session,
+                        chat,
                         audio,
                         takeover,
                         scenes,
@@ -661,6 +685,65 @@ fn main() -> Result<()> {
             core_handle.clone(),
         );
         screens::notes::window::install(cx, notes_frame, APP_ID);
+
+        // Follow the app in front and the password-manager hide (plan 210
+        // D10/D11): the core's follower, fed by the platform's front-app
+        // watcher. Only macOS has one so far.
+        {
+            #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+            let mut self_ids = vec![APP_ID.to_string()];
+            #[cfg(target_os = "macos")]
+            self_ids.extend(platform::macos::front_app::self_bundle_id());
+            let feed = videorc_app_core::studio::follow_runner::start(
+                &core_handle,
+                studio.clone(),
+                self_ids,
+                follow_logger.clone(),
+            );
+            #[cfg(target_os = "macos")]
+            if platform::macos::front_app::start(feed.sender.clone()) {
+                let watch = feed.watch_windows.clone();
+                cx.spawn(async move |cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(500))
+                            .await;
+                        if watch.load(std::sync::atomic::Ordering::Relaxed) {
+                            cx.update(|_| platform::macos::front_app::poll());
+                        }
+                    }
+                })
+                .detach();
+            } else {
+                follow_logger.warn(
+                    "Follow the app in front: the front-app watcher did not start; Follow and the password-manager hide stay off.",
+                );
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                drop(feed);
+                follow_logger.info(
+                    "Follow the app in front: this platform has no front-app watcher yet; Follow and the password-manager hide stay off.",
+                );
+            }
+        }
+        // P1549: a Preview left floating floats again once the workspace
+        // shows (Electron's `restorePreviewWindowOnLaunch`, held while
+        // first-run setup fills the window).
+        #[cfg(target_os = "macos")]
+        if let Some(preview) = preview_slot.borrow().clone() {
+            if first_run.read(cx).is_open() {
+                let pending = std::cell::Cell::new(true);
+                cx.observe(&first_run, move |first_run, cx| {
+                    if !first_run.read(cx).is_open() && pending.replace(false) {
+                        preview.update(cx, |preview, cx| preview.restore_at_launch(cx));
+                    }
+                })
+                .detach();
+            } else {
+                preview.update(cx, |preview, cx| preview.restore_at_launch(cx));
+            }
+        }
         screens::captions::reader::install(cx, captions_frame, APP_ID);
 
         // The smoke command server and the UI driver (plan 260 S2.5), when a

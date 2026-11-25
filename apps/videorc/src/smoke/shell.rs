@@ -6,10 +6,10 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{AnyWindowHandle, App, Entity, WindowHandle};
+use gpui::{AnyWindowHandle, App, Entity, WindowAppearance, WindowHandle};
 use serde_json::{Value, json};
 use videorc_app_core::smoke::security::{UiAppearanceRequest, UiToastRequest, UiWindow};
-use videorc_kit::theme::{ForcedDark, IncreaseContrast, ReduceMotion};
+use videorc_kit::theme::{IncreaseContrast, ReduceMotion};
 use videorc_kit::{ToastData, ToastKind};
 
 use super::ShellSmoke;
@@ -97,9 +97,15 @@ impl ShellSmoke for ShellWindows {
             reduce_motion: apply(before.reduce_motion, request.reduce_motion),
         };
         self.forced.set(forced);
+        // Dark/light goes through the same window appearance the Settings
+        // theme picker uses; theme::current then follows window.appearance().
         // The app does not read Increase Contrast or Reduce Motion from the
         // system yet (S2.6), so giving one back means off.
-        cx.set_global(ForcedDark(forced.dark));
+        cx.set_window_appearance(match forced.dark {
+            Some(true) => Some(WindowAppearance::Dark),
+            Some(false) => Some(WindowAppearance::Light),
+            None => None,
+        });
         cx.set_global(IncreaseContrast(forced.increase_contrast.unwrap_or(false)));
         cx.set_global(ReduceMotion(forced.reduce_motion.unwrap_or(false)));
         cx.refresh_windows();
@@ -136,6 +142,16 @@ impl ShellSmoke for ShellWindows {
             .ok_or_else(|| super::MAIN_WINDOW_NOT_READY.to_string())?;
         let mode = preview.read(cx).mode();
         let can_float = preview.read(cx).can_float();
+        if command == "inspect-native-preview-live-background" {
+            // Electron's proof surface drew the idle live background on
+            // Linux; the GPUI preview draws the backend compositor's frames
+            // everywhere, so `compositor.status` reports it.
+            return Ok(json!({
+                "liveBackground": null,
+                "reporter": "compositor",
+                "detail": "The GPUI preview draws the compositor's frames; compositor.status reports the live background.",
+            }));
+        }
         let wanted = match command {
             "inspect-native-preview-runtime" | "preview-window-state" => None,
             "preview-window-open" => Some(WindowMode::Floating),
@@ -159,7 +175,29 @@ impl ShellSmoke for ShellWindows {
                 preview.update(cx, |preview, cx| preview.toggle_floating(cx));
             }
         }
-        Ok(preview.read(cx).smoke_state())
+        let mut state = preview.read(cx).smoke_state();
+        // Electron's `preview-window-state` shape too: whether the preview is
+        // on screen, and its own window's content size while it floats.
+        let floating = state["mode"] == "floating";
+        let shown = if floating {
+            state["floatingOpen"] == true
+        } else {
+            state["dockedShown"] == true
+        };
+        state["open"] = json!(shown);
+        state["visible"] = json!(shown);
+        let bounds = preview
+            .read(cx)
+            .floating_window()
+            .and_then(|handle| handle.update(cx, |_, window, _| window.bounds().size).ok());
+        state["contentBounds"] = match bounds {
+            Some(size) => json!({
+                "width": f32::from(size.width),
+                "height": f32::from(size.height),
+            }),
+            None => Value::Null,
+        };
+        Ok(state)
     }
 }
 

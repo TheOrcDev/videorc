@@ -10,6 +10,7 @@ import {
   readUiSettingJs,
   RELOAD_KEEPING_SEED_JS,
   reloadKeepingSeedJs,
+  seedCaptureConfig,
   seedUiSettingsJs,
   UI_SETTINGS_READY_JS,
   uiSettingsReadyJs,
@@ -322,4 +323,38 @@ test('no script touches a renderer product key through localStorage', () => {
     }
   }
   assert.deepEqual(offenders, [])
+})
+
+test('seedCaptureConfig seeds through the Studio handler on GPUI and through the store on Electron', async () => {
+  const sent = []
+  const request = async (smoke, command, params, options) => {
+    sent.push({ command, params, options })
+    return { ok: true }
+  }
+  const patch = { recordEnabled: true, video: { fps: 60 } }
+  await seedCaptureConfig({}, patch, { app: 'gpui', timeoutMs: 1000, request })
+  assert.deepEqual(sent[0], {
+    command: 'studio-capture-configure',
+    params: { config: patch },
+    options: { timeoutMs: 1000 }
+  })
+  let slept = 0
+  await seedCaptureConfig({}, patch, {
+    app: 'electron',
+    request,
+    forgetWorkingScene: false,
+    sleep: async (ms) => {
+      slept = ms
+    }
+  })
+  assert.equal(sent[1].command, 'eval-js')
+  assert.deepEqual(sent[1].params.patch, patch)
+  assert.match(sent[1].params.code, /location\.reload\(\)/)
+  assert.doesNotMatch(
+    sent[1].params.code,
+    new RegExp(WORKING_SCENE_STORAGE_KEY.replaceAll('.', '\\.'))
+  )
+  assert.equal(slept, 2500)
+  await assert.rejects(seedCaptureConfig({}, [], { request }), /Not a capture config patch/)
+  await assert.rejects(seedCaptureConfig({}, {}, { app: 'rust', request }), /Not a smoke app/)
 })

@@ -36,7 +36,7 @@ import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs'
 import { loadavg, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import {
   afterTakeLiveBackgroundState,
@@ -64,7 +64,11 @@ const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 const forced = process.env.VIDEORC_LIVE_BACKGROUND_FORCE_STILL === '1'
-const idleReporter = idlePreviewLiveBackgroundReporter(process.platform)
+// Plan 260 Phase 3: the GPUI preview draws the backend compositor's frames
+// (no Chromium proof surface), so the idle compositor reports on every
+// platform; its fixture goes through the Studio smoke handler.
+const gpuiApp = smokeAppIsGpui()
+const idleReporter = gpuiApp ? 'compositor' : idlePreviewLiveBackgroundReporter(process.platform)
 
 /** Plan 190 "Performance budget": the background's own p95 on an M-series Mac. */
 const BUDGET_MS = { 1080: 1.5, 2160: 3.0 }
@@ -180,14 +184,24 @@ try {
     // app can't read, so the start is refused. This smoke records its own
     // scene: turn the switch off first, as the record-latency smoke does.
     // The renderer mounts after main's markers; on a slow machine well after.
-    await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
-    const clipsOff = await requestSmokeCommand(
-      smoke,
-      'eval-js',
-      { code: 'return window.__videorcSmokeSetReplayBuffer?.(false) ?? null' },
-      { timeoutMs }
-    )
-    assert.equal(clipsOff?.result, true, 'the renderer has no clip buffer smoke hook')
+    if (gpuiApp) {
+      const clipsOff = await requestSmokeCommand(
+        smoke,
+        'studio-replay-buffer',
+        { armed: false },
+        { timeoutMs }
+      )
+      assert.equal(clipsOff?.armed, false, 'the clip buffer did not switch off')
+    } else {
+      await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
+      const clipsOff = await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        { code: 'return window.__videorcSmokeSetReplayBuffer?.(false) ?? null' },
+        { timeoutMs }
+      )
+      assert.equal(clipsOff?.result, true, 'the renderer has no clip buffer smoke hook')
+    }
     await waitFor(
       async () => (await request(ws, timeoutMs, 'replay.status'))?.state === 'off',
       'the clip buffer to turn off'
@@ -199,6 +213,43 @@ try {
     // current session…"). The hooks above are there before that: 3 of 10
     // runs set the fixture up ~2.8 s after launch, inside that window, and
     // the apply was refused (2026-11-23).
+    if (gpuiApp) await prepareGpuiFixture()
+    else await prepareRendererFixture()
+    // The GPUI Preview window opens on macOS; elsewhere it stays docked in the
+    // Studio, where the compositor renders it all the same.
+    if (!gpuiApp || process.platform === 'darwin') {
+      await requestSmokeCommand(smoke, 'preview-window-open', {}, { timeoutMs })
+    }
+    await waitFor(async () => (await status()).framesRendered > 0, 'the first preview frame')
+
+    // Zero cost when off: before any live background, nothing is built.
+    const before = await status()
+    assert.equal(before.framePipeline?.liveBackgroundPrograms ?? 0, 0, 'no live program while off')
+    assert.equal(before.framePipeline?.liveBackgroundScratchBytes ?? 0, 0, 'no scratch while off')
+    assert.equal(before.liveBackground, undefined, 'no live status while off')
+
+    for (const [index, testCase] of CASES.entries()) {
+      await runCase(testCase, index)
+    }
+
+    // Off again: the programs and scratch are released.
+    await applyPreview(null, CASES[0])
+    await waitFor(async () => {
+      const current = await status()
+      return (
+        current.liveBackground === undefined &&
+        (current.framePipeline?.liveBackgroundPrograms ?? 0) === 0 &&
+        (current.framePipeline?.liveBackgroundScratchBytes ?? 0) === 0
+      )
+    }, 'the live background to release its programs and scratch')
+    console.log('Live background smoke PASS')
+  } finally {
+    await request(ws, timeoutMs, 'session.stop').catch(() => {})
+    ws.close()
+  }
+
+  /** Electron: the on-stream scene edited to the screen-only test pattern, Camera Off. */
+  async function prepareRendererFixture() {
     await waitFor(async () => {
       const { result } = await requestSmokeCommand(
         smoke,
@@ -251,33 +302,51 @@ try {
       )
     }, 'the renderer-owned screen-only pattern with Camera Off')
     assert(prepared.result.activeId, 'the fixture must keep a scene on stream')
-    await requestSmokeCommand(smoke, 'preview-window-open', {}, { timeoutMs })
-    await waitFor(async () => (await status()).framesRendered > 0, 'the first preview frame')
+  }
 
-    // Zero cost when off: before any live background, nothing is built.
-    const before = await status()
-    assert.equal(before.framePipeline?.liveBackgroundPrograms ?? 0, 0, 'no live program while off')
-    assert.equal(before.framePipeline?.liveBackgroundScratchBytes ?? 0, 0, 'no scratch while off')
-    assert.equal(before.liveBackground, undefined, 'no live status while off')
-
-    for (const [index, testCase] of CASES.entries()) {
-      await runCase(testCase, index)
-    }
-
-    // Off again: the programs and scratch are released.
-    await applyPreview(null, CASES[0])
+  /** GPUI: the same fixture through the Studio smoke handler: Camera Off, the
+   * screen-only layout over the test pattern, saved as a scene and on stream. */
+  async function prepareGpuiFixture() {
     await waitFor(async () => {
-      const current = await status()
+      const state = await requestSmokeCommand(smoke, 'studio-state', {}, { timeoutMs })
+      const scenes = await requestSmokeCommand(smoke, 'studio-scenes-state', {}, { timeoutMs })
       return (
-        current.liveBackground === undefined &&
-        (current.framePipeline?.liveBackgroundPrograms ?? 0) === 0 &&
-        (current.framePipeline?.liveBackgroundScratchBytes ?? 0) === 0
+        state?.bootstrapped === true &&
+        state?.connection?.state === 'connected' &&
+        scenes?.loaded === true &&
+        !scenes?.readOnly
       )
-    }, 'the live background to release its programs and scratch')
-    console.log('Live background smoke PASS')
-  } finally {
-    await request(ws, timeoutMs, 'session.stop').catch(() => {})
-    ws.close()
+    }, 'the Studio connected with its scene loaded')
+    await requestSmokeCommand(
+      smoke,
+      'select-camera-device',
+      { off: true, settleMs: 0 },
+      { timeoutMs }
+    )
+    await requestSmokeCommand(
+      smoke,
+      'select-layout-preset',
+      { preset: 'screen-only', settleMs: 0 },
+      { timeoutMs }
+    )
+    const saved = await requestSmokeCommand(
+      smoke,
+      'studio-scene-save',
+      { name: 'Live background fixture' },
+      { timeoutMs }
+    )
+    assert(saved?.applied, `the fixture scene did not go on stream: ${JSON.stringify(saved)}`)
+    await waitFor(async () => {
+      const scenes = await requestSmokeCommand(smoke, 'studio-scenes-state', {}, { timeoutMs })
+      const visual = scenes?.visual
+      return (
+        scenes?.onStreamId === saved.id &&
+        visual?.cameraOff === true &&
+        !visual?.cameraId &&
+        visual?.testPattern === true &&
+        visual?.layoutPreset === 'screen-only'
+      )
+    }, 'the Studio-owned screen-only pattern with Camera Off')
   }
 
   async function runCase(testCase, index) {

@@ -52,6 +52,7 @@ pub const IMPLEMENTED_COMMANDS: &[&str] = &[
     "app-quit",
     "authorize-smoke-resource",
     "backend-debug-rpc",
+    "import-smoke-background",
     "inspect-backend-state-isolation",
     "preview-lifecycle-allow-app-quit",
     "preview-lifecycle-attempt-app-quit",
@@ -62,21 +63,30 @@ pub const IMPLEMENTED_COMMANDS: &[&str] = &[
 /// `window.__videorcSmoke*`). The app's Studio handler takes exactly these.
 pub const STUDIO_COMMANDS: &[&str] = &[
     "enable-synthetic-source",
+    "preview-surface-scene-state",
     "scheduled-mutate",
     "scheduled-state",
     "select-camera-device",
+    "select-layout-preset",
     "select-screen-device",
     "studio-capture-configure",
     "studio-live-audio-hold",
+    "studio-privacy-add-app",
+    "studio-privacy-state",
     "studio-put-setting",
     "studio-record",
     "studio-replay-buffer",
     "studio-scene-apply",
     "studio-scene-background",
     "studio-scene-delete",
+    "studio-scene-edit",
+    "studio-scene-insert",
     "studio-scene-layout",
+    "studio-scene-move",
     "studio-scene-save",
     "studio-scenes-state",
+    "studio-screen-privacy",
+    "studio-shortcut",
     "studio-state",
     "studio-stop",
 ];
@@ -137,10 +147,10 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "global-shortcuts-fire",
     "global-shortcuts-recorder",
     "global-shortcuts-state",
-    "import-smoke-background",
     "import-smoke-scheduled-thumbnail",
     "import-takeover-image",
     "inspect-native-preview-bootstrap",
+    "inspect-native-preview-live-background",
     "inspect-native-preview-runtime",
     "inspect-preview-stage-badges",
     "main-window-focus",
@@ -168,7 +178,6 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "permissions-state",
     "preview-route-set",
     "preview-route-state",
-    "preview-surface-scene-state",
     "preview-window-close",
     "preview-window-open",
     "preview-window-os-close",
@@ -191,7 +200,6 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "scene-stage-state",
     "scroll-studio",
     "select-camera-shape",
-    "select-layout-preset",
     "studio-dock-slot",
     "suspend-native-preview-surface",
     "ui-appearance",
@@ -353,6 +361,7 @@ impl AppSmokeCommands {
             }
             "authorize-smoke-resource" => self.authorize_resource(&params).await,
             "backend-debug-rpc" => self.backend_debug_rpc(&params).await,
+            "import-smoke-background" => self.import_background(&params).await,
             "inspect-backend-state-isolation" => self.inspect_isolation(&params).await,
             other => Err(not_supported_message(other)),
         }
@@ -396,6 +405,33 @@ impl AppSmokeCommands {
             "kind": kind,
             "displayName": display_name(&grant.path),
         }))
+    }
+
+    /// `import-smoke-background {path}`: a background image inside the smoke's
+    /// state directory, imported as the Images page imports one (the
+    /// backend's `backgrounds.import` copies it into app storage), answered
+    /// as Electron's main answers it.
+    async fn import_background(&self, params: &Map<String, Value>) -> Result<Value, String> {
+        const UNAVAILABLE: &str =
+            "Smoke background import is unavailable or invalid in this app mode.";
+        if self.config.packaged || params.len() != 1 {
+            return Err(UNAVAILABLE.into());
+        }
+        let path = params.get("path").cloned().ok_or(UNAVAILABLE)?;
+        let mut check = Map::new();
+        check.insert("path".into(), path);
+        check.insert("kind".into(), json!("input-file"));
+        let grant =
+            validate_smoke_resource_authorization(&check, self.config.state_directory.as_deref())?;
+        let imported = self
+            .admin
+            .request(
+                "backgrounds.import",
+                json!({ "path": grant.path.to_string_lossy() }),
+                IMAGE_IMPORT_TIMEOUT,
+            )
+            .await?;
+        background_import_answer(&grant.path, &imported)
     }
 
     async fn backend_debug_rpc(&self, params: &Map<String, Value>) -> Result<Value, String> {
@@ -518,6 +554,53 @@ pub fn implemented(command: &str) -> bool {
     IMPLEMENTED_COMMANDS.contains(&command)
 }
 
+/// How long the backend may take to copy and tile an imported image.
+const IMAGE_IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A managed background's URL (`managedBackgroundAssetUrl`).
+pub fn managed_background_asset_url(file_name: &str) -> String {
+    let mut encoded = String::new();
+    for byte in file_name.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    format!("videorc-asset://background/{encoded}")
+}
+
+/// `importBackgroundImageFromPath`'s answer from `backgrounds.import`'s.
+fn background_import_answer(source: &std::path::Path, imported: &Value) -> Result<Value, String> {
+    let id = imported
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("The backend's background import gave no id.")?;
+    let asset = imported
+        .get("assetFileName")
+        .and_then(Value::as_str)
+        .ok_or("The backend's background import gave no file.")?;
+    let thumbnail = imported
+        .get("thumbnailFileName")
+        .and_then(Value::as_str)
+        .unwrap_or(asset);
+    let file_name = source
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = source
+        .file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file_name.clone());
+    Ok(json!({
+        "id": id,
+        "name": name,
+        "assetPath": managed_background_asset_url(asset),
+        "thumbnailPath": managed_background_asset_url(thumbnail),
+        "fileName": file_name,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -569,6 +652,24 @@ mod tests {
             assert!(!APP_WINDOW_COMMANDS.contains(&not_yet), "{not_yet}");
             assert!(!STUDIO_COMMANDS.contains(&not_yet), "{not_yet}");
         }
+    }
+
+    #[test]
+    fn an_imported_background_answers_as_electron_main_does() {
+        let answer = background_import_answer(
+            std::path::Path::new("/tmp/smoke/solid background.png"),
+            &json!({"id": "bg-1", "assetFileName": "a b.png", "thumbnailFileName": null}),
+        )
+        .unwrap();
+        assert_eq!(answer["id"], "bg-1");
+        assert_eq!(answer["name"], "solid background");
+        assert_eq!(answer["assetPath"], "videorc-asset://background/a%20b.png");
+        assert_eq!(
+            answer["thumbnailPath"],
+            "videorc-asset://background/a%20b.png"
+        );
+        assert_eq!(answer["fileName"], "solid background.png");
+        assert!(background_import_answer(std::path::Path::new("/x.png"), &json!({})).is_err());
     }
 
     #[test]

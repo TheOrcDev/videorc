@@ -17,7 +17,7 @@ use videorc_kit::panel_section::PanelSection;
 use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::section_label::SectionLabel;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
-use videorc_kit::tokens::{size, text};
+use videorc_kit::tokens::{radius, size, text};
 
 pub type AppStudio = Studio<BackendClient>;
 
@@ -212,7 +212,7 @@ impl Render for ImagesPanel {
                                     .id(format!("live-bg-{id}"))
                                     .w(px(120.))
                                     .h(px(72.))
-                                    .rounded(px(6.))
+                                    .rounded(px(radius::CHIP))
                                     .border_1()
                                     .border_color(hsla(t.border))
                                     .bg(hsla(t.muted))

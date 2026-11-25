@@ -11,16 +11,17 @@
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
-use gpui::{App, Bounds, NativeView, Pixels, Window, rgb};
+use gpui::{App, Bounds, NativeView, Pixels, Window};
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2::{ClassType, MainThreadMarker, MainThreadOnly, msg_send};
+use objc2::{ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::NSView;
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
 use objc2_quartz_core::{CAAutoresizingMask, CALayer, CAMetalLayer, CATransaction};
 use raw_window_handle::{
     AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle as RawHandle,
 };
+use videorc_kit::theme::hsla;
+use videorc_kit::tokens::DARK;
 use videorc_preview::bounds::WindowGeometry;
 
 /// One place the layer can live: the `NSView` given to GPUI, and GPUI's
@@ -41,7 +42,7 @@ impl HostView {
             .map_err(|error| format!("GPUI could not host the preview: {error:#}"))?;
         // What shows for a frame or two while GPUI moves the view: the
         // slot's own black.
-        native.set_background(rgb(0x000000), cx);
+        native.set_background(hsla(DARK.video_ground), cx);
         Ok(Self { view, native })
     }
 }
@@ -108,34 +109,6 @@ pub fn tune_video_layer(host: &NSView, radius: f64) -> bool {
         }
     }
     found
-}
-
-/// The window's `NSWindow`, through the GPUI view's raw handle.
-fn ns_window_of(window: &Window) -> Option<*mut AnyObject> {
-    let handle = HasWindowHandle::window_handle(window).ok()?;
-    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
-        return None;
-    };
-    let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
-    // SAFETY: the GPUI view is live while the window is; main thread.
-    let ns_window: *mut AnyObject = unsafe { msg_send![ns_view, window] };
-    (!ns_window.is_null()).then_some(ns_window)
-}
-
-/// The floating Preview window's place among windows: above other apps
-/// (`NSFloatingWindowLevel`), and out of every screen capture
-/// (`NSWindowSharingNone`), so it never shows in the stream or in itself.
-/// S0.1 checked it: `sharingType` reads back 0 and `screencapture -l` of the
-/// window writes nothing. Returns the `sharingType` read back.
-pub fn float_out_of_capture(window: &Window) -> Option<usize> {
-    let ns_window = ns_window_of(window)?;
-    // SAFETY: a live NSWindow, on the main thread.
-    unsafe {
-        let _: () = msg_send![ns_window, setSharingType: 0usize];
-        let _: () = msg_send![ns_window, setLevel: 3isize];
-        let sharing: usize = msg_send![ns_window, sharingType];
-        Some(sharing)
-    }
 }
 
 /// Where the slot sits, for the surface's record: the window's content on

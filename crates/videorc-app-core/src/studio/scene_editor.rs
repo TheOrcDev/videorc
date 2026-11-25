@@ -1082,6 +1082,34 @@ impl<B: StudioBackend> Studio<B> {
         true
     }
 
+    /// The smokes' `studio-scene-background` (`applyBackgroundSlot`): the
+    /// working look with `background` (a saved background, or `None` for
+    /// none) as one quiet transaction. False when it does not resolve.
+    pub async fn set_working_background(self: &Arc<Self>, background: Option<&Value>) -> bool {
+        let layout = {
+            let mut guard = self.lock();
+            let inner = &mut *guard;
+            inner.capture.sync(inner.settings.get(keys::CAPTURE_CONFIG));
+            inner.capture.config["layout"].clone()
+        };
+        let resolved = match background {
+            Some(style) => match resolve_saved_background(Some(style)) {
+                Some(resolved) => Some(resolved),
+                None => return false,
+            },
+            None => None,
+        };
+        self.request_layout_transaction(
+            layout,
+            TransactionOptions {
+                quiet: true,
+                background_override: Some(resolved),
+                ..TransactionOptions::default()
+            },
+        )
+        .await
+    }
+
     /// `applyWorkingBackgroundStyle({ visibilityPercent })` (Screen size):
     /// the scene's background with its Visibility, as one quiet transaction.
     pub async fn set_background_visibility(self: &Arc<Self>, visibility_percent: f64) -> bool {

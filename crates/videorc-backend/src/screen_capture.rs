@@ -153,79 +153,24 @@ pub fn app_previews(params: AppPreviewsParams) -> Result<Vec<AppPreview>, String
     }
 }
 
-/// Still pictures are independent of every running capture and compositor.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
-pub enum ScenePictureTarget {
-    App {
-        #[serde(rename = "bundleId")]
-        bundle_id: String,
-    },
-    Window {
-        #[serde(rename = "windowId")]
-        window_id: String,
-    },
-    Display {
-        #[serde(rename = "screenId")]
-        screen_id: String,
-    },
+// `sources.scene_pictures`' wire types are the protocol's (plan 260, L2);
+// the TS mirror reads the same fixture.
+pub use crate::protocol::scene_pictures::{
+    ScenePicture, ScenePictureOutcome, ScenePictureTarget, ScenePicturesParams, ScenePicturesResult,
+};
+
+/// The privacy recheck after the blocking task returns to the async RPC
+/// dispatcher too: a hide or show during the batch refuses every picture.
+pub trait GuardScenePictures {
+    fn guard_privacy(
+        self,
+        start: crate::screen_privacy::ScreenPrivacyView,
+        current: crate::screen_privacy::ScreenPrivacyView,
+    ) -> Self;
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ScenePicturesParams {
-    pub targets: Vec<ScenePictureTarget>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_width: Option<u32>,
-}
-
-impl ScenePicturesParams {
-    pub fn valid(&self) -> bool {
-        self.targets.len() <= 512
-            && self
-                .max_width
-                .is_none_or(|width| (32..=1920).contains(&width))
-            && self.targets.iter().all(|target| {
-                let id = match target {
-                    ScenePictureTarget::App { bundle_id } => bundle_id,
-                    ScenePictureTarget::Window { window_id } => window_id,
-                    ScenePictureTarget::Display { screen_id } => screen_id,
-                };
-                !id.trim().is_empty() && id.len() <= 16_384
-            })
-    }
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ScenePicturesResult {
-    pub pictures: Vec<ScenePicture>,
-    pub elapsed_ms: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hidden: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unsupported: Option<bool>,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct ScenePicture {
-    pub target: ScenePictureTarget,
-    #[serde(flatten)]
-    pub outcome: ScenePictureOutcome,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ScenePictureOutcome {
-    /// Only macOS takes pictures (D17); elsewhere every target is unavailable.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    JpegBase64(String),
-    Unavailable(String),
-}
-
-impl ScenePicturesResult {
-    /// Recheck after the blocking task returns to the async RPC dispatcher too.
-    pub fn guard_privacy(
+impl GuardScenePictures for ScenePicturesResult {
+    fn guard_privacy(
         self,
         start: crate::screen_privacy::ScreenPrivacyView,
         current: crate::screen_privacy::ScreenPrivacyView,
@@ -242,21 +187,6 @@ impl ScenePicturesResult {
             );
             refused.elapsed_ms = self.elapsed_ms;
             refused
-        }
-    }
-
-    fn unavailable(targets: Vec<ScenePictureTarget>, reason: &str) -> Self {
-        Self {
-            pictures: targets
-                .into_iter()
-                .map(|target| ScenePicture {
-                    target,
-                    outcome: ScenePictureOutcome::Unavailable(reason.into()),
-                })
-                .collect(),
-            elapsed_ms: 0.0,
-            hidden: (reason == "hidden").then_some(true),
-            unsupported: (reason == "unsupported").then_some(true),
         }
     }
 }

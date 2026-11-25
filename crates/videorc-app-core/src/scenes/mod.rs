@@ -31,6 +31,8 @@
 //!   (`lib/layout-transaction-policy.ts`).
 //! - [`thumb`]: `LayoutThumb`'s geometry, the layout diagram on scene
 //!   cards and Scene page rows.
+//! - [`pictures`]: the cards' still pictures, when they are asked for and
+//!   what an answer does (`hooks/use-scene-pictures.ts`).
 
 pub mod background;
 pub mod follow;
@@ -40,6 +42,7 @@ pub mod list;
 pub mod migration;
 pub mod model;
 pub mod picker;
+pub mod pictures;
 pub mod preflight;
 pub mod section;
 pub mod store;

@@ -107,6 +107,15 @@ CI covers Rust advisory audit, Rust fmt, clippy, Rust tests, JS production advis
 - Do not commit secrets, local tokens, app data, recordings, or generated media evidence unless a doc explicitly asks for a tiny fixture.
 - The worktree may contain user changes. Stage only files you intentionally changed for the current slice.
 
+## Pull Requests And Merging
+
+Every merge onto main reruns CI, the Windows gates and the Linux gates, and every red run emails the owner. On 2026-11-24 about 126 PRs merged back to back: 233 failed CI runs and 219 emails. Owner rule (2026-11-25), for this repo and videorc-ui:
+
+- Open a PR as a draft, and mark it ready only when its batch is done.
+- Batch related changes: one PR per screen or per area, not one per fix. Commit as you go, but push a branch only when the batch is done, not after every commit.
+- Don't merge a run of small PRs onto main back to back. Leave a few minutes between your own merges, and let a tiny follow-up ride along with your next batch instead of opening its own PR.
+- Put these rules in any brief you hand a helper agent.
+
 ## Cleanup After Merge
 
 Every agent checkout is a git worktree (`~/.t3/worktrees/videorc/*`, `~/projects/videorc-*`, `.claude/worktrees/*`) with its own `target/` and `node_modules`, 2 to 9 GB each. Once the work is on main they are dead weight: by 2026-11-06, 144 of them held over 200 GB on the owner's Mac. Clean up after yourself.

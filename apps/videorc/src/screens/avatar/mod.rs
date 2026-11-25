@@ -7,10 +7,18 @@
 //! (Still/Alive, Test, the living preview), Reactions and Motion, Greetings,
 //! the onboarding dialog and the Alive creator.
 
+mod bubble;
+mod consent;
+mod gate;
+mod greetings;
 mod library;
+mod look;
 mod persona;
 mod pictures;
+mod preview;
+mod reactions;
 mod status;
+mod test_dialog;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,8 +38,8 @@ use videorc_kit::dialog::DialogHandle;
 use videorc_kit::input::InputState;
 use videorc_kit::page_tabs::PageTabs;
 use videorc_kit::textarea::TextareaState;
-use videorc_kit::theme::{self, FONT, TypeScale, hsla};
-use videorc_kit::tokens::{size, text};
+use videorc_kit::theme::FONT;
+use videorc_kit::tokens::size;
 use videorc_protocol::cohost::CohostPersona;
 
 use status::Placement;
@@ -40,7 +48,9 @@ pub type AppStudio = Studio<BackendClient>;
 
 /// The events the page follows; `main.rs` adds them to the client's filter.
 /// `account.changed` is already there (Settings').
-pub const EVENTS: [&str; 3] = [
+pub const EVENTS: [&str; 5] = [
+    videorc_app_core::buddy::look::PROGRESS_EVENT,
+    videorc_app_core::buddy::look::DRAFT_EVENT,
     LIBRARY_CHANGED_EVENT,
     SETTINGS_CHANGED_EVENT,
     videorc_app_core::chat::overlay::LAYOUT_EVENT,
@@ -60,6 +70,12 @@ const UPDATE_THE_LIBRARY: UserErrorContext = UserErrorContext {
 pub struct OpenPage(pub PageId);
 
 impl EventEmitter<OpenPage> for AvatarScreen {}
+
+/// Opens a Sidekick tab (Greetings' "Sidekick → Chat").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenSidekickTab(pub usize);
+
+impl EventEmitter<OpenSidekickTab> for AvatarScreen {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -155,12 +171,39 @@ pub struct AvatarScreen {
     /// "About you": the avatar's notes (`cohost.settings` `notes`).
     notes: Option<String>,
     persona_fields: Option<persona::PersonaFields>,
-    /// A failed save in Name and personality.
-    persona_error: Option<String>,
+    /// `autoChat`: the greetings live in it.
+    auto_chat: Option<videorc_protocol::cohost::CohostAutoChat>,
+    greeting_editor: Option<greetings::GreetingEditor>,
+    /// The last failed persona save, and the section that shows it.
+    save_error: Option<(reactions::SaveSection, String)>,
+    /// `cohost.pet.list`: the worn pack's reactions.
+    packs: Vec<reactions::PackSummary>,
+    /// The same list as the moves list shows it (name, source, poses).
+    pack_rows: Vec<look::PackRow>,
+    packs_loaded: bool,
+    packs_error: Option<String>,
+    /// The Look section: the look's state, Alive's actions, its dialogs.
+    look_ui: look::LookUi,
+    /// The living preview beside Look, and the draft's.
+    preview: gpui::Entity<preview::PetPreview>,
+    draft_preview: gpui::Entity<preview::PetPreview>,
+    bubbles: bubble::Bubbles,
+    test: test_dialog::TestUi,
+    motion: Option<reactions::MotionWidgets>,
     placement: Option<Placement>,
     library: Option<LibraryState>,
     /// `aiCapabilities.cohost.buddyLibrary.alive`: the web keeps imports.
-    library_alive: bool,
+    /// `ai.capabilities.get`: what the web offers (the gates, the lines).
+    capabilities: Option<Value>,
+    /// `account.get`: signed in, Premium (`liveCohost`) and its upgrade link.
+    signed_in: bool,
+    entitled: bool,
+    upgrade_url: Option<String>,
+    /// Cloud AI consent (`families::ai_consent`).
+    consented: bool,
+    consent_handle: DialogHandle,
+    consent_want_open: bool,
+    consent_was_open: bool,
     /// The first `cohost.library.get` has not answered.
     loading: bool,
     pending: Option<Pending>,
@@ -189,8 +232,10 @@ impl AvatarScreen {
         user_data_dir: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
+        let (preview, draft_preview) = look::new_previews(cx);
         let tab = Tab::from_id(UiLocal::in_dir(&user_data_dir).avatar_tab());
         let invitation_dismissed = studio.read_ui_settings(families::buddy_invitation_dismissed);
+        let consented = studio.read_ui_settings(families::ai_consent);
         let screen = Self {
             studio,
             runtime,
@@ -200,10 +245,29 @@ impl AvatarScreen {
             persona: None,
             notes: None,
             persona_fields: None,
-            persona_error: None,
+            auto_chat: None,
+            greeting_editor: None,
+            save_error: None,
+            packs: Vec::new(),
+            pack_rows: Vec::new(),
+            packs_loaded: false,
+            packs_error: None,
+            look_ui: look::LookUi::new(),
+            preview,
+            draft_preview,
+            bubbles: bubble::Bubbles::new(),
+            test: test_dialog::TestUi::new(),
+            motion: None,
             placement: None,
             library: None,
-            library_alive: false,
+            capabilities: None,
+            signed_in: false,
+            entitled: false,
+            upgrade_url: None,
+            consented,
+            consent_handle: DialogHandle::new(false),
+            consent_want_open: false,
+            consent_was_open: false,
             loading: true,
             pending: None,
             problem: None,
@@ -231,6 +295,11 @@ impl AvatarScreen {
             return;
         }
         self.active = active;
+        // The previews tick only while the page shows.
+        self.preview
+            .update(cx, |preview, cx| preview.set_active(active, cx));
+        self.draft_preview
+            .update(cx, |preview, cx| preview.set_active(active, cx));
         if active {
             self.sync(cx);
         }
@@ -260,6 +329,12 @@ impl AvatarScreen {
                                 }
                             });
                         }
+                        videorc_app_core::buddy::look::PROGRESS_EVENT
+                        | videorc_app_core::buddy::look::DRAFT_EVENT => {
+                            let name = event.clone();
+                            let _ =
+                                this.update(cx, |screen, cx| screen.look_event(&name, payload, cx));
+                        }
                         SETTINGS_CHANGED_EVENT | "account.changed" => {
                             let _ = this.update(cx, |screen, cx| screen.refresh(cx));
                         }
@@ -282,6 +357,8 @@ impl AvatarScreen {
     /// The persona, the cached library (no network) and the overlay's
     /// switches.
     fn refresh(&self, cx: &mut Context<Self>) {
+        self.refresh_packs(cx);
+        self.refresh_look(cx);
         let studio = self.studio.clone();
         let read = self.runtime.spawn(async move {
             let backend = studio.backend().clone();
@@ -291,6 +368,9 @@ impl AvatarScreen {
                 .ok()
                 .and_then(|value| CohostSettingsView::from_json(&value));
             let notes = settings.as_ref().map(|settings| settings.notes.clone());
+            let auto_chat = settings
+                .as_ref()
+                .and_then(|settings| settings.auto_chat.clone());
             let persona = settings.and_then(|settings| settings.persona);
             let library = backend
                 .request("cohost.library.get", json!({}))
@@ -302,20 +382,22 @@ impl AvatarScreen {
                 .await
                 .ok()
                 .and_then(|layout| Placement::from_layout(&layout));
-            let library_alive = backend
-                .request("ai.capabilities.get", json!({}))
-                .await
-                .ok()
-                .and_then(|value| {
-                    value
-                        .pointer("/cohost/buddyLibrary/alive")
-                        .and_then(Value::as_bool)
-                })
-                .unwrap_or(false);
-            (persona, notes, library, placement, library_alive)
+            let capabilities = backend.request("ai.capabilities.get", json!({})).await.ok();
+            let account = backend.request("account.get", json!({})).await.ok();
+            (
+                persona,
+                notes,
+                auto_chat,
+                library,
+                placement,
+                capabilities,
+                account,
+            )
         });
         cx.spawn(async move |this, cx| {
-            let Ok((persona, notes, library, placement, library_alive)) = read.await else {
+            let Ok((persona, notes, auto_chat, library, placement, capabilities, account)) =
+                read.await
+            else {
                 return;
             };
             let _ = this.update(cx, |screen, cx| {
@@ -325,10 +407,19 @@ impl AvatarScreen {
                 if notes.is_some() {
                     screen.notes = notes;
                 }
+                if auto_chat.is_some() {
+                    screen.auto_chat = auto_chat;
+                }
                 if let Some(library) = library {
                     screen.library_changed(library, cx);
                 }
-                screen.library_alive = library_alive;
+                if capabilities.is_some() {
+                    screen.capabilities = capabilities;
+                }
+                if let Some(account) = account {
+                    screen.account_answered(&account);
+                }
+                screen.consented = screen.studio.read_ui_settings(families::ai_consent);
                 screen.loading = false;
                 if placement.is_some() {
                     screen.placement = placement;
@@ -684,31 +775,49 @@ impl Render for AvatarScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_dialogs(window, cx);
         self.ensure_persona_fields(window, cx);
-        let body = match self.tab {
-            Tab::Profile => div()
-                .flex()
-                .flex_col()
-                .child(status::render_status(self, window, cx))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(size::GUTTER))
-                        .p(px(size::GUTTER))
-                        .child(library::render_library(self, window, cx))
-                        .children(persona::render_persona(self, window, cx)),
-                )
-                .into_any_element(),
-            Tab::Greetings => {
-                let t = theme::resolve(None, window, cx);
-                div()
+        self.ensure_motion(window, cx);
+        self.sync_consent(window, cx);
+        self.sync_bubble_zoom(window, cx);
+        self.sync_look_dialogs(window, cx);
+        self.sync_test(window, cx);
+        self.ensure_bubble(false, cx);
+        self.sync_previews(cx);
+        let body =
+            match self.tab {
+                Tab::Profile => div()
+                    .flex()
+                    .flex_col()
+                    .child(status::render_status(self, window, cx))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(size::GUTTER))
+                            .p(px(size::GUTTER))
+                            .child(library::render_library(self, window, cx))
+                            .children(persona::render_persona(self, window, cx))
+                            .children(look::render_look(self, window, cx))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap(px(size::GUTTER))
+                                    .children(reactions::render_reactions(self, window, cx).map(
+                                        |section| div().flex_1().min_w(px(420.)).child(section),
+                                    ))
+                                    .children(reactions::render_motion(self, window, cx).map(
+                                        |section| div().flex_1().min_w(px(420.)).child(section),
+                                    )),
+                            ),
+                    )
+                    .into_any_element(),
+                Tab::Greetings => div()
+                    .flex()
+                    .flex_col()
                     .p(px(size::GUTTER))
-                    .type_scale(text::META)
-                    .text_color(hsla(t.muted_foreground))
-                    .child("Greetings come in their own Phase 3 PR.")
-                    .into_any_element()
-            }
-        };
+                    .children(greetings::render_greetings(self, window, cx))
+                    .into_any_element(),
+            };
 
         let entity = cx.entity();
         let mut tabs = PageTabs::new("avatar-page", words::AVATAR_TABS_LABEL);
@@ -731,5 +840,9 @@ impl Render for AvatarScreen {
             .child(library::edit_dialog(self, window, cx))
             .child(library::delete_dialog(self, window, cx))
             .child(persona::persona_dialogs(self, cx))
+            .child(consent::consent_dialog(self, window, cx))
+            .child(bubble::zoom_dialog(self, window, cx))
+            .child(look::look_dialogs(self, cx))
+            .child(test_dialog::test_dialog(self, window, cx))
     }
 }

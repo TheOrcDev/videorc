@@ -1,9 +1,20 @@
+//! The player's picture: on macOS the native element (IOSurface frames on
+//! a layer of the player's own view), on Windows and Linux the CPU-ring
+//! element (`videorc_preview::cpu_playback`: the backend's playback ring,
+//! put on the screen by the live preview's Linux presenter). Both have the
+//! same API, so the open, resume and visibility rules below are one.
+
 use super::*;
+#[cfg(target_os = "macos")]
 use crate::preview::macos::{HostView, ViewHost, tune_video_layer};
+#[cfg(not(target_os = "macos"))]
+use videorc_preview::cpu_playback::{PlaybackElement, PlaybackView};
+#[cfg(target_os = "macos")]
 use videorc_preview::playback::{PlaybackElement, PlaybackView};
 
 pub(super) struct Native {
     pub element: Option<PlaybackElement>,
+    #[cfg(target_os = "macos")]
     pub host: HostView,
     pub before_frame: u64,
     last_status: Option<PlaybackStatus>,
@@ -16,6 +27,7 @@ impl Drop for Native {
     }
 }
 impl Player {
+    #[cfg(target_os = "macos")]
     pub(super) fn start_native(
         &mut self,
         window: &mut Window,
@@ -39,6 +51,55 @@ impl Player {
         self.native = Some(Native {
             element: Some(element),
             host,
+            before_frame: 0,
+            last_status: None,
+        });
+        cx.spawn(async move |entity, cx| {
+            loop {
+                let view = watch.borrow_and_update().clone();
+                if entity
+                    .update(cx, |this, cx| this.note_playback(view, cx))
+                    .is_err()
+                {
+                    break;
+                }
+                if watch.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        Ok(())
+    }
+    /// Windows and Linux: the CPU-ring element. On Linux its presenter's
+    /// child goes into this window, above GPUI's drawing, hidden until the
+    /// first frame of the recording is presented; Windows has no presenter
+    /// yet, so the slot says so and the sound and controls work.
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn start_native(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let mut element = PlaybackElement::start(
+            &self.runtime,
+            self.files.backend.clone(),
+            self.logger.clone(),
+        )?;
+        element.set_visible(false);
+        if let Err(error) = element.attach(&*window) {
+            self.logger.log(
+                videorc_app_core::Level::Error,
+                &format!("[player] the presenter did not attach: {error}"),
+            );
+            element.stop();
+            return Err("Playback isn't available in this window.".into());
+        }
+        let mut watch = element
+            .view_watch()
+            .ok_or("Playback isn't available in this window.")?;
+        self.native = Some(Native {
+            element: Some(element),
             before_frame: 0,
             last_status: None,
         });
@@ -193,6 +254,7 @@ impl Player {
             cx.notify();
         }
     }
+    #[cfg(target_os = "macos")]
     pub(super) fn slot(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let mut slot = gpui::div()
             .relative()
@@ -227,6 +289,62 @@ impl Player {
                     .size_full(),
                 );
             }
+        }
+        slot.into_any_element()
+    }
+
+    /// Windows and Linux: the slot the presenter's child follows. GPUI
+    /// draws nothing under it but the video ground; on Windows, where no
+    /// presenter draws yet, the slot says the picture is missing.
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn slot(&self, cx: &Context<Self>) -> gpui::AnyElement {
+        let t = videorc_kit::tokens::DARK;
+        let mut slot = gpui::div()
+            .relative()
+            .w_full()
+            .h(gpui::px(300.))
+            .overflow_hidden()
+            .rounded(gpui::px(videorc_kit::tokens::radius::ROW))
+            .bg(videorc_kit::theme::hsla(t.video_ground));
+        if !videorc_preview::cpu_playback::DRAWS_PICTURE {
+            slot = slot.flex().items_center().justify_center().child(
+                gpui::div()
+                    .px(gpui::px(16.))
+                    .text_color(videorc_kit::theme::hsla(t.video_ground_muted))
+                    .child(p::NO_PICTURE_HERE_YET),
+            );
+        }
+        if self.active && self.native.is_some() {
+            let weak = cx.entity().downgrade();
+            slot = slot.child(
+                gpui::canvas(
+                    move |bounds, window, cx| {
+                        let scale = f64::from(window.scale_factor());
+                        let _ = weak.update(cx, |this, _| {
+                            if let Some(element) =
+                                this.native.as_mut().and_then(|n| n.element.as_mut())
+                            {
+                                // The presenter places in the window's own
+                                // logical points.
+                                element.place(
+                                    videorc_preview::LayerRect {
+                                        x: f64::from(bounds.origin.x),
+                                        y: f64::from(bounds.origin.y),
+                                        width: f64::from(bounds.size.width),
+                                        height: f64::from(bounds.size.height),
+                                    },
+                                    scale,
+                                );
+                            }
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
         }
         slot.into_any_element()
     }

@@ -18,6 +18,8 @@
 
 #[cfg(target_os = "macos")]
 mod floating;
+#[cfg(target_os = "macos")]
+pub(crate) mod frame;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -25,9 +27,12 @@ pub(crate) mod macos;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod scene;
 
-use gpui::{AnyElement, App, AppContext, Entity, FontWeight, Window, div, prelude::*, px, rgb};
+use gpui::{AnyElement, App, AppContext, Entity, FontWeight, Window, div, prelude::*, px};
+use videorc_kit::theme::hsla;
+// The video ground and its words are the same in every appearance.
 use tokio::sync::watch;
 use videorc_app_core::{BackendState, Level, Logger};
+use videorc_kit::tokens::DARK as VIDEO;
 use videorc_preview::element::Phase;
 use videorc_preview::lifecycle::WindowMode;
 use videorc_preview::words::{self, PreviewWords};
@@ -92,6 +97,10 @@ pub struct Preview {
     /// Pop out was pressed and the window is opening (`Preview::float`).
     #[cfg(target_os = "macos")]
     opening: bool,
+    /// The Preview window's `preview-window.json` (P1549, P132), once the
+    /// shell hands it over ([`Preview::remember_window`]).
+    #[cfg(target_os = "macos")]
+    frame: Option<frame::PreviewFrame>,
 }
 
 impl Preview {
@@ -229,6 +238,7 @@ impl Preview {
                 }),
                 floating: None,
                 opening: false,
+                frame: None,
             }
         })
     }
@@ -243,6 +253,7 @@ impl Preview {
             native: None,
             floating: None,
             opening: false,
+            frame: None,
         }
     }
 
@@ -318,6 +329,61 @@ impl Preview {
         self.native_ready()
     }
 
+    /// The Preview window's remembered frame, mode and Keep on top.
+    #[cfg(target_os = "macos")]
+    pub fn remember_window(&mut self, frame: frame::PreviewFrame) {
+        self.frame = Some(frame);
+    }
+
+    /// `restorePreviewWindowOnLaunch` (P1549): a Preview left floating
+    /// floats again, once the workspace shows.
+    #[cfg(target_os = "macos")]
+    pub fn restore_at_launch(&mut self, cx: &mut Context<Self>) {
+        if self.mode == WindowMode::Docked
+            && self
+                .frame
+                .as_ref()
+                .is_some_and(frame::PreviewFrame::floats_at_launch)
+        {
+            self.float(cx);
+        }
+    }
+
+    /// Keep on top of other apps (P132), off unless turned on.
+    #[cfg(target_os = "macos")]
+    pub fn keep_on_top(&self) -> bool {
+        self.frame
+            .as_ref()
+            .is_some_and(frame::PreviewFrame::always_on_top)
+    }
+
+    /// Turns Keep on top on or off: saved, and applied to the open window.
+    #[cfg(target_os = "macos")]
+    pub fn set_keep_on_top(&mut self, on: bool, cx: &mut Context<Self>) {
+        if let Some(frame) = &self.frame {
+            frame.set_always_on_top(on);
+        }
+        if let Some(handle) = self.floating {
+            let _ = handle.update(cx, |_, window, _| {
+                if let Err(error) = crate::platform::current().set_keep_on_top(window, on) {
+                    self.logger.log(
+                        Level::Warn,
+                        &format!("[preview] Keep on top didn't change: {error}"),
+                    );
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    /// Bring to front (P130): the Preview window comes up.
+    #[cfg(target_os = "macos")]
+    pub fn bring_to_front(&self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.floating {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        }
+    }
+
     /// The shell says whether the Studio page shows: a slot that is not on
     /// screen presents nothing (the surface's record says `visible: false`).
     pub fn set_docked_shown(&mut self, shown: bool) {
@@ -340,7 +406,7 @@ impl Preview {
             .relative()
             .size_full()
             .rounded(px(SLOT_RADIUS as f32))
-            .bg(rgb(0x000000))
+            .bg(hsla(VIDEO.video_ground))
             .overflow_hidden();
         #[cfg(target_os = "macos")]
         if preview.mode == WindowMode::Docked
@@ -412,6 +478,10 @@ impl Preview {
         #[cfg(target_os = "macos")]
         {
             if let Some(handle) = self.floating.take() {
+                // Quitting while floating: the next launch floats it again.
+                if let Some(frame) = &self.frame {
+                    frame.quitting();
+                }
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             }
             if let Some(native) = self.native.take() {
@@ -561,6 +631,9 @@ impl Preview {
     #[cfg(target_os = "macos")]
     fn dock(&mut self, cx: &mut Context<Self>) {
         self.return_to_dock();
+        if let Some(frame) = &self.frame {
+            frame.docked();
+        }
         if let Some(handle) = self.floating.take() {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
         }
@@ -573,6 +646,9 @@ impl Preview {
     pub(crate) fn floating_closed(&mut self, cx: &mut Context<Self>) {
         self.floating = None;
         self.return_to_dock();
+        if let Some(frame) = &self.frame {
+            frame.docked();
+        }
         cx.notify();
     }
 
@@ -633,7 +709,17 @@ impl Preview {
 /// [`Preview::float`]), and hands it to the Preview.
 #[cfg(target_os = "macos")]
 fn open_floating(preview: WeakEntity<Preview>, cx: &mut App) {
-    let bounds = gpui::Bounds::centered(None, size(px(960.), px(540.)), cx);
+    let remembered = preview
+        .upgrade()
+        .and_then(|entity| entity.read(cx).frame.clone());
+    let bounds = match &remembered {
+        Some(frame) => frame.opening(cx),
+        None => gpui::Bounds::centered(
+            None,
+            size(px(frame::DEFAULT_WIDTH), px(frame::DEFAULT_HEIGHT)),
+            cx,
+        ),
+    };
     let builder = preview.clone();
     let opened = cx.open_window(
         WindowOptions {
@@ -642,10 +728,13 @@ fn open_floating(preview: WeakEntity<Preview>, cx: &mut App) {
                 title: Some("Preview".into()),
                 ..Default::default()
             }),
-            kind: WindowKind::Floating,
+            // A normal window, as Electron's: a panel hides when Videorc
+            // goes to the background. Keep on top raises its level.
+            kind: WindowKind::Normal,
+            window_min_size: Some(size(px(frame::MIN_WIDTH), px(frame::MIN_HEIGHT))),
             ..Default::default()
         },
-        move |window, cx| floating::FloatingPreview::build(builder, window, cx),
+        move |window, cx| floating::FloatingPreview::build(builder, remembered, window, cx),
     );
     let window = opened.as_ref().ok().copied();
     if preview
@@ -672,7 +761,7 @@ fn words_card(words: PreviewWords) -> impl IntoElement {
         .justify_center()
         .gap(px(4.))
         .px(px(24.))
-        .text_color(rgb(0xe8e8ea))
+        .text_color(hsla(VIDEO.video_ground_foreground))
         .child(
             div()
                 .text_size(px(13.))
@@ -683,7 +772,7 @@ fn words_card(words: PreviewWords) -> impl IntoElement {
         card = card.child(
             div()
                 .text_size(px(12.))
-                .text_color(rgb(0x8e8e93))
+                .text_color(hsla(VIDEO.video_ground_muted))
                 .child(words.detail),
         );
     }

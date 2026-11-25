@@ -23,6 +23,9 @@ pub mod copy {
     pub const CONNECTED: &str = "Chat is connected. New messages appear here.";
     /// `STUDIO_CHAT_NO_MESSAGES`.
     pub const NO_MESSAGES: &str = "No messages yet.";
+    /// `Open {WINDOW_NAMES.streamManager}`: the header's door to the full
+    /// chat, with the `comments-window` key in its tooltip.
+    pub const OPEN_STREAM_MANAGER: &str = "Open Stream Manager";
     /// `HIDE_STUDIO_CHAT_LABEL`: the hide button and its tooltip.
     pub const HIDE: &str = "Hide chat in Studio";
     /// The hide's toast (`HIDDEN_TOAST_ID`), its line and its Undo.
@@ -40,6 +43,14 @@ pub mod copy {
 
 /// `MAX_RENDERED_LIVE_CHAT_MESSAGES`: the newest rows a list draws at once.
 pub const MAX_RENDERED: usize = 200;
+
+/// `shortcutAccelerator('comments-window')`: the key the Open Stream
+/// Manager tooltip shows.
+pub const OPEN_STREAM_MANAGER_SHORTCUT: &str = "comments-window";
+
+/// `STUDIO_CHAT_LIST_HEIGHT` (`h-64`, D8): about seven one-line messages,
+/// fixed, so the inspector never jumps.
+pub const LIST_HEIGHT_PX: f32 = 256.0;
 
 /// `studioChatShows`: the Settings switch is on and a livestream is on air
 /// (chat exists only for a livestream: idle, a recording, Clips alone and a
@@ -238,6 +249,8 @@ pub struct ChatRowView {
     /// blocks (`CommentMessageBody`, the Stream Manager's message body).
     pub pieces: Vec<crate::stream_manager::rows::Piece>,
     pub gifs: Vec<crate::stream_manager::rows::Gif>,
+    /// What C copies (`${authorName}: ${messageText}`).
+    pub copy: String,
 }
 
 /// The words a row shows (`MessageBody`'s text, the emotes as their names).
@@ -307,6 +320,7 @@ impl ChatRowView {
             arrival: super::arrival::arrival_chip(message.arrival.as_ref()),
             pieces: Vec::new(),
             gifs: Vec::new(),
+            copy: format!("{}: {}", message.author_name, message.message_text),
         }
         .with_pieces(message)
     }
@@ -385,6 +399,161 @@ pub fn jump_chip(unread: usize, incomplete: bool) -> (String, String) {
         copy::READING_BACK.to_string()
     };
     (text, format!("Chat paused: {state}. Jump to the newest"))
+}
+
+/// How a run of a row's one line reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStyle {
+    /// The name: semibold.
+    Author,
+    /// A notice (system text, moderation, a Twitch notice's own sentence):
+    /// italic, secondary.
+    Notice,
+    /// A removed message: struck through, secondary.
+    Deleted,
+}
+
+/// The name and the words on one line that wraps, chat style
+/// (`{authorName} {words}`), and the runs that read differently. A Twitch
+/// notice with the viewer's own words says its sentence first.
+pub fn row_line(row: &ChatRowView) -> (String, Vec<(std::ops::Range<usize>, RunStyle)>) {
+    let mut text = row.author.clone();
+    let mut runs = vec![(0..text.len(), RunStyle::Author)];
+    text.push(' ');
+    if let Some(sentence) = &row.notice_sentence {
+        let start = text.len();
+        text.push_str(sentence);
+        runs.push((start..text.len(), RunStyle::Notice));
+        text.push(' ');
+    }
+    let start = text.len();
+    text.push_str(&row.words);
+    match row.style {
+        WordsStyle::Plain => {}
+        WordsStyle::Notice => runs.push((start..text.len(), RunStyle::Notice)),
+        WordsStyle::Deleted => runs.push((start..text.len(), RunStyle::Deleted)),
+    }
+    runs.retain(|(range, _)| !range.is_empty());
+    (text, runs)
+}
+
+impl ChatRowView {
+    /// The row is a button: a click (Enter, Space) shows it on stream or
+    /// takes it off. While its click is on the way it takes no other
+    /// (`disabled={highlight.phase === 'applying'}`).
+    pub fn pressable(&self) -> bool {
+        self.highlightable && self.phase != RowPhase::Applying
+    }
+}
+
+/// `ChatRowMove`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowMove {
+    Next,
+    Previous,
+    First,
+    Last,
+}
+
+/// What a key on a row means in the Studio's list (`chatRowKeyCommand`,
+/// without the Stream Manager's Reply, Remove and composer keys: those are
+/// the Stream Manager's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowKey {
+    Move(RowMove),
+    /// C: "Name: message" to the clipboard.
+    Copy,
+    /// Enter and Space: the row button's own click.
+    Press,
+}
+
+/// `chatRowKeyCommand` for a key as GPUI names it (`up`, `down`, `home`,
+/// `end`, `enter`, `space`, `c`): ↑ ↓ Home End move, C copies, Enter and
+/// Space press. ⌘, Ctrl or ⌥ leave the key alone, and Shift turns every
+/// one of them off.
+pub fn row_key(key: &str, shift: bool, command: bool, alt: bool) -> Option<RowKey> {
+    if command || alt || shift {
+        return None;
+    }
+    match key {
+        "down" => Some(RowKey::Move(RowMove::Next)),
+        "up" => Some(RowKey::Move(RowMove::Previous)),
+        "home" => Some(RowKey::Move(RowMove::First)),
+        "end" => Some(RowKey::Move(RowMove::Last)),
+        "enter" | "space" => Some(RowKey::Press),
+        _ if key.eq_ignore_ascii_case("c") => Some(RowKey::Copy),
+        _ => None,
+    }
+}
+
+/// `chatRowAfterMove`: the row index a move lands on; `None` for an empty
+/// list. With no active row, Next lands on the first and the rest on the
+/// last.
+pub fn row_after_move(count: usize, index: Option<usize>, step: RowMove) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    match step {
+        RowMove::First => return Some(0),
+        RowMove::Last => return Some(count - 1),
+        _ => {}
+    }
+    let Some(index) = index.filter(|index| *index < count) else {
+        return Some(if step == RowMove::Next { 0 } else { count - 1 });
+    };
+    Some(match step {
+        RowMove::Next => (index + 1).min(count - 1),
+        _ => index.saturating_sub(1),
+    })
+}
+
+/// One change to a virtual list's rows, in its old indices: the rows in
+/// `range` become `count` new ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowSplice {
+    pub range: std::ops::Range<usize>,
+    pub count: usize,
+}
+
+/// The splices that turn the list's `old` row ids into `new` ones, to apply
+/// in order, so a list that keeps each row's measured height and scroll
+/// anchor moves only what changed: the oldest rows dropped off the front
+/// (the newest [`MAX_RENDERED`] are drawn), then the run that differs (new
+/// rows at the end, a late message slotted in by its time, a removal).
+pub fn row_splices<S: AsRef<str>>(old: &[S], new: &[S]) -> Vec<RowSplice> {
+    let dropped = new
+        .first()
+        .and_then(|first| old.iter().position(|id| id.as_ref() == first.as_ref()))
+        .unwrap_or(0);
+    let kept = &old[dropped..];
+    let prefix = kept
+        .iter()
+        .zip(new)
+        .take_while(|(a, b)| a.as_ref() == b.as_ref())
+        .count();
+    let suffix = kept[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a.as_ref() == b.as_ref())
+        .count();
+    let mut splices = Vec::new();
+    let start = dropped + prefix;
+    let end = old.len() - suffix;
+    let count = new.len() - prefix - suffix;
+    if start < end || count > 0 {
+        splices.push(RowSplice {
+            range: start..end,
+            count,
+        });
+    }
+    if dropped > 0 {
+        splices.push(RowSplice {
+            range: 0..dropped,
+            count: 0,
+        });
+    }
+    splices
 }
 
 #[cfg(test)]
@@ -594,6 +763,219 @@ mod tests {
                 "Latest".to_string(),
                 "Chat paused: reading back. Jump to the newest".to_string()
             )
+        );
+    }
+
+    /// The section's words are Electron's, byte for byte.
+    #[test]
+    fn the_words_are_electrons() {
+        const SECTION: &str = include_str!(
+            "../../../../apps/desktop/src/renderer/src/components/studio/studio-chat.tsx"
+        );
+        const VIEW: &str =
+            include_str!("../../../../apps/desktop/src/renderer/src/lib/studio-chat-view.ts");
+        const JUMP: &str =
+            include_str!("../../../../apps/desktop/src/renderer/src/components/chat-jump-chip.tsx");
+        for words in [
+            copy::HIDE,
+            copy::HIDDEN_TOAST_ID,
+            copy::HIDDEN,
+            copy::HIDDEN_WHERE,
+            copy::UNDO,
+            copy::LIST,
+            OPEN_STREAM_MANAGER_SHORTCUT,
+        ] {
+            assert!(SECTION.contains(words), "studio-chat.tsx lost {words:?}");
+        }
+        for words in [copy::NO_CHAT, copy::CONNECTED, copy::NO_MESSAGES] {
+            assert!(VIEW.contains(words), "studio-chat-view.ts lost {words:?}");
+        }
+        for words in [
+            copy::NEW_CHAT,
+            copy::LATEST,
+            copy::READING_BACK,
+            "Jump to the newest",
+        ] {
+            assert!(JUMP.contains(words), "chat-jump-chip.tsx lost {words:?}");
+        }
+        assert!(SECTION.contains("Open {WINDOW_NAMES.streamManager}"));
+        assert_eq!(
+            copy::OPEN_STREAM_MANAGER,
+            format!("Open {}", crate::stream_manager::copy::WINDOW_NAME)
+        );
+        assert!(SECTION.contains("export const STUDIO_CHAT_LIST_HEIGHT = 'h-64'"));
+        assert_eq!(LIST_HEIGHT_PX, 64.0 * 4.0);
+    }
+
+    #[test]
+    fn a_row_reads_as_one_line_with_its_name_first() {
+        let row = ChatRowView::new(&message("01"), RowHighlight::default(), true);
+        let (text, runs) = row_line(&row);
+        assert_eq!(text, "Ada Lovelace Ship it!");
+        assert_eq!(runs, [(0..12, RunStyle::Author)]);
+
+        let mut gone = message("02");
+        gone.is_deleted = true;
+        let (text, runs) = row_line(&ChatRowView::new(&gone, RowHighlight::default(), true));
+        assert_eq!(&text[13..], "Ship it!");
+        assert_eq!(
+            runs,
+            [(0..12, RunStyle::Author), (13..21, RunStyle::Deleted)]
+        );
+
+        let mut sub = message("03");
+        sub.event_type = "system".into();
+        sub.raw_provider_type = Some("channel.chat.notification".into());
+        sub.message_text = "Ada subscribed".into();
+        sub.fragments = vec![LiveChatFragment {
+            fragment_type: "text".into(),
+            text: "hi".into(),
+            ..LiveChatFragment::default()
+        }];
+        let (text, runs) = row_line(&ChatRowView::new(&sub, RowHighlight::default(), true));
+        assert_eq!(text, "Ada Lovelace Ada subscribed hi");
+        assert_eq!(
+            runs,
+            [(0..12, RunStyle::Author), (13..27, RunStyle::Notice)]
+        );
+    }
+
+    #[test]
+    fn a_row_copies_name_and_message_and_waits_while_applying() {
+        let row = ChatRowView::new(&message("01"), RowHighlight::default(), true);
+        assert_eq!(row.copy, "Ada Lovelace: Ship it!");
+        assert!(row.pressable());
+        let applying = RowHighlight {
+            phase: RowPhase::Applying,
+            ..RowHighlight::default()
+        };
+        let row = ChatRowView::new(&message("01"), applying, true);
+        assert!(row.highlightable);
+        assert!(!row.pressable());
+        assert_eq!(row.chips, [("Applying…", StatusChip::Neutral)]);
+    }
+
+    #[test]
+    fn a_failed_show_says_why_under_the_row() {
+        let failure = HighlightFailure {
+            message_id: "01".into(),
+            reason: "The comment didn't reach the stream.".into(),
+        };
+        let idle = CommentHighlightState::default();
+        let highlight = highlight::presentation("01", &idle, None, Some(&failure));
+        let row = ChatRowView::new(&message("01"), highlight, true);
+        assert_eq!(row.phase, RowPhase::Failed);
+        assert_eq!(
+            row.problem.as_deref(),
+            Some("The comment didn't reach the stream.")
+        );
+        assert_eq!(
+            row.description,
+            "Shows it on stream. The comment didn't reach the stream."
+        );
+        assert_eq!(row.chips, [("Failed", StatusChip::Destructive)]);
+    }
+
+    // `chat-list-keys.test.ts`: chatRowKeyCommand and chatRowAfterMove.
+    #[test]
+    fn row_keys_move_copy_and_press() {
+        assert_eq!(
+            row_key("down", false, false, false),
+            Some(RowKey::Move(RowMove::Next))
+        );
+        assert_eq!(
+            row_key("up", false, false, false),
+            Some(RowKey::Move(RowMove::Previous))
+        );
+        assert_eq!(
+            row_key("home", false, false, false),
+            Some(RowKey::Move(RowMove::First))
+        );
+        assert_eq!(
+            row_key("end", false, false, false),
+            Some(RowKey::Move(RowMove::Last))
+        );
+        assert_eq!(row_key("c", false, false, false), Some(RowKey::Copy));
+        assert_eq!(row_key("C", false, false, false), Some(RowKey::Copy));
+        assert_eq!(row_key("enter", false, false, false), Some(RowKey::Press));
+        assert_eq!(row_key("space", false, false, false), Some(RowKey::Press));
+        // ⌘C is the system's copy, ⇧↓ a selection, ⌥↑ nothing here.
+        assert_eq!(row_key("c", false, true, false), None);
+        assert_eq!(row_key("down", true, false, false), None);
+        assert_eq!(row_key("up", false, false, true), None);
+        // Reply and Remove are the Stream Manager's.
+        assert_eq!(row_key("r", false, false, false), None);
+        assert_eq!(row_key("backspace", true, false, false), None);
+    }
+
+    #[test]
+    fn a_move_stays_inside_the_list() {
+        assert_eq!(row_after_move(0, None, RowMove::Next), None);
+        assert_eq!(row_after_move(3, None, RowMove::Next), Some(0));
+        assert_eq!(row_after_move(3, None, RowMove::Previous), Some(2));
+        assert_eq!(row_after_move(3, Some(9), RowMove::Next), Some(0));
+        assert_eq!(row_after_move(3, Some(1), RowMove::Next), Some(2));
+        assert_eq!(row_after_move(3, Some(2), RowMove::Next), Some(2));
+        assert_eq!(row_after_move(3, Some(0), RowMove::Previous), Some(0));
+        assert_eq!(row_after_move(3, Some(1), RowMove::First), Some(0));
+        assert_eq!(row_after_move(3, Some(1), RowMove::Last), Some(2));
+    }
+
+    #[test]
+    fn the_list_moves_only_what_changed() {
+        let none: Vec<RowSplice> = Vec::new();
+        assert_eq!(row_splices(&["a", "b"], &["a", "b"]), none);
+        // New rows at the end.
+        assert_eq!(
+            row_splices(&["a", "b"], &["a", "b", "c", "d"]),
+            [RowSplice {
+                range: 2..2,
+                count: 2
+            }]
+        );
+        // The oldest row drops off the front as a new one arrives.
+        assert_eq!(
+            row_splices(&["a", "b", "c"], &["b", "c", "d"]),
+            [
+                RowSplice {
+                    range: 3..3,
+                    count: 1
+                },
+                RowSplice {
+                    range: 0..1,
+                    count: 0
+                },
+            ]
+        );
+        // A late message slots in by its time; a removal closes the gap.
+        assert_eq!(
+            row_splices(&["a", "c"], &["a", "b", "c"]),
+            [RowSplice {
+                range: 1..1,
+                count: 1
+            }]
+        );
+        assert_eq!(
+            row_splices(&["a", "b", "c"], &["a", "c"]),
+            [RowSplice {
+                range: 1..2,
+                count: 0
+            }]
+        );
+        // A new livestream replaces everything.
+        assert_eq!(
+            row_splices(&["a", "b"], &["x"]),
+            [RowSplice {
+                range: 0..2,
+                count: 1
+            }]
+        );
+        assert_eq!(
+            row_splices(&["a", "b"], &[] as &[&str]),
+            [RowSplice {
+                range: 0..2,
+                count: 0
+            }]
         );
     }
 

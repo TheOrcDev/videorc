@@ -23,6 +23,7 @@ pub mod overlay_layout;
 pub mod playback;
 pub mod repair;
 pub mod room_program_camera;
+pub mod scene_pictures;
 pub mod source_registry;
 pub mod source_status;
 pub mod streaming;

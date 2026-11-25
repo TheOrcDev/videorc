@@ -4,7 +4,7 @@
 //! line. The screens fill the pages in Phase 3; the kit (`videorc-kit`)
 //! replaces these plain elements when it lands.
 
-use crate::screens::avatar::{AvatarScreen, OpenPage as AvatarOpenPage};
+use crate::screens::avatar::{AvatarScreen, OpenPage as AvatarOpenPage, OpenSidekickTab};
 use crate::screens::command_palette::{Command, CommandPalette};
 use crate::screens::dialogs::{DialogsHost, OpenPage as DialogOpenPage};
 use crate::screens::notifications::{Centre, Hub, Navigate as NoticeNavigate, ToggleNotifications};
@@ -216,6 +216,17 @@ impl Shell {
             &avatar,
             window,
             |this, _, open: &AvatarOpenPage, window, cx| this.open_page(open.0, window, cx),
+        )
+        .detach();
+        cx.subscribe_in(
+            &avatar,
+            window,
+            |this, _, open: &OpenSidekickTab, window, cx| {
+                let tab = open.0;
+                this.sidekick
+                    .update(cx, |sidekick, cx| sidekick.select_tab(tab, cx));
+                this.open_page(PageId::Ai, window, cx);
+            },
         )
         .detach();
         cx.observe(&sidekick, |_, _, cx| cx.notify()).detach();

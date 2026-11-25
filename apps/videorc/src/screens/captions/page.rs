@@ -528,43 +528,35 @@ impl CaptionsPanel {
         }
         section = section.child(elsewhere);
 
-        // The look: applied live, the name and its line.
-        let style = c::style(&view.style_id);
+        // The look: applied live. Each chip shows a swatch, the name and
+        // its line (`StyleSwatch`).
         let styles = c::STYLES.iter().fold(
             ToggleGroup::new("caption-style")
                 .outline(true)
                 .accessibility_label(c::STYLE_LABEL)
                 .disabled(locked)
                 .value([view.style_id.clone()]),
-            |group, style| group.item(ToggleItem::new(style.id, style.label)),
+            |group, style| {
+                group.item(ToggleItem::new(style.id, style.label).child(style_chip(t, style)))
+            },
         );
         section = section.child(field(
             t,
             c::STYLE,
             c::STYLE_DESCRIPTION,
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(styles.on_change({
-                    let this = this.clone();
-                    move |values, _, app| {
-                        let Some(value) = values.into_iter().next() else {
-                            return;
-                        };
-                        if c::STYLES.iter().any(|style| style.id == value.as_ref()) {
-                            let _ = this.update(app, |this, cx| {
-                                this.patch("styleId", json!(value.as_ref()), true, cx)
-                            });
-                        }
+            div().flex().flex_col().gap(px(6.)).child(styles.on_change({
+                let this = this.clone();
+                move |values, _, app| {
+                    let Some(value) = values.into_iter().next() else {
+                        return;
+                    };
+                    if c::STYLES.iter().any(|style| style.id == value.as_ref()) {
+                        let _ = this.update(app, |this, cx| {
+                            this.patch("styleId", json!(value.as_ref()), true, cx)
+                        });
                     }
-                }))
-                .child(
-                    div()
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child(style.description),
-                ),
+                }
+            })),
         ));
 
         let sizes = c::TEXT_SIZES.iter().fold(
@@ -743,6 +735,71 @@ impl CaptionsPanel {
         }
         Some(section.into_any_element())
     }
+}
+
+/// One Style chip's body (`StyleSwatch` and its words): the bar's shape on
+/// a stand-in frame, then the name and its line. The frame is video, so it
+/// is the video ground in both themes.
+fn style_chip(t: &Theme, style: &c::CaptionStyle) -> AnyElement {
+    let words = div()
+        .max_w_full()
+        .px(px(8.))
+        .py(px(4.))
+        .text_size(px(11.))
+        .truncate()
+        .text_color(hsla(t.video_ground_foreground))
+        .child(c::STYLE_SAMPLE);
+    let plate = match style.id {
+        "glass" => words
+            .rounded(px(radius::CHIP))
+            .border_1()
+            .border_color(hsla(t.border))
+            .bg(hsla(t.glass_float)),
+        "lower-third" => words
+            .w_full()
+            .rounded(px(radius::TAG))
+            .bg(hsla(t.glass_float)),
+        "high-contrast" => words
+            .rounded(px(radius::TAG))
+            .font_weight(gpui::FontWeight::BOLD)
+            .bg(hsla(t.video_ground)),
+        _ => words.font_weight(gpui::FontWeight::SEMIBOLD),
+    };
+    let mut swatch = div()
+        .flex()
+        .items_end()
+        .w_full()
+        .h(px(48.))
+        .p(px(8.))
+        .overflow_hidden()
+        .rounded(px(radius::CHIP))
+        .bg(hsla(t.video_ground));
+    swatch = if style.id == "lower-third" {
+        swatch.justify_start()
+    } else {
+        swatch.justify_center()
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .w(px(180.))
+        .p(px(8.))
+        .child(swatch.child(plate))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(div().type_scale(text::META).child(style.label))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(hsla(t.muted_foreground))
+                        .child(style.description),
+                ),
+        )
+        .into_any_element()
 }
 
 /// The preview's words: the latest line, or the sample before one arrives.

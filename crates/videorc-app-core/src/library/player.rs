@@ -50,6 +50,10 @@ pub const MARKER_TIMELINE: &str = "Marker timeline";
 /// The renderer's words when no `grantSessionMedia` exists: here, a
 /// platform without the playback element (Windows and Linux until S4.1d).
 pub const NOT_IN_THIS_WINDOW: &str = "Playback isn't available in this window.";
+/// Windows, until its presenter lands (plan 260 S2.3b): the slot's words
+/// while the sound and the controls play without the picture.
+pub const NO_PICTURE_HERE_YET: &str =
+    "The picture doesn't show on Windows yet. The sound and the controls work.";
 
 /// Recordings of an hour or more show hours on both the playhead and the
 /// duration.
