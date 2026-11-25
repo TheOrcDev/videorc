@@ -55,7 +55,7 @@ use videorc_kit::slider::{Slider, SliderEvent, SliderState};
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
-use videorc_kit::tokens::{Theme, font, size, text};
+use videorc_kit::tokens::{Theme, size, text};
 
 use crate::app::permissions::Permissions;
 use crate::app::shell::Shell;
@@ -275,8 +275,10 @@ fn labelled_switch(
 
 /// A control row's readout: `font-mono text-xs text-muted-foreground`.
 fn value_text(t: &Theme, words: impl Into<SharedString>) -> gpui::Div {
+    // `font::MONO[0]` is the CSS `ui-monospace`, which GPUI can't load (kit
+    // request); the LCD's loadable mono face until the token carries one.
     div()
-        .font_family(font::MONO[0])
+        .font_family(crate::lcd::SCREEN_FONT)
         .type_scale(text::META)
         .whitespace_nowrap()
         .text_color(hsla(t.muted_foreground))
@@ -1229,7 +1231,9 @@ impl SourcesPanel {
             body = body.child(
                 div()
                     .flex()
-                    .items_baseline()
+                    // GPUI's baseline follows a wrapped line's last row; the
+                    // action sits on the first, as Electron's does.
+                    .items_start()
                     .justify_between()
                     .gap(px(12.))
                     .type_scale(text::META)
@@ -1240,7 +1244,8 @@ impl SourcesPanel {
                             .child(SharedString::from(scene.line.clone())),
                     )
                     .child(
-                        div().flex_none().mr(px(-8.)).child(
+                        // The 24 px Xs button centred on the 16 px first line.
+                        div().flex_none().mr(px(-8.)).mt(px(-4.)).child(
                             Button::new(format!("{picker_id}-open-scenes"))
                                 .label(scene.open_label)
                                 .size(ButtonSize::Xs)
@@ -1388,6 +1393,8 @@ impl SourcesPanel {
         let entity = cx.entity();
         body = body.child(
             SettingsRow::new("noise-reduction", audio_copy::NOISE_REDUCTION)
+                // Electron: a bare horizontal Field inside the strip, no inset.
+                .flush(true)
                 .description(mic.noise_reduction.description.clone())
                 .child(
                     Switch::new("noise-reduction-switch")
@@ -1716,6 +1723,8 @@ impl SourcesPanel {
         let entity = cx.entity();
         body = body.child(
             SettingsRow::new("hear-sounds", audio_copy::HEAR_SOUNDS)
+                // Electron: a bare horizontal Field inside the strip, no inset.
+                .flush(true)
                 .description(audio_copy::HEAR_SOUNDS_DESCRIPTION)
                 .child(
                     Switch::new("hear-sounds-switch")
