@@ -46,6 +46,7 @@ pub const STUDIO_SMOKE_COMMANDS: &[&str] = &[
     "select-camera-device",
     "select-layout-preset",
     "select-screen-device",
+    "preview-surface-scene-state",
     "studio-capture-configure",
     "studio-record",
     "studio-replay-buffer",
@@ -152,6 +153,40 @@ fn sources_json(snapshot: &StudioSnapshot) -> Value {
         "testPattern": sources.test_pattern,
         "layoutPreset": serde_json::to_value(&snapshot.settings.capture.layout.layout_preset)
             .unwrap_or(Value::Null),
+        "video": {
+            "width": snapshot.settings.capture.video.width,
+            "height": snapshot.settings.capture.video.height,
+            "fps": snapshot.settings.capture.video.fps,
+        },
+    })
+}
+
+/// `preview-surface-scene-state` on GPUI: the scene the Studio committed,
+/// which the preview shows (Electron's native surface scene). The GPUI app
+/// keeps no separate surface revision, so `sceneRevision` is the backend's
+/// to read (`compositor.status`).
+pub fn surface_scene_json(snapshot: &StudioSnapshot) -> Value {
+    let scene = snapshot.sources.scene.as_ref();
+    let ids = |visible_only: bool| -> Vec<String> {
+        scene
+            .map(|scene| {
+                scene
+                    .sources
+                    .iter()
+                    .filter(|source| !visible_only || source.visible)
+                    .map(|source| source.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    json!({
+        "sceneRevision": null,
+        "layoutPreset": serde_json::to_value(&snapshot.settings.capture.layout.layout_preset)
+            .unwrap_or(Value::Null),
+        "cameraShape": snapshot.settings.capture_doc["layout"]["cameraShape"],
+        "sourceIds": ids(false),
+        "visibleSourceIds": ids(true),
+        "proofWindowVisible": false,
     })
 }
 
@@ -565,6 +600,7 @@ impl SmokeCommandHandler for StudioSmoke {
                 "select-camera-device" => self.select_camera(params).await,
                 "select-layout-preset" => self.select_layout_preset(params).await,
                 "studio-scenes-state" => Ok(scenes_json(&self.studio.snapshot())),
+                "preview-surface-scene-state" => Ok(surface_scene_json(&self.studio.snapshot())),
                 "studio-scene-save" => self.scene_save(params).await,
                 "studio-scene-apply" => self.scene_apply(params).await,
                 "studio-scene-delete" => self.scene_delete(params).await,

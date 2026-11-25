@@ -1,6 +1,6 @@
 import { request as httpRequest } from 'node:http'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
@@ -55,6 +55,18 @@ const LAYOUTS = [
   }
 ]
 
+// Plan 260 Phase 3: on the GPUI app the preview is watched in its own window
+// (macOS; it docks only into the Studio), the stored layout and canvas come
+// from `studio-scenes-state`, and the surface scene is the Studio's committed
+// scene (`preview-surface-scene-state`).
+const gpuiApp = smokeAppIsGpui()
+if (gpuiApp && process.platform !== 'darwin') {
+  console.log(
+    'Layout source loop SKIP: the GPUI Preview window opens only on macOS so far, and the docked Preview hides off the Studio.'
+  )
+  process.exit(0)
+}
+
 const launched = await launchDevApp({
   requiredMarkers: ['backend-ready', 'preview-motion-ready'],
   timeoutMs,
@@ -75,7 +87,7 @@ try {
   // A fresh profile starts the Preview stuck to the app (plan 213 D5). Only
   // macOS docks it into the Layout tab's canvas; elsewhere the docked Preview
   // lives in the Studio slot and hides on this tab, so float it to watch it.
-  if (process.platform !== 'darwin') {
+  if (process.platform !== 'darwin' && !gpuiApp) {
     await smokeCommand(smoke, 'preview-window-set-mode', { mode: 'floating' })
   }
   // Isolated smoke profiles persist no camera; camera presets need one selected.
@@ -83,7 +95,8 @@ try {
   // Enable the synthetic replacement last. A late device-list reconciliation
   // must not auto-select a physical display over this explicit diagnostic source.
   await smokeCommand(smoke, 'enable-synthetic-source', { settleMs })
-  await smokeCommand(smoke, 'open-layout-tab')
+  if (gpuiApp) await smokeCommand(smoke, 'open-tab', { tab: 'layout' })
+  else await smokeCommand(smoke, 'open-layout-tab')
   await sleep(settleMs)
 
   for (const layout of LAYOUTS) {
@@ -94,15 +107,22 @@ try {
     const previewWindow = await revealDockedPreview(smoke)
     const [surface, captureState] = await Promise.all([
       smokeCommand(smoke, 'preview-surface-scene-state'),
-      smokeCommand(smoke, 'eval-js', {
-        code: `
+      gpuiApp
+        ? smokeCommand(smoke, 'studio-scenes-state').then((state) => ({
+            result: {
+              layoutPreset: state?.visual?.layoutPreset ?? null,
+              video: state?.visual?.video ?? null
+            }
+          }))
+        : smokeCommand(smoke, 'eval-js', {
+            code: `
           const stored = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}');
           return {
             layoutPreset: stored.layout?.layoutPreset ?? null,
             video: stored.video ?? null
           };
         `
-      })
+          })
     ])
     const scene = await request(ws, timeoutMs, 'scene.get')
     assertLayoutLoop(layout, selected, surface, scene, previewWindow, captureState.result)
@@ -198,7 +218,7 @@ function assertLayoutLoop(layout, selected, surface, scene, previewWindow, captu
 // Preview is unaffected by the scroll.
 async function revealDockedPreview(smoke) {
   const before = await smokeCommand(smoke, 'preview-window-state')
-  if (before?.mode === 'docked') {
+  if (before?.mode === 'docked' && !gpuiApp) {
     const revealed = await smokeCommand(smoke, 'eval-js', {
       code: `const slot = document.querySelector('[data-videorc-dock-slot="scene"]'); if (!slot) return false; slot.scrollIntoView({ block: 'center', behavior: 'instant' }); return true;`
     })
