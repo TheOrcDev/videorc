@@ -1,6 +1,6 @@
 //! Stream details basics on Setup (`MetadataEditor` title/description/privacy/save).
 
-use gpui::{AnyElement, Context, Entity, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Entity, Focusable, Window, div, prelude::*, px};
 use gpui_base::input::InputEvent;
 use videorc_app_core::livestream::copy as page_copy;
 use videorc_app_core::livestream::details;
@@ -71,17 +71,43 @@ impl DestinationsPanel {
         let Some(draft) = state.draft.as_ref() else {
             return;
         };
-        if inputs.seeded_at.as_deref() == Some(draft.updated_at.as_str()) {
+        // A save (a new `updatedAt`) refills both fields and is clean.
+        if inputs.seeded_at.as_deref() != Some(draft.updated_at.as_str()) {
+            inputs.title.update(cx, |input, cx| {
+                input.set_value(draft.title.clone(), window, cx);
+            });
+            inputs.description.update(cx, |input, cx| {
+                input.set_value(draft.description.clone(), window, cx);
+            });
+            inputs.seeded_at = Some(draft.updated_at.clone());
+            self.details_dirty = false;
             return;
         }
-        inputs.title.update(cx, |input, cx| {
-            input.set_value(draft.title.clone(), window, cx);
-        });
-        inputs.description.update(cx, |input, cx| {
-            input.set_value(draft.description.clone(), window, cx);
-        });
-        inputs.seeded_at = Some(draft.updated_at.clone());
-        self.details_dirty = false;
+        // The draft changed elsewhere (Go live's fields, then Cancel or
+        // not): Electron has one draft, so a field nobody is typing in
+        // follows it, and the edit is unsaved here too.
+        let mut followed = false;
+        let title = inputs.title.clone();
+        if !title.read(cx).focus_handle(cx).is_focused(window)
+            && title.read(cx).value().as_ref() != draft.title.as_str()
+        {
+            title.update(cx, |input, cx| {
+                input.set_value(draft.title.clone(), window, cx)
+            });
+            followed = true;
+        }
+        let description = inputs.description.clone();
+        if !description.read(cx).focus_handle(cx).is_focused(window)
+            && description.read(cx).value().as_ref() != draft.description.as_str()
+        {
+            description.update(cx, |input, cx| {
+                input.set_value(draft.description.clone(), window, cx)
+            });
+            followed = true;
+        }
+        if followed {
+            self.details_dirty = true;
+        }
     }
 
     pub(super) fn details_section(
