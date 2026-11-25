@@ -42,7 +42,9 @@ tree, and the driver reads it with `Window::debug_a11y_tree_json`. Pointer
 and keys go through `Window::dispatch_event` and `Window::dispatch_keystroke`,
 the window's own dispatch, so a dialog's scrim takes a click meant for what
 it covers, as a mouse would. `ui-click` / `ui-focus` take a selector by
-element id or accessibility name; `ui-key` with no selector sends keys to
+element id or accessibility name; `ui-click {x,y}` and `ui-drag
+{fromX,fromY,toX,toY}` hit absolute window points (the Scene stage paints
+sources without a11y nodes); `ui-key` with no selector sends keys to
 whatever has the focus.
 
 ## Gaps in gpui-pre 0.3.14
@@ -75,9 +77,11 @@ Each gap is answered by name in the driver and listed here until it closes.
    selector's `id` matches the element id that created the node, which debug
    builds print, qualified by its view (`StudioPage::record`).
 
-Gap 1 is closed locally (`patches/gpui-pre`). Gap 2 (AccessKit actions) is
-still open: `ui-click {via: "action"}` waits. Pointer clicks, focus, and keys
-go through `Window::dispatch_event` / `dispatch_keystroke` (no OS-level HID).
+Gap 1 is closed locally (`patches/gpui-pre`). Absolute `ui-click {x,y}` and
+`ui-drag {fromX,fromY,toX,toY}` use the same pointer dispatch for painted
+stage content that has no accessibility node. Gap 2 (AccessKit actions) is
+still open: `ui-click {via: "action"}` waits. Pointer clicks, focus, drag, and
+keys go through `Window::dispatch_event` / `dispatch_keystroke` (no OS-level HID).
 
 ## What the plan's "done when" still needs
 
@@ -153,7 +157,6 @@ Wait for a GPUI product path or new commands first:
 | `smoke:html-overlay`                                                                                                                             | the Chromium page host (`videorc-page-host` / P5-D10); `html-overlay-stats` answers `{ stats: null }` until then (named SKIP on GPUI)                           |
 | `smoke:screens` theme screenshots                                                                                                                | the port itself (C1): `capture-page` captures the composited window on macOS now (gap 3)                                                                        |
 | `smoke:preview-pump-diagnostics`, `smoke:preview-click-focus`                                                                                    | Electron's present-pump and click-focus probes                                                                                                                  |
-| `smoke:preview-scene-commit`, `smoke:freeform-editor`                                                                                            | `select-camera-shape`; freeform-editor clicks unblocked once gap 1's bounds patch is in the smoke binary                                                        |
 | `smoke:recording-native-preview`, `smoke:preview-surface`, `probe:preview-lifecycle`, `probe:preview-window`, `smoke:preview-interaction-stress` | Electron's native-surface and window commands; they need GPUI-specific probes, not a port                                                                       |
 | `probe:comments-window`                                                                                                                          | Electron fixtures (`push-*`/`seed-*`/person-card/layout-metrics) stay Electron-only. GPUI path: `comments-window-probe-gpui.mjs` (open/place/raise/hide + `#2142` composited capture on macOS; Win/Linux SKIP) |
 
@@ -199,6 +202,8 @@ use `capture-page` on macOS for theme screenshots; the renderer mic `eval-js` ch
   screen off macOS), or `sourceId`; it turns the test pattern off first, as Electron's hook does. Answers `{id, kind}`.
 - `select-camera-device {cameraId?, off?, timeoutMs?, settleMs?}`: the first available camera, `cameraId`, or Camera
   off. Answers `{cameraId}`.
+- `select-camera-shape {shape, settleMs?}`: `apply_camera_preset` with `camera_shape_patch` (circle / rounded /
+  rectangle). Answers `{shape, pressed, editModeActivated, label}`. Shared with `smoke:preview-scene-commit`.
 - `select-layout-preset {preset, settleMs?}`: the layout on stream (switching to 9:16 first for a `vertical-` preset),
   answered once the capture config shows it. It moved from the window commands to the Studio's.
 - `studio-scenes-state`: the library (`scenes`, `onStreamId`, `pendingSceneId`, `modified`, `readOnly`, `error`) and
@@ -232,10 +237,17 @@ use `capture-page` on macOS for theme screenshots; the renderer mic `eval-js` ch
   `scenes::migration`.
 - New scenes: the GPUI Scene page has no Add scene… dialog yet, so the smoke builds the app scenes (Follow on, the app's
   name, "<name> 2" for a second) and inserts them with `studio-scene-insert`.
-- Reorder: can use a row's Alt+ArrowUp through `ui-focus` + `ui-key` (gap 1 closed); `studio-scene-move` remains as a
-  direct Studio path. Position keys come from `studio-scenes-state`'s `keys`.
+- Reorder: `ui-focus` on `scene-row-{id}` then Alt+ArrowUp through `ui-key` (gap 1 closed; rows `track_focus`).
+  `studio-scene-move` remains as a direct Studio path. Position keys come from `studio-scenes-state`'s `keys`.
 - Rapid keys: the trace is polled from `studio-scenes-state`; the renderer-only diagnostics (layout intent, queued key,
   resolve generation) are `null`. The gate reads only the frames and the final state.
 - A refused scene apply reads as `false` (the command's error); refusal reasons come from `studio-state`.
 - Add app… for the password-manager list goes through `studio-privacy-add-app` (no picker yet).
 - Follow's "Videorc in front" row is Electron's and is left out on GPUI.
+
+### freeform-editor on GPUI
+
+`smoke:freeform-editor` with `VIDEORC_APP=gpui` skips CDP / `__freeformSmoke` and drives the Scene stage through
+`ui-click {x,y}` and `ui-drag` (`scripts/lib/freeform-editor-gpui.mjs`). Stage bounds come from `ui-find` on
+`scene-stage` (gutter 28 px). The gate is backend-authoritative (scene revision + accepted transform); DOM frame /
+pointer-capture evidence stays Electron. `select-camera-shape` covers the mask case shared with preview-scene-commit.

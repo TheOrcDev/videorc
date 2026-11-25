@@ -11,11 +11,15 @@
 //!   reveal?}`: waits (Electron's `waitFor`, 8 s by default) for a match and
 //!   answers it with the number of matches. A password field's value is
 //!   masked unless `reveal: true`.
-//! - `ui-click {…selector, via?}`: a pointer press and release at the
-//!   element's centre through the window's own dispatch (`via: "pointer"`,
-//!   the default: what a mouse does, so a dialog's scrim takes a click meant
-//!   for what it covers). A disabled element is waited for, then refused by
-//!   name. The selector is an element id or accessibility name (label).
+//! - `ui-click {…selector, via?}` or `ui-click {x, y, modifiers?}`: a pointer
+//!   press and release at the element's centre (or at absolute window points)
+//!   through the window's own dispatch (`via: "pointer"`, the default: what a
+//!   mouse does, so a dialog's scrim takes a click meant for what it covers).
+//!   A disabled element is waited for, then refused by name. The selector is
+//!   an element id or accessibility name (label). Absolute `x`/`y` is
+//!   pointer-only (no `via: "action"`).
+//! - `ui-drag {fromX, fromY, toX, toY, steps?, modifiers?}`: press at `from`,
+//!   move through `steps` samples to `to`, release — freeform stage gestures.
 //! - `ui-focus {…selector}`: the same pointer click so a row or field takes
 //!   the focus; answers once the tree says it is focused.
 //! - `ui-type {…selector?, text, clear?}`: focuses the element (a click, then
@@ -73,6 +77,7 @@ pub const UI_DRIVER_WINDOW_COMMANDS: &[&str] = &[
     "resize-window",
     "ui-appearance",
     "ui-click",
+    "ui-drag",
     "ui-find",
     "ui-focus",
     "ui-key",
@@ -159,6 +164,7 @@ fn window_of(request: &UiDriverRequest) -> UiWindow {
         UiDriverRequest::Tree { window, .. }
         | UiDriverRequest::Find { window, .. }
         | UiDriverRequest::Click { window, .. }
+        | UiDriverRequest::Drag { window, .. }
         | UiDriverRequest::Focus { window, .. }
         | UiDriverRequest::Type { window, .. }
         | UiDriverRequest::Key { window, .. }
@@ -263,7 +269,19 @@ fn look(
                 None => missing(selector),
             })
         }
-        UiDriverRequest::Click { selector, via, .. } => {
+        UiDriverRequest::Click {
+            selector,
+            point: at,
+            via,
+            modifiers,
+            ..
+        } => {
+            let held = modifiers_of(modifiers);
+            if let Some((x, y)) = *at {
+                pointer_click(point(px(x as f32), px(y as f32)), held, window, cx);
+                return Ok(Attempt::Done(json!({ "clicked": true, "x": x, "y": y })));
+            }
+            let selector = selector.as_ref().expect("validated: selector or point");
             let Some(node) = selector.find(tree) else {
                 return Ok(missing(selector));
             };
@@ -276,13 +294,31 @@ fn look(
             match via {
                 UiClickVia::Action => Err(NO_ACTIONS.into()),
                 UiClickVia::Pointer => {
-                    click(node, window, cx)?;
+                    click_node(node, held, window, cx)?;
                     Ok(Attempt::Done(json!({
                         "clicked": true,
                         "element": node.json(false, Some(0)),
                     })))
                 }
             }
+        }
+        UiDriverRequest::Drag {
+            from,
+            to,
+            steps,
+            modifiers,
+            ..
+        } => {
+            let held = modifiers_of(modifiers);
+            pointer_drag(*from, *to, *steps, held, window, cx);
+            Ok(Attempt::Done(json!({
+                "dragged": true,
+                "fromX": from.0,
+                "fromY": from.1,
+                "toX": to.0,
+                "toY": to.1,
+                "steps": steps,
+            })))
         }
         UiDriverRequest::Focus { selector, .. } => {
             let Some(node) = selector.find(tree) else {
@@ -300,7 +336,7 @@ fn look(
                     "element": node.json(false, Some(0)),
                 })));
             }
-            click(node, window, cx)?;
+            click_node(node, Modifiers::none(), window, cx)?;
             Ok(Attempt::Wait(format!(
                 "{} did not take the focus.",
                 selector.describe()
@@ -334,7 +370,7 @@ fn look(
                     return Ok(missing(selector));
                 };
                 if !node.focused {
-                    click(node, window, cx)?;
+                    click_node(node, Modifiers::none(), window, cx)?;
                     return Ok(Attempt::Wait(format!(
                         "{} did not take the focus.",
                         selector.describe()
@@ -427,7 +463,7 @@ fn type_into(
         )));
     }
     if !node.focused {
-        click(node, window, cx)?;
+        click_node(node, Modifiers::none(), window, cx)?;
         return Ok(Attempt::Wait(format!(
             "{} did not take the focus.",
             describe_node(node)
@@ -460,11 +496,25 @@ fn centre(node: &UiNode) -> Result<Point<gpui::Pixels>, String> {
     Ok(point(px(x as f32), px(y as f32)))
 }
 
-/// A pointer move, press and release at the element's centre, through the
-/// window's own dispatch: what a mouse does.
-fn click(node: &UiNode, window: &mut Window, cx: &mut App) -> Result<(), String> {
-    let position = centre(node)?;
-    let modifiers = Modifiers::none();
+/// A pointer move, press and release at the element's centre.
+fn click_node(
+    node: &UiNode,
+    modifiers: Modifiers,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<(), String> {
+    pointer_click(centre(node)?, modifiers, window, cx);
+    Ok(())
+}
+
+/// A pointer move, press and release at `position`, through the window's own
+/// dispatch: what a mouse does.
+fn pointer_click(
+    position: Point<gpui::Pixels>,
+    modifiers: Modifiers,
+    window: &mut Window,
+    cx: &mut App,
+) {
     window.dispatch_event(
         PlatformInput::MouseMove(MouseMoveEvent {
             position,
@@ -492,7 +542,62 @@ fn click(node: &UiNode, window: &mut Window, cx: &mut App) -> Result<(), String>
         }),
         cx,
     );
-    Ok(())
+}
+
+/// Press at `from`, move through `steps` samples to `to`, release.
+fn pointer_drag(
+    from: (f64, f64),
+    to: (f64, f64),
+    steps: usize,
+    modifiers: Modifiers,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let start = point(px(from.0 as f32), px(from.1 as f32));
+    let end = point(px(to.0 as f32), px(to.1 as f32));
+    window.dispatch_event(
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: start,
+            pressed_button: None,
+            modifiers,
+        }),
+        cx,
+    );
+    window.dispatch_event(
+        PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: start,
+            modifiers,
+            click_count: 1,
+            first_mouse: false,
+        }),
+        cx,
+    );
+    let hops = steps.max(1);
+    for hop in 1..=hops {
+        let t = hop as f64 / hops as f64;
+        let position = point(
+            px((from.0 + (to.0 - from.0) * t) as f32),
+            px((from.1 + (to.1 - from.1) * t) as f32),
+        );
+        window.dispatch_event(
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position,
+                pressed_button: Some(MouseButton::Left),
+                modifiers,
+            }),
+            cx,
+        );
+    }
+    window.dispatch_event(
+        PlatformInput::MouseUp(MouseUpEvent {
+            button: MouseButton::Left,
+            position: end,
+            modifiers,
+            click_count: 1,
+        }),
+        cx,
+    );
 }
 
 fn modifiers_of(held: &[UiModifier]) -> Modifiers {

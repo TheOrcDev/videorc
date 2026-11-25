@@ -113,6 +113,8 @@ pub struct ScenePage {
     hotkeys: crate::app::hotkeys::Hotkeys,
     /// A row drag: (the dragged row's index, the row under the pointer).
     row_drag: Option<(usize, usize)>,
+    /// Focus handles for each scene row so Alt+↑/↓ reorder can land (smoke).
+    row_focus: std::collections::HashMap<String, FocusHandle>,
     /// The scene rows' stills, by `picture_key` (P458).
     row_stills: std::collections::HashMap<String, Arc<gpui::Image>>,
     /// Hide screen's Add app… popover, and its search.
@@ -223,6 +225,7 @@ impl ScenePage {
             hotkeys,
             row_stills: Default::default(),
             row_drag: None,
+            row_focus: Default::default(),
             add_app_open: false,
             add_app_search,
             status_timer: None,

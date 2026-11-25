@@ -253,10 +253,17 @@ impl ScenePage {
             .filter(|(_, over)| *over == index && cx.has_active_drag())
             .and_then(|(from, _)| drop_edge(from, index));
         let ring = hsla(t.ring);
+        let focus = self
+            .row_focus
+            .entry(id.clone())
+            .or_insert_with(|| cx.focus_handle())
+            .clone();
         let mut host = div()
             .id(SharedString::from(format!("scene-row-{id}")))
             .relative()
             .group(KEBAB_HOST)
+            .track_focus(&focus)
+            .tab_index(0)
             .child(line)
             .children(edge.map(|edge| {
                 let line = div()
