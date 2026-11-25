@@ -23,7 +23,6 @@ pub const ALLOW_CLOUD_AI: &str = "Allow cloud AI";
 /// `VIDEORC_PREMIUM_URL`.
 pub const PREMIUM_URL: &str = "https://videorc.com/premium";
 /// A new look is four pictures (`BUDDY_LOOK_CREATE_IMAGES`).
-#[allow(dead_code)] // The onboarding's gate (batch B).
 pub const LOOK_CREATE_IMAGES: u64 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +45,6 @@ pub enum GateAction {
 /// Why creating is off: one line, and the one thing that turns it on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gate {
-    #[allow(dead_code)] // Read by the tests and the onboarding (batch B).
     pub kind: GateKind,
     pub reason: String,
     pub action: Option<GateAction>,
@@ -128,7 +126,6 @@ fn look_gate(input: &GateInput, library: Option<&LibraryState>, images: u64) -> 
 }
 
 /// `buddyLookCreateGate`: why a new look can't be made now, or None.
-#[allow(dead_code)] // The onboarding (batch B) asks it.
 pub fn look_create_gate(input: &GateInput, library: Option<&LibraryState>) -> Option<Gate> {
     look_gate(input, library, LOOK_CREATE_IMAGES)
 }
