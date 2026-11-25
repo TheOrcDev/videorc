@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{AnyWindowHandle, App, Entity, WindowAppearance, WindowHandle};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use videorc_app_core::smoke::security::{UiAppearanceRequest, UiToastRequest, UiWindow};
 use videorc_kit::theme::{IncreaseContrast, ReduceMotion};
 use videorc_kit::{ToastData, ToastKind};
