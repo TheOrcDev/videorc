@@ -40,6 +40,7 @@
 //! [`SmokeStart`] the same way as `studio`.
 
 pub mod activate;
+pub mod capture;
 pub mod driver;
 pub mod shell;
 pub mod windows;
@@ -281,6 +282,10 @@ pub fn start(cx: &mut App, start: SmokeStart) -> bool {
         AppSmokeConfig::from_env(env, start.packaged, start.isolated_backend),
         start.quit,
     )
+    .with_handler(Arc::new(capture::CaptureCommands::new(
+        ui.clone(),
+        output_dir.clone(),
+    )))
     .with_handler(Arc::new(driver::UiDriver::new(ui.clone(), output_dir)))
     .with_handler(Arc::new(windows::WindowCommands::new(ui.clone())))
     .with_handler(Arc::new(ShellCommands { ui }));

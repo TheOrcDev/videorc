@@ -69,7 +69,6 @@ use super::{UiThread, shell};
 /// The commands the driver takes. The server's test (`ui-driver.test.mjs`)
 /// checks every `ui-*` command the JS driver sends is named here.
 pub const UI_DRIVER_WINDOW_COMMANDS: &[&str] = &[
-    "capture-page",
     "capture-page-alpha",
     "resize-window",
     "ui-appearance",
@@ -96,8 +95,8 @@ const NO_BOUNDS: &str = "This element's accessibility node has no bounds, so the
 const NO_ACTIONS: &str = "GPUI (gpui-pre 0.3.14) has no public way to send an accessibility \
      action into a window; use the pointer (plan 260 S2.5 gap: docs/gpui/ui-driver.md).";
 /// The capture gap, by name.
-const NO_CAPTURE: &str = "capture-page needs a window capture GPUI (gpui-pre 0.3.14) only \
-     offers to tests (plan 260 S2.5 gap: docs/gpui/ui-driver.md).";
+const NO_CAPTURE: &str = "capture-page-alpha reads a page render GPUI (gpui-pre 0.3.14) only \
+     offers to tests; capture-page is the composited window (super::capture).";
 
 /// The driver's handler.
 pub struct UiDriver {
@@ -115,7 +114,7 @@ impl UiDriver {
 
     async fn drive(&self, command: &str, params: Map<String, Value>) -> Result<Value, String> {
         match command {
-            "capture-page" | "capture-page-alpha" => return Err(NO_CAPTURE.into()),
+            "capture-page-alpha" => return Err(NO_CAPTURE.into()),
             "resize-window" => {
                 let (width, height) = resize_params(&params)?;
                 return self
