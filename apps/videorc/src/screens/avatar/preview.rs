@@ -76,6 +76,8 @@ pub struct PetPreview {
     error: Option<String>,
     paused: bool,
     active: bool,
+    /// Click cycles reactions (Avatar Try/Test). Community Preview is off.
+    interactive: bool,
     /// The tick loop runs (one at a time).
     ticking: bool,
     epoch: Instant,
@@ -93,6 +95,7 @@ impl PetPreview {
             error: None,
             paused: false,
             active: true,
+            interactive: true,
             ticking: false,
             epoch: Instant::now(),
         }
@@ -148,6 +151,11 @@ impl PetPreview {
         }
         self.kick(cx);
         cx.notify();
+    }
+
+    /// Electron `interactive={false}`: no click cycle (Community Preview).
+    pub fn set_interactive(&mut self, interactive: bool) {
+        self.interactive = interactive;
     }
 
     /// Still: the four pictures (`stillImages`), each a whole frame. A
@@ -426,14 +434,17 @@ impl Render for PetPreview {
             .rounded(px(radius::ROW))
             .border_1()
             .border_color(hsla(t.border))
-            .bg(hsla(t.inset))
-            .cursor_pointer()
-            .on_click(cx.listener(|preview, _, _, cx| preview.click(cx)))
-            .on_key_down(cx.listener(|preview, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
-                    preview.recenter(cx);
-                }
-            }));
+            .bg(hsla(t.inset));
+        if self.interactive {
+            stage = stage
+                .cursor_pointer()
+                .on_click(cx.listener(|preview, _, _, cx| preview.click(cx)))
+                .on_key_down(cx.listener(|preview, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        preview.recenter(cx);
+                    }
+                }));
+        }
         match (&self.art, frame) {
             (Some(Art::Still(pictures)), Some(frame)) => {
                 let picture = pictures
