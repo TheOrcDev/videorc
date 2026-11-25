@@ -47,8 +47,8 @@ use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::section_label::SectionLabel;
 use videorc_kit::spinner::Spinner;
-use videorc_kit::theme::{self, TypeScale, hsla, with_alpha};
-use videorc_kit::tokens::{Theme, radius, text};
+use videorc_kit::theme::{self, TypeScale, faded_over, hsla, with_alpha};
+use videorc_kit::tokens::{Color, Theme, radius, text};
 use videorc_kit::tooltip::tooltip;
 
 use super::talk_show_host::TalkShowRoomHost;
@@ -915,55 +915,55 @@ impl ShowStage {
         cx: &App,
     ) -> AnyElement {
         let disabled = !interactive || screen.blocked_reason.is_some();
-        let border = if screen.on_program {
-            hsla(t.foreground)
-        } else {
-            hsla(t.border)
-        };
+        let paint = StageCardPaint::of(t, screen.on_program, disabled);
         let frame = self.remote_frame(&screen.identity, RemoteSource::Screen, cx);
-        let muted = hsla(t.muted_foreground);
         let entity_screen = screen.clone();
         let mut thumb = div()
+            .relative()
             .h(px(72.))
             .w_full()
             .rounded(px(radius::CHIP / 2.))
-            .bg(hsla(t.inset))
+            .bg(paint.thumb)
             .overflow_hidden();
         if let Some(frame) = frame {
             thumb = thumb.child(img(frame).size_full().object_fit(ObjectFit::Cover));
         }
-        let mut card =
-            div()
-                .id(format!("stage-screen-{}", screen.identity))
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .w(px(140.))
-                .p(px(8.))
-                .rounded(px(radius::CHIP))
-                .border_1()
-                .border_color(border)
-                .bg(hsla(if screen.on_program {
-                    with_alpha(t.foreground, 0.08)
+        if let Some(veil) = paint.thumb_veil {
+            thumb = thumb.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(radius::CHIP / 2.))
+                    .bg(veil),
+            );
+        }
+        let mut card = div()
+            .id(format!("stage-screen-{}", screen.identity))
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .w(px(140.))
+            .p(px(8.))
+            .rounded(px(radius::CHIP))
+            .border_1()
+            .border_color(paint.border)
+            .bg(paint.fill)
+            .child(thumb)
+            .child(
+                div()
+                    .type_scale(text::META)
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(paint.name)
+                    .truncate()
+                    .child(screen.name.clone()),
+            )
+            .child(div().type_scale(text::META).text_color(paint.meta).child(
+                if screen.on_program {
+                    ON_STAGE
                 } else {
-                    with_alpha(t.foreground, 0.)
-                }))
-                .opacity(if disabled { 0.5 } else { 1. })
-                .child(thumb)
-                .child(
-                    div()
-                        .type_scale(text::META)
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .truncate()
-                        .child(screen.name.clone()),
-                )
-                .child(div().type_scale(text::META).text_color(muted).child(
-                    if screen.on_program {
-                        ON_STAGE
-                    } else {
-                        PUT_ON_STAGE
-                    },
-                ));
+                    PUT_ON_STAGE
+                },
+            ));
         if !disabled {
             card = card.on_click(move |_, _, cx| {
                 let screen = entity_screen.clone();
@@ -1250,6 +1250,61 @@ fn program_monitor_view_simple(
     })
 }
 
+/// Colours for a layout / Screens card. Disabled paints each layer
+/// pre-blended over the card ground — never `.opacity` (GPUI fades each
+/// layer alone and the label shows its fill through).
+struct StageCardPaint {
+    border: gpui::Hsla,
+    fill: gpui::Hsla,
+    thumb: gpui::Hsla,
+    name: gpui::Hsla,
+    meta: gpui::Hsla,
+    /// Half the card ground over a live thumb when the card is disabled.
+    thumb_veil: Option<gpui::Hsla>,
+}
+
+impl StageCardPaint {
+    fn of(t: &Theme, selected: bool, disabled: bool) -> Self {
+        let ground = faded_over(t.foreground, t.glass_solid, 0.04);
+        let dim = |color: Color| {
+            if disabled {
+                faded_over(color, ground, 0.5)
+            } else {
+                color
+            }
+        };
+        let border = if selected { t.foreground } else { t.border };
+        let fill = if selected {
+            with_alpha(t.foreground, 0.08)
+        } else {
+            with_alpha(t.foreground, 0.)
+        };
+        Self {
+            border: hsla(dim(border)),
+            fill: hsla(if disabled {
+                faded_over(fill, ground, 0.5)
+            } else {
+                fill
+            }),
+            thumb: hsla(dim(t.inset)),
+            name: hsla(dim(t.foreground)),
+            meta: hsla(dim(t.muted_foreground)),
+            thumb_veil: disabled.then(|| hsla(with_alpha(ground, 0.5))),
+        }
+    }
+
+    /// Layout cards use a muted plate instead of the Screens inset well.
+    fn layout_thumb(t: &Theme, disabled: bool) -> gpui::Hsla {
+        let ground = faded_over(t.foreground, t.glass_solid, 0.04);
+        let plate = with_alpha(t.muted, 0.5);
+        hsla(if disabled {
+            faded_over(plate, ground, 0.5)
+        } else {
+            plate
+        })
+    }
+}
+
 fn person_name(
     tile: &StageTile,
     participant: Option<&RoomParticipant>,
@@ -1284,11 +1339,7 @@ fn layout_card(
     let selected = current == option.value;
     let disabled = !interactive || option.disabled_reason.is_some();
     let reason = interactive.then_some(option.disabled_reason).flatten();
-    let border = if selected {
-        hsla(t.foreground)
-    } else {
-        hsla(t.border)
-    };
+    let paint = StageCardPaint::of(t, selected, disabled);
     let value = option.value;
     let mut card = div()
         .id(format!("stage-layout-{}", option.label))
@@ -1299,23 +1350,19 @@ fn layout_card(
         .p(px(8.))
         .rounded(px(radius::CHIP))
         .border_1()
-        .border_color(border)
-        .bg(hsla(if selected {
-            with_alpha(t.foreground, 0.08)
-        } else {
-            with_alpha(t.foreground, 0.)
-        }))
-        .opacity(if disabled { 0.5 } else { 1. })
+        .border_color(paint.border)
+        .bg(paint.fill)
         .child(
             div()
                 .h(px(40.))
                 .rounded(px(radius::CHIP / 2.))
-                .bg(hsla(with_alpha(t.muted, 0.5))),
+                .bg(StageCardPaint::layout_thumb(t, disabled)),
         )
         .child(
             div()
                 .type_scale(text::META)
                 .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(paint.name)
                 .truncate()
                 .child(option.label),
         );
