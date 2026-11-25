@@ -25,6 +25,11 @@ pub const PRESENTATION_EVENT: &str = "cloud.room.presentation";
 pub const MICROPHONE_SET: &str = "cloud.room.microphone.set";
 pub const CAMERA_SET: &str = "cloud.room.camera.set";
 pub const HTML_SET: &str = "cloud.room.html.set";
+pub const ROUTING_SET: &str = "cloud.room.routing.set";
+pub const SCREEN_SET: &str = "cloud.room.screen.set";
+pub const MONITOR_SET: &str = "cloud.room.monitor.set";
+/// The runner's return: opened for the Program monitor (a node show's).
+pub const RETURN_SET: &str = "cloud.return.set";
 
 /// The room microphone's gain bounds (`room_microphone::Settings`).
 const GAIN_DB_MIN: f64 = -24.0;
@@ -157,6 +162,48 @@ pub fn html_params(held: bool) -> Value {
     json!({ "enabled": !held })
 }
 
+/// `cloud.room.routing.set`'s params: what the program pages play of the
+/// host's speech and auxiliary audio (`ProgramAudioSettings`), gains 0 to 1.
+pub fn routing_params(program: &crate::soundboard::room::ProgramAudio) -> Value {
+    json!({
+        "speechGain": f64::from(program.speech_gain).clamp(0.0, 1.0),
+        "auxiliaryGain": f64::from(program.auxiliary_gain).clamp(0.0, 1.0),
+        "speechMuted": program.speech_muted,
+        "auxiliaryMuted": program.auxiliary_muted,
+    })
+}
+
+/// `cloud.room.screen.set`'s params: a screen or window by its native id
+/// (`screen:…`, `window:…`, the device list's own), or `None` for anything
+/// else; [`stop_screen_params`] takes the share down.
+pub fn screen_params(source_id: &str) -> Option<Value> {
+    let native = (source_id.starts_with("screen:") || source_id.starts_with("window:"))
+        && source_id.len() <= 512
+        && !source_id.contains(['\0', '\r', '\n']);
+    native.then(|| json!({ "screen": { "sourceId": source_id } }))
+}
+
+pub fn stop_screen_params() -> Value {
+    json!({ "screen": null })
+}
+
+/// `cloud.room.monitor.set`'s params: the runner's return taken, and heard
+/// only with Listen on.
+pub fn monitor_params(enabled: bool, listening: bool) -> Value {
+    json!({ "enabled": enabled, "listen": enabled && listening })
+}
+
+/// `cloud.return.set`'s params (`setMonitor`'s): the runner opens its
+/// return for the Program monitor.
+pub fn return_params(open: bool) -> Value {
+    json!({ "open": open })
+}
+
+/// Whether a `cloud.room.*` answer says the backend holds the seat.
+pub fn held(answer: &Value) -> bool {
+    answer.get("held").and_then(Value::as_bool) == Some(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +309,36 @@ mod tests {
             microphone_params(None, &settings, false),
             json!({ "microphone": null })
         );
+    }
+
+    #[test]
+    fn the_stage_controls_send_the_backends_shapes() {
+        let program = crate::soundboard::room::ProgramAudio {
+            speech_gain: 1.5,
+            auxiliary_gain: 0.5,
+            speech_muted: true,
+            auxiliary_muted: false,
+        };
+        assert_eq!(
+            routing_params(&program),
+            json!({ "speechGain": 1.0, "auxiliaryGain": 0.5, "speechMuted": true, "auxiliaryMuted": false })
+        );
+        assert_eq!(
+            screen_params("screen:screencapturekit:1"),
+            Some(json!({ "screen": { "sourceId": "screen:screencapturekit:1" } }))
+        );
+        assert_eq!(screen_params("camera:1"), None);
+        assert_eq!(stop_screen_params(), json!({ "screen": null }));
+        assert_eq!(
+            monitor_params(false, true),
+            json!({ "enabled": false, "listen": false })
+        );
+        assert_eq!(
+            monitor_params(true, true),
+            json!({ "enabled": true, "listen": true })
+        );
+        assert!(held(&json!({ "held": true })));
+        assert!(!held(&json!({ "held": false })));
     }
 
     #[test]
