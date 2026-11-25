@@ -5,8 +5,8 @@
 //! each under its heading; a row's value is the footer's words and what
 //! search matches, its context follows the title, its key sits at the end.
 use gpui::{
-    Context, Entity, EntityInputHandler, EventEmitter, Focusable, FontWeight, ScrollHandle,
-    SharedString, Window, div, prelude::*, px,
+    Context, Entity, EntityInputHandler, EventEmitter, Focusable, ScrollHandle, SharedString,
+    Window, div, prelude::*, px,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -27,11 +27,13 @@ use videorc_app_core::{
 };
 use videorc_kit::{
     ShortcutKeys,
-    command::{CommandInput, CommandItem, CommandList, InputEvent, InputState, command_dialog},
+    command::{
+        CommandEmpty, CommandFooter, CommandGroup, CommandInput, CommandItem, CommandList,
+        CommandSeparator, InputEvent, InputState, command_dialog,
+    },
     dialog::DialogHandle,
     icon::{IconName, icon},
-    theme::{TypeScale, current, hsla},
-    tokens::text,
+    theme::{current, hsla},
 };
 
 use crate::app::hotkeys::{ShortcutActions, StudioActions};
@@ -87,6 +89,8 @@ struct Row {
     keywords: Vec<String>,
     command: Command,
     enabled: bool,
+    /// The row's glyph (`<XIcon className="size-4" />` before the title).
+    icon: Option<IconName>,
 }
 impl Row {
     fn new(
@@ -97,7 +101,9 @@ impl Row {
         enabled: bool,
     ) -> Self {
         let label = label.into();
+        let icon = command_icon(&command);
         Self {
+            icon,
             id: id.into(),
             group,
             value: label.clone(),
@@ -130,6 +136,41 @@ impl Row {
         self.checked = checked;
         self
     }
+    fn icon(mut self, icon: IconName) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+}
+
+/// Each command's glyph in Electron's palette (`command-palette.tsx`, the
+/// aliases in `icons.tsx`). Hide screen has none there. Mute picks its
+/// speaker at the row, from the microphone's state.
+fn command_icon(command: &Command) -> Option<IconName> {
+    Some(match command {
+        Command::Page(page) => crate::app::shell::page_icon(*page),
+        Command::Settings(_) | Command::Setup => IconName::GearSix,
+        Command::Preview => IconName::Eye,
+        Command::StreamManager | Command::Chat => IconName::ChatCircle,
+        Command::Notes => IconName::NotePencil,
+        Command::CaptionsReader => IconName::ClosedCaptioning,
+        Command::Notifications => IconName::Bell,
+        Command::Record => IconName::Record,
+        Command::GoLive => IconName::Broadcast,
+        Command::HideScreen => return None,
+        Command::Stop | Command::StopAllSounds => IconName::Stop,
+        Command::Microphone => IconName::SpeakerSlash,
+        Command::Clip(_) => IconName::Scissors,
+        Command::Scene(_) | Command::AddScene => IconName::SquaresFour,
+        Command::SceneBackground => IconName::SlidersHorizontal,
+        Command::Theme(ThemeChoice::Light) => IconName::SunFill,
+        Command::Theme(ThemeChoice::Dark) => IconName::MoonFill,
+        Command::Theme(ThemeChoice::System) => IconName::Desktop,
+        Command::PlaySound(_) => IconName::SpeakerHigh,
+        // Electron draws the streamer's own Buddy picture (`OwnBuddyIcon`);
+        // the Avatar page's glyph stands in.
+        Command::AvatarTab(_) => IconName::Smiley,
+        Command::SidekickTab(_) => IconName::UserSound,
+    })
 }
 
 /// Which windows are open when Search opens: their rows say Open or Close.
@@ -322,6 +363,12 @@ impl CommandPalette {
                 Command::Microphone,
                 connected,
             )
+            // `MuteIcon`: the speaker on while muted (Unmute), off to mute.
+            .icon(if s.settings.capture.audio.microphone_muted {
+                IconName::SpeakerHigh
+            } else {
+                IconName::SpeakerSlash
+            })
             .keywords(&["mic", "microphone", "audio", "mute", "silence"])
             .shortcut(bound_accelerator(&globals, "micToggle")),
         );
@@ -812,46 +859,26 @@ impl Render for CommandPalette {
         let t = current(window, cx).theme();
         let mut list = CommandList::new("command-results", &self.scroll);
         if self.rows.is_empty() {
-            // `CommandEmpty`: `py-6 text-center text-sm`, the secondary ink.
-            list = list.child(
-                div()
-                    .flex_none()
-                    .py(px(24.))
-                    .text_center()
-                    .text_size(px(14.))
-                    .line_height(px(20.))
-                    .text_color(hsla(t.muted_foreground))
-                    .child("No results found."),
-            );
+            list = list.child(CommandEmpty::new("No results found."));
         }
         let mut group = None;
         for (index, row) in self.rows.iter().enumerate() {
             if group != Some(row.group) {
-                // `CommandSeparator` between groups: `my-1 h-px`, the hairline,
-                // with each group's own 6 px pad around it.
+                // `CommandSeparator` between groups (`my-1 h-px`), with each
+                // group's own 6 px pad around it.
                 if group.is_some() {
-                    list = list.child(div().flex_none().h(px(1.)).my(px(10.)).bg(hsla(t.border)));
+                    list = list.child(div().flex_none().py(px(6.)).child(CommandSeparator::new()));
                 }
-                // The group heading: `px-2.5 pt-3 pb-2 text-xs leading-none
-                // font-semibold`, the tertiary ink.
-                list = list.child(
-                    div()
-                        .flex_none()
-                        .px(px(10.))
-                        .pt(px(12.))
-                        .pb(px(8.))
-                        .text_size(px(text::META.size))
-                        .line_height(px(text::META.size))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(hsla(t.subtle))
-                        .child(row.group),
-                );
+                list = list.child(CommandGroup::new(row.group));
                 group = Some(row.group);
             }
             let selected = index == self.selected;
             let mut item = CommandItem::new(SharedString::from(row.id.clone()), row.label.clone())
                 .selected(selected)
                 .disabled(!row.enabled);
+            if let Some(glyph) = row.icon {
+                item = item.icon(glyph);
+            }
             if let Some(context) = row.context {
                 item = item.child(
                     div()
@@ -923,21 +950,10 @@ impl Render for CommandPalette {
                 }))
                 .child(CommandInput::new(&self.input))
                 .child(list)
-                // `CommandFooter`: 40 px, `px-4 text-xs`, the secondary ink;
-                // the selected action, then the key that runs it.
+                // `CommandFooter`: the selected action, then the key that
+                // runs it.
                 .child(
-                    div()
-                        .flex_none()
-                        .h(px(40.))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(12.))
-                        .px(px(16.))
-                        .border_t_1()
-                        .border_color(hsla(t.border))
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
+                    CommandFooter::new()
                         .child(div().min_w(px(0.)).truncate().child(footer))
                         .child(div().flex_none().child(ShortcutKeys::keystrokes("enter"))),
                 ),

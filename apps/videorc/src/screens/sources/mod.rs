@@ -408,7 +408,8 @@ fn fill_select(id: impl Into<gpui::ElementId>, picker: &PickerView, disabled: bo
             "Choose…".to_string()
         })
         .disabled(disabled)
-        .width(280.0)
+        // The device picker's `w-full min-w-0`: it fills its column.
+        .full_width(true)
         .value(selected.map(SharedString::from));
     for item in &picker.items {
         if !item.heading.is_empty() {

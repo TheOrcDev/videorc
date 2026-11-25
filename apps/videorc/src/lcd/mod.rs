@@ -18,6 +18,7 @@ use gpui::{
 };
 use videorc_kit::chrome::box_shadow;
 use videorc_kit::icon::{IconName, icon};
+use videorc_kit::select::SelectTriggerState;
 use videorc_kit::slider::Slider;
 use videorc_kit::theme::{hsla, is_dark, with_alpha};
 use videorc_kit::tokens::{Shadow, Theme, radius};
@@ -61,6 +62,60 @@ pub fn fader(slider: Slider, theme: &Theme) -> Slider {
         .track_color(with_alpha(theme.primary, 0.4))
         .range_color(theme.primary)
         .thumb_color(theme.primary, glow)
+}
+
+/// The device picker on the screen (`lcd-device-picker.tsx:93-127`,
+/// `LCD_VALUE_BUTTON`): the pick lit in capitals, the placeholder and a
+/// disabled picker dim, then the pixel chevron; the unlit dots light behind
+/// it on hover and while its list is open. The kit Select keeps the button,
+/// the keys and the list.
+pub fn picker_trigger(theme: &Theme) -> impl FnOnce(SelectTriggerState) -> AnyElement + 'static {
+    let (lit_ink, dim_ink, unlit_ink) = (lit(theme), dim(theme), unlit(theme));
+    move |state| {
+        let quiet = state.label.is_none() || state.disabled;
+        let ink = if quiet { dim_ink } else { lit_ink };
+        let words = state.label.unwrap_or(state.placeholder);
+        div()
+            .id("lcd-picker-trigger")
+            .flex()
+            .min_w_0()
+            .items_center()
+            .gap(px(8.))
+            .mx(px(-4.))
+            .px(px(4.))
+            .py(px(2.))
+            .rounded(px(radius::CHIP))
+            .text_color(ink)
+            .when(state.open, |trigger| trigger.bg(unlit_ink))
+            .when(!state.disabled, |trigger| {
+                trigger.hover(move |style| style.bg(unlit_ink))
+            })
+            .child(div().min_w_0().truncate().child(caps(words)))
+            .child(pixel_chevron(ink))
+            .into_any_element()
+    }
+}
+
+/// `LcdPixelChevron` (down): five 2 px dots in a 5×3 grid, 10 × 6 px.
+fn pixel_chevron(ink: Hsla) -> Div {
+    let dot = |x: f32, y: f32| {
+        div()
+            .absolute()
+            .left(px(x * 2.))
+            .top(px(y * 2.))
+            .size(px(2.))
+            .bg(ink)
+    };
+    div()
+        .relative()
+        .flex_none()
+        .w(px(10.))
+        .h(px(6.))
+        .child(dot(0., 0.))
+        .child(dot(4., 0.))
+        .child(dot(1., 1.))
+        .child(dot(3., 1.))
+        .child(dot(2., 2.))
 }
 
 /// The opaque solid for inverted key fills.
