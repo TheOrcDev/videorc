@@ -22,6 +22,7 @@ use videorc_app_core::desktop::permissions::PermissionPlatform;
 use videorc_app_core::protocol::{Banner, ScreenPrivacy, ScreenPrivacyReason, SoundboardState};
 use videorc_app_core::stream_manager::copy::WINDOW_NAME;
 use videorc_app_core::stream_manager::dashboard::{LiveDashboard, SessionState};
+use videorc_app_core::studio::StudioBackend;
 use videorc_app_core::studio::families::{self, StatsLayout};
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
