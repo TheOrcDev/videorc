@@ -133,6 +133,8 @@ pub enum IconName {
     ChatCircle,
     /// `AccountIcon` (Phosphor's UserCircle).
     UserCircle,
+    /// `BuddyPageIcon` / Sidekick mark (Phosphor's UserSound).
+    UserSound,
     /// `FolderIcon` (Phosphor's FolderOpen).
     FolderOpen,
     /// `WaveformMutedIcon` (Phosphor's WaveformSlash).
@@ -229,6 +231,7 @@ impl IconName {
             IconName::ArrowRight => include_bytes!("../icons/arrow-right.svg"),
             IconName::ChatCircle => include_bytes!("../icons/chat-circle.svg"),
             IconName::UserCircle => include_bytes!("../icons/user-circle.svg"),
+            IconName::UserSound => include_bytes!("../icons/user-sound.svg"),
             IconName::FolderOpen => include_bytes!("../icons/folder-open.svg"),
             IconName::WaveformSlash => include_bytes!("../icons/waveform-slash.svg"),
             IconName::Desktop => include_bytes!("../icons/desktop.svg"),
