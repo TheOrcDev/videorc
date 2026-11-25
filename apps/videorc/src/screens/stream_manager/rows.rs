@@ -1,17 +1,20 @@
-//! Chat rows and their menus (P966–P969): ManagerRow chrome, the ⋯ menu from
-//! `pane::row_menu`, and the person right-click menu (About / Same person /
-//! Mark as bot). A click on the row and ⋯ Highlight put the message on
-//! stream (the pane's highlight driver); the other actions are stubs until
-//! the chat / community drivers land.
+//! Chat rows and their menus (P966–P969, P1268): ManagerRow chrome, the ⋯
+//! menu from `pane::row_menu`, and the person right-click menu (About /
+//! Same person / Mark as bot). A click on the row and ⋯ Highlight put the
+//! message on stream; Remove from chat runs the Studio's moderation request
+//! after the 3 s Undo toast.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{AnyElement, App, IntoElement, SharedString, Window, div, prelude::*, px};
 use videorc_app_core::chat::highlight::{RowHighlight, RowPhase, StatusChip};
-use videorc_app_core::chat::model::LiveChatMessage;
+use videorc_app_core::chat::model::{LiveChatMessage, LiveChatProviderState};
 use videorc_app_core::stream_manager::pane::{
     RowAction, RowMenuInputs, copy_text, row_menu, row_menu_label,
+};
+use videorc_app_core::stream_manager::removal::{
+    ModerationOperation, remove_from_chat_available, remove_from_chat_blocked_reason,
 };
 use videorc_app_core::stream_manager::rows::ManagerRow;
 use videorc_kit::{
@@ -29,6 +32,8 @@ const X_SELF_LINK_REASON: &str = "X accounts can't be linked as the same person 
 
 /// What a row's click and its ⋯ Highlight ask the pane for, by message id.
 pub type OnHighlight = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+/// ⋯ Remove from chat, by message id.
+pub type OnRemove = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
 /// One chat row: body + ⋯ menu, wrapped in the person right-click menu.
 pub fn chat_row(
@@ -36,16 +41,23 @@ pub fn chat_row(
     highlight: RowHighlight,
     live: bool,
     mention_names: &[String],
+    providers: &[LiveChatProviderState],
+    operation: Option<&ModerationOperation>,
+    requesting: bool,
     on_highlight: OnHighlight,
+    on_remove: OnRemove,
 ) -> AnyElement {
     let view = ManagerRow::new(message, highlight, live, mention_names);
     let highlightable = view.row.highlightable;
+    let blocked = remove_from_chat_blocked_reason(message, providers);
+    let available =
+        live && blocked.is_none() && remove_from_chat_available(message, operation, requesting);
     let inputs = RowMenuInputs {
         highlightable,
         on_stream: view.row.phase == RowPhase::Live,
         can_reply: true,
-        removable: false,
-        remove_reason: Some("Reconnect to remove messages."),
+        removable: available,
+        remove_reason: blocked.as_deref(),
     };
     let kebab_items: Vec<KebabMenuItem> = row_menu(message, inputs)
         .into_iter()
@@ -62,11 +74,19 @@ pub fn chat_row(
             let text = copy_text(message);
             let message_id = message.id.clone();
             let on_highlight = on_highlight.clone();
+            let on_remove = on_remove.clone();
             let mut kebab = KebabMenuItem::new(id, item.label, move |window, app| {
-                if action == RowAction::Highlight {
-                    on_highlight(&message_id, window, app);
+                match &action {
+                    RowAction::Highlight => on_highlight(&message_id, window, app),
+                    RowAction::Remove => on_remove(&message_id, window, app),
+                    RowAction::Copy => {
+                        // Clipboard wiring lands with the rest of Copy.
+                        let _ = &text;
+                    }
+                    _ => {
+                        let _ = &text;
+                    }
                 }
-                let _ = &text;
             })
             .destructive(item.destructive)
             .disabled(item.disabled);

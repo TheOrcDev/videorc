@@ -115,6 +115,7 @@ fn build_menu(
         menu = menu.separator().item(
             MenuItem::new(copy::SIGN_OUT)
                 .tone(MenuItemTone::Destructive)
+                .icon(|ink| icon(IconName::SignOut, 16., ink))
                 .disabled(locked)
                 .on_select(|_, cx| {
                     let live = live(cx);

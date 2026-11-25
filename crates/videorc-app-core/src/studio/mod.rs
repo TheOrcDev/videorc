@@ -97,6 +97,7 @@ pub mod linux_desktop;
 pub mod live_audio;
 pub mod live_chat;
 pub mod live_sources;
+pub mod moderation;
 pub mod output_quality;
 pub mod performance_check;
 mod platform_lifecycle;
@@ -281,6 +282,7 @@ pub const STUDIO_EVENTS: [&str; 41] = [
     live_chat::SNAPSHOT_EVENT,
     live_chat::CLEARED_EVENT,
     live_chat::PROVIDER_EVENT,
+    moderation::OPERATION_EVENT,
     // The Output page's performance check (it holds the Clips ring).
     performance_check::PROGRESS_EVENT,
     performance_check::COMPLETED_EVENT,
@@ -975,6 +977,8 @@ pub struct Studio<B: StudioBackend> {
     dashboard: Arc<Mutex<dashboard::DashboardInner>>,
     /// Live chat for the Stream Manager (and Studio's Chat section later).
     live_chat_tx: watch::Sender<crate::chat::LiveChat>,
+    /// Chat removals (`liveChat.moderationOperation` ledger).
+    moderation_tx: watch::Sender<Vec<crate::stream_manager::removal::ModerationOperation>>,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -1048,6 +1052,7 @@ impl<B: StudioBackend> Studio<B> {
             watch::channel(crate::stream_manager::dashboard::LiveDashboard::default());
         let dashboard = Arc::new(Mutex::new(dashboard::DashboardInner::new(&now_iso())));
         let (live_chat_tx, _) = watch::channel(crate::chat::LiveChat::default());
+        let (moderation_tx, _) = watch::channel(Vec::new());
         Self {
             backend,
             config,
@@ -1084,6 +1089,7 @@ impl<B: StudioBackend> Studio<B> {
             dashboard_tx,
             dashboard,
             live_chat_tx,
+            moderation_tx,
         }
     }
 
@@ -1408,6 +1414,7 @@ impl<B: StudioBackend> Studio<B> {
                 let _ = self.handle_dashboard_event(&event, &payload);
                 if self.handle_performance_event(&event, &payload)
                     || self.handle_live_chat_event(&event, &payload)
+                    || self.handle_moderation_event(&event, &payload)
                     || self.handle_chat_commands_event(&event, &payload)
                     || self.handle_watchdog_event(&event, &payload)
                     || self.handle_cloud_event(&event, &payload).await

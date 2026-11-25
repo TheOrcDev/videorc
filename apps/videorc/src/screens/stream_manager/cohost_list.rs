@@ -34,7 +34,8 @@ use videorc_kit::tooltip::tooltip;
 
 use super::cohost::{
     ANSWERED_KEY, DISMISS_KEY, DismissRow, LIST_CONTEXT, MarkRowAnswered, OPEN_KEY, OpenRow,
-    REPLY_KEY, ReplyToRow, SHOW_KEY, SelectNext, SelectPrevious, ShowRowOnStream,
+    REMOVE_FLAGGED_KEY, REPLY_KEY, RemoveFlagged, ReplyToRow, SHOW_KEY, SelectNext, SelectPrevious,
+    ShowRowOnStream,
 };
 use super::sidekick::SidekickPane;
 
@@ -453,6 +454,7 @@ impl SidekickPane {
                 cx.listener(|pane, _: &MarkRowAnswered, _, cx| pane.row_key(RowKey::Answered, cx)),
             )
             .on_action(cx.listener(|pane, _: &DismissRow, _, cx| pane.row_key(RowKey::Dismiss, cx)))
+            .on_action(cx.listener(|pane, _: &RemoveFlagged, _, cx| pane.remove_flagged(cx)))
             .on_action(cx.listener(|pane, _: &OpenRow, _, cx| pane.row_key(RowKey::Primary, cx)));
         if rows.is_empty() {
             let presence = presence_view(
@@ -732,6 +734,25 @@ impl SidekickPane {
                 OPEN_KEY,
                 RowKey::Primary,
             ));
+            let flag_id = rows
+                .iter()
+                .find(|row| row.key == active)
+                .map(|row| row.id.clone());
+            if let Some(id) = flag_id.filter(|id| self.flag_removable(id)) {
+                bar = bar.child(
+                    Button::new("cohost-remove-from-chat")
+                        .label(videorc_app_core::stream_manager::removal::REMOVE_FROM_CHAT)
+                        .variant(ButtonVariant::Destructive)
+                        .size(ButtonSize::Xs)
+                        .tooltip(videorc_app_core::stream_manager::removal::REMOVE_FROM_CHAT)
+                        .child(ShortcutKeys::keystrokes(REMOVE_FLAGGED_KEY))
+                        .disabled(pending)
+                        .on_click(cx.listener(move |pane, _, _, cx| {
+                            let _ = &id;
+                            pane.remove_flagged(cx);
+                        })),
+                );
+            }
         }
         bar = bar.child(
             action(
