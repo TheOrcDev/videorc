@@ -21,6 +21,9 @@
 //!   says when they are asked for), its glyph (P288), where a dragged card
 //!   lands (P281), the place ⌥← ⌥→ moves it to (P282) and the tooltip a
 //!   cut name or meta line shows (P292).
+//! - each card's ⋯ menu: which items are off and why (P294–P301,
+//!   [`SceneCardMenu`]), and whether a click asks for its sources first
+//!   (P280).
 //!
 //! The status line has a clock: it shows a moment after a switch starts.
 //! The view says when ([`ScenesGalleryView::status_at`]) so the UI draws
@@ -40,11 +43,12 @@ use crate::scenes::list::{
     MoveAxis, MoveKey, SceneGlyph, saved_scene_blocked_reason, scene_glyph, scene_move_key_step,
     scene_shortcut_bindings,
 };
-use crate::scenes::model::{SavedScene, scene_source_problems};
+use crate::scenes::model::{SavedScene, SceneAudio, scene_audio, scene_source_problems};
 use crate::scenes::section::{
     ScenePictureTarget, scene_card_words, scene_cards_camera_gaps, scene_picture_target,
     scene_slot_keys_line,
 };
+use crate::scenes::store::{DeleteRule, can_delete_scene};
 use crate::scenes::switch_progress::{SceneSwitchStatusLine, SwitchCamera};
 use crate::scenes::v2::{Orientation, layout_preset};
 
@@ -82,6 +86,11 @@ pub mod copy {
     pub const RESOLVE_SOURCES: &str = "Resolve sources";
     /// The gallery reason's door.
     pub const OPEN_SOURCES: &str = "Open Sources";
+    /// `READ_ONLY_REASON` (`scene-dialogs.tsx:63`): why the ⋯ items that
+    /// write are off in a library from a newer Videorc.
+    pub const READ_ONLY_REASON: &str = crate::studio::vertical_stream::READ_ONLY_REASON;
+    /// Why Save audio to scene is off (`scene-dialogs.tsx:327`).
+    pub const SAVE_AUDIO_SAME: &str = "The scene already keeps this microphone and System audio.";
 }
 
 /// The line under the title (`ScenesLine`, D5).
@@ -136,6 +145,80 @@ pub struct SceneCardView {
     /// (`verticalScreenFraming === 'fit'`).
     pub fit: bool,
     pub keys: Vec<CardKey>,
+    /// Its sources need choosing again (`needsSources`, the meta's "Resolve
+    /// sources"): a click opens Resolve scene sources instead.
+    pub needs_sources: bool,
+    /// Its ⋯ menu's states and reasons.
+    pub menu: SceneCardMenu,
+}
+
+/// A card's ⋯ menu (`dialogs.menuItems`, D11): which items are off and
+/// why. Set key… never is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneCardMenu {
+    /// A library from a newer Videorc: Rename…, Follow, Guests in the
+    /// room… and Duplicate are off with this reason.
+    pub read_only_reason: Option<&'static str>,
+    /// Why Change screen… is off (`changeScreenBlockedReason`): read-only,
+    /// or, on the scene on stream, its screen's switch.
+    pub change_screen_reason: Option<String>,
+    /// An app scene: whether it follows its app's front window (Stop
+    /// following) or not (Follow the app). None for any other scene.
+    pub follows: Option<bool>,
+    /// Why Save audio to scene is off: read-only, or the scene already keeps
+    /// the working microphone and System audio.
+    pub save_audio_reason: Option<&'static str>,
+    /// Delete is off: read-only, the last scene, the one going on stream,
+    /// or the scene on stream while recording or live (D16).
+    pub delete_disabled: bool,
+    /// Delete's reason while off, when there are words for it.
+    pub delete_reason: Option<&'static str>,
+}
+
+/// `audioKept`: the scene keeps exactly the working audio. A scene that
+/// keeps none never does.
+pub fn scene_keeps_audio(saved: Option<&SceneAudio>, working: &SceneAudio) -> bool {
+    saved == Some(working)
+}
+
+/// A card's ⋯ menu (`dialogs.menuItems`), for `scene` in `scenes`.
+pub fn scene_card_menu(
+    scenes: &ScenesView,
+    scene: &SavedScene,
+    session_active: bool,
+    capture_reason: Option<&str>,
+    working_audio: &SceneAudio,
+) -> SceneCardMenu {
+    let read_only = scenes.read_only.then_some(copy::READ_ONLY_REASON);
+    let on_stream = scenes.on_stream_id.as_deref() == Some(scene.id.as_str());
+    let change_screen_reason = match read_only {
+        Some(reason) => Some(reason.to_string()),
+        None if on_stream => capture_reason.map(str::to_string),
+        None => None,
+    };
+    let save_audio_reason = read_only.or_else(|| {
+        scene_keeps_audio(scene.audio.as_ref(), working_audio).then_some(copy::SAVE_AUDIO_SAME)
+    });
+    let refused = match can_delete_scene(
+        &scenes.scenes,
+        &scene.id,
+        scenes.on_stream_id.as_deref().unwrap_or_default(),
+        session_active,
+        scenes.pending_scene_id.as_deref() == Some(scene.id.as_str()),
+    ) {
+        DeleteRule::Allowed { .. } => None,
+        DeleteRule::Refused(reason) => Some(reason),
+    };
+    SceneCardMenu {
+        read_only_reason: read_only,
+        change_screen_reason,
+        follows: scene
+            .app()
+            .map(|app| app.get("follows") == Some(&Value::Bool(true))),
+        save_audio_reason,
+        delete_disabled: read_only.is_some() || refused.is_some(),
+        delete_reason: read_only.or(refused.flatten()),
+    }
 }
 
 /// The gallery, once the library is read.
@@ -191,6 +274,11 @@ pub struct ScenesSectionInput<'a> {
     pub session_active: bool,
     /// `followSettings.followFrontApp`.
     pub follow_front_app: bool,
+    /// `sourceSwitchReason('capture')`: why the scene on stream's screen
+    /// can't change now.
+    pub capture_reason: Option<&'a str>,
+    /// The working microphone and System audio (`sceneLibraryActions.workingAudio`).
+    pub working_audio: &'a SceneAudio,
     /// What the snapshot doesn't hold.
     pub extras: ScenesExtras<'a>,
 }
@@ -349,6 +437,13 @@ impl ScenesSectionView {
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty());
         let layout = config.get("layout").unwrap_or(&Value::Null);
+        let working_audio = scene_audio(
+            config.get("sources").unwrap_or(&Value::Null),
+            config
+                .get("audio")
+                .and_then(|audio| audio.get("systemAudioEnabled"))
+                == Some(&Value::Bool(true)),
+        );
         Self::of(ScenesSectionInput {
             scenes: &snapshot.scenes,
             devices: &snapshot.sources.devices.devices,
@@ -357,6 +452,8 @@ impl ScenesSectionView {
             camera_id,
             session_active: session_active(snapshot),
             follow_front_app: snapshot.settings.families.follow.follow_front_app,
+            capture_reason: snapshot.source_reasons[0].as_deref(),
+            working_audio: &working_audio,
             extras,
         })
     }
@@ -391,18 +488,13 @@ impl ScenesSectionView {
                     devices,
                 );
                 let camera_blocked = camera.blocked.contains(&scene.id);
+                let needs_sources = blocked.is_none()
+                    && !camera_blocked
+                    && scene.app().is_none()
+                    && scene_needs_sources(scene, scenes.remembered_apps.get(&scene.id), devices);
                 let meta = match &blocked {
                     Some(reason) => Some(reason.clone()),
-                    None if !camera_blocked
-                        && scene.app().is_none()
-                        && scene_needs_sources(
-                            scene,
-                            scenes.remembered_apps.get(&scene.id),
-                            devices,
-                        ) =>
-                    {
-                        Some(copy::RESOLVE_SOURCES.to_string())
-                    }
+                    None if needs_sources => Some(copy::RESOLVE_SOURCES.to_string()),
                     None => scene_card_words(&scene.name, &scene.visual),
                 };
                 let disabled_reason = blocked
@@ -430,6 +522,14 @@ impl ScenesSectionView {
                         input.shortcuts,
                         extras.platform,
                         extras.registered,
+                    ),
+                    needs_sources,
+                    menu: scene_card_menu(
+                        scenes,
+                        scene,
+                        input.session_active,
+                        input.capture_reason,
+                        input.working_audio,
                     ),
                 }
             })

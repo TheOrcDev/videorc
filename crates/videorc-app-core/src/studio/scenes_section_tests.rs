@@ -76,6 +76,8 @@ struct Fixture {
     registered: BTreeMap<String, bool>,
     platform: &'static str,
     session_active: bool,
+    capture_reason: Option<String>,
+    working_audio: SceneAudio,
     room_open: bool,
     now_ms: u64,
 }
@@ -95,6 +97,8 @@ impl Fixture {
             registered: BTreeMap::new(),
             platform: "darwin",
             session_active: false,
+            capture_reason: None,
+            working_audio: scene_audio(&json!({"microphoneId": "mic:1"}), true),
             room_open: false,
             now_ms: 0,
         }
@@ -109,6 +113,8 @@ impl Fixture {
             camera_id: Some("camera"),
             session_active: self.session_active,
             follow_front_app: true,
+            capture_reason: self.capture_reason.as_deref(),
+            working_audio: &self.working_audio,
             extras: ScenesExtras {
                 room_open: self.room_open,
                 platform: Some(self.platform),
@@ -392,4 +398,89 @@ fn a_cut_line_shows_the_whole_name_and_the_cut_meta() {
         Some("Figma\nFigma · front window")
     );
     assert_eq!(cut_tooltip("Talk", false, None, true), None);
+}
+
+#[test]
+fn the_menu_is_all_on_for_a_scene_off_stream_and_set_key_never_waits() {
+    let gallery = Fixture::new().gallery();
+    let display = &gallery.cards[1];
+    assert!(display.needs_sources);
+    assert_eq!(
+        display.menu,
+        SceneCardMenu {
+            read_only_reason: None,
+            change_screen_reason: None,
+            follows: None,
+            save_audio_reason: None,
+            delete_disabled: false,
+            delete_reason: None,
+        }
+    );
+    assert!(!gallery.cards[0].needs_sources);
+    // An app scene follows its app or doesn't.
+    assert_eq!(gallery.cards[2].menu.follows, Some(true));
+    assert!(!gallery.cards[2].needs_sources);
+}
+
+#[test]
+fn a_newer_library_turns_every_write_off_with_its_reason() {
+    let mut fixture = Fixture::new();
+    fixture.scenes.read_only = true;
+    let menu = fixture.gallery().cards[1].menu.clone();
+    assert_eq!(
+        menu.read_only_reason,
+        Some("Update Videorc to change your scenes.")
+    );
+    assert_eq!(
+        menu.change_screen_reason.as_deref(),
+        Some(copy::READ_ONLY_REASON)
+    );
+    assert_eq!(menu.save_audio_reason, Some(copy::READ_ONLY_REASON));
+    assert!(menu.delete_disabled);
+    assert_eq!(menu.delete_reason, Some(copy::READ_ONLY_REASON));
+}
+
+#[test]
+fn change_screen_waits_for_the_screen_switch_only_on_the_scene_on_stream() {
+    let mut fixture = Fixture::new();
+    fixture.capture_reason = Some("Switching screens…".into());
+    let gallery = fixture.gallery();
+    assert_eq!(
+        gallery.cards[0].menu.change_screen_reason.as_deref(),
+        Some("Switching screens…")
+    );
+    assert_eq!(gallery.cards[1].menu.change_screen_reason, None);
+}
+
+#[test]
+fn save_audio_waits_only_while_the_scene_keeps_the_working_audio() {
+    let mut fixture = Fixture::new();
+    // Kept nothing yet: it can save.
+    assert_eq!(fixture.gallery().cards[0].menu.save_audio_reason, None);
+    fixture.scenes.scenes[0].audio = Some(fixture.working_audio.clone());
+    assert_eq!(
+        fixture.gallery().cards[0].menu.save_audio_reason,
+        Some("The scene already keeps this microphone and System audio.")
+    );
+    fixture.scenes.scenes[0].audio = Some(scene_audio(&json!({"microphoneId": "mic:2"}), true));
+    assert_eq!(fixture.gallery().cards[0].menu.save_audio_reason, None);
+    assert!(!scene_keeps_audio(None, &fixture.working_audio));
+}
+
+#[test]
+fn delete_keeps_the_last_scene_and_the_scene_on_stream_while_live() {
+    let mut fixture = Fixture::new();
+    fixture.session_active = true;
+    let gallery = fixture.gallery();
+    assert!(gallery.cards[0].menu.delete_disabled);
+    assert_eq!(
+        gallery.cards[0].menu.delete_reason,
+        Some("Switch to another scene first.")
+    );
+    assert!(!gallery.cards[1].menu.delete_disabled);
+    fixture.session_active = false;
+    fixture.scenes.scenes.truncate(1);
+    let only = &fixture.gallery().cards[0];
+    assert!(only.menu.delete_disabled);
+    assert_eq!(only.menu.delete_reason, Some("Keep at least one scene."));
 }
