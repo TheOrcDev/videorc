@@ -337,6 +337,8 @@ fn main() -> Result<()> {
     // The main window's frame, saved in the data directory.
     let stream_manager_frame = StreamManagerFrame::new(&paths.user_data_dir, logger.clone());
     let notes_frame = NotesFrame::new(&paths.user_data_dir, logger.clone());
+    #[cfg(target_os = "macos")]
+    let preview_frame = preview::frame::PreviewFrame::new(&paths.user_data_dir, logger.clone());
     let captions_frame =
         screens::captions::reader::CaptionsFrame::new(&paths.user_data_dir, logger.clone());
     let quit_guard = sleep_guard.clone();
@@ -521,6 +523,10 @@ fn main() -> Result<()> {
                     window,
                     cx,
                 );
+                #[cfg(target_os = "macos")]
+                preview.update(cx, |preview, _| {
+                    preview.remember_window(preview_frame.clone())
+                });
                 *preview_slot.borrow_mut() = Some(preview.clone());
                 let session = cx.new(|cx| {
                     SessionSection::new(
@@ -638,6 +644,23 @@ fn main() -> Result<()> {
             core_handle.clone(),
         );
         screens::notes::window::install(cx, notes_frame, APP_ID);
+        // P1549: a Preview left floating floats again once the workspace
+        // shows (Electron's `restorePreviewWindowOnLaunch`, held while
+        // first-run setup fills the window).
+        #[cfg(target_os = "macos")]
+        if let Some(preview) = preview_slot.borrow().clone() {
+            if first_run.read(cx).is_open() {
+                let pending = std::cell::Cell::new(true);
+                cx.observe(&first_run, move |first_run, cx| {
+                    if !first_run.read(cx).is_open() && pending.replace(false) {
+                        preview.update(cx, |preview, cx| preview.restore_at_launch(cx));
+                    }
+                })
+                .detach();
+            } else {
+                preview.update(cx, |preview, cx| preview.restore_at_launch(cx));
+            }
+        }
         screens::captions::reader::install(cx, captions_frame, APP_ID);
 
         // The smoke command server and the UI driver (plan 260 S2.5), when a
