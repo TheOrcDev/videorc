@@ -106,6 +106,7 @@ pub mod preview_scene;
 pub mod preview_startup;
 pub mod recordings_folder;
 mod recordings_folder_actions;
+pub mod remote;
 pub mod room_background;
 pub mod room_frames;
 pub mod room_media;
@@ -231,13 +232,15 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 43] = [
+pub const STUDIO_EVENTS: [&str; 44] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
     crate::client::names::HEALTH_EVENT,
     videorc_protocol::ui_settings::UI_SETTINGS_CHANGED_EVENT,
     crate::client::names::RECORDING_FINALIZATION,
+    // A remote's key press, for the Studio to run and ack (`remote`).
+    crate::client::names::REMOTE_INTENT,
     // The toasts' news.
     crate::client::names::STREAM_TARGETS,
     crate::client::names::REPLAY_STATE,
@@ -985,6 +988,13 @@ pub struct Studio<B: StudioBackend> {
     live_chat_tx: watch::Sender<crate::chat::LiveChat>,
     /// Chat removals (`liveChat.moderationOperation` ledger).
     moderation_tx: watch::Sender<Vec<crate::stream_manager::removal::ModerationOperation>>,
+    /// The remote-control surface's publisher and the intents waiting
+    /// (`remote`).
+    remote: Mutex<remote::RemotePublisher>,
+    /// The surface changed; the driver publishes it.
+    remote_publish_kick: Notify,
+    /// A remote intent waits; the driver runs it.
+    remote_intent_kick: Notify,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -1096,6 +1106,9 @@ impl<B: StudioBackend> Studio<B> {
             dashboard,
             live_chat_tx,
             moderation_tx,
+            remote: Mutex::new(remote::RemotePublisher::default()),
+            remote_publish_kick: Notify::new(),
+            remote_intent_kick: Notify::new(),
         }
     }
 
@@ -1142,12 +1155,15 @@ impl<B: StudioBackend> Studio<B> {
     /// retries when they fall due. S1.6b part 5d: the live audio queue
     /// drains beside the events, so an `audio.processing.update` in flight
     /// never holds them up. S1.6b part 4c-2: the vertical stream's live
-    /// sends the same.
+    /// sends the same. The remote surface's publishes and the remote
+    /// intents run beside them too (`remote`).
     pub async fn drive(self: Arc<Self>, events: broadcast::Receiver<BackendEvent>) {
         tokio::select! {
             () = self.drive_events(events) => {}
             () = self.drain_live_audio_when_kicked() => {}
             () = self.drain_vertical_leg_when_kicked() => {}
+            () = self.publish_remote_surface_when_kicked() => {}
+            () = self.run_remote_intents_when_kicked() => {}
         }
     }
 
@@ -1249,6 +1265,9 @@ impl<B: StudioBackend> Studio<B> {
                     inner.bootstrap_generation += 1;
                     inner.bootstrap_generation
                 };
+                // The new backend holds no remote surface: the bootstrap's
+                // publish sends it again.
+                self.remote_lock().forget_connection();
                 self.publish();
                 self.bootstrap(generation).await;
                 // S1.6b part 5d: a session that runs on this connection.
@@ -1358,13 +1377,14 @@ impl<B: StudioBackend> Studio<B> {
                     inner.health.clear_backend();
                     inner.sources.forget_devices();
                 }
+                self.remote_lock().forget_connection();
                 self.publish();
                 // S1.6b part 5d: the engine is away: the live sync ends.
                 self.follow_live_audio().await;
             }
-            // The remote executor runs these from its own subscription; the
-            // Studio only holds the state they act on.
-            BackendEvent::RemoteIntent(_) => {}
+            // A remote's key press: the driver runs it beside the events
+            // (a Record start never holds them up) and acks it.
+            BackendEvent::RemoteIntent(envelope) => self.queue_remote_intent(*envelope),
             // L2's S1.4 adds `ui.settings.changed`; the client passes it on
             // as JSON until the protocol names it.
             BackendEvent::Untyped { event, payload }
@@ -2886,6 +2906,12 @@ impl<B: StudioBackend> Studio<B> {
         read(&self.lock().settings)
     }
 
+    fn remote_lock(&self) -> MutexGuard<'_, remote::RemotePublisher> {
+        self.remote
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner
             .lock()
@@ -2968,6 +2994,8 @@ impl<B: StudioBackend> Studio<B> {
         if clips_woke {
             self.settings_retry.notify_one();
         }
+        // The remotes' keys follow every change (`remote`).
+        self.note_remote_surface(&snapshot);
         self.snapshot.send_replace(snapshot);
         self.post(scene_notices);
     }

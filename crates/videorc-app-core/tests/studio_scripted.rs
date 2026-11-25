@@ -109,6 +109,9 @@ struct Script {
     /// (`scene.layout.apply_live` with `simulcastLeg`). The backend commits
     /// it to the leg only: the program's scene and revision stay.
     leg_sends: Vec<Value>,
+    /// Every remote surface published, and every remote intent's ack.
+    remote_surfaces: Vec<Value>,
+    remote_acks: Vec<RemoteIntentAckParams>,
 }
 
 struct Scripted {
@@ -302,13 +305,15 @@ impl StudioBackend for Scripted {
         }
     }
 
-    async fn remote_intent_ack(&self, _params: RemoteIntentAckParams) -> Result<(), RpcError> {
+    async fn remote_intent_ack(&self, params: RemoteIntentAckParams) -> Result<(), RpcError> {
         self.note("remote.intent.ack");
+        self.script.lock().unwrap().remote_acks.push(params);
         Ok(())
     }
 
-    async fn remote_surface_publish(&self, _snapshot: Value) -> Result<(), RpcError> {
+    async fn remote_surface_publish(&self, snapshot: Value) -> Result<(), RpcError> {
         self.note("remote.surface.publish");
+        self.script.lock().unwrap().remote_surfaces.push(snapshot);
         Ok(())
     }
 
@@ -5186,4 +5191,75 @@ async fn a_restarted_backend_puts_the_talk_show_back_in_its_room_and_says_so_mea
         .filter(|method| *method == "cloud.room.resume")
         .count();
     assert_eq!(resumes, 1);
+}
+
+// ── The remote-control surface (Stream Deck, the phone remote) ──────────
+
+use videorc_app_core::client::RemoteIntentEnvelope;
+use videorc_app_core::studio::remote::copy as remote_copy;
+
+#[tokio::test]
+async fn the_driver_publishes_the_remote_surface_and_again_after_a_reconnect() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    let (events, receiver) = broadcast::channel(16);
+    let driver = tokio::spawn(Arc::clone(&studio).drive(receiver));
+    events.send(ready()).unwrap();
+    // The bootstrap's own writes (the scene library's migration) may move
+    // the surface once more; the backend ends up holding what the Studio
+    // shows.
+    let shown = || serde_json::to_value(studio.remote_surface()).unwrap();
+    eventually("the backend holds the Studio's surface", || {
+        backend.script.lock().unwrap().remote_surfaces.last() == Some(&shown())
+    })
+    .await;
+    let published = shown();
+    assert_eq!(published["state"]["sessionState"], json!("idle"));
+    assert_eq!(published["state"]["sessionActive"], json!(false));
+    assert!(published["describe"]["layoutPresets"].is_array());
+
+    // (The same body twice is never sent: `remote_tests.rs`.)
+    let sent = backend.count("remote.surface.publish");
+
+    // A new backend holds nothing: the same surface goes out again.
+    events
+        .send(BackendEvent::ConnectionClosed {
+            reason: "gone".to_string(),
+        })
+        .unwrap();
+    events.send(ready()).unwrap();
+    eventually("the surface is published again", || {
+        backend.count("remote.surface.publish") > sent
+    })
+    .await;
+    driver.abort();
+}
+
+#[tokio::test]
+async fn a_remote_intent_is_run_and_acked() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    let (events, receiver) = broadcast::channel(16);
+    let driver = tokio::spawn(Arc::clone(&studio).drive(receiver));
+    events.send(ready()).unwrap();
+    eventually("the bootstrap", || studio.snapshot().bootstrapped).await;
+    events
+        .send(BackendEvent::RemoteIntent(Box::new(RemoteIntentEnvelope {
+            intent_id: "intent-1".to_string(),
+            intent: json!({ "kind": "recordStop" }),
+        })))
+        .unwrap();
+    eventually("the intent is acked", || {
+        backend.count("remote.intent.ack") == 1
+    })
+    .await;
+    assert_eq!(
+        backend.script.lock().unwrap().remote_acks,
+        [RemoteIntentAckParams {
+            intent_id: "intent-1".to_string(),
+            ok: false,
+            message: Some(remote_copy::NOT_RUNNING.to_string()),
+        }]
+    );
+    driver.abort();
 }
