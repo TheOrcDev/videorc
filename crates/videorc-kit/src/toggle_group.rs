@@ -23,7 +23,7 @@ use smallvec::SmallVec;
 
 use crate::{
     badge::plate_shadows,
-    theme::{Appearance, faded_over, hsla, resolve},
+    theme::{Appearance, faded_over, hsla, resolve, with_alpha},
     tokens::{Color, radius, size},
     tooltip::tooltip,
 };
@@ -81,6 +81,8 @@ pub struct ToggleGroup {
     xs: bool,
     /// Outlined chips; the default is transparent.
     outline: bool,
+    /// Caption style cards: pressed = `border-primary/50 bg-primary/10`.
+    card: bool,
     /// Gap between chips in px. Default 8.
     spacing: f32,
     vertical: bool,
@@ -100,6 +102,7 @@ impl ToggleGroup {
             multiple: false,
             xs: false,
             outline: false,
+            card: false,
             spacing: 8.0,
             vertical: false,
             disabled: false,
@@ -136,6 +139,12 @@ impl ToggleGroup {
     /// Outlined chips.
     pub fn outline(mut self, outline: bool) -> Self {
         self.outline = outline;
+        self
+    }
+
+    /// Caption style cards: selected chip uses primary wash, not chrome plate.
+    pub fn card(mut self, card: bool) -> Self {
+        self.card = card;
         self
     }
 
@@ -292,6 +301,11 @@ impl RenderOnce for ToggleGroup {
                             .border_color(hsla(faded_over(t.input, ground, 0.5)))
                             .bg(hsla(faded_over(t.glass_solid, ground, 0.5)));
                     }
+                } else if pressed && self.card {
+                    chip = chip
+                        .text_color(hsla(t.foreground))
+                        .border_color(hsla(with_alpha(t.primary, 0.5)))
+                        .bg(hsla(with_alpha(t.primary, 0.1)));
                 } else if pressed {
                     chip = chip
                         .text_color(hsla(t.foreground))

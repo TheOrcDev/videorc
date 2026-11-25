@@ -279,19 +279,26 @@ impl RenderOnce for Button {
                 color
             }
         };
-        let (height, mut pad, gap, text_size, line_height) = match self.size {
-            ButtonSize::Default => (size::CONTROL, 12.0, 6.0, 14.0, 20.0),
-            ButtonSize::Xs => (24.0, 10.0, 4.0, 12.0, 16.0),
-            ButtonSize::Lg => (32.0, 16.0, 6.0, 14.0, 20.0),
-            ButtonSize::Icon => (size::CONTROL, 0.0, 0.0, 14.0, 20.0),
-            ButtonSize::IconXs => (24.0, 0.0, 0.0, 12.0, 16.0),
+        // Electron Link+Xs ("Open Sources"): h-auto p-0 text-xs font-normal.
+        let link_inline =
+            self.variant == ButtonVariant::Link && matches!(self.size, ButtonSize::Xs);
+        let (height, mut pad, gap, text_size, line_height) = if link_inline {
+            (0.0, 0.0, 0.0, 12.0, 16.0)
+        } else {
+            match self.size {
+                ButtonSize::Default => (size::CONTROL, 12.0, 6.0, 14.0, 20.0),
+                ButtonSize::Xs => (24.0, 10.0, 4.0, 12.0, 16.0),
+                ButtonSize::Lg => (32.0, 16.0, 6.0, 14.0, 20.0),
+                ButtonSize::Icon => (size::CONTROL, 0.0, 0.0, 14.0, 20.0),
+                ButtonSize::IconXs => (24.0, 0.0, 0.0, 12.0, 16.0),
+            }
         };
         // Dense keeps height; only the horizontal pad shrinks (not icon squares).
         if self.dense && !matches!(self.size, ButtonSize::Icon | ButtonSize::IconXs) {
             pad = 6.0;
         }
         let square = matches!(self.size, ButtonSize::Icon | ButtonSize::IconXs);
-        let has_leading = self.leading_icon.is_some() && !square;
+        let has_leading = self.leading_icon.is_some() && !square && !link_inline;
         // Electron `has-data-[icon=inline-start]:pl-2.5` / xs `pl-2`.
         let (pad_l, pad_r) = if has_leading {
             let left = match self.size {
@@ -325,13 +332,17 @@ impl RenderOnce for Button {
         };
 
         let expanded = self.selected;
+        let weight = if link_inline {
+            FontWeight::NORMAL
+        } else {
+            FontWeight::MEDIUM
+        };
         let mut button = gpui_base::Button::new(self.id)
             .group(GROUP)
             .disabled(disabled)
             .selected(expanded)
             .relative()
             .flex_none()
-            .h(px(height))
             .gap(px(gap))
             .rounded(px(r))
             .border_1()
@@ -339,11 +350,13 @@ impl RenderOnce for Button {
             .whitespace_nowrap()
             .text_size(px(text_size))
             .line_height(px(line_height))
-            .font_weight(FontWeight::MEDIUM);
-        button = if square {
-            button.w(px(height))
+            .font_weight(weight);
+        button = if link_inline {
+            button
+        } else if square {
+            button.h(px(height)).w(px(height))
         } else {
-            button.pl(px(pad_l)).pr(px(pad_r))
+            button.h(px(height)).pl(px(pad_l)).pr(px(pad_r))
         };
         if let Some(label) = self.accessibility_label {
             button = button.accessibility_label(label);

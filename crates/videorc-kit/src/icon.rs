@@ -151,6 +151,16 @@ pub enum IconName {
     BookmarkSimple,
     /// Electron `TextIcon` (Phosphor's TextAa): Stream details section title.
     TextAa,
+    /// `BugIcon` (Phosphor's Bug): Health support bundle.
+    Bug,
+    /// `RefreshIcon` (Phosphor's ArrowClockwise): Captions Retry.
+    ArrowClockwise,
+    /// `AdjustIcon` (Phosphor's SlidersHorizontal): Scene inspector titles.
+    SlidersHorizontal,
+    /// `ArrowUpIcon`: Scene d-pad.
+    ArrowUp,
+    /// On-stream check at Phosphor's bold weight.
+    CheckBold,
     /// `FolderIcon` (Phosphor's FolderOpen).
     FolderOpen,
     /// `WaveformMutedIcon` (Phosphor's WaveformSlash).
@@ -256,6 +266,11 @@ impl IconName {
             IconName::Terminal => include_bytes!("../icons/terminal.svg"),
             IconName::BookmarkSimple => include_bytes!("../icons/bookmark-simple.svg"),
             IconName::TextAa => include_bytes!("../icons/text-aa.svg"),
+            IconName::Bug => include_bytes!("../icons/bug.svg"),
+            IconName::ArrowClockwise => include_bytes!("../icons/arrow-clockwise.svg"),
+            IconName::SlidersHorizontal => include_bytes!("../icons/sliders-horizontal.svg"),
+            IconName::ArrowUp => include_bytes!("../icons/arrow-up.svg"),
+            IconName::CheckBold => include_bytes!("../icons/check-bold.svg"),
             IconName::FolderOpen => include_bytes!("../icons/folder-open.svg"),
             IconName::WaveformSlash => include_bytes!("../icons/waveform-slash.svg"),
             IconName::Desktop => include_bytes!("../icons/desktop.svg"),
