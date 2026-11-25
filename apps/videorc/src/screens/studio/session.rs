@@ -346,6 +346,9 @@ impl SessionSection {
                     .disabled(self.agents_stopping)
                     .on_click(stop),
             )
+            // `agents-session-row.tsx:55`, `icon={TerminalIcon}`: the
+            // NavigableRow's leading icon, 16 px, secondary gray.
+            .icon(icon(IconName::Terminal, 16., hsla(theme.muted_foreground)))
             .grouped()
             .into_any_element(),
         )

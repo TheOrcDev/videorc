@@ -44,7 +44,7 @@ use videorc_app_core::studio::watchdog_alerts::{SnoozeScope, WatchdogState};
 use videorc_kit::kebab_menu::{KebabMenu, KebabMenuItem};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
-use videorc_kit::{Alert, AlertVariant, Button, ButtonSize, ButtonVariant};
+use videorc_kit::{Alert, AlertVariant, Button, ButtonSize, ButtonVariant, SelectableText};
 
 use super::transport::{AppStudio, OpenPage};
 use crate::preview::Preview;
@@ -520,8 +520,15 @@ impl Render for CloudResumeSlot {
             .when_some(card.notice.detail.clone(), |body, detail| {
                 body.child(div().child(detail))
             })
+            // P184: where a phone or device continues, selectable so the
+            // streamer can copy it (`cloud-resume-notice.tsx:54`,
+            // `select-text`).
             .when_some(card.notice.pointer, |body, pointer| {
-                body.child(div().id("cloud-continue-pointer").child(pointer))
+                body.child(
+                    div()
+                        .id("cloud-continue-pointer")
+                        .child(SelectableText::new("cloud-continue-pointer-text", pointer)),
+                )
             })
             .child(actions().child(resume).child(end));
         div()
