@@ -8,6 +8,7 @@
 
 pub mod activity;
 pub mod buddy;
+pub mod completions;
 pub mod copy;
 pub mod dashboard;
 pub mod format;
