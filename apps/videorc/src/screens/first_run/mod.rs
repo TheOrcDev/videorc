@@ -2,7 +2,7 @@
 //! `videorc_app_core::first_run` (#1766), drawn with `videorc-kit`. Words
 //! match Electron's `components/first-run/*` and `lib/first-run.ts`.
 
-mod pictures;
+pub(crate) mod pictures;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

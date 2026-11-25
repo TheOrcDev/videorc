@@ -11,6 +11,7 @@ pub mod account_menu;
 pub mod accounts;
 pub mod args;
 pub mod bridge;
+pub mod bundled_backgrounds;
 pub mod camera;
 pub mod capture;
 pub mod exit;
