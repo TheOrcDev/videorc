@@ -380,7 +380,7 @@ impl CaptionsPanel {
         let this = cx.entity().downgrade();
         // The column's only section: no hairline under it.
         PanelSection::new("caption-preview")
-            .icon(icon(IconName::Eye, 16., hsla(t.muted_foreground)))
+            .icon(icon(IconName::EyeDuotone, 16., hsla(t.muted_foreground)))
             .title(c::PREVIEW_TITLE)
             .description(c::PREVIEW_DESCRIPTION)
             .last(true)
@@ -449,7 +449,7 @@ impl CaptionsPanel {
         let muted = hsla(t.muted_foreground);
 
         let section = PanelSection::new("captions-controls")
-            .icon(icon(IconName::ClosedCaptioning, 16., muted))
+            .icon(icon(IconName::ClosedCaptioningDuotone, 16., muted))
             .title(c::LIVE_CAPTIONS)
             .description(c::PANEL_DESCRIPTION)
             .last(last);

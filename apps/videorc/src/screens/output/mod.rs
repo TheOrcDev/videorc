@@ -1371,8 +1371,19 @@ impl OutputPanel {
                 continue;
             };
             let refused = refusal.filter(|(refused, ..)| *refused == field);
+            let (_, _, step) = quality::limits(field, model.vertical);
+            // A step press moves the draft, like Chrome's number spinner:
+            // the press focuses the field first (the kit's step buttons take
+            // no focus), so the step stays a draft that Enter or leaving the
+            // field commits and `sync_fields` never puts back.
+            let focus_on_press = state.clone();
             grid = grid.child(
                 div()
+                    .when(!model.quality_locked, |cell| {
+                        cell.on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                            focus_on_press.read(cx).focus_handle(cx).focus(window, cx);
+                        })
+                    })
                     .on_key_down(cx.listener(
                         move |this, event: &gpui::KeyDownEvent, window, cx| {
                             if event.keystroke.key == "escape" {
@@ -1392,6 +1403,7 @@ impl OutputPanel {
                                 &state,
                             )
                             .accessibility_label(label)
+                            .stepper(f64::from(step))
                             .disabled(model.quality_locked)
                             .invalid(refused.is_some()),
                         )
@@ -1447,7 +1459,11 @@ impl OutputPanel {
                 .description(clips_copy::copy::WHERE_CLIPS_GO_DESCRIPTION),
         );
         PanelSection::new("output-clips")
-            .icon(icon(IconName::Scissors, 16., hsla(t.muted_foreground)))
+            .icon(icon(
+                IconName::ScissorsDuotone,
+                16.,
+                hsla(t.muted_foreground),
+            ))
             .title(clips_copy::copy::CLIPS)
             .description(clips_copy::copy::SECTION_DESCRIPTION)
             .child(rows)
@@ -1678,7 +1694,11 @@ impl Render for OutputPanel {
             .map(|&(_, _, label)| label);
 
         let mut local = PanelSection::new("output-local")
-            .icon(icon(IconName::FileVideo, 16., hsla(t.muted_foreground)))
+            .icon(icon(
+                IconName::FileVideoDuotone,
+                16.,
+                hsla(t.muted_foreground),
+            ))
             .title("Local recording")
             .description(LOCAL_DESCRIPTION);
         if model.session_locked {
@@ -1973,7 +1993,7 @@ impl Render for OutputPanel {
                                 .py(px(2.))
                                 .rounded(px(videorc_kit::tokens::radius::CHIP))
                                 .bg(hsla(t.inset))
-                                .font_family(videorc_kit::tokens::font::MONO[0])
+                                .font_family(theme::FONT_MONO)
                                 .type_scale(text::META)
                                 .text_color(hsla(t.foreground))
                                 .child(command),
@@ -2000,7 +2020,11 @@ impl Render for OutputPanel {
             }
             camera_section = Some(
                 PanelSection::new("output-videorc-camera")
-                    .icon(icon(IconName::VideoCamera, 16., hsla(t.muted_foreground)))
+                    .icon(icon(
+                        IconName::VideoCameraDuotone,
+                        16.,
+                        hsla(t.muted_foreground),
+                    ))
                     .title(CAMERA_SECTION_TITLE)
                     .description(CAMERA_SECTION_DESCRIPTION)
                     .child(

@@ -4,8 +4,8 @@ use videorc_app_core::desktop::{permissions::PermissionPlatform, system_access a
 use videorc_app_core::studio::cloud_program_health::{self as cloud_health, ProgramHealthTone};
 use videorc_app_core::studio::virtual_camera::camera_copy;
 use videorc_kit::{
-    Alert, AlertVariant, Button, ButtonSize, ButtonVariant, GroupedList, ListRow, PanelSection,
-    StatusBadge,
+    Alert, AlertVariant, Button, ButtonSize, ButtonVariant, Collapsible, GroupedList, ListRow,
+    PanelSection, StatusBadge,
     dialog::Dialog,
     icon::{IconName, icon},
     scroll_area::ScrollArea,
@@ -159,14 +159,25 @@ impl HealthScreen {
         let id = group.id;
         let muted = hsla(t.muted_foreground);
         let (accent, foreground) = (hsla(t.accent), hsla(t.foreground));
-        let trigger = gpui_base::Button::new(SharedString::from(format!("toggle-{id}")))
-            .aria_expanded(expanded)
-            .when(group.attention, |row| {
-                row.accessibility_label(format!("{}, needs a look", group.title))
-            })
+        // Electron's `<h3>` wraps the trigger; the kit's header is the
+        // button, so the heading sits inside it and the button carries the
+        // name its text gives in Electron (a heading's text never names it).
+        let mut name = group.title.clone();
+        if group.attention {
+            name.push_str(", needs a look");
+        }
+        if !group.meta.is_empty() {
+            name.push_str(", ");
+            name.push_str(&group.meta);
+        }
+        let trigger = div()
+            .id(SharedString::from(format!("{id}-heading")))
+            .role(Role::Heading)
+            .aria_level(3)
+            .flex()
+            .items_center()
             .w_full()
             .min_w(px(0.))
-            .justify_start()
             .gap(px(8.))
             .px(px(8.))
             .py(px(6.))
@@ -190,21 +201,24 @@ impl HealthScreen {
                         .line_height(px(16.))
                         .child(group.meta.clone()),
                 )
-            })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.groups.insert(id.into(), !expanded);
-                cx.notify();
-            }));
-        let heading = div()
-            .id(SharedString::from(format!("{id}-heading")))
-            .role(Role::Heading)
-            .aria_level(3)
-            .child(trigger);
-        let mut section = div().flex().flex_col().child(heading);
+            });
+        let entity = cx.entity();
+        let mut disclosure = Collapsible::new(SharedString::from(format!("toggle-{id}")))
+            .unstyled(true)
+            .open(expanded)
+            .accessibility_label(name)
+            .trigger(trigger)
+            .on_toggle(move |open, _, cx| {
+                entity.update(cx, |this, cx| {
+                    this.groups.insert(id.into(), open);
+                    cx.notify();
+                })
+            });
+        // Only an open group builds its content.
         if expanded {
-            section = section.child(self.metric_body(group, t, cx));
+            disclosure = disclosure.content(self.metric_body(group, t, cx));
         }
-        section.into_any_element()
+        disclosure.into_any_element()
     }
 
     /// The open group's content (`CollapsibleContent className="pt-2 pb-1"`).
@@ -399,7 +413,11 @@ impl Render for HealthScreen {
         // the recorder line, then the checks. A log that didn't load says so
         // in its own group under Technical details.
         let mut summary = PanelSection::new("health-checks")
-            .icon(icon(IconName::Heartbeat, 16., hsla(t.muted_foreground)))
+            .icon(icon(
+                IconName::HeartbeatDuotone,
+                16.,
+                hsla(t.muted_foreground),
+            ))
             .title(h::copy::CHECKS_TITLE)
             .description(h::copy::CHECKS_DESCRIPTION)
             .child(verdict_alert)
@@ -470,43 +488,43 @@ impl Render for HealthScreen {
             .id("health-details-heading")
             .role(Role::Heading)
             .aria_level(2)
-            .child(
-                gpui_base::Button::new("health-details-toggle")
-                    .aria_expanded(details_open)
-                    .w_full()
-                    .justify_start()
-                    .gap(px(8.))
-                    .px(px(size::GUTTER))
-                    .py(px(12.))
-                    .type_scale(text::SECTION)
-                    .text_color(hsla(t.foreground))
-                    .hover(move |style| style.bg(accent))
-                    .child(icon(chevron(details_open), 14., hsla(t.muted_foreground)))
-                    .child(h::copy::TECHNICAL_DETAILS)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.details = !this.details;
-                        cx.notify();
-                    })),
-            );
-        let mut details = div()
-            .id("health-details")
+            .flex()
+            .items_center()
+            .w_full()
+            .gap(px(8.))
+            .px(px(size::GUTTER))
+            .py(px(12.))
+            .type_scale(text::SECTION)
+            .text_color(hsla(t.foreground))
+            .hover(move |style| style.bg(accent))
+            .child(icon(chevron(details_open), 14., hsla(t.muted_foreground)))
+            .child(h::copy::TECHNICAL_DETAILS);
+        let mut groups = div()
             .flex()
             .flex_col()
-            .border_b_1()
-            .border_color(hsla(t.border))
-            .child(details_trigger);
+            .gap(px(4.))
+            .px(px(size::GUTTER))
+            .pb(px(size::GUTTER));
         if details_open {
-            let mut groups = div()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .px(px(size::GUTTER))
-                .pb(px(size::GUTTER));
             for group in &self.view.groups {
                 groups = groups.child(self.metric_group(group, t, cx));
             }
-            details = details.child(groups);
         }
+        let details_page = cx.entity();
+        let details = Collapsible::new("health-details-toggle")
+            .unstyled(true)
+            .open(details_open)
+            .accessibility_label(h::copy::TECHNICAL_DETAILS)
+            .trigger(details_trigger)
+            .content(groups)
+            .on_toggle(move |open, _, cx| {
+                details_page.update(cx, |this, cx| {
+                    this.details = open;
+                    cx.notify();
+                })
+            })
+            .border_b_1()
+            .border_color(hsla(t.border));
         div()
             .id("health-page")
             .flex()
