@@ -53,7 +53,9 @@
     "bar-visualizer",
     "live-waveform",
     "sound-pad",
-    "qr-code"
+    "qr-code",
+    "progress",
+    "selectable-text"
   ],
   "keepLocal": []
 }
