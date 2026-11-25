@@ -19,7 +19,7 @@ use videorc_app_core::desktop::capture_protection::{
     HideMethod, WindowRole, stream_manager_hide_method,
 };
 use videorc_app_core::desktop::permissions::PermissionPlatform;
-use videorc_app_core::protocol::{Banner, ScreenPrivacy, ScreenPrivacyReason};
+use videorc_app_core::protocol::{Banner, ScreenPrivacy, ScreenPrivacyReason, SoundboardState};
 use videorc_app_core::stream_manager::copy::WINDOW_NAME;
 use videorc_app_core::stream_manager::dashboard::{LiveDashboard, SessionState};
 use videorc_app_core::{BackendClient, Studio};
@@ -38,7 +38,7 @@ use super::layout::{MIN_HEIGHT, MIN_WIDTH, Pane, Slot, Tier, right_pane_width, s
 use super::panes::{PaneKey, Panes, composer_available, key_runs};
 use super::sidekick::sidekick_pane;
 use super::stats::{StatsView, stats_bar};
-use super::status::{BannerRow, status_bar};
+use super::status::{BannerRow, SoundRow, status_bar};
 use crate::app::hide::HideFromStream;
 use crate::app::menus::ToggleStreamManager;
 use crate::platform;
@@ -195,6 +195,8 @@ pub struct StreamManager {
     screen_blocked: Option<String>,
     /// `None` while loading; empty when Images has none.
     banners: Option<Vec<BannerRow>>,
+    /// `None` while loading; empty when Sounds has none.
+    sounds: Option<Vec<SoundRow>>,
     clear: DialogHandle,
     focus: FocusHandle,
     _bounds: Subscription,
@@ -302,6 +304,25 @@ impl StreamManager {
             })
             .detach();
         }
+        // Sounds menu: seed from `sounds.list`.
+        {
+            let studio = studio.clone();
+            let runtime = runtime.clone();
+            cx.spawn(async move |this, cx| {
+                let answer = runtime
+                    .spawn(async move { studio.backend().sounds_list().await })
+                    .await;
+                let rows = match answer {
+                    Ok(Ok(board)) => Some(sound_rows(&board)),
+                    _ => Some(Vec::new()),
+                };
+                let _ = this.update(cx, |sm, cx| {
+                    sm.sounds = rows;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         Self {
             frame,
             studio,
@@ -323,10 +344,31 @@ impl StreamManager {
             screen_hidden: false,
             screen_blocked: None,
             banners: None,
+            sounds: None,
             clear: DialogHandle::new(false),
             focus,
             _bounds: bounds,
         }
+    }
+
+    fn play_sound(&self, id: String) {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            let _ = studio
+                .backend()
+                .sounds_request("sounds.play", json!({ "id": id }))
+                .await;
+        });
+    }
+
+    fn stop_all_sounds(&self) {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            let _ = studio
+                .backend()
+                .sounds_request("sounds.stop", json!({}))
+                .await;
+        });
     }
 
     fn refresh_banners(&mut self, cx: &mut Context<Self>) {
@@ -530,6 +572,7 @@ impl Render for StreamManager {
         let screen_hidden = self.screen_hidden;
         let screen_blocked = self.screen_blocked.clone();
         let banners = self.banners.clone();
+        let sounds = self.sounds.clone();
         let this = cx.entity().downgrade();
         let pin = this.clone();
         let hide = this.clone();
@@ -538,6 +581,8 @@ impl Render for StreamManager {
         let screen = this.clone();
         let banner = this.clone();
         let banner_all = this.clone();
+        let sound = this.clone();
+        let sound_stop = this.clone();
         let clear_dialog = Dialog::new("stream-manager-clear", &self.clear, "Clear the view?")
             .description(
                 "Chat and Activity in this window are emptied and the messages per minute start over. The Library keeps the history.",
@@ -629,11 +674,29 @@ impl Render for StreamManager {
                     move |_window, app| {
                         let _ = banner_all.update(app, |this, cx| this.hide_all_banners(cx));
                     },
+                    sounds,
+                    move |id, _window, app| {
+                        let _ = sound.update(app, |this, _| this.play_sound(id));
+                    },
+                    move |_window, app| {
+                        let _ = sound_stop.update(app, |this, _| this.stop_all_sounds());
+                    },
                 ))
                 .child(clear_dialog)
                 .child(self.notices.read(cx).toasts()),
         )
     }
+}
+
+fn sound_rows(board: &SoundboardState) -> Vec<SoundRow> {
+    board
+        .sounds
+        .iter()
+        .map(|s| SoundRow {
+            id: s.id.clone(),
+            name: s.name.clone(),
+        })
+        .collect()
 }
 
 fn parse_banner_rows(value: Value) -> Vec<BannerRow> {

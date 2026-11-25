@@ -35,6 +35,9 @@ const SOUNDS_HINT: &str = "Play a sound (or type /sound)";
 const HIDE_ALL_BANNERS: &str = "Hide all banners";
 const LOADING_BANNERS: &str = "Loading banners…";
 const IMPORT_BANNERS: &str = "Import banners in Images";
+const STOP_ALL_SOUNDS: &str = "Stop all sounds";
+const LOADING_SOUNDS: &str = "Loading sounds…";
+const IMPORT_SOUNDS: &str = "Import sounds in Sounds";
 
 /// One banner row for the Banners menu (id, name, shown).
 #[derive(Clone, Debug)]
@@ -42,6 +45,13 @@ pub struct BannerRow {
     pub id: String,
     pub name: String,
     pub shown: bool,
+}
+
+/// One sound row for the Sounds menu (id, name).
+#[derive(Clone, Debug)]
+pub struct SoundRow {
+    pub id: String,
+    pub name: String,
 }
 const HIDE_SCREEN_HINT: &str =
     "Cover your screen with a frosted picture on the recording and every stream";
@@ -64,6 +74,9 @@ pub fn status_bar(
     banners: Option<Vec<BannerRow>>,
     on_banner: impl Fn(String, bool, &mut Window, &mut App) + 'static,
     on_banner_hide_all: impl Fn(&mut Window, &mut App) + 'static,
+    sounds: Option<Vec<SoundRow>>,
+    on_sound: impl Fn(String, &mut Window, &mut App) + 'static,
+    on_sound_stop_all: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let tier = Tier::of(width);
     let labels = full_labels(width);
@@ -92,6 +105,8 @@ pub fn status_bar(
     let on_screen = Rc::new(on_screen);
     let on_banner = Rc::new(on_banner);
     let on_banner_hide_all = Rc::new(on_banner_hide_all);
+    let on_sound = Rc::new(on_sound);
+    let on_sound_stop_all = Rc::new(on_sound_stop_all);
     let screen_label = if screen_hidden {
         SHOW_SCREEN
     } else {
@@ -196,10 +211,18 @@ pub fn status_bar(
                     }),
             )
             .child(
-                StatusBarAction::new("sounds", SOUNDS)
-                    .text(SOUNDS)
-                    .hint(SOUNDS_HINT)
-                    .on_click(|_, _, _| {}),
+                DropdownMenu::new("sounds")
+                    .trigger(
+                        StatusBarAction::new("sounds", SOUNDS)
+                            .text(SOUNDS)
+                            .hint(SOUNDS_HINT),
+                    )
+                    .menu({
+                        let sounds = sounds.clone();
+                        let on_sound = on_sound.clone();
+                        let stop_all = on_sound_stop_all.clone();
+                        move |_, _| sounds_menu(sounds.as_ref(), on_sound.clone(), stop_all.clone())
+                    }),
             )
             .child(
                 StatusBarAction::new("clear-view", CLEAR_VIEW)
@@ -258,6 +281,9 @@ pub fn status_bar(
                         let banners = banners.clone();
                         let on_banner = on_banner.clone();
                         let hide_all = on_banner_hide_all.clone();
+                        let sounds = sounds.clone();
+                        let on_sound = on_sound.clone();
+                        let stop_all = on_sound_stop_all.clone();
                         let screen_item = screen_label.to_string();
                         let screen_off = screen_disabled;
                         move |_, _| {
@@ -290,7 +316,14 @@ pub fn status_bar(
                                         hide_all.clone(),
                                     ),
                                 )
-                                .item(MenuItem::new(format!("{SOUNDS}…")).on_select(|_, _| {}))
+                                .submenu(
+                                    format!("{SOUNDS}…"),
+                                    sounds_menu(
+                                        sounds.as_ref(),
+                                        on_sound.clone(),
+                                        stop_all.clone(),
+                                    ),
+                                )
                                 .item(MenuItem::new("Chat commands…").on_select(|_, _| {}))
                                 .item(MenuItem::new(preview_menu.clone()).on_select(|_, _| {}))
                                 .separator()
@@ -333,6 +366,36 @@ fn banners_menu(
                 MenuItem::new(HIDE_ALL_BANNERS)
                     .disabled(!any_shown)
                     .on_select(move |window, app| hide_all(window, app)),
+            );
+        }
+    }
+    menu
+}
+
+fn sounds_menu(
+    sounds: Option<&Vec<SoundRow>>,
+    on_sound: Rc<dyn Fn(String, &mut Window, &mut App)>,
+    stop_all: Rc<dyn Fn(&mut Window, &mut App)>,
+) -> Menu {
+    let mut menu = Menu::new();
+    match sounds {
+        None => {
+            menu = menu.item(MenuItem::new(LOADING_SOUNDS).disabled(true));
+        }
+        Some(list) if list.is_empty() => {
+            menu = menu.item(MenuItem::new(IMPORT_SOUNDS).disabled(true));
+        }
+        Some(list) => {
+            for sound in list {
+                let id = sound.id.clone();
+                let play = on_sound.clone();
+                menu = menu.item(
+                    MenuItem::new(sound.name.clone())
+                        .on_select(move |window, app| play(id.clone(), window, app)),
+                );
+            }
+            menu = menu.separator().item(
+                MenuItem::new(STOP_ALL_SOUNDS).on_select(move |window, app| stop_all(window, app)),
             );
         }
     }
