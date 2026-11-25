@@ -8,9 +8,11 @@
 //! This is the one module that may spell a key glyph; the design guards
 //! reject them anywhere else.
 
+use std::cell::RefCell;
+
 use gpui::{
-    Action, App, FontWeight, IntoElement, Keystroke, Modifiers, OperatingSystem, SharedString,
-    Window, div, prelude::*,
+    Action, App, FontWeight, IntoElement, KeyBinding, Keystroke, Modifiers, OperatingSystem,
+    SharedString, Window, div, prelude::*,
 };
 
 use crate::{kbd::Kbd, theme::Appearance, tokens::Color};
@@ -38,8 +40,9 @@ pub struct ShortcutKeys {
 }
 
 impl ShortcutKeys {
-    /// The binding the keymap gives `action` in the focused context; shows
-    /// nothing when the action has no binding.
+    /// The binding the keymap gives `action`: the one that matches the
+    /// rendered frame's contexts, else the last one bound in any context;
+    /// shows nothing when the action has no binding at all.
     pub fn for_action(action: &dyn Action) -> Self {
         Self::from_source(Source::Action(action.boxed_clone()))
     }
@@ -113,10 +116,11 @@ impl ShortcutKeys {
 }
 
 impl RenderOnce for ShortcutKeys {
-    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let strokes: Vec<(Modifiers, String)> = match &self.source {
             Source::Action(action) => window
                 .highest_precedence_binding_for_action(action.as_ref())
+                .or_else(|| any_context_binding(action.as_ref(), cx))
                 .map(|binding| {
                     binding
                         .keystrokes()
@@ -156,6 +160,22 @@ impl RenderOnce for ShortcutKeys {
             }
         }
     }
+}
+
+/// The last binding the keymap holds for `action` in any context.
+///
+/// `Window::highest_precedence_binding_for_action` matches against the
+/// rendered frame's build-time context stack, which is empty once the frame
+/// is done, so every binding gated on a key context (`Workspace`,
+/// `StudioScreen`, ...) came back as none and the chip drew blank. The chip
+/// names the key that runs the action where it is bound, like Electron's
+/// menus and chips do, so it falls back to the keymap itself; the last
+/// binding added wins, as GPUI orders them for display.
+fn any_context_binding(action: &dyn Action, cx: &App) -> Option<KeyBinding> {
+    let keymap = cx.key_bindings();
+    let keymap = RefCell::borrow(&keymap);
+    let found = keymap.bindings_for_action(action).next_back().cloned();
+    found
 }
 
 /// A key's name as the platform prints it.

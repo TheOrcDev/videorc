@@ -96,10 +96,11 @@ impl DestinationsPanel {
     }
 
     pub(super) fn close_schedule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(editor) = self.schedule.as_mut() {
-            editor.dialog.close(window, cx);
-        }
-        self.schedule = None;
+        // Take first so Escape/`on_open_change` re-entry is a no-op.
+        let Some(editor) = self.schedule.take() else {
+            return;
+        };
+        editor.dialog.close(window, cx);
         cx.notify();
     }
 
@@ -210,6 +211,15 @@ impl DestinationsPanel {
             copy::schedule_on(label)
         };
         dialog
+            .on_open_change({
+                let entity = entity.clone();
+                move |open, _, window, cx| {
+                    if !open {
+                        // Escape / backdrop / X — same as Cancel.
+                        entity.update(cx, |this, cx| this.close_schedule(window, cx));
+                    }
+                }
+            })
             .footer(
                 Button::new("schedule-cancel")
                     .label(copy::CANCEL)

@@ -24,7 +24,7 @@ use videorc_kit::theme::{self, hsla};
 use videorc_kit::tokens::radius;
 use videorc_protocol::buddy_pet::BuddyMotionSettings;
 
-use super::pictures;
+use super::{files, pictures};
 
 /// `BUDDY_STILL_PACK_ID`: the pack id the preview takes for Still.
 pub const STILL_PACK_ID: &str = "still";
@@ -36,6 +36,8 @@ const STILL_STATES: [(&str, bool); 4] = [
     ("think", true),
 ];
 const LOAD_FAILED: &str = "Couldn't load the preview.";
+/// A creation's built moves, as `files::creation_file` names them.
+const CREATION_MANIFEST: &str = "pack/manifest.json";
 
 /// The packs Videorc ships with the app (`buddy-assets/bundled`): the
 /// build's resources, or `VIDEORC_BUDDY_BUNDLED_ROOT` where a package puts
@@ -43,7 +45,7 @@ const LOAD_FAILED: &str = "Couldn't load the preview.";
 pub fn bundled_root() -> PathBuf {
     std::env::var_os("VIDEORC_BUDDY_BUNDLED_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../desktop/resources/buddy"))
+        .unwrap_or_else(|| videorc_app_core::bundled::current().buddy.clone())
 }
 
 /// One sheet of a pack, decoded once.
@@ -74,6 +76,8 @@ pub struct PetPreview {
     error: Option<String>,
     paused: bool,
     active: bool,
+    /// Click cycles reactions (Avatar Try/Test). Community Preview is off.
+    interactive: bool,
     /// The tick loop runs (one at a time).
     ticking: bool,
     epoch: Instant,
@@ -91,6 +95,7 @@ impl PetPreview {
             error: None,
             paused: false,
             active: true,
+            interactive: true,
             ticking: false,
             epoch: Instant::now(),
         }
@@ -148,6 +153,11 @@ impl PetPreview {
         cx.notify();
     }
 
+    /// Electron `interactive={false}`: no click cycle (Community Preview).
+    pub fn set_interactive(&mut self, interactive: bool) {
+        self.interactive = interactive;
+    }
+
     /// Still: the four pictures (`stillImages`), each a whole frame. A
     /// missing state falls back to idle, then the default pack's.
     pub fn show_still(
@@ -179,6 +189,41 @@ impl PetPreview {
         cx: &mut Context<Self>,
     ) {
         let key = format!("{persona_id}/{pack_id}");
+        let write_root = user_data_dir.join(pictures::BUDDY_ASSETS_FOLDER);
+        let (persona_id, pack_id) = (persona_id.to_string(), pack_id.to_string());
+        self.load(
+            key,
+            move || load_pack(&write_root, &bundled_root(), &persona_id, &pack_id),
+            cx,
+        );
+    }
+
+    /// The Alive creator's Check: a creation's built moves
+    /// (`creations/<build>/pack/`, Electron's `readBuddyCreationFile`), read
+    /// again when `reload_key` (the build's finish time) moves.
+    pub fn show_creation(
+        &mut self,
+        user_data_dir: &Path,
+        persona_id: &str,
+        build_id: &str,
+        reload_key: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let key = format!("creation:{persona_id}/{build_id}/{reload_key}");
+        let write_root = user_data_dir.join(pictures::BUDDY_ASSETS_FOLDER);
+        let folder = files::creation_file(user_data_dir, persona_id, build_id, CREATION_MANIFEST)
+            .and_then(|manifest| manifest.parent().map(Path::to_path_buf));
+        self.load(key, move || load_pack_at(&folder?, &write_root), cx);
+    }
+
+    /// Reads a pack off the main thread and plays it, unless `key` already
+    /// shows or a newer choice overtakes the read.
+    fn load(
+        &mut self,
+        key: String,
+        read: impl FnOnce() -> Option<LoadedPack> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
         if self.key.as_deref() == Some(key.as_str()) {
             return;
         }
@@ -186,11 +231,7 @@ impl PetPreview {
         self.art = None;
         self.player = None;
         self.error = None;
-        let write_root = user_data_dir.join(pictures::BUDDY_ASSETS_FOLDER);
-        let (persona_id, pack_id) = (persona_id.to_string(), pack_id.to_string());
-        let read = cx.background_spawn(async move {
-            load_pack(&write_root, &bundled_root(), &persona_id, &pack_id)
-        });
+        let read = cx.background_spawn(async move { read() });
         cx.spawn(async move |this, cx| {
             let loaded = read.await;
             let _ = this.update(cx, |preview, cx| {
@@ -344,11 +385,16 @@ fn load_pack(
     pack_id: &str,
 ) -> Option<LoadedPack> {
     let (folder, root) = pet_pack::pack_folder(write_root, bundled, persona_id, pack_id)?;
-    let manifest = read_pack_file(&folder, &root, pet_pack::MANIFEST_FILE)?;
+    load_pack_at(&folder, &root)
+}
+
+/// The pack in `folder`, every file inside `root`.
+fn load_pack_at(folder: &Path, root: &Path) -> Option<LoadedPack> {
+    let manifest = read_pack_file(folder, root, pet_pack::MANIFEST_FILE)?;
     let preview = read_manifest(&manifest)?;
     let mut sheets = BTreeMap::new();
     for name in &preview.sheets {
-        let bytes = read_pack_file(&folder, &root, name)?;
+        let bytes = read_pack_file(folder, root, name)?;
         let size = pictures::image_size(&bytes)?;
         let format = if name.ends_with(".png") {
             ImageFormat::Png
@@ -388,14 +434,17 @@ impl Render for PetPreview {
             .rounded(px(radius::ROW))
             .border_1()
             .border_color(hsla(t.border))
-            .bg(hsla(t.inset))
-            .cursor_pointer()
-            .on_click(cx.listener(|preview, _, _, cx| preview.click(cx)))
-            .on_key_down(cx.listener(|preview, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
-                    preview.recenter(cx);
-                }
-            }));
+            .bg(hsla(t.inset));
+        if self.interactive {
+            stage = stage
+                .cursor_pointer()
+                .on_click(cx.listener(|preview, _, _, cx| preview.click(cx)))
+                .on_key_down(cx.listener(|preview, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        preview.recenter(cx);
+                    }
+                }));
+        }
         match (&self.art, frame) {
             (Some(Art::Still(pictures)), Some(frame)) => {
                 let picture = pictures

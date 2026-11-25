@@ -1,115 +1,82 @@
-//! Sound pads for Studio → Soundboard.
-//!
-//! KIT PLACEHOLDER: audiocn's `SoundPad` / `SoundPadGrid` are not in
-//! `videorc-kit` yet (requested under Kit in plan 260 `queues.md`). Until
-//! they land, each pad is an Outline button with its name, optional key
-//! chip, and a playing ring via border colour. Progress for non-loop voices
-//! is omitted (the kit pad owns that).
+//! Sound pads for Studio → Soundboard (`SoundPad` / `SoundPadGrid` from kit).
 
-use gpui::{AnyElement, SharedString, Window, div, prelude::*, px};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use gpui::{AnyElement, prelude::*};
 use videorc_app_core::protocol::{Sound, SoundMode, SoundVoice};
 use videorc_app_core::soundboard::{self, press_stops};
-use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
-use videorc_kit::kbd::Kbd;
-use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::{radius, text};
+use videorc_kit::sound_pad::{SoundPad, SoundPadGrid, SoundPadMode, SoundPadSize};
 
 /// Most pads in a row (`SoundPadBoard columns={6}`).
 pub const COLUMNS: usize = 6;
-/// Minimum pad width so six columns still read on a narrow pane.
-const PAD_MIN_PX: f32 = 88.;
-const PAD_GAP_PX: f32 = 8.;
 
-/// How many columns fit in `width`.
-pub fn columns(width: f32) -> usize {
-    if width <= PAD_MIN_PX {
-        return 1;
-    }
-    (((width + PAD_GAP_PX) / (PAD_MIN_PX + PAD_GAP_PX)).floor() as usize).clamp(1, COLUMNS)
-}
-
-/// Six-column (or fewer) pad grid.
+/// Six-column (or fewer via wrap) pad grid.
 pub fn grid(
     sounds: &[Sound],
     voices: &std::collections::BTreeMap<String, SoundVoice>,
-    width: f32,
     disabled: bool,
     entity: gpui::WeakEntity<super::SoundboardSection>,
-    window: &mut Window,
-    cx: &mut gpui::App,
 ) -> AnyElement {
-    let theme = theme::resolve(None, window, cx);
-    let cols = columns(width);
-    let pad_w = ((width - PAD_GAP_PX * (cols.saturating_sub(1)) as f32) / cols as f32)
-        .floor()
-        .max(PAD_MIN_PX);
-    let mut row = div()
-        .id("sound-pad-board")
-        .flex()
-        .flex_wrap()
-        .gap(px(PAD_GAP_PX))
-        .w_full();
+    let now_ms = wall_now_ms();
+    let mut board = SoundPadGrid::new("sound-pad-board").columns(COLUMNS);
     for sound in sounds {
-        let playing = voices.contains_key(&sound.id);
+        let voice = voices.get(&sound.id);
+        let playing = voice.is_some();
         let stops = press_stops(sound.mode, playing);
-        let click_stops = stops || (playing && sound.mode == SoundMode::Hold);
-        let label = soundboard::pad_label(&sound.name, click_stops || stops);
-        let border = if playing {
-            hsla(theme.foreground)
-        } else {
-            hsla(theme.border)
-        };
+        let label = soundboard::pad_label(&sound.name, stops);
+        let mode = pad_mode(sound.mode);
+        let progress = voice.and_then(|v| voice_progress(v, now_ms));
         let play_entity = entity.clone();
         let stop_entity = entity.clone();
         let play_id = sound.id.clone();
         let stop_id = sound.id.clone();
-        let mut button = Button::new(("sound-pad", sound.id.clone()))
-            .variant(ButtonVariant::Outline)
-            .size(ButtonSize::Xs)
-            .disabled(disabled)
-            .tooltip(label.clone())
-            .accessibility_label(label)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(4.))
-                    .w_full()
-                    .child(
-                        div()
-                            .w_full()
-                            .overflow_hidden()
-                            .type_scale(text::META)
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .child(SharedString::from(sound.name.clone())),
-                    )
-                    .when_some(sound.hotkey.clone(), |el, key| el.child(Kbd::new(key))),
-            );
-        if click_stops {
-            button = button.on_click(move |_, _, cx| {
-                let _ = stop_entity.update(cx, |section, cx| section.stop(stop_id.clone(), cx));
-            });
-        } else {
-            button = button.on_click(move |_, _, cx| {
-                let _ = play_entity.update(cx, |section, cx| section.play(play_id.clone(), cx));
-            });
+        let mut pad = SoundPad::new(
+            (gpui::ElementId::from("sound-pad"), sound.id.clone()),
+            sound.name.clone(),
+        )
+        .mode(mode)
+        .size(SoundPadSize::Sm)
+        .playing(playing)
+        .disabled(disabled)
+        .accessibility_label(label)
+        .on_trigger(move |_, cx| {
+            let _ = play_entity.update(cx, |section, cx| section.play(play_id.clone(), cx));
+        })
+        .on_stop(move |_, cx| {
+            let _ = stop_entity.update(cx, |section, cx| section.stop(stop_id.clone(), cx));
+        });
+        if let Some(key) = sound.hotkey.clone() {
+            pad = pad.hotkey(key);
         }
-        row = row.child(
-            div()
-                .id(("sound-pad-wrap", sound.id.clone()))
-                .flex_grow()
-                .flex_shrink_0()
-                .min_w(px(PAD_MIN_PX))
-                .w(px(pad_w))
-                // PLACEHOLDER chrome for the missing SoundPad playing ring.
-                .rounded(px(radius::ROW))
-                .border_1()
-                .border_color(border)
-                .when(playing, |el| el.border_2())
-                .child(button),
-        );
+        if let Some(progress) = progress {
+            pad = pad.progress(progress);
+        }
+        board = board.child(pad);
     }
-    row.into_any_element()
+    board.into_any_element()
+}
+
+fn pad_mode(mode: SoundMode) -> SoundPadMode {
+    match mode {
+        SoundMode::OneShot => SoundPadMode::OneShot,
+        SoundMode::Toggle => SoundPadMode::Toggle,
+        SoundMode::Loop => SoundPadMode::Loop,
+        SoundMode::Hold => SoundPadMode::Hold,
+    }
+}
+
+/// 0..=1 through a non-loop voice; loops / idle omit progress (kit default).
+fn voice_progress(voice: &SoundVoice, now_ms: u64) -> Option<f32> {
+    if voice.r#loop || voice.duration_ms == 0 {
+        return None;
+    }
+    let elapsed = now_ms.saturating_sub(voice.started_at_ms) as f32;
+    Some((elapsed / voice.duration_ms as f32).clamp(0.0, 1.0))
+}
+
+fn wall_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

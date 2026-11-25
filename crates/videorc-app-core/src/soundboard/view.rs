@@ -76,6 +76,11 @@ pub fn format_duration(duration_ms: u32) -> String {
     format!("{:.1} s", duration_ms as f64 / 1000.0)
 }
 
+/// `formatDb` for a sound's volume fader ("+0 dB", "-3 dB").
+pub fn format_volume_db(volume_db: i32) -> String {
+    format!("{volume_db:+} dB")
+}
+
 /// `soundPadLabel`: "Play Airhorn" / "Stop Airhorn".
 pub fn pad_label(name: &str, stops: bool) -> String {
     format!("{} {name}", if stops { "Stop" } else { "Play" })

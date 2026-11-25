@@ -58,7 +58,6 @@ pub struct LiveView {
     pub checked: bool,
     pub switch_disabled: bool,
     pub unlock: Option<Unlock>,
-    pub stream_manager: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -149,6 +148,5 @@ pub fn live_view(input: LiveInput<'_>) -> LiveView {
         checked: enabled,
         switch_disabled: !input.settings_known || (!enabled && unlock.is_some()),
         unlock,
-        stream_manager: input.live,
     }
 }

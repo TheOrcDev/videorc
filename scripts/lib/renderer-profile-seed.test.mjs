@@ -167,17 +167,17 @@ test('no smoke seeds the capture config and reloads on its own timer', () => {
 })
 
 // A stale v2 library must not override a deterministic capture seed (D15).
-test('a clean seed clears v2 again on pagehide; a real-source seed preserves it', () => {
+test('a clean seed clears v2 again on pagehide; a real-source seed preserves it', async () => {
   const stored = { [SCENES_STORAGE_KEY]: '{"version":2}', [WORKING_SCENE_STORAGE_KEY]: '{}' }
-  const clean = runSeedSnippet(stored)
+  const clean = await runSeedSnippet(stored)
   assert.equal(clean.store.has(SCENES_STORAGE_KEY), false)
   clean.store.set(SCENES_STORAGE_KEY, 'late renderer write')
   clean.listeners.get('pagehide')()
   assert.equal(clean.store.has(SCENES_STORAGE_KEY), false)
-  const kept = runSeedSnippet(stored, reloadKeepingSeedJs({ forgetWorkingScene: false }))
+  const kept = await runSeedSnippet(stored, reloadKeepingSeedJs({ forgetWorkingScene: false }))
   kept.listeners.get('pagehide')()
   assert.equal(kept.store.get(SCENES_STORAGE_KEY), stored[SCENES_STORAGE_KEY])
-  const migration = runSeedSnippet(
+  const migration = await runSeedSnippet(
     stored,
     reloadKeepingSeedJs({ forgetWorkingScene: false, forgetScenes: true })
   )

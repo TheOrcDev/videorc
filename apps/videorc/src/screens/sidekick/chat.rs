@@ -5,22 +5,25 @@ use gpui_base::input::InputEvent;
 use videorc_app_core::buddy::chat::{self, RULES_MAX, SENSITIVITIES, SHOW_ON_STREAM, TONES};
 use videorc_app_core::buddy::copy as words;
 use videorc_app_core::stream_manager::buddy::CohostSettingsView;
-use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::field::FieldGroup;
 use videorc_kit::icon::{IconName, icon};
-use videorc_kit::input::{Input, InputState};
+use videorc_kit::input::InputState;
+use videorc_kit::input_group::{InputGroup, InputGroupAddon};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
-use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
 use videorc_kit::shortcut_keys::ShortcutKeys;
 use videorc_kit::slider::{Slider, SliderEvent, SliderState};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::{size, text};
+use videorc_kit::tokens::{Theme, text};
 use videorc_protocol::cohost::CohostAutoChat;
 
 use super::live::{LiveView, UnlockAction};
-use super::{SaveSection, SidekickScreen};
+use super::{
+    SaveSection, SidekickScreen, config_grid_pair, field_beside, field_description, field_stack,
+    field_text, save_error_line, tab_lead, unlock_alert,
+};
 
 const ANSWERS: &str = "Answers";
 const BANTER: &str = "Banter";
@@ -36,6 +39,13 @@ const RULES_FULL: &str = "Remove a rule to add another";
 const RULES_HELP: &str =
     "Plain-language rules Sidekick flags for you, like “no spoilers” or “English only”.";
 const BANTER_DESCRIPTION: &str = "A short remark when you've been quiet for a while, never within a minute of a greeting or an answer.";
+const REPLY_TONE_DESCRIPTION: &str = "How the drafted replies read before you edit them.";
+const FLAG_SENSITIVITY_DESCRIPTION: &str = "How sure Sidekick must be before a flag shows up. Relaxed shows only the clear cases, Strict shows everything it noticed.";
+const PUT_COMMENTS_DESCRIPTION: &str =
+    "Puts a chat comment on your stream by itself. You can always show one yourself with H.";
+const SHOW_VOICE_NOTE: &str = "What I talk about needs Sidekick to hear you (or live captions).";
+const SHOW_PICKS_NOTE: &str =
+    "Sidekick's picks: at most one card every 45 seconds; nothing Sidekick flagged is ever shown.";
 
 fn auto_chat(settings: Option<&CohostSettingsView>) -> CohostAutoChat {
     settings
@@ -188,13 +198,56 @@ impl SidekickScreen {
     }
 }
 
-fn save_error_line(message: Option<&str>, color: gpui::Hsla) -> Option<gpui::Div> {
-    message.map(|message| {
-        div()
-            .type_scale(text::META)
-            .text_color(color)
-            .child(message.to_string())
-    })
+/// `CohostCooldownField`: one AI behaviour, its switch beside its words and
+/// its cooldown slider (`max-w-56`) with the cooldown after it.
+#[allow(clippy::too_many_arguments)]
+fn cooldown_field(
+    id: &'static str,
+    label: &'static str,
+    description: String,
+    enabled: bool,
+    slider: &Entity<SliderState>,
+    seconds: u32,
+    locked: bool,
+    t: &Theme,
+    entity: Entity<SidekickScreen>,
+) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .child(field_beside(
+            field_text(label, Some(description.into()), t),
+            Switch::new(id)
+                .accessibility_label(label)
+                .checked(enabled)
+                .disabled(locked)
+                .on_change(move |value, _, cx| {
+                    entity.update(cx, |screen, cx| {
+                        screen.patch_auto_behaviour(id, Some(value), None, cx);
+                    });
+                }),
+        ))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(
+                    div().flex_1().min_w_0().max_w(px(224.)).child(
+                        Slider::new(slider)
+                            .accessibility_label(format!("{label} cooldown"))
+                            .disabled(locked),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .type_scale(text::META)
+                        .text_color(hsla(t.muted_foreground))
+                        .child(format!("{} cooldown", chat::cooldown_label(seconds))),
+                ),
+        )
 }
 
 pub fn render_chat(
@@ -202,12 +255,13 @@ pub fn render_chat(
     settings: Option<&CohostSettingsView>,
     widgets: &ChatWidgets,
     errors: (Option<&str>, Option<&str>),
+    wide: bool,
     window: &mut Window,
     cx: &mut Context<SidekickScreen>,
 ) -> AnyElement {
     let theme = theme::resolve(None, window, cx);
     let muted = hsla(theme.muted_foreground);
-    let destructive = hsla(theme.destructive);
+    let border = hsla(theme.border);
     let (replies_error, moderation_error) = errors;
     let locked = view.unlock.is_some();
     let auto = auto_chat(settings);
@@ -215,30 +269,21 @@ pub fn render_chat(
         chat::display_name(settings.and_then(|s| s.persona.as_ref().map(|p| p.name.as_str())));
     let entity = cx.entity();
 
-    let mut lead = div().flex().flex_col().gap(px(8.)).p(px(size::GUTTER));
-    if let Some(unlock) = view.unlock.as_ref() {
-        let reason = format!("{} {}", unlock.reason, words::CHAT_FREE_NOTE);
-        let mut alert = Alert::new("sidekick-chat-unlock")
-            .variant(AlertVariant::Warning)
-            .title(reason);
-        if let Some(action) = unlock.action {
-            let label = match action {
-                UnlockAction::SignIn => words::SIGN_IN,
-                UnlockAction::ViewPremium => words::VIEW_PREMIUM,
-            };
-            alert = alert.action(
-                Button::new("chat-unlock-action")
-                    .variant(ButtonVariant::Outline)
-                    .size(ButtonSize::Xs)
-                    .label(label)
-                    .on_click(move |_, _, cx| match action {
-                        UnlockAction::SignIn => crate::app::accounts::sign_in(cx),
-                        UnlockAction::ViewPremium => cx.open_url("https://videorc.com/premium"),
-                    }),
-            );
-        }
-        lead = lead.child(alert);
-    }
+    // One lock above both columns; what stays free follows the reason only
+    // under a Premium lock (`BuddyUnlockAlert freeNote`).
+    let lead = view.unlock.as_ref().map(|unlock| {
+        let reason = if unlock.action == Some(UnlockAction::ViewPremium) {
+            format!("{} {}", unlock.reason, words::CHAT_FREE_NOTE)
+        } else {
+            unlock.reason.clone()
+        };
+        tab_lead(border).child(unlock_alert(
+            "sidekick-chat-unlock",
+            "chat-unlock-action",
+            unlock,
+            reason,
+        ))
+    });
 
     let answers_secs = widgets.answers_cooldown.read(cx).value().end().round() as u32;
     let banter_secs = widgets.banter_cooldown.read(cx).value().end().round() as u32;
@@ -247,122 +292,90 @@ pub fn render_chat(
         .and_then(|v| v.as_str())
         .unwrap_or("friendly");
 
+    let mut tone_control = SegmentedControl::new("reply-tone")
+        .small(true)
+        .accessibility_label(REPLY_TONE)
+        .value(Some(tone))
+        .disabled(locked);
+    for (id, label) in TONES {
+        tone_control = tone_control.option(Segment::new(id, label));
+    }
+    let tone_control = tone_control.on_change({
+        let entity = entity.clone();
+        move |value, _, cx| {
+            let tone = value.to_string();
+            entity.update(cx, |screen, cx| {
+                screen.patch_section(
+                    serde_json::json!({ "tone": tone }),
+                    SaveSection::Replies,
+                    cx,
+                );
+            });
+        }
+    });
+
     let replies = PanelSection::new("sidekick-replies")
         .title(REPLIES)
         .description(chat::replies_description(&name))
+        .last(wide)
         .child(
-            SettingsGroup::new()
-                .row(
-                    SettingsRow::new("answers", ANSWERS)
-                        .description(answers_description(&name))
-                        .child(
-                            Switch::new("answers")
-                                .accessibility_label(ANSWERS)
-                                .checked(auto.answers.enabled)
-                                .disabled(locked)
-                                .on_change({
-                                    let entity = entity.clone();
-                                    move |value, _, cx| {
-                                        entity.update(cx, |screen, cx| {
-                                            screen.patch_auto_behaviour(
-                                                "answers",
-                                                Some(value),
-                                                None,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                }),
-                        ),
-                )
-                .row(
-                    SettingsRow::new("answers-cooldown", format!("{ANSWERS} cooldown"))
-                        .description(format!("{} cooldown", chat::cooldown_label(answers_secs)))
-                        .child(
-                            Slider::new(&widgets.answers_cooldown)
-                                .accessibility_label(format!("{ANSWERS} cooldown"))
-                                .disabled(locked),
-                        ),
-                )
-                .row(
-                    SettingsRow::new("banter", BANTER)
-                        .description(BANTER_DESCRIPTION)
-                        .child(
-                            Switch::new("banter")
-                                .accessibility_label(BANTER)
-                                .checked(auto.banter.enabled)
-                                .disabled(locked)
-                                .on_change({
-                                    let entity = entity.clone();
-                                    move |value, _, cx| {
-                                        entity.update(cx, |screen, cx| {
-                                            screen.patch_auto_behaviour(
-                                                "banter",
-                                                Some(value),
-                                                None,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                }),
-                        ),
-                )
-                .row(
-                    SettingsRow::new("banter-cooldown", format!("{BANTER} cooldown"))
-                        .description(format!("{} cooldown", chat::cooldown_label(banter_secs)))
-                        .child(
-                            Slider::new(&widgets.banter_cooldown)
-                                .accessibility_label(format!("{BANTER} cooldown"))
-                                .disabled(locked),
-                        ),
-                )
-                .row(
-                    SettingsRow::new("greetings-ai", WRITE_GREETINGS_AI)
-                        .description(chat::ai_description(&name))
-                        .child(
-                            Switch::new("greetings-ai")
-                                .accessibility_label(WRITE_GREETINGS_AI)
-                                .checked(auto.greetings.ai)
-                                .disabled(locked)
-                                .on_change({
-                                    let entity = entity.clone();
-                                    move |value, _, cx| {
-                                        entity.update(cx, |screen, cx| {
-                                            let mut next = auto_chat(screen.settings.as_ref());
-                                            next.greetings.ai = value;
-                                            screen.patch_section(
-                                                serde_json::json!({ "autoChat": next }),
-                                                SaveSection::Replies,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                }),
-                        ),
-                )
-                .row(SettingsRow::new("reply-tone", REPLY_TONE).child({
-                    let mut control = SegmentedControl::new("reply-tone")
-                        .small(true)
-                        .accessibility_label(REPLY_TONE)
-                        .value(Some(tone))
-                        .disabled(locked);
-                    for (id, label) in TONES {
-                        control = control.option(Segment::new(id, label));
-                    }
-                    let entity = entity.clone();
-                    control.on_change(move |value, _, cx| {
-                        let tone = value.to_string();
-                        entity.update(cx, |screen, cx| {
-                            screen.patch_section(
-                                serde_json::json!({ "tone": tone }),
-                                SaveSection::Replies,
-                                cx,
-                            );
-                        });
-                    })
-                })),
+            FieldGroup::new()
+                .grouped()
+                .child(cooldown_field(
+                    "answers",
+                    ANSWERS,
+                    answers_description(&name),
+                    auto.answers.enabled,
+                    &widgets.answers_cooldown,
+                    answers_secs,
+                    locked,
+                    theme,
+                    entity.clone(),
+                ))
+                .child(cooldown_field(
+                    "banter",
+                    BANTER,
+                    BANTER_DESCRIPTION.to_string(),
+                    auto.banter.enabled,
+                    &widgets.banter_cooldown,
+                    banter_secs,
+                    locked,
+                    theme,
+                    entity.clone(),
+                ))
+                .child(field_beside(
+                    field_text(
+                        WRITE_GREETINGS_AI,
+                        Some(chat::ai_description(&name).into()),
+                        theme,
+                    ),
+                    Switch::new("greetings-ai")
+                        .accessibility_label(WRITE_GREETINGS_AI)
+                        .checked(auto.greetings.ai)
+                        .disabled(locked)
+                        .on_change({
+                            let entity = entity.clone();
+                            move |value, _, cx| {
+                                entity.update(cx, |screen, cx| {
+                                    let mut next = auto_chat(screen.settings.as_ref());
+                                    next.greetings.ai = value;
+                                    screen.patch_section(
+                                        serde_json::json!({ "autoChat": next }),
+                                        SaveSection::Replies,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                ))
+                .child(field_stack(
+                    REPLY_TONE,
+                    REPLY_TONE_DESCRIPTION,
+                    vec![tone_control.into_any_element()],
+                    theme,
+                )),
         )
-        .children(save_error_line(replies_error, destructive));
+        .children(save_error_line(replies_error, theme));
 
     let rules: Vec<String> = settings
         .and_then(|s| s.raw.get("rules"))
@@ -390,58 +403,47 @@ pub fn render_chat(
     let show_index = chat::show_on_stream_index(auto_highlight, voice_highlight);
     let show_value = ["off", "voice", "voice-and-picks"][show_index];
 
-    let mut rules_list = div().flex().flex_col().gap(px(6.)).child(
-        div()
-            .type_scale(text::META)
-            .text_color(muted)
-            .child(RULES_HELP),
-    );
-    for (index, (_, input)) in widgets.rule_inputs.iter().enumerate() {
-        let number = index + 1;
-        rules_list = rules_list.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(
-                    div().min_w(px(0.)).flex_1().child(
-                        Input::new(format!("chat-rule-{index}"), input)
-                            .accessibility_label(format!("Chat rule {number}"))
-                            .disabled(locked),
+    // Chat rules: each saved rule in its own field with its remove button,
+    // then the draft with Add and its Enter key inside it, then the count.
+    let mut rules_rest: Vec<AnyElement> = Vec::new();
+    if !widgets.rule_inputs.is_empty() {
+        let mut saved = div().flex().flex_col().gap(px(6.));
+        for (index, (_, input)) in widgets.rule_inputs.iter().enumerate() {
+            let number = index + 1;
+            saved = saved.child(
+                InputGroup::new(format!("chat-rule-{index}"), input)
+                    .accessibility_label(format!("Chat rule {number}"))
+                    .disabled(locked)
+                    .end(
+                        InputGroupAddon::end().child(
+                            Button::new(format!("remove-rule-{index}"))
+                                .variant(ButtonVariant::Ghost)
+                                .size(ButtonSize::IconXs)
+                                .accessibility_label(format!("Remove chat rule {number}"))
+                                .child(icon(IconName::X, 14., muted))
+                                .disabled(locked)
+                                .on_click({
+                                    let entity = entity.clone();
+                                    move |_, _, cx| {
+                                        entity.update(cx, |screen, cx| {
+                                            screen.remove_chat_rule(index, cx);
+                                        });
+                                    }
+                                }),
+                        ),
                     ),
-                )
-                .child(
-                    Button::new(format!("remove-rule-{index}"))
-                        .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::IconXs)
-                        .accessibility_label(format!("Remove chat rule {number}"))
-                        .child(icon(IconName::X, 14., muted))
-                        .disabled(locked)
-                        .on_click({
-                            let entity = entity.clone();
-                            move |_, _, cx| {
-                                entity.update(cx, |screen, cx| {
-                                    screen.remove_chat_rule(index, cx);
-                                });
-                            }
-                        }),
-                ),
-        );
+            );
+        }
+        rules_rest.push(saved.into_any_element());
     }
-    rules_list = rules_list
-        .child(
-            Input::new("chat-rule-draft", &widgets.rule_draft)
-                .accessibility_label(if rules_full { RULES_FULL } else { ADD_A_RULE })
-                .disabled(locked || rules_full),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
+    rules_rest.push(
+        InputGroup::new("chat-rule-draft", &widgets.rule_draft)
+            .accessibility_label(if rules_full { RULES_FULL } else { ADD_A_RULE })
+            .disabled(locked || rules_full)
+            .end(
+                InputGroupAddon::end().child(
                     Button::new("add-chat-rule")
-                        .variant(ButtonVariant::Outline)
+                        .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Xs)
                         .label("Add")
                         .child(ShortcutKeys::accelerator("Enter"))
@@ -454,88 +456,110 @@ pub fn render_chat(
                                 });
                             }
                         }),
-                )
-                .child(
-                    div()
-                        .type_scale(text::META)
-                        .text_color(muted)
-                        .child(format!("{}/{}", rules.len(), RULES_MAX)),
                 ),
-        );
+            )
+            .into_any_element(),
+    );
+    rules_rest.push(
+        div()
+            .type_scale(text::META)
+            .text_color(muted)
+            .child(format!("{}/{}", rules.len(), RULES_MAX))
+            .into_any_element(),
+    );
+    let rules_field = field_stack(CHAT_RULES, RULES_HELP, rules_rest, theme);
+
+    let mut sensitivity_control = SegmentedControl::new("flag-sensitivity")
+        .small(true)
+        .accessibility_label(FLAG_SENSITIVITY)
+        .value(Some(sensitivity))
+        .disabled(locked);
+    for (id, label) in SENSITIVITIES {
+        sensitivity_control = sensitivity_control.option(Segment::new(id, label));
+    }
+    let sensitivity_control = sensitivity_control.on_change({
+        let entity = entity.clone();
+        move |value, _, cx| {
+            let sensitivity = value.to_string();
+            entity.update(cx, |screen, cx| {
+                screen.patch_section(
+                    serde_json::json!({ "sensitivity": sensitivity }),
+                    SaveSection::Moderation,
+                    cx,
+                );
+            });
+        }
+    });
+
+    let mut show_control = SegmentedControl::new("put-comments")
+        .small(true)
+        .accessibility_label(PUT_COMMENTS)
+        .value(Some(show_value))
+        .disabled(locked);
+    let values = ["off", "voice", "voice-and-picks"];
+    for (i, (label, _, _)) in SHOW_ON_STREAM.iter().enumerate() {
+        show_control = show_control.option(Segment::new(values[i], *label));
+    }
+    let show_control = show_control.on_change({
+        let entity = entity.clone();
+        move |value, _, cx| {
+            let (auto, voice) = match value.as_ref() {
+                "voice" => (false, true),
+                "voice-and-picks" => (true, true),
+                _ => (false, false),
+            };
+            entity.update(cx, |screen, cx| {
+                screen.patch_section(
+                    serde_json::json!({
+                        "autoHighlight": auto,
+                        "voiceHighlight": voice
+                    }),
+                    SaveSection::Moderation,
+                    cx,
+                );
+            });
+        }
+    });
 
     let moderation = PanelSection::new("sidekick-moderation")
         .title(MODERATION)
         .description(chat::moderation_description())
+        .last(true)
         .child(
-            SettingsGroup::new()
-                .row(SettingsRow::new("chat-rules", CHAT_RULES).child(rules_list))
-                .row(
-                    SettingsRow::new("flag-sensitivity", FLAG_SENSITIVITY).child({
-                        let mut control = SegmentedControl::new("flag-sensitivity")
-                            .small(true)
-                            .accessibility_label(FLAG_SENSITIVITY)
-                            .value(Some(sensitivity))
-                            .disabled(locked);
-                        for (id, label) in SENSITIVITIES {
-                            control = control.option(Segment::new(id, label));
-                        }
-                        let entity = entity.clone();
-                        control.on_change(move |value, _, cx| {
-                            let sensitivity = value.to_string();
-                            entity.update(cx, |screen, cx| {
-                                screen.patch_section(
-                                    serde_json::json!({ "sensitivity": sensitivity }),
-                                    SaveSection::Moderation,
-                                    cx,
-                                );
-                            });
-                        })
-                    }),
-                )
-                .row(SettingsRow::new("put-comments", PUT_COMMENTS).child({
-                    let mut control = SegmentedControl::new("put-comments")
-                        .small(true)
-                        .accessibility_label(PUT_COMMENTS)
-                        .value(Some(show_value))
-                        .disabled(locked);
-                    let values = ["off", "voice", "voice-and-picks"];
-                    for (i, (label, _, _)) in SHOW_ON_STREAM.iter().enumerate() {
-                        control = control.option(Segment::new(values[i], *label));
-                    }
-                    let entity = entity.clone();
-                    control.on_change(move |value, _, cx| {
-                        let (auto, voice) = match value.as_ref() {
-                            "voice" => (false, true),
-                            "voice-and-picks" => (true, true),
-                            _ => (false, false),
-                        };
-                        entity.update(cx, |screen, cx| {
-                            screen.patch_section(
-                                serde_json::json!({
-                                    "autoHighlight": auto,
-                                    "voiceHighlight": voice
-                                }),
-                                SaveSection::Moderation,
-                                cx,
-                            );
-                        });
-                    })
-                })),
+            FieldGroup::new()
+                .grouped()
+                .child(rules_field)
+                .child(field_stack(
+                    FLAG_SENSITIVITY,
+                    FLAG_SENSITIVITY_DESCRIPTION,
+                    vec![sensitivity_control.into_any_element()],
+                    theme,
+                ))
+                .child(field_stack(
+                    PUT_COMMENTS,
+                    PUT_COMMENTS_DESCRIPTION,
+                    vec![
+                        show_control.into_any_element(),
+                        // The notes are one `FieldDescription`, its lines
+                        // `gap-0.5` apart.
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(field_description(SHOW_VOICE_NOTE, theme))
+                            .child(field_description(SHOW_PICKS_NOTE, theme))
+                            .into_any_element(),
+                    ],
+                    theme,
+                )),
         )
-        .children(save_error_line(moderation_error, destructive));
+        .children(save_error_line(moderation_error, theme));
 
     div()
         .flex()
         .flex_col()
-        .child(lead)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(size::GUTTER))
-                .p(px(size::GUTTER))
-                .child(replies)
-                .child(moderation),
-        )
+        .flex_1()
+        .children(lead)
+        .child(config_grid_pair(replies, moderation, wide, border))
         .into_any_element()
 }

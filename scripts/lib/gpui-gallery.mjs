@@ -82,6 +82,16 @@ export const SCREENS = Object.freeze([
     sections: ['Scene ⌘3: Scenes list', 'Scene ⌘3: Layout section', 'Scene ⌘3: Hide screen']
   },
   {
+    id: 'studio-retro',
+    title: 'Studio ⌘1, Retro LCD look',
+    deck: 'shell-studio',
+    open: page('studio'),
+    // Settings → General → Retro LCD Studio, on for this screen only.
+    settings: { key: 'videorc.settings', patch: { retroLcdStudio: true } },
+    baseline: { screen: 'studio-retro', state: 'default' },
+    sections: ['Audio section, Retro LCD look', 'Retro LCD transport']
+  },
+  {
     id: 'palette',
     title: '⌘K command palette',
     deck: 'shell-studio',
@@ -184,7 +194,10 @@ export const SCREENS = Object.freeze([
     title: 'Go Live dialog',
     deck: 'livestream',
     open: page('studio', { dialog: 'go-live' }),
-    close: 'Escape',
+    // GPUI's dialog doesn't take the key focus Escape needs, and the UI
+    // driver's tree doesn't reach real builds yet: Cancel, else a fresh app.
+    close: { click: { name: 'Cancel', role: 'button' } },
+    restart: true,
     baseline: { screen: 'go-live', state: 'dialog' },
     sections: ['Go Live dialog']
   },
@@ -203,6 +216,27 @@ export const SCREENS = Object.freeze([
     open: page('avatar', { subTab: 'profile' }),
     baseline: { screen: 'avatar-profile', state: 'default' },
     sections: ['Avatar page', 'Avatar → Profile']
+  },
+  // Profile below the fold: the page scrolled down by `dy` CSS pixels (the
+  // smoke driver's `ui-scroll`, a wheel at the window's centre; Electron's
+  // shooter sets the page-tabs scroller's `scrollTop` to the same value).
+  {
+    id: 'avatar-profile-2',
+    title: 'Avatar ⌘8, Profile scrolled: Name and personality, Look',
+    deck: 'livestream',
+    open: page('avatar', { subTab: 'profile' }),
+    scroll: { dy: 600 },
+    baseline: { screen: 'avatar-profile', state: 'scroll-2' },
+    sections: ['Avatar → Profile: Name and personality', 'Avatar → Profile: Look']
+  },
+  {
+    id: 'avatar-profile-3',
+    title: 'Avatar ⌘8, Profile scrolled: Reactions and Motion',
+    deck: 'livestream',
+    open: page('avatar', { subTab: 'profile' }),
+    scroll: { dy: 1200 },
+    baseline: { screen: 'avatar-profile', state: 'scroll-3' },
+    sections: ['Avatar → Profile: Reactions and Motion']
   },
   {
     id: 'avatar-greetings',

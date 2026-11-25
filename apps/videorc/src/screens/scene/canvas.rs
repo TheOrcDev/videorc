@@ -27,6 +27,7 @@ use videorc_app_core::studio::transport::transport_active;
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::kbd::Kbd;
+use videorc_kit::label::Label;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::shortcut_keys::{self, ShortcutKeys};
@@ -115,12 +116,7 @@ impl ScenePage {
                     .items_center()
                     .justify_between()
                     .gap(px(12.))
-                    .child(
-                        div()
-                            .type_scale(text::LABEL)
-                            .text_color(hsla(t.foreground))
-                            .child(copy::OVERLAYS_ON),
-                    )
+                    .child(Label::new(copy::OVERLAYS_ON))
                     .child(
                         SegmentedControl::new("scene-overlay-orientation")
                             .accessibility_label(copy::OVERLAYS_ON)

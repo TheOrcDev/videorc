@@ -22,6 +22,7 @@ use videorc_app_core::studio::camera_background_view::{
 use videorc_kit::command::InputEvent;
 use videorc_kit::dialog::DialogHandle;
 use videorc_kit::input::{Input, InputState};
+use videorc_kit::label::Label;
 use videorc_kit::slider::{Slider, SliderEvent, SliderState};
 use videorc_kit::theme::{TypeScale, hsla};
 use videorc_kit::tokens::{Theme, text};
@@ -741,12 +742,7 @@ impl ScenePage {
                     .items_center()
                     .justify_between()
                     .gap(px(8.))
-                    .child(
-                        div()
-                            .type_scale(text::LABEL)
-                            .text_color(hsla(t.foreground))
-                            .child(label),
-                    )
+                    .child(Label::new(label))
                     .child(
                         div()
                             .type_scale(text::META)
@@ -769,8 +765,9 @@ impl ScenePage {
     }
 
     /// One typed percent: its label over the field and the `%` after it.
-    // TODO(kit): InputGroup with an inline-end addon, and Escape reverting
-    // the draft (the field keeps what was typed until Enter or blur).
+    // TODO(kit): InputGroup with an inline-end addon. P549: Escape reverts
+    // the draft to what the field held when it took focus (kit
+    // `Input::revert_on_escape`).
     pub(super) fn percent_field(
         &self,
         field: Field,
@@ -790,12 +787,7 @@ impl ScenePage {
             .gap(px(4.))
             .min_w_0()
             .flex_1()
-            .child(
-                div()
-                    .type_scale(text::LABEL)
-                    .text_color(hsla(t.foreground))
-                    .child(label),
-            )
+            .child(Label::new(label))
             .child(
                 div()
                     .flex()
@@ -805,6 +797,7 @@ impl ScenePage {
                         div().flex_1().min_w_0().child(
                             Input::new(SharedString::from(id), self.controls.input(field))
                                 .disabled(!enabled)
+                                .revert_on_escape(true)
                                 .accessibility_label(name),
                         ),
                     )

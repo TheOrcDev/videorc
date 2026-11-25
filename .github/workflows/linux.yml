@@ -8,6 +8,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     # PRs into spikes/gpui (plan 260 throwaway spikes) build nothing this
     # workflow checks, so they skip it.
     branches: [main]
@@ -24,7 +25,7 @@ jobs:
   gates:
     name: Linux gates (FFmpeg policy + Rust compile/test)
     needs: scope
-    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.linux_heavy == 'true' }}
+    if: ${{ needs.scope.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.scope.outputs.linux_heavy == 'true' }}
     runs-on: ubuntu-latest
     # The Test step compiles with CARGO_BUILD_JOBS=1 (the runner ran out of
     # memory with more). Before the CI-only profile that took 36-44 min, and a
@@ -137,7 +138,7 @@ jobs:
   gates-skip:
     name: Linux gates (FFmpeg policy + Rust compile/test)
     needs: scope
-    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.linux_heavy != 'true' }}
+    if: ${{ needs.scope.result == 'success' && (!(github.event_name != 'pull_request' || github.event.pull_request.draft == false) || needs.scope.outputs.linux_heavy != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

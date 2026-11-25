@@ -9,7 +9,7 @@ import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import {
@@ -32,6 +32,13 @@ if (process.platform !== 'darwin') {
 }
 
 const deviceMode = process.env.VIDEORC_PREVIEW_INTERACTION_DEVICE_SMOKE === '1'
+// Plan 260 Phase 3: VIDEORC_APP=gpui runs the GPUI app's own stress gate (its
+// native preview sampled through the GPUI smoke server).
+if (smokeAppIsGpui()) {
+  const { runGpuiPreviewInteractionStress } = await import('./gpui-preview-interaction-stress.mjs')
+  process.exit(await runGpuiPreviewInteractionStress())
+}
+
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const deviceRecordingMs = Number(process.env.VIDEORC_PREVIEW_INTERACTION_RECORDING_MS ?? 60000)
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'

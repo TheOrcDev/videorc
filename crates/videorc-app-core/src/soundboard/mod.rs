@@ -6,6 +6,7 @@
 
 pub mod copy;
 pub mod room;
+pub mod starters;
 pub mod studio;
 pub mod view;
 

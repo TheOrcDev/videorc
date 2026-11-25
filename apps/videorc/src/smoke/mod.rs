@@ -8,7 +8,7 @@
 //!
 //! - [`UiThread`]: one hop from the server's tokio task to GPUI's
 //!   foreground, where every window command runs.
-//! - [`driver`]: `ui-tree`, `ui-find`, `ui-click`, `ui-type`, `ui-key`,
+//! - [`driver`]: `ui-tree`, `ui-find`, `ui-click`, `ui-focus`, `ui-type`, `ui-key`,
 //!   `ui-scroll`, `ui-set-value`, `ui-appearance`, `ui-toast` and
 //!   `resize-window` over each window's AccessKit tree.
 //! - [`windows`]: the Notes and Stream Manager windows' commands and
@@ -40,6 +40,7 @@
 //! [`SmokeStart`] the same way as `studio`.
 
 pub mod activate;
+pub mod capture;
 pub mod driver;
 pub mod shell;
 pub mod windows;
@@ -78,6 +79,8 @@ pub trait ShellSmoke: 'static {
     /// The preview's commands ([`PREVIEW_COMMANDS`]): its state, its own
     /// window opened, closed or toggled, and Retry preview.
     fn preview(&self, command: &str, cx: &mut App) -> Result<Value, String>;
+    /// The preview, once the main window started it (`preview-surface-sample`).
+    fn preview_entity(&self) -> Option<gpui::Entity<crate::preview::Preview>>;
 }
 
 /// The preview's commands on the GPUI app. The preview draws in the main
@@ -86,11 +89,21 @@ pub trait ShellSmoke: 'static {
 pub const PREVIEW_COMMANDS: &[&str] = &[
     "inspect-native-preview-live-background",
     "inspect-native-preview-runtime",
+    // What the element presents (`presentedFrameId`), live.
+    "native-preview-surface-status",
     // GPUI only: Retry preview (`Preview::retry`), answered with the state
     // and whether it ran; the phase goes back to starting.
     "preview-retry",
+    // GPUI only: Window → Preview / ⌘P, the `TogglePreview` action itself.
+    "preview-toggle-open",
     "preview-window-close",
     "preview-window-open",
+    // The Preview window closed as its close button closes it (the app's
+    // should-close path): the Preview is then closed (P131).
+    "preview-window-os-close",
+    // The Preview window moved and sized (`{x?, y?, width?, height?}`, top-left
+    // screen points), as a window manager or the person would.
+    "preview-window-set-bounds",
     "preview-window-state",
     "preview-window-toggle",
 ];
@@ -162,7 +175,7 @@ pub struct ShellCommands {
 
 impl SmokeCommandHandler for ShellCommands {
     fn handles(&self, command: &str) -> bool {
-        command == "open-tab" || PREVIEW_COMMANDS.contains(&command)
+        command == "open-tab" || command == "main-window-id" || PREVIEW_COMMANDS.contains(&command)
     }
 
     fn run<'a>(
@@ -171,12 +184,21 @@ impl SmokeCommandHandler for ShellCommands {
         params: serde_json::Map<String, Value>,
     ) -> videorc_app_core::smoke::CommandFuture<'a> {
         Box::pin(async move {
+            if command == "preview-window-set-bounds" {
+                return self
+                    .ui
+                    .run(move |cx| set_preview_window_bounds(&params, cx))
+                    .await?;
+            }
             if PREVIEW_COMMANDS.contains(&command) {
                 let command = command.to_string();
                 return self
                     .ui
                     .run(move |cx| shell(cx)?.preview(&command, cx))
                     .await?;
+            }
+            if command == "main-window-id" {
+                return self.ui.run(main_window_id).await?;
             }
             let tab = params
                 .get("tab")
@@ -193,6 +215,87 @@ impl SmokeCommandHandler for ShellCommands {
             Ok(serde_json::json!({ "activeTab": tab, "subTab": sub_tab }))
         })
     }
+}
+
+/// `main-window-id`: the OS capture id and bounds, as Electron's
+/// `getMediaSourceId` / `getBounds` answer them. Bounds are top-left screen
+/// points. `capture-page` stays refused (gap 3).
+fn main_window_id(cx: &mut App) -> Result<Value, String> {
+    use crate::platform::{self, ScreenFrame};
+    let handle = shell(cx)?
+        .window(videorc_app_core::smoke::security::UiWindow::Main, cx)
+        .ok_or_else(|| MAIN_WINDOW_NOT_READY.to_string())?;
+    handle
+        .update(cx, |_, window, _| {
+            let bounds = window.bounds();
+            let frame = ScreenFrame {
+                x: f64::from(f32::from(bounds.origin.x)),
+                y: f64::from(f32::from(bounds.origin.y)),
+                width: f64::from(f32::from(bounds.size.width)),
+                height: f64::from(f32::from(bounds.size.height)),
+            };
+            Ok(serde_json::json!({
+                "windowId": platform::current().capture_window_id(window),
+                "bounds": {
+                    "x": frame.x,
+                    "y": frame.y,
+                    "width": frame.width,
+                    "height": frame.height,
+                },
+            }))
+        })
+        .map_err(|_| MAIN_WINDOW_NOT_READY.to_string())?
+}
+
+/// `preview-window-set-bounds {x?, y?, width?, height?}`: the Preview
+/// window's frame in top-left screen points, each side not given kept; its
+/// state after (the layer follows at the window's next layout).
+fn set_preview_window_bounds(
+    params: &serde_json::Map<String, Value>,
+    cx: &mut App,
+) -> Result<Value, String> {
+    use crate::platform::{self, ScreenFrame};
+    let preview = shell(cx)?
+        .preview_entity()
+        .ok_or_else(|| MAIN_WINDOW_NOT_READY.to_string())?;
+    let handle = preview
+        .read(cx)
+        .floating_window()
+        .ok_or("preview-window-set-bounds: the Preview window is not open.")?;
+    handle
+        .update(cx, |_, window, _| {
+            let bounds = window.bounds();
+            let side = |key: &str, current: gpui::Pixels| {
+                params
+                    .get(key)
+                    .and_then(Value::as_f64)
+                    .unwrap_or(f64::from(f32::from(current)))
+            };
+            platform::current().set_window_frame(
+                window,
+                ScreenFrame {
+                    x: side("x", bounds.origin.x),
+                    y: side("y", bounds.origin.y),
+                    width: side("width", bounds.size.width),
+                    height: side("height", bounds.size.height),
+                },
+            )
+        })
+        .map_err(|_| "preview-window-set-bounds: the Preview window closed.".to_string())??;
+    let mut state = preview.read(cx).smoke_state();
+    let bounds = handle
+        .update(cx, |_, window, _| window.bounds())
+        .ok()
+        .map(|bounds| {
+            serde_json::json!({
+                "x": f32::from(bounds.origin.x),
+                "y": f32::from(bounds.origin.y),
+                "width": f32::from(bounds.size.width),
+                "height": f32::from(bounds.size.height),
+            })
+        });
+    state["bounds"] = bounds.unwrap_or(Value::Null);
+    Ok(state)
 }
 
 /// The shell's answers, where the driver's foreground jobs find them.
@@ -281,6 +384,10 @@ pub fn start(cx: &mut App, start: SmokeStart) -> bool {
         AppSmokeConfig::from_env(env, start.packaged, start.isolated_backend),
         start.quit,
     )
+    .with_handler(Arc::new(capture::CaptureCommands::new(
+        ui.clone(),
+        output_dir.clone(),
+    )))
     .with_handler(Arc::new(driver::UiDriver::new(ui.clone(), output_dir)))
     .with_handler(Arc::new(windows::WindowCommands::new(ui.clone())))
     .with_handler(Arc::new(ShellCommands { ui }));

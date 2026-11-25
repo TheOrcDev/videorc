@@ -10,6 +10,7 @@ use videorc_app_core::buddy::copy as words;
 use videorc_app_core::nav::PageId;
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::shortcut_keys::ShortcutKeys;
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::theme::{self, hsla};
@@ -70,24 +71,34 @@ pub fn render_status(
         show_in_recording: true,
     });
 
-    let picture: Option<ImageSource> = match screen.persona_picture() {
-        Some(path) => Some(path.into()),
-        None => super::pictures::default_idle().map(Into::into),
+    // `BuddyEmblem size="lg"`: 56 px tall. The default golem is the emblem
+    // at its own width (`w-auto`); a picture of the avatar's own fits a
+    // 56 px square (`aspect-square object-contain`).
+    let (picture, width): (ImageSource, f32) = match screen.persona_picture() {
+        Some(path) => (path.into(), EMBLEM),
+        None => {
+            let (w, h) = super::pictures::EMBLEM_LARGE_SIZE;
+            (super::pictures::emblem_large().into(), EMBLEM * w / h)
+        }
     };
     let emblem = div()
-        .size(px(EMBLEM))
+        .w(px(width))
+        .h(px(EMBLEM))
         .flex_none()
-        .children(picture.map(|picture| img(picture).size_full().object_fit(ObjectFit::Contain)));
+        .child(img(picture).size_full().object_fit(ObjectFit::Contain));
 
     let shortcut = PageId::Layouts
         .key()
         .and_then(crate::app::menus::page_action)
         .map(|action| ShortcutKeys::for_action(action.as_ref()));
     let entity = cx.entity();
+    // `SceneIcon` leads, the page's key closes it (`ml-0.5`).
     let place = Button::new("avatar-place-on-scene")
         .variant(ButtonVariant::Outline)
-        .label("Place on Scene")
-        .children(shortcut)
+        .accessibility_label("Place on Scene")
+        .child(icon(IconName::SquaresFour, 16., hsla(t.foreground)))
+        .child("Place on Scene")
+        .children(shortcut.map(|keys| div().ml(px(2.)).child(keys)))
         .on_click(move |_, window, cx| {
             entity.update(cx, |screen, cx| {
                 screen.open_page(PageId::Layouts, window, cx)
@@ -116,10 +127,23 @@ pub fn render_status(
                         .text_color(hsla(t.foreground))
                         .child(name.clone()),
                 )
+                // The dot in its tone, and where viewers see the avatar in
+                // 12 px / 500 primary text (`font-medium text-foreground`).
                 .child(
-                    StatusDot::new("avatar-placement")
-                        .tone(placement.tone())
-                        .label(placement.label()),
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(StatusDot::new("avatar-placement").tone(placement.tone()))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .line_height(px(16.))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(hsla(t.foreground))
+                                .child(placement.label()),
+                        ),
                 ),
         )
         .child(place);

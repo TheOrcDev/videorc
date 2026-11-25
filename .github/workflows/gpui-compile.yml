@@ -1,0 +1,125 @@
+name: GPUI compile
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      artifacts:
+        description: Build downloadable Linux debug app and backend binaries
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # Settled-batch dispatches must finish even when a new merge lands.
+  # Keep them separate from the cancellable push/PR checks.
+  group: gpui-compile-${{ github.event_name == 'workflow_dispatch' && 'sentinel' || 'continuous' }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  compile:
+    name: gpui compile
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.artifacts && 60 || 30 }}
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install GPUI platform headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config libssl-dev \
+            libasound2-dev libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libx11-dev libx11-xcb-dev libxi-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libegl1-mesa-dev \
+            libvulkan-dev
+
+      - name: Install Linux backend headers
+        if: github.event_name == 'workflow_dispatch' && inputs.artifacts
+        run: sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libspa-0.2-dev
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache GPUI check dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gpui-compile-linux
+          cache-on-failure: true
+
+      - name: Compile GPUI and test targets without running tests
+        env:
+          BUILD_ARTIFACTS: ${{ inputs.artifacts }}
+        run: |
+          lock_args=(--locked)
+          if [ "$BUILD_ARTIFACTS" = true ]; then lock_args=(); fi
+          cargo check "${lock_args[@]}" -p videorc-app-core -p videorc-kit -p videorc-protocol -p videorc-app --all-targets
+
+      - name: Build Linux debug app and backend
+        if: github.event_name == 'workflow_dispatch' && inputs.artifacts
+        env:
+          CARGO_BUILD_JOBS: 1
+        # Separate invocations avoid unifying main's backend ashpd/tokio with
+        # GPUI's async-io until held #2189 lands. No --locked: its branch may
+        # need Cargo to prune the feature edges. Never change release inputs.
+        run: |
+          cargo build -p videorc-app
+          cargo build -p videorc-backend
+
+      - name: Bundle executable Linux debug binaries
+        if: github.event_name == 'workflow_dispatch' && inputs.artifacts
+        run: |
+          artifact_dir="$RUNNER_TEMP/gpui-linux-x64"
+          mkdir -p "$artifact_dir"
+          cp target/debug/Videorc target/debug/videorc-backend "$artifact_dir/"
+          cp Cargo.lock "$artifact_dir/"
+          printf '%s\n' "$GITHUB_SHA" > "$artifact_dir/SOURCE_SHA"
+          # Tar preserves executable permissions across upload/download.
+          tar -czf "$RUNNER_TEMP/gpui-linux-x64.tar.gz" -C "$artifact_dir" .
+
+      - name: Upload Linux debug binaries
+        if: github.event_name == 'workflow_dispatch' && inputs.artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpui-linux-x64-${{ github.sha }}
+          path: ${{ runner.temp }}/gpui-linux-x64.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  compile-windows:
+    name: gpui compile (Windows)
+    # Keep draft/PR feedback cheap; the sentinel dispatches both platforms
+    # on main after ten quiet minutes, once per settled batch.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache GPUI check dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gpui-compile-windows
+          cache-on-failure: true
+
+      - name: Compile GPUI and test targets without running tests
+        run: cargo check --locked -p videorc-app-core -p videorc-kit -p videorc-protocol -p videorc-app --all-targets

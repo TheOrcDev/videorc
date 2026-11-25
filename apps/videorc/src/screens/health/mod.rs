@@ -18,6 +18,7 @@ use videorc_app_core::protocol::{
     CompositorFramePipelineStatus, SessionDetailListParams, SessionListParams, SessionLogEntry,
     VirtualCameraStatus,
 };
+use videorc_app_core::studio::cloud_program_health::{self as cloud_health, ProgramHealthRow};
 use videorc_app_core::studio::health_page::{
     self as h, CameraGroupInputs, Fields, PageInputs, RecordingLog,
 };
@@ -60,6 +61,8 @@ pub struct HealthScreen {
     /// Plan 257 / P1489: Linux desktop diagnostics + keyring probe.
     linux_keyring: Option<LinuxKeyringStatus>,
     linux_desktop: Option<Value>,
+    /// P070: Cloud room program-health while a room is open (`None` when closed).
+    cloud_room: Option<Vec<ProgramHealthRow>>,
 }
 
 impl HealthScreen {
@@ -86,6 +89,7 @@ impl HealthScreen {
         );
         let mut snapshots = studio.watch();
         let mut telemetry = studio.telemetry();
+        let mut cloud = studio.cloud();
         let mut events = studio.backend().subscribe();
         cx.spawn(async move |entity, cx| {
             let mut identity = None;
@@ -94,10 +98,12 @@ impl HealthScreen {
                 let event = tokio::select! {
                     changed = snapshots.changed() => { if changed.is_err() { break; } None },
                     changed = telemetry.changed() => { if changed.is_err() { break; } None },
+                    changed = cloud.changed() => { if changed.is_err() { break; } None },
                     event = events.recv() => match event { Ok(event) => Some(event), Err(tokio::sync::broadcast::error::RecvError::Closed) => break, Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => Some(BackendEvent::ClientLagged { skipped }) },
                 };
                 let snapshot = snapshots.borrow_and_update().clone();
                 telemetry.borrow_and_update();
+                let cloud_state = cloud.borrow_and_update().clone();
                 let next = (snapshot.connection_generation, snapshot.session.status.session_id.clone(), snapshot.session.phase);
                 let next_log = (snapshot.connection_generation, snapshot.session.status.session_id.clone());
                 let log_changed = log_identity.as_ref() != Some(&next_log);
@@ -105,6 +111,11 @@ impl HealthScreen {
                 let changed = identity.as_ref() != Some(&next);
                 identity = Some(next);
                 if entity.update(cx, |this, cx| {
+                    this.cloud_room = cloud_state
+                        .status
+                        .as_ref()
+                        .and_then(|status| cloud_health::ProgramHealthInput::from_cloud(status, None))
+                        .map(|input| cloud_health::program_health_rows(&input));
                     if log_changed {
                         this.recording_log = RecordingLog {
                             session_id: snapshot.session.status.session_id.clone(),
@@ -183,6 +194,7 @@ impl HealthScreen {
             confirm: DialogHandle::new(false),
             linux_keyring: None,
             linux_desktop: None,
+            cloud_room: None,
         }
     }
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {

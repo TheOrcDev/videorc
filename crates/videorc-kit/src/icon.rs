@@ -141,8 +141,26 @@ pub enum IconName {
     Smiley,
     /// `LibraryIcon` / `LibraryRowIcon` (Phosphor's FilmReel).
     FilmReel,
-    /// `HealthIcon` / `HealthRowIcon` (Phosphor's Pulse).
+    /// `HealthIcon` / `HealthRowIcon` (Phosphor's Pulse): account menu Health.
     Pulse,
+    /// `HeartbeatIcon` (Phosphor's Heartbeat): distinct from Pulse/Health.
+    Heartbeat,
+    /// `TerminalIcon` / Agents row (Phosphor's Terminal).
+    Terminal,
+    /// Electron `MarkersIcon` (Phosphor's BookmarkSimple): Sidekick Markers.
+    BookmarkSimple,
+    /// Electron `TextIcon` (Phosphor's TextAa): Stream details section title.
+    TextAa,
+    /// `BugIcon` (Phosphor's Bug): Health support bundle.
+    Bug,
+    /// `RefreshIcon` (Phosphor's ArrowClockwise): Captions Retry.
+    ArrowClockwise,
+    /// `AdjustIcon` (Phosphor's SlidersHorizontal): Scene inspector titles.
+    SlidersHorizontal,
+    /// `ArrowUpIcon`: Scene d-pad.
+    ArrowUp,
+    /// On-stream check at Phosphor's bold weight.
+    CheckBold,
     /// `FolderIcon` (Phosphor's FolderOpen).
     FolderOpen,
     /// `WaveformMutedIcon` (Phosphor's WaveformSlash).
@@ -169,9 +187,118 @@ pub enum IconName {
     KickLogo,
     /// `StopIcon` at Phosphor's fill weight.
     StopFill,
+    /// `StudioIcon` at Phosphor's fill weight: the Studio slab and its row on the Studio page.
+    VideoCameraFill,
+    /// `SourcesIcon` at fill weight: the selected sidebar row.
+    MonitorFill,
+    /// `SceneIcon` at fill weight: the selected sidebar row.
+    SquaresFourFill,
+    /// `CaptionsIcon` at fill weight: the selected sidebar row.
+    ClosedCaptioningFill,
+    /// `RecordIcon` at fill weight: the selected sidebar row, Studio's Record.
+    RecordFill,
+    /// `LivestreamIcon` at fill weight: the selected sidebar row, Go live.
+    BroadcastFill,
+    /// `AccountIcon` at fill weight: the selected sidebar row.
+    UserCircleFill,
+    /// `AvatarPageIcon` at fill weight: the selected sidebar row.
+    SmileyFill,
+    /// `BuddyPageIcon` at fill weight: the selected sidebar row.
+    UserSoundFill,
+    /// `AssetsIcon` at fill weight: the selected sidebar row.
+    ImageSquareFill,
+    /// `SpeakerOnIcon` at fill weight: the selected sidebar row.
+    SpeakerHighFill,
+    /// `LibraryIcon` at fill weight: the selected sidebar row.
+    FilmReelFill,
+    /// `SettingsIcon` at fill weight: the selected sidebar row.
+    GearSixFill,
+    /// `HealthIcon` at fill weight: the selected sidebar row.
+    PulseFill,
+    /// `LightModeIcon` (Phosphor's Sun) at fill weight: the theme toggle in dark.
+    SunFill,
+    /// `DarkModeIcon` (Phosphor's Moon) at fill weight: the theme toggle in light.
+    MoonFill,
+    /// `SparkleIcon` at fill weight: an alert's icon.
+    SparkleFill,
+    /// `UploadIcon` at fill weight: an alert's icon.
+    UploadSimpleFill,
+    /// `SyncIcon` at fill weight: an alert's icon.
+    ArrowsClockwiseFill,
+    /// `PlayIcon` at fill weight: Library and Sounds play buttons.
+    PlayFill,
+    /// `CodeIcon` (Phosphor's Code): Images, Import HTML…
+    Code,
+    /// `NoteIcon` (Phosphor's NotePencil): Edit personality.
+    NotePencil,
+    /// `HeartbeatIcon` at Phosphor's duotone weight.
+    HeartbeatDuotone,
+    /// `PreviewIcon` at duotone weight.
+    EyeDuotone,
+    /// `CaptionsIcon` at duotone weight.
+    ClosedCaptioningDuotone,
+    /// `VideoFileIcon` at duotone weight.
+    FileVideoDuotone,
+    /// `ClipIcon` at duotone weight.
+    ScissorsDuotone,
+    /// `CameraIcon` at duotone weight.
+    VideoCameraDuotone,
+    /// `DisplayIcon` at duotone weight.
+    MonitorDuotone,
+    /// `MicrophoneIcon` at duotone weight.
+    MicrophoneDuotone,
+    /// `DesktopIcon` at duotone weight.
+    DesktopDuotone,
+    /// `SpeakerOnIcon` at duotone weight.
+    SpeakerHighDuotone,
+    /// `SpeakerOffIcon` at duotone weight.
+    SpeakerSlashDuotone,
+    /// `PauseIcon` (Phosphor's Pause): the avatar preview's pause.
+    Pause,
+    /// `PauseIcon` at fill weight: the Library player.
+    PauseFill,
+    /// `ZoomInIcon` (Phosphor's MagnifyingGlassPlus): the Bubble zoom.
+    MagnifyingGlassPlus,
+    /// `LinkIcon` (Phosphor's LinkSimple): Guests' invite link.
+    LinkSimple,
 }
 
 impl IconName {
+    /// The same glyph at Phosphor's fill weight (`weight="fill"`), or itself
+    /// when the kit carries no fill twin: the selected sidebar row, an alert's
+    /// icon, a pressed toggle.
+    pub fn filled(self) -> IconName {
+        match self {
+            IconName::VideoCamera => IconName::VideoCameraFill,
+            IconName::Monitor => IconName::MonitorFill,
+            IconName::SquaresFour => IconName::SquaresFourFill,
+            IconName::ClosedCaptioning => IconName::ClosedCaptioningFill,
+            IconName::Record => IconName::RecordFill,
+            IconName::Broadcast => IconName::BroadcastFill,
+            IconName::UserCircle => IconName::UserCircleFill,
+            IconName::Smiley => IconName::SmileyFill,
+            IconName::UserSound => IconName::UserSoundFill,
+            IconName::ImageSquare => IconName::ImageSquareFill,
+            IconName::SpeakerHigh => IconName::SpeakerHighFill,
+            IconName::FilmReel => IconName::FilmReelFill,
+            IconName::GearSix => IconName::GearSixFill,
+            IconName::Pulse => IconName::PulseFill,
+            IconName::Sparkle => IconName::SparkleFill,
+            IconName::UploadSimple => IconName::UploadSimpleFill,
+            IconName::ArrowsClockwise => IconName::ArrowsClockwiseFill,
+            IconName::Play => IconName::PlayFill,
+            IconName::Pause => IconName::PauseFill,
+            IconName::Info => IconName::InfoFill,
+            IconName::XCircle => IconName::XCircleFill,
+            IconName::CheckCircle => IconName::CheckCircleFill,
+            IconName::Warning => IconName::WarningFill,
+            IconName::LockKey => IconName::LockFill,
+            IconName::PushPin => IconName::PushPinFill,
+            IconName::Stop => IconName::StopFill,
+            other => other,
+        }
+    }
+
     fn bytes(self) -> &'static [u8] {
         match self {
             IconName::MagnifyingGlass => include_bytes!("../icons/magnifying-glass.svg"),
@@ -244,6 +371,15 @@ impl IconName {
             IconName::Smiley => include_bytes!("../icons/smiley.svg"),
             IconName::FilmReel => include_bytes!("../icons/film-reel.svg"),
             IconName::Pulse => include_bytes!("../icons/pulse.svg"),
+            IconName::Heartbeat => include_bytes!("../icons/heartbeat.svg"),
+            IconName::Terminal => include_bytes!("../icons/terminal.svg"),
+            IconName::BookmarkSimple => include_bytes!("../icons/bookmark-simple.svg"),
+            IconName::TextAa => include_bytes!("../icons/text-aa.svg"),
+            IconName::Bug => include_bytes!("../icons/bug.svg"),
+            IconName::ArrowClockwise => include_bytes!("../icons/arrow-clockwise.svg"),
+            IconName::SlidersHorizontal => include_bytes!("../icons/sliders-horizontal.svg"),
+            IconName::ArrowUp => include_bytes!("../icons/arrow-up.svg"),
+            IconName::CheckBold => include_bytes!("../icons/check-bold.svg"),
             IconName::FolderOpen => include_bytes!("../icons/folder-open.svg"),
             IconName::WaveformSlash => include_bytes!("../icons/waveform-slash.svg"),
             IconName::Desktop => include_bytes!("../icons/desktop.svg"),
@@ -257,6 +393,45 @@ impl IconName {
             IconName::FacebookLogo => include_bytes!("../icons/facebook-logo.svg"),
             IconName::KickLogo => include_bytes!("../icons/kick-logo.svg"),
             IconName::StopFill => include_bytes!("../icons/stop-fill.svg"),
+            IconName::VideoCameraFill => include_bytes!("../icons/video-camera-fill.svg"),
+            IconName::MonitorFill => include_bytes!("../icons/monitor-fill.svg"),
+            IconName::SquaresFourFill => include_bytes!("../icons/squares-four-fill.svg"),
+            IconName::ClosedCaptioningFill => include_bytes!("../icons/closed-captioning-fill.svg"),
+            IconName::RecordFill => include_bytes!("../icons/record-fill.svg"),
+            IconName::BroadcastFill => include_bytes!("../icons/broadcast-fill.svg"),
+            IconName::UserCircleFill => include_bytes!("../icons/user-circle-fill.svg"),
+            IconName::SmileyFill => include_bytes!("../icons/smiley-fill.svg"),
+            IconName::UserSoundFill => include_bytes!("../icons/user-sound-fill.svg"),
+            IconName::ImageSquareFill => include_bytes!("../icons/image-square-fill.svg"),
+            IconName::SpeakerHighFill => include_bytes!("../icons/speaker-high-fill.svg"),
+            IconName::FilmReelFill => include_bytes!("../icons/film-reel-fill.svg"),
+            IconName::GearSixFill => include_bytes!("../icons/gear-six-fill.svg"),
+            IconName::PulseFill => include_bytes!("../icons/pulse-fill.svg"),
+            IconName::SunFill => include_bytes!("../icons/sun-fill.svg"),
+            IconName::MoonFill => include_bytes!("../icons/moon-fill.svg"),
+            IconName::SparkleFill => include_bytes!("../icons/sparkle-fill.svg"),
+            IconName::UploadSimpleFill => include_bytes!("../icons/upload-simple-fill.svg"),
+            IconName::ArrowsClockwiseFill => include_bytes!("../icons/arrows-clockwise-fill.svg"),
+            IconName::PlayFill => include_bytes!("../icons/play-fill.svg"),
+            IconName::Code => include_bytes!("../icons/code.svg"),
+            IconName::NotePencil => include_bytes!("../icons/note-pencil.svg"),
+            IconName::HeartbeatDuotone => include_bytes!("../icons/heartbeat-duotone.svg"),
+            IconName::EyeDuotone => include_bytes!("../icons/eye-duotone.svg"),
+            IconName::ClosedCaptioningDuotone => {
+                include_bytes!("../icons/closed-captioning-duotone.svg")
+            }
+            IconName::FileVideoDuotone => include_bytes!("../icons/file-video-duotone.svg"),
+            IconName::ScissorsDuotone => include_bytes!("../icons/scissors-duotone.svg"),
+            IconName::VideoCameraDuotone => include_bytes!("../icons/video-camera-duotone.svg"),
+            IconName::MonitorDuotone => include_bytes!("../icons/monitor-duotone.svg"),
+            IconName::MicrophoneDuotone => include_bytes!("../icons/microphone-duotone.svg"),
+            IconName::DesktopDuotone => include_bytes!("../icons/desktop-duotone.svg"),
+            IconName::SpeakerHighDuotone => include_bytes!("../icons/speaker-high-duotone.svg"),
+            IconName::SpeakerSlashDuotone => include_bytes!("../icons/speaker-slash-duotone.svg"),
+            IconName::Pause => include_bytes!("../icons/pause.svg"),
+            IconName::PauseFill => include_bytes!("../icons/pause-fill.svg"),
+            IconName::MagnifyingGlassPlus => include_bytes!("../icons/magnifying-glass-plus.svg"),
+            IconName::LinkSimple => include_bytes!("../icons/link-simple.svg"),
         }
     }
 }

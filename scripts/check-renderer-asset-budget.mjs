@@ -183,9 +183,14 @@ const htmlPath = resolve(
 // notification center's expected ~1-1.5 KB eager gzip. The old unminified
 // ceilings (2,425,000 / 500,000, entry 1,200,000 / 235,000) left ~145 KB gzip
 // of slack, so they caught nothing. Keep new surfaces lazy.
+// Raised 2026-11-25 (owner-approved, 0.38.0 readiness): eager gzip 337,000 ->
+// 339,000. Since 0.37.1 (333,733) the eager set grew +5.2 KB: #1884's local
+// times from bundled tz data (~1.9 KB), #1833/#1840's UI settings store read
+// before first paint (~1.6 KB), #1816's account avatar bytes (~0.85 KB). Moving
+// `offsetTimeZone` out of schedule-time.ts cut 322; main then measured 338,622.
 const budget = {
   maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 1_060_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 337_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 339_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 549_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 169_000)
 }

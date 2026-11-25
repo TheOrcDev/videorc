@@ -26,7 +26,7 @@ import { execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, existsSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
 import { cpus, loadavg, platform, release, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import {
   ONBOARDING_STORAGE_KEY,
   seedUiSettingsJs,
@@ -44,6 +44,7 @@ import {
   evaluatePreviewCadence,
   summarizeFreeformTiming
 } from './lib/freeform-editor-gate.mjs'
+import { runGpuiFreeformEditor } from './lib/freeform-editor-gpui.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -101,6 +102,7 @@ class Cdp {
   }
 }
 
+const gpuiApp = smokeAppIsGpui()
 const baseSourceId = 'source:test-pattern'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const outputDirectory = mkdtempSync(join(tmpdir(), 'videorc-freeform-editor-'))
@@ -146,8 +148,8 @@ const LIVE_MOVE_DEFINITION =
 // Control runs keep the preview floating: same gestures and commits, no live
 // surface and no idle hold (the floating preview still follows each drag's
 // drafts, not gated here); the cadence samplers still run for the A/B.
-const liveSupported = report.live.supported && !report.live.control
-const cadenceSupported = report.live.supported
+const liveSupported = report.live.supported && !report.live.control && !gpuiApp
+const cadenceSupported = report.live.supported && !gpuiApp
 let devtoolsUrl
 let cdp
 let backend
@@ -160,7 +162,7 @@ const launched = await launchDevApp({
     VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
     VIDEORC_SMOKE_COMMAND_SERVER: '1',
     VIDEORC_SMOKE_PREVIEW_MOTION: '1',
-    VIDEORC_REMOTE_DEBUG_PORT: '0'
+    ...(gpuiApp ? {} : { VIDEORC_REMOTE_DEBUG_PORT: '0' })
   },
   onLine(line) {
     appendFileSync(join(outputDirectory, 'launch.log'), line + '\n')
@@ -172,6 +174,15 @@ const mouseEvent = createFreeformMouseSequence()
 const smoke = launched.connections['preview-motion-ready']
 const command = (name, params = {}) => requestSmokeCommand(smoke, name, params, { timeoutMs })
 try {
+  if (gpuiApp) {
+    await runGpuiFreeformEditor({
+      launched,
+      report,
+      outputDirectory,
+      timeoutMs,
+      connectBackend
+    })
+  } else {
   assert.ok(devtoolsUrl, 'Electron did not expose its development CDP endpoint')
   const targets = await (await fetch(`http://${new URL(devtoolsUrl).host}/json/list`)).json()
   const target = targets.find(
@@ -259,6 +270,7 @@ try {
   console.log(
     `Freeform editor smoke OK: ${report.gestures.length} trusted gestures; evidence ${outputDirectory}`
   )
+  } // end Electron path
 } catch (error) {
   const failureShot = await cdp?.send('Page.captureScreenshot', { format: 'png' }).catch(() => null)
   if (failureShot) {

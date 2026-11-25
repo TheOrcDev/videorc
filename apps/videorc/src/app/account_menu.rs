@@ -5,11 +5,11 @@
 //! Settings, and Sign out, locked while recording or live, with its reason
 //! under it. Only the Videorc account is here, never a platform account.
 //!
-//! The picture is the initials (the kit's small avatar): the account's
+//! The picture is the initials (the kit's 20 px avatar): the account's
 //! picture loads through an
 //! avatar cache in Electron, never hot-linked, and the app has none yet.
 
-use gpui::{App, WeakEntity, Window, div, prelude::*, px};
+use gpui::{App, FontWeight, WeakEntity, Window, div, prelude::*, px};
 use videorc_app_core::accounts::{Account, AccountsState, MenuItem as Row, copy, menu_items};
 use videorc_app_core::nav::PageId;
 use videorc_app_core::studio::scenes_section::session_active;
@@ -19,8 +19,8 @@ use videorc_kit::{
     dropdown_menu::{DropdownMenu, Menu, MenuItem, MenuItemTone},
     icon::{IconName, icon},
     status_dot::{StatusDot, StatusTone},
-    theme::hsla,
-    tokens::Theme,
+    theme::{TypeScale, hsla},
+    tokens::{Theme, text},
 };
 
 use super::accounts::{self, Shared};
@@ -115,6 +115,7 @@ fn build_menu(
         menu = menu.separator().item(
             MenuItem::new(copy::SIGN_OUT)
                 .tone(MenuItemTone::Destructive)
+                .icon(|ink| icon(IconName::SignOut, 16., ink))
                 .disabled(locked)
                 .on_select(|_, cx| {
                     let live = live(cx);
@@ -143,21 +144,32 @@ pub fn row(
     let name = account.display_name();
     let health_label = health_label.into();
     let picture = if account.is_signed_in() {
-        Avatar::new(initials(&name)).sm().into_any_element()
+        // `size-5`: a 20 px face, so the initials keep the 11 px floor.
+        Avatar::new(initials(&name)).xs().into_any_element()
     } else {
         icon(IconName::UserCircle, 16., hsla(t.muted_foreground)).into_any_element()
     };
+    // `ACCOUNT_MENU_TRIGGER_CLASS`: `h-7` with a 6 px side pad (`px-1.5`).
     let trigger = Button::new("account-menu-trigger")
         .variant(ButtonVariant::Ghost)
+        .dense(true)
         .accessibility_label(name.clone())
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(8.))
+                .gap(px(6.))
                 .min_w(px(0.))
                 .child(picture)
-                .child(div().truncate().child(name))
+                // Electron's trigger (`account-menu-trigger.tsx`): a 28 px
+                // row with the name at `text-xs font-medium`, 12/16 px.
+                .child(
+                    div()
+                        .truncate()
+                        .type_scale(text::META)
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(name),
+                )
                 // P025: bare, so the trigger's name stays the words it shows;
                 // the Go Live check, the toast and the chat row say why.
                 .when(needs_sign_in, |row| {

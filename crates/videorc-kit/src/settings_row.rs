@@ -10,6 +10,7 @@ use gpui::{
 use smallvec::SmallVec;
 
 use crate::{
+    icon::{IconName, icon},
     theme::{Appearance, TypeScale, hsla, resolve},
     tokens::{radius, text},
 };
@@ -18,13 +19,17 @@ use crate::{
 pub struct SettingsRow {
     id: ElementId,
     label: SharedString,
-    description: Option<SharedString>,
+    /// An element before the label's words (Guests' "● Room closed").
+    label_leading: Option<AnyElement>,
+    description: Option<AnyElement>,
     error: Option<SharedString>,
     /// When the control is a button that cannot take the label's name.
     accessibility_label: Option<SharedString>,
     children: SmallVec<[AnyElement; 2]>,
     /// Flush inside a [`SettingsGroup`]: no own padding (the group adds it).
     grouped: bool,
+    /// Ungrouped flush: no padding (Electron bare horizontal Field / L7 K2).
+    flush: bool,
     appearance: Option<Appearance>,
 }
 
@@ -33,22 +38,31 @@ impl SettingsRow {
         SettingsRow {
             id: id.into(),
             label: label.into(),
+            label_leading: None,
             description: None,
             error: None,
             accessibility_label: None,
             children: SmallVec::new(),
             grouped: false,
+            flush: false,
             appearance: None,
         }
     }
 
-    /// 12 px secondary text under the label.
-    pub fn description(mut self, description: impl Into<SharedString>) -> Self {
-        self.description = Some(description.into());
+    /// 12 px secondary text under the label (string or a status-dot row).
+    /// An element before the label's words, 6 px on (a StatusDot: "● Room
+    /// closed"). The row is still named by the label's words.
+    pub fn label_leading(mut self, leading: impl IntoElement) -> Self {
+        self.label_leading = Some(leading.into_any_element());
         self
     }
 
-    /// The row's own refusal or failure under the description.
+    pub fn description(mut self, description: impl IntoElement) -> Self {
+        self.description = Some(description.into_any_element());
+        self
+    }
+
+    /// The row's own refusal or failure under the description (FieldError look).
     pub fn error(mut self, error: impl Into<SharedString>) -> Self {
         self.error = Some(error.into());
         self
@@ -57,6 +71,12 @@ impl SettingsRow {
     /// Names the row when the control is a button (a label cannot name one).
     pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
         self.accessibility_label = Some(label.into());
+        self
+    }
+
+    /// No padding outside a group (Electron ungrouped horizontal Field).
+    pub fn flush(mut self, flush: bool) -> Self {
+        self.flush = flush;
         self
     }
 
@@ -94,29 +114,41 @@ impl RenderOnce for SettingsRow {
             .gap(px(4.0))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
                     .text_size(px(14.0))
                     .line_height(px(20.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(hsla(t.foreground))
-                    .child(self.label),
+                    .children(
+                        self.label_leading
+                            .map(|leading| div().flex_none().flex().items_center().child(leading)),
+                    )
+                    .child(div().min_w(px(0.0)).child(self.label)),
             )
-            .when_some(self.description, |content, description| {
-                content.child(
-                    div()
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child(description),
-                )
-            })
+            .children(self.description.map(|description| {
+                div()
+                    .type_scale(text::META)
+                    .line_height(px(18.0))
+                    .text_color(hsla(t.muted_foreground))
+                    .child(description)
+            }))
             .when_some(self.error, |content, error| {
                 content.child(
                     div()
-                        .type_scale(text::META)
-                        .text_color(hsla(t.destructive))
-                        .child(error),
+                        .flex()
+                        .items_start()
+                        .gap(px(6.0))
+                        .text_size(px(12.0))
+                        .line_height(px(16.0))
+                        .text_color(hsla(t.foreground))
+                        .child(icon(IconName::XCircleFill, 14.0, hsla(t.destructive)))
+                        .child(div().min_w(px(0.0)).child(error)),
                 )
             });
 
+        let pad = !self.flush && !self.grouped;
         div()
             .id(self.id)
             .role(gpui::Role::Group)
@@ -124,10 +156,10 @@ impl RenderOnce for SettingsRow {
             .flex()
             .w_full()
             .flex_row()
-            .items_center()
+            .items_start()
             .gap(px(12.0))
-            .when(!self.grouped, |row| row.px(px(12.0)).py(px(10.0)))
-            .when(self.grouped, |row| row.px(px(12.0)).py(px(10.0)))
+            .when(pad || self.grouped, |row| row.px(px(12.0)).py(px(10.0)))
+            .when(self.flush, |row| row.gap(px(12.0)))
             .child(content)
             .children(self.children)
     }

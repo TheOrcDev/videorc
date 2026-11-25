@@ -3,7 +3,9 @@
 //! (hover delay, placement): `.tooltip(tooltip("Record"))` on any stateful
 //! element, or `Button::tooltip`.
 
-use gpui::{AnyView, App, Context, IntoElement, Render, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    Action, AnyView, App, Context, IntoElement, Render, SharedString, Window, div, prelude::*, px,
+};
 
 use crate::{
     motion::{Glass, floating, presence},
@@ -13,6 +15,8 @@ use crate::{
 };
 
 enum ShortcutSource {
+    /// Binding looked up from the live keymap for this action.
+    Action(Box<dyn Action>),
     /// GPUI keystroke syntax (`cmd-shift-j`).
     Keystrokes(SharedString),
     /// Electron accelerator (`CmdOrCtrl+Shift+J`).
@@ -38,6 +42,7 @@ impl Render for Tooltip {
             radius: radius::ROW,
         };
         let chip = self.shortcut.as_ref().map(|source| match source {
+            ShortcutSource::Action(action) => ShortcutKeys::for_action(action.as_ref()),
             ShortcutSource::Keystrokes(keys) => ShortcutKeys::keystrokes_owned(keys.clone()),
             ShortcutSource::Accelerator(accel) => ShortcutKeys::accelerator(accel.clone()),
         });
@@ -74,6 +79,23 @@ pub fn tooltip(
         cx.new(|_| Tooltip {
             text: text.clone(),
             shortcut: None,
+        })
+        .into()
+    }
+}
+
+/// A tooltip whose key chip reads the live keymap for `action` (P189). Prefer
+/// this over a fixed string so the chip cannot drift from the binding that runs.
+pub fn tooltip_with_action(
+    text: impl Into<SharedString>,
+    action: &dyn Action,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text = text.into();
+    let action = action.boxed_clone();
+    move |_, cx| {
+        cx.new(|_| Tooltip {
+            text: text.clone(),
+            shortcut: Some(ShortcutSource::Action(action.boxed_clone())),
         })
         .into()
     }

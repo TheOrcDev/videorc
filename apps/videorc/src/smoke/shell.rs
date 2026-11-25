@@ -138,6 +138,10 @@ impl ShellSmoke for ShellWindows {
             .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())?
     }
 
+    fn preview_entity(&self) -> Option<Entity<Preview>> {
+        self.preview.borrow().clone()
+    }
+
     fn preview(&self, command: &str, cx: &mut App) -> Result<Value, String> {
         let preview = self
             .preview
@@ -146,6 +150,9 @@ impl ShellSmoke for ShellWindows {
             .ok_or_else(|| super::MAIN_WINDOW_NOT_READY.to_string())?;
         let mode = preview.read(cx).mode();
         let can_float = preview.read(cx).can_float();
+        if command == "native-preview-surface-status" {
+            return Ok(preview.read(cx).smoke_surface_status());
+        }
         if command == "inspect-native-preview-live-background" {
             // Electron's proof surface drew the idle live background on
             // Linux; the GPUI preview draws the backend compositor's frames
@@ -155,6 +162,25 @@ impl ShellSmoke for ShellWindows {
                 "reporter": "compositor",
                 "detail": "The GPUI preview draws the compositor's frames; compositor.status reports the live background.",
             }));
+        }
+        if command == "preview-window-os-close" {
+            let handle = preview.read(cx).floating_window().ok_or_else(|| {
+                "preview-window-os-close: the Preview window is not open.".to_string()
+            })?;
+            handle
+                .update(cx, |_, window, _| {
+                    crate::platform::current().perform_close(window)
+                })
+                .map_err(|_| "preview-window-os-close: the Preview window closed.".to_string())??;
+            // The close lands a moment later; the smoke polls
+            // `preview-window-state` for `closed`.
+            return Ok(preview.read(cx).smoke_state());
+        }
+        if command == "preview-toggle-open" {
+            // The menu's and ⌘P's own handler (`main.rs`): the main window
+            // forward, then `Preview::toggle_open`.
+            cx.dispatch_action(&crate::app::menus::TogglePreview);
+            return Ok(preview.read(cx).smoke_state());
         }
         if command == "preview-retry" {
             let retried = preview.update(cx, |preview, cx| preview.retry(cx));
@@ -215,10 +241,13 @@ impl ShellSmoke for ShellWindows {
 
 impl ShellWindows {}
 
-/// Whether this binary is a shipped app rather than a dev build. A dev build
-/// runs from cargo's `target/<profile>/`; anything else is treated as
+/// Debug binaries stay dev builds when the sentinel copies them for the
+/// gallery. Release binaries outside cargo's `target/<profile>/` are
 /// packaged, so the server needs the harness's capability there.
 pub fn packaged() -> bool {
+    if cfg!(debug_assertions) {
+        return false;
+    }
     std::env::current_exe().ok().is_none_or(|exe| {
         let profile = exe.parent();
         let target = profile.and_then(|dir| dir.parent());

@@ -23,8 +23,9 @@ use smallvec::SmallVec;
 
 use crate::{
     badge::plate_shadows,
-    theme::{Appearance, faded_over, hsla, resolve},
+    theme::{Appearance, faded_over, hsla, resolve, with_alpha},
     tokens::{Color, radius, size},
+    tooltip::tooltip,
 };
 
 type ChangeHandler = Rc<dyn Fn(Vec<SharedString>, &mut Window, &mut App)>;
@@ -35,6 +36,8 @@ pub struct ToggleItem {
     label: SharedString,
     /// React `ToggleGroupItem` children: preview content instead of the label.
     child: Option<AnyElement>,
+    /// Hover words (L3 Kinds of cuts chips).
+    tooltip: Option<SharedString>,
     disabled: bool,
 }
 
@@ -44,6 +47,7 @@ impl ToggleItem {
             value: value.into(),
             label: label.into(),
             child: None,
+            tooltip: None,
             disabled: false,
         }
     }
@@ -52,6 +56,12 @@ impl ToggleItem {
     /// label remains the accessible name.
     pub fn child(mut self, child: impl IntoElement) -> Self {
         self.child = Some(child.into_any_element());
+        self
+    }
+
+    /// A tooltip in the float glass's tooltip tier.
+    pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(tooltip.into());
         self
     }
 
@@ -71,6 +81,8 @@ pub struct ToggleGroup {
     xs: bool,
     /// Outlined chips; the default is transparent.
     outline: bool,
+    /// Caption style cards: pressed = `border-primary/50 bg-primary/10`.
+    card: bool,
     /// Gap between chips in px. Default 8.
     spacing: f32,
     vertical: bool,
@@ -90,6 +102,7 @@ impl ToggleGroup {
             multiple: false,
             xs: false,
             outline: false,
+            card: false,
             spacing: 8.0,
             vertical: false,
             disabled: false,
@@ -126,6 +139,12 @@ impl ToggleGroup {
     /// Outlined chips.
     pub fn outline(mut self, outline: bool) -> Self {
         self.outline = outline;
+        self
+    }
+
+    /// Caption style cards: selected chip uses primary wash, not chrome plate.
+    pub fn card(mut self, card: bool) -> Self {
+        self.card = card;
         self
     }
 
@@ -228,6 +247,7 @@ impl RenderOnce for ToggleGroup {
                 let value = item.value.clone();
                 let chip_id = SharedString::from(format!("{group_id}/{}", item.value));
                 let custom = item.child.is_some();
+                let tip = item.tooltip.clone();
                 let body = item
                     .child
                     .unwrap_or_else(|| item.label.clone().into_any_element());
@@ -273,7 +293,31 @@ impl RenderOnce for ToggleGroup {
                     });
                 }
 
-                if disabled {
+                if disabled && pressed {
+                    // A disabled group keeps its choice on show, faded
+                    // (`disabled:opacity-50` over the pressed look),
+                    // pre-blended per the kit.
+                    let fade = |color| faded_over(color, ground, 0.5);
+                    chip = chip.text_color(hsla(fade(t.foreground)));
+                    if self.card {
+                        chip = chip
+                            .border_color(hsla(fade(with_alpha(t.primary, 0.5))))
+                            .bg(hsla(fade(with_alpha(t.primary, 0.1))));
+                    } else {
+                        let mut plate = plate_shadows(t);
+                        for shadow in &mut plate {
+                            shadow.color.a *= 0.5;
+                        }
+                        chip = chip
+                            .bg(linear_gradient(
+                                180.0,
+                                linear_color_stop(hsla(fade(t.chrome_plate_top)), 0.0),
+                                linear_color_stop(hsla(fade(t.chrome_plate_bottom)), 1.0),
+                            )
+                            .color_space(ColorSpace::Oklab))
+                            .shadow(plate);
+                    }
+                } else if disabled {
                     let ink = faded_over(t.muted_foreground, ground, 0.5);
                     chip = chip.text_color(hsla(ink));
                     if self.outline {
@@ -281,6 +325,11 @@ impl RenderOnce for ToggleGroup {
                             .border_color(hsla(faded_over(t.input, ground, 0.5)))
                             .bg(hsla(faded_over(t.glass_solid, ground, 0.5)));
                     }
+                } else if pressed && self.card {
+                    chip = chip
+                        .text_color(hsla(t.foreground))
+                        .border_color(hsla(with_alpha(t.primary, 0.5)))
+                        .bg(hsla(with_alpha(t.primary, 0.1)));
                 } else if pressed {
                     chip = chip
                         .text_color(hsla(t.foreground))
@@ -298,6 +347,10 @@ impl RenderOnce for ToggleGroup {
                     if self.outline {
                         chip = chip.border_color(hsla(t.input)).bg(hsla(t.glass_solid));
                     }
+                }
+
+                if let Some(words) = tip {
+                    chip = chip.tooltip(tooltip(words));
                 }
 
                 chip.into_any_element()

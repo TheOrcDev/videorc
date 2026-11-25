@@ -14,6 +14,25 @@ import { prepareScenes, useScenes } from './use-scenes'
 vi.mock('@/lib/toast', () => ({ toast: { error: vi.fn() } }))
 import { toast } from '@/lib/toast'
 
+// The profile's storage, as an in-memory stand-in whose calls can be counted
+// and made to fail (happy-dom's own is not reachable through Storage.prototype).
+// The scene library reads and writes it through the UI settings store's
+// `Storage` view (plan 220 S1.4b), so that view is this same stand-in.
+const { storage, stored } = vi.hoisted(() => {
+  const stored = { map: new Map<string, string>() }
+  const storage = {
+    getItem: vi.fn((key: string): string | null => stored.map.get(key) ?? null),
+    setItem: vi.fn((key: string, value: string): void => void stored.map.set(key, value)),
+    removeItem: vi.fn((key: string): void => void stored.map.delete(key)),
+    clear: vi.fn((): void => stored.map.clear())
+  }
+  return { storage, stored }
+})
+vi.mock('@/lib/ui-settings-storage', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/ui-settings-storage')>()),
+  uiSettingsStorage: () => storage
+}))
+
 /** A profile's localStorage, from the same fixtures the migration tests read. */
 function seed(name: string): void {
   // happy-dom's URL is not Node's: resolve the path as a string.
@@ -50,16 +69,6 @@ async function mount(strict = false): Promise<{ current: ReturnType<typeof useSc
   return result
 }
 
-// The profile's storage, as an in-memory stand-in whose calls can be counted
-// and made to fail (happy-dom's own is not reachable through Storage.prototype).
-let stored = new Map<string, string>()
-const storage = {
-  getItem: vi.fn((key: string): string | null => stored.get(key) ?? null),
-  setItem: vi.fn((key: string, value: string): void => void stored.set(key, value)),
-  removeItem: vi.fn((key: string): void => void stored.delete(key)),
-  clear: vi.fn((): void => stored.clear())
-}
-
 /** Every write from here on. */
 function watchWrites() {
   storage.setItem.mockClear()
@@ -68,10 +77,10 @@ function watchWrites() {
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-  stored = new Map()
+  stored.map = new Map()
   for (const mock of Object.values(storage)) mock.mockClear()
-  storage.getItem.mockImplementation((key) => stored.get(key) ?? null)
-  storage.setItem.mockImplementation((key, value) => void stored.set(key, value))
+  storage.getItem.mockImplementation((key) => stored.map.get(key) ?? null)
+  storage.setItem.mockImplementation((key, value) => void stored.map.set(key, value))
   vi.stubGlobal('localStorage', storage)
 })
 

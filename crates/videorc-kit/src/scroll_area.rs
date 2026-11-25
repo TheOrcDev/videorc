@@ -18,6 +18,8 @@ pub struct ScrollArea {
     children: SmallVec<[AnyElement; 2]>,
     appearance: Option<Appearance>,
     handle: Option<ScrollHandle>,
+    /// The content is at least the viewport's height (a flex column).
+    fill: bool,
 }
 
 impl ScrollArea {
@@ -27,12 +29,22 @@ impl ScrollArea {
             children: SmallVec::new(),
             appearance: None,
             handle: None,
+            fill: false,
         }
     }
 
     /// Draws in this appearance instead of the window's (the gallery).
     pub fn appearance(mut self, appearance: Appearance) -> Self {
         self.appearance = Some(appearance);
+        self
+    }
+
+    /// The content is at least as tall as the viewport, as a flex column, so
+    /// a page's `flex-1` part stretches to the bottom (Electron's
+    /// `CONFIG_GRID_PAIR`: the rule between Settings' two columns runs to the
+    /// page's foot even when the content is short).
+    pub fn fill(mut self, fill: bool) -> Self {
+        self.fill = fill;
         self
     }
 
@@ -70,7 +82,20 @@ impl RenderOnce for ScrollArea {
                     .size_full()
                     .track_scroll(&handle)
                     .overflow_y_scroll()
-                    .children(self.children),
+                    .map(|scroll| {
+                        if self.fill {
+                            scroll.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .w_full()
+                                    .min_h(gpui::relative(1.0))
+                                    .children(self.children),
+                            )
+                        } else {
+                            scroll.children(self.children)
+                        }
+                    }),
             )
             .child(
                 div().absolute().top_0().left_0().size_full().child(

@@ -4,6 +4,7 @@
 //! corner pick writes the highlight's place into the overlay layout
 //! (Electron's `snapHighlightToAnchor`).
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -16,8 +17,9 @@ use tokio::sync::watch;
 use videorc_app_core::chat::LiveChat;
 use videorc_app_core::chat::highlight::FAILURE_SHOWN_FOR;
 use videorc_app_core::chat::highlight_driver::{self as driver, ChatHighlight};
+use videorc_app_core::chat::images;
 use videorc_app_core::chat::model::CommentHighlightState;
-use videorc_app_core::chat::model::LiveChatMessage;
+use videorc_app_core::chat::model::{LiveChatMessage, LiveChatProviderState};
 use videorc_app_core::chat::store::DeliveryCursor;
 use videorc_app_core::chat::view::{self, platform_label};
 use videorc_app_core::client::BackendEvent;
@@ -31,10 +33,15 @@ use videorc_app_core::stream_manager::copy::{
 use videorc_app_core::stream_manager::pane::{
     self, ChatFilter, chat_pane_messages, filter_platforms,
 };
+use videorc_app_core::stream_manager::removal::{
+    self, ModerationOperation, OutcomeKind, latest_by_message, removal_outcome_toast,
+    remove_from_chat_available,
+};
 use videorc_app_core::stream_manager::send::{
     CHAT_SEND_MAX_CHARS, draft_length, validate_chat_draft, writable_providers,
 };
 use videorc_app_core::studio::screen_views::talk_show_room_in;
+use videorc_app_core::user_error::{Failure, REMOVE_THE_MESSAGE, toast_user_error};
 use videorc_kit::{
     badge::{Badge, BadgeVariant},
     button::{Button, ButtonSize, ButtonVariant},
@@ -46,12 +53,19 @@ use videorc_kit::{
     shortcut_keys::ShortcutKeys,
     switch::Switch,
     theme::{self, hsla},
+    toast::{ToastData, ToastKind, Toaster},
     toggle_group::{ToggleGroup, ToggleItem},
 };
 
 use super::SharedStudio;
 use super::layout::{Tier, full_labels};
-use super::rows::{OnHighlight, chat_row};
+use super::rows::{OnHighlight, OnRemove, chat_row};
+use crate::screens::chat_media::{self, Picture};
+
+/// How many emote/GIF pictures to keep for the visible chat.
+const MEDIA_CACHE: usize = 512;
+
+const UNDO: &str = "Undo";
 
 /// `overlays.layout`: the backend's placement as it changes.
 const OVERLAY_LAYOUT_EVENT: &str = "overlays.layout";
@@ -110,10 +124,17 @@ pub struct ChatPane {
     filter: ChatFilter,
     /// Destinations + message platforms (≥2 draws the platform chips).
     platforms: Vec<String>,
+    /// Live chat providers (Remove from chat's scope check).
+    providers: Vec<LiveChatProviderState>,
     messages: Vec<Arc<LiveChatMessage>>,
     mention_names: Vec<String>,
     live: bool,
     can_send: bool,
+    /// Session removals (`liveChat.moderationOperation`).
+    operations: Vec<ModerationOperation>,
+    /// Message ids with Remove in flight (Undo toast or the RPC).
+    requesting: Vec<String>,
+    toaster: Entity<Toaster>,
     /// P962: the destinations whose chat only a sign-in brings.
     sign_in_rows: Vec<pane::SignInRow>,
     search: Entity<InputState>,
@@ -142,6 +163,8 @@ pub struct ChatPane {
     /// `overlays.layout`, once read: the card's rects.
     overlay_layout: Option<Value>,
     anchor: HighlightAnchor,
+    /// Emote and GIF pictures (P198), keyed by remote URL.
+    pictures: Rc<HashMap<String, Picture>>,
     _search: Subscription,
     _draft: Subscription,
 }
@@ -151,6 +174,8 @@ impl ChatPane {
         studio: SharedStudio,
         runtime: tokio::runtime::Handle,
         mut live_chat: watch::Receiver<LiveChat>,
+        mut moderation: watch::Receiver<Vec<ModerationOperation>>,
+        toaster: Entity<Toaster>,
         live: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -187,6 +212,7 @@ impl ChatPane {
         let sign_in_rows = pane::chat_sign_in_rows(&seed.providers);
         let delivery_cursor = seed.delivery.cursor();
         let session_id = seed.session_id.clone();
+        let operations = moderation.borrow().clone();
         let mut events = studio.backend().subscribe();
         cx.spawn(async move |this, cx| {
             loop {
@@ -221,15 +247,35 @@ impl ChatPane {
             }
         })
         .detach();
+        cx.spawn(async move |this, cx| {
+            loop {
+                if moderation.changed().await.is_err() {
+                    break;
+                }
+                let operations = moderation.borrow().clone();
+                let alive = this.update(cx, |pane, cx| {
+                    pane.operations = operations;
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         let mut pane = Self {
             studio,
             runtime,
             filter: ChatFilter::default(),
             platforms,
+            providers: seed.providers.clone(),
             messages,
             mention_names,
             live,
             can_send,
+            operations,
+            requesting: Vec::new(),
+            toaster,
             sign_in_rows,
             search,
             draft,
@@ -249,6 +295,7 @@ impl ChatPane {
             session_id,
             overlay_layout: None,
             anchor: HighlightAnchor::default(),
+            pictures: Rc::new(HashMap::new()),
             _search: search_sub,
             _draft: draft_sub,
         };
@@ -338,10 +385,12 @@ impl ChatPane {
             room_open,
             self.overlay_layout.as_ref(),
         );
-        let click = match self
-            .highlight
-            .click(&message, self.session_id.as_deref(), &canvas)
-        {
+        let click = match self.highlight.click(
+            &message,
+            self.session_id.as_deref(),
+            &canvas,
+            self.anchor.id(),
+        ) {
             Ok(click) => click,
             Err(mark) => {
                 self.expire_later(mark, cx);
@@ -484,13 +533,18 @@ impl ChatPane {
 
     fn apply_live_chat(&mut self, chat: &LiveChat, cx: &mut Context<Self>) {
         let (messages, platforms, mention_names, can_send) = view_from_chat(chat);
+        let session_changed = self.session_id != chat.session_id;
         self.messages = messages;
         self.platforms = platforms;
+        self.providers = chat.providers.clone();
         self.mention_names = mention_names;
         self.can_send = can_send;
         self.sign_in_rows = pane::chat_sign_in_rows(&chat.providers);
         self.composer = self.live && can_send;
         self.session_id = chat.session_id.clone();
+        if session_changed {
+            self.requesting.clear();
+        }
         let progress = chat.delivery.progress(Some(self.delivery_cursor));
         self.delivery_cursor = chat.delivery.cursor();
         if progress.reset || self.following {
@@ -505,7 +559,191 @@ impl ChatPane {
                 self.incomplete = true;
             }
         }
+        self.warm_media(cx);
         cx.notify();
+    }
+
+    /// Cache emote and GIF pictures for the rows on screen (P198).
+    fn warm_media(&mut self, cx: &mut Context<Self>) {
+        let mut wanted: Vec<(String, bool)> = Vec::new();
+        for message in &self.messages {
+            let row = videorc_app_core::stream_manager::rows::ManagerRow::new(
+                message,
+                videorc_app_core::chat::highlight::RowHighlight::default(),
+                self.live,
+                &self.mention_names,
+            );
+            for (url, as_gif) in chat_media::media_urls(&row.pieces, &row.gifs) {
+                if !self.pictures.contains_key(&url)
+                    && !wanted.iter().any(|(existing, _)| existing == &url)
+                {
+                    wanted.push((url, as_gif));
+                }
+            }
+        }
+        if self.pictures.len() + wanted.len() > MEDIA_CACHE {
+            let keep: std::collections::HashSet<String> = self
+                .messages
+                .iter()
+                .flat_map(|message| {
+                    let row = videorc_app_core::stream_manager::rows::ManagerRow::new(
+                        message,
+                        videorc_app_core::chat::highlight::RowHighlight::default(),
+                        self.live,
+                        &self.mention_names,
+                    );
+                    chat_media::media_urls(&row.pieces, &row.gifs)
+                        .into_iter()
+                        .map(|(url, _)| url)
+                })
+                .collect();
+            Rc::make_mut(&mut self.pictures).retain(|url, _| keep.contains(url));
+        }
+        for (url, as_gif) in wanted {
+            self.load_picture(url, as_gif, cx);
+        }
+    }
+
+    fn load_picture(&mut self, url: String, as_gif: bool, cx: &mut Context<Self>) {
+        if self.pictures.contains_key(&url) {
+            return;
+        }
+        Rc::make_mut(&mut self.pictures).insert(url.clone(), Picture::Loading);
+        let backend = self.studio.backend().clone();
+        let remote = url.clone();
+        let kind = chat_media::cache_kind_for_url(&remote, as_gif);
+        let job = self.runtime.spawn(async move {
+            let local = driver::cache_image_as(&*backend, &remote, kind).await?;
+            let bytes = images::read_route(&local).await.ok()?;
+            Some(chat_media::picture_from_bytes(bytes))
+        });
+        cx.spawn(async move |this, cx| {
+            let picture = job.await.ok().flatten().unwrap_or(Picture::Failed);
+            let _ = this.update(cx, |pane, cx| {
+                Rc::make_mut(&mut pane.pictures).insert(url, picture);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Whether a flagged message can still be removed (P1268).
+    pub fn can_remove(&self, message_id: &str) -> bool {
+        if !self.live {
+            return false;
+        }
+        let Some(message) = self.messages.iter().find(|m| m.id == message_id) else {
+            return false;
+        };
+        let latest = latest_by_message(&self.operations);
+        let operation = latest.get(message_id).copied();
+        let requesting = self.requesting.iter().any(|id| id == message_id);
+        remove_from_chat_available(message, operation, requesting)
+            && removal::remove_from_chat_blocked_reason(message, &self.providers).is_none()
+    }
+
+    /// Manual Remove from chat (⋯ menu or Co-host Shift+Backspace): 3 s Undo
+    /// toast, then `liveChat.moderation.request`.
+    pub fn remove_from_chat(
+        &mut self,
+        message_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_remove(message_id) || self.requesting.iter().any(|id| id == message_id) {
+            return;
+        }
+        let Some(message) = self.messages.iter().find(|m| m.id == message_id).cloned() else {
+            return;
+        };
+        self.requesting.push(message.id.clone());
+        let toast_id = SharedString::from(removal::undo_toast_id(&message.id));
+        let title = removal::undo_toast_title(&message.author_name);
+        let message_id = message.id.clone();
+        let toaster = self.toaster.clone();
+        let entity = cx.entity();
+        let mut toast = ToastData::new(ToastKind::Plain, title);
+        toast.timeout = Some(Some(removal::REMOVE_UNDO));
+        toast = toast.action(UNDO, {
+            let message_id = message_id.clone();
+            let toast_id = toast_id.clone();
+            let toaster = toaster.clone();
+            let entity = entity.clone();
+            move |window, cx| {
+                let _ = entity.update(cx, |pane, cx| {
+                    pane.requesting.retain(|id| id != &message_id);
+                    cx.notify();
+                });
+                toaster.update(cx, |toaster, cx| toaster.dismiss(&toast_id, window, cx));
+            }
+        });
+        let flush = Rc::new({
+            let message_id = message_id.clone();
+            let entity = entity.clone();
+            move |_: &mut Window, cx: &mut App| {
+                let _ = entity.update(cx, |pane, cx| {
+                    pane.flush_removal(&message_id, cx);
+                });
+            }
+        });
+        toast.on_auto_close = Some(flush.clone());
+        toast.on_close = Some(flush);
+        self.toaster.update(cx, |toaster, cx| {
+            toaster.show(toast_id, toast, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn flush_removal(&mut self, message_id: &str, cx: &mut Context<Self>) {
+        if !self.requesting.iter().any(|id| id == message_id) {
+            return;
+        }
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        let message_id = message_id.to_string();
+        let job = {
+            let message_id = message_id.clone();
+            runtime.spawn(async move { studio.request_chat_removal(&message_id).await })
+        };
+        cx.spawn(async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |pane, cx| {
+                pane.requesting.retain(|id| id != &message_id);
+                match result {
+                    Ok(Ok(operation)) => {
+                        if let Some((kind, text)) = removal_outcome_toast(&operation, false) {
+                            let toast_kind = match kind {
+                                OutcomeKind::Success => ToastKind::Success,
+                                OutcomeKind::Warning => ToastKind::Warning,
+                                OutcomeKind::Error => ToastKind::Error,
+                                OutcomeKind::Message => ToastKind::Plain,
+                            };
+                            let id = format!("chat-removal:{}", operation.operation_id);
+                            // Outcome toasts go through the notice store on
+                            // the main window; the Stream Manager only needs
+                            // the row chip from the ledger.
+                            let _ = (toast_kind, text, id);
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        let toast_id = format!("chat-removal:{message_id}");
+                        if let Some(command) = toast_user_error(
+                            Failure::Sentence {
+                                text: &error.message,
+                                warning: false,
+                            },
+                            REMOVE_THE_MESSAGE,
+                            &toast_id,
+                        ) {
+                            pane.studio.post_notices(vec![command]);
+                        }
+                    }
+                    Err(_) => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn follow_newest(&mut self, cx: &mut Context<Self>) {
@@ -903,8 +1141,19 @@ impl Render for ChatPane {
                 let _ = this.update(app, |pane, cx| pane.press_highlight(&id, cx));
             })
         };
+        let on_remove: OnRemove = {
+            let this = this.clone();
+            Rc::new(move |id: &str, window: &mut Window, app: &mut App| {
+                let id = id.to_string();
+                let _ = this.update(app, |pane, cx| pane.remove_from_chat(&id, window, cx));
+            })
+        };
         let highlight = self.highlight.clone();
         let mention_names = self.mention_names.clone();
+        let providers = self.providers.clone();
+        let latest = latest_by_message(&self.operations);
+        let requesting = self.requesting.clone();
+        let pictures = self.pictures.clone();
         let completion_scroll = ScrollHandle::new();
         let show_jump = !self.following && !shown.is_empty();
         let (jump_label, jump_name) = view::jump_chip(self.unread, self.incomplete);
@@ -954,12 +1203,19 @@ impl Render for ChatPane {
                                 highlight.applying_id.as_deref(),
                                 highlight.failure.as_ref(),
                             );
+                            let operation = latest.get(message.id.as_str()).copied();
+                            let in_flight = requesting.iter().any(|id| id == &message.id);
                             chat_row(
                                 message,
                                 presentation,
                                 live,
                                 &mention_names,
+                                &providers,
+                                operation,
+                                in_flight,
+                                &pictures,
                                 on_highlight.clone(),
+                                on_remove.clone(),
                             )
                         })),
                 )

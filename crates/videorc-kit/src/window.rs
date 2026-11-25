@@ -4,7 +4,10 @@
 //! its own toolbar band over the window's solid, as `window-glass.ts` does
 //! for Electron.
 
-use gpui::{Bounds, Pixels, SharedString, TitlebarOptions, WindowBounds, WindowOptions, point, px};
+use gpui::{
+    Bounds, Pixels, SharedString, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
+    WindowOptions, point, px,
+};
 
 use crate::tokens::size;
 
@@ -15,9 +18,9 @@ const TRAFFIC_LIGHTS_HEIGHT: f32 = 14.0;
 
 /// A kit window. On macOS the title bar is hidden and the traffic lights sit
 /// on the 40 px toolbar band at (14, 13) (P044). On Windows and Linux the OS
-/// draws the native title bar (P046); Mica (P045) waits on the Windows glass
-/// path. The window's root view paints the theme's `glass_solid` behind
-/// everything.
+/// draws the native title bar (P046). Windows 11 gets Mica (P045) so
+/// contributors can try the material; the root still paints `glass_solid`
+/// over it until a glass path lands.
 pub fn options(title: impl Into<SharedString>, bounds: Bounds<Pixels>) -> WindowOptions {
     let title = title.into();
     #[cfg(target_os = "macos")]
@@ -35,9 +38,14 @@ pub fn options(title: impl Into<SharedString>, bounds: Bounds<Pixels>) -> Window
         appears_transparent: false,
         traffic_light_position: None,
     });
+    #[cfg(target_os = "windows")]
+    let window_background = WindowBackgroundAppearance::MicaBackdrop;
+    #[cfg(not(target_os = "windows"))]
+    let window_background = WindowBackgroundAppearance::Opaque;
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar,
+        window_background,
         ..Default::default()
     }
 }

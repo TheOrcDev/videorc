@@ -67,9 +67,11 @@ pub mod scheduled;
 pub mod scheduled_copy;
 pub mod setup;
 pub mod stream_report;
+pub mod talk_show_outputs;
 pub mod targets;
 pub mod time_zones;
 pub mod watchdog;
+pub mod watchdog_notify;
 pub mod watchdog_section;
 
 use accounts::{

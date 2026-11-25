@@ -23,6 +23,7 @@ use videorc_app_core::desktop::system_access::{
 };
 use videorc_app_core::nav::PageId;
 use videorc_app_core::protocol::SoundboardSettingsParams;
+use videorc_app_core::studio::StudioBackend;
 use videorc_app_core::studio::audio_levels::MicLevels;
 use videorc_app_core::studio::audio_mixer;
 use videorc_app_core::studio::audio_section::{AudioMeters, AudioMetersView, IssueAction};
@@ -36,7 +37,8 @@ use videorc_app_core::studio::sources_audio::{
 };
 use videorc_app_core::studio::sources_page::{
     ChipTone, GrantAction, GrantRow, GrantState, PermissionInputs, SourcePermissionAlert,
-    SourcesPageInput, SourcesPageView, VideoSourceView, copy as page_copy, sources_page_view,
+    SourcesPageInput, SourcesPageView, SyntheticView, VideoSourceView, copy as page_copy,
+    sources_page_view,
 };
 use videorc_app_core::studio::sources_section::copy as section_copy;
 use videorc_app_core::{BackendClient, Studio, StudioSnapshot};
@@ -45,15 +47,15 @@ use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::list_row::{GroupedList, ListRow};
-use videorc_kit::navigable_row::NavigableRow;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::select::Select;
+use videorc_kit::settings_row::SettingsRow;
 use videorc_kit::slider::{Slider, SliderEvent, SliderState};
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
-use videorc_kit::tokens::{size, text};
+use videorc_kit::tokens::{Theme, size, text};
 
 use crate::app::permissions::Permissions;
 use crate::app::shell::Shell;
@@ -72,8 +74,8 @@ const METER_TICK: Duration = Duration::from_millis(33);
 /// Binds ⌘/Ctrl+↑/↓ for the Sources Audio column; call once at start.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("secondary-up", FocusPreviousStrip, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-down", FocusNextStrip, Some(KEY_CONTEXT)),
+        KeyBinding::new(secondary!("up"), FocusPreviousStrip, Some(KEY_CONTEXT)),
+        KeyBinding::new(secondary!("down"), FocusNextStrip, Some(KEY_CONTEXT)),
     ]);
 }
 
@@ -174,8 +176,201 @@ fn status_chip(
         .pulse(live)
 }
 
+/// The header's small outline tag after the title (`<Badge variant="outline">`).
 fn tag_badge(label: impl Into<SharedString>) -> Badge {
-    Badge::new(label).variant(BadgeVariant::Neutral)
+    Badge::new(label).variant(BadgeVariant::Outline)
+}
+
+/// `SourceItem`'s body indent (`pl-10.5`): the row's 12 px padding, the
+/// 20 px icon tile and the 10 px gap, so the body starts under the title.
+const ITEM_INDENT: f32 = 42.0;
+
+/// `SourceItem`'s header: the ListRow at `h-auto min-h-10 py-1.5`, so a
+/// 32 px row with 4 px over and under it is the 40 px header.
+fn item_header(row: ListRow) -> gpui::Div {
+    div().py(px(4.)).child(row)
+}
+
+/// The header's source icon: 16 px, muted, subtle while the source is off.
+fn source_icon(name: IconName, disabled: bool, t: &Theme) -> impl IntoElement {
+    let ink = if disabled {
+        t.subtle
+    } else {
+        t.muted_foreground
+    };
+    icon(name, 16.0, hsla(ink))
+}
+
+/// `source-item-body`: `flex min-w-0 flex-col gap-2 pr-3 pb-3 pl-10.5`.
+fn item_body() -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w(px(0.))
+        .gap(px(8.))
+        .pl(px(ITEM_INDENT))
+        .pr(px(12.))
+        .pb(px(12.))
+}
+
+/// `source-item-more`: `flex min-w-0 flex-col gap-3 border-t py-3 pr-3 pl-10.5`.
+fn item_more(t: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w(px(0.))
+        .gap(px(12.))
+        .border_t_1()
+        .border_color(hsla(t.border))
+        .py(px(12.))
+        .pr(px(12.))
+        .pl(px(ITEM_INDENT))
+}
+
+/// `SourceFacts`: `text-xs text-muted-foreground`.
+fn facts_line(t: &Theme, words: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .type_scale(text::META)
+        .text_color(hsla(t.muted_foreground))
+        .child(words.into())
+}
+
+/// The status hint under the body: `text-xs text-foreground`.
+fn hint_line(t: &Theme, words: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .type_scale(text::META)
+        .text_color(hsla(t.foreground))
+        .child(words.into())
+}
+
+/// The Synthetic and Low-light rows in a body: an `text-xs font-medium`
+/// title over its `text-xs` muted line, the small switch at the end.
+fn labelled_switch(
+    t: &Theme,
+    title: &'static str,
+    description: &'static str,
+    switch: Switch,
+) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w(px(0.))
+                .child(
+                    div()
+                        .type_scale(text::META)
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(hsla(t.foreground))
+                        .child(title),
+                )
+                .child(facts_line(t, description)),
+        )
+        .child(switch.small(true))
+}
+
+/// A control row's readout: `font-mono text-xs text-muted-foreground`.
+fn value_text(t: &Theme, words: impl Into<SharedString>) -> gpui::Div {
+    // `font::MONO[0]` is the CSS `ui-monospace`, which GPUI can't load (kit
+    // request); the LCD's loadable mono face until the token carries one.
+    div()
+        .font_family(crate::lcd::SCREEN_FONT)
+        .type_scale(text::META)
+        .whitespace_nowrap()
+        .text_color(hsla(t.muted_foreground))
+        .child(words.into())
+}
+
+/// The readout off its default: a ghost xs button that puts it back, the
+/// reset's words in its tooltip (`SourceControlRow`'s `reset`).
+fn reset_value(
+    id: &'static str,
+    value: String,
+    reset: String,
+    t: &Theme,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .mr(px(-8.))
+        .child(
+            Button::new(id)
+                .size(ButtonSize::Xs)
+                .variant(ButtonVariant::Ghost)
+                .accessibility_label(format!("{value}. {reset}"))
+                .tooltip(reset)
+                .child(value_text(t, value))
+                .on_click(on_click),
+        )
+        .into_any_element()
+}
+
+/// `SourceControlRow`: `Gain [——●——] 0.0 dB`. The label is `w-9 text-xs`
+/// muted, the control fills the line, and the readout column is `8ch` wide
+/// so a drag never resizes the row.
+fn control_row(
+    t: &Theme,
+    label: &'static str,
+    control: impl IntoElement,
+    value: AnyElement,
+) -> gpui::Div {
+    div()
+        .flex()
+        .min_w(px(0.))
+        .items_center()
+        .gap(px(12.))
+        .child(
+            div()
+                .flex_none()
+                .w(px(36.))
+                .type_scale(text::META)
+                .text_color(hsla(t.muted_foreground))
+                .child(label),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_1()
+                .min_w(px(0.))
+                .items_center()
+                .child(control),
+        )
+        .child(
+            div()
+                .flex_none()
+                .min_w(px(58.))
+                .flex()
+                .justify_end()
+                .child(value),
+        )
+}
+
+/// The Microphone header's Mute (`MuteToggle size="icon"`): a 28 px square
+/// with the speaker, the mute tone while muted.
+fn mute_button(
+    muted: bool,
+    t: &Theme,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> Button {
+    let (speaker, ink) = if muted {
+        (IconName::SpeakerSlash, t.channel_mute_foreground)
+    } else {
+        (IconName::SpeakerHigh, t.muted_foreground)
+    };
+    Button::new("mute-mic")
+        .size(ButtonSize::Icon)
+        .variant(ButtonVariant::Secondary)
+        .accessibility_label(if muted {
+            audio_mixer::copy::UNMUTE_MICROPHONE
+        } else {
+            audio_mixer::copy::MUTE_MICROPHONE
+        })
+        .tooltip(audio_mixer::copy::MUTE_MICROPHONE)
+        .child(icon(speaker, 16.0, hsla(ink)))
+        .on_click(on_click)
 }
 
 fn more_button(
@@ -861,6 +1056,13 @@ impl SourcesPanel {
         }
     }
 
+    /// P283: Open Scenes brings the Studio's Scenes section into view.
+    fn open_studio_scenes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(shell) = self.shell.as_ref() {
+            let _ = shell.update(cx, |shell, cx| shell.open_studio_scenes(window, cx));
+        }
+    }
+
     fn toggle_more(&mut self, key: &'static str, cx: &mut Context<Self>) {
         if !self.ui.more.insert(key) {
             self.ui.more.remove(key);
@@ -881,13 +1083,19 @@ impl SourcesPanel {
 }
 
 impl SourcesPanel {
+    /// `SourcePermissionAlertsView`: `flex flex-col gap-2 px-gutter pt-3`.
     fn render_alerts(
         &self,
         alerts: &[SourcePermissionAlert],
         device_problem: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut column = div().flex().flex_col().gap(px(8.));
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .px(px(size::GUTTER))
+            .pt(px(12.));
         for alert in alerts {
             let pane = alert.pane;
             let pending = self.ui.pending_alert == Some(pane);
@@ -916,11 +1124,12 @@ impl SourcesPanel {
             let entity = cx.entity();
             column = column.child(
                 Alert::new("device-problem")
-                    .variant(AlertVariant::Warning)
+                    .variant(AlertVariant::Quiet)
                     .title(page_copy::DEVICE_PROBLEM)
                     .action(
                         Button::new("open-health")
                             .label(OPEN_HEALTH_LABEL)
+                            .size(ButtonSize::Xs)
                             .variant(ButtonVariant::Ghost)
                             .on_click(move |_, window, cx| {
                                 entity.update(cx, |panel, cx| {
@@ -933,6 +1142,10 @@ impl SourcesPanel {
         column.into_any_element()
     }
 
+    /// The device picker with its lines under the trigger (the list's
+    /// status, why it is off, and `SourceSwitchStatus`), as the React
+    /// `DevicePicker`'s description sits under it.
+    #[allow(clippy::too_many_arguments)]
     fn render_picker(
         &self,
         id: &'static str,
@@ -940,131 +1153,605 @@ impl SourcesPanel {
         picker: &PickerView,
         disabled: bool,
         disabled_reason: Option<&str>,
-        t: &videorc_kit::tokens::Theme,
+        switch_line: Option<String>,
+        t: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let entity = cx.entity();
-        let mut block = div().flex().flex_col().gap(px(6.));
-        if !picker.list_status.is_empty() {
-            block = block.child(self.muted_line(t, picker.list_status.clone()));
-        }
-        if let Some(reason) = disabled_reason {
-            block = block.child(self.muted_line(t, reason.to_string()));
-        }
-        block = block.child(
+        let mut block = div().flex().flex_col().min_w(px(0.)).gap(px(6.)).child(
             fill_select(id, picker, disabled).on_change(move |value, _, cx| {
                 entity.update(cx, |panel, cx| {
                     panel.select_device(kind, value.to_string(), cx);
                 });
             }),
         );
+        if !picker.list_status.is_empty() {
+            block = block.child(self.muted_line(t, picker.list_status.clone()));
+        }
+        if let Some(reason) = disabled_reason {
+            block = block.child(self.muted_line(t, reason.to_string()));
+        }
+        if let Some(line) = switch_line {
+            block = block.child(self.muted_line(t, line));
+        }
         block.into_any_element()
     }
 
+    /// One Video `SourceItem` (`video-sources.tsx`): the header row with its
+    /// icon and status, then the body under the title: picker, facts (or
+    /// the camera's shortfall), the scene line with Open Scenes, the
+    /// Synthetic or Low-light switch, and the status hint last.
+    #[allow(clippy::too_many_arguments)]
     fn render_video_row(
         &self,
         title: &'static str,
+        icon_name: IconName,
         kind: SourceKind,
         picker_id: &'static str,
         video: &VideoSourceView,
-        t: &videorc_kit::tokens::Theme,
+        synthetic: Option<SyntheticView>,
+        t: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let disabled = video.disabled || video.row.disabled_reason.is_some();
-        let mut chips = div().flex().items_center().gap(px(8.));
+        let mut row = ListRow::new(format!("{picker_id}-title"), title).icon(source_icon(
+            icon_name,
+            video.disabled,
+            t,
+        ));
         if let Some(status) = video.status.as_ref() {
-            chips = chips.child(status_chip(
+            row = row.child(status_chip(
                 format!("{picker_id}-status"),
                 status.label.clone(),
                 status.tone,
             ));
         }
-        if let Some(line) = video.row.status.as_ref() {
-            chips = chips.child(status_chip(
-                format!("{picker_id}-row-status"),
-                line.message.clone(),
-                ChipTone::Warn,
-            ));
-        }
-        let mut body = div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(ListRow::new(format!("{picker_id}-title"), title).child(chips));
-        if let Some(hint) = video.status.as_ref().and_then(|s| s.hint.as_ref()) {
-            body = body.child(div().px(px(12.)).child(self.muted_line(t, hint.clone())));
-        }
-        body = body.child(div().px(px(12.)).child(self.render_picker(
+        let mut body = item_body().child(self.render_picker(
             picker_id,
             kind,
             &video.row.picker,
             disabled,
             video.row.disabled_reason.as_deref(),
+            video.row.status.as_ref().map(|line| line.message.clone()),
             t,
             cx,
-        )));
+        ));
         if let Some(shortfall) = video.shortfall.as_ref() {
             body = body.child(
-                div().px(px(12.)).child(
-                    Alert::new(format!("{picker_id}-shortfall"))
-                        .variant(AlertVariant::Warning)
-                        .title(shortfall.clone()),
-                ),
+                Alert::new(format!("{picker_id}-shortfall"))
+                    .variant(AlertVariant::Warning)
+                    .title(shortfall.clone()),
             );
         } else if let Some(facts) = video.facts.as_ref() {
-            body = body.child(
-                div()
-                    .px(px(12.))
-                    .pb(px(4.))
-                    .child(self.muted_line(t, facts.clone())),
-            );
+            body = body.child(facts_line(t, facts.clone()));
         }
         if let Some(scene) = video.scene.as_ref() {
             let entity = cx.entity();
-            body = body.child(
-                NavigableRow::new(
-                    format!("{picker_id}-scene"),
-                    scene.line.clone(),
-                    scene.open_label,
-                )
-                .on_navigate(move |_, window, cx| {
-                    entity.update(cx, |panel, cx| {
-                        panel.open_page(PageId::Studio, window, cx);
-                    });
-                }),
-            );
-        }
-        if let Some(low_light) = video.low_light.as_ref() {
-            let checked = low_light.checked;
-            let disabled = low_light.disabled;
-            let entity = cx.entity();
+            // The action keeps the line's end, however the words wrap.
             body = body.child(
                 div()
+                    .flex()
+                    // GPUI's baseline follows a wrapped line's last row; the
+                    // action sits on the first, as Electron's does.
+                    .items_start()
+                    .justify_between()
+                    .gap(px(12.))
+                    .type_scale(text::META)
+                    .text_color(hsla(t.muted_foreground))
                     .child(
-                        ListRow::new("low-light", low_light.label).child(
-                            Switch::new("low-light-switch")
-                                .accessibility_label(low_light.label)
-                                .checked(checked)
-                                .disabled(disabled)
+                        div()
+                            .min_w(px(0.))
+                            .child(SharedString::from(scene.line.clone())),
+                    )
+                    .child(
+                        // The 24 px Xs button centred on the 16 px first line.
+                        div().flex_none().mr(px(-8.)).mt(px(-4.)).child(
+                            Button::new(format!("{picker_id}-open-scenes"))
+                                .label(scene.open_label)
+                                .size(ButtonSize::Xs)
+                                .variant(ButtonVariant::Ghost)
+                                .on_click(move |_, window, cx| {
+                                    entity.update(cx, |panel, cx| {
+                                        panel.open_studio_scenes(window, cx);
+                                    });
+                                }),
+                        ),
+                    ),
+            );
+        }
+        if let Some(synthetic) = synthetic {
+            let entity = cx.entity();
+            body = body.child(labelled_switch(
+                t,
+                page_copy::SYNTHETIC,
+                page_copy::SYNTHETIC_DESCRIPTION,
+                Switch::new("synthetic-switch")
+                    .accessibility_label(page_copy::SYNTHETIC)
+                    .checked(synthetic.checked)
+                    .disabled(synthetic.disabled)
+                    .on_change(move |value, _, cx| {
+                        entity.update(cx, |panel, _| {
+                            let studio = panel.studio.clone();
+                            panel.run_studio(async move {
+                                let _ = studio.set_test_pattern(value).await;
+                            });
+                        });
+                    }),
+            ));
+        }
+        if let Some(low_light) = video.low_light.as_ref() {
+            let entity = cx.entity();
+            body = body.child(labelled_switch(
+                t,
+                low_light.label,
+                low_light.description,
+                Switch::new("low-light-switch")
+                    .accessibility_label(low_light.label)
+                    .checked(low_light.checked)
+                    .disabled(low_light.disabled)
+                    .on_change(move |value, _, cx| {
+                        entity.update(cx, |panel, _| {
+                            let studio = panel.studio.clone();
+                            panel.run_studio(async move {
+                                let _ = studio.set_camera_low_light(value).await;
+                            });
+                        });
+                    }),
+            ));
+        }
+        if let Some(hint) = video.status.as_ref().and_then(|s| s.hint.as_ref()) {
+            body = body.child(hint_line(t, hint.clone()));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .child(item_header(row))
+            .child(body)
+            .into_any_element()
+    }
+
+    /// The Microphone `SourceItem` (`MicrophoneChannel`): Mute in the
+    /// header; the picker, the level, Gain and Noise reduction in the body
+    /// (whether or not a microphone is chosen); Sync and Keep microphone
+    /// ready folded into More.
+    fn render_microphone(
+        &self,
+        mic: &videorc_app_core::studio::sources_audio::MicrophoneChannelView,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let more = self.ui.more.contains("mic");
+        let muted = mic.row.muted;
+        let mut row = ListRow::new("mic-title", audio_mixer::copy::MICROPHONE).icon(source_icon(
+            IconName::Microphone,
+            false,
+            t,
+        ));
+        if let Some(tag) = mic.sync_tag.as_ref() {
+            row = row.alias(tag_badge(tag.clone()));
+        }
+        if let Some(chip) = mic.chip.as_ref() {
+            row = row.child(status_chip("mic-chip", chip.label.clone(), chip.tone));
+        }
+        let entity = cx.entity();
+        row = row.child(mute_button(muted, t, move |_, _, cx| {
+            entity.update(cx, |panel, _| panel.mute_toggle());
+        }));
+        let entity = cx.entity();
+        row = row.child(more_button("more-mic", more, t, move |_, _, cx| {
+            entity.update(cx, |panel, cx| panel.toggle_more("mic", cx));
+        }));
+
+        let mut body = item_body().child(self.render_picker(
+            "mic-picker",
+            SourceKind::Microphone,
+            &mic.row.picker,
+            mic.row.disabled_reason.is_some(),
+            mic.row.disabled_reason.as_deref(),
+            mic.row.status.as_ref().map(|line| line.message.clone()),
+            t,
+            cx,
+        ));
+        if !mic.selected {
+            body = body.child(facts_line(t, audio_copy::NO_MICROPHONE));
+        }
+        body = body.child(self.level_meter(
+            self.meters_view.microphone,
+            &self.meters_view.microphone_lcd,
+            muted || !mic.selected,
+            t,
+        ));
+        let gain_value = match mic.row.gain_reset.clone() {
+            Some(reset) => {
+                let entity = cx.entity();
+                reset_value(
+                    "mic-gain-reset",
+                    mic.row.gain_text.clone(),
+                    reset,
+                    t,
+                    move |_, _, cx| {
+                        entity.update(cx, |panel, _| {
+                            let studio = panel.studio.clone();
+                            panel.run_studio(async move {
+                                studio.set_microphone_gain(0.0).await;
+                            });
+                        });
+                    },
+                )
+            }
+            None => value_text(t, mic.row.gain_text.clone()).into_any_element(),
+        };
+        body = body.child(control_row(
+            t,
+            audio_mixer::copy::GAIN,
+            Slider::new(&self.mic_gain).accessibility_label(audio_mixer::copy::MICROPHONE_GAIN),
+            gain_value,
+        ));
+        if let Some(line) = mic.level_line {
+            body = body.child(facts_line(t, line));
+        }
+        let entity = cx.entity();
+        body = body.child(
+            SettingsRow::new("noise-reduction", audio_copy::NOISE_REDUCTION)
+                // Electron: a bare horizontal Field inside the strip, no inset.
+                .flush(true)
+                .description(mic.noise_reduction.description.clone())
+                .child(
+                    Switch::new("noise-reduction-switch")
+                        .accessibility_label(audio_copy::NOISE_REDUCTION)
+                        .small(true)
+                        .checked(mic.noise_reduction.checked)
+                        .disabled(mic.noise_reduction.disabled)
+                        .on_change(move |value, _, cx| {
+                            entity.update(cx, |panel, _| {
+                                let studio = panel.studio.clone();
+                                panel.run_studio(async move {
+                                    studio.set_microphone_noise_suppression(value).await;
+                                });
+                            });
+                        }),
+                ),
+        );
+
+        let more_area = more.then(|| {
+            let sync = mic.sync_ms;
+            let mut readout = div().flex().items_center().gap(px(4.));
+            if sync != 0 {
+                let entity = cx.entity();
+                readout = readout.child(
+                    Button::new("sync-reset")
+                        .label("Reset")
+                        .size(ButtonSize::Xs)
+                        .variant(ButtonVariant::Ghost)
+                        .on_click(move |_, _, cx| {
+                            entity.update(cx, |panel, _| {
+                                let studio = panel.studio.clone();
+                                panel.run_studio(async move {
+                                    studio.set_microphone_sync_offset(0, true).await;
+                                });
+                            });
+                        }),
+                );
+            }
+            readout = readout.child(value_text(t, format!("{sync:+} ms")));
+            let mut area = item_more(t).child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .line_height(px(20.))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child(audio_copy::MICROPHONE_SYNC),
+                            )
+                            .child(readout),
+                    )
+                    .child(
+                        Slider::new(&self.sync_ms).accessibility_label(audio_copy::MICROPHONE_SYNC),
+                    )
+                    .child(facts_line(t, mic.sync_description.clone())),
+            );
+            if let Some(keep) = mic.keep_ready.as_ref() {
+                let entity = cx.entity();
+                area = area.child(
+                    SettingsRow::new("keep-ready", audio_copy::KEEP_READY)
+                        .description(keep.description.clone())
+                        .child(
+                            Switch::new("keep-ready-switch")
+                                .accessibility_label(audio_copy::KEEP_READY)
+                                .small(true)
+                                .checked(keep.checked)
                                 .on_change(move |value, _, cx| {
                                     entity.update(cx, |panel, _| {
                                         let studio = panel.studio.clone();
                                         panel.run_studio(async move {
-                                            let _ = studio.set_camera_low_light(value).await;
+                                            studio.set_keep_microphone_warm(value).await;
                                         });
                                     });
                                 }),
                         ),
-                    )
-                    .child(
-                        div()
-                            .px(px(12.))
-                            .pb(px(8.))
-                            .child(self.muted_line(t, low_light.description)),
-                    ),
-            );
+                );
+            }
+            area
+        });
+
+        div()
+            .id("sources-channel-strip-microphone")
+            .track_focus(&self.mic_focus)
+            .tab_index(0)
+            .child(
+                div()
+                    .id(mic.focus)
+                    .flex()
+                    .flex_col()
+                    .child(item_header(row))
+                    .child(body)
+                    .children(more_area),
+            )
+            .into_any_element()
+    }
+
+    /// The System audio `SourceItem` (`SystemAudioSettings`): the switch in
+    /// the header; what it captures; while on, its level and Gain; then any
+    /// issue. The echo guard and the notes sit in More.
+    fn render_system_audio(
+        &self,
+        system: &videorc_app_core::studio::sources_audio::SystemAudioChannelView,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let more = self.ui.more.contains("system");
+        let off = system.row.permission_required;
+        let mut row = ListRow::new("system-title", audio_mixer::copy::SYSTEM_AUDIO)
+            .icon(source_icon(IconName::Desktop, off, t));
+        if let Some(chip) = system.chip.as_ref() {
+            row = row.child(status_chip("system-chip", chip.label.clone(), chip.tone));
+        } else if let Some(chip) = system.row.chip.as_ref() {
+            row = row.child(status_chip(
+                "system-row-chip",
+                chip.label,
+                ChipTone::Neutral,
+            ));
         }
-        GroupedList::new().item(body).into_any_element()
+        let entity = cx.entity();
+        row = row.child(
+            Switch::new("system-audio-toggle")
+                .accessibility_label(audio_mixer::copy::SYSTEM_AUDIO)
+                .small(true)
+                .checked(system.row.checked)
+                .disabled(system.row.disabled)
+                .on_change(move |value, _, cx| {
+                    entity.update(cx, |panel, _| {
+                        let studio = panel.studio.clone();
+                        panel.run_studio(async move {
+                            studio.set_system_audio_enabled(value).await;
+                        });
+                    });
+                }),
+        );
+        let entity = cx.entity();
+        row = row.child(more_button("more-system", more, t, move |_, _, cx| {
+            entity.update(cx, |panel, cx| panel.toggle_more("system", cx));
+        }));
+
+        let mut body = item_body().child(facts_line(t, system.facts.clone()));
+        if system.row.show_level {
+            body = body.child(self.level_meter(
+                self.meters_view.system_audio,
+                &self.meters_view.system_audio_lcd,
+                false,
+                t,
+            ));
+        } else if system.row.idle_line {
+            body = body.child(facts_line(t, audio_mixer::copy::IDLE_LINE));
+        }
+        if system.row.show_gain {
+            let gain_value = match system.row.gain_reset.clone() {
+                Some(reset) if !off => {
+                    let entity = cx.entity();
+                    reset_value(
+                        "sys-gain-reset",
+                        system.row.gain_text.clone(),
+                        reset,
+                        t,
+                        move |_, _, cx| {
+                            entity.update(cx, |panel, _| {
+                                let studio = panel.studio.clone();
+                                panel.run_studio(async move {
+                                    studio.set_system_audio_gain(-6.0).await;
+                                });
+                            });
+                        },
+                    )
+                }
+                _ => value_text(t, system.row.gain_text.clone()).into_any_element(),
+            };
+            body = body.child(control_row(
+                t,
+                audio_mixer::copy::GAIN,
+                Slider::new(&self.sys_gain)
+                    .accessibility_label(audio_mixer::copy::SYSTEM_AUDIO_GAIN)
+                    .disabled(off),
+                gain_value,
+            ));
+        }
+        if let Some(issue) = system.issue.clone() {
+            let mut alert = Alert::new("system-issue")
+                .variant(AlertVariant::Warning)
+                .title(issue);
+            if let Some(action) = system.issue_action {
+                let label = match action {
+                    IssueAction::OpenPermissions => audio_mixer::copy::OPEN_PERMISSIONS,
+                    IssueAction::Resume => audio_mixer::copy::RESUME,
+                };
+                let entity = cx.entity();
+                alert = alert.action(
+                    Button::new("system-issue-action")
+                        .label(label)
+                        .size(ButtonSize::Xs)
+                        .variant(ButtonVariant::Ghost)
+                        .on_click(move |_, window, cx| {
+                            entity.update(cx, |panel, cx| match action {
+                                IssueAction::OpenPermissions => {
+                                    panel.open_page(PageId::Settings, window, cx);
+                                }
+                                IssueAction::Resume => {
+                                    let studio = panel.studio.clone();
+                                    panel.run_studio(async move {
+                                        studio.resume_system_audio().await;
+                                    });
+                                }
+                            });
+                        }),
+                );
+            }
+            body = body.child(alert);
+        }
+
+        let more_area = more.then(|| {
+            let entity = cx.entity();
+            item_more(t)
+                .child(
+                    SettingsRow::new("echo-guard", audio_copy::ECHO_GUARD)
+                        .description(system.echo_guard_description.clone())
+                        .child(
+                            Switch::new("echo-guard-switch")
+                                .accessibility_label(audio_copy::ECHO_GUARD)
+                                .small(true)
+                                .checked(system.echo_guard)
+                                .disabled(off)
+                                .on_change(move |value, _, cx| {
+                                    entity.update(cx, |panel, _| {
+                                        let studio = panel.studio.clone();
+                                        panel.run_studio(async move {
+                                            studio.set_system_audio_echo_guard(value).await;
+                                        });
+                                    });
+                                }),
+                        ),
+                )
+                .child(
+                    div().flex().flex_col().gap(px(4.)).children(
+                        system
+                            .notes
+                            .iter()
+                            .map(|note| facts_line(t, format!("• {note}"))),
+                    ),
+                )
+        });
+
+        div()
+            .id("sources-channel-strip-system-audio")
+            .track_focus(&self.sys_focus)
+            .tab_index(0)
+            .child(
+                div()
+                    .id(system.focus)
+                    .flex()
+                    .flex_col()
+                    .child(item_header(row))
+                    .child(body)
+                    .children(more_area),
+            )
+            .into_any_element()
+    }
+
+    /// The Sounds `SourceItem` (`SoundsSettings`): the level or its idle
+    /// line, Level, and Hear sounds yourself.
+    fn render_sounds(
+        &self,
+        sounds: &videorc_app_core::studio::sources_audio::SoundsChannelView,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let disabled = sounds.disabled;
+        let row = ListRow::new("sounds-title", audio_copy::SOUNDS).icon(source_icon(
+            IconName::SpeakerHigh,
+            disabled,
+            t,
+        ));
+        let mut body = item_body();
+        if sounds.show_level {
+            body = body.child(self.level_meter(
+                self.meters_view.sounds,
+                &self.meters_view.sounds_lcd,
+                false,
+                t,
+            ));
+        } else {
+            body = body.child(facts_line(t, audio_copy::SOUNDS_IDLE));
+        }
+        let level_value = match sounds.volume_reset.clone() {
+            Some(reset) if !disabled => {
+                let entity = cx.entity();
+                reset_value(
+                    "sounds-level-reset",
+                    sounds.volume_text.clone(),
+                    reset,
+                    t,
+                    move |_, _, cx| {
+                        entity.update(cx, |panel, cx| {
+                            panel.apply_sounds_settings(
+                                SoundboardSettingsParams {
+                                    volume_db: Some(SOUNDS_VOLUME_DEFAULT),
+                                    ..Default::default()
+                                },
+                                cx,
+                            );
+                        });
+                    },
+                )
+            }
+            _ => value_text(t, sounds.volume_text.clone()).into_any_element(),
+        };
+        body = body.child(control_row(
+            t,
+            audio_copy::LEVEL,
+            Slider::new(&self.sounds_gain)
+                .accessibility_label(audio_copy::SOUNDS_LEVEL)
+                .disabled(disabled),
+            level_value,
+        ));
+        let entity = cx.entity();
+        body = body.child(
+            SettingsRow::new("hear-sounds", audio_copy::HEAR_SOUNDS)
+                // Electron: a bare horizontal Field inside the strip, no inset.
+                .flush(true)
+                .description(audio_copy::HEAR_SOUNDS_DESCRIPTION)
+                .child(
+                    Switch::new("hear-sounds-switch")
+                        .accessibility_label(audio_copy::HEAR_SOUNDS)
+                        .small(true)
+                        .checked(sounds.monitor)
+                        .disabled(disabled)
+                        .on_change(move |value, _, cx| {
+                            entity.update(cx, |panel, cx| {
+                                panel.apply_sounds_settings(
+                                    SoundboardSettingsParams {
+                                        monitor: Some(value),
+                                        ..Default::default()
+                                    },
+                                    cx,
+                                );
+                            });
+                        }),
+                ),
+        );
+
+        div()
+            .id("sources-channel-strip-sounds")
+            .track_focus(&self.sounds_focus)
+            .tab_index(0)
+            .child(div().flex().flex_col().child(item_header(row)).child(body))
+            .into_any_element()
     }
 }
 
@@ -1081,563 +1768,79 @@ impl Render for SourcesPanel {
         };
         let entity = cx.entity();
 
-        let header = PanelSection::new("sources-header")
-            .description(page.description)
-            .action(
+        // `PageHeader` (`px-gutter flex items-center gap-3 py-2 border-b`):
+        // the intro line with Refresh at its end. The toolbar names the page.
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(size::GUTTER))
+            .py(px(8.))
+            .border_b_1()
+            .border_color(hsla(t.border))
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .flex_1()
+                    .type_scale(text::META)
+                    .text_color(hsla(t.muted_foreground))
+                    .child(page.description),
+            )
+            .child(
                 Button::new("sources-refresh")
-                    .label(refresh_label)
-                    .variant(ButtonVariant::Secondary)
+                    .variant(ButtonVariant::Outline)
+                    .accessibility_label(refresh_label)
+                    .tooltip(page_copy::REFRESH_TOOLTIP)
                     .disabled(page.refreshing)
+                    .child(icon(IconName::ArrowsClockwise, 16.0, hsla(t.foreground)))
+                    .child(refresh_label)
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |panel, cx| panel.refresh(cx));
                     }),
             );
 
-        let mut video = PanelSection::new("sources-video")
+        // The Video column: Screen and Camera, one grouped list.
+        let video = PanelSection::new("sources-video")
             .title(page_copy::VIDEO)
             .description(page.video_description)
-            .child(self.render_video_row(
-                sources::copy::SCREEN,
-                SourceKind::Capture,
-                "screen-picker",
-                &page.screen,
-                t,
-                cx,
-            ));
-        if let Some(synthetic) = page.synthetic.as_ref() {
-            let checked = synthetic.checked;
-            let disabled = synthetic.disabled;
-            let entity = cx.entity();
-            video = video.child(
-                GroupedList::new().item(
-                    div()
-                        .child(
-                            ListRow::new("synthetic", page_copy::SYNTHETIC).child(
-                                Switch::new("synthetic-switch")
-                                    .accessibility_label(page_copy::SYNTHETIC)
-                                    .checked(checked)
-                                    .disabled(disabled)
-                                    .on_change(move |value, _, cx| {
-                                        entity.update(cx, |panel, _| {
-                                            let studio = panel.studio.clone();
-                                            panel.run_studio(async move {
-                                                let _ = studio.set_test_pattern(value).await;
-                                            });
-                                        });
-                                    }),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .px(px(12.))
-                                .pb(px(8.))
-                                .child(self.muted_line(t, page_copy::SYNTHETIC_DESCRIPTION)),
-                        ),
-                ),
-            );
-        }
-        video = video.child(self.render_video_row(
-            section_copy::CAMERA,
-            SourceKind::Camera,
-            "camera-picker",
-            &page.camera,
-            t,
-            cx,
-        ));
-
-        let mut audio_col = PanelSection::new("sources-audio")
-            .title(audio_copy::AUDIO)
-            .description(audio.description);
-
-        // Microphone
-        {
-            let mic = &audio.microphone;
-            let more = self.ui.more.contains("mic");
-            let muted = mic.row.muted;
-            let mut chips = div().flex().items_center().gap(px(8.));
-            if let Some(chip) = mic.chip.as_ref() {
-                chips = chips.child(status_chip("mic-chip", chip.label.clone(), chip.tone));
-            }
-            if let Some(tag) = mic.sync_tag.as_ref() {
-                chips = chips.child(tag_badge(tag.clone()));
-            }
-            let entity = cx.entity();
-            let mute = Switch::new("mute-mic")
-                .accessibility_label(if muted {
-                    audio_mixer::copy::UNMUTE_MICROPHONE
-                } else {
-                    audio_mixer::copy::MUTE_MICROPHONE
-                })
-                .checked(muted)
-                .on_change(move |_, _, cx| {
-                    entity.update(cx, |panel, _| panel.mute_toggle());
-                });
-            let entity = cx.entity();
-            let more_btn = more_button("more-mic", more, t, move |_, _, cx| {
-                entity.update(cx, |panel, cx| panel.toggle_more("mic", cx));
-            });
-            let mut card = div()
-                .id(mic.focus)
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(
-                    ListRow::new("mic-title", audio_mixer::copy::MICROPHONE)
-                        .child(chips)
-                        .child(mute)
-                        .child(more_btn),
-                )
-                .child(div().px(px(12.)).child(self.render_picker(
-                    "mic-picker",
-                    SourceKind::Microphone,
-                    &mic.row.picker,
-                    mic.row.disabled_reason.is_some(),
-                    mic.row.disabled_reason.as_deref(),
-                    t,
-                    cx,
-                )));
-            if !mic.selected {
-                card = card.child(
-                    div()
-                        .px(px(12.))
-                        .child(self.muted_line(t, audio_copy::NO_MICROPHONE)),
-                );
-            } else {
-                card = card
-                    .child(
-                        div()
-                            .px(px(12.))
-                            .child(self.muted_line(t, audio_mixer::copy::MICROPHONE_LEVEL)),
-                    )
-                    .child(div().px(px(12.)).child(self.level_meter(
-                        self.meters_view.microphone,
-                        &self.meters_view.microphone_lcd,
-                        muted,
+            .last(true)
+            .child(
+                GroupedList::new()
+                    .item(self.render_video_row(
+                        sources::copy::SCREEN,
+                        IconName::Monitor,
+                        SourceKind::Capture,
+                        "screen-picker",
+                        &page.screen,
+                        page.synthetic,
                         t,
-                    )));
-                if let Some(line) = mic.level_line {
-                    card = card.child(div().px(px(12.)).child(self.muted_line(t, line)));
-                }
-                let gain_text = mic.row.gain_text.clone();
-                card = card.child(
-                    ListRow::new("mic-gain", audio_mixer::copy::GAIN)
-                        .meta(gain_text)
-                        .child(
-                            div().w(px(180.)).child(
-                                Slider::new(&self.mic_gain)
-                                    .accessibility_label(audio_mixer::copy::GAIN),
-                            ),
-                        ),
-                );
-                if let Some(reset) = mic.row.gain_reset.clone() {
-                    let entity = cx.entity();
-                    card = card.child(
-                        div().px(px(12.)).child(
-                            Button::new("mic-gain-reset")
-                                .label(reset)
-                                .variant(ButtonVariant::Ghost)
-                                .on_click(move |_, _, cx| {
-                                    entity.update(cx, |panel, _| {
-                                        let studio = panel.studio.clone();
-                                        panel.run_studio(async move {
-                                            studio.set_microphone_gain(0.0).await;
-                                        });
-                                    });
-                                }),
-                        ),
-                    );
-                }
-                let noise_on = mic.noise_reduction.checked;
-                let noise_disabled = mic.noise_reduction.disabled;
-                let entity = cx.entity();
-                card = card
-                    .child(
-                        ListRow::new("noise-reduction", audio_copy::NOISE_REDUCTION).child(
-                            Switch::new("noise-reduction-switch")
-                                .accessibility_label(audio_copy::NOISE_REDUCTION)
-                                .checked(noise_on)
-                                .disabled(noise_disabled)
-                                .on_change(move |value, _, cx| {
-                                    entity.update(cx, |panel, _| {
-                                        let studio = panel.studio.clone();
-                                        panel.run_studio(async move {
-                                            studio.set_microphone_noise_suppression(value).await;
-                                        });
-                                    });
-                                }),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .px(px(12.))
-                            .pb(px(8.))
-                            .child(self.muted_line(t, mic.noise_reduction.description.clone())),
-                    );
-            }
-            if more {
-                let sync = mic.sync_ms;
-                let entity = cx.entity();
-                card = card.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.))
-                        .pt(px(8.))
-                        .border_t_1()
-                        .border_color(hsla(t.border))
-                        .child(
-                            div()
-                                .px(px(12.))
-                                .type_scale(text::META)
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .child(audio_copy::MORE_MICROPHONE),
-                        )
-                        .child(
-                            ListRow::new("mic-sync", audio_copy::MICROPHONE_SYNC)
-                                .meta(format!("{sync:+} ms"))
-                                .child(
-                                    div().w(px(180.)).child(
-                                        Slider::new(&self.sync_ms)
-                                            .accessibility_label(audio_copy::MICROPHONE_SYNC),
-                                    ),
-                                )
-                                .child(
-                                    Button::new("sync-reset")
-                                        .label("Reset")
-                                        .variant(ButtonVariant::Ghost)
-                                        .on_click(move |_, _, cx| {
-                                            entity.update(cx, |panel, _| {
-                                                let studio = panel.studio.clone();
-                                                panel.run_studio(async move {
-                                                    studio
-                                                        .set_microphone_sync_offset(0, true)
-                                                        .await;
-                                                });
-                                            });
-                                        }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .px(px(12.))
-                                .child(self.muted_line(t, mic.sync_description.clone())),
-                        ),
-                );
-                if let Some(keep) = mic.keep_ready.as_ref() {
-                    let checked = keep.checked;
-                    let entity = cx.entity();
-                    card = card
-                        .child(
-                            ListRow::new("keep-ready", audio_copy::KEEP_READY).child(
-                                Switch::new("keep-ready-switch")
-                                    .accessibility_label(audio_copy::KEEP_READY)
-                                    .checked(checked)
-                                    .on_change(move |value, _, cx| {
-                                        entity.update(cx, |panel, _| {
-                                            let studio = panel.studio.clone();
-                                            panel.run_studio(async move {
-                                                studio.set_keep_microphone_warm(value).await;
-                                            });
-                                        });
-                                    }),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .px(px(12.))
-                                .pb(px(8.))
-                                .child(self.muted_line(t, keep.description.clone())),
-                        );
-                }
-            }
-            audio_col = audio_col.child(
-                GroupedList::new().item(
-                    div()
-                        .id("sources-channel-strip-microphone")
-                        .track_focus(&self.mic_focus)
-                        .tab_index(0)
-                        .child(card),
-                ),
+                        cx,
+                    ))
+                    .item(self.render_video_row(
+                        section_copy::CAMERA,
+                        IconName::VideoCamera,
+                        SourceKind::Camera,
+                        "camera-picker",
+                        &page.camera,
+                        None,
+                        t,
+                        cx,
+                    )),
             );
-        }
 
-        // System audio
-        if let Some(system) = audio.system_audio.clone() {
-            let more = self.ui.more.contains("system");
-            let mut chips = div().flex().items_center().gap(px(8.));
-            if let Some(chip) = system.chip.as_ref() {
-                chips = chips.child(status_chip("system-chip", chip.label.clone(), chip.tone));
-            } else if let Some(chip) = system.row.chip.as_ref() {
-                chips = chips.child(status_chip(
-                    "system-row-chip",
-                    chip.label,
-                    ChipTone::Neutral,
-                ));
-            }
-            let checked = system.row.checked;
-            let disabled = system.row.disabled;
-            let entity = cx.entity();
-            let toggle = Switch::new("system-audio-toggle")
-                .accessibility_label(audio_mixer::copy::SYSTEM_AUDIO)
-                .checked(checked)
-                .disabled(disabled)
-                .on_change(move |value, _, cx| {
-                    entity.update(cx, |panel, _| {
-                        let studio = panel.studio.clone();
-                        panel.run_studio(async move {
-                            studio.set_system_audio_enabled(value).await;
-                        });
-                    });
-                });
-            let entity = cx.entity();
-            let more_btn = more_button("more-system", more, t, move |_, _, cx| {
-                entity.update(cx, |panel, cx| panel.toggle_more("system", cx));
-            });
-            let mut card = div()
-                .id(system.focus)
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(
-                    ListRow::new("system-title", audio_mixer::copy::SYSTEM_AUDIO)
-                        .child(chips)
-                        .child(toggle)
-                        .child(more_btn),
-                )
-                .child(
-                    div()
-                        .px(px(12.))
-                        .child(self.muted_line(t, system.facts.clone())),
-                );
-            if system.row.show_level {
-                card = card.child(div().px(px(12.)).child(self.level_meter(
-                    self.meters_view.system_audio,
-                    &self.meters_view.system_audio_lcd,
-                    false,
-                    t,
-                )));
-            } else if system.row.idle_line {
-                card = card.child(
-                    div()
-                        .px(px(12.))
-                        .child(self.muted_line(t, audio_mixer::copy::IDLE_LINE)),
-                );
-            }
-            if system.row.show_gain {
-                card = card.child(
-                    ListRow::new("sys-gain", audio_mixer::copy::GAIN)
-                        .meta(system.row.gain_text.clone())
-                        .child(
-                            div().w(px(180.)).child(
-                                Slider::new(&self.sys_gain)
-                                    .accessibility_label(audio_mixer::copy::GAIN),
-                            ),
-                        ),
-                );
-                if let Some(reset) = system.row.gain_reset.clone() {
-                    let entity = cx.entity();
-                    card = card.child(
-                        div().px(px(12.)).child(
-                            Button::new("sys-gain-reset")
-                                .label(reset)
-                                .variant(ButtonVariant::Ghost)
-                                .on_click(move |_, _, cx| {
-                                    entity.update(cx, |panel, _| {
-                                        let studio = panel.studio.clone();
-                                        panel.run_studio(async move {
-                                            studio.set_system_audio_gain(-6.0).await;
-                                        });
-                                    });
-                                }),
-                        ),
-                    );
-                }
-            }
-            if let Some(issue) = system.issue.clone() {
-                let action = system.issue_action;
-                let entity = cx.entity();
-                let mut alert = Alert::new("system-issue")
-                    .variant(AlertVariant::Warning)
-                    .title(issue);
-                if let Some(action) = action {
-                    let label = match action {
-                        IssueAction::OpenPermissions => audio_mixer::copy::OPEN_PERMISSIONS,
-                        IssueAction::Resume => audio_mixer::copy::RESUME,
-                    };
-                    alert = alert.action(
-                        Button::new("system-issue-action")
-                            .label(label)
-                            .variant(ButtonVariant::Outline)
-                            .on_click(move |_, window, cx| {
-                                entity.update(cx, |panel, cx| match action {
-                                    IssueAction::OpenPermissions => {
-                                        panel.open_page(PageId::Settings, window, cx);
-                                    }
-                                    IssueAction::Resume => {
-                                        let studio = panel.studio.clone();
-                                        panel.run_studio(async move {
-                                            studio.resume_system_audio().await;
-                                        });
-                                    }
-                                });
-                            }),
-                    );
-                }
-                card = card.child(div().px(px(12.)).child(alert));
-            }
-            if more {
-                let echo = system.echo_guard;
-                let entity = cx.entity();
-                card = card.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.))
-                        .pt(px(8.))
-                        .border_t_1()
-                        .border_color(hsla(t.border))
-                        .child(
-                            div()
-                                .px(px(12.))
-                                .type_scale(text::META)
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .child(audio_copy::MORE_SYSTEM_AUDIO),
-                        )
-                        .child(
-                            ListRow::new("echo-guard", audio_copy::ECHO_GUARD).child(
-                                Switch::new("echo-guard-switch")
-                                    .accessibility_label(audio_copy::ECHO_GUARD)
-                                    .checked(echo)
-                                    .on_change(move |value, _, cx| {
-                                        entity.update(cx, |panel, _| {
-                                            let studio = panel.studio.clone();
-                                            panel.run_studio(async move {
-                                                studio.set_system_audio_echo_guard(value).await;
-                                            });
-                                        });
-                                    }),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .px(px(12.))
-                                .child(self.muted_line(t, system.echo_guard_description.clone())),
-                        ),
-                );
-                for note in &system.notes {
-                    card = card.child(
-                        div()
-                            .px(px(12.))
-                            .child(self.muted_line(t, format!("• {note}"))),
-                    );
-                }
-            }
-            audio_col = audio_col.child(
-                GroupedList::new().item(
-                    div()
-                        .id("sources-channel-strip-system-audio")
-                        .track_focus(&self.sys_focus)
-                        .tab_index(0)
-                        .child(card),
-                ),
-            );
+        // The Audio column: Microphone, System audio, then Sounds, one
+        // grouped list inside the mixer's key map.
+        let mut channels =
+            GroupedList::new().item(self.render_microphone(&audio.microphone, t, cx));
+        if let Some(system) = audio.system_audio.as_ref() {
+            channels = channels.item(self.render_system_audio(system, t, cx));
         }
-
-        // Sounds
-        {
-            let sounds = &audio.sounds;
-            let disabled = sounds.disabled;
-            let mut card = div()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(ListRow::new("sounds-title", audio_copy::SOUNDS));
-            if sounds.show_level {
-                card = card.child(div().px(px(12.)).child(self.level_meter(
-                    self.meters_view.sounds,
-                    &self.meters_view.sounds_lcd,
-                    false,
-                    t,
-                )));
-            } else {
-                card = card.child(
-                    div()
-                        .px(px(12.))
-                        .child(self.muted_line(t, audio_copy::SOUNDS_IDLE)),
-                );
-            }
-            let volume_text = sounds.volume_text.clone();
-            card = card.child(
-                ListRow::new("sounds-level", audio_copy::LEVEL)
-                    .meta(volume_text)
-                    .child(
-                        div().w(px(180.)).child(
-                            Slider::new(&self.sounds_gain)
-                                .accessibility_label(audio_copy::SOUNDS_LEVEL)
-                                .disabled(disabled),
-                        ),
-                    ),
-            );
-            if let Some(reset) = sounds.volume_reset.clone() {
-                let entity = cx.entity();
-                card = card.child(
-                    div().px(px(12.)).child(
-                        Button::new("sounds-level-reset")
-                            .label(reset)
-                            .variant(ButtonVariant::Ghost)
-                            .disabled(disabled)
-                            .on_click(move |_, _, cx| {
-                                entity.update(cx, |panel, cx| {
-                                    panel.apply_sounds_settings(
-                                        SoundboardSettingsParams {
-                                            volume_db: Some(SOUNDS_VOLUME_DEFAULT),
-                                            ..Default::default()
-                                        },
-                                        cx,
-                                    );
-                                });
-                            }),
-                    ),
-                );
-            }
-            let entity = cx.entity();
-            let monitor = sounds.monitor;
-            card = card
-                .child(
-                    ListRow::new("hear-sounds", audio_copy::HEAR_SOUNDS).child(
-                        Switch::new("hear-sounds-switch")
-                            .accessibility_label(audio_copy::HEAR_SOUNDS)
-                            .checked(monitor)
-                            .disabled(disabled)
-                            .on_change(move |value, _, cx| {
-                                entity.update(cx, |panel, cx| {
-                                    panel.apply_sounds_settings(
-                                        SoundboardSettingsParams {
-                                            monitor: Some(value),
-                                            ..Default::default()
-                                        },
-                                        cx,
-                                    );
-                                });
-                            }),
-                    ),
-                )
-                .child(
-                    div()
-                        .px(px(12.))
-                        .pb(px(8.))
-                        .child(self.muted_line(t, audio_copy::HEAR_SOUNDS_DESCRIPTION)),
-                );
-            audio_col = audio_col.last(true).child(
-                GroupedList::new().item(
-                    div()
-                        .id("sources-channel-strip-sounds")
-                        .track_focus(&self.sounds_focus)
-                        .tab_index(0)
-                        .child(card),
-                ),
-            );
-        }
+        channels = channels.item(self.render_sounds(&audio.sounds, t, cx));
+        let audio_col = PanelSection::new("sources-audio")
+            .title(audio_copy::AUDIO)
+            .description(audio.description)
+            .last(true)
+            .child(channels);
 
         let audio_mixer = div()
             .id("sources-audio-channels")
@@ -1661,22 +1864,28 @@ impl Render for SourcesPanel {
                     div()
                         .flex()
                         .flex_col()
-                        .px(px(size::GUTTER))
-                        .py(px(8.))
-                        .gap(px(8.))
+                        .min_h_full()
                         .child(header)
                         .children(
                             (!page.alerts.is_empty() || page.device_problem)
                                 .then(|| self.render_alerts(&page.alerts, page.device_problem, cx)),
                         )
+                        // `ConfigGrid` + `CONFIG_GRID_PAIR`: two flush columns
+                        // that fill the height, a hairline between them.
                         .child(
                             div()
                                 .flex()
-                                .flex_wrap()
-                                .items_start()
-                                .gap(px(8.))
-                                .child(div().flex_1().min_w(px(360.)).child(video))
-                                .child(div().flex_1().min_w(px(360.)).child(audio_mixer)),
+                                .flex_1()
+                                .min_w(px(0.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .border_r_1()
+                                        .border_color(hsla(t.border))
+                                        .child(video),
+                                )
+                                .child(div().flex_1().min_w(px(0.)).child(audio_mixer)),
                         ),
                 ),
             )

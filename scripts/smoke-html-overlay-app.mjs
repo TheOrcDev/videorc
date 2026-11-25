@@ -27,7 +27,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
@@ -43,6 +43,16 @@ const streamOrientations = htmlOverlaySmokeStreamOrientations(process.platform)
 console.log(
   `HTML overlay smoke on ${process.platform}: streams ${streamOrientations.join(' + ')} (plan 232 S11).`
 )
+
+// Plan 260 Phase 3: the GPUI app has import-takeover-image and
+// html-overlay-stats (null until the page host lands). Painting HTML banners
+// needs videorc-page-host (P5-D10); without it overlays never go live.
+if (smokeAppIsGpui()) {
+  console.log(
+    'SKIP: smoke:html-overlay on VIDEORC_APP=gpui waits for the Chromium page host (videorc-page-host / plan 260 P5-D10). html-overlay-stats answers { stats: null } until then.'
+  )
+  process.exit(0)
+}
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const fixtureDirectory = join(repoRoot, 'scripts', 'fixtures', 'html-overlay', 'animated-badge')

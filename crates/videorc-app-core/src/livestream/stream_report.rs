@@ -257,6 +257,13 @@ impl Section {
         AfterReadFailure::RetryAfter(*wait)
     }
 
+    /// An automatic retry came due for the failed read `request`: the new
+    /// read's request number, or `None` when a newer read or save already
+    /// went out (that cancels the retry, as `cancelRetry` does).
+    pub fn retry_due(&mut self, request: u64) -> Option<u64> {
+        (request == self.latest).then(|| self.read_started())
+    }
+
     /// The email switch flipped: shown at once, saved with this request.
     pub fn email_flipped(&mut self, enabled: bool) -> u64 {
         if let Some(state) = &mut self.state {
@@ -479,5 +486,28 @@ mod tests {
         let late = section.latest;
         section.answered(late - 1, signed_in(Some(true)));
         assert!(section.state.is_none());
+    }
+
+    #[test]
+    fn a_newer_read_or_save_cancels_the_pending_retry() {
+        let mut section = Section::default();
+        let first = section.read_started();
+        assert_eq!(
+            section.read_failed(first),
+            AfterReadFailure::RetryAfter(2_000)
+        );
+        let retry = section.retry_due(first).unwrap();
+        assert_eq!(retry, first + 1);
+        assert_eq!(
+            section.read_failed(retry),
+            AfterReadFailure::RetryAfter(5_000)
+        );
+        // Try again went out while the next retry waited.
+        let manual = section.retry_started();
+        assert_eq!(section.retry_due(retry), None);
+        assert_eq!(
+            section.read_failed(manual),
+            AfterReadFailure::RetryAfter(2_000)
+        );
     }
 }

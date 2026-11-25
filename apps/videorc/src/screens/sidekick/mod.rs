@@ -7,6 +7,7 @@ mod chat;
 mod clean_cut;
 mod clean_cut_review;
 mod community;
+mod community_preview;
 mod live;
 mod overview;
 mod reports;
@@ -15,7 +16,7 @@ mod voice;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{Context, Window, div, prelude::*};
+use gpui::{AnyElement, Context, FontWeight, Hsla, SharedString, Window, div, prelude::*, px};
 use serde_json::json;
 use videorc_app_core::account::entitlements::{live_cohost_gate, read_snapshot};
 use videorc_app_core::buddy::chat::{self as buddy_chat, RULES_MAX};
@@ -32,10 +33,13 @@ use videorc_app_core::user_error::{
     Failure, UserErrorContext, UserErrorKind, toast_user_error, user_error_message,
 };
 use videorc_app_core::{BackendClient, BackendEvent, BackendState, Studio};
+use videorc_kit::alert::{Alert, AlertVariant};
+use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::DialogHandle;
 use videorc_kit::page_tabs::PageTabs;
-use videorc_kit::theme::FONT;
+use videorc_kit::theme::{FONT, TypeScale, hsla};
 use videorc_kit::toast::{ToastData, ToastKind};
+use videorc_kit::tokens::{Theme, size, text};
 use videorc_protocol::cohost::CohostAutoChat;
 use videorc_protocol::{CleanCutJob, CleanCutMode};
 
@@ -43,7 +47,7 @@ use chat::{ChatWidgets, render_chat};
 use clean_cut::CleanCutState;
 pub use clean_cut::OpenLibrarySession;
 use community::{CommunityState, LinkSuggestion, PersonDetail, PersonRow, render_community};
-use live::{LiveInput, LiveView, live_view};
+use live::{LiveInput, LiveView, Unlock, UnlockAction, live_view};
 use overview::{OverviewState, render_overview};
 use reports::{ReportsState, render_reports};
 use videorc_app_core::buddy::community::CommunitySummary;
@@ -63,6 +67,195 @@ pub const EVENTS: [&str; 5] = [
 ];
 /// Premium changed (a purchase, a refresh): the locks read again.
 const ENTITLEMENTS_UPDATED: &str = "entitlements.updated";
+
+/// `PAGE_WIDE_MIN_PX` (`lib/page-layout.ts`): from this much page width a
+/// config grid puts its two sections side by side (`@min-[940px]/page`).
+const PAGE_WIDE_MIN: f32 = 940.;
+
+/// `ConfigGrid` with `CONFIG_GRID_PAIR` (`components/page.tsx`): two flush
+/// columns from 940 px of page that fill the visible height, so the column
+/// hairline runs the full height however short the tab is; stacked below
+/// that, in the same order. A column's last section passes
+/// `PanelSection::last(wide)` for the lead (`[&>*]:border-b-0`; stacked, its
+/// hairline splits the two) and `last(true)` for the trail.
+pub(crate) fn config_grid_pair(
+    lead: impl IntoElement,
+    trail: impl IntoElement,
+    wide: bool,
+    border: Hsla,
+) -> gpui::Div {
+    if wide {
+        div()
+            .flex()
+            .flex_1()
+            .w_full()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .border_r_1()
+                    .border_color(border)
+                    .child(lead),
+            )
+            .child(div().flex().flex_col().flex_1().min_w_0().child(trail))
+    } else {
+        div().flex().flex_col().w_full().child(lead).child(trail)
+    }
+}
+
+/// A tab's lead strip (`border-b border-border p-gutter`, `gap-2`): the
+/// locked reason and any notes above the grid.
+pub(crate) fn tab_lead(border: Hsla) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .p(px(size::GUTTER))
+        .border_b_1()
+        .border_color(border)
+}
+
+/// `LockAlert` with `lockAlertAction(view.unlock.action)`: why Sidekick is
+/// locked, in the locked tone, and its one way out (Sign in or View
+/// Premium).
+pub(crate) fn unlock_alert(
+    id: &'static str,
+    action_id: &'static str,
+    unlock: &Unlock,
+    reason: impl Into<SharedString>,
+) -> Alert {
+    let mut alert = Alert::new(id).variant(AlertVariant::Locked).title(reason);
+    if let Some(action) = unlock.action {
+        let label = match action {
+            UnlockAction::SignIn => words::SIGN_IN,
+            UnlockAction::ViewPremium => words::VIEW_PREMIUM,
+        };
+        alert = alert.action(
+            Button::new(action_id)
+                .variant(ButtonVariant::Outline)
+                .size(ButtonSize::Xs)
+                .label(label)
+                .on_click(move |_, _, cx| match action {
+                    UnlockAction::SignIn => crate::app::accounts::sign_in(cx),
+                    UnlockAction::ViewPremium => cx.open_url("https://videorc.com/premium"),
+                }),
+        );
+    }
+    alert
+}
+
+/// `FieldLabel`: 14 px / 500 in primary text.
+fn field_label(label: SharedString, t: &Theme) -> gpui::Div {
+    div()
+        .text_size(px(14.))
+        .line_height(px(20.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(hsla(t.foreground))
+        .child(label)
+}
+
+/// `FieldDescription`: 12 px secondary text at `leading-normal` (18 px), so
+/// a wrapped description reads as Electron's.
+pub(crate) fn field_description(description: impl Into<SharedString>, t: &Theme) -> gpui::Div {
+    let description: SharedString = description.into();
+    div()
+        .text_size(px(12.))
+        .line_height(px(18.))
+        .text_color(hsla(t.muted_foreground))
+        .child(description)
+}
+
+/// A Field's words beside its control: `FieldLabel` over a
+/// `FieldDescription`, `gap-0.5`.
+pub(crate) fn field_text(
+    label: impl Into<SharedString>,
+    description: Option<SharedString>,
+    t: &Theme,
+) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .gap(px(2.))
+        .child(field_label(label.into(), t))
+        .children(description.map(|description| field_description(description, t)))
+}
+
+/// The same words with a plain `text-xs` line under the label (16 px line
+/// height), as the listening and wake-word fields write theirs.
+pub(crate) fn field_text_xs(
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    t: &Theme,
+) -> gpui::Div {
+    let description: SharedString = description.into();
+    div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .gap(px(2.))
+        .child(field_label(label.into(), t))
+        .child(
+            div()
+                .type_scale(text::META)
+                .text_color(hsla(t.muted_foreground))
+                .child(description),
+        )
+}
+
+/// A vertical `Field` (`flex-col gap-3`): the label, its description, then
+/// `rest` (the control and anything after it). The description pulls up
+/// 4 px when it is the second-to-last child (`nth-last-2:-mt-1`), so the
+/// words sit 8 px apart over a lone control and 12 px over more.
+pub(crate) fn field_stack(
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    rest: Vec<AnyElement>,
+    t: &Theme,
+) -> gpui::Div {
+    let description_gap = if rest.len() == 1 { 8. } else { 12. };
+    div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .child(field_label(label.into(), t))
+        .child(field_description(description, t).mt(px(description_gap)))
+        .children(rest.into_iter().map(|child| div().mt(px(12.)).child(child)))
+}
+
+/// `FieldError`: a failed save under its card, monochrome text after the
+/// destructive icon.
+pub(crate) fn save_error_line(message: Option<&str>, t: &Theme) -> Option<gpui::Div> {
+    message.map(|message| {
+        div()
+            .flex()
+            .items_start()
+            .gap(px(6.))
+            .text_size(px(12.))
+            .line_height(px(16.))
+            .text_color(hsla(t.foreground))
+            .child(videorc_kit::icon::icon(
+                videorc_kit::icon::IconName::XCircleFill,
+                14.,
+                hsla(t.destructive),
+            ))
+            .child(div().min_w_0().child(message.to_string()))
+    })
+}
+
+/// A Field whose control sits beside its words (`flex items-center
+/// justify-between gap-3`).
+pub(crate) fn field_beside(head: gpui::Div, control: impl IntoElement) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.))
+        .child(div().flex_1().min_w_0().child(head))
+        .child(control)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -173,6 +366,14 @@ pub struct SidekickScreen {
     community: Option<CommunityState>,
     reports: Option<ReportsState>,
     clean_cut: Option<CleanCutState>,
+    /// The app-wide recording poster cache (`app::posters`): Clean cut's
+    /// rows draw the Library's posters.
+    posters: Option<gpui::Entity<crate::app::posters::Posters>>,
+    /// The shell has Sidekick on screen (Community's living preview ticks).
+    page_shown: bool,
+    /// The page's measured width: two columns from [`PAGE_WIDE_MIN`]. It
+    /// starts wide, as the default window is, so the first frame doesn't flip.
+    page_width: f32,
 }
 
 impl SidekickScreen {
@@ -190,6 +391,10 @@ impl SidekickScreen {
     ) -> Self {
         let tab = Tab::from_id(UiLocal::in_dir(&local_dir).buddy_tab());
         let consented = studio.read_ui_settings(families::ai_consent);
+        let posters = crate::app::posters::shared(cx);
+        if let Some(posters) = posters.as_ref() {
+            cx.observe(posters, |_, _, cx| cx.notify()).detach();
+        }
         let mut screen = Self {
             studio: studio.clone(),
             runtime: runtime.clone(),
@@ -205,10 +410,13 @@ impl SidekickScreen {
             consent: DialogHandle::new(false),
             pending_on: false,
             save_error: None,
+            page_shown: false,
+            page_width: PAGE_WIDE_MIN,
             chat: None,
             community: None,
             reports: None,
             clean_cut: None,
+            posters,
         };
         screen.refresh(cx);
         screen.watch(cx);
@@ -401,6 +609,21 @@ impl SidekickScreen {
         })
     }
 
+    /// The page's width, measured each frame; draws again only when the
+    /// grids flip between one column and two.
+    fn measured(&mut self, width: f32, cx: &mut Context<Self>) {
+        let flips = (width >= PAGE_WIDE_MIN) != self.wide();
+        self.page_width = width;
+        if flips {
+            cx.notify();
+        }
+    }
+
+    /// Two columns (`@min-[940px]/page`).
+    pub(crate) fn wide(&self) -> bool {
+        self.page_width >= PAGE_WIDE_MIN
+    }
+
     pub(crate) fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         let tab = Tab::from_index(index);
         if self.tab == tab {
@@ -420,6 +643,7 @@ impl SidekickScreen {
         if tab == Tab::CleanCut {
             self.refresh_clean_cut(cx);
         }
+        self.sync_community_preview_active(cx);
         cx.notify();
     }
 
@@ -466,6 +690,14 @@ impl SidekickScreen {
                     }
                     if let Some(sessions) = sessions {
                         clean.sessions = sessions;
+                        if let Some(posters) = screen.posters.clone() {
+                            let listed = &clean.sessions;
+                            posters.update(cx, |posters, _| {
+                                posters.keep(clean_cut::POSTER_USER, |id| {
+                                    listed.iter().any(|session| session.id == id)
+                                })
+                            });
+                        }
                     }
                     clean.capabilities =
                         videorc_app_core::buddy::clean_cut_view::clean_cut_capabilities(
@@ -618,6 +850,7 @@ impl SidekickScreen {
                     community.suggestions = suggestions;
                     community.loaded = true;
                 }
+                screen.load_community_avatars(cx);
                 cx.notify();
             });
         })
@@ -736,8 +969,7 @@ impl SidekickScreen {
         if let Some(community) = self.community.as_mut() {
             community.forget_id = Some(person_id);
             community.forget_name = name;
-            // The question takes the card's place (kit dialogs don't stack).
-            community.person.close(window, cx);
+            // The question stacks over the card (`Dialog::layer(1)`).
             community.forget.open(window, cx);
         }
         cx.notify();
@@ -750,6 +982,8 @@ impl SidekickScreen {
         if let Some(community) = self.community.as_mut() {
             community.forget.close(window, cx);
             community.forget_id = None;
+            // The person is gone, so their card goes with the question.
+            community.person.close(window, cx);
         }
         let backend = self.studio.backend().clone();
         let job = self.runtime.spawn(async move {
@@ -1170,10 +1404,12 @@ impl Render for SidekickScreen {
         self.ensure_reports(cx);
         self.ensure_clean_cut(window, cx);
         let view = self.view();
+        let wide = self.wide();
         let listen = self.settings.as_ref().map(|s| s.listen).unwrap_or(false);
         let community_settings = community::community_settings(self.settings.as_ref());
         let overview = OverviewState {
             view: &view,
+            wide,
             listen,
             consented: self.consented,
             cloud_uses: cloud_ai_uses(),
@@ -1187,7 +1423,6 @@ impl Render for SidekickScreen {
         };
         let settings = self.settings.as_ref();
         let widgets = self.chat.as_ref().expect("chat widgets");
-        let community = self.community.as_ref().expect("community state");
         let body = match self.tab {
             Tab::Overview => render_overview(overview, window, cx),
             Tab::Chat => {
@@ -1195,20 +1430,24 @@ impl Render for SidekickScreen {
                     self.save_error(SaveSection::Replies),
                     self.save_error(SaveSection::Moderation),
                 );
-                render_chat(&view, settings, widgets, errors, window, cx)
+                render_chat(&view, settings, widgets, errors, wide, window, cx)
             }
-            Tab::Community => render_community(
-                &view,
-                self.entitled,
-                community,
-                &community_settings,
-                window,
-                cx,
-            ),
+            Tab::Community => {
+                let preview = self.render_community_preview(window, cx);
+                render_community(
+                    self.entitled,
+                    self.community.as_ref().expect("community state"),
+                    &community_settings,
+                    preview,
+                    wide,
+                    window,
+                    cx,
+                )
+            }
             Tab::Voice => {
                 let paused = command_availability_lines(self.state.command_availability.as_ref());
                 let rows = remove_messages_rows(&self.studio.platforms_now());
-                render_voice(&view, settings, &paused, &rows, window, cx)
+                render_voice(&view, settings, &paused, &rows, wide, window, cx)
             }
             Tab::Reports => {
                 let reports = self.reports.as_ref().expect("reports state");
@@ -1245,12 +1484,28 @@ impl Render for SidekickScreen {
 
         let consent = overview::consent_dialog(&self.consent, cx);
 
+        // The page's own width (`@container/page`), never the window's: the
+        // config grids put their sections side by side from 940 px.
+        let page = cx.entity().downgrade();
+        let measure = gpui::canvas(
+            move |bounds, _, cx| {
+                let width = f32::from(bounds.size.width);
+                page.update(cx, |screen, cx| screen.measured(width, cx))
+                    .ok();
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+
         div()
             .id("sidekick-screen")
+            .relative()
             .size_full()
             .flex()
             .flex_col()
             .font_family(FONT)
+            .child(measure)
             .child(tabs.child(body))
             .child(consent)
             // Reports' Markers dialog draws itself when open.
