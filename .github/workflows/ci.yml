@@ -15,13 +15,48 @@ on:
     # PRs into spikes/gpui (plan 260 throwaway spikes) build nothing this
     # workflow checks, so they skip it.
     branches: [main]
+  pull_request_target:
+    # Trusted metadata-only cleanup; never check out a PR's code with this token.
+    types: [synchronize, closed]
+    branches: [main]
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request_target' && format('cleanup-pr-{0}', github.event.pull_request.number) || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  retire-obsolete-pr-runs:
+    name: Retire obsolete PR runs
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Check out trusted default-branch cleanup code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Cancel obsolete CI runs, including queued always summaries
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { cancelObsoletePullRequestRuns } = await import(
+              `${process.env.GITHUB_WORKSPACE}/scripts/lib/ci-run-cleanup.mjs`
+            )
+            const cancelled = await cancelObsoletePullRequestRuns({
+              github,
+              ...context.repo,
+              pullNumber: context.payload.pull_request.number
+            })
+            core.info(`Cancelled ${cancelled.length} obsolete PR runs: ${cancelled.join(', ')}`)
+
   scope:
     name: Change scope
+    if: github.event_name != 'pull_request_target'
     uses: ./.github/workflows/ci-change-scope.yml
 
   rust:
@@ -396,7 +431,7 @@ jobs:
   js:
     name: JS (format + lint + tests)
     needs: [scope, js-checks, js-build, js-node, js-vitest]
-    if: ${{ always() && needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
+    if: ${{ !cancelled() && needs.scope.result == 'success' && needs.scope.outputs.js == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
