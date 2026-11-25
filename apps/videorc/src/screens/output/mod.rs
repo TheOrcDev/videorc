@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, ElementId, Entity, Focusable, FontWeight, Keystroke,
+    AnyElement, App, ClipboardItem, Context, Entity, Focusable, FontWeight, Keystroke,
     PathPromptOptions, SharedString, Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use serde_json::{Value, json};
@@ -44,7 +44,8 @@ use videorc_kit::list_row::GroupedList;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
-use videorc_kit::select::Select;
+use videorc_kit::select::{Select, SelectOption};
+use videorc_kit::settings_row::SettingsRow;
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
@@ -1359,12 +1360,7 @@ impl OutputPanel {
 
     /// P659: Width, Height, FPS and Bitrate kbps. Enter or leaving commits,
     /// Escape puts the setting back, a refused size says the rule.
-    fn field_grid(
-        &self,
-        model: &OutputModel,
-        t: &videorc_kit::tokens::Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn field_grid(&self, model: &OutputModel, cx: &mut Context<Self>) -> gpui::AnyElement {
         // `grid grid-cols-2 gap-4`, each value a vertical Field.
         let mut grid = div().grid().grid_cols(2).gap(px(16.));
         let refusal = self
@@ -1399,9 +1395,9 @@ impl OutputPanel {
                             .disabled(model.quality_locked)
                             .invalid(refused.is_some()),
                         )
-                        // `FieldError` under the input, as `OutputNumberInput`
-                        // puts it.
-                        .children(refused.map(|(_, rule, _)| field_error(rule, t))),
+                        // `FieldError` under the input, the label staying
+                        // foreground, as `OutputNumberInput` puts it.
+                        .when_some(refused, |row, (_, rule, _)| row.error(rule)),
                     ),
             );
         }
@@ -1418,50 +1414,38 @@ impl OutputPanel {
     ) -> PanelSection {
         let entity = cx.entity();
         let mut rows = GroupedList::new()
-            .item(settings_row(
-                "output-clips-switch",
-                clips_copy::copy::KEEP_LAST_SECONDS,
-                Some(model.clips_description.clone().into_any_element()),
-                None,
-                Some(
-                    Switch::new("output-clips-enabled")
-                        .accessibility_label(clips_copy::copy::KEEP_LAST_SECONDS)
-                        .checked(model.clips_on)
-                        .on_change(move |value, _, cx| {
-                            entity.update(cx, |this, cx| this.set_clips_enabled(value, cx))
-                        })
-                        .into_any_element(),
-                ),
-                t,
-            ))
-            .item(settings_row(
-                "output-clips-disk",
-                clips_copy::copy::DISK_USE,
-                Some(model.disk_detail.clone().into_any_element()),
-                None,
-                // `text-sm tabular-nums text-muted-foreground`.
-                Some(
-                    div()
-                        .flex_none()
-                        .text_size(px(14.))
-                        .line_height(px(20.))
-                        .text_color(hsla(t.muted_foreground))
-                        .child(model.disk_estimate.clone())
-                        .into_any_element(),
-                ),
-                t,
-            ));
-        for row in self.clip_key_rows(t, cx) {
+            .item(
+                SettingsRow::new("output-clips-switch", clips_copy::copy::KEEP_LAST_SECONDS)
+                    .description(model.clips_description.clone())
+                    .child(
+                        Switch::new("output-clips-enabled")
+                            .accessibility_label(clips_copy::copy::KEEP_LAST_SECONDS)
+                            .checked(model.clips_on)
+                            .on_change(move |value, _, cx| {
+                                entity.update(cx, |this, cx| this.set_clips_enabled(value, cx))
+                            }),
+                    ),
+            )
+            .item(
+                SettingsRow::new("output-clips-disk", clips_copy::copy::DISK_USE)
+                    .description(model.disk_detail.clone())
+                    // `text-sm tabular-nums text-muted-foreground`.
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(14.))
+                            .line_height(px(20.))
+                            .text_color(hsla(t.muted_foreground))
+                            .child(model.disk_estimate.clone()),
+                    ),
+            );
+        for row in self.clip_key_rows(cx) {
             rows = rows.item(row);
         }
-        rows = rows.item(settings_row(
-            "output-clips-folder",
-            clips_copy::copy::WHERE_CLIPS_GO,
-            Some(clips_copy::copy::WHERE_CLIPS_GO_DESCRIPTION.into_any_element()),
-            None,
-            None,
-            t,
-        ));
+        rows = rows.item(
+            SettingsRow::new("output-clips-folder", clips_copy::copy::WHERE_CLIPS_GO)
+                .description(clips_copy::copy::WHERE_CLIPS_GO_DESCRIPTION),
+        );
         PanelSection::new("output-clips")
             .icon(icon(IconName::Scissors, 16., hsla(t.muted_foreground)))
             .title(clips_copy::copy::CLIPS)
@@ -1471,11 +1455,7 @@ impl OutputPanel {
 
     /// The two clip keys as Settings → Shortcuts records them: press the
     /// button, then the keys; Escape cancels, Backspace clears.
-    fn clip_key_rows(
-        &self,
-        t: &videorc_kit::tokens::Theme,
-        cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
+    fn clip_key_rows(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let platform = Some(hotkeys::node_platform());
         let registration = self.hotkeys.registration();
         let config = self.shortcut_config();
@@ -1519,24 +1499,23 @@ impl OutputPanel {
                 let action = row.action.clone();
                 // `ShortcutRecorderField`: a SettingsRow, its refusal as the
                 // row's error.
-                settings_row(
+                SettingsRow::new(
                     SharedString::from(format!("output-key-{action}")),
                     row.label,
-                    None,
-                    message.map(SharedString::from),
-                    Some(
-                        Button::new(SharedString::from(format!("output-record-{action}")))
-                            .accessibility_label(name)
-                            .label(label)
-                            .variant(ButtonVariant::Outline)
-                            .disabled(!hotkeys::supported(&action))
-                            .tooltip("Click to change")
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                )
+                .when_some(message, |field, message| field.error(message))
+                .child(
+                    Button::new(SharedString::from(format!("output-record-{action}")))
+                        .accessibility_label(name)
+                        .label(label)
+                        .variant(ButtonVariant::Outline)
+                        .disabled(!hotkeys::supported(&action))
+                        .tooltip("Click to change")
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| {
                                 this.arm_recorder(action.clone(), cx)
-                            }))
-                            .into_any_element(),
-                    ),
-                    t,
+                            }),
+                        ),
                 )
                 .into_any_element()
             })
@@ -1665,59 +1644,6 @@ impl OutputPanel {
     }
 }
 
-/// One settings row as `SettingsRow` (`ui/field.tsx`) draws it in a grouped
-/// FieldGroup: `px-3 py-2.5`, the 14 px / 500 label with its 12 px
-/// description (`leading-normal`, 18 px) and error 4 px apart on the left,
-/// and the control at the top on the right (`items-start` beside a
-/// FieldContent). The description takes rich content (status lines, a
-/// folder path), which the kit's `SettingsRow` can't yet.
-fn settings_row(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    description: Option<AnyElement>,
-    error: Option<SharedString>,
-    control: Option<AnyElement>,
-    t: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    let label: SharedString = label.into();
-    div()
-        .id(id)
-        .role(gpui::Role::Group)
-        .aria_label(label.clone())
-        .flex()
-        .w_full()
-        .flex_row()
-        .items_start()
-        .gap(px(12.))
-        .px(px(12.))
-        .py(px(10.))
-        .child(
-            div()
-                .flex()
-                .flex_1()
-                .min_w(px(0.))
-                .flex_col()
-                .gap(px(4.))
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .line_height(px(20.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(hsla(t.foreground))
-                        .child(label),
-                )
-                .children(description.map(|description| {
-                    div()
-                        .type_scale(text::META)
-                        .line_height(px(18.))
-                        .text_color(hsla(t.muted_foreground))
-                        .child(description)
-                }))
-                .children(error.map(|error| field_error(error, t))),
-        )
-        .children(control)
-}
-
 /// `FieldError`: monochrome 12 px words with the destructive error glyph.
 fn field_error(error: impl Into<SharedString>, t: &Theme) -> gpui::Div {
     let error: SharedString = error.into();
@@ -1768,33 +1694,30 @@ impl Render for OutputPanel {
             SAVE_RECORDING_OFF
         };
         let entity = cx.entity();
-        let mut local_rows = GroupedList::new().item(settings_row(
-            "output-save-recording",
-            "Save a local recording",
-            Some(save_desc.into_any_element()),
-            None,
-            Some(
-                Switch::new("output-save")
-                    .accessibility_label("Save a local recording")
-                    .checked(model.record_enabled)
-                    .disabled(model.session_locked)
-                    .on_change({
-                        let entity = entity.clone();
-                        move |value, _, cx| {
-                            entity.update(cx, |this, cx| this.set_record_enabled(value, cx))
-                        }
-                    })
-                    .into_any_element(),
-            ),
-            t,
-        ));
+        let mut local_rows = GroupedList::new().item(
+            SettingsRow::new("output-save-recording", "Save a local recording")
+                .description(save_desc)
+                .child(
+                    Switch::new("output-save")
+                        .accessibility_label("Save a local recording")
+                        .checked(model.record_enabled)
+                        .disabled(model.session_locked)
+                        .on_change({
+                            let entity = entity.clone();
+                            move |value, _, cx| {
+                                entity.update(cx, |this, cx| this.set_record_enabled(value, cx))
+                            }
+                        }),
+                ),
+        );
         if model.separate_supported {
-            local_rows = local_rows.item(settings_row(
-                "output-separate-source-recordings",
-                "Separate source recordings",
-                Some(SEPARATE_DESCRIPTION.into_any_element()),
-                None,
-                Some(
+            local_rows = local_rows.item(
+                SettingsRow::new(
+                    "output-separate-source-recordings",
+                    "Separate source recordings",
+                )
+                .description(SEPARATE_DESCRIPTION)
+                .child(
                     Switch::new("output-separate")
                         .accessibility_label("Separate source recordings")
                         .checked(model.separate_enabled)
@@ -1804,11 +1727,9 @@ impl Render for OutputPanel {
                             move |value, _, cx| {
                                 entity.update(cx, |this, cx| this.set_separate_enabled(value, cx))
                             }
-                        })
-                        .into_any_element(),
+                        }),
                 ),
-                t,
-            ));
+            );
         }
         local = local.child(local_rows);
 
@@ -1822,6 +1743,10 @@ impl Render for OutputPanel {
             .value(Some(SharedString::from(model.preset.clone())));
         for (value, label) in &model.preset_options {
             preset = preset.option(value.clone(), label.clone());
+        }
+        // `SelectSeparator` before Custom when there are presets.
+        if !model.preset_options.is_empty() {
+            preset = preset.option_item(SelectOption::separator());
         }
         preset = preset.option("custom", "Custom");
         let entity = cx.entity();
@@ -1865,7 +1790,7 @@ impl Render for OutputPanel {
                     .label("Resolution")
                     .child(resolution),
             )
-            .child(self.field_grid(&model, t, cx));
+            .child(self.field_grid(&model, cx));
         if let Some(encoder) = self
             .encoder
             .as_ref()
@@ -2065,8 +1990,8 @@ impl Render for OutputPanel {
                                 .accessibility_label(copy_label)
                                 .variant(ButtonVariant::Ghost)
                                 .size(videorc_kit::button::ButtonSize::Xs)
-                                .child(icon(IconName::Copy, 12., hsla(t.foreground)))
-                                .child(copy_label)
+                                .icon(IconName::Copy)
+                                .label(copy_label)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.copy_camera_command(copy_command.clone(), cx)
                                 }))
@@ -2078,14 +2003,14 @@ impl Render for OutputPanel {
                     .icon(icon(IconName::VideoCamera, 16., hsla(t.muted_foreground)))
                     .title(CAMERA_SECTION_TITLE)
                     .description(CAMERA_SECTION_DESCRIPTION)
-                    .child(GroupedList::new().item(settings_row(
-                        "output-videorc-camera-row",
-                        VIDEORC_CAMERA,
-                        Some(description.into_any_element()),
-                        self.camera_error.clone().map(SharedString::from),
-                        Some(trailing.into_any_element()),
-                        t,
-                    ))),
+                    .child(
+                        GroupedList::new().item(
+                            SettingsRow::new("output-videorc-camera-row", VIDEORC_CAMERA)
+                                .description(description)
+                                .when_some(self.camera_error.clone(), |row, error| row.error(error))
+                                .child(trailing),
+                        ),
+                    ),
             );
         }
 
@@ -2102,8 +2027,8 @@ impl Render for OutputPanel {
                 Button::new("recordings-choose")
                     .accessibility_label(folder_copy::CHOOSE)
                     .variant(ButtonVariant::Outline)
-                    .child(icon(IconName::FolderOpen, 16., hsla(t.foreground)))
-                    .child(folder_copy::CHOOSE)
+                    .icon(IconName::FolderOpen)
+                    .label(folder_copy::CHOOSE)
                     .on_click(cx.listener(|this, _, _, cx| this.choose_folder(cx))),
             );
         if model.folder.can_reveal {
@@ -2141,30 +2066,26 @@ impl Render for OutputPanel {
             .last(true)
             .child(
                 GroupedList::new()
-                    .item(settings_row(
-                        "recordings-folder",
-                        folder_copy::RECORDINGS_FOLDER,
-                        Some(folder_detail.into_any_element()),
-                        model.folder.problem.map(SharedString::from),
-                        Some(folder_actions.into_any_element()),
-                        t,
-                    ))
-                    .item(settings_row(
-                        "keep-original",
-                        "Keep original recording",
-                        Some(KEEP_ORIGINAL_DESCRIPTION.into_any_element()),
-                        None,
-                        Some(
-                            Switch::new("keep-original-recording")
-                                .accessibility_label("Keep original recording")
-                                .checked(model.keep_original)
-                                .on_change(move |value, _, cx| {
-                                    entity.update(cx, |this, cx| this.set_keep_original(value, cx))
-                                })
-                                .into_any_element(),
-                        ),
-                        t,
-                    )),
+                    .item(
+                        SettingsRow::new("recordings-folder", folder_copy::RECORDINGS_FOLDER)
+                            .description(folder_detail)
+                            .when_some(model.folder.problem, |row, problem| row.error(problem))
+                            .child(folder_actions),
+                    )
+                    .item(
+                        SettingsRow::new("keep-original", "Keep original recording")
+                            .description(KEEP_ORIGINAL_DESCRIPTION)
+                            .child(
+                                Switch::new("keep-original-recording")
+                                    .accessibility_label("Keep original recording")
+                                    .checked(model.keep_original)
+                                    .on_change(move |value, _, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.set_keep_original(value, cx)
+                                        })
+                                    }),
+                            ),
+                    ),
             );
 
         div()

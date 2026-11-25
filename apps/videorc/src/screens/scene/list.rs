@@ -134,7 +134,7 @@ impl ScenePage {
 
         // No visible label: Electron names the group for assistive tech
         // only (`aria-label`), under the section's own "Scenes" title.
-        let mut rows = GroupedList::new();
+        let mut rows = GroupedList::new().accessibility_label(copy::SCENES_TITLE);
         for row in &list.rows {
             rows = rows.item(self.scene_row(row, list.read_only, window, cx));
         }
@@ -240,7 +240,7 @@ impl ScenePage {
                     .id(SharedString::from(format!("scene-on-stream-{id}")))
                     .flex()
                     .tooltip(tooltip(copy::ON_STREAM))
-                    .child(icon(IconName::Check, 16., ink)),
+                    .child(icon(IconName::CheckBold, 16., ink)),
             );
         }
         line = line.child(

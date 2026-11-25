@@ -241,6 +241,7 @@ impl ScenePage {
         let animate_page = page;
         section = section.child(
             SettingsRow::new("animate-scene-changes", copy::ANIMATE)
+                .flush(true)
                 .description(copy::ANIMATE_DESCRIPTION)
                 .child(
                     Switch::new("animate-scene-changes-switch")

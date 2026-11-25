@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Background, Context, Entity, EventEmitter, FontWeight, ObjectFit, Role,
-    SharedString, Window, div, linear_color_stop, linear_gradient, prelude::*, px,
+    AnyElement, App, Context, Entity, EventEmitter, FontWeight, ObjectFit, Role, SharedString,
+    Window, div, prelude::*, px,
 };
 use serde_json::{Value, json};
 use videorc_app_core::account::entitlements::EntitlementGate;
@@ -19,7 +19,8 @@ use videorc_kit::{
     alert::{Alert, AlertVariant},
     badge::{Badge, BadgeVariant},
     button::{Button, ButtonSize, ButtonVariant},
-    field::FieldGroup,
+    caption_preview_backdrop::{CaptionPreviewBackdrop, CaptionPreviewBackdropEl},
+    field::{Field, FieldGroup},
     icon::{IconName, icon},
     list_row::GroupedList,
     navigable_row::NavigableRow,
@@ -318,17 +319,12 @@ impl CaptionsPanel {
         let video_h = capture["video"]["height"].as_u64().unwrap_or(1080);
         let (canvas_w, canvas_h) = c::preview_canvas(video_w as u32, video_h as u32);
         let top = capture["captions"]["position"].as_str() == Some("top");
-        // Stand-in video, so the video tokens in both themes. Light is
-        // Electron's 135° light-to-grey ramp; Dark and Mixed stay flat
-        // until the kit carries their gradient stops.
-        let ground: Background = match self.backdrop {
-            PreviewBackdrop::Dark => hsla(t.video_ground).into(),
-            PreviewBackdrop::Light => linear_gradient(
-                135.,
-                linear_color_stop(hsla(t.video_ground_foreground), 0.),
-                linear_color_stop(hsla(t.video_ground_muted), 1.),
-            ),
-            PreviewBackdrop::Mixed => hsla(t.video_ground_muted).into(),
+        // Stand-in video: Electron's fixed preview surfaces, drawn by the
+        // kit (Light from the video tokens, Dark and Mixed pre-drawn).
+        let backdrop = match self.backdrop {
+            PreviewBackdrop::Dark => CaptionPreviewBackdrop::Dark,
+            PreviewBackdrop::Light => CaptionPreviewBackdrop::Light,
+            PreviewBackdrop::Mixed => CaptionPreviewBackdrop::Mixed,
         };
         // The stand-in video fills the column at the canvas aspect
         // (`aspect-video w-full`), the backend's bar on it.
@@ -341,7 +337,15 @@ impl CaptionsPanel {
             .rounded(px(radius::ROW))
             .border_1()
             .border_color(hsla(t.border))
-            .bg(ground);
+            .bg(hsla(t.video_ground))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .child(CaptionPreviewBackdropEl::new(backdrop)),
+            );
         // Faint safe-area columns: a hairline at the middle of every 8rem
         // tile, white 8% at 35%.
         let column = hsla(with_alpha(t.video_ground_foreground, 0.08 * 0.35));
@@ -470,20 +474,32 @@ impl CaptionsPanel {
         }
 
         // One state signal: the switch says on or off; while on, one dot
-        // names what captions are doing, with its line.
-        let mut switch_row = SettingsRow::new("captions-enabled-row", c::LIVE_CAPTIONS)
-            .description(view.switch_line.clone());
+        // names what captions are doing, with its line, in the row's
+        // description (`flex flex-wrap items-center gap-x-2 gap-y-0.5`).
+        let switch_line: AnyElement = if view.enabled {
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_x(px(8.))
+                .gap_y(px(2.))
+                .child(
+                    StatusDot::new("captions-status")
+                        .tone(status_tone(view.status_tone))
+                        .label(view.status_word),
+                )
+                .child(div().min_w(px(0.)).child(view.switch_line.clone()))
+                .into_any_element()
+        } else {
+            view.switch_line.clone().into_any_element()
+        };
+        let mut switch_row =
+            SettingsRow::new("captions-enabled-row", c::LIVE_CAPTIONS).description(switch_line);
         let mut trailing = div().flex().flex_none().items_center().gap(px(8.));
-        if view.enabled {
-            trailing = trailing.child(
-                StatusDot::new("captions-status")
-                    .tone(status_tone(view.status_tone))
-                    .label(view.status_word),
-            );
-        }
         if view.show_retry {
             trailing = trailing.child(
                 Button::new("captions-retry")
+                    .icon(IconName::ArrowClockwise)
                     .label(c::RETRY)
                     .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
@@ -556,13 +572,11 @@ impl CaptionsPanel {
             outputs = outputs.option(Segment::new(*value, *label));
         }
         // Its line sits under the control (`FieldLabel`, the control, then
-        // `FieldDescription`).
+        // `FieldDescription`): the kit `Field` order.
         fields.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(12.))
-                .child(field_label(c::OUTPUTS_LABEL))
+            Field::new("captions-outputs-field")
+                .label(c::OUTPUTS_LABEL)
+                .description(view.outputs_description)
                 .child(outputs.on_change({
                     let this = this.clone();
                     move |value, _, app| {
@@ -571,7 +585,6 @@ impl CaptionsPanel {
                         });
                     }
                 }))
-                .child(field_description(t, view.outputs_description))
                 .into_any_element(),
         );
 
@@ -585,6 +598,7 @@ impl CaptionsPanel {
         };
         // The group's name is for screen readers only (`aria-label`).
         let mut elsewhere = GroupedList::new()
+            .accessibility_label(c::ELSEWHERE_LABEL)
             .row(
                 NavigableRow::new(
                     "captions-microphone",
@@ -612,22 +626,17 @@ impl CaptionsPanel {
                 )),
             );
         }
-        fields.push(
-            div()
-                .id("captions-elsewhere")
-                .role(Role::Group)
-                .aria_label(c::ELSEWHERE_LABEL)
-                .child(elsewhere)
-                .into_any_element(),
-        );
+        fields.push(elsewhere.into_any_element());
 
         // The look: applied live. Each chip shows a swatch, the name and
         // its line (`StyleSwatch`).
         // Two chips to a row, 8 px apart (`grid w-full grid-cols-2 gap-2`).
         let chip_width = self.style_chip_width();
         let styles = c::STYLES.iter().fold(
+            // `data-pressed:border-primary/50 data-pressed:bg-primary/10`.
             ToggleGroup::new("caption-style")
                 .outline(true)
+                .card(true)
                 .spacing(STYLE_GAP)
                 .accessibility_label(c::STYLE_LABEL)
                 .disabled(locked)
@@ -669,20 +678,17 @@ impl CaptionsPanel {
             |control, (value, label)| control.option(Segment::new(*value, *label)),
         );
         fields.push(
-            field(
-                t,
-                c::TEXT_SIZE,
-                "",
-                sizes.on_change({
+            Field::new("caption-text-size-field")
+                .label(c::TEXT_SIZE)
+                .child(sizes.on_change({
                     let this = this.clone();
                     move |value, _, app| {
                         let _ = this.update(app, |this, cx| {
                             this.patch("textSize", json!(value.as_ref()), true, cx)
                         });
                     }
-                }),
-            )
-            .into_any_element(),
+                }))
+                .into_any_element(),
         );
 
         let languages = c::LANGUAGES.iter().fold(
@@ -760,13 +766,6 @@ impl CaptionsPanel {
             format!("Open {}", c::READER_NAME)
         };
         let reader_disabled = !reader_open && locked;
-        // The icon carries its own colour: pre-blend it as the button
-        // fades its words.
-        let reader_ink = if reader_disabled {
-            faded_over(t.foreground, t.glass_solid, 0.5)
-        } else {
-            t.foreground
-        };
         fields.push(
             div()
                 .flex()
@@ -787,7 +786,7 @@ impl CaptionsPanel {
                 )
                 .child(
                     // Leading ExternalLinkIcon, the words, then the keys
-                    // (`ml-1`); label would draw first, so all are children.
+                    // (`ml-1`).
                     Button::new("captions-reader-toggle")
                         .accessibility_label(reader_label.clone())
                         .variant(ButtonVariant::Outline)
@@ -795,8 +794,8 @@ impl CaptionsPanel {
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(ToggleCaptions), cx)
                         })
-                        .child(icon(IconName::ArrowSquareOut, 16., hsla(reader_ink)))
-                        .child(reader_label)
+                        .icon(IconName::ArrowSquareOut)
+                        .label(reader_label)
                         .child(
                             div()
                                 .ml(px(4.))
@@ -998,45 +997,42 @@ fn status_tone(tone: Tone) -> StatusTone {
     }
 }
 
-/// A labelled field (`Field`): the name and its line 4 px apart
-/// (`FieldContent`), then the control 12 px under them.
+/// A field whose line sits above the control (`Field` > `FieldContent`
+/// [`FieldTitle`/`FieldLabel` 14/20/500, `FieldDescription` 12/18, 4 px
+/// apart], then the control 12 px under them). The kit `Field` puts the
+/// description after the control (the plain shadcn order), so Style and
+/// Spoken language keep this one.
 fn field(
     t: &Theme,
     label: &'static str,
     description: &'static str,
     control: impl IntoElement,
 ) -> impl IntoElement {
-    let mut content = div()
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .child(field_label(label));
-    if !description.is_empty() {
-        content = content.child(field_description(t, description));
-    }
     div()
         .flex()
         .flex_col()
         .gap(px(12.))
-        .child(content)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .line_height(px(20.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .type_scale(text::META)
+                        .line_height(px(18.))
+                        .text_color(hsla(t.muted_foreground))
+                        .child(description),
+                ),
+        )
         .child(control)
-}
-
-/// `FieldLabel` / `FieldTitle`: `text-sm font-medium`.
-fn field_label(label: &'static str) -> impl IntoElement {
-    div()
-        .text_size(px(14.))
-        .line_height(px(20.))
-        .font_weight(FontWeight::MEDIUM)
-        .child(label)
-}
-
-/// `FieldDescription`: 12 px secondary text.
-fn field_description(t: &Theme, description: &'static str) -> impl IntoElement {
-    div()
-        .type_scale(text::META)
-        .text_color(hsla(t.muted_foreground))
-        .child(description)
 }
 
 /// The settled line for screen readers (`aria-live="polite"`), drawn
