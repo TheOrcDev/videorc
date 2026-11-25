@@ -567,11 +567,14 @@ impl Render for PreviewStartup {
         // `w-10` segments, full or empty (`value={state === 'next' ? 0 : 100}`).
         let segments: Vec<_> = PREVIEW_STARTUP_STEPS
             .iter()
-            .map(|segment| {
+            .enumerate()
+            .map(|(index, segment)| {
                 let state = preview_startup_segment_state(*segment, &view);
-                div()
-                    .w(px(40.))
-                    .child(Progress::new(state.value()).appearance(dark))
+                div().w(px(40.)).child(
+                    Progress::new(state.value())
+                        .id(("preview-startup-segment", index))
+                        .appearance(dark),
+                )
             })
             .collect();
         let open_sources = (view.action == Some(PreviewStartupAction::OpenSources)).then(|| {

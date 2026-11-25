@@ -32,7 +32,7 @@ impl Picture {
 /// Decode route bytes into a [`Picture`].
 pub fn picture_from_bytes(bytes: Vec<u8>) -> Picture {
     match images::image_kind(&bytes) {
-        Ok(kind) => {
+        Some(kind) => {
             let format = match kind {
                 ImageKind::Png => ImageFormat::Png,
                 ImageKind::Jpeg => ImageFormat::Jpeg,
@@ -41,7 +41,7 @@ pub fn picture_from_bytes(bytes: Vec<u8>) -> Picture {
             };
             Picture::Ready(Arc::new(Image::from_bytes(format, bytes)))
         }
-        Err(_) => Picture::Failed,
+        None => Picture::Failed,
     }
 }
 

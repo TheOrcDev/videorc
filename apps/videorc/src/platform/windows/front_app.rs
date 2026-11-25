@@ -29,7 +29,9 @@ thread_local! {
     static LAST: RefCell<Option<FrontApp>> = const { RefCell::new(None) };
 }
 
-static HOOK: Mutex<Option<HWINEVENTHOOK>> = Mutex::new(None);
+/// The hook as an integer: a raw pointer is not `Send`, so a `Mutex` of it
+/// could not be a `static`.
+static HOOK: Mutex<Option<usize>> = Mutex::new(None);
 
 fn wide_to_string(buf: &[u16]) -> String {
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
@@ -168,7 +170,7 @@ pub fn start(sender: UnboundedSender<FrontApp>) -> bool {
     };
     if !hook.is_null() {
         if let Ok(mut slot) = HOOK.lock() {
-            *slot = Some(hook);
+            *slot = Some(hook as usize);
         }
     }
     if let Some(app) = frontmost() {
@@ -192,7 +194,7 @@ pub fn stop() {
     if let Ok(mut slot) = HOOK.lock() {
         if let Some(hook) = slot.take() {
             // SAFETY: hook from SetWinEventHook on this process.
-            unsafe { UnhookWinEvent(hook) };
+            unsafe { UnhookWinEvent(hook as HWINEVENTHOOK) };
         }
     }
     SENDER.with_borrow_mut(|slot| *slot = None);

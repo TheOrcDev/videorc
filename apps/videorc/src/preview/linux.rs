@@ -78,6 +78,7 @@ fn failed(logger: Logger) -> Preview {
         closed_from: WindowMode::Docked,
         studio: None,
         scrolled_away: false,
+        smoke_slots: [None, None],
     }
 }
 
@@ -190,6 +191,7 @@ pub(super) fn new(setup: PreviewSetup, window: &mut Window, cx: &mut App) -> Ent
             closed_from: WindowMode::Docked,
             studio: Some(words_studio),
             scrolled_away: false,
+            smoke_slots: [None, None],
         }
     })
 }

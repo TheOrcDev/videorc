@@ -15,6 +15,9 @@ const TRACK_H: f32 = 6.0;
 
 #[derive(IntoElement)]
 pub struct Progress {
+    /// Its element id: the accessibility role needs a stateful element.
+    /// Bars that share a parent need their own (`Self::id`).
+    id: gpui::ElementId,
     value: f32,
     max: f32,
     label: Option<SharedString>,
@@ -27,6 +30,7 @@ impl Progress {
     /// A bar from 0 to `max` (100 by default). A non-positive `max` reads as 100.
     pub fn new(value: f32) -> Self {
         Progress {
+            id: "progress".into(),
             value,
             max: DEFAULT_MAX,
             label: None,
@@ -34,6 +38,12 @@ impl Progress {
             accessibility_label: None,
             appearance: None,
         }
+    }
+
+    /// Its element id, for bars that share a parent.
+    pub fn id(mut self, id: impl Into<gpui::ElementId>) -> Self {
+        self.id = id.into();
+        self
     }
 
     pub fn max(mut self, max: f32) -> Self {
@@ -111,6 +121,7 @@ impl RenderOnce for Progress {
         };
 
         div()
+            .id(self.id)
             .flex()
             .w_full()
             .flex_col()
