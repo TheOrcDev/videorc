@@ -6,8 +6,10 @@
 //! runs their actions through the Studio's apply path and the backend's
 //! `screen.hide` / `screen.show`.
 //!
-//! The watcher is the app's (NSWorkspace on macOS; other platforms say they
-//! have none yet). App names and bundle ids never reach a log line.
+//! The watcher is the app's (NSWorkspace on macOS; WinEvent /
+//! GetForegroundWindow on Windows; `_NET_ACTIVE_WINDOW` on Linux X11;
+//! Wayland stays a named no-op). App names and bundle ids never reach a log
+//! line.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -795,42 +795,90 @@ fn main() -> Result<()> {
 
         // Follow the app in front and the password-manager hide (plan 210
         // D10/D11): the core's follower, fed by the platform's front-app
-        // watcher. Only macOS has one so far.
+        // watcher (NSWorkspace on macOS; WinEvent / GetForegroundWindow on
+        // Windows; _NET_ACTIVE_WINDOW on Linux X11; Wayland named no-op).
         {
-            #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
             let mut self_ids = vec![APP_ID.to_string()];
             #[cfg(target_os = "macos")]
             self_ids.extend(platform::macos::front_app::self_bundle_id());
+            #[cfg(target_os = "windows")]
+            self_ids.extend(platform::windows::front_app::self_bundle_id());
+            #[cfg(target_os = "linux")]
+            self_ids.extend(platform::linux::front_app::self_bundle_id());
             let feed = videorc_app_core::studio::follow_runner::start(
                 &core_handle,
                 studio.clone(),
                 self_ids,
                 follow_logger.clone(),
             );
-            #[cfg(target_os = "macos")]
-            if platform::macos::front_app::start(feed.sender.clone()) {
+            let started = {
+                #[cfg(target_os = "macos")]
+                {
+                    platform::macos::front_app::start(feed.sender.clone())
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    platform::windows::front_app::start(feed.sender.clone())
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    platform::linux::front_app::start(feed.sender.clone())
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+                {
+                    let _ = &feed;
+                    false
+                }
+            };
+            if started {
                 let watch = feed.watch_windows.clone();
                 cx.spawn(async move |cx| {
                     loop {
                         cx.background_executor()
                             .timer(Duration::from_millis(500))
                             .await;
-                        if watch.load(std::sync::atomic::Ordering::Relaxed) {
-                            cx.update(|_| platform::macos::front_app::poll());
+                        // Always poll on Windows/Linux (event hooks miss
+                        // same-app window swaps); on macOS only while Follow
+                        // asks for the front-window watch.
+                        let want = {
+                            #[cfg(target_os = "macos")]
+                            {
+                                watch.load(std::sync::atomic::Ordering::Relaxed)
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                let _ = &watch;
+                                true
+                            }
+                        };
+                        if want {
+                            cx.update(|_| {
+                                #[cfg(target_os = "macos")]
+                                platform::macos::front_app::poll();
+                                #[cfg(target_os = "windows")]
+                                platform::windows::front_app::poll();
+                                #[cfg(target_os = "linux")]
+                                platform::linux::front_app::poll();
+                            });
                         }
                     }
                 })
                 .detach();
             } else {
+                drop(feed);
+                #[cfg(target_os = "linux")]
+                {
+                    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                        follow_logger.info(platform::linux::front_app::WAYLAND_NO_WATCHER);
+                    } else {
+                        follow_logger.warn(
+                            "Follow the app in front: the X11 front-app watcher did not start; Follow and the password-manager hide stay off.",
+                        );
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
                 follow_logger.warn(
                     "Follow the app in front: the front-app watcher did not start; Follow and the password-manager hide stay off.",
-                );
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                drop(feed);
-                follow_logger.info(
-                    "Follow the app in front: this platform has no front-app watcher yet; Follow and the password-manager hide stay off.",
                 );
             }
         }
