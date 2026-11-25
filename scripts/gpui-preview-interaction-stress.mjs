@@ -1,0 +1,302 @@
+// Plan 260 Phase 3 (L6): `smoke:preview-interaction-stress` on the GPUI app
+// (VIDEORC_APP=gpui; scripts/smoke-preview-interaction-stress-app.mjs hands
+// over here). Electron's gate keeps sampling its native layer while
+// placement, focus and scene intent change with no settle period; this does
+// the same to the GPUI native preview. A sampler reads the element's live
+// `presentedFrameId` and the preview's phase every 100 ms through every
+// phase, and each phase must keep presenting:
+//
+// 1. Rapid scenes: an overlapping burst of layout intents (the last must
+//    win), then VIDEORC_PREVIEW_STRESS_SCENE_ROUNDS (3) rounds of Electron's
+//    sequence (`PREVIEW_INTERACTION_STRESS_PROFILE.sceneSequence`), each
+//    converging on the compositor's scene. A preset the backend refuses
+//    without a real screen or camera is a named SKIP for the phase.
+// 2. The Preview window (macOS): a storm of moves and resizes
+//    (`preview-window-set-bounds` every 40 ms, no settle), then an alignment
+//    read (the screen against the presented frame, as probe:preview-window).
+// 3. Docked: the main window moved and sized in a storm
+//    (`main-window-set-bounds`).
+//
+// A phase fails when the preview stood still longer than
+// VIDEORC_PREVIEW_STRESS_MAX_STILL_MS (1000), left presenting (healing,
+// stalled, fallback), or presented nothing. Functional contract only; the fps
+// budgets stay in Electron's gate.
+
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+
+import {
+  describePreview,
+  enableTestPattern,
+  launchGpuiApp,
+  sleep,
+  waitUntil
+} from './lib/gpui-preview-probe.mjs'
+import { PREVIEW_INTERACTION_STRESS_PROFILE } from './lib/preview-interaction-stress.mjs'
+import { alignedCells, GRID } from './gpui-preview-window-probe.mjs'
+import { connectBackend, request } from './smoke-recording-session.mjs'
+
+const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 240000)
+const presentBudgetMs = Number(process.env.VIDEORC_GPUI_PREVIEW_BUDGET_MS ?? 20000)
+const maxStillMs = Number(process.env.VIDEORC_PREVIEW_STRESS_MAX_STILL_MS ?? 1000)
+const sceneRounds = Math.max(1, Number(process.env.VIDEORC_PREVIEW_STRESS_SCENE_ROUNDS ?? 3))
+const STORM_STEPS = 60
+const STORM_EVERY_MS = 40
+const SAMPLE_EVERY_MS = 100
+
+/**
+ * What a phase's samples say: the longest stretch the presented frame stood
+ * still, the phases seen, and how far it advanced. Pure.
+ */
+export function continuity(samples) {
+  let longestStillMs = 0
+  let stillSince = samples[0]?.at ?? 0
+  for (let index = 1; index < samples.length; index++) {
+    if (samples[index].presented !== samples[index - 1].presented) {
+      stillSince = samples[index].at
+    }
+    longestStillMs = Math.max(longestStillMs, samples[index].at - stillSince)
+  }
+  const ids = samples.map((sample) => sample.presented).filter((id) => typeof id === 'number')
+  return {
+    longestStillMs,
+    phases: [...new Set(samples.map((sample) => sample.phase))],
+    advance: ids.length ? ids.at(-1) - ids[0] : 0,
+    samples: samples.length
+  }
+}
+
+/** A phase's continuity failures. Pure. */
+export function continuityFailures(label, summary, limitMs = maxStillMs) {
+  const failures = []
+  if (!(summary.advance > 0)) failures.push(`${label}: no frames presented`)
+  if (summary.longestStillMs > limitMs) {
+    failures.push(`${label}: the preview stood still for ${summary.longestStillMs} ms`)
+  }
+  const bad = summary.phases.filter((phase) => phase && phase !== 'presenting')
+  if (bad.length) failures.push(`${label}: the preview left presenting (${bad.join(', ')})`)
+  return failures
+}
+
+/** Samples the preview every 100 ms until stopped. */
+function startSampler(command) {
+  let running = true
+  let samples = []
+  const loop = (async () => {
+    while (running) {
+      const at = Date.now()
+      const [surface, state] = await Promise.all([
+        command('native-preview-surface-status').catch(() => null),
+        command('preview-window-state').catch(() => null)
+      ])
+      samples.push({
+        at,
+        presented: surface?.presentedFrameId ?? null,
+        phase: state?.phase ?? null
+      })
+      await sleep(SAMPLE_EVERY_MS)
+    }
+  })()
+  return {
+    /** The samples since the last take, and a fresh start. */
+    take() {
+      const taken = samples
+      samples = []
+      return taken
+    },
+    async stop() {
+      running = false
+      await loop
+    }
+  }
+}
+
+const results = []
+function record(name, verdict, detail = {}) {
+  results.push({ name, verdict, ...detail })
+  const words = detail.reason ?? detail.summary ?? ''
+  console.log(`gpui-preview-stress: ${verdict} ${name}${words ? ` — ${words}` : ''}`)
+}
+
+export async function runGpuiPreviewInteractionStress() {
+  const stateDir = resolve(
+    process.env.VIDEORC_SMOKE_OUTPUT_DIR ??
+      (await mkdtemp(join(tmpdir(), 'videorc-gpui-preview-stress-')))
+  )
+  const { app, command } = await launchGpuiApp({
+    stateDir,
+    timeoutMs,
+    verbose: process.env.VIDEORC_SMOKE_VERBOSE === '1'
+  })
+  const ws = await connectBackend(app.connections['backend-ready'], timeoutMs)
+  const rpc = (method, params = {}) => request(ws, 15000, method, params)
+  const state = () => command('preview-window-state')
+  const presenting = (seen) => seen?.phase === 'presenting' && seen?.closed !== true
+  let sampler
+  /** Runs `body` with the sampler's window around it and judges continuity. */
+  const phase = async (name, body) => {
+    sampler.take()
+    let detail
+    try {
+      detail = (await body()) ?? {}
+    } catch (error) {
+      sampler.take()
+      record(name, 'FAIL', { reason: error?.message ?? String(error) })
+      return
+    }
+    if (detail.skip) {
+      sampler.take()
+      record(name, 'SKIP', detail)
+      return
+    }
+    const summary = continuity(sampler.take())
+    const failures = [...(detail.failures ?? []), ...continuityFailures(name, summary)]
+    record(name, failures.length ? 'FAIL' : 'PASS', {
+      summary: `still ≤ ${summary.longestStillMs} ms, +${summary.advance} frames, phases [${summary.phases.join(', ')}]${detail.summary ? `; ${detail.summary}` : ''}`,
+      failures,
+      continuity: summary
+    })
+  }
+
+  try {
+    await enableTestPattern(command)
+    await waitUntil('the docked preview never presented', state, presenting, {
+      budgetMs: presentBudgetMs,
+      label: describePreview
+    })
+    sampler = startSampler(command)
+
+    await phase('rapid scenes (latest intent wins)', async () => {
+      const failures = []
+      const converge = async (preset) => {
+        await waitUntil(
+          `the compositor never showed ${preset}`,
+          () => rpc('compositor.status'),
+          (status) => status?.sceneLayout?.layoutPreset === preset,
+          { budgetMs: 10000, everyMs: 100 }
+        )
+      }
+      // The overlapping burst: three intents in flight at once.
+      const burst = ['camera-only', 'screen-only', 'side-by-side']
+      const sent = await Promise.allSettled(
+        burst.map((preset) => command('select-layout-preset', { preset, settleMs: 0 }))
+      )
+      const refused = sent.find(
+        (each) =>
+          each.status === 'rejected' &&
+          /blocked|needs a (screen|camera)|refus/i.test(each.reason?.message ?? '')
+      )
+      if (refused) {
+        return {
+          skip: true,
+          reason: `the backend refuses a layout without a real device: ${refused.reason.message}`
+        }
+      }
+      try {
+        await converge(burst.at(-1))
+      } catch (error) {
+        failures.push(`burst: ${error.message}`)
+      }
+      for (let round = 1; round <= sceneRounds; round++) {
+        for (const preset of PREVIEW_INTERACTION_STRESS_PROFILE.sceneSequence) {
+          try {
+            await command('select-layout-preset', { preset, settleMs: 0 })
+            await converge(preset)
+          } catch (error) {
+            failures.push(`round ${round} ${preset}: ${error.message}`)
+          }
+        }
+      }
+      return {
+        failures,
+        summary: `${sceneRounds} rounds of ${PREVIEW_INTERACTION_STRESS_PROFILE.sceneSequence.length}`
+      }
+    })
+
+    await phase('the Preview window: move and resize storm', async () => {
+      if ((await state())?.canFloat !== true) {
+        return {
+          skip: true,
+          reason: 'the Preview window opens only on macOS with the native preview'
+        }
+      }
+      await command('preview-window-open')
+      await waitUntil(
+        'the Preview window never presented',
+        state,
+        (seen) => seen?.floatingOpen === true && presenting(seen),
+        { budgetMs: presentBudgetMs, label: describePreview }
+      )
+      for (let step = 0; step < STORM_STEPS; step++) {
+        const wave = Math.abs((step % 20) - 10) / 10
+        await command('preview-window-set-bounds', {
+          x: 120 + Math.round(wave * 240),
+          y: 100 + Math.round(wave * 120),
+          width: 640 + Math.round(wave * 420),
+          height: 360 + (step % 3) * 90
+        })
+        await sleep(STORM_EVERY_MS)
+      }
+      await sleep(600)
+      const screen = await command('preview-surface-sample', { rects: GRID })
+      const frame = await rpc('preview.debug.sample', { rects: GRID })
+      const matching = alignedCells(screen.samples ?? [], frame.samples ?? []).filter(
+        Boolean
+      ).length
+      const failures =
+        matching < 13 ? [`after the storm only ${matching}/16 cells match the frame`] : []
+      await command('preview-window-close')
+      await waitUntil(
+        'the Preview never docked back',
+        state,
+        (seen) => seen?.mode === 'docked' && presenting(seen),
+        {
+          budgetMs: presentBudgetMs,
+          label: describePreview
+        }
+      )
+      return { failures, summary: `${STORM_STEPS} moves, then ${matching}/16 cells aligned` }
+    })
+
+    await phase('docked: main-window move and resize storm', async () => {
+      for (let step = 0; step < STORM_STEPS; step++) {
+        const wave = Math.abs((step % 20) - 10) / 10
+        await command('main-window-set-bounds', {
+          x: 80 + Math.round(wave * 160),
+          y: 60 + Math.round(wave * 80),
+          width: 1100 + Math.round(wave * 300),
+          height: 740 + (step % 3) * 40
+        })
+        await sleep(STORM_EVERY_MS)
+      }
+      await command('main-window-set-bounds', { x: 100, y: 90, width: 1180, height: 780 })
+      await sleep(600)
+      return { summary: `${STORM_STEPS} moves` }
+    })
+  } finally {
+    await sampler?.stop()
+    ws.close()
+    await app.stop()
+    await writeFile(
+      join(stateDir, 'gpui-preview-stress.json'),
+      JSON.stringify({ platform: process.platform, maxStillMs, sceneRounds, results }, null, 2)
+    )
+    console.log(`gpui-preview-stress: evidence ${join(stateDir, 'gpui-preview-stress.json')}`)
+  }
+  const failed = results.filter((each) => each.verdict === 'FAIL')
+  console.log(`gpui-preview-stress: ${failed.length ? `FAIL (${failed.length})` : 'PASS'}`)
+  return failed.length ? 1 : 0
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  runGpuiPreviewInteractionStress().then(
+    (code) => {
+      process.exitCode = code
+    },
+    (error) => {
+      console.error(error?.stack ?? String(error))
+      process.exitCode = 1
+    }
+  )
+}

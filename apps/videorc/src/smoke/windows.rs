@@ -35,6 +35,7 @@ pub const WINDOW_COMMANDS: &[&str] = &[
     "comments-window-set-smoke-marker",
     "comments-window-state",
     "comments-window-toggle",
+    "main-window-set-bounds",
     "notes-window-close",
     "notes-window-open",
     "notes-window-save-document",
@@ -182,6 +183,18 @@ fn run(command: &str, params: &Map<String, Value>, cx: &mut App) -> Result<Value
             let view = stream_manager::window::view(cx).ok_or(CHAT_CLOSED)?;
             view.update(cx, |sm, _, cx| sm.smoke_command_trace(cx))
                 .map_err(|_| CHAT_CLOSED.to_string())
+        }
+        "main-window-set-bounds" => {
+            // Electron's: the main window's frame (top-left screen points),
+            // each side not given kept, brought forward without focus.
+            let handle = super::shell(cx)?
+                .window(videorc_app_core::smoke::security::UiWindow::Main, cx)
+                .ok_or(super::MAIN_WINDOW_NOT_READY)?;
+            place(handle, params, cx)?;
+            let bounds = handle
+                .update(cx, |_, window, _| bounds_json(frame_of(window)))
+                .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())?;
+            Ok(json!({ "bounds": bounds }))
         }
         "raise-window" => raise(params, cx),
         other => Err(format!("{other} is not a Notes or Stream Manager command.")),
