@@ -7,6 +7,7 @@
 use crate::screens::avatar::{AvatarScreen, OpenPage as AvatarOpenPage, OpenSidekickTab};
 use crate::screens::command_palette::{Command, CommandPalette};
 use crate::screens::dialogs::{DialogsHost, OpenPage as DialogOpenPage};
+use crate::screens::error_panels::ErrorPanels;
 use crate::screens::notifications::{Centre, Hub, Navigate as NoticeNavigate, ToggleNotifications};
 use crate::screens::settings::{Navigate, SettingsScreen};
 use gpui::{Context, Entity, Focusable, Window, div, prelude::*, px};
@@ -113,6 +114,8 @@ pub struct Shell {
     palette: Entity<CommandPalette>,
     /// Shell dialogs (End livestream, Confirm, start-blocked). Go Live is Destinations'.
     dialogs: Entity<DialogsHost>,
+    /// Root / page crash panels (P1445–P1446).
+    errors: Entity<ErrorPanels>,
     notices: Entity<Centre>,
     notice_hub: Entity<Hub>,
     /// Phase 3 (L1): Scene ⌘3.
@@ -146,6 +149,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Self {
         let notices = cx.new(|cx| Centre::new(notice_hub.clone(), "main", window, cx));
+        let errors = cx.new(ErrorPanels::new);
+        cx.observe(&errors, |_, _, cx| cx.notify()).detach();
         palette.update(cx, |palette, _| palette.set_notifications_available());
         let captions = crate::screens::captions::page(cx);
         if let Some(captions) = &captions {
@@ -331,6 +336,7 @@ impl Shell {
             library,
             palette,
             dialogs,
+            errors,
             notices,
             notice_hub,
             scene,
@@ -339,6 +345,10 @@ impl Shell {
 
     pub fn dialogs(&self) -> Entity<DialogsHost> {
         self.dialogs.clone()
+    }
+
+    pub fn errors(&self) -> Entity<ErrorPanels> {
+        self.errors.clone()
     }
 
     pub fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -548,9 +558,19 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme::current(window, cx).theme();
         window.set_window_title(&nav::window_title(self.page));
+        let root_error = self.errors.read(cx).is_root();
         let status = self.backend.read(cx).value().clone();
         let connection = self.connection.read(cx).value().clone();
         let page = self.page;
+        let page_error = self.errors.read(cx).is_page();
+        if root_error {
+            return div()
+                .size_full()
+                .font_family(FONT)
+                .bg(hsla(t.glass_solid))
+                .text_color(hsla(t.foreground))
+                .child(self.errors.clone());
+        }
         let sources = self.sources.clone();
         let output = self.output.clone();
         let captions = self.captions.clone();
@@ -589,7 +609,16 @@ impl Render for Shell {
                     .flex()
                     .flex_row()
                     .child(self.sidebar(t, cx))
-                    .child(if page == PageId::Studio {
+                    .child(if page_error {
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .child(self.errors.clone())
+                    } else if page == PageId::Studio {
                         div()
                             .flex_1()
                             .min_w(px(0.))

@@ -97,6 +97,8 @@ pub struct DestinationsPanel {
     /// Per-destination draft for the stream key field while expanded.
     manual_key_drafts: std::collections::BTreeMap<String, Entity<InputState>>,
     manual_url_drafts: std::collections::BTreeMap<String, Entity<InputState>>,
+    /// P1493: keyring LinuxSetupAlert before sign-in (Linux only).
+    keyring_issue: Option<videorc_app_core::studio::linux_desktop::LinuxSetupIssue>,
 }
 
 impl DestinationsPanel {
@@ -133,6 +135,42 @@ impl DestinationsPanel {
             }
         })
         .detach();
+        // Keyring probe + diagnostics.linuxDesktop (P1489 / P1493).
+        if cfg!(target_os = "linux") {
+            let studio = studio.clone();
+            let runtime = runtime.clone();
+            cx.spawn(async move |this, cx| {
+                let desktop = runtime
+                    .spawn({
+                        let studio = studio.clone();
+                        async move {
+                            studio
+                                .backend()
+                                .request("diagnostics.linuxDesktop", serde_json::Value::Null)
+                                .await
+                                .ok()
+                        }
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                let keyring = runtime
+                    .spawn_blocking(crate::screens::linux_setup::probe_keyring_status)
+                    .await
+                    .ok()
+                    .flatten();
+                let issue = keyring.and_then(|keyring| {
+                    crate::screens::linux_setup::keyring_setup_issue(&keyring, desktop.as_ref())
+                });
+                let _ = this.update(cx, |panel, cx| {
+                    if panel.keyring_issue != issue {
+                        panel.keyring_issue = issue;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
         let mut panel = Self {
             studio,
             runtime,
@@ -156,6 +194,7 @@ impl DestinationsPanel {
             discord_paste: None,
             manual_key_drafts: std::collections::BTreeMap::new(),
             manual_url_drafts: std::collections::BTreeMap::new(),
+            keyring_issue: None,
         };
         panel.rebuild_from_studio();
         panel
@@ -774,6 +813,9 @@ impl Render for DestinationsPanel {
             DestinationsTab::Setup => {
                 let setup = self.setup.clone();
                 let mut notices = div().flex().flex_col().gap(px(8.));
+                if let Some(issue) = &self.keyring_issue {
+                    notices = notices.child(crate::screens::linux_setup::linux_setup_alert(issue));
+                }
                 if let Some((reason, action)) = &setup.notices.entitlement {
                     let mut alert = Alert::new("dest-entitlement")
                         .variant(AlertVariant::Locked)
