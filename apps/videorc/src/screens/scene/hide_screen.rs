@@ -4,7 +4,7 @@
 //! Screen row. "Add app…" joins with the picker's open-app list.
 
 use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px};
-use videorc_app_core::desktop::accelerator::accelerator_display_keys;
+use videorc_app_core::desktop::accelerator::accelerator_label;
 use videorc_app_core::editor::inspector::{
     copy as inspector_copy, remove_password_manager, restore_built_in_password_managers,
 };
@@ -14,7 +14,7 @@ use videorc_app_core::studio::families::{PrivacySettings, add_password_manager};
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input_group::{InputGroup, InputGroupAddon};
-use videorc_kit::kbd::{Kbd, kbd_group};
+use videorc_kit::kbd::Kbd;
 use videorc_kit::kebab_menu::{KEBAB_HOST, KebabMenu, KebabMenuItem, KebabReveal};
 use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::navigable_row::NavigableRow;
@@ -39,18 +39,18 @@ impl ScenePage {
         let platform = self.model.platform;
         let page = cx.entity().downgrade();
 
-        // P617: the key, or "Not set"; the row opens Settings → Shortcuts.
+        // P617: the key as one keycap (`ShortcutKeys`), or "Not set"; the
+        // row opens Settings → Shortcuts.
         let key: AnyElement = if self.model.hide_accelerator.trim().is_empty() {
             div()
                 .text_color(muted)
                 .child(inspector_copy::NOT_SET)
                 .into_any_element()
         } else {
-            kbd_group(
-                accelerator_display_keys(Some(self.model.hide_accelerator.as_str()), platform)
-                    .into_iter()
-                    .map(Kbd::new),
-            )
+            Kbd::new(accelerator_label(
+                Some(self.model.hide_accelerator.as_str()),
+                platform,
+            ))
             .into_any_element()
         };
         let shortcut = NavigableRow::with_control("hide-screen-shortcut", copy::SHORTCUT, key)
@@ -59,15 +59,13 @@ impl ScenePage {
                 this.navigate(SceneNavigate::Settings(SettingsTab::Shortcuts), cx)
             }));
 
-        let mut section = PanelSection::new("hide-screen")
-            .title(copy::HIDE_SCREEN_TITLE)
-            .description(div().child(copy::HIDE_SCREEN_DESCRIPTION))
-            .child(GroupedList::new().row(shortcut));
-
+        // The key and, on macOS, the password-manager hide share one inset
+        // group (`FieldGroup variant="grouped"`).
+        let mut settings = GroupedList::new().row(shortcut);
         if view.mac {
             // P618: the password-manager hide.
             let switch_page = page.clone();
-            section = section.child(
+            settings = settings.item(
                 SettingsRow::new("hide-for-password-managers", copy::PASSWORD_MANAGER_SWITCH)
                     .description(copy::PASSWORD_MANAGER_DESCRIPTION)
                     .child(
@@ -85,7 +83,13 @@ impl ScenePage {
                             }),
                     ),
             );
+        }
+        let mut section = PanelSection::new("hide-screen")
+            .title(copy::HIDE_SCREEN_TITLE)
+            .description(div().child(copy::HIDE_SCREEN_DESCRIPTION))
+            .child(settings);
 
+        if view.mac {
             // P619: the list, never empty; the last row can't be removed.
             let mut list = GroupedList::new().label(copy::PASSWORD_MANAGERS);
             for entry in &view.entries {
@@ -113,7 +117,7 @@ impl ScenePage {
                                 entry.name.clone(),
                             )
                             .grouped()
-                            .icon(icon(IconName::LockKey, 14., muted))
+                            .icon(icon(IconName::LockKey, 16., muted))
                             .child(
                                 KebabMenu::new(
                                     SharedString::from(format!(
@@ -128,7 +132,6 @@ impl ScenePage {
                         ),
                 );
             }
-            section = section.child(list);
 
             // P620: Add app… (the open apps from the device list; the app
             // pictures' request is not in the protocol yet). P621: Restore
@@ -175,7 +178,15 @@ impl ScenePage {
                         }),
                 );
             }
-            section = section.child(actions);
+            // The list and its buttons 8 px apart, as one block.
+            section = section.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(list)
+                    .child(actions),
+            );
         }
         section.into_any_element()
     }

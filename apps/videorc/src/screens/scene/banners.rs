@@ -24,6 +24,7 @@ use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::empty::Empty;
 use videorc_kit::icon::{IconName, icon};
+use videorc_kit::label::Label;
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::navigable_row::NavigableRow;
 use videorc_kit::panel_section::PanelSection;
@@ -38,18 +39,19 @@ use super::editor::copy;
 use super::inspector::meta_line;
 use super::{SceneNavigate, ScenePage};
 
-/// A label over a row of outline buttons (`Field` + `FieldLabel`).
-fn labelled(label: impl IntoElement, body: impl IntoElement, t: &Theme) -> gpui::Div {
+/// A banner row's checkerboard: 4 px squares over the 36 × 20 thumbnail.
+const CHECKER_SQUARE: f32 = 4.;
+const THUMB_COLUMNS: u32 = 9;
+const THUMB_ROWS: u32 = 5;
+
+/// A label over a row of outline buttons (`Field` + `FieldLabel`: 14 px /
+/// 500, 12 px over its control).
+fn labelled(label: &'static str, body: impl IntoElement) -> gpui::Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(6.))
-        .child(
-            div()
-                .type_scale(text::LABEL)
-                .text_color(hsla(t.foreground))
-                .child(label),
-        )
+        .gap(px(12.))
+        .child(Label::new(label))
         .child(body)
 }
 
@@ -148,7 +150,7 @@ impl ScenePage {
             );
         }
         section
-            .child(labelled(overlay.snap_label, snaps, t))
+            .child(labelled(overlay.snap_label, snaps))
             .into_any_element()
     }
 
@@ -200,7 +202,7 @@ impl ScenePage {
                     .on_click(cx.listener(move |this, _, _, cx| this.place_banner(place, cx))),
             );
         }
-        section = section.child(labelled(banner.place_label, places, t));
+        section = section.child(labelled(banner.place_label, places));
 
         // P603: where it is drawn largest, and whether the image is that big.
         let advice = &banner.advice;
@@ -234,7 +236,7 @@ impl ScenePage {
         section = section.child(self.knob_row(Knob::Opacity, copy::OPACITY, blocked, None, t, cx));
 
         // P606: Appears in, the switch before its words.
-        let mut appears = div().flex().flex_wrap().gap(px(16.));
+        let mut appears = div().flex().flex_wrap().gap_x(px(24.)).gap_y(px(8.));
         for (id, label, key, on) in [
             (
                 "scene-banner-stream",
@@ -270,15 +272,10 @@ impl ScenePage {
                                 });
                             }),
                     )
-                    .child(
-                        div()
-                            .type_scale(text::LABEL)
-                            .text_color(hsla(t.foreground))
-                            .child(label),
-                    ),
+                    .child(Label::new(label)),
             );
         }
-        section = section.child(labelled(copy::APPEARS_IN, appears, t));
+        section = section.child(labelled(copy::APPEARS_IN, appears));
 
         // P607: Order, as the Images list draws them (later is on top).
         let mut front = Button::new("scene-banner-front")
@@ -308,7 +305,6 @@ impl ScenePage {
                 .gap(px(8.))
                 .child(front)
                 .child(back),
-            t,
         ));
 
         // P608, P609: Timing, closed until opened for this banner.
@@ -326,13 +322,7 @@ impl ScenePage {
                 .items_center()
                 .gap(px(8.))
                 .min_w_0()
-                .child(
-                    div()
-                        .flex_none()
-                        .type_scale(text::LABEL)
-                        .text_color(hsla(t.foreground))
-                        .child(copy::TIMING),
-                )
+                .child(div().flex_none().child(Label::new(copy::TIMING)))
                 .child(
                     div()
                         .flex_1()
@@ -510,7 +500,24 @@ impl ScenePage {
             .and_then(|banner| {
                 super::stage::banner_file(&self.user_data_dir, &banner.thumbnail_file)
             });
+        // `CHECKERBOARD` at the row's `bg-size-[8px_8px]`: 4 px squares of
+        // the foreground at 9 %, so a banner's transparency shows the same
+        // way in both themes.
+        let square = hsla(with_alpha(t.foreground, 0.09));
+        let checker = (0..THUMB_ROWS).flat_map(move |row| {
+            (0..THUMB_COLUMNS)
+                .filter(move |column| (row + column) % 2 == 1)
+                .map(move |column| {
+                    div()
+                        .absolute()
+                        .left(px(column as f32 * CHECKER_SQUARE))
+                        .top(px(row as f32 * CHECKER_SQUARE))
+                        .size(px(CHECKER_SQUARE))
+                        .bg(square)
+                })
+        });
         let frame = div()
+            .relative()
             .h(px(20.))
             .w(px(36.))
             .flex_none()
@@ -519,11 +526,16 @@ impl ScenePage {
             .justify_center()
             .overflow_hidden()
             .rounded(px(radius::CHIP))
-            .bg(hsla(with_alpha(t.foreground, 0.04)));
+            .bg(hsla(with_alpha(t.foreground, 0.04)))
+            .children(checker);
         match path {
             Some(path) => frame
-                .p(px(2.))
-                .child(img(path).size_full().object_fit(ObjectFit::Contain))
+                .child(
+                    div()
+                        .size_full()
+                        .p(px(2.))
+                        .child(img(path).size_full().object_fit(ObjectFit::Contain)),
+                )
                 .into_any_element(),
             None => frame
                 .child(icon(IconName::ImageSquare, 14., hsla(t.muted_foreground)))
