@@ -249,7 +249,8 @@ pub trait StudioBackend: Send + Sync + 'static {
         async move { Err(RpcError::not_connected(method)) }
     }
     /// Plan 260 S1.6a part 6c: the Clips ring's and the clip action's
-    /// requests by name (`replay.status`, `clip.mark`), as the backend's
+    /// requests by name (`replay.status`, `clip.mark`), and cloud Clips'
+    /// (`cloud.clips.*`, Output while a room is open), as the backend's
     /// JSON. A backend without them (a test fake) answers nothing, so the
     /// ring is never armed (Electron's failed `replay.status` read).
     fn clips_request(

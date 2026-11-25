@@ -6,18 +6,26 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{Context, PathPromptOptions, SharedString, WeakEntity, Window, div, prelude::*, px};
+use gpui::{
+    ClipboardItem, Context, Keystroke, PathPromptOptions, SharedString, Subscription, WeakEntity,
+    Window, div, prelude::*, px,
+};
 use serde_json::{Value, json};
 use videorc_app_core::desktop::camera_extension::camera_extension_approval_url;
-use videorc_app_core::protocol::{
-    VirtualCameraPlatformStep, VirtualCameraState, VirtualCameraStatus,
-};
+use videorc_app_core::desktop::{accelerator as accel, global_shortcuts as keys};
+use videorc_app_core::protocol::VirtualCameraStatus;
+use videorc_app_core::shortcuts as recorder;
 use videorc_app_core::studio::Connection;
 use videorc_app_core::studio::capture_config::{self, VIDEO_PRESETS};
 use videorc_app_core::studio::clips as clips_copy;
+use videorc_app_core::studio::cloud_clips::{
+    self as cloud_clips, CloudClipJob, CloudClipsStatus, JobAction, Orientation,
+};
 use videorc_app_core::studio::inspector::format_video_quality;
 use videorc_app_core::studio::recordings_folder::{self, StoredFolder, copy as folder_copy};
-use videorc_app_core::studio::virtual_camera::{VIDEORC_CAMERA, camera_copy, camera_hidden};
+use videorc_app_core::studio::virtual_camera::{
+    CameraAction, CameraTone, OutputCameraView, VIDEORC_CAMERA,
+};
 use videorc_app_core::{BackendClient, Studio, StudioSnapshot};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonVariant};
@@ -29,8 +37,10 @@ use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::tabs::Tabs;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
+use videorc_kit::toggle_group::{ToggleGroup, ToggleItem};
 use videorc_kit::tokens::{size, text};
 
+use crate::app::hotkeys::{self, Hotkeys};
 use crate::app::shell::Shell;
 
 pub type AppStudio = Studio<BackendClient>;
@@ -52,11 +62,10 @@ const CAMERA_SECTION_DESCRIPTION: &str =
 const CAMERA_DESCRIPTION: &str = "Shows your program as a camera in Meet, Zoom, Teams and Discord. No sound. Meet shows you a mirror image; everyone else sees it right.";
 const FOLDER_SECTION_DESCRIPTION: &str =
     "The folder each recording is saved to, and what Videorc keeps there.";
-const OFFLINE_LOCK: &str = "Videorc is reconnecting. These controls come back in a moment.";
-/// `platformCopy(platform).deviceNoun`: "Mac", "PC" or "computer".
-fn device_noun() -> &'static str {
-    videorc_app_core::format::device_noun(crate::app::hotkeys::node_platform())
-}
+/// The two clip keys (plan 199 D5): the 30-second clip, then the minute.
+const CLIP_KEY_ACTIONS: [&str; 2] = ["clip-mark", "clip-mark-long"];
+/// The recorder gives up after this long without a key (Settings' rule).
+const RECORDER_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
 
 const RECORDING_PRESETS: &[&str] = &[
     "tutorial-540p30",
@@ -160,116 +169,6 @@ fn recording_preset_options(current: &str, vertical: bool) -> Vec<(String, Strin
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct CameraLine {
-    text: String,
-    tone: StatusTone,
-    busy: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct CameraModel {
-    hidden: bool,
-    checked: bool,
-    disabled: bool,
-    line: Option<CameraLine>,
-    show_approval: bool,
-}
-
-impl CameraModel {
-    fn of(status: Option<&VirtualCameraStatus>, connected: bool) -> Self {
-        let Some(status) = status.filter(|status| !camera_hidden(Some(status))) else {
-            return Self {
-                hidden: true,
-                checked: false,
-                disabled: true,
-                line: None,
-                show_approval: false,
-            };
-        };
-        let mut model = Self {
-            hidden: false,
-            checked: status.on && status.available,
-            disabled: !connected || !status.available,
-            line: None,
-            show_approval: false,
-        };
-        let say = |text: String, tone: StatusTone, busy: bool| CameraLine { text, tone, busy };
-        if !status.available {
-            model.line = Some(say(
-                status
-                    .message
-                    .clone()
-                    .filter(|_| status.platform_step == Some(VirtualCameraPlatformStep::Failed))
-                    .unwrap_or_else(|| camera_copy::cant_run(device_noun())),
-                StatusTone::Warn,
-                false,
-            ));
-        } else {
-            match status.state {
-                VirtualCameraState::Off => {}
-                VirtualCameraState::Installing => {
-                    let text =
-                        if status.platform_step == Some(VirtualCameraPlatformStep::Installing) {
-                            camera_copy::INSTALLING
-                        } else {
-                            camera_copy::STARTING
-                        };
-                    model.line = Some(say(text.into(), StatusTone::Neutral, true));
-                }
-                VirtualCameraState::NeedsApproval => {
-                    if status.platform_step == Some(VirtualCameraPlatformStep::NeedsReboot) {
-                        model.line = Some(say(
-                            camera_copy::needs_restart(device_noun()),
-                            StatusTone::Warn,
-                            false,
-                        ));
-                    } else {
-                        model.line = Some(say(
-                            format!(
-                                "Allow {VIDEORC_CAMERA} in System Settings → {}.",
-                                camera_copy::APPROVAL_PATH_MACOS_15
-                            ),
-                            StatusTone::Warn,
-                            false,
-                        ));
-                        model.show_approval = true;
-                    }
-                }
-                VirtualCameraState::NeedsSetup => {
-                    model.line = Some(say(
-                        camera_copy::NEEDS_SETUP.into(),
-                        StatusTone::Warn,
-                        false,
-                    ));
-                }
-                VirtualCameraState::Ready => {
-                    model.line = Some(say(camera_copy::READY.into(), StatusTone::Good, false));
-                }
-                VirtualCameraState::Streaming => {
-                    let text = match status.viewers.filter(|count| *count > 0) {
-                        Some(apps) => camera_copy::in_use(i64::from(apps)),
-                        None => camera_copy::READY.to_string(),
-                    };
-                    model.line = Some(say(text, StatusTone::Good, false));
-                }
-                VirtualCameraState::Unavailable => {
-                    let detail = status.message.as_deref().unwrap_or(camera_copy::RETRYING);
-                    model.line = Some(say(
-                        format!("{} {detail}", camera_copy::STOPPED),
-                        StatusTone::Warn,
-                        false,
-                    ));
-                }
-            }
-        }
-        if !connected {
-            model.line = Some(say(OFFLINE_LOCK.into(), StatusTone::Neutral, false));
-        }
-        model
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
 struct OutputModel {
     session_locked: bool,
     record_enabled: bool,
@@ -291,7 +190,7 @@ struct OutputModel {
     folder: recordings_folder::RecordingsFolderView,
     folder_path: Option<PathBuf>,
     keep_original: bool,
-    camera: CameraModel,
+    camera: OutputCameraView,
     connected: bool,
 }
 
@@ -334,41 +233,87 @@ impl OutputModel {
                 .as_ref()
                 .map(|folder| folder.path.clone()),
             keep_original: snapshot.settings.studio.keep_original_recording(),
-            camera: CameraModel::of(
+            camera: OutputCameraView::of(
                 camera,
                 matches!(snapshot.connection, Connection::Connected { .. }),
+                hotkeys::node_platform(),
             ),
             connected: matches!(snapshot.connection, Connection::Connected { .. }),
         }
     }
 }
 
+/// The clip-key recorder (Settings → Shortcuts' rules): one armed row.
+#[derive(Default)]
+struct Recorder {
+    action: Option<String>,
+    interceptor: Option<Subscription>,
+    generation: u64,
+    message: Option<(String, String)>,
+}
+
+/// Cloud Clips while a room is open: the show it reads, what it read, and
+/// the one action in flight.
+#[derive(Default)]
+struct CloudClips {
+    show_id: Option<String>,
+    status: Option<CloudClipsStatus>,
+    jobs: Vec<CloudClipJob>,
+    orientation: Orientation,
+    busy: bool,
+    error: Option<String>,
+    reading: bool,
+}
+
 pub struct OutputPanel {
     studio: Arc<AppStudio>,
     runtime: tokio::runtime::Handle,
+    hotkeys: Hotkeys,
     model: OutputModel,
     camera_status: Option<VirtualCameraStatus>,
     camera_pending: bool,
+    camera_action: Option<CameraAction>,
     camera_error: Option<String>,
+    command_copied: bool,
+    recorder: Recorder,
+    cloud: CloudClips,
+    active: bool,
     #[allow(dead_code)]
     shell: Option<WeakEntity<Shell>>,
     facts_ticket: u64,
+}
+
+/// The open room's show: cloud Clips replaces the native section while it
+/// is open (`cloudStatus.room.phase === 'open' && cloudStatus.show`).
+fn open_room_show(studio: &AppStudio) -> Option<String> {
+    let status = studio.cloud_now().status?;
+    let open = status
+        .room
+        .as_ref()
+        .is_some_and(|room| room["phase"].as_str() == Some("open"));
+    open.then_some(status.show?.id)
 }
 
 impl OutputPanel {
     pub fn new(
         studio: Arc<AppStudio>,
         runtime: tokio::runtime::Handle,
+        hotkeys: Hotkeys,
         cx: &mut Context<Self>,
     ) -> Self {
         let model = OutputModel::of(&*studio.watch().borrow(), None);
         let studio_watch = studio.clone();
         cx.spawn(async move |this, cx| {
             let mut studio_rx = studio_watch.watch();
+            let mut cloud_rx = studio_watch.cloud();
             let mut events = studio_watch.backend().subscribe();
             loop {
                 let event = tokio::select! {
                     changed = studio_rx.changed() => {
+                        if changed.is_err() { break; }
+                        None
+                    }
+                    changed = cloud_rx.changed() => {
                         if changed.is_err() { break; }
                         None
                     }
@@ -386,17 +331,39 @@ impl OutputPanel {
                         panel.camera_status = serde_json::from_value(payload).ok();
                     }
                     panel.rebuild(&snapshot, cx);
+                    panel.follow_room(cx);
                 });
+            }
+        })
+        .detach();
+        // Cloud Clips reads every two seconds while the page shows it.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(cloud_clips::READ_EVERY)
+                    .await;
+                if this
+                    .update(cx, |panel, cx| panel.read_cloud_clips(cx))
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();
         Self {
             studio,
             runtime,
+            hotkeys,
             model,
             camera_status: None,
             camera_pending: false,
+            camera_action: None,
             camera_error: None,
+            command_copied: false,
+            recorder: Recorder::default(),
+            cloud: CloudClips::default(),
+            active: false,
             shell: None,
             facts_ticket: 0,
         }
@@ -407,10 +374,278 @@ impl OutputPanel {
     }
 
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.active = active;
         if active {
             self.refresh_camera(cx);
             self.schedule_folder_facts(cx);
+            self.follow_room(cx);
+            self.read_cloud_clips(cx);
+        } else {
+            self.disarm_recorder(cx);
         }
+    }
+
+    // ── Cloud Clips (P666–P668) ──────────────────────────────────────────
+
+    /// A new room (or none) starts the section over, as Electron keys it
+    /// by the show.
+    fn follow_room(&mut self, cx: &mut Context<Self>) {
+        let show = open_room_show(&self.studio);
+        if show != self.cloud.show_id {
+            self.cloud = CloudClips {
+                show_id: show,
+                ..CloudClips::default()
+            };
+            self.read_cloud_clips(cx);
+            cx.notify();
+        }
+    }
+
+    fn read_cloud_clips(&mut self, cx: &mut Context<Self>) {
+        let Some(show_id) = self.cloud.show_id.clone() else {
+            return;
+        };
+        if !self.active || self.cloud.reading {
+            return;
+        }
+        self.cloud.reading = true;
+        let studio = self.studio.clone();
+        let read_show = show_id.clone();
+        let job = self
+            .runtime
+            .spawn(async move { studio.cloud_clips_read(&read_show).await });
+        cx.spawn(async move |this, cx| {
+            let answer = job.await.ok().flatten();
+            let _ = this.update(cx, |panel, cx| {
+                panel.cloud.reading = false;
+                if panel.cloud.show_id.as_deref() != Some(show_id.as_str()) {
+                    return;
+                }
+                let (status, jobs) = match answer {
+                    Some((status, jobs)) => (Some(status), jobs),
+                    None => (None, panel.cloud.jobs.clone()),
+                };
+                if panel.cloud.status != status || panel.cloud.jobs != jobs {
+                    panel.cloud.status = status;
+                    panel.cloud.jobs = jobs;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// One cloud Clips action at a time; a refusal says the one thing
+    /// Electron said, and a new status replaces the read one.
+    fn cloud_act<F, Fut>(&mut self, run: F, cx: &mut Context<Self>)
+    where
+        F: FnOnce(Arc<AppStudio>, String) -> Fut,
+        Fut:
+            std::future::Future<Output = Result<Option<CloudClipsStatus>, String>> + Send + 'static,
+    {
+        let Some(show_id) = self.cloud.show_id.clone() else {
+            return;
+        };
+        if self.cloud.busy {
+            return;
+        }
+        self.cloud.busy = true;
+        self.cloud.error = None;
+        let job = self
+            .runtime
+            .spawn(run(self.studio.clone(), show_id.clone()));
+        cx.spawn(async move |this, cx| {
+            let result = job
+                .await
+                .unwrap_or_else(|_| Err(cloud_clips::copy::ACTION_FAILED.into()));
+            let _ = this.update(cx, |panel, cx| {
+                panel.cloud.busy = false;
+                if panel.cloud.show_id.as_deref() != Some(show_id.as_str()) {
+                    return;
+                }
+                match result {
+                    Ok(Some(status)) => panel.cloud.status = Some(status),
+                    Ok(None) => {}
+                    Err(_) => panel.cloud.error = Some(cloud_clips::copy::ACTION_FAILED.into()),
+                }
+                panel.read_cloud_clips(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn enable_cloud_clips(&mut self, cx: &mut Context<Self>) {
+        let orientation = self.cloud.orientation;
+        self.cloud_act(
+            move |studio, show| async move {
+                studio
+                    .cloud_clips_enable(&show, orientation)
+                    .await
+                    .map(Some)
+            },
+            cx,
+        );
+    }
+
+    fn disable_cloud_clips(&mut self, cx: &mut Context<Self>) {
+        let Some(generation) =
+            cloud_clips::disable_generation(self.cloud.status.as_ref()).map(str::to_string)
+        else {
+            return;
+        };
+        self.cloud_act(
+            move |studio, show| async move {
+                studio
+                    .cloud_clips_disable(&show, &generation)
+                    .await
+                    .map(Some)
+            },
+            cx,
+        );
+    }
+
+    fn cloud_job_action(
+        &mut self,
+        action: JobAction,
+        job_id: String,
+        marker_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self
+            .cloud
+            .status
+            .as_ref()
+            .and_then(|status| status.generation.clone());
+        self.cloud_act(
+            move |studio, show| async move {
+                let done: Result<(), String> = match action {
+                    JobAction::Cancel => studio.cloud_clips_cancel(&job_id).await,
+                    JobAction::Discard => studio.cloud_clips_discard(&job_id).await,
+                    JobAction::Retry => match generation {
+                        Some(generation) => {
+                            studio
+                                .cloud_clips_retry(&show, &marker_id, &generation)
+                                .await
+                        }
+                        None => Err(cloud_clips::copy::ACTION_FAILED.into()),
+                    },
+                };
+                done.map(|()| None)
+            },
+            cx,
+        );
+    }
+
+    // ── The clip keys (P663/P664) ────────────────────────────────────────
+
+    fn shortcut_config(&self) -> keys::GlobalShortcutsConfig {
+        serde_json::from_value(self.studio.snapshot().settings.studio.global_shortcuts())
+            .unwrap_or_default()
+    }
+
+    fn shortcut_scenes(&self) -> Vec<(String, String)> {
+        self.studio
+            .snapshot()
+            .scenes
+            .scenes
+            .iter()
+            .map(|scene| (scene.id.clone(), scene.name.clone()))
+            .collect()
+    }
+
+    fn disarm_recorder(&mut self, cx: &mut Context<Self>) {
+        if self.recorder.action.take().is_some() {
+            self.recorder.interceptor = None;
+            self.recorder.generation += 1;
+            self.hotkeys.set_recorder_armed(false);
+            cx.notify();
+        }
+    }
+
+    fn arm_recorder(&mut self, action: String, cx: &mut Context<Self>) {
+        if !hotkeys::supported(&action) {
+            return;
+        }
+        self.disarm_recorder(cx);
+        self.recorder.message = None;
+        self.recorder.action = Some(action);
+        self.hotkeys.set_recorder_armed(true);
+        let weak = cx.entity().downgrade();
+        // Interception runs before the keymap, so navigation and Record do
+        // not fire while the key is being recorded.
+        self.recorder.interceptor = Some(cx.intercept_keystrokes(move |event, _, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                if this.recorder.action.is_some() {
+                    cx.stop_propagation();
+                    this.record_key(&event.keystroke, cx);
+                }
+            });
+        }));
+        let generation = self.recorder.generation;
+        cx.spawn(async move |entity, cx| {
+            cx.background_executor().timer(RECORDER_IDLE).await;
+            let _ = entity.update(cx, |this, cx| {
+                if this.recorder.generation == generation {
+                    this.disarm_recorder(cx);
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn record_key(&mut self, key: &Keystroke, cx: &mut Context<Self>) {
+        let Some(action) = self.recorder.action.clone() else {
+            return;
+        };
+        let platform = Some(hotkeys::node_platform());
+        let config = self.shortcut_config();
+        let scenes = self.shortcut_scenes();
+        let input = accel::KeyInput {
+            code: accel::code_for_gpui_key(&key.key),
+            meta: key.modifiers.platform,
+            control: key.modifiers.control,
+            alt: key.modifiers.alt,
+            shift: key.modifiers.shift,
+            key_up: false,
+        };
+        let step = recorder::shortcut_recorder_step(&input, platform, |value| {
+            accel::global_shortcut_taken_reason(&config, value, &action, platform, &scenes)
+        });
+        let value = match step {
+            recorder::RecorderStep::Commit(value) => value,
+            recorder::RecorderStep::Clear => String::new(),
+            recorder::RecorderStep::Cancel => {
+                self.disarm_recorder(cx);
+                return;
+            }
+            recorder::RecorderStep::Held(_) => return,
+            recorder::RecorderStep::Reject(message) => {
+                self.recorder.message = Some((action, message));
+                cx.notify();
+                return;
+            }
+        };
+        self.disarm_recorder(cx);
+        self.recorder.message = None;
+        let studio = self.studio.clone();
+        // Settings applies the saved keys to the OS on the change.
+        self.run_studio(async move {
+            let _ = studio
+                .update_studio_settings(|settings| {
+                    let config =
+                        serde_json::from_value(settings.global_shortcuts()).unwrap_or_default();
+                    settings.set(
+                        keys::SETTINGS_FIELD,
+                        serde_json::to_value(keys::with_global_shortcut(&config, &action, &value))
+                            .unwrap_or_default(),
+                    );
+                })
+                .await;
+        });
+        cx.notify();
     }
 
     fn rebuild(&mut self, snapshot: &StudioSnapshot, cx: &mut Context<Self>) {
@@ -650,8 +885,315 @@ impl OutputPanel {
         cx.notify();
     }
 
-    fn open_camera_approval(&mut self, cx: &mut Context<Self>) {
-        cx.open_url(camera_extension_approval_url(None));
+    /// The button beside the switch: macOS' approval, Linux's module load.
+    fn run_camera_action(&mut self, action: CameraAction, cx: &mut Context<Self>) {
+        if self.camera_action.is_some() || !self.connected() {
+            return;
+        }
+        match action {
+            CameraAction::OpenApprovalSettings => {
+                cx.open_url(camera_extension_approval_url(None));
+            }
+            CameraAction::LoadModule => self.load_camera_module(cx),
+            // Windows' driver setup waits for its platform pass (plan 260:
+            // Windows is hidden until proven); the row never offers it.
+            CameraAction::SetUp => {}
+        }
+    }
+
+    /// Linux: `pkexec modprobe v4l2loopback …`; polkit asks for the
+    /// password, and the backend's next probe settles the status.
+    #[cfg(target_os = "linux")]
+    fn load_camera_module(&mut self, cx: &mut Context<Self>) {
+        self.camera_action = Some(CameraAction::LoadModule);
+        self.camera_error = None;
+        let job = self
+            .runtime
+            .spawn_blocking(crate::platform::linux::v4l2loopback::load_module);
+        cx.spawn(async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |panel, cx| {
+                panel.camera_action = None;
+                panel.camera_error = match result {
+                    Ok(result) if result.ok() => None,
+                    Ok(result) => result.message,
+                    Err(_) => Some("Couldn't do that. Try again in a moment.".into()),
+                };
+                panel.refresh_camera(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn load_camera_module(&mut self, cx: &mut Context<Self>) {
+        use videorc_app_core::desktop::linux::v4l2loopback::LoadResult;
+        self.camera_error = LoadResult::not_linux().message;
+        cx.notify();
+    }
+
+    /// Linux: the install command to paste into a terminal.
+    fn copy_camera_command(&mut self, command: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(command));
+        self.command_copied = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
+            let _ = this.update(cx, |panel, cx| {
+                panel.command_copied = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Clips on this computer: the ring's switch, its disk use, the two clip
+    /// keys and where clips go.
+    fn native_clips_section(
+        &self,
+        model: &OutputModel,
+        t: &videorc_kit::tokens::Theme,
+        cx: &mut Context<Self>,
+    ) -> PanelSection {
+        let entity = cx.entity();
+        let mut rows = GroupedList::new()
+            .item(
+                self.settings_row(
+                    "output-clips-switch",
+                    clips_copy::copy::KEEP_LAST_SECONDS,
+                    model.clips_description.clone(),
+                    Switch::new("output-clips-enabled")
+                        .accessibility_label(clips_copy::copy::KEEP_LAST_SECONDS)
+                        .checked(model.clips_on)
+                        .on_change(move |value, _, cx| {
+                            entity.update(cx, |this, cx| this.set_clips_enabled(value, cx))
+                        }),
+                    t,
+                ),
+            )
+            .item(
+                self.settings_row(
+                    "output-clips-disk",
+                    clips_copy::copy::DISK_USE,
+                    model.disk_detail.clone(),
+                    div()
+                        .type_scale(text::META)
+                        .text_color(hsla(t.muted_foreground))
+                        .child(model.disk_estimate.clone()),
+                    t,
+                ),
+            );
+        for row in self.clip_key_rows(t, cx) {
+            rows = rows.item(row);
+        }
+        rows = rows.item(
+            ListRow::new("output-clips-folder", clips_copy::copy::WHERE_CLIPS_GO)
+                .meta(clips_copy::copy::WHERE_CLIPS_GO_DESCRIPTION),
+        );
+        PanelSection::new("output-clips")
+            .title(clips_copy::copy::CLIPS)
+            .description(clips_copy::copy::SECTION_DESCRIPTION)
+            .child(rows)
+    }
+
+    /// The two clip keys as Settings → Shortcuts records them: press the
+    /// button, then the keys; Escape cancels, Backspace clears.
+    fn clip_key_rows(
+        &self,
+        t: &videorc_kit::tokens::Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let platform = Some(hotkeys::node_platform());
+        let registration = self.hotkeys.registration();
+        let config = self.shortcut_config();
+        let scenes = self.shortcut_scenes();
+        let view = recorder::shortcuts_view(recorder::ShortcutsInput {
+            config: &config,
+            platform,
+            unavailable: registration.unavailable.as_deref(),
+            system_audio_available: false,
+            scenes: &scenes,
+            registered: &registration.registered,
+        });
+        view.action_rows
+            .into_iter()
+            .filter(|row| CLIP_KEY_ACTIONS.contains(&row.action.as_str()))
+            .map(|row| {
+                let armed = self.recorder.action.as_deref() == Some(row.action.as_str());
+                let name = recorder::shortcut_recorder_name(
+                    &row.label,
+                    row.value.as_deref(),
+                    row.app_key.as_ref(),
+                    armed,
+                    platform,
+                );
+                let label = if armed {
+                    "Press shortcut…".to_string()
+                } else {
+                    row.value
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                        .map(|value| accel::accelerator_label(Some(value), platform))
+                        .unwrap_or_else(|| "Unassigned".into())
+                };
+                let message = self
+                    .recorder
+                    .message
+                    .as_ref()
+                    .filter(|(action, _)| *action == row.action)
+                    .map(|(_, message)| message.clone())
+                    .or(row.conflict.clone());
+                let action = row.action.clone();
+                div()
+                    .child(
+                        ListRow::new(
+                            SharedString::from(format!("output-key-{action}")),
+                            row.label,
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("output-record-{action}")))
+                                .accessibility_label(name)
+                                .label(label)
+                                .variant(ButtonVariant::Outline)
+                                .disabled(!hotkeys::supported(&action))
+                                .tooltip("Click to change")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.arm_recorder(action.clone(), cx)
+                                })),
+                        ),
+                    )
+                    .children(message.map(|message| {
+                        div()
+                            .px(px(12.))
+                            .pb(px(8.))
+                            .type_scale(text::META)
+                            .text_color(hsla(t.destructive))
+                            .child(message)
+                    }))
+                    .into_any_element()
+            })
+            .collect()
+    }
+
+    /// Cloud Clips while a room is open (`CloudClipsSection`): the same
+    /// Clips actions with cloud ownership, never the native camera session.
+    fn cloud_clips_section(
+        &self,
+        t: &videorc_kit::tokens::Theme,
+        cx: &mut Context<Self>,
+    ) -> PanelSection {
+        use cloud_clips::copy;
+        let state = &self.cloud;
+        let status = state.status.as_ref();
+        let connected = self.model.connected;
+        let muted = |words: &str| {
+            div()
+                .type_scale(text::META)
+                .text_color(hsla(t.muted_foreground))
+                .child(words.to_string())
+        };
+        let entity = cx.entity();
+        let orientation = ToggleGroup::new("output-cloud-clips-orientation")
+            .accessibility_label(copy::ORIENTATION_LABEL)
+            .value([state.orientation.wire()])
+            .item(ToggleItem::new(
+                Orientation::Horizontal.wire(),
+                copy::HORIZONTAL,
+            ))
+            .item(ToggleItem::new(
+                Orientation::Vertical.wire(),
+                copy::VERTICAL,
+            ))
+            .on_change(move |values, _, cx| {
+                let Some(next) = values
+                    .first()
+                    .and_then(|value| Orientation::of_wire(value.as_ref()))
+                else {
+                    return;
+                };
+                entity.update(cx, |this, cx| {
+                    this.cloud.orientation = next;
+                    cx.notify();
+                });
+            });
+        let mut buttons = div().flex().gap(px(8.)).child(
+            Button::new("output-cloud-clips-enable")
+                .label(copy::ENABLE)
+                .variant(ButtonVariant::Outline)
+                .disabled(!connected || state.busy || !cloud_clips::can_enable(status))
+                .on_click(cx.listener(|this, _, _, cx| this.enable_cloud_clips(cx))),
+        );
+        if cloud_clips::disable_generation(status).is_some() {
+            buttons = buttons.child(
+                Button::new("output-cloud-clips-disable")
+                    .label(copy::DISABLE)
+                    .variant(ButtonVariant::Ghost)
+                    .disabled(state.busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.disable_cloud_clips(cx))),
+            );
+        }
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .type_scale(text::LABEL)
+                    .text_color(hsla(t.muted_foreground))
+                    .child(cloud_clips::status_line(status).to_string()),
+            )
+            .child(muted(copy::COSTS))
+            .child(orientation)
+            .child(buttons)
+            .child(muted(copy::HOW_TO_SAVE));
+        if let Some(error) = &state.error {
+            body = body.child(Alert::new("output-cloud-clips-error").title(error.clone()));
+        }
+        let show_id = state.show_id.clone().unwrap_or_default();
+        let has_generation = status
+            .and_then(|status| status.generation.as_ref())
+            .is_some();
+        for row in cloud_clips::job_rows(&state.jobs, &show_id) {
+            let mut actions = div().flex().gap(px(8.));
+            for (action, label) in row.actions.iter().copied() {
+                let job_id = row.id.clone();
+                let marker_id = row.marker_id.clone();
+                actions = actions.child(
+                    Button::new(SharedString::from(format!(
+                        "output-cloud-clip-{}-{label}",
+                        row.id
+                    )))
+                    .label(label)
+                    .variant(ButtonVariant::Ghost)
+                    .size(videorc_kit::button::ButtonSize::Xs)
+                    .disabled(state.busy || (action == JobAction::Retry && !has_generation))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.cloud_job_action(action, job_id.clone(), marker_id.clone(), cx)
+                    })),
+                );
+            }
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .type_scale(text::LABEL)
+                            .text_color(hsla(t.foreground))
+                            .child(row.text),
+                    )
+                    .child(actions),
+            );
+        }
+        PanelSection::new("output-cloud-clips")
+            .title(copy::TITLE)
+            .description(copy::DESCRIPTION)
+            .child(body)
     }
 
     fn settings_row(
@@ -799,55 +1341,33 @@ impl Render for OutputPanel {
         );
         local = local.child(local_rows);
 
-        let entity = cx.entity();
-        let clips = PanelSection::new("output-clips")
-            .title(clips_copy::copy::CLIPS)
-            .description(clips_copy::copy::SECTION_DESCRIPTION)
-            .child(
-                GroupedList::new()
-                    .item(
-                        self.settings_row(
-                            "output-clips-switch",
-                            clips_copy::copy::KEEP_LAST_SECONDS,
-                            model.clips_description.clone(),
-                            Switch::new("output-clips-enabled")
-                                .accessibility_label(clips_copy::copy::KEEP_LAST_SECONDS)
-                                .checked(model.clips_on)
-                                .on_change(move |value, _, cx| {
-                                    entity.update(cx, |this, cx| this.set_clips_enabled(value, cx))
-                                }),
-                            t,
-                        ),
-                    )
-                    .item(
-                        self.settings_row(
-                            "output-clips-disk",
-                            clips_copy::copy::DISK_USE,
-                            model.disk_detail.clone(),
-                            div()
-                                .type_scale(text::META)
-                                .text_color(hsla(t.muted_foreground))
-                                .child(model.disk_estimate.clone()),
-                            t,
-                        ),
-                    )
-                    .item(
-                        ListRow::new("output-clips-folder", clips_copy::copy::WHERE_CLIPS_GO)
-                            .meta(clips_copy::copy::WHERE_CLIPS_GO_DESCRIPTION),
-                    ),
-            );
+        let clips = if self.cloud.show_id.is_some() {
+            self.cloud_clips_section(t, cx).into_any_element()
+        } else {
+            self.native_clips_section(&model, t, cx).into_any_element()
+        };
 
         let mut camera_section = None;
         if !model.camera.hidden {
             let entity = cx.entity();
             let mut trailing = div().flex().items_center().gap(px(8.));
-            if model.camera.show_approval {
+            // Windows' Set up waits for its platform pass (see `run_camera_action`).
+            if let Some(action) = model.camera.action.filter(|a| *a != CameraAction::SetUp) {
+                let label = if self.camera_action == Some(action) {
+                    action.pending_label()
+                } else {
+                    action.label()
+                };
                 trailing = trailing.child(
                     Button::new("output-videorc-camera-action")
-                        .label("Open System Settings")
+                        .label(label)
                         .variant(ButtonVariant::Outline)
-                        .disabled(!model.connected || self.camera_pending)
-                        .on_click(cx.listener(|this, _, _, cx| this.open_camera_approval(cx))),
+                        .disabled(
+                            !model.connected || self.camera_pending || self.camera_action.is_some(),
+                        )
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.run_camera_action(action, cx)),
+                        ),
                 );
             }
             trailing = trailing.child(
@@ -866,16 +1386,54 @@ impl Render for OutputPanel {
                     .child(CAMERA_DESCRIPTION),
             );
             if let Some(line) = &model.camera.line {
-                let status = if line.busy {
-                    StatusDot::new("output-videorc-camera-status")
-                        .tone(StatusTone::Neutral)
-                        .label(line.text.clone())
-                } else {
-                    StatusDot::new("output-videorc-camera-status")
-                        .tone(line.tone)
-                        .label(line.text.clone())
+                let tone = match line.tone {
+                    _ if line.busy => StatusTone::Neutral,
+                    CameraTone::Neutral => StatusTone::Neutral,
+                    CameraTone::Good => StatusTone::Good,
+                    CameraTone::Warn => StatusTone::Warn,
                 };
-                description = description.child(status);
+                description = description.child(
+                    StatusDot::new("output-videorc-camera-status")
+                        .tone(tone)
+                        .label(line.text.clone()),
+                );
+            }
+            if let Some(command) = model.camera.command.clone() {
+                let copy_command = command.clone();
+                description = description.child(
+                    div()
+                        .flex()
+                        .min_w(px(0.))
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .id("output-videorc-camera-command")
+                                .min_w(px(0.))
+                                .truncate()
+                                .px(px(6.))
+                                .py(px(2.))
+                                .rounded(px(videorc_kit::tokens::radius::CHIP))
+                                .bg(hsla(t.inset))
+                                .font_family(videorc_kit::tokens::font::MONO[0])
+                                .type_scale(text::META)
+                                .text_color(hsla(t.foreground))
+                                .child(command),
+                        )
+                        .child(
+                            Button::new("output-videorc-camera-copy")
+                                .label(if self.command_copied {
+                                    "Copied"
+                                } else {
+                                    "Copy"
+                                })
+                                .variant(ButtonVariant::Ghost)
+                                .size(videorc_kit::button::ButtonSize::Xs)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.copy_camera_command(copy_command.clone(), cx)
+                                })),
+                        ),
+                );
             }
             if let Some(error) = &self.camera_error {
                 description = description.child(
