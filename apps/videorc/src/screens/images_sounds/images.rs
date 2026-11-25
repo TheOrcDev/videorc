@@ -1,14 +1,23 @@
 //! Images ⇧⌘G: Backgrounds, Banners and Takeovers.
 
+use std::path::Path;
 use std::sync::Arc;
 
-use gpui::{Context, Entity, SharedString, WeakEntity, Window, div, prelude::*, px};
+use gpui::{
+    Context, Entity, PathPromptOptions, SharedString, WeakEntity, Window, div, prelude::*, px,
+};
+use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::watch;
 use videorc_app_core::assets::{self, BannerImportKind, ImportPhase};
 use videorc_app_core::nav::PageId;
 use videorc_app_core::protocol::{Banner, StreamScreen};
+use videorc_app_core::resources::{
+    capability::{IssueOptions, ResourceKind},
+    issue_capability,
+};
 use videorc_app_core::studio::StudioBackend;
-use videorc_app_core::{BackendClient, Studio};
+use videorc_app_core::{BackendClient, BackendState, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
@@ -38,9 +47,23 @@ enum PendingDelete {
     Takeover { id: String, name: String },
 }
 
+/// A background the Images page imported this session (`backgrounds.import`).
+#[derive(Debug, Clone)]
+struct ImportedBackground {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackgroundImportAnswer {
+    id: String,
+}
+
 pub struct ImagesPanel {
     studio: Arc<AppStudio>,
     runtime: tokio::runtime::Handle,
+    backend: watch::Receiver<BackendState>,
     connected: bool,
     session_active: bool,
     banners: Vec<Banner>,
@@ -51,6 +74,7 @@ pub struct ImagesPanel {
     banner_kind: BannerImportKind,
     takeover_importing: bool,
     background_importing: bool,
+    backgrounds: Vec<ImportedBackground>,
     load_epoch: u64,
     rename: DialogHandle,
     rename_banner: bool,
@@ -65,6 +89,7 @@ impl ImagesPanel {
     pub fn new(
         studio: Arc<AppStudio>,
         runtime: tokio::runtime::Handle,
+        backend: watch::Receiver<BackendState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let studio_watch = studio.clone();
@@ -81,6 +106,7 @@ impl ImagesPanel {
         let mut panel = Self {
             studio,
             runtime,
+            backend,
             connected: false,
             session_active: false,
             banners: Vec::new(),
@@ -91,6 +117,7 @@ impl ImagesPanel {
             banner_kind: BannerImportKind::Image,
             takeover_importing: false,
             background_importing: false,
+            backgrounds: Vec::new(),
             load_epoch: 0,
             rename: DialogHandle::new(false),
             rename_banner: true,
@@ -352,6 +379,225 @@ impl ImagesPanel {
             });
         }
     }
+
+    fn import_banner(&mut self, kind: BannerImportKind, cx: &mut Context<Self>) {
+        if self.banner_import != ImportPhase::Idle
+            || assets::banner_import_blocked_reason(false, ImportPhase::Idle, self.banners.len())
+                .is_some()
+        {
+            return;
+        }
+        self.banner_kind = kind;
+        self.banner_import = ImportPhase::Choosing;
+        cx.notify();
+        let html = kind == BannerImportKind::Html;
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            // Folder HTML overlays need `input-directory` (not in app-core yet);
+            // a single .html file still imports.
+            directories: false,
+            multiple: false,
+            prompt: Some(
+                if html {
+                    assets::IMPORT_HTML
+                } else {
+                    assets::IMPORT_IMAGE
+                }
+                .into(),
+            ),
+        });
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        let backend = self.backend.clone();
+        let method = if html {
+            "banners.importHtml"
+        } else {
+            "banners.importImage"
+        };
+        cx.spawn(async move |this, cx| {
+            let path = match picked.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                _ => None,
+            };
+            let Some(path) = path else {
+                let _ = this.update(cx, |panel, cx| {
+                    panel.banner_import = ImportPhase::Idle;
+                    cx.notify();
+                });
+                return;
+            };
+            let _ = this.update(cx, |panel, cx| {
+                panel.banner_import = ImportPhase::Importing;
+                cx.notify();
+            });
+            let job = runtime.spawn(async move {
+                let bootstrap = backend
+                    .borrow()
+                    .bootstrap()
+                    .cloned()
+                    .ok_or_else(|| "Videorc is reconnecting.".to_string())?;
+                let (_, issued) = issue_capability(
+                    &bootstrap,
+                    &path,
+                    ResourceKind::InputFile,
+                    IssueOptions::default(),
+                )
+                .await?;
+                let _ = studio
+                    .backend()
+                    .scene_request(method, json!({ "sourceCapability": issued.capability_id }))
+                    .await
+                    .map_err(|error| error.message)?;
+                Ok::<(), String>(())
+            });
+            let _ = job.await;
+            let _ = this.update(cx, |panel, cx| {
+                panel.banner_import = ImportPhase::Idle;
+                panel.refresh(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn import_takeovers(&mut self, cx: &mut Context<Self>) {
+        if self.takeover_importing || !self.connected || self.session_active {
+            return;
+        }
+        self.takeover_importing = true;
+        cx.notify();
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some(assets::IMPORT_IMAGES.into()),
+        });
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let paths = match picked.await {
+                Ok(Ok(Some(paths))) if !paths.is_empty() => paths,
+                _ => {
+                    let _ = this.update(cx, |panel, cx| {
+                        panel.takeover_importing = false;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let job = runtime.spawn(async move {
+                let bootstrap = backend
+                    .borrow()
+                    .bootstrap()
+                    .cloned()
+                    .ok_or_else(|| "Videorc is reconnecting.".to_string())?;
+                for path in paths {
+                    let (_, issued) = issue_capability(
+                        &bootstrap,
+                        &path,
+                        ResourceKind::InputFile,
+                        IssueOptions::default(),
+                    )
+                    .await?;
+                    let _ = studio
+                        .backend()
+                        .sources_request(
+                            "screens.importImage",
+                            json!({ "sourceCapability": issued.capability_id }),
+                        )
+                        .await
+                        .map_err(|error| error.message)?;
+                }
+                Ok::<(), String>(())
+            });
+            let _ = job.await;
+            let _ = this.update(cx, |panel, cx| {
+                panel.takeover_importing = false;
+                panel.refresh(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn import_background(&mut self, cx: &mut Context<Self>) {
+        if self.background_importing || !self.connected {
+            return;
+        }
+        self.background_importing = true;
+        cx.notify();
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(assets::IMPORT_IMAGE.into()),
+        });
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let path = match picked.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                _ => None,
+            };
+            let Some(path) = path else {
+                let _ = this.update(cx, |panel, cx| {
+                    panel.background_importing = false;
+                    cx.notify();
+                });
+                return;
+            };
+            let name = background_name_from_path(&path);
+            let job = runtime.spawn(async move {
+                let bootstrap = backend
+                    .borrow()
+                    .bootstrap()
+                    .cloned()
+                    .ok_or_else(|| "Videorc is reconnecting.".to_string())?;
+                let (_, issued) = issue_capability(
+                    &bootstrap,
+                    &path,
+                    ResourceKind::InputFile,
+                    IssueOptions::default(),
+                )
+                .await?;
+                let value = studio
+                    .backend()
+                    .sources_request(
+                        "backgrounds.import",
+                        json!({ "sourceCapability": issued.capability_id }),
+                    )
+                    .await
+                    .map_err(|error| error.message)?;
+                let imported: BackgroundImportAnswer =
+                    serde_json::from_value(value).map_err(|error| error.to_string())?;
+                Ok::<ImportedBackground, String>(ImportedBackground {
+                    id: imported.id,
+                    name,
+                })
+            });
+            let result = job.await;
+            let _ = this.update(cx, |panel, cx| {
+                panel.background_importing = false;
+                if let Ok(Ok(imported)) = result {
+                    if !panel.backgrounds.iter().any(|row| row.id == imported.id) {
+                        panel.backgrounds.push(imported);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+fn background_name_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("Background")
+        .to_string()
 }
 
 fn parse_banners(value: Value) -> Option<Vec<Banner>> {
@@ -400,15 +646,53 @@ impl Render for ImagesPanel {
             );
         }
 
+        let bg_importing = self.background_importing;
+        let bg_import_btn = |id: &'static str| {
+            let entity = entity.clone();
+            Button::new(id)
+                .label(assets::background_import_label(bg_importing))
+                .variant(ButtonVariant::Outline)
+                .disabled(offline || bg_importing)
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |panel, cx| panel.import_background(cx));
+                })
+        };
+        let image_tiles = if self.backgrounds.is_empty() {
+            Empty::new()
+                .title(assets::ADD_IMAGE)
+                .description("Import a PNG, JPEG or WebP for your scenes.")
+                .child(bg_import_btn("images-import-bg-empty"))
+                .into_any_element()
+        } else {
+            let mut grid = div().flex().flex_wrap().gap(px(8.));
+            for row in &self.backgrounds {
+                grid = grid.child(
+                    div()
+                        .id(format!("bg-asset-{}", row.id))
+                        .w(px(120.))
+                        .h(px(72.))
+                        .rounded(px(radius::CHIP))
+                        .border_1()
+                        .border_color(hsla(t.border))
+                        .bg(hsla(t.muted))
+                        .flex()
+                        .items_end()
+                        .px(px(8.))
+                        .py(px(6.))
+                        .child(
+                            div()
+                                .type_scale(text::META)
+                                .text_color(hsla(t.foreground))
+                                .child(row.name.clone()),
+                        ),
+                );
+            }
+            grid.into_any_element()
+        };
         let backgrounds = PanelSection::new("images-backgrounds")
             .title(assets::BACKGROUNDS)
             .description(assets::BACKGROUNDS_DESCRIPTION)
-            .action(
-                Button::new("images-import-bg")
-                    .label(assets::background_import_label(self.background_importing))
-                    .variant(ButtonVariant::Outline)
-                    .disabled(offline || self.background_importing),
-            )
+            .action(bg_import_btn("images-import-bg"))
             .child(
                 div()
                     .flex()
@@ -442,11 +726,7 @@ impl Render for ImagesPanel {
                         grid
                     })
                     .child(SectionLabel::new(assets::IMAGES_GROUP))
-                    .child(
-                        Empty::new()
-                            .title(assets::ADD_IMAGE)
-                            .description("Import a PNG, JPEG or WebP for your scenes."),
-                    ),
+                    .child(image_tiles),
             );
 
         let banner_reason =
@@ -454,7 +734,9 @@ impl Render for ImagesPanel {
         let banner_actions = div()
             .flex()
             .gap(px(8.))
-            .child(
+            .child({
+                let entity = entity.clone();
+                let reason = banner_reason;
                 Button::new("banner-import-image")
                     .label(assets::banner_import_label(
                         self.banner_import,
@@ -462,9 +744,18 @@ impl Render for ImagesPanel {
                         self.banner_kind,
                     ))
                     .variant(ButtonVariant::Outline)
-                    .disabled(banner_reason.is_some()),
-            )
-            .child(
+                    .disabled(reason.is_some())
+                    .on_click(move |_, _, cx| {
+                        if reason.is_none() {
+                            entity.update(cx, |panel, cx| {
+                                panel.import_banner(BannerImportKind::Image, cx)
+                            });
+                        }
+                    })
+            })
+            .child({
+                let entity = entity.clone();
+                let reason = banner_reason;
                 Button::new("banner-import-html")
                     .label(assets::banner_import_label(
                         self.banner_import,
@@ -472,8 +763,15 @@ impl Render for ImagesPanel {
                         self.banner_kind,
                     ))
                     .variant(ButtonVariant::Outline)
-                    .disabled(banner_reason.is_some()),
-            );
+                    .disabled(reason.is_some())
+                    .on_click(move |_, _, cx| {
+                        if reason.is_none() {
+                            entity.update(cx, |panel, cx| {
+                                panel.import_banner(BannerImportKind::Html, cx)
+                            });
+                        }
+                    })
+            });
 
         let mut banners_section = PanelSection::new("images-banners")
             .title(assets::BANNERS)
@@ -603,14 +901,23 @@ impl Render for ImagesPanel {
                     );
                 }
                 LoadState::Ready => {
-                    banners_section = banners_section.child(
+                    banners_section = banners_section.child({
+                        let entity = entity.clone();
+                        let reason = banner_reason;
                         Empty::new().title(assets::NO_BANNERS).child(
                             Button::new("banner-import-empty")
                                 .label(assets::IMPORT_IMAGE)
                                 .variant(ButtonVariant::Outline)
-                                .disabled(banner_reason.is_some()),
-                        ),
-                    );
+                                .disabled(reason.is_some())
+                                .on_click(move |_, _, cx| {
+                                    if reason.is_none() {
+                                        entity.update(cx, |panel, cx| {
+                                            panel.import_banner(BannerImportKind::Image, cx)
+                                        });
+                                    }
+                                }),
+                        )
+                    });
                 }
             }
         }
@@ -619,15 +926,19 @@ impl Render for ImagesPanel {
             .title(assets::TAKEOVERS)
             .description(assets::TAKEOVERS_DESCRIPTION)
             .last(true)
-            .action(
+            .action({
+                let entity = entity.clone();
                 Button::new("takeover-import")
                     .label(assets::takeover_import_label(
                         false,
                         self.takeover_importing,
                     ))
                     .variant(ButtonVariant::Outline)
-                    .disabled(offline || self.takeover_importing || session_lock),
-            );
+                    .disabled(offline || self.takeover_importing || session_lock)
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |panel, cx| panel.import_takeovers(cx));
+                    })
+            });
         if !self.takeovers.is_empty() {
             let mut list = GroupedList::new().label(assets::TAKEOVERS);
             for (index, screen) in self.takeovers.iter().enumerate() {
