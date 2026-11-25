@@ -622,6 +622,8 @@ impl SidekickScreen {
 
     /// The shell shows or hides the Sidekick page.
     pub(crate) fn set_page_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        self.page_shown = shown;
+        self.sync_community_preview_active(cx);
         if !shown {
             self.hide_clean_cut_review_player(cx);
         }

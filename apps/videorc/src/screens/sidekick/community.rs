@@ -252,6 +252,8 @@ pub struct CommunityState {
     copied_epoch: u64,
     /// Export… or Import… while its file is being written or read.
     pub file_busy: Option<CommunityFile>,
+    /// P1201: Play a welcome / Play a milestone (local preview only).
+    pub(super) preview: Option<super::community_preview::CommunityPreview>,
 }
 
 /// Export… and Import… (D12): a picked folder or file goes to the backend
@@ -322,6 +324,7 @@ impl CommunityState {
             copied: false,
             copied_epoch: 0,
             file_busy: None,
+            preview: None,
         }
     }
 }
@@ -726,6 +729,7 @@ pub fn render_community(
     entitled: bool,
     state: &CommunityState,
     settings: &CommunitySettings,
+    preview: AnyElement,
     window: &mut Window,
     cx: &mut Context<SidekickScreen>,
 ) -> AnyElement {
@@ -1076,6 +1080,7 @@ pub fn render_community(
                 .child(links)
                 .child(people)
                 .child(community_settings)
+                .child(preview)
                 .child(premium)
                 .child(data),
         )
