@@ -445,12 +445,8 @@ impl ShowStage {
                     if let (Some(room), Some(identity)) = (room, host_identity) {
                         let max = if two { STAGE_MAX_SCREENS } else { 1 };
                         let next = add_screen(&room.stage, &identity, max);
-                        let set = host_entity
-                            .update(cx, |host, cx| host.set_stage(next, cx))
-                            .ok();
-                        if let Some(set) = set
-                            && let Err(error) = set.await
-                        {
+                        let set = host_entity.update(cx, |host, cx| host.set_stage(next, cx));
+                        if let Err(error) = set.await {
                             eprintln!("[videorc-app] Show stage: put screen on stage: {error}");
                         }
                     }
