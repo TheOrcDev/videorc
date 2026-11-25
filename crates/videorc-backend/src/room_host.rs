@@ -1,7 +1,8 @@
 //! Plan 260 S1.8a: the backend joins the talk show's room as the host
-//! (`host:<showId>`, D9), with no media yet. Behind a dev switch
-//! (`VIDEORC_BACKEND_ROOM=1`, debug builds only); without it the renderer
-//! holds the host connection as before and nothing here runs.
+//! (`host:<showId>`, D9). On by default on macOS ([`enabled`]: S1.8's
+//! blockers have landed); `VIDEORC_ROOM_HOST=renderer` or
+//! `VIDEORC_BACKEND_ROOM=0` keeps the renderer's host connection, and then
+//! nothing here runs.
 //!
 //! With the switch on, the backend follows `cloud.state`: while the room is
 //! open it holds the seat with its own token (`room_token`, which then never
@@ -42,6 +43,9 @@ pub(crate) const SWITCH_ENV: &str = "VIDEORC_BACKEND_ROOM";
 pub(crate) const CLIENT_ROOM_ENV: &str = "VIDEORC_ROOM_HOST";
 /// [`CLIENT_ROOM_ENV`]'s value for a client with no room of its own.
 pub(crate) const CLIENT_ROOM_BACKEND: &str = "backend";
+/// [`CLIENT_ROOM_ENV`]'s value that keeps the renderer's room (Electron's
+/// way back, for support, until S1.8e removes it).
+pub(crate) const CLIENT_ROOM_RENDERER: &str = "renderer";
 
 /// The data topic the guest page listens on for the stage (`guest-wire.ts`,
 /// the renderer's `STAGE_TOPIC`).
@@ -67,20 +71,27 @@ const TAKE_OVER_WAIT: Duration = Duration::from_secs(3);
 /// Whether the backend holds (or is getting) the host seat.
 static HOLDS_SEAT: AtomicBool = AtomicBool::new(false);
 
-/// The switch: debug builds with `VIDEORC_BACKEND_ROOM=1`, or a client
-/// that holds no room itself (`VIDEORC_ROOM_HOST=backend`, the GPUI app), in
-/// any build.
+/// The switch (plan 260 S1.8, on by default once its blockers landed: c4a's
+/// session microphone, c4b's picked screen, d3's echo cancellation): the
+/// backend holds the talk show's room on macOS in any build. A client with
+/// no room of its own says `VIDEORC_ROOM_HOST=backend` (the GPUI app);
+/// `VIDEORC_ROOM_HOST=renderer`, or `VIDEORC_BACKEND_ROOM=0`, keeps
+/// Electron's renderer room until S1.8e removes it.
 pub(crate) fn enabled() -> bool {
     switched_on(
-        cfg!(debug_assertions),
         std::env::var(SWITCH_ENV).ok().as_deref(),
         std::env::var(CLIENT_ROOM_ENV).ok().as_deref(),
     )
 }
 
-/// [`enabled`]'s rule, from its inputs.
-fn switched_on(debug: bool, dev_switch: Option<&str>, client_room: Option<&str>) -> bool {
-    (debug && dev_switch == Some("1")) || client_room == Some(CLIENT_ROOM_BACKEND)
+/// [`enabled`]'s rule, from its inputs: the client's word first, then the
+/// dev switch's off, else on.
+fn switched_on(dev_switch: Option<&str>, client_room: Option<&str>) -> bool {
+    match client_room {
+        Some(CLIENT_ROOM_BACKEND) => true,
+        Some(CLIENT_ROOM_RENDERER) => false,
+        _ => dev_switch != Some("0"),
+    }
 }
 
 /// Whether the backend holds the host seat, so the renderer must stay out.
@@ -94,8 +105,8 @@ pub(crate) fn start(state: AppState) {
         return;
     }
     tracing::info!(
-        "the backend holds the talk show's host seat ({SWITCH_ENV}=1 in a debug build, or \
-         {CLIENT_ROOM_ENV}={CLIENT_ROOM_BACKEND} from a client with no room of its own)"
+        "the backend holds the talk show's host seat (on by default; \
+         {CLIENT_ROOM_ENV}={CLIENT_ROOM_RENDERER} or {SWITCH_ENV}=0 keeps the renderer's room)"
     );
     tokio::spawn(follow(state));
 }
@@ -707,18 +718,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_room_is_the_backends_in_a_dev_build_or_for_a_client_without_one() {
-        // Electron's release: neither set, the renderer hosts.
-        assert!(!switched_on(false, None, None));
-        // The dev switch counts in debug builds only.
-        assert!(switched_on(true, Some("1"), None));
-        assert!(!switched_on(false, Some("1"), None));
-        assert!(!switched_on(true, Some("0"), None));
-        // The GPUI app: any build.
-        assert!(switched_on(false, None, Some("backend")));
-        assert!(switched_on(true, None, Some("backend")));
-        assert!(!switched_on(false, None, Some("renderer")));
-        assert!(!switched_on(false, None, Some("")));
+    fn the_room_is_the_backends_unless_a_client_keeps_its_own() {
+        // Electron, nothing set: the backend hosts.
+        assert!(switched_on(None, None));
+        assert!(switched_on(Some("1"), None));
+        // The ways back to the renderer's room.
+        assert!(!switched_on(Some("0"), None));
+        assert!(!switched_on(None, Some("renderer")));
+        // The GPUI app always: it has no room of its own.
+        assert!(switched_on(Some("0"), Some("backend")));
+        assert!(!switched_on(Some("1"), Some("renderer")));
+        // Anything else is the default.
+        assert!(switched_on(None, Some("")));
     }
 
     #[test]

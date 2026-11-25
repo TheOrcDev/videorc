@@ -14186,8 +14186,10 @@ async fn handle_text_message_with_role(
         // Plan 260 S1.8: who holds the room's host seat, asked before the
         // renderer starts a room client of its own.
         "cloud.room.owner" => {
+            // On, the backend takes every open room: the renderer stays out
+            // even before the backend's join has started (no token race).
             #[cfg(target_os = "macos")]
-            let backend = room_host::holds_seat();
+            let backend = room_host::holds_seat() || room_host::enabled();
             #[cfg(not(target_os = "macos"))]
             let backend = false;
             ServerResponse::ok(command.id, serde_json::json!({ "backend": backend }))
