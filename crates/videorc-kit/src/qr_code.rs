@@ -1,7 +1,8 @@
-//! QR code (`phone-remote-section.tsx`'s pairing SVG): dark modules on
-//! white paper in both themes — scanners need the contrast. Encodes the
-//! text (pairing URL) with medium ECC and a 2-module quiet border, then
-//! paints via the kit's SVG raster (same path as SoundPad's ring).
+//! QrCode (`components/ui/qr-code.tsx`): dark modules on white paper in both
+//! themes. Scanners need the contrast; the style guard allowlists the fixed
+//! black/white ink. ECC Medium and a quiet zone of 2 modules match Electron
+//! Phone Pair (`uqr` + `qrCodePath`). C5 Sweep B wires Pair a phone against
+//! [`QrCode::new`].
 
 use std::sync::Arc;
 
@@ -9,20 +10,27 @@ use gpui::{
     App, Bounds, ElementId, IntoElement, RenderImage, SharedString, Window, canvas, div,
     prelude::*, px,
 };
-use qrcode::{Color, EcLevel, QrCode as Encoder};
+use qrcode::{Color as ModuleColor, EcLevel, QrCode as Encoder};
 
 use crate::{
     chrome,
     theme::{Appearance, hsla, resolve},
-    tokens::radius,
+    tokens::{Color, radius},
 };
 
+/// Paper under the modules (`bg-white`). Fixed for scanners in both themes.
+const PAPER: Color = 0xffff_ffff;
 /// Default on-screen edge, matching Electron's `size-56` (14 rem).
 pub const DEFAULT_SIZE: f32 = 224.0;
+/// Electron's `p-1` around the modules.
+const PAD: f32 = 4.0;
 
 /// One SVG path for the whole code (a run per dark span), matching
-/// Electron's `qrCodePath`.
+/// Electron's `qrCodePath`. Quiet zone of 2 modules is included in `size`.
 pub fn path_for(text: &str) -> Option<(String, usize)> {
+    if text.is_empty() {
+        return None;
+    }
     let code = Encoder::with_error_correction_level(text.as_bytes(), EcLevel::M).ok()?;
     let width = code.width();
     let border = 2;
@@ -31,12 +39,12 @@ pub fn path_for(text: &str) -> Option<(String, usize)> {
     for y in 0..width {
         let mut x = 0;
         while x < width {
-            if code[(x, y)] != Color::Dark {
+            if code[(x, y)] != ModuleColor::Dark {
                 x += 1;
                 continue;
             }
             let mut run = 1;
-            while x + run < width && code[(x + run, y)] == Color::Dark {
+            while x + run < width && code[(x + run, y)] == ModuleColor::Dark {
                 run += 1;
             }
             let px = x + border;
@@ -65,6 +73,7 @@ pub struct QrCode {
 }
 
 impl QrCode {
+    /// Pairing URL (or any payload) to encode.
     pub fn new(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Self {
         QrCode {
             id: id.into(),
@@ -75,6 +84,7 @@ impl QrCode {
         }
     }
 
+    /// Outer edge length in px (default [`DEFAULT_SIZE`]).
     pub fn size(mut self, size: f32) -> Self {
         self.size = size;
         self
@@ -85,10 +95,15 @@ impl QrCode {
         self
     }
 
+    /// Draws in this appearance instead of the window's (the gallery).
     pub fn appearance(mut self, appearance: Appearance) -> Self {
         self.appearance = Some(appearance);
         self
     }
+}
+
+fn paint_qr(window: &mut Window, bounds: Bounds<gpui::Pixels>, image: Arc<RenderImage>) {
+    let _ = window.paint_image(bounds, bounds, gpui::Corners::default(), image, 0, false);
 }
 
 impl RenderOnce for QrCode {
@@ -103,13 +118,15 @@ impl RenderOnce for QrCode {
         });
         div()
             .id(self.id)
+            .role(gpui::Role::Image)
+            .aria_label(label)
             .size(edge)
             .flex_none()
-            .rounded(px(radius::CHIP))
-            .bg(hsla(0xffffff_ff))
-            .p(px(4.))
+            // Electron uses rounded-row; CHIP is too tight for the paper.
+            .rounded(px(radius::ROW))
+            .bg(hsla(PAPER))
+            .p(px(PAD))
             .overflow_hidden()
-            .aria_label(label)
             .child(match raster {
                 Some(image) => div()
                     .size_full()
@@ -128,6 +145,8 @@ impl RenderOnce for QrCode {
                     .flex()
                     .items_center()
                     .justify_center()
+                    .text_size(px(12.0))
+                    .line_height(px(16.0))
                     .text_color(hsla(t.muted_foreground))
                     .child("Couldn't draw the code.")
                     .into_any_element(),
@@ -135,11 +154,6 @@ impl RenderOnce for QrCode {
     }
 }
 
-fn paint_qr(window: &mut Window, bounds: Bounds<gpui::Pixels>, image: Arc<RenderImage>) {
-    let _ = window.paint_image(bounds, bounds, gpui::Corners::default(), image, 0, false);
-}
-
-/// Gallery / tests: the encoded path exists for a short URL.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +164,10 @@ mod tests {
         assert!(size >= 21);
         assert!(path.contains('M'));
         assert!(path.contains('h'));
+    }
+
+    #[test]
+    fn empty_text_has_no_path() {
+        assert!(path_for("").is_none());
     }
 }

@@ -89,6 +89,7 @@ pub use page_tabs::PageTabs;
 pub use panel_section::PanelSection;
 pub use pin_window_button::{PIN_WINDOW_LABEL, PinWindowButton};
 pub use popover::Popover;
+pub use qr_code::{DEFAULT_SIZE, QrCode, path_for};
 pub use scroll_area::ScrollArea;
 pub use section_label::SectionLabel;
 pub use segmented_control::{Segment, SegmentedControl};

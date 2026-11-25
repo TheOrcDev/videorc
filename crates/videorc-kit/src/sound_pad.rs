@@ -312,7 +312,8 @@ impl RenderOnce for SoundPad {
             .min_h(px(min_h))
             .p(px(pad_pad))
             .overflow_hidden()
-            .rounded(px(radius::XL))
+            // Electron's twin uses rounded-xl (14); the guard's pad tier is panel (12).
+            .rounded(px(radius::PANEL))
             .bg(hsla(face))
             .text_color(hsla(fade(t.foreground)))
             .when(self.variant == SoundPadVariant::Outline, |pad| {
