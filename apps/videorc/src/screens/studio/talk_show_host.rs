@@ -13,22 +13,30 @@
 //! Show stage, the guest tiles and the Program monitor ([`Self::room_media`]).
 //! The join chime and the scripted smoke room (P396, P398) wait.
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use gpui::{Context, Entity, Window, div, prelude::*};
+use gpui::{Context, Entity, Image, ImageFormat, Window, div, prelude::*};
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
-use videorc_app_core::BackendEvent;
 use videorc_app_core::guests::session::ControllerFacts;
 use videorc_app_core::library::cloud::{CloudRecordingStop, CloudRecordingWatch};
+use videorc_app_core::studio::room_frames::{self, FrameCursor, FramePoll, RemoteSource};
 use videorc_app_core::studio::room_media::{
     self, CAMERA_SET, HTML_SET, MICROPHONE_SET, PRESENTATION_EVENT, RoomMedia,
 };
 use videorc_app_core::studio::screen_views::TalkShowRoomView;
+use videorc_app_core::{BackendEvent, ConnectionState};
 
 use super::transport::AppStudio;
 use crate::app::bridge::Mirror;
+
+/// The tiles' polling pace: half the renderer's 30 fps until the Show
+/// stage's cost is measured (each picture is a whole BMP decoded here).
+const TILE_INTERVAL: Duration = Duration::from_millis(66);
+/// The monitor's key: the route ignores its identity.
+const MONITOR_KEY: &str = "monitor";
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -53,6 +61,9 @@ pub struct TalkShowRoomHost {
     /// The params last sent (microphone, camera, sheet), so a repeat sends
     /// nothing; cleared when the room closes (the backend lets go).
     sent: [Option<Value>; 3],
+    /// R3: each person's latest picture (camera or screen) and the Program
+    /// monitor's, with its cursor, while the room publishes them.
+    frames: HashMap<(String, RemoteSource), (FrameCursor, Arc<Image>)>,
 }
 
 impl TalkShowRoomHost {
@@ -121,6 +132,44 @@ impl TalkShowRoomHost {
             }
         })
         .detach();
+        // R3: the people's pictures and the monitor's, polled one at a time
+        // on the backend's loopback server while the room publishes them.
+        let poll_studio = studio.clone();
+        let poll_runtime = runtime.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(TILE_INTERVAL).await;
+                let Ok(wanted) = this.update(cx, |host, cx| host.wanted_feeds(cx)) else {
+                    break;
+                };
+                if wanted.is_empty() {
+                    continue;
+                }
+                let ConnectionState::Connected { ready, .. } =
+                    poll_studio.backend().current_state()
+                else {
+                    continue;
+                };
+                for (identity, source, after) in wanted {
+                    let (port, token) = (ready.port, ready.token.clone());
+                    let asked = identity.clone();
+                    let job = poll_runtime.spawn(async move {
+                        room_frames::poll_remote_frame(port, &token, &asked, source, after.as_ref())
+                            .await
+                    });
+                    let Ok(Ok(poll)) = job.await else {
+                        continue;
+                    };
+                    if this
+                        .update(cx, |host, cx| host.take_poll(identity, source, poll, cx))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        })
+        .detach();
         let initial = talk_show.read(cx).value().clone();
         let mut host = Self {
             studio,
@@ -132,6 +181,7 @@ impl TalkShowRoomHost {
             room_media: None,
             enabled_epoch: 0,
             sent: [None, None, None],
+            frames: HashMap::new(),
         };
         host.on_talk_show(&initial);
         host
@@ -159,6 +209,78 @@ impl TalkShowRoomHost {
         self.room_media.as_ref()
     }
 
+    /// R3: a person's latest picture (`Camera` or `Screen`), or the Program
+    /// monitor's (`Monitor`, any identity), while the room publishes it. The
+    /// host notifies on every new picture.
+    pub fn remote_frame(&self, identity: &str, source: RemoteSource) -> Option<Arc<Image>> {
+        let key = match source {
+            RemoteSource::Monitor => MONITOR_KEY,
+            _ => identity,
+        };
+        self.frames
+            .get(&(key.to_string(), source))
+            .map(|(_, image)| image.clone())
+    }
+
+    /// The pictures to poll now, each with its cursor; the ones no longer
+    /// published are dropped.
+    fn wanted_feeds(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Vec<(String, RemoteSource, Option<FrameCursor>)> {
+        let mut wanted: Vec<(String, RemoteSource)> = Vec::new();
+        if let Some(media) = &self.room_media {
+            for person in &media.people {
+                if person.camera {
+                    wanted.push((person.identity.clone(), RemoteSource::Camera));
+                }
+                if person.screen {
+                    wanted.push((person.identity.clone(), RemoteSource::Screen));
+                }
+            }
+            if media.monitor.is_some_and(|monitor| monitor.video) {
+                wanted.push((MONITOR_KEY.to_string(), RemoteSource::Monitor));
+            }
+        }
+        let before = self.frames.len();
+        self.frames.retain(|key, _| wanted.contains(key));
+        if self.frames.len() != before {
+            cx.notify();
+        }
+        wanted
+            .into_iter()
+            .map(|(identity, source)| {
+                let after = self
+                    .frames
+                    .get(&(identity.clone(), source))
+                    .map(|(cursor, _)| cursor.clone());
+                (identity, source, after)
+            })
+            .collect()
+    }
+
+    fn take_poll(
+        &mut self,
+        identity: String,
+        source: RemoteSource,
+        poll: FramePoll,
+        cx: &mut Context<Self>,
+    ) {
+        match poll {
+            FramePoll::Frame { cursor, bmp } => {
+                let image = Arc::new(Image::from_bytes(ImageFormat::Bmp, bmp));
+                self.frames.insert((identity, source), (cursor, image));
+                cx.notify();
+            }
+            FramePoll::Empty => {
+                if self.frames.remove(&(identity, source)).is_some() {
+                    cx.notify();
+                }
+            }
+            FramePoll::Unchanged => {}
+        }
+    }
+
     /// The devices are held after a takeover from another device (plan 249
     /// S24): nothing captures here until the streamer turns them on.
     pub fn devices_held(&self) -> bool {
@@ -181,7 +303,8 @@ impl TalkShowRoomHost {
     fn sync_room(&mut self, cx: &mut Context<Self>) {
         if !self.room_open() {
             self.sent = [None, None, None];
-            if self.room_media.take().is_some() {
+            if self.room_media.take().is_some() || !self.frames.is_empty() {
+                self.frames.clear();
                 cx.notify();
             }
             return;
