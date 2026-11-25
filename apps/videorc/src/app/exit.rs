@@ -145,6 +145,13 @@ impl ExitGuard {
         let _ = main.update(cx, |_, window, _| window.remove_window());
     }
 
+    /// Electron's `watchdogLive`: the session streams, or this computer's
+    /// cloud room is on air (a talk show has no local session).
+    pub fn livestream_on_air(cx: &App) -> bool {
+        cx.try_global::<Self>()
+            .is_some_and(|this| this.lock().livestream_on_air())
+    }
+
     /// The main window, once it is open.
     pub fn main_window(cx: &App) -> Option<AnyWindowHandle> {
         cx.try_global::<Self>().and_then(|this| this.main_window)

@@ -6,14 +6,16 @@
 //! after the first, arms the second ask at since + 60 s, and posts through
 //! GPUI's system notification. Behind Destinations → Watchdog → System
 //! notifications, never over the alert's own toast on screen. A click
-//! brings the Studio forward on its page; it never runs a fix.
+//! brings the Studio forward on its page; it never runs a fix. While live
+//! it also reports the system's idle time every 30 s (still-there).
 
 use super::*;
 use gpui::{App, SystemNotification};
 use videorc_app_core::livestream::watchdog::WatchdogAlert;
 use videorc_app_core::livestream::watchdog_notify::{self as wn, Ask, Reason};
 use videorc_app_core::notices::sources::watchdog::subject_key;
-use videorc_app_core::protocol::RecordingState;
+use videorc_app_core::studio::session::session_is_live;
+use videorc_app_core::studio::watchdog_alerts::idle_report_due;
 
 /// One alert's second ask: armed under this number, or already asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +62,7 @@ impl Centre {
                 )))
             });
         });
+        self.start_idle_reports(window, cx);
         let mut alerts = studio.watchdog();
         cx.spawn_in(window, async move |this, cx| {
             while alerts.changed().await.is_ok() {
@@ -75,10 +78,48 @@ impl Centre {
         .detach();
     }
 
-    /// `live()`: the session streams. A record-only session's alerts are
-    /// the recording's own notices, never a system notification.
+    /// `watchdogLive`: the session streams, or this computer's cloud room
+    /// is on air. A record-only session's alerts are the recording's own
+    /// notices, never a system notification.
     fn streaming(&self, cx: &App) -> bool {
-        self.hub.read(cx).studio.snapshot().session.status.state == RecordingState::Streaming
+        crate::app::exit::ExitGuard::livestream_on_air(cx)
+            || session_is_live(&self.hub.read(cx).studio.snapshot().session.status)
+    }
+
+    /// `mountWatchdogSurface`'s idle tick (still-there): one report as live
+    /// starts, then every 30 s while it lasts, of the system's idle time.
+    /// Where the platform has no answer nothing goes, and the check stays
+    /// quiet.
+    fn start_idle_reports(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let mut last_report: Option<std::time::Instant> = None;
+            loop {
+                let alive = this.update(cx, |centre, cx| {
+                    let live = centre.streaming(cx);
+                    if !live {
+                        last_report = None;
+                        return;
+                    }
+                    let now = std::time::Instant::now();
+                    if !idle_report_due(live, last_report, now) {
+                        return;
+                    }
+                    last_report = Some(now);
+                    let Some(idle) = crate::platform::idle::system_idle_seconds() else {
+                        return;
+                    };
+                    let hub = centre.hub.read(cx);
+                    let studio = hub.studio.clone();
+                    hub.runtime
+                        .spawn(async move { studio.report_system_idle(idle).await });
+                });
+                if alive.is_err() {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+            }
+        })
+        .detach();
     }
 
     /// `onWatchdogAlertsChanged`.
