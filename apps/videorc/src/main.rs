@@ -181,11 +181,25 @@ fn main() -> Result<()> {
     let mut launch = if args.cargo_run {
         BackendLaunch::cargo_run(&root, paths.user_data_dir.clone())
     } else {
-        let backend = args.backend.clone().unwrap_or_else(|| {
-            root.join("target")
-                .join(args::build_profile_dir())
-                .join(videorc_app_core::process::backend_binary_name())
-        });
+        let backend = args
+            .backend
+            .clone()
+            .or_else(|| {
+                // Published sentinel pairs and packaged apps keep their
+                // backend beside the app, independent of the build checkout.
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| {
+                        exe.parent()
+                            .map(|dir| dir.join(videorc_app_core::process::backend_binary_name()))
+                    })
+                    .filter(|path| path.is_file())
+            })
+            .unwrap_or_else(|| {
+                root.join("target")
+                    .join(args::build_profile_dir())
+                    .join(videorc_app_core::process::backend_binary_name())
+            });
         if !backend.is_file() {
             bail!(
                 "backend binary {} is missing; build it with `cargo build -p videorc-backend`, pass --backend, or use --cargo-run",
