@@ -172,7 +172,7 @@ fn gif_block(gif: &Gif, pictures: &HashMap<String, Picture>, height_px: f32) -> 
                     .w_auto()
                     .max_w_full()
                     .object_fit(ObjectFit::Contain)
-                    .rounded(px(6.)),
+                    .rounded(px(videorc_kit::tokens::radius::CHIP)),
             )
             .into_any_element(),
         None => div()
