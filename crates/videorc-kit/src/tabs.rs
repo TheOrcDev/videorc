@@ -151,8 +151,11 @@ impl RenderOnce for Tabs {
                     _ => tab,
                 }
             });
+        // Electron TabsList: `inline-flex w-fit` — hug the triggers; flex_1 on
+        // each tab only shares space inside this track, not the page width.
         let list = gpui_base::Tabs::new(self.id)
             .flex()
+            .flex_none()
             .items_center()
             .justify_center()
             .h(px(size::CONTROL))
