@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
@@ -31,10 +31,9 @@ use videorc_app_core::chat::images::{self, ImageKind};
 use videorc_app_core::chat::model::CommentHighlightState;
 use videorc_app_core::chat::store::DeliveryCursor;
 use videorc_app_core::chat::view::{
-    self, ChatRowView, LIST_HEIGHT_PX, OPEN_STREAM_MANAGER_SHORTCUT, RowKey, RowTint, RunStyle,
-    StudioChatBody, StudioChatView, copy,
+    self, ChatRowView, LIST_HEIGHT_PX, RowKey, RowTint, RunStyle, StudioChatBody, StudioChatView,
+    copy,
 };
-use videorc_app_core::shortcuts::shortcut_accelerator;
 use videorc_app_core::studio::screen_views::talk_show_room_in;
 use videorc_app_core::studio::session::session_is_live;
 use videorc_app_core::{BackendEvent, StudioSnapshot};
@@ -43,7 +42,7 @@ use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, TypeScale, hsla, with_alpha};
 use videorc_kit::toast::{ToastData, ToastKind};
 use videorc_kit::tokens::{Theme, radius, text};
-use videorc_kit::tooltip::{tooltip, tooltip_with_accelerator};
+use videorc_kit::tooltip::{tooltip, tooltip_with_action};
 use videorc_kit::{
     Avatar, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, ChatPlatform, Empty,
     PanelSection,
@@ -113,14 +112,6 @@ impl Gate {
             hydrated: snapshot.settings.hydrated,
         }
     }
-}
-
-/// The `comments-window` accelerator, for the Open Stream Manager tooltip
-/// (`shortcutAccelerator('comments-window')`).
-fn stream_manager_accelerator() -> Option<&'static str> {
-    static KEYS: OnceLock<Option<String>> = OnceLock::new();
-    KEYS.get_or_init(|| shortcut_accelerator(OPEN_STREAM_MANAGER_SHORTCUT))
-        .as_deref()
 }
 
 /// `ChatPlatformIcon`'s platform: the backend's id, anything else custom.
@@ -752,15 +743,17 @@ impl Render for ChatSection {
             .label(copy::OPEN_STREAM_MANAGER)
             .accessibility_label(copy::OPEN_STREAM_MANAGER)
             .on_click(|_, _, cx| crate::screens::stream_manager::window::show(cx));
-        let open_tip = div().id("studio-chat-open-stream-manager-tip");
-        let open = match stream_manager_accelerator() {
-            Some(accelerator) => open_tip.tooltip(tooltip_with_accelerator(
+        // P189: the chip reads the live keymap for the action the
+        // `comments-window` chord runs (`studio-chat.tsx:111`,
+        // `shortcutAccelerator('comments-window')`), so it cannot drift from
+        // the binding.
+        let open = div()
+            .id("studio-chat-open-stream-manager-tip")
+            .tooltip(tooltip_with_action(
                 copy::OPEN_STREAM_MANAGER,
-                accelerator,
-            )),
-            None => open_tip.tooltip(tooltip(copy::OPEN_STREAM_MANAGER)),
-        }
-        .child(open);
+                &crate::app::menus::ToggleStreamManager,
+            ))
+            .child(open);
         let hide = Button::new("studio-chat-hide")
             .variant(ButtonVariant::Ghost)
             .size(ButtonSize::IconXs)

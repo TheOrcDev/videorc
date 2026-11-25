@@ -29,10 +29,12 @@ pub mod vertical_stream;
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding,
-    KeyDownEvent, KeyUpEvent, Role, ScrollHandle, Window, canvas, div, point, prelude::*, px,
+    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding,
+    KeyDownEvent, KeyUpEvent, Role, ScrollHandle, Task, Window, canvas, div, point, prelude::*, px,
 };
 use videorc_app_core::StopOrigin;
 use videorc_app_core::desktop::permissions::{PermissionPlatform, SystemPermissionPane};
@@ -42,6 +44,11 @@ use videorc_app_core::desktop::system_access::{
     system_access_rows,
 };
 use videorc_app_core::livestream::plan;
+use videorc_app_core::nav::PageId;
+use videorc_app_core::studio::preview_startup::{
+    OPEN_SOURCES_LABEL, PREVIEW_STARTUP_STEPS, PreviewStartupAction, PreviewStartupInputs,
+    StallClock, preview_startup_segment_state, step_words,
+};
 #[cfg(target_os = "macos")]
 use videorc_app_core::studio::screen_views::KEEP_ON_TOP_LABEL;
 use videorc_app_core::studio::screen_views::{
@@ -51,11 +58,12 @@ use videorc_app_core::studio::screen_views::{
 use videorc_kit::ShortcutKeys;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::scroll_area::ScrollArea;
-use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::{size, text};
-use videorc_kit::{Button, ButtonVariant, Spinner};
+use videorc_kit::theme::{self, Appearance, TypeScale, hsla};
+use videorc_kit::tokens::{radius, size, text};
+use videorc_kit::{Button, ButtonVariant, Progress, Spinner};
 use videorc_preview::element::Phase;
 use videorc_preview::lifecycle::{PermissionStatus, WindowMode};
+use videorc_preview::words;
 
 use crate::app::menus::TogglePreview;
 use crate::app::permissions::PermissionsGlobal;
@@ -73,7 +81,7 @@ use soundboard::SoundboardSection;
 use space::{KEY_CONTEXT, SPACE, SpaceAction, SpacePress, ToggleRecord, space_action};
 use takeover::TakeoverSection;
 use talk_show_host::TalkShowRoomHost;
-use transport::{OpenPage, Transport};
+use transport::{AppStudio, OpenPage, Transport};
 use vertical_stream::VerticalStreamSection;
 
 /// Binds the page's keys; call once at start.
@@ -89,6 +97,9 @@ pub struct StudioPage {
     /// The degraded preview's alert under the stage (P117/P118) and the
     /// performance check's line on the docked row (P138).
     preview_notes: Entity<PreviewNotes>,
+    /// The docked slot's startup card (P135), over the slot until the first
+    /// frame.
+    preview_startup: Entity<PreviewStartup>,
     /// The cloud's Resume notice above Session; draws nothing until a show
     /// waits.
     cloud_resume: Entity<CloudResumeSlot>,
@@ -198,11 +209,17 @@ impl StudioPage {
         // The preview's notes: Open Health goes through the page's door, and
         // the check's line redraws the docked row.
         let studio = transport.read(cx).studio();
+        let startup_studio = studio.clone();
         let notes_preview = preview.clone();
         let preview_notes = cx.new(|cx| PreviewNotes::new(studio, notes_preview, cx));
         cx.subscribe(&preview_notes, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
         cx.observe(&preview_notes, |_, _, cx| cx.notify()).detach();
+        // P135: the startup card's Open Sources goes through the page's door.
+        let startup_preview = preview.clone();
+        let preview_startup = cx.new(|cx| PreviewStartup::new(startup_studio, startup_preview, cx));
+        cx.subscribe(&preview_startup, |_, _, open: &OpenPage, cx| cx.emit(*open))
+            .detach();
         // Release While held pads when the window blurs (P343).
         cx.observe_window_activation(window, |page, window, cx| {
             if !window.is_window_active() {
@@ -217,6 +234,7 @@ impl StudioPage {
             transport,
             preview,
             preview_notes,
+            preview_startup,
             cloud_resume,
             session,
             chat,
@@ -407,6 +425,197 @@ struct PermissionFix {
 
 /// The docked frame's Close (`preview-stage.tsx:417`).
 const DOCKED_CLOSE_LABEL: &str = "Close";
+
+/// P135: the docked slot shows the startup card where it would say
+/// "Opening preview…": docked, open, the native path up, no grant to wait
+/// for and no frame yet (`dockedStageShowsStartup`, `preview-stage.tsx:336`:
+/// a normal-toned status; a hidden dock, a failure and a permission wait keep
+/// their own words).
+fn startup_shows(preview: &Preview) -> bool {
+    preview.mode() == WindowMode::Docked && preview.docked_words() == Some(words::OPENING)
+}
+
+/// P135 (`DockedPreviewStartup` and `PreviewStartupCard`,
+/// `preview-startup-card.tsx:56-124`): what the docked slot says until the
+/// first real frame. A title, the step in plain words, three short segments
+/// and, when a step is stuck, Open Sources. Every word and state is
+/// app-core's (`studio::preview_startup`); it follows the snapshot and the
+/// preview statuses and redraws only when what it waits for changes, or
+/// when the step's stall clock runs out.
+pub struct PreviewStartup {
+    inputs: PreviewStartupInputs,
+    clock: StallClock,
+    /// The slot shows the card; the stall clock runs only while it does.
+    shown: bool,
+    /// Wakes the card when the running step stalls.
+    _stall: Option<Task<()>>,
+}
+
+impl EventEmitter<OpenPage> for PreviewStartup {}
+
+impl PreviewStartup {
+    fn new(studio: Arc<AppStudio>, preview: Entity<Preview>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&preview, |card, preview, cx| {
+            let shown = startup_shows(preview.read(cx));
+            card.set_shown(shown, cx);
+        })
+        .detach();
+        let mut telemetry = studio.telemetry();
+        let mut snapshot = studio.watch();
+        let inputs = PreviewStartupInputs::of(&snapshot.borrow(), &telemetry.borrow());
+        cx.spawn(async move |this, cx| {
+            loop {
+                let open = tokio::select! {
+                    changed = telemetry.changed() => changed.is_ok(),
+                    changed = snapshot.changed() => changed.is_ok(),
+                };
+                if !open {
+                    break;
+                }
+                let inputs = PreviewStartupInputs::of(
+                    &snapshot.borrow_and_update(),
+                    &telemetry.borrow_and_update(),
+                );
+                let alive = this.update(cx, |card, cx| {
+                    if card.inputs != inputs {
+                        card.inputs = inputs;
+                        card.arm(cx);
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let mut card = Self {
+            inputs,
+            clock: StallClock::default(),
+            shown: startup_shows(preview.read(cx)),
+            _stall: None,
+        };
+        card.arm(cx);
+        card
+    }
+
+    fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if self.shown == shown {
+            return;
+        }
+        self.shown = shown;
+        // Each showing gives its step a full budget
+        // (`usePreviewStartupStalled` runs while the card is mounted).
+        self.clock.reset();
+        self.arm(cx);
+        cx.notify();
+    }
+
+    /// Notes the step now running and wakes the card when it stalls.
+    fn arm(&mut self, cx: &mut Context<Self>) {
+        if !self.shown {
+            self.clock.reset();
+            self._stall = None;
+            return;
+        }
+        let now = Instant::now();
+        let stalled = self.clock.observe(self.inputs.step(), now);
+        self._stall = match self.clock.deadline() {
+            Some(deadline) if !stalled => Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(deadline.saturating_duration_since(now))
+                    .await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })),
+            _ => None,
+        };
+    }
+}
+
+impl Render for PreviewStartup {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.shown {
+            return div().id("preview-startup").absolute().into_any_element();
+        }
+        let stalled = self.clock.observe(self.inputs.step(), Instant::now());
+        let view = self.inputs.view(stalled);
+        // The stage is a dark video ground in both themes, so the card scopes
+        // the dark tokens to itself (`className="dark …"`).
+        let dark = Appearance {
+            dark: true,
+            ..theme::current(window, cx)
+        };
+        let t = dark.theme();
+        // `w-10` segments, full or empty (`value={state === 'next' ? 0 : 100}`).
+        let segments: Vec<_> = PREVIEW_STARTUP_STEPS
+            .iter()
+            .map(|segment| {
+                let state = preview_startup_segment_state(*segment, &view);
+                div()
+                    .w(px(40.))
+                    .child(Progress::new(state.value()).appearance(dark))
+            })
+            .collect();
+        let open_sources = (view.action == Some(PreviewStartupAction::OpenSources)).then(|| {
+            Button::new("preview-startup-open-sources")
+                .label(OPEN_SOURCES_LABEL)
+                .variant(ButtonVariant::Outline)
+                .appearance(dark)
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Sources))))
+        });
+        div()
+            .id("preview-startup")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .rounded(px(radius::PANEL))
+            .bg(hsla(t.video_ground))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .max_w_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(24.))
+                    .child(
+                        // `role="status"`, with the sr-only "Step n of 3".
+                        div()
+                            .id("preview-startup-status")
+                            .role(Role::Status)
+                            .aria_description(step_words(view.step))
+                            .max_w_full()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .line_height(px(20.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(hsla(t.video_ground_foreground))
+                                    .child(view.title),
+                            )
+                            .child(
+                                div()
+                                    .max_w_full()
+                                    .truncate()
+                                    .type_scale(text::META)
+                                    .text_color(hsla(t.video_ground_muted))
+                                    .child(view.detail),
+                            ),
+                    )
+                    .child(div().flex().items_center().gap(px(6.)).children(segments))
+                    .children(open_sources),
+            )
+            .into_any_element()
+    }
+}
 
 impl StudioPage {
     /// P133: the fix for the grant the open Preview waits for, while it
@@ -755,7 +964,10 @@ impl Render for StudioPage {
                         .w_full()
                         .when_some(widest, |stage, widest| stage.max_w(px(widest)))
                         .aspect_ratio(aspect)
-                        .child(Preview::docked_slot(&self.preview, cx)),
+                        .child(Preview::docked_slot(&self.preview, cx))
+                        // P135: over the slot's "Opening preview…" until the
+                        // first frame (`preview-stage.tsx:373-380`).
+                        .child(self.preview_startup.clone()),
                 )
                 .into_any_element()
         };

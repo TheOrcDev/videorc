@@ -102,6 +102,7 @@ pub mod performance_check;
 mod platform_lifecycle;
 mod platforms;
 pub mod preview_scene;
+pub mod preview_startup;
 pub mod recordings_folder;
 mod recordings_folder_actions;
 pub mod room_frames;

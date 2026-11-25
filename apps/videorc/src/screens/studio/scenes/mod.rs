@@ -1164,6 +1164,17 @@ impl ScenesSection {
                 )
             });
 
+        let focus = self
+            .focus
+            .entry(card.id.clone())
+            .or_insert_with(|| cx.focus_handle())
+            .clone();
+        // Focus anywhere in the card (the card itself, or tabbed into its ⋯)
+        // shows the ⋯ and hides the check, as hover does
+        // (`scene-card.tsx:182`, `group-focus-within/kebab-host`; the kit's
+        // own focus-within covers only the ⋯'s trigger and open menu).
+        let focus_within = focus.contains_focused(window, cx);
+
         // The icon of what it shows before the name (`SceneGlyphIcon`),
         // faded with a disabled card.
         let name_row = div()
@@ -1186,7 +1197,8 @@ impl ScenesSection {
                     .child(card.name.clone())
                     .child(self.text_measure(&card.id, true, cx)),
             )
-            // The check's place is the ⋯'s: on hover the menu takes it.
+            // The check's place is the ⋯'s: on hover and focus the menu
+            // takes it.
             .child(
                 div()
                     .flex_none()
@@ -1197,6 +1209,7 @@ impl ScenesSection {
                     .when(card.on_stream, |check| {
                         check
                             .group_hover(KEBAB_HOST, |style| style.opacity(0.))
+                            .when(focus_within, |check| check.opacity(0.))
                             .child(icon(IconName::Check, 16., foreground))
                     }),
             );
@@ -1266,11 +1279,6 @@ impl ScenesSection {
 
         let interactive = !card.on_stream && !card.disabled;
         let accent = hsla(t.accent);
-        let focus = self
-            .focus
-            .entry(card.id.clone())
-            .or_insert_with(|| cx.focus_handle())
-            .clone();
         // The selected plate's light and shade, and the keyboard's ring.
         let plate = if card.on_stream {
             vec![
@@ -1321,7 +1329,11 @@ impl ScenesSection {
                 self.menu_items(card, cx),
             )
             .label(menu_copy::actions_for(&card.name))
-            .reveal(KebabReveal::Hover),
+            .reveal(if focus_within {
+                KebabReveal::Always
+            } else {
+                KebabReveal::Hover
+            }),
         );
         div()
             .id(("scene-card", index))
