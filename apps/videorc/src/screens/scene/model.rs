@@ -75,6 +75,8 @@ pub mod copy {
     pub const LAYOUT_TITLE: &str = "Layout";
     pub const ORIENTATION: &str = "Orientation";
     pub const HORIZONTAL_TIP: &str = "Horizontal · 16:9";
+    pub const HORIZONTAL_NAME: &str = "Horizontal (16:9)";
+    pub const VERTICAL_NAME: &str = "Vertical (9:16)";
     pub const VERTICAL_TIP: &str = "Vertical · 9:16";
     pub const SCREEN: &str = "Screen";
     pub const SCREEN_FRAMING: &str = "Screen framing";
