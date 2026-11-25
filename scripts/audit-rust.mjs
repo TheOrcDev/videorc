@@ -42,6 +42,34 @@ export const acceptedUnmaintainedAdvisories = [
     crate: 'chrono',
     via: 'videorc-backend, rmcp 3, schemars 1',
     reviewed: '2026-11-18'
+  },
+  // The GPUI app's (plan 260) UI stack pulls these in; none has a maintained
+  // release to move to and gpui-pre 0.3.14 / gpui-base 0.11.0 pin them. Revisit
+  // each on the next gpui-pre or gpui-base bump and drop the ones it no longer
+  // brings.
+  {
+    id: 'RUSTSEC-2024-0384',
+    crate: 'instant',
+    via: 'gpui-base 0.11.0',
+    reviewed: '2026-11-25'
+  },
+  {
+    id: 'RUSTSEC-2024-0436',
+    crate: 'paste',
+    via: 'gpui-pre 0.3.14 -> image -> ravif -> rav1e',
+    reviewed: '2026-11-25'
+  },
+  {
+    id: 'RUSTSEC-2026-0206',
+    crate: 'rustybuzz',
+    via: 'gpui-pre 0.3.14 -> usvg',
+    reviewed: '2026-11-25'
+  },
+  {
+    id: 'RUSTSEC-2026-0192',
+    crate: 'ttf-parser',
+    via: 'gpui-pre 0.3.14 (direct, and through usvg, fontdb and rustybuzz)',
+    reviewed: '2026-11-25'
   }
 ]
 
