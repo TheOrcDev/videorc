@@ -29,6 +29,8 @@
 //!   `lib/scene-switch-progress.ts`); [`transaction_policy`]: when a commit
 //!   applies, and what a failed one reconciles to
 //!   (`lib/layout-transaction-policy.ts`).
+//! - [`thumb`]: `LayoutThumb`'s geometry, the layout diagram on scene
+//!   cards and Scene page rows.
 
 pub mod background;
 pub mod follow;
@@ -42,6 +44,7 @@ pub mod preflight;
 pub mod section;
 pub mod store;
 pub mod switch_progress;
+pub mod thumb;
 pub mod transaction_policy;
 pub mod v2;
 pub mod view;
