@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use gpui::{Context, Window, div, prelude::*};
 use serde_json::json;
+use videorc_app_core::account::entitlements::{live_cohost_gate, read_snapshot};
 use videorc_app_core::buddy::chat::{self as buddy_chat, RULES_MAX};
 use videorc_app_core::buddy::copy as words;
 use videorc_app_core::stream_manager::buddy::{
@@ -52,12 +53,15 @@ pub type AppStudio = Studio<BackendClient>;
 /// The events the page follows; `main.rs` adds them to the client's filter
 /// (the backend drops the rest). `cohost.settings.changed` and
 /// `account.changed` come with Avatar's and Settings' lists.
-pub const EVENTS: [&str; 4] = [
+pub const EVENTS: [&str; 5] = [
     "cohost.state",
     "cleanCut.status",
     "cohost.report.saved",
     "cohost.community.changed",
+    ENTITLEMENTS_UPDATED,
 ];
+/// Premium changed (a purchase, a refresh): the locks read again.
+const ENTITLEMENTS_UPDATED: &str = "entitlements.updated";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -267,7 +271,10 @@ impl SidekickScreen {
                             Ok(BackendEvent::Untyped { event, payload }) => {
                                 let refresh = matches!(
                                     event.as_str(),
-                                    "cohost.state" | "cohost.settings.changed" | "account.changed"
+                                    "cohost.state"
+                                        | "cohost.settings.changed"
+                                        | "account.changed"
+                                        | ENTITLEMENTS_UPDATED
                                 );
                                 if event == "cohost.state" {
                                     if let Ok(state) =
@@ -347,11 +354,14 @@ impl SidekickScreen {
                 .and_then(|value| value.get("status"))
                 .and_then(|status| status.as_str())
                 == Some("signed-in");
-            let entitled = account
-                .as_ref()
-                .and_then(|value| value.pointer("/entitlements/liveCohost/allowed"))
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
+            // Premium comes from `entitlements.get` (`liveCohostGate`):
+            // `account.get` carries no entitlements.
+            let entitlements = backend
+                .request("entitlements.get", serde_json::Value::Null)
+                .await
+                .ok()
+                .and_then(|value| read_snapshot(&value));
+            let entitled = live_cohost_gate(entitlements.as_ref()).allowed();
             (settings, signed_in, entitled)
         });
         cx.spawn(async move |this, cx| {

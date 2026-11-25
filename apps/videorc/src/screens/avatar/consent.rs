@@ -13,19 +13,27 @@ use videorc_kit::tokens::text;
 
 use super::gate::{ALLOW_CLOUD_AI, GateInput};
 use super::{AvatarScreen, sync_handle};
+use videorc_app_core::account::entitlements::{EntitlementGate, live_cohost_gate, read_snapshot};
 
 impl AvatarScreen {
-    /// `account.get`'s answer: signed in, Premium, its upgrade link.
+    /// `account.get`'s answer: signed in.
     pub(super) fn account_answered(&mut self, account: &Value) {
         self.signed_in = account.get("status").and_then(Value::as_str) == Some("signed-in");
-        self.entitled = account
-            .pointer("/entitlements/liveCohost/allowed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        self.upgrade_url = account
-            .pointer("/entitlements/liveCohost/upgradeUrl")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+    }
+
+    /// `entitlements.get`'s answer: Premium (`liveCohostGate`) and, when
+    /// the reason sells Premium, its page. `account.get` carries neither.
+    pub(super) fn entitlements_answered(&mut self, entitlements: &Value) {
+        let snapshot = read_snapshot(entitlements);
+        let gate = live_cohost_gate(snapshot.as_ref());
+        self.entitled = gate.allowed();
+        self.upgrade_url = match gate {
+            EntitlementGate::Locked {
+                upgrade_url: Some(url),
+                ..
+            } => Some(url.to_string()),
+            _ => None,
+        };
     }
 
     /// What the create gates read.
