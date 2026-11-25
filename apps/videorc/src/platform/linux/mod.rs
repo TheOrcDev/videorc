@@ -32,10 +32,11 @@ pub mod v4l2loopback;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use gpui::Window;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use videorc_app_core::desktop::linux::secret_store::SecretStore;
 use videorc_app_core::desktop::linux::sleep_inhibit::LinuxSleepInhibitor;
 
-use super::{OsResult, Platform};
+use super::{OsResult, Platform, ScreenFrame, SmokeWindowLevel};
 use bus::Bus;
 use inhibit::DbusInhibit;
 use secrets::SecretService;
@@ -56,9 +57,97 @@ pub const HIDE_FROM_STREAM_UNSUPPORTED: &str =
 const KEEP_ON_TOP_WAYLAND: &str =
     "Wayland doesn't let an app keep its window above other apps' windows.";
 const KEEP_ON_TOP_X11: &str = "Keep on top isn't written for X11 yet (plan 260 S2.6c).";
+const PLACE_WAYLAND: &str =
+    "Placing a window isn't available on Wayland yet (plan 260 platform fill-ins).";
+const RAISE_WAYLAND: &str =
+    "Raising a window isn't available on Wayland yet (plan 260 platform fill-ins).";
 
 fn wayland() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
+
+/// The window's X11 id from GPUI's raw handle (Xlib or Xcb).
+fn x11_window_id(window: &Window) -> OsResult<u32> {
+    let handle = HasWindowHandle::window_handle(window)
+        .map_err(|error| format!("no window handle: {error}"))?;
+    match handle.as_raw() {
+        RawWindowHandle::Xlib(handle) => {
+            u32::try_from(handle.window).map_err(|_| "Xlib window id does not fit u32".to_string())
+        }
+        RawWindowHandle::Xcb(handle) => Ok(handle.window.get()),
+        RawWindowHandle::Wayland(_) => Err("not an X11 window".into()),
+        _ => Err("not an X11 window".into()),
+    }
+}
+
+fn x11_place(window: u32, frame: ScreenFrame) -> OsResult<()> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt, StackMode};
+
+    let (conn, _) = x11rb::connect(None).map_err(|error| format!("the X connection: {error}"))?;
+    let x = frame.x.round() as i32;
+    let y = frame.y.round() as i32;
+    let width = frame.width.round().max(1.0) as u32;
+    let height = frame.height.round().max(1.0) as u32;
+    conn.configure_window(
+        window,
+        &ConfigureWindowAux::new()
+            .x(x)
+            .y(y)
+            .width(width)
+            .height(height)
+            .stack_mode(StackMode::ABOVE),
+    )
+    .map_err(|error| format!("configure_window(place): {error}"))?;
+    conn.flush()
+        .map_err(|error| format!("flush(place): {error}"))?;
+    Ok(())
+}
+
+fn x11_raise(window: u32, level: SmokeWindowLevel) -> OsResult<()> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{
+        ClientMessageEvent, ConfigureWindowAux, ConnectionExt, EventMask, StackMode,
+    };
+
+    let (conn, _) = x11rb::connect(None).map_err(|error| format!("the X connection: {error}"))?;
+    conn.configure_window(
+        window,
+        &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+    )
+    .map_err(|error| format!("configure_window(raise): {error}"))?;
+
+    // Floating / screen-saver ask for `_NET_WM_STATE_ABOVE` so the window
+    // stays over the motion stimulus the invisibility smokes draw.
+    if matches!(
+        level,
+        SmokeWindowLevel::ScreenSaver | SmokeWindowLevel::Floating
+    ) {
+        let intern = |name: &str| -> OsResult<u32> {
+            let reply = conn
+                .intern_atom(false, name.as_bytes())
+                .map_err(|error| format!("intern_atom({name}): {error}"))?
+                .reply()
+                .map_err(|error| format!("intern_atom({name}) reply: {error}"))?;
+            Ok(reply.atom)
+        };
+        let state = intern("_NET_WM_STATE")?;
+        let above = intern("_NET_WM_STATE_ABOVE")?;
+        let root = conn.setup().roots.first().map(|s| s.root).unwrap_or(0);
+        // _NET_WM_STATE: action 1 = add
+        let event = ClientMessageEvent::new(32, window, state, [1u32, above, 0, 0, 0]);
+        conn.send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            event,
+        )
+        .map_err(|error| format!("send_event(_NET_WM_STATE): {error}"))?;
+    }
+
+    conn.flush()
+        .map_err(|error| format!("flush(raise): {error}"))?;
+    Ok(())
 }
 
 pub struct Linux {
@@ -134,6 +223,20 @@ impl Platform for Linux {
 
     fn set_hidden_from_capture(&self, _window: &Window, _hidden: bool) -> OsResult<Option<u64>> {
         Err(HIDE_FROM_STREAM_UNSUPPORTED.to_string())
+    }
+
+    fn set_window_frame(&self, window: &Window, frame: ScreenFrame) -> OsResult<()> {
+        if wayland() {
+            return Err(PLACE_WAYLAND.into());
+        }
+        x11_place(x11_window_id(window)?, frame)
+    }
+
+    fn raise_window(&self, window: &Window, level: SmokeWindowLevel) -> OsResult<()> {
+        if wayland() {
+            return Err(RAISE_WAYLAND.into());
+        }
+        x11_raise(x11_window_id(window)?, level)
     }
 
     fn set_keep_on_top(&self, _window: &Window, _on_top: bool) -> OsResult<()> {

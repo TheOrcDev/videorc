@@ -2,7 +2,7 @@
 //! [`Platform`]. Hide from stream uses `SetWindowDisplayAffinity
 //! (WDA_EXCLUDEFROMCAPTURE)`, matching Electron's `setContentProtection`
 //! and the backend's D3D11 presenter path. Follow's front-app watcher is
-//! [`front_app`]; place and raise land in a follow-up PR.
+//! [`front_app`]. Smoke place/raise use `SetWindowPos` without activation.
 
 pub mod front_app;
 
@@ -10,10 +10,11 @@ use gpui::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetWindowDisplayAffinity, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    GetWindowDisplayAffinity, HWND_TOP, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SetWindowDisplayAffinity, SetWindowPos, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
 
-use super::{OsResult, Platform};
+use super::{OsResult, Platform, ScreenFrame, SmokeWindowLevel};
 
 /// The window's `HWND`, from the handle GPUI hands out.
 fn hwnd(window: &Window) -> OsResult<HWND> {
@@ -67,6 +68,59 @@ impl Platform for WindowsOs {
         // Windows has no ScreenCaptureKit-style window number for the
         // backend filter; content protection is the whole route.
         Ok(None)
+    }
+
+    /// Electron's `setBounds` on Windows: top-left screen points, shown
+    /// without taking focus (`SWP_NOACTIVATE`).
+    fn set_window_frame(&self, window: &Window, frame: ScreenFrame) -> OsResult<()> {
+        let hwnd = hwnd(window)?;
+        let x = frame.x.round() as i32;
+        let y = frame.y.round() as i32;
+        let cx = frame.width.round().max(1.0) as i32;
+        let cy = frame.height.round().max(1.0) as i32;
+        // SAFETY: live HWND; flags keep Z-order and skip activation.
+        let ok = unsafe {
+            SetWindowPos(
+                hwnd,
+                HWND_TOP,
+                x,
+                y,
+                cx,
+                cy,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+        };
+        if ok == 0 {
+            return Err("SetWindowPos(place) failed".into());
+        }
+        Ok(())
+    }
+
+    /// Smoke `raise-window`: topmost (floating / screen-saver) without focus.
+    fn raise_window(&self, window: &Window, level: SmokeWindowLevel) -> OsResult<()> {
+        let hwnd = hwnd(window)?;
+        let after = match level {
+            SmokeWindowLevel::Floating => HWND_TOPMOST,
+            // Windows has no AppKit screen-saver level; TOPMOST is the
+            // closest match for the invisibility smokes' motion stimulus.
+            SmokeWindowLevel::ScreenSaver => HWND_TOPMOST,
+        };
+        // SAFETY: live HWND; NOMOVE/NOSIZE keep the frame, NOACTIVATE skips focus.
+        let ok = unsafe {
+            SetWindowPos(
+                hwnd,
+                after,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+        };
+        if ok == 0 {
+            return Err(format!("SetWindowPos(raise {}) failed", level.id()));
+        }
+        Ok(())
     }
 
     fn set_keep_on_top(&self, _: &Window, _: bool) -> OsResult<()> {
