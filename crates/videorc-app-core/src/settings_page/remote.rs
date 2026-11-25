@@ -90,6 +90,16 @@ pub struct RemoteLanStatus {
     pub pairing_expires_at: Option<String>,
 }
 
+/// `RemoteLanPairing`: the one-shot QR ticket from `remote.lan.pairing.begin`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteLanPairing {
+    pub url: String,
+    pub address: String,
+    pub addresses: Vec<String>,
+    pub expires_at: String,
+}
+
 // ── Remote control ───────────────────────────────────────────────────────
 
 /// The card's description, naming this computer.

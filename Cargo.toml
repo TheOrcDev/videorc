@@ -46,6 +46,7 @@ gpui_base = { package = "gpui-base", version = "=0.11.0" }
 resvg = { version = "=0.46.0", default-features = false }
 image = { version = "0.25", default-features = false }
 smallvec = "1"
+qrcode = { version = "0.14", default-features = false }
 
 # GPUI patches (plan 260 D1: our own copy of only the patched crate, pinned to
 # the version it was cut from; a fourth patch is a STOP), copied from

@@ -35,6 +35,7 @@ pub mod page_tabs;
 pub mod panel_section;
 pub mod pin_window_button;
 pub mod popover;
+pub mod qr_code;
 pub mod scroll_area;
 pub mod section_label;
 pub mod segmented_control;

@@ -68,10 +68,20 @@ pub struct SettingsScreen {
     pending_permission: Option<videorc_app_core::desktop::permissions::SystemPermissionPane>,
     confirm: DialogHandle,
     rename: DialogHandle,
+    pair: DialogHandle,
     phone_edit: Option<(
         videorc_app_core::settings_page::remote::RemoteLanDevice,
         gpui::Entity<videorc_kit::input::InputState>,
     )>,
+    pairing: Option<(
+        videorc_app_core::settings_page::remote::RemoteLanPairing,
+        i64,
+    )>,
+    pairing_revealed: bool,
+    pairing_link_copied: bool,
+    pair_need_open: bool,
+    pair_need_close: bool,
+    pair_tick_generation: u64,
     confirmation: Option<remote::Confirmation>,
     obs: obs::ObsImport,
     hotkeys: crate::app::hotkeys::Hotkeys,
@@ -265,7 +275,14 @@ impl SettingsScreen {
             pending_permission: None,
             confirm: DialogHandle::new(false),
             rename: DialogHandle::new(false),
+            pair: DialogHandle::new(false),
             phone_edit: None,
+            pairing: None,
+            pairing_revealed: false,
+            pairing_link_copied: false,
+            pair_need_open: false,
+            pair_need_close: false,
+            pair_tick_generation: 0,
             confirmation: None,
             obs: obs::ObsImport::default(),
             hotkeys,
@@ -479,6 +496,7 @@ impl Render for SettingsScreen {
         if self.obs.state.open && !self.obs.dialog.is_open() && !self.obs.state.applying {
             self.obs.state.closed();
         }
+        self.flush_pair_dialog(window, cx);
         let t = theme::current(window, cx).theme();
         let mut tabs = Tabs::new("settings-tabs").selected(self.tab.index());
         for tab in view::TABS {
@@ -529,6 +547,7 @@ impl Render for SettingsScreen {
             )
             .child(self.confirmation_dialog(cx))
             .child(self.rename_dialog(cx))
+            .child(self.pair_dialog(window, cx))
             .child(self.obs_dialog(cx))
             .child(self.setup_dialog(window, cx))
             .child(self.changelog_dialog(cx))
