@@ -148,6 +148,8 @@ pub(super) struct Controls {
     look_next: Option<Value>,
     /// Reset camera settings?
     pub camera_reset: DialogHandle,
+    /// Choose an image (P586).
+    pub choose_image: DialogHandle,
     /// The banner whose Timing is open (closed again for another banner).
     pub timing_open_for: Option<String>,
     /// The connection the banners and the overlay layout were read on.
@@ -196,6 +198,7 @@ impl Controls {
             look_in_flight: false,
             look_next: None,
             camera_reset: DialogHandle::new(false),
+            choose_image: DialogHandle::new(false),
             timing_open_for: None,
             lists_generation: None,
             width: 0.,

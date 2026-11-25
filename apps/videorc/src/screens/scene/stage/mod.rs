@@ -156,6 +156,12 @@ fn banner_file_name(value: &str) -> bool {
         && !value.contains("..")
 }
 
+/// A banner file (its image or its thumbnail) under the managed `Banners`
+/// folder; None for anything but a bare basename.
+pub(super) fn banner_file(user_data_dir: &std::path::Path, file: &str) -> Option<PathBuf> {
+    banner_file_name(file).then(|| user_data_dir.join("Banners").join(file))
+}
+
 impl Entry {
     fn source(&self) -> Option<&SceneSource> {
         match &self.target {
@@ -617,12 +623,12 @@ impl ScenePage {
                 grabs_body: !banner_fills_canvas(fit),
                 // The full image, not the thumbnail: a strip may span the
                 // canvas (`<userData>/Banners/<imageFile>`).
-                picture: banner_file_name(&banner.image_file).then(|| ItemPicture {
-                    file: PictureFile::File(
-                        self.user_data_dir.join("Banners").join(&banner.image_file),
-                    ),
-                    buddy: false,
-                    opacity: banner.opacity.clamp(0.0, 1.0) as f32,
+                picture: banner_file(&self.user_data_dir, &banner.image_file).map(|path| {
+                    ItemPicture {
+                        file: PictureFile::File(path),
+                        buddy: false,
+                        opacity: banner.opacity.clamp(0.0, 1.0) as f32,
+                    }
                 }),
             });
         }
